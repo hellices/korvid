@@ -27,8 +27,7 @@ from typing import Any
 
 import yaml
 
-from korvid.core.config import KorvidConfig
-from korvid.core.store import ALL_NAMESPACES, ResourceStore
+from korvid.core.store import ALL_NAMESPACES
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import manifest_uid
@@ -40,6 +39,8 @@ from korvid.k8s.olm import (
     resolve_olm_meta,
 )
 from korvid.k8s.writes import WriteOps
+from korvid.ui.ui_surface import UiSurface
+from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 from korvid.ui.write_gate import WriteGate
 
@@ -70,45 +71,23 @@ class OperatorController:
         self,
         *,
         gate: WriteGate,
+        view: ViewState,
+        ui: UiSurface,
         write_ops: Callable[[], WriteOps | None],
         #: optional: no manifest fetcher means the flows report and stop.
         get_manifest: Callable[
             [], Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None
         ],
-        aliases: Callable[[], dict[str, ResourceMeta]],
-        store: Callable[[], ResourceStore],
-        config: Callable[[], KorvidConfig],
-        notify: Callable[..., None],
-        push_screen: Callable[..., Any],
-        run_worker: Callable[..., Any],
-        current_kind: Callable[[], str],
-        current_scope: Callable[[], str],
-        current_namespace: Callable[[], str],
-        canonical_kind: Callable[[str], str],
-        gvr_label: Callable[[ResourceMeta], str],
-        write_locus: Callable[[str | None], str],
         confirm_screen: Callable[..., Any],
-        selected_uid: Callable[..., str | None],
         uid_intact_after_fetch: Callable[..., bool],
         precheck_keybinding_write: Callable[..., Any],
     ) -> None:
         self._gate = gate
+        self._view = view
+        self._ui = ui
         self._write_ops = write_ops
         self._get_manifest = get_manifest
-        self._aliases = aliases
-        self._store = store
-        self._config = config
-        self._notify = notify
-        self._push_screen = push_screen
-        self._run_worker = run_worker
-        self._current_kind = current_kind
-        self._current_scope = current_scope
-        self._current_namespace = current_namespace
-        self._canonical_kind = canonical_kind
-        self._gvr_label = gvr_label
-        self._write_locus = write_locus
         self._confirm_screen = confirm_screen
-        self._selected_uid = selected_uid
         self._uid_intact_after_fetch = uid_intact_after_fetch
         self._precheck_keybinding_write = precheck_keybinding_write
 
@@ -116,32 +95,34 @@ class OperatorController:
         self, pkg_meta: ResourceMeta, ns: str | None, name: str, uid: str | None
     ) -> None:
         """Fetch the PackageManifest and open the install wizard."""
-        sub_meta = resolve_olm_meta(self._aliases(), "subscriptions", OPERATORS_GROUP)
+        sub_meta = resolve_olm_meta(self._view.aliases(), "subscriptions", OPERATORS_GROUP)
         if sub_meta is None:
-            self._notify(
+            self._ui.notify(
                 "Install unavailable: the OLM Subscription API was not discovered",
                 severity="warning",
             )
             return
         get_manifest = self._get_manifest()
         if get_manifest is None:
-            self._notify("Install unavailable: no manifest source", severity="warning")
+            self._ui.notify("Install unavailable: no manifest source", severity="warning")
             return
         epoch = self._gate.epoch()
         try:
             # Fetch by the canonical view kind (which may be a group-qualified
             # alias), as the edit path does: a bare plural would resolve to a
             # colliding foreign CRD's meta when names overlap.
-            manifest = await get_manifest(self._canonical_kind(self._current_kind()), ns, name)
+            manifest = await get_manifest(
+                self._view.canonical_kind(self._view.current_kind()), ns, name
+            )
         except Exception as exc:
-            self._notify(f"Could not fetch the package manifest: {exc}", severity="error")
+            self._ui.notify(f"Could not fetch the package manifest: {exc}", severity="error")
             return
         # The wizard must be fed the incarnation the user selected: if the
         # catalog entry was deleted and recreated under the same name during
         # the fetch, its facts (channels, catalog source) may differ.
         if not self._uid_intact_after_fetch(manifest, ns, name, uid):
-            self._notify(
-                f"install {self._gvr_label(pkg_meta)}/{name} cancelled -"
+            self._ui.notify(
+                f"install {self._view.gvr_label(pkg_meta)}/{name} cancelled -"
                 " the catalog entry changed during the manifest fetch",
                 severity="warning",
             )
@@ -157,7 +138,7 @@ class OperatorController:
                 return
             # The SSAR round trip must not run inside a screen callback:
             # a worker re-checks, revalidates, then confirms.
-            self._run_worker(
+            self._ui.run_worker(
                 self._confirm_operator_install(pkg_meta, sub_meta, ns, uid, facts, choices, epoch)
             )
 
@@ -166,14 +147,14 @@ class OperatorController:
         # namespace, or the configured workload namespace on the
         # all-namespaces view (the catalog default since `:operators`
         # opens cluster-wide).
-        view_ns = self._current_namespace()
+        view_ns = self._view.current_namespace()
         # Same fallback as current_scope's initialization: with zero config,
         # config.namespace is None while the effective workload namespace is
         # "default" - an empty prefill would fail validation on submit.
         default_ns = (
-            view_ns if view_ns != ALL_NAMESPACES else (self._config().namespace or "default")
+            view_ns if view_ns != ALL_NAMESPACES else (self._view.default_namespace() or "default")
         )
-        await self._push_screen(
+        await self._ui.push_screen(
             OperatorInstallPrompt(facts, namespace=default_ns),
             _on_choices,
         )
@@ -206,7 +187,7 @@ class OperatorController:
         except ValueError as exc:
             # Blank catalog facts (malformed PackageManifest status) land
             # here; the wizard already validated its own inputs.
-            self._notify(f"install cancelled: {exc}", severity="warning")
+            self._ui.notify(f"install cancelled: {exc}", severity="warning")
             return
         # Create is authorized against the collection POST before the object
         # name exists (resourceNames rules cannot grant create), so the SSAR
@@ -217,11 +198,11 @@ class OperatorController:
             "install", pkg_meta, ns, facts.package, phase="the install wizard", epoch=epoch
         ):
             return
-        if uid and self._selected_uid(ns, facts.package) != uid:
+        if uid and self._view.selected_uid(ns, facts.package) != uid:
             # Same name, different incarnation: the catalog entry was
             # replaced while the wizard was open.
-            self._notify(
-                f"install {self._gvr_label(pkg_meta)}/{facts.package} cancelled -"
+            self._ui.notify(
+                f"install {self._view.gvr_label(pkg_meta)}/{facts.package} cancelled -"
                 " the catalog entry changed during the install wizard",
                 severity="warning",
             )
@@ -239,14 +220,14 @@ class OperatorController:
             # create has no server-side uid precondition (there is no target
             # object yet): recheck the catalog incarnation one last time at
             # execution, after the confirmation gap.
-            if uid and self._selected_uid(ns, facts.package) != uid:
-                self._notify(
-                    f"install {self._gvr_label(pkg_meta)}/{facts.package} cancelled -"
+            if uid and self._view.selected_uid(ns, facts.package) != uid:
+                self._ui.notify(
+                    f"install {self._view.gvr_label(pkg_meta)}/{facts.package} cancelled -"
                     " the catalog entry changed during the approval dialog",
                     severity="warning",
                 )
                 return
-            self._run_worker(
+            self._ui.run_worker(
                 self._gate.run(
                     "install",
                     sub_meta,
@@ -257,7 +238,7 @@ class OperatorController:
                 )
             )
 
-        await self._push_screen(
+        await self._ui.push_screen(
             self._confirm_screen(f"Install operator {facts.package}?", operation), _done
         )
 
@@ -275,17 +256,19 @@ class OperatorController:
             return
         get_manifest = self._get_manifest()
         if get_manifest is None:
-            self._notify("Approve unavailable: no manifest source", severity="warning")
+            self._ui.notify("Approve unavailable: no manifest source", severity="warning")
             return
         try:
             # Canonical view kind, not the bare plural: safe under alias
             # collisions (see _start_operator_install).
-            manifest = await get_manifest(self._canonical_kind(self._current_kind()), ns, name)
+            manifest = await get_manifest(
+                self._view.canonical_kind(self._view.current_kind()), ns, name
+            )
         except Exception as exc:
-            self._notify(f"Could not fetch the install plan: {exc}", severity="error")
+            self._ui.notify(f"Could not fetch the install plan: {exc}", severity="error")
             return
         if not self._uid_intact_after_fetch(manifest, ns, name, uid):
-            self._notify(
+            self._ui.notify(
                 f"approve installplans/{name} cancelled -"
                 " the install plan changed during the manifest fetch",
                 severity="warning",
@@ -303,7 +286,7 @@ class OperatorController:
         csvs = ", ".join(str(c) for c in spec.get("clusterServiceVersionNames") or []) or "?"
         operation = (
             f"REPLACE installplans/{name} with spec.approved=true"
-            f"{self._write_locus(ns)}\ninstalls: {csvs}"
+            f"{self._view.write_locus(ns)}\ninstalls: {csvs}"
         )
         await self._gate.confirm(
             f"Approve installplans/{name}?",
@@ -324,7 +307,7 @@ class OperatorController:
         spec = spec if isinstance(spec, dict) else {}
         approval_mode = str(spec.get("approval") or "")
         if approval_mode != "Manual":
-            self._notify(
+            self._ui.notify(
                 f"installplans/{name} has approval mode"
                 f" {approval_mode or '?'!r} - only pending Manual plans"
                 " can be approved here",
@@ -332,7 +315,7 @@ class OperatorController:
             )
             return None
         if spec.get("approved"):
-            self._notify(f"installplans/{name} is already approved", severity="information")
+            self._ui.notify(f"installplans/{name} is already approved", severity="information")
             return None
         return spec
 
@@ -345,7 +328,7 @@ class OperatorController:
         group-qualified alias, like `resolve_olm_meta`), or None when the
         API was not discovered."""
         for key in (f"{plural}.{OPERATORS_GROUP}", plural):
-            meta = self._aliases().get(key)
+            meta = self._view.aliases().get(key)
             if meta is not None and meta.group == OPERATORS_GROUP:
                 return key
         return None
@@ -380,7 +363,7 @@ class OperatorController:
         try:
             csv_meta, csv_uid = await self._installed_csv_target(ns, csv_name)
         except _CsvTargetUnavailable as exc:
-            self._notify(
+            self._ui.notify(
                 f"uninstall {name} aborted: {exc} -"
                 f" installed CSV {csv_name} cannot be safely removed",
                 severity="error",
@@ -399,7 +382,7 @@ class OperatorController:
 
         def _done(confirmed: bool | None) -> None:
             if confirmed:
-                self._run_worker(
+                self._ui.run_worker(
                     self._operator_apply_uninstall(
                         ops,
                         sub_meta,
@@ -413,7 +396,7 @@ class OperatorController:
                     )
                 )
 
-        await self._push_screen(
+        await self._ui.push_screen(
             self._confirm_screen(f"Uninstall operator {name}?", operation), _done
         )
 
@@ -425,17 +408,17 @@ class OperatorController:
         incarnation than the row the user acted on."""
         get_manifest = self._get_manifest()
         if get_manifest is None:
-            self._notify("Uninstall unavailable: no manifest source", severity="warning")
+            self._ui.notify("Uninstall unavailable: no manifest source", severity="warning")
             return None
         try:
             manifest = await get_manifest(fetch_kind, ns, name)
         except Exception as exc:
-            self._notify(f"Could not fetch the subscription: {exc}", severity="error")
+            self._ui.notify(f"Could not fetch the subscription: {exc}", severity="error")
             return None
         fetched = manifest_uid(manifest)
         if uid and fetched and fetched != uid:
-            self._notify(
-                f"uninstall {self._gvr_label(sub_meta)}/{name} cancelled -"
+            self._ui.notify(
+                f"uninstall {self._view.gvr_label(sub_meta)}/{name} cancelled -"
                 " the subscription changed during the manifest fetch",
                 severity="warning",
             )
@@ -470,7 +453,7 @@ class OperatorController:
         csv_uid = manifest_uid(manifest)
         if not csv_uid:
             raise _CsvTargetUnavailable("the CSV manifest has no uid to pin")
-        return self._aliases()[key], csv_uid
+        return self._view.aliases()[key], csv_uid
 
     def _operator_uninstall_operation(
         self,
@@ -483,13 +466,13 @@ class OperatorController:
         """The uninstall dialog body: exactly what will be deleted, what OLM
         garbage-collects, and what is deliberately kept."""
         lines = [
-            f"OPERATOR UNINSTALL {name}{self._write_locus(ns)}",
+            f"OPERATOR UNINSTALL {name}{self._view.write_locus(ns)}",
             "",
-            f"  DELETE {self._gvr_label(sub_meta)}/{name}",
+            f"  DELETE {self._view.gvr_label(sub_meta)}/{name}",
         ]
         if csv_meta is not None and csv_name:
             lines += [
-                f"  DELETE {self._gvr_label(csv_meta)}/{csv_name}",
+                f"  DELETE {self._view.gvr_label(csv_meta)}/{csv_name}",
                 "",
                 "OLM garbage-collects the operator's Deployment and RBAC owned by the CSV.",
             ]
@@ -567,7 +550,7 @@ class OperatorController:
     ) -> None:
         """The uninstall itself, with the in-flight reservation already held."""
         if await self._subscription_target_stale(fetch_kind, ns, name, uid, csv_name):
-            self._notify(
+            self._ui.notify(
                 f"uninstall {name} aborted: the subscription changed while"
                 " the dialog was open - refresh and retry",
                 severity="warning",
@@ -628,20 +611,22 @@ class OperatorController:
         row = next(
             (
                 obj
-                for obj in self._store().get(self._canonical_kind(sub_key), self._current_scope())
+                for obj in self._view.resources(
+                    self._view.canonical_kind(sub_key), self._view.current_scope()
+                )
                 if getattr(obj, "installed_csv", "") == name and (ns is None or obj.namespace == ns)
             ),
             None,
         )
         if row is None:
             return False
-        self._notify(
+        self._ui.notify(
             f"{name} was installed by subscriptions/{row.name} - OLM would"
             " reinstall a deleted CSV; uninstalling the operator instead",
             severity="warning",
         )
         await self.uninstall(
-            self._aliases()[sub_key],
+            self._view.aliases()[sub_key],
             row.namespace or None,
             row.name,
             str(getattr(row, "uid", "") or "") or None,

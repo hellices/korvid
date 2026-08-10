@@ -18,10 +18,11 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Mapping
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar
 
 if TYPE_CHECKING:
@@ -33,11 +34,14 @@ if TYPE_CHECKING:
 import yaml
 from rich.text import Text
 from textual.app import App, ComposeResult, ScreenStackError, SuspendNotSupported
+from textual.await_complete import AwaitComplete
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
 from textual.events import DescendantBlur, DescendantFocus, Key
+from textual.screen import Screen
+from textual.widget import AwaitMount
 from textual.widgets import DataTable, Static
 from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, get_current_worker
@@ -140,6 +144,8 @@ from korvid.ui.shell import (
     parse_debug_pod_name,
 )
 from korvid.ui.transfer import TransferController, TransferProgress
+from korvid.ui.ui_surface import ScreenResultT, Severity, UiSurface
+from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.command_bar import CommandBar
@@ -797,22 +803,11 @@ class KorvidApp(App[None]):
         #: permitted/run directly rather than the standard confirm flow.
         self._olm = OperatorController(
             gate=AppWriteGate(self),
+            view=AppViewState(self),
+            ui=AppUiSurface(self),
             write_ops=lambda: self._write_ops,
             get_manifest=lambda: self._get_manifest,
-            aliases=lambda: self.aliases,
-            store=lambda: self.store,
-            config=lambda: self.config,
-            notify=self.notify,
-            push_screen=self.push_screen,
-            run_worker=self.run_worker,
-            current_kind=lambda: self.current_kind,
-            current_scope=lambda: self.current_scope,
-            current_namespace=lambda: self.current_namespace,
-            canonical_kind=self._canonical_kind,
-            gvr_label=self._gvr_label,
-            write_locus=self._write_locus,
             confirm_screen=lambda *a, **k: self._confirm_screen(*a, **k),
-            selected_uid=lambda *a, **k: self._selected_uid(*a, **k),
             uid_intact_after_fetch=lambda *a, **k: self._uid_intact_after_fetch(*a, **k),
             precheck_keybinding_write=lambda *a, **k: self._precheck_keybinding_write(*a, **k),
         )
@@ -823,23 +818,11 @@ class KorvidApp(App[None]):
         self._helm_ctl = HelmController(
             helm=lambda: self._helm,
             gate=AppWriteGate(self),
-            config=lambda: self.config,
-            store=lambda: self.store,
-            notify=self.notify,
-            push_screen=self.push_screen,
-            run_worker=self.run_worker,
-            screen=lambda: self.screen,
-            screen_stack=lambda: self.screen_stack,
-            current_kind=lambda: self.current_kind,
-            current_namespace=lambda: self.current_namespace,
-            current_scope=lambda: self.current_scope,
-            canonical_kind=self._canonical_kind,
-            progress=self._progress,
-            selected_ns_name=self._selected_ns_name,
+            view=AppViewState(self),
+            ui=AppUiSurface(self),
             # Late-binding, like DebugController's suspend/refresh: the editor
-            # entry points are patched per test, and a switch retargets
-            # nothing here — binding the bound method at construction would
-            # freeze whatever existed then.
+            # entry points are patched per test, so binding the bound method
+            # at construction would freeze whatever existed then.
             edit_in_external_editor=lambda *a, **k: self._edit_in_external_editor(*a, **k),
             edit_text=lambda: self._edit_text,
         )
@@ -9129,3 +9112,106 @@ class AppWriteGate(WriteGate):
 
     def switching(self) -> bool:
         return self._app._ctx_switching
+
+
+class AppViewState(ViewState):
+    """Nominal `ViewState` adapter over `KorvidApp` (issue #187).
+
+    Textual's `App` metaclass conflicts with `ABCMeta`, so the app conforms
+    through an adapter rather than inheriting - the same arrangement as
+    `AppUIBridge` and `AppWriteGate`. Every method is a live read: a `:ctx`
+    switch rebuilds the alias table and the store, and the selection moves
+    constantly, so nothing here may be cached by a caller.
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    def current_kind(self) -> str:
+        return self._app.current_kind
+
+    def current_scope(self) -> str:
+        return self._app.current_scope
+
+    def current_namespace(self) -> str:
+        return self._app.current_namespace
+
+    def canonical_kind(self, kind: str) -> str:
+        return self._app._canonical_kind(kind)
+
+    def aliases(self) -> Mapping[str, ResourceMeta]:
+        return MappingProxyType(self._app.aliases)
+
+    def resources(self, kind: str, scope: str) -> list[Summary]:
+        return self._app.store.get(kind, scope)
+
+    def readonly(self) -> bool:
+        return self._app.config.readonly
+
+    def default_namespace(self) -> str | None:
+        return self._app.config.namespace
+
+    def selected_ns_name(self) -> tuple[str | None, str | None]:
+        return self._app._selected_ns_name()
+
+    def selected_uid(self, namespace: str | None, name: str) -> str | None:
+        return self._app._selected_uid(namespace, name)
+
+    def gvr_label(self, meta: ResourceMeta) -> str:
+        return self._app._gvr_label(meta)
+
+    def write_locus(self, namespace: str | None) -> str:
+        return self._app._write_locus(namespace)
+
+
+class AppUiSurface(UiSurface):
+    """Nominal `UiSurface` adapter over `KorvidApp` (issue #187).
+
+    Adapter for the same metaclass reason as the others. `run_worker` stays
+    the app's, so controller work is supervised and cancelled on shutdown
+    rather than left as a bare task.
+
+    It does not make controller work context-safe: `_teardown_context`
+    cancels only the `hint-events` group, so a worker started before a
+    `:ctx` switch keeps running against the cluster it captured. Controllers
+    revalidate explicitly through the epoch or `WriteGate.context_intact`.
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: Severity = "information",
+        timeout: float | None = None,
+    ) -> None:
+        self._app.notify(message, title=title, severity=severity, timeout=timeout)
+
+    def push_screen(
+        self,
+        screen: Screen[ScreenResultT],
+        callback: Callable[[ScreenResultT | None], None] | None = None,
+    ) -> AwaitMount | AwaitComplete:
+        return self._app.push_screen(screen, callback)
+
+    def run_worker(
+        self,
+        work: Coroutine[Any, Any, Any] | Callable[[], Any],
+        *,
+        exclusive: bool = False,
+        group: str = "default",
+        name: str = "",
+    ) -> Worker[Any]:
+        return self._app.run_worker(work, exclusive=exclusive, group=group, name=name)
+
+    def progress(self, label: str) -> contextlib.AbstractContextManager[None]:
+        return self._app._progress(label)
+
+    def is_current_screen(self, screen: Screen[Any]) -> bool:
+        return self._app.screen is screen
+
+    def screen_depth(self) -> int:
+        return len(self._app.screen_stack)
