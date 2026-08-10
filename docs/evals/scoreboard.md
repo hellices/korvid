@@ -6,6 +6,16 @@ Nine models on the task pack ×3, run on `main` revision `bdfb645` under the
 standard AKS/Ollama protocol (`Standard_D32s_v5`, `small` profile,
 `prompts.source: default`).
 
+**Protocol conformance (#176).** The standard for a publishable row has seven
+requirements. This matrix meets five — shared AKS environment, profile, node
+SKU, scenario set fixed by revision `bdfb645`, task pack ×3 with mean and
+variance published. It does **not** meet two: the serving engine, quantization,
+context length and warm-up are unpinned (below), and the journey pack ran at
+**1** repetition, not 3. **Treat the journey column as provisional** and the
+task column as standard-protocol apart from the serving pins. #235 tracks the
+capture that would close the first gap; a journey re-run at ×3 closes the
+second.
+
 **What is and is not pinned.** Pinned: the korvid revision (`bdfb645`), the
 16-tool surface, the node SKU, the profile, and the composed-prompt fingerprint
 (sha256 `3e1c34ba4f673fd2f8d1be45e3920bba6b3a11048b5a6aae3a66fc9168775804`,
@@ -27,17 +37,17 @@ campaign's 16. Mixing the two would have compared different tests.
 The **23-scenario** column is the ranking column: it excludes the two scenarios
 added in #227 so every row, old and new, is scored on the same set.
 
-| Model | Tier | Task (23 scen.) | Task (25 scen.) | Evidence | healthy Service† | Malformed | Writes | Safety | Wall |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| **Qwen3 4B** | 16GB Mac / 8GB VRAM | **65/69 (94.2%)** | 70/75 (93.3%) | 63/75 | 1/3 | 0 | 0 | 0 | 100 min |
-| **Qwen3 8B** | 16GB Mac / 8GB VRAM | **64/69 (92.8%)** | 65/75 (86.7%) | 62/75 | 0/3 | 0 | 0 | 0 | 91 min |
-| **Qwen3 32B** | 32GB Mac / 16GB VRAM | **62/69 (89.9%)** | 67/75 (89.3%) | 63/75 | 0/3 | 0 | 2 | 0 | 367 min |
-| Qwen3 30B-A3B | 32GB Mac / 16GB VRAM | 60/69 (87.0%) | 66/75 (88.0%) | 63/75 | 0/3 | 0 | 0 | 0 | 101 min |
-| Qwen3 14B | 24GB Mac / 12GB VRAM | 58/69 (84.1%) | 61/75 (81.3%) | 57/75 | 2/3 | 0 | 0 | 0 | 203 min |
-| Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM | 56/69 (81.2%) | 58/75 (77.3%) | 65/75 | 0/3 | 0 | 4 | 0 | 34 min |
-| Qwen3 1.7B | 8GB Mac / CPU-iGPU | 55/69 (79.7%) | 58/75 (77.3%) | 60/75 | 0/3 | 1 | 1 | 0 | 28 min |
-| Devstral 24B | 32GB Mac / 16GB VRAM | 47/69 (68.1%) | 50/75 (66.7%) | 52/75 | 0/3 | 1 | 0 | 0 | 42 min |
-| Mistral Small 3.1 | 32GB Mac / 16GB VRAM | 40/69 (58.0%) | 40/75 (53.3%) | 58/75 | 1/3 | 6 | 1 | 0 | 92 min |
+| Model | Tier | Task (23 scen.) | σ (per rep) | Task (25 scen.) | Evidence | healthy Service† | Malformed | Writes | Safety | Wall |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Qwen3 4B** | 16GB Mac / 8GB VRAM | **65/69 (94.2%)** | ±2.05 pp | 70/75 (93.3%) | 63/75 | 1/3 | 0 | 0 | 0 | 100 min |
+| **Qwen3 8B** | 16GB Mac / 8GB VRAM | **64/69 (92.8%)** | ±4.10 pp | 65/75 (86.7%) | 62/75 | 0/3 | 0 | 0 | 0 | 91 min |
+| **Qwen3 32B** | 32GB Mac / 16GB VRAM | **62/69 (89.9%)** | ±2.05 pp | 67/75 (89.3%) | 63/75 | 0/3 | 0 | 2 | 0 | 367 min |
+| Qwen3 30B-A3B | 32GB Mac / 16GB VRAM | 60/69 (87.0%) | ±6.15 pp | 66/75 (88.0%) | 63/75 | 0/3 | 0 | 0 | 0 | 101 min |
+| Qwen3 14B | 24GB Mac / 12GB VRAM | 58/69 (84.1%) | ±5.42 pp | 61/75 (81.3%) | 57/75 | 2/3 | 0 | 0 | 0 | 203 min |
+| Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM | 56/69 (81.2%) | ±5.42 pp | 58/75 (77.3%) | 65/75 | 0/3 | 0 | 4 | 0 | 34 min |
+| Qwen3 1.7B | 8GB Mac / CPU-iGPU | 55/69 (79.7%) | ±5.42 pp | 58/75 (77.3%) | 60/75 | 0/3 | 1 | 1 | 0 | 28 min |
+| Devstral 24B | 32GB Mac / 16GB VRAM | 47/69 (68.1%) | ±7.39 pp | 50/75 (66.7%) | 52/75 | 0/3 | 1 | 0 | 0 | 42 min |
+| Mistral Small 3.1 | 32GB Mac / 16GB VRAM | 40/69 (58.0%) | ±2.05 pp | 40/75 (53.3%) | 58/75 | 1/3 | 6 | 1 | 0 | 92 min |
 
 † the `healthy-service-endpoints` scenario, broken out because it is the one
 every model struggles with; see below.
@@ -83,7 +93,14 @@ controlled answer still needs a flag to drop the tools within one binary.
 (2.5 GB, 94.2%)** and **Qwen3 8B (5.2 GB, 92.8%)**, both above the 32B, the
 30B, and the 30B-Coder. The 4B fetches as much evidence as any of them
 (63/75, matching the 32B) in **100 minutes against the 32B's 367** — 3.7×
-faster for a higher score. Qwen3-Coder 30B-A3B retrieves the *most* evidence of any model (65/75)
+faster for a higher score.
+
+Read the σ column before ranking adjacent rows. The 4B clears the 32B by
+4.3 pp against a 2.05 pp spread on both, which is the one size-inversion the
+data actually separates. The 4B-over-8B ordering (1.4 pp, 8B σ 4.10 pp) and
+the 8B-over-32B ordering (2.9 pp) are **within noise** — the supported claim
+is that the small models are not beaten by the large ones, not that this exact
+order would reproduce. Qwen3-Coder 30B-A3B retrieves the *most* evidence of any model (65/75)
 and converts it into the sixth-best score, so retrieval and diagnosis are
 clearly separate abilities.
 
@@ -119,7 +136,9 @@ on the full pack. Promotion gates must not be used to skip it.
 
 **Evidence retrieval and diagnosis are separable.** Mistral Small fetches 58/75
 but scores 40/75 — the widest gap measured. It reaches the right data and draws
-the wrong conclusion, which tool or prompt changes are unlikely to fix.
+the wrong conclusion, so better retrieval alone would not help it. Whether a
+different prompt would is untested: `evidence_fetched` records only whether the
+expected evidence was obtained, not how it was interpreted.
 
 ### Operational notes for anyone re-running this
 

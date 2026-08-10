@@ -293,9 +293,6 @@ def test_scoreboard_only_names_scenarios_and_journeys_that_exist() -> None:
     scenarios = {path.stem for path in bundled_scenarios_dir().glob("*.yaml")}
     journeys = {path.stem for path in (bundled_scenarios_dir().parent / "journeys").glob("*.yaml")}
     known = scenarios | journeys
-    # Only check identifiers shaped like a pack id: lowercase, hyphenated,
-    # and sharing a stem with something we ship. Prose, pod names and
-    # branch names are not pack ids.
     cited = _cited_pack_ids(text)
     missing = sorted(cited - known)
     assert not missing, (
