@@ -20,9 +20,40 @@ KorvidApp  (ui/app.py)
 └── ...                                           further extractions pending
 ```
 
-Controllers do **not** import `app.py`. Every dependency arrives as a narrow
-callable in the constructor, which is what makes "does this controller touch
-X?" answerable by reading its `__init__` instead of the whole class.
+Controllers do **not** import `app.py`. Dependencies arrive in the
+constructor, and the load-bearing ones arrive as *named interfaces* rather
+than anonymous callables.
+
+### Why interfaces and not callables
+
+The first extraction used one callable per dependency and `HelmController`
+ended up with 21. Measuring what the remaining areas would need showed that
+does not scale:
+
+| Area | Methods | Distinct app attributes used |
+|---|---:|---:|
+| OLM | 15 | 26 |
+| port-forward | 14 | 27 |
+| logs | 24 | 36 |
+| shell / debug | 19 | 41 |
+
+Worse than the count, `Callable[..., bool]` erases the argument contract. The
+approval and revalidation hooks carry the security-relevant keywords
+(`action`, `meta`, `op_factory`, `epoch`), and under an ellipsis mypy stops
+checking them — dropping `epoch=epoch` from a context check type-checked
+clean. As `WriteGate` it fails with *Missing named argument "epoch"*.
+
+So the boundaries that matter are named:
+
+- **`WriteGate`** (`ui/write_gate.py`) — approval, revalidation, the
+  fail-closed audit precondition, and the context epoch. One implementation,
+  `AppWriteGate`, adapting the app.
+- `ViewState` and `UiSurface` — planned, same treatment for "what is the user
+  looking at" and "the Textual capabilities a controller may use".
+
+`AppWriteGate` is an adapter rather than the app inheriting `WriteGate`
+because Textual's `App` metaclass conflicts with `ABCMeta` — the same reason
+`AppUIBridge` exists.
 
 ## What stays on the app
 
@@ -31,13 +62,15 @@ must have exactly one implementation:
 
 | Concern | Why it stays |
 |---|---|
-| `_push_write_confirmation` | The approval gate. Agent writes and user writes enter here and nowhere else. |
-| `_write_context_intact` | Revalidation after an awaited gap, including the `:ctx` epoch check. |
-| `_run_write` | Audit-before-mutation, fail-closed. |
+| `_push_write_confirmation` | The approval gate. Agent writes and user writes enter here and nowhere else. Reached through `WriteGate.confirm`. |
+| `_write_context_intact` | Revalidation after an awaited gap, including the `:ctx` epoch check. Reached through `WriteGate.context_intact`. |
+| `_run_write` | Audit-before-mutation, fail-closed. Never called by a controller. |
 | `run_worker` ownership | Cancellation and exclusivity belong to the app that owns the event loop. |
 
-A controller composes an operation and asks the app to approve and run it. It
-never mutates the cluster directly.
+A controller composes an operation *factory* and hands it to the gate. The
+ordering is the invariant, not the location of the helm/kubectl call: a
+declined dialog constructs nothing, and the app awaits the factory from its
+own worker only after the intent audit record has persisted.
 
 ## Late binding
 
