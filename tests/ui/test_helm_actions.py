@@ -1219,7 +1219,7 @@ async def test_rollback_target_is_captured_by_the_action_not_the_worker(tmp_path
     async with app.run_test() as pilot:
         await _navigate(pilot, "helmrevisions", "helmrevisions")
         await _rows_listed(pilot, app, 1)
-        with mock.patch.object(app._helm_ctl, "_rollback_flow", spy):
+        with mock.patch.object(app._helm_ctl, "rollback", spy):
             await pilot.press("r")
             # captured synchronously: the facts exist before any worker ran
             assert seen == [("web", 2, "default")]

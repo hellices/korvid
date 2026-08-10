@@ -169,6 +169,7 @@ from korvid.ui.widgets.status_bar import StatusBar
 from korvid.ui.widgets.telepresence_screen import TelepresenceScreen
 from korvid.ui.widgets.top_bar import KeyEntry, TopBar
 from korvid.ui.widgets.transfer_screen import TransferProgressScreen, TransferScreen
+from korvid.ui.write_gate import WriteGate
 
 _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
     "pods": PODS_META,
@@ -822,7 +823,7 @@ class KorvidApp(App[None]):
         #: perimeter keeps a single implementation.
         self._helm_ctl = HelmController(
             helm=lambda: self._helm,
-            audit=lambda: self._audit,
+            gate=AppWriteGate(self),
             config=lambda: self.config,
             store=lambda: self.store,
             notify=self.notify,
@@ -833,12 +834,8 @@ class KorvidApp(App[None]):
             current_kind=lambda: self.current_kind,
             current_namespace=lambda: self.current_namespace,
             current_scope=lambda: self.current_scope,
-            ctx_epoch=lambda: self._ctx_epoch,
-            ctx_switching=lambda: self._ctx_switching,
             canonical_kind=self._canonical_kind,
             progress=self._progress,
-            push_write_confirmation=self._push_write_confirmation,
-            write_context_intact=self._write_context_intact,
             selected_ns_name=self._selected_ns_name,
             # Late-binding, like DebugController's suspend/refresh: the editor
             # entry points are patched per test, and a switch retargets
@@ -5878,7 +5875,7 @@ class KorvidApp(App[None]):
         derived from."""
         if not self._helm_view_guard(HELM_RELEASES_META, "Helm install"):
             return
-        self._helm_ctl._install_flow()
+        self._helm_ctl.install()
 
     def action_helm_upgrade(self) -> None:
         """u on the helm browser: upgrade the selected release (issue #31).
@@ -5886,7 +5883,7 @@ class KorvidApp(App[None]):
         keys must not retarget the upgrade."""
         if not self._helm_view_guard(HELM_RELEASES_META, "Helm upgrade"):
             return
-        self._helm_ctl._upgrade_flow()
+        self._helm_ctl.upgrade()
 
     async def action_helm_history(self) -> None:
         """h on the helm release browser: the flat revision drill-down.
@@ -5917,13 +5914,13 @@ class KorvidApp(App[None]):
         ns, name = self._selected_ns_name()
         if name is None:
             return
-        row = self._helm_ctl._revision_row(ns, name)
+        row = self._helm_ctl.revision_row(ns, name)
         if row is None:
             self.notify("no helm revision selected", severity="warning")
             return
         namespace = ns or row.namespace
         self.run_worker(
-            self._helm_ctl._rollback_flow(helm, row, ns, name, namespace, epoch),
+            self._helm_ctl.rollback(helm, row, ns, name, namespace, epoch),
             exclusive=True,
             group="helm-write",
         )
@@ -5940,13 +5937,13 @@ class KorvidApp(App[None]):
         ns, name = self._selected_ns_name()
         if name is None:
             return
-        row = self._helm_ctl._release_row(ns, name)
+        row = self._helm_ctl.release_row(ns, name)
         if row is None:
             self.notify("no helm release selected", severity="warning")
             return
         namespace = ns or row.namespace
         self.run_worker(
-            self._helm_ctl._uninstall_flow(helm, row, ns, name, namespace, epoch),
+            self._helm_ctl.uninstall(helm, row, ns, name, namespace, epoch),
             exclusive=True,
             group="helm-write",
         )
@@ -9512,3 +9509,70 @@ class AppUIBridge(UIBridge):
         return await self._dispatch(
             self._app.agent_cancel_write_proposal(proposal_id, session_id=session_id)
         )
+
+
+class AppWriteGate(WriteGate):
+    """Nominal `WriteGate` adapter over `KorvidApp` (issue #187).
+
+    Same reason as `AppUIBridge`: the boundary interface must be an
+    `abc.ABC` (AGENTS.md), but Textual's `App` metaclass conflicts with
+    `ABCMeta`, so the app conforms through a thin adapter instead of
+    inheriting. Every method delegates to the app's single implementation —
+    the approval dialog, the epoch revalidation, and the `_run_write`
+    worker that audits before mutating stay exactly where they were.
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    async def confirm(
+        self,
+        title: str,
+        operation: str,
+        *,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        op_factory: Callable[[], Awaitable[None]],
+        detail: str = "",
+        require_name: str | None = None,
+        preview: list[str] | None = None,
+        preview_title: str = "server dry-run preview:",
+        managed_note: str | None = None,
+    ) -> None:
+        await self._app._push_write_confirmation(
+            title,
+            operation,
+            action=action,
+            meta=meta,
+            namespace=namespace,
+            name=name,
+            op_factory=op_factory,
+            detail=detail,
+            require_name=require_name,
+            preview=preview,
+            preview_title=preview_title,
+            managed_note=managed_note,
+        )
+
+    def context_intact(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        *,
+        phase: str = "the permission check",
+        epoch: int,
+    ) -> bool:
+        return self._app._write_context_intact(action, meta, ns, name, phase=phase, epoch=epoch)
+
+    def audit_configured(self) -> bool:
+        return self._app._audit is not None
+
+    def epoch(self) -> int:
+        return self._app._ctx_epoch
+
+    def switching(self) -> bool:
+        return self._app._ctx_switching

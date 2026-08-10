@@ -29,7 +29,6 @@ import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
-from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore
 from korvid.k8s.helm import (
@@ -43,6 +42,7 @@ from korvid.ui.widgets.helm_chart_search import HelmChartSearchScreen
 from korvid.ui.widgets.helm_install import HelmInstallPrompt, HelmReleaseChoices
 from korvid.ui.widgets.helm_repos import HelmRepoScreen
 from korvid.ui.widgets.pick_screen import PickScreen
+from korvid.ui.write_gate import WriteGate
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,6 @@ class HelmController:
         self,
         *,
         helm: Callable[[], HelmCLI | None],
-        audit: Callable[[], AuditLog | None],
         config: Callable[[], KorvidConfig],
         store: Callable[[], ResourceStore],
         notify: Callable[..., None],
@@ -134,19 +133,15 @@ class HelmController:
         current_kind: Callable[[], str],
         current_namespace: Callable[[], str],
         current_scope: Callable[[], str],
-        ctx_epoch: Callable[[], int],
-        ctx_switching: Callable[[], bool],
         canonical_kind: Callable[[str], str],
         progress: Callable[[str], contextlib.AbstractContextManager[None]],
-        push_write_confirmation: Callable[..., Awaitable[None]],
-        write_context_intact: Callable[..., bool],
+        gate: WriteGate,
         selected_ns_name: Callable[[], tuple[str | None, str | None]],
         edit_in_external_editor: Callable[..., Awaitable[str | None]],
         #: optional injected editor (tests); None falls back to the real one.
         edit_text: Callable[[], Callable[..., Awaitable[str | None]] | None],
     ) -> None:
         self._helm = helm
-        self._audit = audit
         self._config = config
         self._store = store
         self._notify = notify
@@ -157,12 +152,9 @@ class HelmController:
         self._current_kind = current_kind
         self._current_namespace = current_namespace
         self._current_scope = current_scope
-        self._ctx_epoch = ctx_epoch
-        self._ctx_switching = ctx_switching
         self._canonical_kind = canonical_kind
         self._progress = progress
-        self._push_write_confirmation = push_write_confirmation
-        self._write_context_intact = write_context_intact
+        self._gate = gate
         self._selected_ns_name = selected_ns_name
         self._edit_in_external_editor = edit_in_external_editor
         self._edit_text = edit_text
@@ -175,7 +167,7 @@ class HelmController:
         if self._config().readonly:
             self._notify("Read-only mode: cluster writes are disabled", severity="warning")
             return None
-        if self._audit() is None:
+        if not self._gate.audit_configured():
             # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
             self._notify("Writes disabled: no audit log configured", severity="warning")
             return None
@@ -194,7 +186,7 @@ class HelmController:
         view_ns = self._current_namespace()
         return view_ns if view_ns != ALL_NAMESPACES else (self._config().namespace or "default")
 
-    def _install_flow(self) -> None:
+    def install(self) -> None:
         """Install (the `hint_details` key on the helm view): search-first
         chart picker -> wizard -> dry-run preview -> approval -> audited
         `helm install`. The picker opens instantly and fetches charts per
@@ -208,11 +200,11 @@ class HelmController:
             helm,
             release=None,
             namespace=self._view_namespace(),
-            epoch=self._ctx_epoch(),
+            epoch=self._gate.epoch(),
             initial="",
         )
 
-    def _upgrade_flow(self) -> None:
+    def upgrade(self) -> None:
         """Upgrade (the `helm_upgrade` key on a release row): the same
         wizard with the release name and namespace fixed to the selected
         row's facts; the picker pre-searches the release's chart name.
@@ -221,11 +213,11 @@ class HelmController:
         helm = self.gate()
         if helm is None:
             return
-        epoch = self._ctx_epoch()
+        epoch = self._gate.epoch()
         ns, name = self._selected_ns_name()
         if name is None:
             return
-        row = self._release_row(ns, name)
+        row = self.release_row(ns, name)
         keyword = _chart_base(row.chart) if row is not None else ""
         namespace = ns or (row.namespace if row is not None else self._view_namespace())
         self._open_chart_search(
@@ -358,7 +350,7 @@ class HelmController:
         detail = f"chart={hit.name} version={version_label} values={values_detail}"
 
         title = f"{'Upgrade' if upgrade else 'Install'} {choices.release}?"
-        await self._push_write_confirmation(
+        await self._gate.confirm(
             title,
             operation,
             action=action,
@@ -378,7 +370,7 @@ class HelmController:
         approves must still be the state that was previewed."""
         if upgrade:
             # The row selected for upgrade must still be the one approved.
-            return self._write_context_intact(
+            return self._gate.context_intact(
                 action,
                 HELM_RELEASES_META,
                 choices.namespace,
@@ -386,7 +378,7 @@ class HelmController:
                 phase="the preview render",
                 epoch=epoch,
             )
-        if self._ctx_switching() or epoch != self._ctx_epoch():
+        if self._gate.switching() or epoch != self._gate.epoch():
             # The helm wrapper this flow captured is bound to the old
             # cluster's --kube-context: a switch completed during the wizard
             # or preview must cancel before an approval can open.
@@ -646,7 +638,7 @@ class HelmController:
         # failures, which the caller marks "preview unavailable".
         return (lines if lines is not None else [], title)
 
-    async def _rollback_flow(
+    async def rollback(
         self,
         helm: HelmCLI,
         row: HelmRevisionSummary,
@@ -661,7 +653,7 @@ class HelmController:
         and passed in — this worker must never re-read the selection."""
         with self._progress("rendering rollback preview"):
             preview = await self._rollback_preview(helm, row.release, row.revision, namespace)
-        if not self._write_context_intact(
+        if not self._gate.context_intact(
             "helm-rollback", HELM_REVISIONS_META, ns, name, phase="the diff preview", epoch=epoch
         ):
             return
@@ -669,7 +661,7 @@ class HelmController:
             f"HELM ROLLBACK {row.release} to revision {row.revision} in namespace {namespace}"
         )
 
-        await self._push_write_confirmation(
+        await self._gate.confirm(
             f"Rollback {row.release} to revision {row.revision}?",
             operation,
             action="helm-rollback",
@@ -705,7 +697,7 @@ class HelmController:
             return None
         return _clip_preview(text) if text is not None else None
 
-    async def _uninstall_flow(
+    async def uninstall(
         self,
         helm: HelmCLI,
         row: HelmReleaseSummary,
@@ -721,7 +713,7 @@ class HelmController:
         time and passed in - this worker must never re-read the selection."""
         with self._progress("rendering uninstall preview"):
             preview = await self._uninstall_preview(helm, row.name, namespace)
-        if not self._write_context_intact(
+        if not self._gate.context_intact(
             "helm-uninstall", HELM_RELEASES_META, ns, name, phase="the dry-run preview", epoch=epoch
         ):
             return
@@ -729,7 +721,7 @@ class HelmController:
             f"HELM UNINSTALL {row.name} ({row.chart}) from namespace {namespace}\n"
             "Deletes every resource this release owns and removes its history."
         )
-        await self._push_write_confirmation(
+        await self._gate.confirm(
             f"Uninstall release {row.name}?",
             operation,
             action="helm-uninstall",
@@ -759,7 +751,7 @@ class HelmController:
             return None
         return _clip_preview(text)
 
-    def _release_row(self, ns: str | None, name: str) -> HelmReleaseSummary | None:
+    def release_row(self, ns: str | None, name: str) -> HelmReleaseSummary | None:
         for obj in self._store().get("helmreleases", self._current_scope()):
             if (
                 obj.name == name
@@ -769,7 +761,7 @@ class HelmController:
                 return obj
         return None
 
-    def _revision_row(self, ns: str | None, name: str) -> HelmRevisionSummary | None:
+    def revision_row(self, ns: str | None, name: str) -> HelmRevisionSummary | None:
         for obj in self._store().get("helmrevisions", self._current_scope()):
             if (
                 obj.name == name
