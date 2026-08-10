@@ -19,7 +19,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 
-from korvid.core.config import KorvidConfig
 from korvid.core.store import Summary
 from korvid.k8s.discovery import ResourceMeta
 
@@ -67,8 +66,21 @@ class ViewState(ABC):
         """
 
     @abstractmethod
-    def config(self) -> KorvidConfig:
-        """Session configuration - read-only mode, default namespace, context."""
+    def readonly(self) -> bool:
+        """Whether the session refuses every write.
+
+        Narrower than handing out `KorvidConfig`, which is only shallowly
+        frozen: its `keybindings` and `agent_options` dicts are mutable, and
+        no controller has business reading the agent configuration.
+        """
+
+    @abstractmethod
+    def default_namespace(self) -> str | None:
+        """Session default namespace, or None when the session set none.
+
+        None is distinct from `"default"`: callers decide the fallback,
+        because the right one differs between a write and a read.
+        """
 
     @abstractmethod
     def selected_ns_name(self) -> tuple[str | None, str | None]:

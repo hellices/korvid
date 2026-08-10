@@ -144,7 +144,7 @@ from korvid.ui.shell import (
     parse_debug_pod_name,
 )
 from korvid.ui.transfer import TransferController, TransferProgress
-from korvid.ui.ui_surface import ScreenResultT, UiSurface
+from korvid.ui.ui_surface import ScreenResultT, Severity, UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
@@ -9145,8 +9145,11 @@ class AppViewState(ViewState):
     def resources(self, kind: str, scope: str) -> list[Summary]:
         return self._app.store.get(kind, scope)
 
-    def config(self) -> KorvidConfig:
-        return self._app.config
+    def readonly(self) -> bool:
+        return self._app.config.readonly
+
+    def default_namespace(self) -> str | None:
+        return self._app.config.namespace
 
     def selected_ns_name(self) -> tuple[str | None, str | None]:
         return self._app._selected_ns_name()
@@ -9182,10 +9185,10 @@ class AppUiSurface(UiSurface):
         message: str,
         *,
         title: str = "",
-        severity: str = "information",
+        severity: Severity = "information",
         timeout: float | None = None,
     ) -> None:
-        self._app.notify(message, title=title, severity=severity, timeout=timeout)  # type: ignore[arg-type]  # Textual types severity as a Literal
+        self._app.notify(message, title=title, severity=severity, timeout=timeout)
 
     def push_screen(
         self,
@@ -9210,5 +9213,5 @@ class AppUiSurface(UiSurface):
     def screen(self) -> Any:
         return self._app.screen
 
-    def screen_stack(self) -> list[Any]:
-        return self._app.screen_stack
+    def screen_depth(self) -> int:
+        return len(self._app.screen_stack)

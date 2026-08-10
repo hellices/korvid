@@ -152,7 +152,7 @@ class OperatorController:
         # config.namespace is None while the effective workload namespace is
         # "default" - an empty prefill would fail validation on submit.
         default_ns = (
-            view_ns if view_ns != ALL_NAMESPACES else (self._view.config().namespace or "default")
+            view_ns if view_ns != ALL_NAMESPACES else (self._view.default_namespace() or "default")
         )
         await self._ui.push_screen(
             OperatorInstallPrompt(facts, namespace=default_ns),

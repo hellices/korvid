@@ -55,14 +55,20 @@ So the boundaries that matter are named:
   at: the focused kind and scope, alias resolution, the selected row, and a
   `resources(kind, scope)` query. Read-only structurally, not just by
   convention: there are no setters, `aliases()` returns a `Mapping` view,
-  and the `ResourceStore` is *not* exposed, so no controller can reach
-  `clear`, `clear_all` or `apply_event` and erase the view. Implemented by
+  and neither the `ResourceStore` nor `KorvidConfig` is exposed — the
+  first would let a controller `clear` the view, and the second is only
+  shallowly frozen, so its `keybindings` and `agent_options` dicts are
+  mutable. Configuration arrives as `readonly()` and
+  `default_namespace()`, which is all any controller uses. Implemented by
   `AppViewState`.
 - **`UiSurface`** (`ui/ui_surface.py`) — the Textual capabilities a
   controller may use: `notify`, `push_screen`, `run_worker`, `progress` and
   screen inspection. `push_screen` is generic over the screen's result type,
-  so a callback written for a different screen is a type error. Implemented
-  by `AppUiSurface`.
+  so a callback written for a different screen is a type error; `notify`
+  takes the `Literal` severity Textual accepts rather than a bare `str`;
+  and the modal stack is inspected through `screen_depth()`, because the
+  live list would let a controller `pop` or reorder screens outside
+  Textual's lifecycle. Implemented by `AppUiSurface`.
 
 `UiSurface.run_worker` gives supervision, not context safety: a `:ctx`
 switch cancels only the `hint-events` group, so a worker started before the

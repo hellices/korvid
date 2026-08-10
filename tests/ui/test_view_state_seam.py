@@ -21,6 +21,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary
 from korvid.ui.app import AppViewState, KorvidApp
+from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 
 _ALIASES = {
@@ -87,3 +88,39 @@ def test_resources_reads_the_live_store() -> None:
         GenericSummary(name="api-1", namespace="default", kind="Pod", created="", uid="u1"),
     )
     assert [obj.name for obj in view.resources("pods", "default")] == ["api-1"]
+
+
+def test_config_is_not_handed_out_whole() -> None:
+    """`KorvidConfig` is only shallowly frozen.
+
+    Returning it exposes mutable `keybindings` and `agent_options` dicts
+    through a seam that promises read-only access, and hands controllers
+    agent configuration they have no business seeing. The two values they
+    actually use are the default namespace and the read-only flag.
+    """
+    offenders = [
+        name
+        for name, member in inspect.getmembers(ViewState, inspect.isfunction)
+        if not name.startswith("_") and member.__annotations__.get("return") == "KorvidConfig"
+    ]
+    assert offenders == []
+
+
+def test_ui_surface_exposes_no_mutable_screen_stack() -> None:
+    """The modal stack is inspected for depth, never reordered.
+
+    Handing out Textual's live list lets a controller `pop` or `clear`
+    screens outside Textual's lifecycle. The only real use is `len(...)`.
+    """
+    offenders = [
+        name
+        for name, member in inspect.getmembers(UiSurface, inspect.isfunction)
+        if not name.startswith("_") and member.__annotations__.get("return") == "list[Any]"
+    ]
+    assert offenders == []
+
+
+def test_notify_severity_is_a_closed_set() -> None:
+    """`str` lets an invalid severity pass strict mypy and fail at runtime."""
+    severity = UiSurface.notify.__annotations__["severity"]
+    assert severity != "str"

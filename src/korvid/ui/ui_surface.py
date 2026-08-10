@@ -20,12 +20,16 @@ from __future__ import annotations
 import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from textual.await_complete import AwaitComplete
 from textual.screen import Screen
 from textual.widget import AwaitMount
 from textual.worker import Worker
+
+#: The severities Textual accepts. As a bare `str` an invalid value
+#: type-checks and fails when the toast is rendered.
+Severity = Literal["information", "warning", "error"]
 
 #: Result a modal returns through its callback. Binding it makes the
 #: screen and the callback agree, so a handler written for the wrong
@@ -42,7 +46,7 @@ class UiSurface(ABC):
         message: str,
         *,
         title: str = "",
-        severity: str = "information",
+        severity: Severity = "information",
         timeout: float | None = None,
     ) -> None:
         """Show a toast. The only way a controller talks to the user directly."""
@@ -100,5 +104,10 @@ class UiSurface(ABC):
         """
 
     @abstractmethod
-    def screen_stack(self) -> list[Any]:
-        """The whole modal stack; length is how flows detect an interloper."""
+    def screen_depth(self) -> int:
+        """How many screens are stacked; more than one means an interloper.
+
+        A depth rather than the stack itself: Textual's list is live, so
+        handing it over lets a controller `pop`, `clear` or reorder screens
+        outside the lifecycle that owns them.
+        """

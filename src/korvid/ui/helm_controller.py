@@ -145,7 +145,7 @@ class HelmController:
         fail-closed audit rule apply exactly as to API writes, plus the
         binary must have been detected at startup. None (with a
         notification) blocks the flow."""
-        if self._view.config().readonly:
+        if self._view.readonly():
             self._ui.notify("Read-only mode: cluster writes are disabled", severity="warning")
             return None
         if not self._gate.audit_configured():
@@ -170,7 +170,7 @@ class HelmController:
         all-namespaces view (same fallback as the operator install wizard)."""
         view_ns = self._view.current_namespace()
         return (
-            view_ns if view_ns != ALL_NAMESPACES else (self._view.config().namespace or "default")
+            view_ns if view_ns != ALL_NAMESPACES else (self._view.default_namespace() or "default")
         )
 
     def install(self) -> None:
@@ -374,7 +374,7 @@ class HelmController:
                 severity="warning",
             )
             return False
-        if len(self._ui.screen_stack()) > 1:  # another dialog opened during the preview
+        if self._ui.screen_depth() > 1:  # another dialog opened during the preview
             return False
         if self._view.canonical_kind(self._view.current_kind()) != HELM_RELEASES_META.plural:
             self._ui.notify(
