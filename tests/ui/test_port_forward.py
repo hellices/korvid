@@ -14,6 +14,8 @@ from unittest.mock import patch
 import pytest
 from textual.widgets import Input
 
+import korvid.ui.app
+import korvid.ui.forward_controller
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.portforward import ForwardRecord, ForwardRegistry, ForwardSpec
@@ -778,7 +780,7 @@ async def test_failed_reattach_marks_breakage_as_already_reported(tmp_path: Path
         notices.append(message)
         return original(message, **kwargs)
 
-    with patch("korvid.ui.app._FORWARD_READY_SECONDS", 0.05):
+    with patch("korvid.ui.forward_controller._FORWARD_READY_SECONDS", 0.05):
         async with app.run_test() as pilot:
             app.notify = _capture  # type: ignore[method-assign]  # test spy
             await _wait_rows(app, pilot)
@@ -1791,7 +1793,7 @@ async def test_silent_start_times_out_as_failure(tmp_path: Path) -> None:
 
     with (
         patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
-        patch("korvid.ui.app._FORWARD_READY_SECONDS", 0.05),
+        patch("korvid.ui.forward_controller._FORWARD_READY_SECONDS", 0.05),
     ):
         async with app.run_test() as pilot:
             app.notify = _capture  # type: ignore[method-assign]  # test spy
@@ -2097,3 +2099,15 @@ async def test_forward_worker_refused_when_scheduled_with_stale_epoch() -> None:
             label="forward entry epoch refusal",
         )
         assert procs == []
+
+
+def test_readiness_budget_has_exactly_one_definition() -> None:
+    """A duplicate constant makes `patch` silently target the dead copy.
+
+    The extraction left `_FORWARD_READY_SECONDS` in both modules. Tests
+    patched the app's copy, so the controller kept its real 5s budget and
+    raced the 5s `until()` allowance - green locally, red on a slower
+    Windows runner.
+    """
+    assert not hasattr(korvid.ui.app, "_FORWARD_READY_SECONDS")
+    assert korvid.ui.forward_controller._FORWARD_READY_SECONDS == 5.0

@@ -183,10 +183,6 @@ logger = logging.getLogger(__name__)
 #: How often the app polls the forward registry for dead kubectl processes.
 _FORWARD_POLL_SECONDS = 2.0
 
-#: How long to wait for kubectl's readiness line before the start is failed
-#: explicitly — the silent child is terminated, never assumed to be ready.
-_FORWARD_READY_SECONDS = 5.0
-
 _MAX_MULTI_STREAM_PODS = 8
 # ``l`` accumulates side-by-side pod logs; beyond 4 pods each panel gets too
 # small to read — comparing >4 replicas is what ``L`` (multi-stream) is for.
