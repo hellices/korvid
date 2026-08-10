@@ -814,7 +814,6 @@ class KorvidApp(App[None]):
             confirm_screen=lambda *a, **k: self._confirm_screen(*a, **k),
             selected_uid=lambda *a, **k: self._selected_uid(*a, **k),
             uid_intact_after_fetch=lambda *a, **k: self._uid_intact_after_fetch(*a, **k),
-            write_target=lambda: self._write_target(),
             precheck_keybinding_write=lambda *a, **k: self._precheck_keybinding_write(*a, **k),
         )
         #: helm write workflows (issue #187): the controller owns the wizard,
@@ -9104,7 +9103,7 @@ class AppWriteGate(WriteGate):
     ) -> bool:
         return await self._app._permitted(action, meta, namespace, name)
 
-    async def run(
+    def run(
         self,
         action: str,
         meta: ResourceMeta,
@@ -9112,8 +9111,12 @@ class AppWriteGate(WriteGate):
         name: str,
         op_factory: Callable[[], Awaitable[None]],
         detail: str = "",
-    ) -> str:
-        return await self._app._run_write(action, meta, namespace, name, op_factory, detail=detail)
+    ) -> Coroutine[Any, Any, str]:
+        # Straight through, deliberately: `_run_write` is decorated to reserve
+        # the in-flight cluster write synchronously, and an async adapter here
+        # would defer that to when the coroutine starts — reopening the
+        # callback-to-worker gap a queued `:ctx` could slip through.
+        return self._app._run_write(action, meta, namespace, name, op_factory, detail=detail)
 
     def reserve_write(self) -> Callable[[], None]:
         return self._app._reserve_cluster_write()

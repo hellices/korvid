@@ -14,7 +14,8 @@ dialog, the `_run_write` worker, and the fail-closed intent audit.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
 
@@ -79,7 +80,7 @@ class WriteGate(ABC):
         """
 
     @abstractmethod
-    async def run(
+    def run(
         self,
         action: str,
         meta: ResourceMeta,
@@ -87,8 +88,14 @@ class WriteGate(ABC):
         name: str,
         op_factory: Callable[[], Awaitable[None]],
         detail: str = "",
-    ) -> str:
-        """Execute an already-approved write with fail-closed auditing.
+    ) -> Coroutine[Any, Any, str]:
+        """Build the coroutine for an already-approved, fail-closed write.
+
+        Synchronous on purpose, returning an unstarted coroutine: the
+        in-flight cluster write is reserved *here*, so a `:ctx` queued
+        between the confirmation callback and `run_worker` starting the
+        coroutine already sees it. Wrapping this in an async adapter
+        reintroduces exactly that gap.
 
         The intent record must persist *before* the mutation; if it cannot,
         the write is blocked. Only for flows that own their own approval

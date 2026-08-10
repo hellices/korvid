@@ -90,7 +90,6 @@ class OperatorController:
         confirm_screen: Callable[..., Any],
         selected_uid: Callable[..., str | None],
         uid_intact_after_fetch: Callable[..., bool],
-        write_target: Callable[[], tuple[ResourceMeta, str | None, str, str | None] | None],
         precheck_keybinding_write: Callable[..., Any],
     ) -> None:
         self._gate = gate
@@ -111,7 +110,6 @@ class OperatorController:
         self._confirm_screen = confirm_screen
         self._selected_uid = selected_uid
         self._uid_intact_after_fetch = uid_intact_after_fetch
-        self._write_target = write_target
         self._precheck_keybinding_write = precheck_keybinding_write
 
     async def install(

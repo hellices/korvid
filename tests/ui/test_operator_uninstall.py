@@ -418,3 +418,30 @@ async def test_ctrl_d_on_csv_without_known_subscription_is_a_plain_delete(
         await pilot.press("y")
         await until(pilot, lambda: len(ops.calls) == 1, label="plain delete ran")
         assert ops.calls[0][:2] == ("delete", "clusterserviceversions")
+
+
+async def test_gate_run_reserves_the_cluster_write_slot_synchronously(
+    tmp_path: Path,
+) -> None:
+    """`WriteGate.run` must reserve before it returns, like `_run_write` does.
+
+    The install dialog owns its own approval, so it calls the gate's run
+    directly from the confirmation callback and hands the coroutine to
+    `run_worker`. An adapter that only reserves once the coroutine starts
+    leaves a gap in which a queued `:ctx` sees zero active writes, switches,
+    and lets the approved install execute against the previous cluster
+    (issue #36).
+    """
+    app = make_app({}, {}, tmp_path / "audit.jsonl", write_ops=Recorder())
+    async with app.run_test():
+
+        async def op() -> None:
+            return None
+
+        coro = app._olm._gate.run("operator-install", SUB_META, "operators", "x", op)
+        try:
+            assert app._active_cluster_writes == 1, "reserved before the worker starts"
+            await coro
+        finally:
+            coro.close()  # keep a failed assert from leaking the coroutine
+        assert app._active_cluster_writes == 0, "the reservation outlived the write"
