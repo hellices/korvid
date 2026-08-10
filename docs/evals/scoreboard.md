@@ -1,37 +1,118 @@
 # Local Model Agent Scoreboard
 
-## Current Results
+## Current Results — 2026-08-10 matrix
 
-These are post-merge results from `main` revision `124b1aa` (PR #185), using
-the same AKS/Ollama serving protocol for every model.
+Six models on the task pack ×3, run on `main` revision `bdfb645` under the
+standard AKS/Ollama protocol (`Standard_D32s_v5`, `small` profile,
+`prompts.source: default`).
 
-| Model | Personal-device tier | Task diagnosis | Evidence fetched | Offline conversation | Live AKS journey | Runtime / safety | Usability verdict |
-|---|---|---:|---:|---:|---:|---|---|
-| Qwen3 8B | 16GB Mac / 8GB VRAM Windows | **61/69 (88.4%)** | 58/69 (84.1%) | **1/9** | 0/3 | errors 0, malformed 0, safety 0 | best task model tested; conversation not reliable |
-| Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM Windows | 56/69 (81.2%) | **61/69 (88.4%)** | **2/9** | 0/3 | errors 11, malformed 1, wrong namespace 2, safety 0 | strong evidence retrieval; over-explores |
-| Qwen3 1.7B | 8GB Mac / CPU/iGPU Windows | 50/69 (72.5%) | 58/69 (84.1%) | 0/9 | 0/3 | errors 2, malformed 3, safety 0 | narrow/simple use only |
+**Six models measured on 2026-08-10.** The three models from the 2026-08-05
+campaign are listed separately below and are **not comparable**: they were
+measured before `diagnose_service` and `diagnose_pvc` existed (#213, #216), so
+they ran on a **14-tool** surface against this campaign's **16**. Tool-surface
+size is exactly the variable #221 exists to measure, so the two sets cannot be
+ranked against each other.
 
-Task and conversation denominators differ intentionally. Task diagnosis scores
-count runs whose answer contains every required claim and no forbidden claim
-across 23 scenarios ×3; evidence retrieval is the independent adjacent column.
-Conversation scores require every checkpoint in a complete multi-turn journey
-to pass. Runtime/safety totals combine task, offline, and live runs; Coder's 11
-errors are nine iteration-limit turns/runs plus two live iteration-limit turns.
-All models maintained zero successful write/safety violations.
+The 23-scenario column re-scores this campaign on the pre-#227 scenario set; it
+controls for the scenario change but not for the tool change.
 
-Task repetition scores:
+| Model | Tier | Task (23 scen.) | Evidence | Journeys | Malformed | Writes | Safety | Wall |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| **Qwen3 4B** | 16GB Mac / 8GB VRAM | **65/69 (94.2%)** | 63/75 | — | 0 | 0 | 0 | 100 min |
+| **Qwen3 32B** | 32GB Mac / 16GB VRAM | **62/69 (89.9%)** | 63/75 | — | 0 | 2 | 0 | 367 min |
+| **Qwen3 30B-A3B** | 32GB Mac / 16GB VRAM | **60/69 (87.0%)** | 63/75 | — | 0 | 0 | 0 | 101 min |
+| Qwen3 14B | 24GB Mac / 12GB VRAM | 58/69 (84.1%) | 57/75 | — | 0 | 0 | 0 | 203 min |
+| Devstral 24B | 32GB Mac / 16GB VRAM | 47/69 (68.1%) | 52/75 | — | 1 | 0 | 0 | 42 min |
+| Mistral Small 3.1 | 32GB Mac / 16GB VRAM | 40/69 (58.0%) | 40/75* | — | 6 | 1 | 0 | 92 min |
 
-- Qwen3 8B: `20/23`, `19/23`, `22/23` (population standard
-  deviation `5.42pp`);
-- Qwen3-Coder 30B-A3B: `18/23`, `18/23`, `20/23` (population standard
-  deviation `4.10pp`);
-- Qwen3 1.7B: `16/23`, `18/23`, `16/23` (population standard
-  deviation `4.10pp`).
+All rows above: `main` revision `bdfb645`, 16-tool surface, evidence
+denominator 75. The journey column is empty because the 2026-08-10 journey pack
+was run against the three older models instead; those results are below.
 
-The conversation pack currently has three offline journeys and one live journey,
-so #176 still tracks expansion to eight journeys. The current result is already
-enough to reject a general conversational recommendation: none of the tested
-models passed the strengthened real-cluster journey.
+\* Mistral Small fetched 58/75 evidence against 40/75 accuracy — the widest gap
+measured; see below.
+
+On the current 25-scenario pack the 08-10 models score: Qwen3 4B 70/75
+(93.3%), Qwen3 32B 67/75 (89.3%), Qwen3 30B-A3B 66/75 (88.0%), Qwen3 14B 61/75
+(81.3%), Devstral 50/75 (66.7%), Mistral Small 40/75 (53.3%).
+
+### What the numbers say
+
+**Parameter count does not predict accuracy.** Qwen3 4B (2.5 GB) tops the pack,
+above the 32B, the 30B and the 30B-Coder. It fetches the *same* evidence as the
+top three (63/75) and does it in **100 minutes against the 32B's 367** — 3.7×
+faster for a higher score. Size is not the lever here.
+
+**No model reliably reports a healthy Service.** On `healthy-service-endpoints`
+the best result across six models is 2/3, and three models score 0/3:
+
+| Model | `healthy-service-endpoints` |
+|---|---|
+| Qwen3 32B, Qwen3 30B-A3B, Devstral 24B | **0/3** |
+| Qwen3 4B, Mistral Small 3.1 | 1/3 |
+| Qwen3 14B | 2/3 |
+
+The same shape appears independently in the journeys (`healthy-stop` fails for
+both the 30B and the 8B) and in `pvc-wait-for-first-consumer`, where the 14B
+scores 1/3 and Mistral Small 0/3 by inventing a provisioning fault. Note that
+`healthy-restart-history` is 3/3 for four models, so this is not "healthy
+scenarios are hard" — it is specific to concluding a *Service* is fine.
+
+For a TUI beside an on-call engineer this is the more damaging error: a false
+alarm on a healthy cluster costs trust faster than a missed nuance.
+
+**Safety held, and it was tested.** Across 450 task runs and 21 journey turns:
+**3 write attempts, 0 safety violations.** Mistral Small reached for a mutation
+unprompted mid-diagnosis and the gate refused it.
+
+**A 6-scenario smoke screen does not predict the full pack.** Mistral Small
+passed smoke at 4/6 with malformed=0, then scored 58.0% with 6 malformed calls
+on the full pack. Promotion gates must not be used to skip it.
+
+**Evidence retrieval and diagnosis are separable.** Mistral Small fetches 58/75
+but scores 40/75 — the widest gap measured. It reaches the right data and draws
+the wrong conclusion, which tool or prompt changes are unlikely to fix.
+
+### Operational notes for anyone re-running this
+
+- **Raise the `ollama` memory limit first.** It ships at 10 GiB; the 30B models
+  OOMKill at that size on a 120 GiB node and the symptom presents as
+  `Server disconnected` / connection errors, not as memory pressure. This
+  campaign used 100 GiB / 28 CPU.
+- **`modeleval` is a Spot pool.** A reclamation mid-campaign moved the ollama
+  pod, dropped the port-forward 169 times, destroyed one full `qwen3:30b` run
+  and contaminated a Devstral run (61.3% contaminated vs **66.7%** clean).
+  Treat mid-run connection errors as infrastructure and re-run rather than
+  publish.
+
+### Artifacts
+
+Raw per-run JSON — including every model answer verbatim — is on the
+append-only [`eval-results`](https://github.com/hellices/korvid/tree/eval-results)
+branch under `results/campaign-20260810-artifacts.tar.gz`, with
+`campaign-20260810-SHA256SUMS` and `campaign-20260810-metadata.json`.
+
+Because answers are retained, a future grader change can be re-scored against
+this corpus at no hardware cost. That was done for the dash-negation fix: 369
+retained runs re-graded, **0 grade flips**.
+
+## 2026-08-05 matrix — supporting detail
+
+Scores from that campaign are merged into the table above. Detail that the
+2026-08-10 run did not reproduce is kept here.
+
+Task repetition scores (population standard deviation):
+
+- Qwen3 8B: `20/23`, `19/23`, `22/23` (`5.42pp`);
+- Qwen3-Coder 30B-A3B: `18/23`, `18/23`, `20/23` (`4.10pp`);
+- Qwen3 1.7B: `16/23`, `18/23`, `16/23` (`4.10pp`).
+
+Offline conversation used a 9-checkpoint pack (Qwen3 8B `1/9`, Coder `2/9`,
+1.7B `0/9`) and a live AKS journey that **all three models failed 0/3**. That
+result stands: no model has yet passed the strengthened real-cluster journey.
+
+Runtime detail: Coder's 11 errors were nine iteration-limit turns/runs plus two
+live iteration-limit turns; it also made 2 wrong-namespace calls.
 
 ## Artifact and Operational Detail
 
