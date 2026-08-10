@@ -180,17 +180,22 @@ def test_pod_shell_reports_a_missing_kubectl_instead_of_raising() -> None:
             return contextlib.nullcontext()
 
         def refresh(self) -> None:
-            return None
+            repaints.append(1)
 
         def notify(self, message: str, **kwargs: Any) -> None:
             notices.append(message)
 
+    repaints: list[int] = []
     controller._ui = _Ui()  # type: ignore[assignment]  # only these three are reached
     controller._run_interactive = _raise_oserror  # type: ignore[method-assign]  # simulate a vanished binary
 
     controller.run_shell("default", "api-1", None)
 
     assert any("kubectl" in note for note in notices)
+    # _run_interactive prints its banner before launching kubectl, so the
+    # terminal is already dirty when it raises: without a repaint the user
+    # is left staring at that banner instead of the TUI.
+    assert repaints == [1], "the TUI was never restored after the failed exec"
 
 
 def _raise_oserror(argv: list[str], banner: str) -> int:

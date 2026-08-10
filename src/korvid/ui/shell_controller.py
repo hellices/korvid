@@ -276,7 +276,11 @@ class ShellController:
             )
             return
         except OSError as exc:
-            # kubectl can vanish between the PATH check and the exec.
+            # kubectl can vanish between the PATH check and the exec. The
+            # banner is printed before the launch, so the terminal is
+            # already dirty here - repaint before reporting, or the user is
+            # left looking at the banner instead of the TUI.
+            self._ui.refresh()
             self._ui.notify(f"shell failed to start kubectl: {exc}", severity="error")
             return
         self._ui.refresh()
