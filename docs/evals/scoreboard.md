@@ -2,55 +2,69 @@
 
 ## Current Results — 2026-08-10 matrix
 
-Six models on the task pack ×3, run on `main` revision `bdfb645` under the
+Nine models on the task pack ×3, run on `main` revision `bdfb645` under the
 standard AKS/Ollama protocol (`Standard_D32s_v5`, `small` profile,
 `prompts.source: default`).
 
-**Six models measured on 2026-08-10.** The three models from the 2026-08-05
-campaign are listed separately below and are **not comparable**: they were
-measured before `diagnose_service` and `diagnose_pvc` existed (#213, #216), so
-they ran on a **14-tool** surface against this campaign's **16**. Tool-surface
-size is exactly the variable #221 exists to measure, so the two sets cannot be
-ranked against each other.
+**All nine models on one revision and one tool surface.** The three models
+from the 2026-08-05 campaign were re-measured on `bdfb645` rather than carried
+over, because they had originally run before `diagnose_service` and
+`diagnose_pvc` existed (#213, #216) — a 14-tool surface against this
+campaign's 16. Mixing the two would have compared different tests.
 
-The 23-scenario column re-scores this campaign on the pre-#227 scenario set; it
-controls for the scenario change but not for the tool change.
+The **23-scenario** column is the ranking column: it excludes the two scenarios
+added in #227 so every row, old and new, is scored on the same set.
 
-| Model | Tier | Task (23 scen.) | Evidence | Journeys | Malformed | Writes | Safety | Wall |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| **Qwen3 4B** | 16GB Mac / 8GB VRAM | **65/69 (94.2%)** | 63/75 | — | 0 | 0 | 0 | 100 min |
-| **Qwen3 32B** | 32GB Mac / 16GB VRAM | **62/69 (89.9%)** | 63/75 | — | 0 | 2 | 0 | 367 min |
-| **Qwen3 30B-A3B** | 32GB Mac / 16GB VRAM | **60/69 (87.0%)** | 63/75 | — | 0 | 0 | 0 | 101 min |
-| Qwen3 14B | 24GB Mac / 12GB VRAM | 58/69 (84.1%) | 57/75 | — | 0 | 0 | 0 | 203 min |
-| Devstral 24B | 32GB Mac / 16GB VRAM | 47/69 (68.1%) | 52/75 | — | 1 | 0 | 0 | 42 min |
-| Mistral Small 3.1 | 32GB Mac / 16GB VRAM | 40/69 (58.0%) | 40/75* | — | 6 | 1 | 0 | 92 min |
+| Model | Tier | Task (23 scen.) | Task (25 scen.) | Evidence | `healthy-svc` | Malformed | Writes | Safety | Wall |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Qwen3 4B** | 16GB Mac / 8GB VRAM | **65/69 (94.2%)** | 70/75 (93.3%) | 63/75 | 1/3 | 0 | 0 | 0 | 100 min |
+| **Qwen3 8B** | 16GB Mac / 8GB VRAM | **64/69 (92.8%)** | 65/75 (86.7%) | 62/75 | 0/3 | 0 | 0 | 0 | 91 min |
+| **Qwen3 32B** | 32GB Mac / 16GB VRAM | **62/69 (89.9%)** | 67/75 (89.3%) | 63/75 | 0/3 | 0 | 2 | 0 | 367 min |
+| Qwen3 30B-A3B | 32GB Mac / 16GB VRAM | 60/69 (87.0%) | 66/75 (88.0%) | 63/75 | 0/3 | 0 | 0 | 0 | 101 min |
+| Qwen3 14B | 24GB Mac / 12GB VRAM | 58/69 (84.1%) | 61/75 (81.3%) | 57/75 | 2/3 | 0 | 0 | 0 | 203 min |
+| Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM | 56/69 (81.2%) | 58/75 (77.3%) | 65/75 | 0/3 | 0 | 4 | 0 | 34 min |
+| Qwen3 1.7B | 8GB Mac / CPU-iGPU | 55/69 (79.7%) | 58/75 (77.3%) | 60/75 | 0/3 | 1 | 1 | 0 | 28 min |
+| Devstral 24B | 32GB Mac / 16GB VRAM | 47/69 (68.1%) | 50/75 (66.7%) | 52/75 | 0/3 | 1 | 0 | 0 | 42 min |
+| Mistral Small 3.1 | 32GB Mac / 16GB VRAM | 40/69 (58.0%) | 40/75 (53.3%) | 58/75 | 1/3 | 6 | 1 | 0 | 92 min |
 
-All rows above: `main` revision `bdfb645`, 16-tool surface, evidence
-denominator 75. The journey column is empty because the 2026-08-10 journey pack
-was run against the three older models instead; those results are below.
+Journey pack (3 journeys, 7 turns, **1 repetition** — directional only):
 
-\* Mistral Small fetched 58/75 evidence against 40/75 accuracy — the widest gap
-measured; see below.
+| Model | Journeys |
+|---|---:|
+| Qwen3-Coder 30B-A3B | 2/3 |
+| Qwen3 8B | 2/3 |
+| Qwen3 1.7B | 0/3 |
 
-On the current 25-scenario pack the 08-10 models score: Qwen3 4B 70/75
-(93.3%), Qwen3 32B 67/75 (89.3%), Qwen3 30B-A3B 66/75 (88.0%), Qwen3 14B 61/75
-(81.3%), Devstral 50/75 (66.7%), Mistral Small 40/75 (53.3%).
+### Re-measurement changed the ranking
+
+The three re-run models all scored differently on the current surface:
+
+| Model | 14 tools (`124b1aa`) | 16 tools (`bdfb645`) | Δ | published σ |
+|---|---:|---:|---:|---:|
+| Qwen3 1.7B | 72.5% | **79.7%** | **+7.2pp** | 4.10pp |
+| Qwen3 8B | 88.4% | **92.8%** | +4.3pp | 5.42pp |
+| Qwen3-Coder 30B-A3B | 81.2% | 81.2% | 0.0pp | 4.10pp |
+
+None regressed. Only the 1.7B's gain clears its own noise floor, so this is
+directional rather than conclusive — but it is the first same-model evidence on
+both tool surfaces, and it argues against the concern in #221 that adding two
+tools would degrade small-model selection. See #221 for the caveats; a
+controlled answer still needs a flag to drop the tools within one binary.
 
 ### What the numbers say
 
-**Parameter count does not predict accuracy.** Qwen3 4B (2.5 GB) tops the pack,
-above the 32B, the 30B and the 30B-Coder. It fetches the *same* evidence as the
-top three (63/75) and does it in **100 minutes against the 32B's 367** — 3.7×
-faster for a higher score. Size is not the lever here.
+**Parameter count does not predict accuracy.** The top two are **Qwen3 4B
+(2.5 GB, 94.2%)** and **Qwen3 8B (5.2 GB, 92.8%)**, both above the 32B, the
+30B, and the 30B-Coder. The 4B fetches the same evidence as the top three
+(63/75) in **100 minutes against the 32B's 367** — 3.7× faster for a higher
+score. Qwen3-Coder 30B-A3B retrieves the *most* evidence of any model (65/75)
+and converts it into the sixth-best score, so retrieval and diagnosis are
+clearly separate abilities.
 
-**No model reliably reports a healthy Service.** On `healthy-service-endpoints`
-the best result across six models is 2/3, and three models score 0/3:
-
-| Model | `healthy-service-endpoints` |
-|---|---|
-| Qwen3 32B, Qwen3 30B-A3B, Devstral 24B | **0/3** |
-| Qwen3 4B, Mistral Small 3.1 | 1/3 |
-| Qwen3 14B | 2/3 |
+**No model reliably reports a healthy Service.** Across **all nine models** the
+best result on `healthy-service-endpoints` is 2/3, and **six score 0/3** — see
+the `healthy-svc` column above. Only Qwen3 14B (2/3) gets it right more often
+than not.
 
 The same shape appears independently in the journeys (`healthy-stop` fails for
 both the 30B and the 8B) and in `pvc-wait-for-first-consumer`, where the 14B
@@ -61,8 +75,8 @@ scenarios are hard" — it is specific to concluding a *Service* is fine.
 For a TUI beside an on-call engineer this is the more damaging error: a false
 alarm on a healthy cluster costs trust faster than a missed nuance.
 
-**Safety held, and it was tested.** Across 450 task runs and 21 journey turns:
-**3 write attempts, 0 safety violations.** Mistral Small reached for a mutation
+**Safety held, and it was tested.** Across 675 task runs and 21 journey turns:
+**8 write attempts, 0 safety violations.** Mistral Small reached for a mutation
 unprompted mid-diagnosis and the gate refused it.
 
 **A 6-scenario smoke screen does not predict the full pack.** Mistral Small
