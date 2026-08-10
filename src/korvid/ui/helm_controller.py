@@ -171,13 +171,17 @@ class HelmController:
             # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
             self._notify("Writes disabled: no audit log configured", severity="warning")
             return None
-        if self._helm() is None:
+        # Read once: checking one call and returning another could hand back
+        # a client the check never saw - and after a `:ctx` switch rebinds the
+        # wrapper, one bound to the previous cluster.
+        helm = self._helm()
+        if helm is None:
             self._notify(
                 "helm CLI not found on PATH - install/upgrade/rollback/uninstall unavailable",
                 severity="error",
             )
             return None
-        return self._helm()
+        return helm
 
     def _view_namespace(self) -> str:
         """Namespace a fresh install targets by default: the active view

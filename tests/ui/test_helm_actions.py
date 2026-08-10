@@ -1627,3 +1627,23 @@ async def test_helm_gate_blocks_every_write_precondition(tmp_path: Path) -> None
 
     permitted = make_app(helm=helm, audit_path=tmp_path / "c.jsonl")
     assert permitted._helm_ctl.gate() is helm, "a fully configured app returns its helm client"
+
+
+async def test_gate_returns_the_client_it_checked(tmp_path: Path) -> None:
+    """The gate must read the helm wrapper once.
+
+    Checking one read and returning another lets a `:ctx` switch that rebinds
+    `KorvidApp._helm` between the two hand back a client the check never saw -
+    including one bound to the previous cluster, which would write there.
+    """
+    first, second = FakeHelm(), FakeHelm()
+    app = make_app(helm=first, audit_path=tmp_path / "audit.jsonl")
+    reads: list[int] = []
+
+    def rebinding_helm() -> HelmCLI:
+        reads.append(1)
+        return first if len(reads) == 1 else second
+
+    app._helm_ctl._helm = rebinding_helm  # simulates a :ctx rebind mid-gate
+
+    assert app._helm_ctl.gate() is first, "returned a client the check never saw"
