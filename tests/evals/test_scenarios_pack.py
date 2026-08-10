@@ -245,6 +245,41 @@ def test_diagnostic_scenario_keywords_reject_the_wrong_conclusions(
         )
 
 
+# Backticked hyphenated tokens in the scoreboard that are deliberately not
+# pack ids. Keeping this list explicit rather than inferring "looks like a
+# pack id" from the shipped fixtures means a deleted fixture is reported
+# instead of silently dropping out of the candidate set.
+_NON_PACK_CITATIONS = frozenset(
+    {
+        "checkout-1",
+        "eval-results",
+        "korvid-agent-eval-124b1aa",
+        "payments-1",
+        "search-1",
+    }
+)
+
+
+def _cited_pack_ids(text: str) -> set[str]:
+    """Return every backticked token in `text` that claims to be a pack id."""
+    tokens = set(re.findall(r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`", text))
+    return tokens - _NON_PACK_CITATIONS
+
+
+def test_cited_pack_ids_reports_a_deleted_fixture() -> None:
+    """A citation whose fixture is gone must be reported, not filtered away.
+
+    Deriving the candidate set from the fixtures that still exist makes the
+    guard blind to exactly the case it exists for: delete the file and the
+    citation stops looking like a pack id.
+    """
+    cited = _cited_pack_ids("prose about `healthy-stop` and `eval-results`")
+    assert cited - {"healthy-stop"} == set(), "known non-pack tokens must be excluded"
+    assert cited - set() == {"healthy-stop"}, (
+        "a citation must still be reported when no fixture matches it"
+    )
+
+
 def test_scoreboard_only_names_scenarios_and_journeys_that_exist() -> None:
     """Every pack identifier the scoreboard cites must resolve to a file.
 
@@ -261,11 +296,7 @@ def test_scoreboard_only_names_scenarios_and_journeys_that_exist() -> None:
     # Only check identifiers shaped like a pack id: lowercase, hyphenated,
     # and sharing a stem with something we ship. Prose, pod names and
     # branch names are not pack ids.
-    cited = {
-        token
-        for token in re.findall(r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`", text)
-        if token.split("-")[0] in {s.split("-")[0] for s in known}
-    }
+    cited = _cited_pack_ids(text)
     missing = sorted(cited - known)
     assert not missing, (
         f"scoreboard cites pack ids that do not exist: {missing}\n"

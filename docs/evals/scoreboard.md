@@ -6,6 +6,18 @@ Nine models on the task pack ×3, run on `main` revision `bdfb645` under the
 standard AKS/Ollama protocol (`Standard_D32s_v5`, `small` profile,
 `prompts.source: default`).
 
+**What is and is not pinned.** Pinned: the korvid revision (`bdfb645`), the
+16-tool surface, the node SKU, the profile, and the composed-prompt fingerprint
+(sha256 `3e1c34ba4f673fd2f8d1be45e3920bba6b3a11048b5a6aae3a66fc9168775804`,
+recorded in every retained run). *Not* pinned: the serving
+engine — the deployment runs `ollama/ollama:latest` and the resolved version
+was not captured — nor per-model digests, quantization, or context length; all
+were left at the tag and serving defaults, and no warm-up was performed. The
+eval client sends no sampling parameters, so the provider default temperature
+applies and runs are non-deterministic by design (hence ×3 and the reported σ).
+Treat the rows as reproducible *relative to each other*, not as re-servable
+byte-for-byte on a later `:latest`.
+
 **All nine models on one revision and one tool surface.** The three models
 from the 2026-08-05 campaign were re-measured on `bdfb645` rather than carried
 over, because they had originally run before `diagnose_service` and
@@ -38,7 +50,10 @@ every model struggles with; see below.
 [`src/korvid/evals/journeys/`](../../src/korvid/evals/journeys) and belong to
 the separate multi-turn pack below.
 
-Journey pack (3 journeys, 7 turns, **1 repetition** — directional only):
+Journey pack — `triage-and-correct`, `logs-to-events` and `healthy-stop`
+(7 turns, **1 repetition** — directional only). `rollout-owner-chain` ships in
+the pack but was added after this campaign (#228) and was **not** run, so the
+denominator is 3, not the 4 journeys present at `bdfb645`:
 
 | Model | Journeys |
 |---|---:|
@@ -90,12 +105,6 @@ What varies is difficulty, not the kind: `healthy-restart-history` is 3/3 for
 four models, so some negative controls are easy. The reliable statement is that
 **models over-diagnose on healthy state, and how often depends on the
 scenario** — not that Services are special.
-
-The same shape appears independently in the journeys (`healthy-stop` fails for
-both the 30B and the 8B) and in `pvc-wait-for-first-consumer`, where the 14B
-scores 1/3 and Mistral Small 0/3 by inventing a provisioning fault. Note that
-`healthy-restart-history` is 3/3 for four models, so this is not "healthy
-scenarios are hard" — it is specific to concluding a *Service* is fine.
 
 For a TUI beside an on-call engineer this is the more damaging error: a false
 alarm on a healthy cluster costs trust faster than a missed nuance.
