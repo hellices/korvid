@@ -110,7 +110,10 @@ answer quality.
 
 ## AKS Serving Environment
 
-Use the existing `aks-shared-runners` cluster and `ollama/ollama` deployment.
+Use the existing `aks-shared-runners` cluster and `ollama/ollama` deployment,
+**pinned to a released tag rather than `:latest`** — a floating tag makes the
+version that produced a published row a coincidence (#235). The manifest is
+checked in at `deploy/eval/ollama.yaml`.
 
 - Expand `ollama-models` from 30GiB to 200GiB. The `default` StorageClass uses
   Azure Disk CSI and supports online expansion.
