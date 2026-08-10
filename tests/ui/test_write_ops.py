@@ -21,6 +21,7 @@ import yaml
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
+from korvid.core.portforward import OWNER_CHAIN_PLURALS, WORKLOAD_PLURALS
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
@@ -1116,6 +1117,41 @@ async def test_pod_banner_walks_the_controller_chain(tmp_path: Path) -> None:
         assert "helm release web/nginx" in str(banner.render())
 
 
+async def test_banner_walks_through_a_replication_controller(tmp_path: Path) -> None:
+    """The owner chain must not stop at a ReplicationController (issue #119).
+
+    Every kind the chain can traverse needs an entry in the plural map; a
+    missing one makes the walk end early and silently drop the banner, so
+    a helm-managed target looks unmanaged at the approval dialog.
+    """
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        if kind == "pods":
+            return {
+                "metadata": {
+                    "name": name,
+                    "namespace": ns,
+                    "ownerReferences": [
+                        {
+                            "apiVersion": "v1",
+                            "kind": "ReplicationController",
+                            "name": "web-rc",
+                            "controller": True,
+                        }
+                    ],
+                }
+            }
+        return _helm_deploy_manifest(kind, ns, name)
+
+    app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count > 0, label="pod row")
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        banner = app.screen.query_one(".confirm-managed")
+        assert "helm release web/nginx" in str(banner.render())
+
+
 async def test_unmanaged_target_shows_no_banner(tmp_path: Path) -> None:
     async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
         return {"metadata": {"name": name, "namespace": ns}}
@@ -1482,3 +1518,14 @@ async def test_cancelled_before_factory_leaks_no_coroutine(tmp_path: Path) -> No
             await task
     assert factory_calls == [], "factory must not be called when cancelled during audit"
     assert rec.calls == [], "no mutation must reach the recorder"
+
+
+def test_owner_chain_is_a_superset_of_the_workload_map() -> None:
+    """The banner walks at least as far as a re-attach follows.
+
+    The two were restated independently once and immediately drifted:
+    `ReplicationController` was dropped from the chain, so the banner
+    stopped there. Deriving one from the other is what keeps them honest.
+    """
+    assert set(WORKLOAD_PLURALS) < set(OWNER_CHAIN_PLURALS)
+    assert all(OWNER_CHAIN_PLURALS[k] == v for k, v in WORKLOAD_PLURALS.items())

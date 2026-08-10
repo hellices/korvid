@@ -14,6 +14,8 @@ from unittest.mock import patch
 import pytest
 from textual.widgets import Input
 
+import korvid.ui.app
+import korvid.ui.forward_controller
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.portforward import ForwardRecord, ForwardRegistry, ForwardSpec
@@ -630,7 +632,9 @@ async def test_workload_resolution_keeps_the_replicaset_when_the_parent_lookup_f
         raise ValueError(f"Unknown resource kind {kind!r}")
 
     app = make_app([_pod("api-1")], get_manifest=_manifest)
-    assert await app._resolve_forward_workload("default", "api-1") == "replicasets/api-6d5f"
+    assert (
+        await app._forward._resolve_forward_workload("default", "api-1") == "replicasets/api-6d5f"
+    )
 
 
 async def test_failed_retarget_audits_the_workload_it_targeted(tmp_path: Path) -> None:
@@ -736,13 +740,13 @@ async def test_reattach_rearms_broken_notification_immediately() -> None:
     procs[0].returncode = 1
     async with app.run_test() as pilot:
         await _wait_rows(app, pilot)
-        app._broken_forwards.add(record.id)  # background poll already toasted
+        app._forward._broken_forwards.add(record.id)  # background poll already toasted
         await _open_pf(app, pilot)
         await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
         await pilot.press("r")
         await until(pilot, lambda: len(procs) == 2)
         # Re-armed right away — not deferred to the next global poll tick.
-        assert record.id not in app._broken_forwards
+        assert record.id not in app._forward._broken_forwards
 
 
 async def test_failed_reattach_marks_breakage_as_already_reported(tmp_path: Path) -> None:
@@ -776,11 +780,11 @@ async def test_failed_reattach_marks_breakage_as_already_reported(tmp_path: Path
         notices.append(message)
         return original(message, **kwargs)
 
-    with patch("korvid.ui.app._FORWARD_READY_SECONDS", 0.05):
+    with patch("korvid.ui.forward_controller._FORWARD_READY_SECONDS", 0.05):
         async with app.run_test() as pilot:
             app.notify = _capture  # type: ignore[method-assign]  # test spy
             await _wait_rows(app, pilot)
-            app._broken_forwards.add(record.id)  # first breakage already toasted
+            app._forward._broken_forwards.add(record.id)  # first breakage already toasted
             await _open_pf(app, pilot)
             await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
             await pilot.press("r")
@@ -795,7 +799,7 @@ async def test_failed_reattach_marks_breakage_as_already_reported(tmp_path: Path
             # re-armed the toast) so the poll doesn't repeat the bad news.
             await until(
                 pilot,
-                lambda: record.id in app._broken_forwards,
+                lambda: record.id in app._forward._broken_forwards,
                 label="failed re-attach re-marks the breakage",
             )
             assert not any("target gone?" in n for n in notices)  # no generic re-toast
@@ -839,12 +843,12 @@ async def test_poll_stays_quiet_while_a_confirmation_reports_the_failure(tmp_pat
             record = registry.forwards()[0]
             await until(
                 pilot,
-                lambda: record.id in app._current_confirmations,
+                lambda: record.id in app._forward._current_confirmations,
                 label="confirmation tracked",
             )
             # kubectl dies silently while the readiness confirmation still waits.
             procs[0].returncode = 1
-            app._poll_forwards()  # marks it broken and wakes the waiter
+            app._forward.poll()  # marks it broken and wakes the waiter
             await until(
                 pilot,
                 lambda: any("failed to start" in n for n in notices),
@@ -906,11 +910,11 @@ async def test_poll_stays_quiet_while_a_launch_is_still_in_flight(tmp_path: Path
             # holds the event loop — the exact window at issue.
             assert published.wait(2.0)
             record = registry.forwards()[0]
-            assert record.id not in app._current_confirmations  # still launching
+            assert record.id not in app._forward._current_confirmations  # still launching
             procs[0].returncode = 1  # kubectl died before the coroutine resumed
-            app._poll_forwards()
+            app._forward.poll()
             assert not any("target gone?" in n for n in notices)
-            assert record.id not in app._broken_forwards
+            assert record.id not in app._forward._broken_forwards
             await until(
                 pilot,
                 lambda: any("failed to start" in n for n in notices),
@@ -963,11 +967,13 @@ async def test_launch_on_another_port_does_not_defer_a_breakage_toast(tmp_path: 
             assert isinstance(app.screen, PortForwardScreen)
             app.screen.query_one("#pf-local", Input).value = "9090"
             await pilot.press("enter")
-            await until(pilot, lambda: bool(app._launching_forwards), label="launch in flight")
+            await until(
+                pilot, lambda: bool(app._forward._launching_forwards), label="launch in flight"
+            )
             # The established forward on the *other* port breaks meanwhile.
             procs[0].returncode = 1
             procs[0].stdout.feed(None)
-            app._poll_forwards()
+            app._forward.poll()
             assert any("target gone?" in n for n in notices)  # not deferred
             release.set()
             await until(pilot, lambda: len(procs) == 2, label="gated launch lands")
@@ -1185,12 +1191,12 @@ async def test_stopping_broken_forward_releases_broken_flag() -> None:
     procs[0].returncode = 1
     async with app.run_test() as pilot:
         await _wait_rows(app, pilot)
-        await until(pilot, lambda: record.id in app._broken_forwards, timeout=6.0)
+        await until(pilot, lambda: record.id in app._forward._broken_forwards, timeout=6.0)
         await _open_pf(app, pilot)
         await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
         await pilot.press("ctrl+d")
         await until(pilot, lambda: registry.forwards() == [])
-        assert record.id not in app._broken_forwards
+        assert record.id not in app._forward._broken_forwards
 
 
 async def test_forward_audit_entries_keep_event_order(tmp_path: Path) -> None:
@@ -1224,7 +1230,9 @@ async def test_forward_audit_entries_keep_event_order(tmp_path: Path) -> None:
             # Entries are popped only after the append lands — exit while a
             # written entry is still queued and the unmount flush would
             # duplicate it (a rare duplicate beats a lost record, by design).
-            await until(pilot, lambda: not app._forward_audit_queue, label="audit queue drained")
+            await until(
+                pilot, lambda: not app._forward._forward_audit_queue, label="audit queue drained"
+            )
     events = [line for line in _audit_lines(tmp_path).splitlines() if "port-forward" in line]
     assert len(events) == 2
     assert "port-forward-start" in events[0]
@@ -1257,7 +1265,7 @@ async def test_drain_cancelled_mid_write_does_not_duplicate(tmp_path: Path) -> N
     """
     audit = _audit_log(tmp_path)
     app = make_app([_pod("api-1")], audit=audit)
-    app._enqueue_forward_audit(
+    app._forward._enqueue_forward_audit(
         "port-forward-stop",
         ForwardSpec(
             kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80
@@ -1277,7 +1285,7 @@ async def test_drain_cancelled_mid_write_does_not_duplicate(tmp_path: Path) -> N
         evt.set()
 
     with patch.object(audit, "append", gated_append):
-        drain = asyncio.create_task(app._drain_forward_audits())
+        drain = asyncio.create_task(app._forward._drain_forward_audits())
         # The write must be in flight before the cancel, or this test would
         # pass without exercising the duplicate window at all.
         assert await asyncio.to_thread(started.wait, 5)
@@ -1287,7 +1295,7 @@ async def test_drain_cancelled_mid_write_does_not_duplicate(tmp_path: Path) -> N
         release.set()
         # The unmount-path flush must serialize behind the lingering write
         # thread and skip the entry it already committed.
-        await app._drain_forward_audits()
+        await app._forward._drain_forward_audits()
     for evt in list(finished):
         assert await asyncio.to_thread(evt.wait, 5)
     assert _audit_lines(tmp_path).count("port-forward-stop") == 1
@@ -1482,13 +1490,13 @@ async def test_quit_during_spawn_still_audits_the_start_first(tmp_path: Path) ->
         async with app.run_test() as pilot:
             # Release the spawn only once teardown has begun — deterministic,
             # unlike a timer that could fire before shutdown on a slow runner.
-            original_teardown = app._teardown_forwards
+            original_teardown = app._forward.teardown
 
-            async def _teardown_and_release(reg: ForwardRegistry) -> None:
+            async def _teardown_and_release(reg: ForwardRegistry) -> list[ForwardRecord]:
                 gate.set()
-                await original_teardown(reg)
+                return await original_teardown(reg)
 
-            app._teardown_forwards = _teardown_and_release  # type: ignore[assignment]  # test hook
+            app._forward.teardown = _teardown_and_release  # type: ignore[assignment,method-assign]  # replacing a bound method on one instance
             await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
@@ -1531,13 +1539,13 @@ async def test_cancelled_retargeted_reattach_audits_the_workload(tmp_path: Path)
     procs[0].returncode = 1
     registry.refresh()
     async with app.run_test() as pilot:
-        task = asyncio.create_task(app._spawn_reattach(registry, record, retarget=True))
+        task = asyncio.create_task(app._forward._spawn_reattach(registry, record, retarget=True))
         await until(pilot, lambda: spawn_started.is_set(), label="re-attach mid-spawn")
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         gate.set()
-        await app._drain_forward_audits()
+        await app._forward._drain_forward_audits()
         cancelled = next(
             line for line in _audit_lines(tmp_path).splitlines() if "stopped before ready" in line
         )
@@ -1581,7 +1589,7 @@ async def test_teardown_during_reattach_window_keeps_audit_order(tmp_path: Path)
             # The child dies; the poll marks it broken.
             procs[0].returncode = 1
             procs[0].stdout.feed(None)
-            app._poll_forwards()
+            app._forward.poll()
             await until(pilot, lambda: record.status == "broken", label="marked broken")
             await _open_pf(app, pilot)
             # Signal adoption deterministically: reattach() returns (on the
@@ -1652,7 +1660,7 @@ async def test_stale_confirmation_never_reports_the_replacement_as_its_own(
     async with app.run_test() as pilot:
         app.notify = _capture  # type: ignore[method-assign]  # test spy
         # The old generation's timed-out confirmation lands only now.
-        app._report_failed_forward_start(
+        app._forward._report_failed_forward_start(
             registry, record, "starting", reattached=False, generation=stale_generation
         )
         await until(
@@ -1696,6 +1704,34 @@ async def test_udp_only_service_is_rejected_up_front() -> None:
             await until(pilot, lambda: any("TCP" in note for note in notices))
             assert not isinstance(app.screen, PortForwardScreen)
             assert procs == []
+
+
+async def test_service_forward_opens_when_the_manifest_cannot_be_fetched() -> None:
+    """An unreachable manifest must not be read as \"no TCP ports declared\".
+
+    Prefill is a convenience. When it fails the dialog opens unrestricted and
+    kubectl has the final say; silently rejecting the Service would strand a
+    forwardable target behind a transient API error.
+    """
+    procs: list[_FakeProc] = []
+
+    async def failing_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        raise RuntimeError("api server unreachable")
+
+    app = make_app(
+        [],
+        forwards=_registry(procs),
+        extra_data={"services": [_svc("dns")]},
+        get_manifest=failing_manifest,
+    )
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app.on_navigate_command(NavigateCommand("services", None))
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            assert isinstance(app.screen, PortForwardScreen)
 
 
 async def test_stop_during_startup_survives_immediate_exit(tmp_path: Path) -> None:
@@ -1757,7 +1793,7 @@ async def test_silent_start_times_out_as_failure(tmp_path: Path) -> None:
 
     with (
         patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
-        patch("korvid.ui.app._FORWARD_READY_SECONDS", 0.05),
+        patch("korvid.ui.forward_controller._FORWARD_READY_SECONDS", 0.05),
     ):
         async with app.run_test() as pilot:
             app.notify = _capture  # type: ignore[method-assign]  # test spy
@@ -1811,7 +1847,7 @@ async def test_last_instant_confirmation_wins_over_the_timeout(tmp_path: Path) -
         await until(pilot, lambda: record.status == "alive", label="listener confirmed")
         # The wait snapshot said "starting", but the listener confirmed since:
         # the failure path must yield to the registry's atomic check.
-        app._report_failed_forward_start(registry, record, "starting", reattached=False)
+        app._forward._report_failed_forward_start(registry, record, "starting", reattached=False)
         await until(
             pilot,
             lambda: any(n.startswith("Forwarding") for n in notices),
@@ -1853,7 +1889,7 @@ async def test_superseded_wait_result_never_fails_the_replacement(tmp_path: Path
         # Simulate the stale generation's wake: the re-attach already swapped
         # the process, but its confirmation token is not published yet.
         with patch.object(registry, "wait_ready", return_value="superseded"):
-            app._track_confirmation(record)
+            app._forward._track_confirmation(record)
             await until(
                 pilot,
                 lambda: "superseded by re-attach" in _audit_lines(tmp_path),
@@ -1900,9 +1936,9 @@ async def test_superseded_confirmation_never_reports_success(tmp_path: Path) -> 
         # Simulate a re-attach having installed the replacement's own
         # confirmation under the same id while ours was still waiting.
         replacement = app.run_worker(asyncio.sleep(0))
-        stale = app.run_worker(app._confirm_forward(record))
-        app._confirming_forwards[record.id] = [stale, replacement]
-        app._current_confirmations[record.id] = replacement
+        stale = app.run_worker(app._forward._confirm_forward(record))
+        app._forward._confirming_forwards[record.id] = [stale, replacement]
+        app._forward._current_confirmations[record.id] = replacement
         procs[0].stdout.feed("Forwarding from 127.0.0.1:18080 -> 80\n")
         await stale.wait()
         # The observed 'alive' belongs to the replacement generation — the
@@ -1910,7 +1946,7 @@ async def test_superseded_confirmation_never_reports_success(tmp_path: Path) -> 
         assert not any(n.startswith("Forwarding") for n in notices)
         assert registry.get(record.id) is record
         # ...and it removes only its own tracking entry on the way out.
-        assert app._confirming_forwards.get(record.id) == [replacement]
+        assert app._forward._confirming_forwards.get(record.id) == [replacement]
         await until(pilot, lambda: "superseded by re-attach" in _audit_lines(tmp_path))
         procs[0].stdout.feed(None)  # release the reader thread
 
@@ -1957,9 +1993,9 @@ async def test_finished_replacement_does_not_promote_a_stale_confirmation(
         )
         # The replacement confirmation already finished and cleaned up its
         # token — only the superseded worker is still pending.
-        stale = app.run_worker(app._confirm_forward(record))
-        app._confirming_forwards[record.id] = [stale]
-        app._current_confirmations.pop(record.id, None)
+        stale = app.run_worker(app._forward._confirm_forward(record))
+        app._forward._confirming_forwards[record.id] = [stale]
+        app._forward._current_confirmations.pop(record.id, None)
         procs[0].stdout.feed("Forwarding from 127.0.0.1:18080 -> 80\n")
         await stale.wait()
         # Being last in the pending list must not make the stale worker
@@ -2027,8 +2063,8 @@ async def test_forward_worker_cancelled_when_context_switched_mid_lookup() -> No
 
     async with app.run_test() as pilot:
         await _wait_rows(app, pilot)
-        app._resolve_forward_workload = switching_lookup  # type: ignore[method-assign]
-        await app._start_forward(
+        app._forward._resolve_forward_workload = switching_lookup  # type: ignore[method-assign]
+        await app._forward.start(
             "pods", "default", "api-1", local_port=18080, remote_port=80, epoch=app._ctx_epoch
         )
         await until(
@@ -2040,7 +2076,7 @@ async def test_forward_worker_cancelled_when_context_switched_mid_lookup() -> No
             label="forward lookup epoch refusal",
         )
         assert procs == []
-        assert app._launching_forwards == {}
+        assert app._forward._launching_forwards == {}
 
 
 async def test_forward_worker_refused_when_scheduled_with_stale_epoch() -> None:
@@ -2051,7 +2087,7 @@ async def test_forward_worker_refused_when_scheduled_with_stale_epoch() -> None:
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
     async with app.run_test() as pilot:
         await _wait_rows(app, pilot)
-        await app._start_forward(
+        await app._forward.start(
             "pods", "default", "api-1", local_port=18081, remote_port=80, epoch=app._ctx_epoch - 1
         )
         await until(
@@ -2063,3 +2099,15 @@ async def test_forward_worker_refused_when_scheduled_with_stale_epoch() -> None:
             label="forward entry epoch refusal",
         )
         assert procs == []
+
+
+def test_readiness_budget_has_exactly_one_definition() -> None:
+    """A duplicate constant makes `patch` silently target the dead copy.
+
+    The extraction left `_FORWARD_READY_SECONDS` in both modules. Tests
+    patched the app's copy, so the controller kept its real 5s budget and
+    raced the 5s `until()` allowance - green locally, red on a slower
+    Windows runner.
+    """
+    assert not hasattr(korvid.ui.app, "_FORWARD_READY_SECONDS")
+    assert korvid.ui.forward_controller._FORWARD_READY_SECONDS == 5.0

@@ -744,6 +744,28 @@ class ForwardRegistry:
             self._reaping = remaining
 
 
+#: Chain the ownership banner may walk (issue #119): derived from the
+#: re-attach map rather than restated, so the two cannot drift — a CronJob-spawned pod must reach the CronJob, where
+#: the helm/OLM markers live (re-attach never targets a CronJob: it
+#: forwards to pods, which Jobs own directly).
+#: Pod controller kinds a re-attach can follow, mapped to their plural.
+#: ReplicaSets are chased one level up so the forward survives rollouts,
+#: not just single pod replacements.
+WORKLOAD_PLURALS: dict[str, str] = {
+    "Deployment": "deployments",
+    "ReplicaSet": "replicasets",
+    "ReplicationController": "replicationcontrollers",
+    "StatefulSet": "statefulsets",
+    "DaemonSet": "daemonsets",
+    "Job": "jobs",
+}
+
+OWNER_CHAIN_PLURALS: dict[str, str] = {
+    **WORKLOAD_PLURALS,
+    "CronJob": "cronjobs",
+}
+
+
 def controller_owner(manifest: dict[str, Any]) -> tuple[str, str] | None:
     """The (kind, name) of the reference that controls this object, if any.
 
