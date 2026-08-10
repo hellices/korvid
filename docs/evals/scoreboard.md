@@ -15,7 +15,7 @@ campaign's 16. Mixing the two would have compared different tests.
 The **23-scenario** column is the ranking column: it excludes the two scenarios
 added in #227 so every row, old and new, is scored on the same set.
 
-| Model | Tier | Task (23 scen.) | Task (25 scen.) | Evidence | `healthy-svc` | Malformed | Writes | Safety | Wall |
+| Model | Tier | Task (23 scen.) | Task (25 scen.) | Evidence | healthy Service† | Malformed | Writes | Safety | Wall |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
 | **Qwen3 4B** | 16GB Mac / 8GB VRAM | **65/69 (94.2%)** | 70/75 (93.3%) | 63/75 | 1/3 | 0 | 0 | 0 | 100 min |
 | **Qwen3 8B** | 16GB Mac / 8GB VRAM | **64/69 (92.8%)** | 65/75 (86.7%) | 62/75 | 0/3 | 0 | 0 | 0 | 91 min |
@@ -26,6 +26,17 @@ added in #227 so every row, old and new, is scored on the same set.
 | Qwen3 1.7B | 8GB Mac / CPU-iGPU | 55/69 (79.7%) | 58/75 (77.3%) | 60/75 | 0/3 | 1 | 1 | 0 | 28 min |
 | Devstral 24B | 32GB Mac / 16GB VRAM | 47/69 (68.1%) | 50/75 (66.7%) | 52/75 | 0/3 | 1 | 0 | 0 | 42 min |
 | Mistral Small 3.1 | 32GB Mac / 16GB VRAM | 40/69 (58.0%) | 40/75 (53.3%) | 58/75 | 1/3 | 6 | 1 | 0 | 92 min |
+
+† the `healthy-service-endpoints` scenario, broken out because it is the one
+every model struggles with; see below.
+
+**Scenario names** (`healthy-service-endpoints`, `pvc-wait-for-first-consumer`,
+`healthy-restart-history`, …) are files under
+[`src/korvid/evals/scenarios/`](../../src/korvid/evals/scenarios).
+**Journey names** (`healthy-stop`, `logs-to-events`, `triage-and-correct`,
+`rollout-owner-chain`) are files under
+[`src/korvid/evals/journeys/`](../../src/korvid/evals/journeys) and belong to
+the separate multi-turn pack below.
 
 Journey pack (3 journeys, 7 turns, **1 repetition** — directional only):
 
@@ -55,16 +66,30 @@ controlled answer still needs a flag to drop the tools within one binary.
 
 **Parameter count does not predict accuracy.** The top two are **Qwen3 4B
 (2.5 GB, 94.2%)** and **Qwen3 8B (5.2 GB, 92.8%)**, both above the 32B, the
-30B, and the 30B-Coder. The 4B fetches the same evidence as the top three
-(63/75) in **100 minutes against the 32B's 367** — 3.7× faster for a higher
-score. Qwen3-Coder 30B-A3B retrieves the *most* evidence of any model (65/75)
+30B, and the 30B-Coder. The 4B fetches as much evidence as any of them
+(63/75, matching the 32B) in **100 minutes against the 32B's 367** — 3.7×
+faster for a higher score. Qwen3-Coder 30B-A3B retrieves the *most* evidence of any model (65/75)
 and converts it into the sixth-best score, so retrieval and diagnosis are
 clearly separate abilities.
 
-**No model reliably reports a healthy Service.** Across **all nine models** the
-best result on `healthy-service-endpoints` is 2/3, and **six score 0/3** — see
-the `healthy-svc` column above. Only Qwen3 14B (2/3) gets it right more often
-than not.
+**No model reliably concludes that nothing is wrong.** Across **all nine
+models** the best result on `healthy-service-endpoints` is 2/3, and **six score
+0/3** — see the healthy-Service column above. Only Qwen3 14B (2/3) gets it
+right more often than not.
+
+The weakness is **not** Service-specific. It reproduces across three different
+resource kinds and both packs:
+
+| Negative control | Kind | Result |
+|---|---|---|
+| `healthy-service-endpoints` (scenario) | Service | best 2/3; six models 0/3 |
+| `pvc-wait-for-first-consumer` (scenario) | PVC | 14B 1/3, Mistral Small 0/3 |
+| `healthy-stop` (journey) | Pod | failed by both the 30B-Coder and the 8B |
+
+What varies is difficulty, not the kind: `healthy-restart-history` is 3/3 for
+four models, so some negative controls are easy. The reliable statement is that
+**models over-diagnose on healthy state, and how often depends on the
+scenario** — not that Services are special.
 
 The same shape appears independently in the journeys (`healthy-stop` fails for
 both the 30B and the 8B) and in `pvc-wait-for-first-consumer`, where the 14B
@@ -92,7 +117,13 @@ the wrong conclusion, which tool or prompt changes are unlikely to fix.
 - **Raise the `ollama` memory limit first.** It ships at 10 GiB; the 30B models
   OOMKill at that size on a 120 GiB node and the symptom presents as
   `Server disconnected` / connection errors, not as memory pressure. This
-  campaign used 100 GiB / 28 CPU.
+  campaign used 100 GiB and 31 CPU (the node allocates 31.5; an earlier limit
+  of 28 was raised after it was found to be throttling).
+- **Do not run models in parallel.** A three-model concurrent run raised CPU
+  from 15.8 to 28 cores and delivered **2.5× worse** throughput than sequential
+  — CPU inference is memory-bandwidth bound, so extra cores do not help. The
+  model volume is also `ReadWriteOnce`, so spreading across nodes is blocked
+  without re-pulling 154 GiB. Every wall time published here is sequential.
 - **`modeleval` is a Spot pool.** A reclamation mid-campaign moved the ollama
   pod, dropped the port-forward 169 times, destroyed one full `qwen3:30b` run
   and contaminated a Devstral run (61.3% contaminated vs **66.7%** clean).
@@ -110,12 +141,18 @@ Because answers are retained, a future grader change can be re-scored against
 this corpus at no hardware cost. That was done for the dash-negation fix: 369
 retained runs re-graded, **0 grade flips**.
 
-## 2026-08-05 matrix — supporting detail
+## Superseded: the 2026-08-05 matrix
 
-Scores from that campaign are merged into the table above. Detail that the
-2026-08-10 run did not reproduce is kept here.
+Everything below is **historical**. Those three models were re-measured on
+`bdfb645` and their current scores are in the table at the top of this page;
+the numbers in this section came from a 14-tool surface and are **not** current.
+It is retained only for detail the 2026-08-10 run did not reproduce —
+per-repetition variance, model digests, token counts, and the live-cluster
+journey.
 
-Task repetition scores (population standard deviation):
+### Task repetition detail
+
+Task repetition scores from that campaign (population standard deviation):
 
 - Qwen3 8B: `20/23`, `19/23`, `22/23` (`5.42pp`);
 - Qwen3-Coder 30B-A3B: `18/23`, `18/23`, `20/23` (`4.10pp`);
@@ -128,7 +165,7 @@ result stands: no model has yet passed the strengthened real-cluster journey.
 Runtime detail: Coder's 11 errors were nine iteration-limit turns/runs plus two
 live iteration-limit turns; it also made 2 wrong-namespace calls.
 
-## Artifact and Operational Detail
+### Artifact and Operational Detail
 
 | Model / resolved digest | Parameters / quantization | Ollama layer |
 |---|---:|---:|
@@ -146,13 +183,13 @@ agent overhead.
 | Qwen3 8B | 83 | 313,499 / 65,792 | 68.6s / 63.0s | 0/0/1 (0.47 journeys) | 0/0/0 (0.00 journeys) | 113 | 440,159 / 92,705 |
 | Qwen3-Coder 30B-A3B | 142 | 593,696 / 18,949 | 22.0s / 15.6s | 0/1/1 (0.47 journeys) | 0/0/0 (0.00 journeys) | 209 | 872,691 / 27,498 |
 
-## Detailed Findings
+### Detailed Findings
 
-### Qwen3 8B
+#### Qwen3 8B
 
 Strengths:
 
-- highest repeated task diagnosis score: 61/69;
+- highest repeated task diagnosis score **of that campaign**: 61/69;
 - no malformed calls, runtime errors, wrong-namespace calls, or safety
   violations across this post-merge matrix;
 - completed one full offline `triage-and-correct` journey.
@@ -170,7 +207,7 @@ Weaknesses:
 Verdict: the most useful tested model for one-shot Kubernetes diagnosis, but not
 yet a dependable conversational Korvid agent.
 
-### Qwen3-Coder 30B-A3B
+#### Qwen3-Coder 30B-A3B
 
 Strengths:
 
@@ -190,7 +227,7 @@ Conversation weaknesses:
 Verdict: useful when exhaustive evidence collection is preferred, but extra
 memory does not buy better Korvid conversation behavior than Qwen3 8B.
 
-### Qwen3 1.7B
+#### Qwen3 1.7B
 
 Strengths:
 
@@ -209,7 +246,7 @@ Weaknesses:
 Verdict: usable for simple listing and narrow inspection only; not suitable as
 the default conversational agent.
 
-## Real-Cluster Validation
+### Real-Cluster Validation
 
 The live result used actual Kubernetes failure states, not fake responses:
 
@@ -222,7 +259,7 @@ dedicated cluster returned to Stopped. The model-serving `modeleval` pool also
 returned to zero nodes. The post-merge live namespace was
 `korvid-agent-eval-124b1aa`.
 
-## Raw Results
+### Raw Results
 
 Generated files are kept off the source branch:
 

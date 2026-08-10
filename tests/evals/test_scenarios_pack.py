@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -242,3 +243,31 @@ def test_diagnostic_scenario_keywords_reject_the_wrong_conclusions(
         assert not result.diagnosis_success, (
             f"{scenario_id}: a wrong answer was graded correct\n  {answer}"
         )
+
+
+def test_scoreboard_only_names_scenarios_and_journeys_that_exist() -> None:
+    """Every pack identifier the scoreboard cites must resolve to a file.
+
+    The scoreboard is the human-readable half of the eval record, and it
+    cites scenarios and journeys by id. A renamed or deleted fixture would
+    otherwise leave the published document pointing at nothing, with no
+    signal until a reader tried to find it.
+    """
+    scoreboard = Path(__file__).parents[2] / "docs" / "evals" / "scoreboard.md"
+    text = scoreboard.read_text(encoding="utf-8")
+    scenarios = {path.stem for path in bundled_scenarios_dir().glob("*.yaml")}
+    journeys = {path.stem for path in (bundled_scenarios_dir().parent / "journeys").glob("*.yaml")}
+    known = scenarios | journeys
+    # Only check identifiers shaped like a pack id: lowercase, hyphenated,
+    # and sharing a stem with something we ship. Prose, pod names and
+    # branch names are not pack ids.
+    cited = {
+        token
+        for token in re.findall(r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`", text)
+        if token.split("-")[0] in {s.split("-")[0] for s in known}
+    }
+    missing = sorted(cited - known)
+    assert not missing, (
+        f"scoreboard cites pack ids that do not exist: {missing}\n"
+        f"known scenarios: {sorted(scenarios)}\nknown journeys: {sorted(journeys)}"
+    )
