@@ -152,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         WARMUP_TIMEOUT_SECONDS,
         capture_serving,
         httpx_fetch,
+        warn_if_unpinned,
     )
 
     args = _parse_args(argv)
@@ -170,6 +171,7 @@ def main(argv: list[str] | None = None) -> int:
             warmup=args.warmup,
         )
     )
+    warn_if_unpinned(serving)
     reports = asyncio.run(_run(args))
     markdown = render_markdown(reports)
     print(markdown)

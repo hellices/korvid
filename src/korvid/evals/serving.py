@@ -33,12 +33,16 @@ class ProbeResult:
         show: `POST /api/show` for the model under test.
         tags: `GET /api/tags`, which is where the digest lives — `/api/show`
             does not return one.
+        ps: `GET /api/ps`, the only source of the *runtime* context
+            allocation. It lists loaded models only, so an un-warmed model
+            is absent.
         error: why the probe could not complete, when it could not.
     """
 
     version: dict[str, Any] | None = None
     show: dict[str, Any] | None = None
     tags: dict[str, Any] | None = None
+    ps: dict[str, Any] | None = None
     error: str | None = None
 
 
@@ -75,7 +79,7 @@ def serving_metadata(
     """
     version = _version(probe.version)
     quantization = _quantization(probe.show)
-    context_length = _context_length(probe.show)
+    context_length = _runtime_context_length(probe.ps, model)
     digest = _digest(probe.tags, model)
     meta: dict[str, Any] = {
         "model": model,
@@ -83,6 +87,7 @@ def serving_metadata(
         "digest": digest,
         "quantization": quantization,
         "context_length": context_length,
+        "max_context_length": _native_context_length(probe.show),
         "parameter_size": _parameter_size(probe.show),
         "warmup": warmup,
         "unavailable": _unavailable(version, digest, quantization, context_length),
@@ -133,7 +138,31 @@ def _details(payload: dict[str, Any] | None) -> dict[str, Any]:
     return details if isinstance(details, dict) else {}
 
 
-def _context_length(payload: dict[str, Any] | None) -> int | None:
+def _runtime_context_length(payload: dict[str, Any] | None, model: str) -> int | None:
+    """The window the run actually had.
+
+    `/api/show` reports the model's *native* maximum, which for Qwen3 is
+    40,960 while ollama may serve 4,096 — publishing the maximum would
+    describe a window the run never had. The runtime allocation is only
+    visible in `/api/ps`, and only while the model is loaded, so this is
+    `None` unless the run warmed up.
+    """
+    if not payload:
+        return None
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return None
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        if model not in (entry.get("name"), entry.get("model")):
+            continue
+        value = entry.get("context_length")
+        return value if isinstance(value, int) and value > 0 else None
+    return None
+
+
+def _native_context_length(payload: dict[str, Any] | None) -> int | None:
     """`model_info` names the key after the architecture, e.g.
     `qwen3.context_length`. Prefer the declared architecture, but fall back
     to any `*.context_length` so a mismatch does not lose the value."""

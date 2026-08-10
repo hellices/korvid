@@ -1,0 +1,100 @@
+# Serving deployment for the local-model eval campaigns (#176, #235).
+#
+# The image tag is pinned deliberately. The 2026-08-10 matrix was served by
+# `ollama/ollama:latest`, nothing recorded which version answered, and the
+# rows on that scoreboard therefore cannot be re-served under the same
+# conditions. A published score is only comparable if the thing that
+# produced it is a decision rather than whatever `latest` resolved to that
+# afternoon.
+#
+# When bumping the tag, treat it as a measurement change: re-run any row you
+# intend to keep comparing. `korvid.evals` captures the running version
+# automatically into `meta.serving`, so an accidental drift shows up in the
+# artifact rather than in a ranking nobody can explain.
+#
+# Resources here are the idle baseline. Campaigns raise them: 30B models
+# OOMKill at 10Gi and the symptom presents as connection errors, so a
+# campaign sets limits to roughly 31 CPU / 100Gi on a Standard_D32s_v5 and
+# returns them afterwards.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-models
+  namespace: ollama
+spec:
+  accessModes:
+    # ReadWriteOnce: the weights cannot be shared across nodes, so a
+    # multi-node campaign would have to re-pull them.
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 200Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: ollama
+  labels:
+    app: ollama
+spec:
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate: the model PVC is ReadWriteOnce.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      nodeSelector:
+        purpose: korvid-model-eval
+      containers:
+        - name: ollama
+          image: ollama/ollama:v0.32.7
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: OLLAMA_HOST
+              value: 0.0.0.0
+            - name: OLLAMA_KEEP_ALIVE
+              value: 30m
+            # One model at a time. Concurrency was measured and rejected:
+            # 3-way parallel raised CPU use from 15.8 to 28 cores and made
+            # throughput 2.5x worse, because CPU inference is
+            # memory-bandwidth bound.
+            - name: OLLAMA_MAX_LOADED_MODELS
+              value: "1"
+            - name: OLLAMA_NUM_PARALLEL
+              value: "1"
+          ports:
+            - containerPort: 11434
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: "2"
+              memory: 6Gi
+            limits:
+              cpu: 3500m
+              memory: 10Gi
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: ollama-models

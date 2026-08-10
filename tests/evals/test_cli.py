@@ -28,6 +28,7 @@ from korvid.evals.__main__ import (
     report_payload,
     run_payload,
     warm_up,
+    warn_if_unpinned,
 )
 from korvid.evals.grader import GradeResult
 from korvid.evals.runner import RunMetrics, ScenarioReport
@@ -304,6 +305,7 @@ def test_probe_serving_collects_version_show_and_tags() -> None:
         "http://host:11434/api/version",
         "http://host:11434/api/show",
         "http://host:11434/api/tags",
+        "http://host:11434/api/ps",
     ]
     assert calls[1][1] == {"model": "qwen3:8b"}
     assert result.error is None
@@ -381,3 +383,15 @@ def test_capture_serving_uses_a_separate_client_for_the_warmup() -> None:
     )
     assert used[0] == "warm:generate"
     assert all(entry.startswith("probe:") for entry in used[1:])
+
+
+def test_warn_unpinned_names_every_missing_field(capsys: pytest.CaptureFixture[str]) -> None:
+    warn_if_unpinned({"unavailable": ["engine", "context_length"]})
+    assert "engine, context_length" in capsys.readouterr().err
+
+
+def test_warn_unpinned_is_silent_for_a_publishable_run(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    warn_if_unpinned({"unavailable": []})
+    assert capsys.readouterr().err == ""

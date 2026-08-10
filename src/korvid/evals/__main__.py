@@ -87,11 +87,19 @@ async def probe_serving(base_url: str, model: str, *, fetch: Fetch) -> ProbeResu
     tolerated individually and whatever answered is kept.
     """
     root = ollama_root(base_url)
-    payloads: dict[str, dict[str, Any] | None] = {"version": None, "show": None, "tags": None}
+    payloads: dict[str, dict[str, Any] | None] = {
+        "version": None,
+        "show": None,
+        "tags": None,
+        "ps": None,
+    }
     requests: list[tuple[str, str, dict[str, Any] | None]] = [
         ("version", f"{root}/api/version", None),
         ("show", f"{root}/api/show", {"model": model}),
         ("tags", f"{root}/api/tags", None),
+        # Last, and after any warm-up: it reports the runtime context
+        # allocation, which only exists while the model is loaded.
+        ("ps", f"{root}/api/ps", None),
     ]
     errors: list[str] = []
     for name, url, body in requests:
@@ -103,6 +111,7 @@ async def probe_serving(base_url: str, model: str, *, fetch: Fetch) -> ProbeResu
         version=payloads["version"],
         show=payloads["show"],
         tags=payloads["tags"],
+        ps=payloads["ps"],
         error="; ".join(errors) or None,
     )
 
@@ -149,6 +158,21 @@ async def capture_serving(
     warmed = await warm_up(base_url, model, fetch=warmup_fetch or fetch) if warmup else False
     probe = await probe_serving(base_url, model, fetch=fetch)
     return serving_metadata(model=model, probe=probe, warmup=warmed)
+
+
+def warn_if_unpinned(serving: dict[str, Any]) -> None:
+    """Say so on stderr when the run cannot be published.
+
+    A publishable row needs an empty `unavailable` list; an operator who
+    only sees the markdown report would otherwise not learn that until the
+    artifact was already on the scoreboard.
+    """
+    missing = serving.get("unavailable") or []
+    if missing:
+        print(
+            f"warning: serving environment not fully pinned: {', '.join(missing)}",
+            file=sys.stderr,
+        )
 
 
 async def warm_up(base_url: str, model: str, *, fetch: Fetch) -> bool:

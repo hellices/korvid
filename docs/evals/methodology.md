@@ -200,7 +200,8 @@ answered — is pinned by the `meta.serving` block the eval CLI writes:
   "engine": {"name": "ollama", "version": "0.5.1"},
   "digest": "bbb…",
   "quantization": "Q4_K_M",
-  "context_length": 40960,
+  "context_length": 4096,
+  "max_context_length": 40960,
   "parameter_size": "8.0B",
   "warmup": true,
   "unavailable": []
@@ -221,8 +222,16 @@ Rules that follow:
 - **publishable rows are measured with `--warmup`**, so the first scenario is
   not charged for paging the weights in. `warmup: false` in an artifact means
   no warm-up happened, including the case where the request failed;
-- **pin the serving deployment to a released tag.** A floating `:latest` makes
-  the recorded version a coincidence rather than a decision;
+- **`context_length` is the runtime allocation, not the model's maximum.** The
+  two differ by an order of magnitude — Qwen3 advertises 40,960 while ollama
+  may serve 4,096 — and only the allocation was in effect. It comes from
+  `/api/ps`, which lists loaded models only, so a run without `--warmup`
+  leaves it unpinned. `max_context_length` carries the native maximum for
+  context;
+- **pin the serving deployment to a released tag.**
+  [`deploy/eval/ollama.yaml`](../../deploy/eval/ollama.yaml) is the checked-in
+  manifest and a test rejects `:latest`. A floating tag makes the recorded
+  version a coincidence rather than a decision;
 - the block is **omitted entirely** in artifacts written before this capture
   existed, which is deliberate: absence means "never captured", not "captured
   and empty".
