@@ -67,6 +67,37 @@ class WriteGate(ABC):
         """
 
     @abstractmethod
+    async def permitted(
+        self, action: str, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> bool:
+        """SubjectAccessReview pre-check, run before the dialog is pushed.
+
+        Advisory by design: with no checker injected this is True and the
+        write still passes the approval gate and the audit. It exists so a
+        missing permission is reported before a failed mutation, not instead
+        of the gate.
+        """
+
+    @abstractmethod
+    async def run(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        op_factory: Callable[[], Awaitable[None]],
+        detail: str = "",
+    ) -> str:
+        """Execute an already-approved write with fail-closed auditing.
+
+        The intent record must persist *before* the mutation; if it cannot,
+        the write is blocked. Only for flows that own their own approval
+        step (the operator install dialog re-checks the UID inside its
+        callback) - everything else goes through `confirm`, which calls this
+        internally. Returns a short outcome string.
+        """
+
+    @abstractmethod
     def audit_configured(self) -> bool:
         """Whether an audit sink exists.
 

@@ -9568,6 +9568,22 @@ class AppWriteGate(WriteGate):
     ) -> bool:
         return self._app._write_context_intact(action, meta, ns, name, phase=phase, epoch=epoch)
 
+    async def permitted(
+        self, action: str, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> bool:
+        return await self._app._permitted(action, meta, namespace, name)
+
+    async def run(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        op_factory: Callable[[], Awaitable[None]],
+        detail: str = "",
+    ) -> str:
+        return await self._app._run_write(action, meta, namespace, name, op_factory, detail=detail)
+
     def audit_configured(self) -> bool:
         return self._app._audit is not None
 
