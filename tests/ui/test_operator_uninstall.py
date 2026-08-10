@@ -263,7 +263,7 @@ async def test_apply_uninstall_reserves_the_cluster_write_slot_synchronously(
             assert app._active_cluster_writes == 1  # reserved before the worker starts
             await coro
         finally:
-            coro.close()  # keep a failed assert from leaking the coroutine
+            coro.release()  # keep a failed assert from leaking the slot
         assert app._active_cluster_writes == 0
 
 
@@ -438,12 +438,12 @@ async def test_gate_run_reserves_the_cluster_write_slot_synchronously(
         async def op() -> None:
             return None
 
-        coro = app._olm._gate.run("operator-install", SUB_META, "operators", "x", op)
+        tracked = app._olm._gate.run("operator-install", SUB_META, "operators", "x", op)
         try:
             assert app._active_cluster_writes == 1, "reserved before the worker starts"
-            await coro
+            await tracked
         finally:
-            coro.close()  # keep a failed assert from leaking the coroutine
+            tracked.release()  # keep a failed assert from leaking the slot
         assert app._active_cluster_writes == 0, "the reservation outlived the write"
 
 
@@ -458,7 +458,6 @@ async def test_uninstall_write_slot_released_when_coroutine_never_runs(
     every future `:ctx` switch. The weakref finalizer covers that path, and
     without this test deleting it would still leave the suite green.
     """
-    import gc
 
     ops = Recorder()
     app = make_app({}, {}, tmp_path / "audit.jsonl", write_ops=ops)
@@ -475,7 +474,7 @@ async def test_uninstall_write_slot_released_when_coroutine_never_runs(
             csv_uid=None,
         )
         assert app._active_cluster_writes == 1
-        coro.close()  # unstarted coroutine: the body's finally never executes
-        del coro
-        gc.collect()
+        # Deterministic hand-back: the caller keeps holding the handle, which
+        # used to keep the slot claimed until collection (issue #237).
+        coro.release()
         assert app._active_cluster_writes == 0, "the reservation leaked"

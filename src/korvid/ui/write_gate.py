@@ -14,10 +14,69 @@ dialog, the `_run_write` worker, and the fail-closed intent audit.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Coroutine
-from typing import Any
+from collections.abc import Awaitable, Callable, Coroutine, Generator
+from typing import Any, Generic, TypeVar
 
 from korvid.k8s.discovery import ResourceMeta
+
+_WriteResult = TypeVar("_WriteResult")
+
+
+class TrackedWrite(Generic[_WriteResult]):
+    """An in-flight cluster write and the `:ctx` slot it holds (issue #36).
+
+    The slot is claimed when this object is built - at approval time - so a
+    `:ctx` queued before the worker's first step already sees the write in
+    flight. It is handed back when the work finishes, or when a caller
+    abandons the work through `release`.
+
+    That second path is why this is an object rather than a bare coroutine.
+    A task cancelled before its first step never enters the coroutine body,
+    so the `finally` below cannot run: with a bare coroutine the slot was
+    held until the object happened to be collected, and an app that keeps
+    the worker (`self._drain_worker = run_worker(...)`) keeps the coroutine
+    alive through it. The slot was then never returned and every later
+    context switch was refused for the rest of the session.
+
+    Awaitable, so it works wherever the coroutine did: `await`,
+    `asyncio.ensure_future`, and Textual's `run_worker`, which accepts any
+    awaitable. `asyncio.create_task` and `asyncio.run` are the exceptions -
+    both require a coroutine specifically - so use `ensure_future`, or
+    `await` the handle from inside a coroutine.
+    """
+
+    def __init__(self, work: Coroutine[Any, Any, _WriteResult], release: Callable[[], None]):
+        self._work = work
+        self._release = release
+        self._started = False
+
+    def __await__(self) -> Generator[Any, None, _WriteResult]:
+        return self._drive().__await__()
+
+    async def _drive(self) -> _WriteResult:
+        self._started = True
+        try:
+            return await self._work
+        finally:
+            self._release()
+
+    def release(self) -> None:
+        """Hand the slot back for work that will never run.
+
+        Idempotent, and safe to call alongside the normal completion path:
+        a double hand-back would let a `:ctx` switch proceed while a write
+        is still in flight, which is the failure the count exists to
+        prevent.
+
+        Work that never started is also closed, so an abandoned write does
+        not surface as a "coroutine was never awaited" warning. Work that
+        *has* started is left alone - it is owned by whatever is driving
+        it, and closing a coroutine out from under its task would corrupt
+        that task's state.
+        """
+        if not self._started:
+            self._work.close()
+        self._release()
 
 
 class WriteGate(ABC):
@@ -88,14 +147,17 @@ class WriteGate(ABC):
         name: str,
         op_factory: Callable[[], Awaitable[None]],
         detail: str = "",
-    ) -> Coroutine[Any, Any, str]:
-        """Build the coroutine for an already-approved, fail-closed write.
+    ) -> TrackedWrite[str]:
+        """Build the unstarted work for an approved, fail-closed write.
 
-        Synchronous on purpose, returning an unstarted coroutine: the
-        in-flight cluster write is reserved *here*, so a `:ctx` queued
-        between the confirmation callback and `run_worker` starting the
-        coroutine already sees it. Wrapping this in an async adapter
-        reintroduces exactly that gap.
+        Synchronous on purpose: the in-flight cluster write is reserved
+        *here*, so a `:ctx` queued between the confirmation callback and
+        `run_worker` starting the work already sees it. Wrapping this in an
+        async adapter reintroduces exactly that gap.
+
+        The returned handle is awaitable and can be handed to `run_worker`.
+        A caller that abandons the work before it starts must call
+        `release` on it, or the slot stays claimed (issue #237).
 
         The intent record must persist *before* the mutation; if it cannot,
         the write is blocked. Only for flows that own their own approval

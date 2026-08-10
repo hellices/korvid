@@ -1505,7 +1505,7 @@ async def test_cancelled_before_factory_leaks_no_coroutine(tmp_path: Path) -> No
     app._audit = audit
 
     async with app.run_test() as pilot:
-        task = asyncio.create_task(
+        task = asyncio.ensure_future(
             app._run_write("delete", _PODS_META, "default", "web-1", factory)
         )
         try:

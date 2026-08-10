@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import contextlib
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, TypeVar
 
 from textual.await_complete import AwaitComplete
@@ -71,7 +71,7 @@ class UiSurface(ABC):
     @abstractmethod
     def run_worker(
         self,
-        work: Coroutine[Any, Any, Any] | Callable[[], Any],
+        work: Awaitable[Any] | Callable[[], Any],
         *,
         exclusive: bool = False,
         group: str = "default",

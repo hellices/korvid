@@ -7,6 +7,7 @@ session restarts on the new cluster with capabilities re-probed.
 """
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
@@ -406,12 +407,46 @@ async def test_write_slot_reserved_before_worker_starts() -> None:
         await started.wait()
 
     async with app.run_test():
-        coro = fake_write(app)
+        tracked = fake_write(app)
         assert app._active_cluster_writes == 1  # reserved synchronously
-        task = asyncio.create_task(coro)
+        task = asyncio.ensure_future(tracked)
         started.set()
         await task
         assert app._active_cluster_writes == 0
+
+
+async def test_a_worker_cancelled_before_it_starts_releases_the_slot() -> None:
+    """A cancelled write worker must not block `:ctx` for the session.
+
+    The reservation is released by the coroutine's `finally`, or - when the
+    coroutine never runs - by a finalizer that only fires on collection. An
+    app that keeps the Worker (`self._drain_worker = run_worker(...)`) keeps
+    the coroutine alive through it, so the slot is never given back and
+    every later context switch is refused with "a cluster write is in
+    progress".
+    """
+    from korvid.ui.app import _tracks_cluster_write
+
+    env = _CtxEnv()
+    app = env.app
+
+    @_tracks_cluster_write
+    async def fake_write(self: KorvidApp) -> None:
+        await asyncio.Event().wait()  # never completes on its own
+
+    async with app.run_test():
+        tracked = fake_write(app)
+        assert app._active_cluster_writes == 1
+        # Retained exactly as the drain path retains its worker.
+        retained = asyncio.ensure_future(tracked)
+        retained.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await retained
+        tracked.release()
+
+        assert app._active_cluster_writes == 0, "cancelled write kept its reservation"
+        assert app._ctx_switch_blocker() is None
+        assert retained.cancelled()
 
 
 async def test_agent_prompt_refused_while_switching() -> None:
@@ -570,12 +605,14 @@ async def test_keybinding_write_aborted_when_context_changed_during_precheck() -
         )
 
 
-async def test_write_slot_released_when_coroutine_never_runs() -> None:
-    """A reserved write whose coroutine is closed without ever running
-    (worker cancelled before start, app shutdown) must not leak the counter
-    and block every future `:ctx` switch."""
-    import gc
+async def test_write_slot_released_when_the_work_never_runs() -> None:
+    """A reserved write that is abandoned before starting must not leak the
+    counter and block every future `:ctx` switch.
 
+    The hand-back is deterministic, so the caller keeps holding the handle
+    here: it used to depend on the object being collected, which an app
+    retaining the worker prevents (issue #237).
+    """
     from korvid.ui.app import _tracks_cluster_write
 
     env = _CtxEnv()
@@ -586,11 +623,11 @@ async def test_write_slot_released_when_coroutine_never_runs() -> None:
         raise AssertionError("must not start")
 
     async with app.run_test():
-        coro = fake_write(app)
+        tracked = fake_write(app)
         assert app._active_cluster_writes == 1
-        coro.close()  # unstarted coroutine: finally inside never executes
-        del coro
-        gc.collect()
+        tracked.release()
+        assert app._active_cluster_writes == 0
+        tracked.release()  # idempotent: a double hand-back would unblock `:ctx` early
         assert app._active_cluster_writes == 0
 
 

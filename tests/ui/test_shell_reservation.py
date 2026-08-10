@@ -76,56 +76,50 @@ def _controller(gate: _RecordingGate) -> ShellController:
     )
 
 
-def test_the_write_slot_is_reserved_before_the_coroutine_runs() -> None:
-    """Building the coroutine reserves; awaiting it is too late."""
+def test_the_write_slot_is_reserved_before_the_work_runs() -> None:
+    """Building the work reserves; awaiting it is too late."""
     gate = _RecordingGate()
     controller = _controller(gate)
 
-    coro = controller.run_debug("default", "api-1", None, None)
+    tracked = controller.run_debug("default", "api-1", None, None)
     try:
-        assert gate.events == ["reserve"], "reservation deferred past coroutine construction"
+        assert gate.events == ["reserve"], "reservation deferred past construction"
     finally:
-        coro.close()
+        tracked.release()
 
 
-def test_a_coroutine_that_never_runs_still_releases_the_slot() -> None:
+def test_work_that_never_runs_hands_the_slot_back_deterministically() -> None:
     """A worker cancelled before its first step must not leak the slot.
 
     A leaked +1 blocks every later `:ctx` switch for the session's life.
-
-    The release fires when the coroutine is collected, not when `close()`
-    is called: a coroutine that never started ignores `close()`, and
-    arming its `finally` by priming makes the object unawaitable
-    (`RuntimeError: coroutine is being awaited already`) anywhere a
-    decorated method is consumed by `await` rather than by a worker task.
-    The window is therefore bounded by collection, which under CPython
-    refcounting is the moment the last reference goes away.
+    The caller keeps holding the handle here on purpose: the hand-back used
+    to depend on the object being collected, which an app that retains the
+    worker prevents (issue #237).
     """
     gate = _RecordingGate()
     controller = _controller(gate)
 
-    coro = controller.run_debug("default", "api-1", None, None)
-    coro.close()
-    del coro
-    gc.collect()
+    tracked = controller.run_debug("default", "api-1", None, None)
+    tracked.release()
 
     assert gate.events == ["reserve", "release"]
+    assert tracked is not None  # still referenced, and still released
 
 
-def test_the_release_is_idempotent_across_close_and_collection() -> None:
-    """Both the finalizer and the coroutine's own `finally` may fire.
+def test_the_hand_back_is_idempotent() -> None:
+    """The completion path, an explicit release and the finalizer may all fire.
 
-    The count must move by exactly one either way, or a double release
-    would let a `:ctx` switch proceed while a write is still in flight -
-    the failure mode this counter exists to prevent.
+    The count must move by exactly one, or a double hand-back would let a
+    `:ctx` switch proceed while a write is still in flight - the failure
+    this counter exists to prevent.
     """
     gate = _RecordingGate()
     controller = _controller(gate)
 
-    coro = controller.run_debug("default", "api-1", None, None)
-    coro.close()
-    del coro
-    gc.collect()
+    tracked = controller.run_debug("default", "api-1", None, None)
+    tracked.release()
+    tracked.release()
+    del tracked
     gc.collect()
 
     assert gate.events.count("release") == 1
@@ -140,7 +134,12 @@ def test_the_slot_is_released_after_the_write_completes() -> None:
         "_Ui", (), {"notify": lambda self, message, **kw: notices.append(message)}
     )()
 
-    asyncio.run(controller.run_debug("default", "api-1", None, None))
+    async def _consume() -> None:
+        # asyncio.run takes a coroutine specifically, so the handle is
+        # awaited from inside one.
+        await controller.run_debug("default", "api-1", None, None)
+
+    asyncio.run(_consume())
 
     assert gate.events == ["reserve", "release"]
 

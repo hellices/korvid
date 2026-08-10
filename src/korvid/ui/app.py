@@ -159,7 +159,7 @@ from korvid.ui.widgets.status_bar import StatusBar
 from korvid.ui.widgets.telepresence_screen import TelepresenceScreen
 from korvid.ui.widgets.top_bar import KeyEntry, TopBar
 from korvid.ui.widgets.transfer_screen import TransferProgressScreen, TransferScreen
-from korvid.ui.write_gate import WriteGate
+from korvid.ui.write_gate import TrackedWrite, WriteGate
 
 _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
     "pods": PODS_META,
@@ -302,17 +302,20 @@ _WriteResult = TypeVar("_WriteResult")
 
 def _tracks_cluster_write(
     method: Callable[Concatenate[KorvidApp, _WriteParams], Awaitable[_WriteResult]],
-) -> Callable[Concatenate[KorvidApp, _WriteParams], Coroutine[Any, Any, _WriteResult]]:
+) -> Callable[Concatenate[KorvidApp, _WriteParams], TrackedWrite[_WriteResult]]:
     """Count in-flight cluster mutations on the app (issue #36).
 
     An approved write worker is neither an open dialog nor the agent task,
     so `:ctx` switching checks this counter: a mutation approved for one
     cluster must never execute against another after a mid-flight retarget.
+
+    Returns a `TrackedWrite` rather than a bare coroutine so work abandoned
+    before it ever starts can hand its slot back deterministically (#237).
     """
 
     def wrapper(
         self: KorvidApp, /, *args: _WriteParams.args, **kwargs: _WriteParams.kwargs
-    ) -> Coroutine[Any, Any, _WriteResult]:
+    ) -> TrackedWrite[_WriteResult]:
         # Reserve the slot synchronously: confirmation callbacks construct
         # this coroutine and hand it to run_worker, which only starts it on
         # a later event-loop iteration — a queued `:ctx` processed in that
@@ -321,24 +324,22 @@ def _tracks_cluster_write(
         released = False
 
         def release() -> None:
-            # Idempotent: normally fired by run()'s finally, but also by the
-            # GC finalizer when the coroutine is closed or collected without
-            # ever running (worker cancelled before start, app shutdown) —
-            # a leaked +1 would block every future `:ctx` switch.
+            # Idempotent: the completion path, an explicit hand-back from a
+            # caller abandoning the work, and the collection finalizer can
+            # all fire. A double hand-back would let a `:ctx` switch proceed
+            # with a write still in flight.
             nonlocal released
             if not released:
                 released = True
                 self._active_cluster_writes -= 1
 
         async def run() -> _WriteResult:
-            try:
-                return await method(self, *args, **kwargs)
-            finally:
-                release()
+            return await method(self, *args, **kwargs)
 
         coro = run()
+        # Backstop for work that is neither awaited nor released.
         weakref.finalize(coro, release)
-        return coro
+        return TrackedWrite(coro, release)
 
     # Not functools.wraps: its _Wrapped return type keeps the explicit
     # 'self' arg and fails the plain-Callable return annotation under
@@ -725,6 +726,10 @@ class KorvidApp(App[None]):
         #: the in-flight drain worker, if any - pressing the drain key again
         #: cancels it (evictions stop; the node stays cordoned).
         self._drain_worker: Worker[None] | None = None
+        #: the in-flight drain's slot. Kept so a worker cancelled before its
+        #: first step - which never runs the write's own completion path -
+        #: can still hand the slot back.
+        self._drain_write: TrackedWrite[None] | None = None
         self._drain_node: str | None = None
         #: status-bar progress labels keyed by owner (drain, helm preview):
         #: concurrent operations must not clear each other's feedback.
@@ -2159,6 +2164,12 @@ class KorvidApp(App[None]):
         stays here; the flow itself belongs to `ShellController`.
         """
         self._shell.shell()
+
+    def _release_drain_write(self) -> None:
+        """Hand back a cancelled drain's `:ctx` slot, if it still holds one."""
+        if self._drain_write is not None:
+            self._drain_write.release()
+            self._drain_write = None
 
     def _reserve_cluster_write(self) -> Callable[[], None]:
         """Count one in-flight cluster mutation; return its idempotent release.
@@ -5117,6 +5128,7 @@ class KorvidApp(App[None]):
                 )
                 return
             worker.cancel()
+            self._release_drain_write()
             return
         resolved = self._node_target("drain")
         if resolved is None:
@@ -5141,7 +5153,8 @@ class KorvidApp(App[None]):
         def _done(confirmed: bool | None) -> None:
             if confirmed:
                 self._drain_node = name
-                self._drain_worker = self.run_worker(self._run_drain(ops, meta, name, uid, plan))
+                self._drain_write = self._run_drain(ops, meta, name, uid, plan)
+                self._drain_worker = self.run_worker(self._drain_write)
 
         blocked_now = sum(1 for t in plan.targets if t.pdb_blocked is not None)
         note = f"; {blocked_now} currently PDB-blocked" if blocked_now else ""
@@ -7185,23 +7198,22 @@ class KorvidApp(App[None]):
                 )
                 return
             detail = self._proposal_provenance(proposal)
-            write = asyncio.ensure_future(
-                self._run_write(
-                    proposal.action,
-                    meta,
-                    ns,
-                    proposal.name,
-                    lambda: op(proposal.uid),
-                    detail=detail,
-                )
+            tracked = self._run_write(
+                proposal.action,
+                meta,
+                ns,
+                proposal.name,
+                lambda: op(proposal.uid),
+                detail=detail,
             )
+            write = asyncio.ensure_future(tracked)
             try:
                 outcome = await asyncio.shield(write)
             except asyncio.CancelledError:
                 # Worker cancellation (TUI shutdown) after the claim: the
                 # record must still reach a terminal state, never a
                 # permanent `approved` over an uncertain cluster outcome.
-                await self._settle_interrupted_execution(store, proposal, write)
+                await self._settle_interrupted_execution(store, proposal, write, tracked)
                 raise
             store.finish_execution(
                 proposal.id, executed=outcome == "done", reason="" if outcome == "done" else outcome
@@ -7210,7 +7222,11 @@ class KorvidApp(App[None]):
                 self.notify(f"Executed proposal: {proposal.summary}")
 
     async def _settle_interrupted_execution(
-        self, store: ProposalStore, proposal: WriteProposal, write: asyncio.Future[str]
+        self,
+        store: ProposalStore,
+        proposal: WriteProposal,
+        write: asyncio.Future[str],
+        tracked: TrackedWrite[str],
     ) -> None:
         """A claimed execution's worker was cancelled mid-write. Use the
         write's real outcome when it already settled; otherwise abandon the
@@ -7225,6 +7241,9 @@ class KorvidApp(App[None]):
             )
             return
         write.cancel()
+        # Cancellation may land before the write's first step, which never
+        # runs its own completion path - hand the slot back here.
+        tracked.release()
         reason = "interrupted before completion — the cluster outcome is uncertain"
         store.finish_execution(proposal.id, executed=False, reason=reason)
         # _run_write only got as far as its intent record: the terminal
@@ -7749,7 +7768,7 @@ class AppWriteGate(WriteGate):
         name: str,
         op_factory: Callable[[], Awaitable[None]],
         detail: str = "",
-    ) -> Coroutine[Any, Any, str]:
+    ) -> TrackedWrite[str]:
         # Straight through, deliberately: `_run_write` is decorated to reserve
         # the in-flight cluster write synchronously, and an async adapter here
         # would defer that to when the coroutine starts — reopening the
@@ -7857,7 +7876,7 @@ class AppUiSurface(UiSurface):
 
     def run_worker(
         self,
-        work: Coroutine[Any, Any, Any] | Callable[[], Any],
+        work: Awaitable[Any] | Callable[[], Any],
         *,
         exclusive: bool = False,
         group: str = "default",

@@ -480,6 +480,35 @@ async def test_drain_aborts_when_plan_gains_unapproved_pods_after_cordon(tmp_pat
         assert "sneaky-1" in entries[-1]["detail"]
 
 
+async def test_cancelling_a_drain_frees_the_context_switch(tmp_path: Path) -> None:
+    """Cancelling a drain must not leave `:ctx` blocked for the session.
+
+    This covers the common case, where the worker is already running and
+    hands its own slot back as it unwinds. It does *not* discriminate the
+    issue #237 defect - a worker cancelled before its first step - which
+    only the unit-level tests in `test_ctx_switch.py` reach; through the UI
+    the drain task is always scheduled before the next key event.
+    """
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = NodeRecorder(plan=plan)
+    rec.release_evictions.clear()  # keep the drain in flight
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(pilot, lambda: app._drain_worker is not None, label="drain worker started")
+        assert app._active_cluster_writes == 1
+
+        await pilot.press("D")  # same node: cancels the drain
+        await until(pilot, lambda: app._active_cluster_writes == 0, label="slot handed back")
+
+        assert app._ctx_switch_blocker() is None
+        rec.release_evictions.set()
+
+
 async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: Path) -> None:
     """Cancelling is targeted: pressing the drain key while a *different*
     node is selected must warn instead of silently killing the running

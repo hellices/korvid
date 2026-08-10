@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import weakref
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import yaml
@@ -42,7 +42,7 @@ from korvid.k8s.writes import WriteOps
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
-from korvid.ui.write_gate import WriteGate
+from korvid.ui.write_gate import TrackedWrite, WriteGate
 
 logger = logging.getLogger(__name__)
 
@@ -498,42 +498,41 @@ class OperatorController:
         csv_meta: ResourceMeta | None,
         csv_name: str,
         csv_uid: str | None,
-    ) -> Coroutine[Any, Any, None]:
+    ) -> TrackedWrite[None]:
         """Subscription first (stops OLM from reinstalling), then the CSV;
         each delete individually audited fail-closed. A failed or blocked
         Subscription delete leaves the CSV untouched - removing the CSV
         alone would only make OLM reinstall it.
 
         Synchronous on purpose: it reserves the in-flight cluster write
-        *here*, while building the coroutine, and returns it unstarted. A
+        *here*, while building the work, and returns it unstarted. A
         confirmation callback hands the result to `run_worker`, which starts
         it a loop iteration later - and a `:ctx` queued in that gap has to
         see the write already in flight (issue #36).
+
+        A caller that abandons the work before it starts must `release` the
+        handle: work that never begins cannot run its own completion path
+        (issue #237).
         """
         release = self._gate.reserve_write()
 
         async def run() -> None:
-            try:
-                await self._apply_uninstall_locked(
-                    ops,
-                    sub_meta,
-                    ns,
-                    name,
-                    uid,
-                    fetch_kind=fetch_kind,
-                    csv_meta=csv_meta,
-                    csv_name=csv_name,
-                    csv_uid=csv_uid,
-                )
-            finally:
-                release()
+            await self._apply_uninstall_locked(
+                ops,
+                sub_meta,
+                ns,
+                name,
+                uid,
+                fetch_kind=fetch_kind,
+                csv_meta=csv_meta,
+                csv_name=csv_name,
+                csv_uid=csv_uid,
+            )
 
         coro = run()
-        # The reservation must not leak if the coroutine is closed or
-        # collected without ever running (worker cancelled before start,
-        # app shutdown): release is idempotent, so this is safe to add.
+        # Backstop for work that is neither awaited nor released.
         weakref.finalize(coro, release)
-        return coro
+        return TrackedWrite(coro, release)
 
     async def _apply_uninstall_locked(
         self,
