@@ -474,7 +474,7 @@ async def test_debug_fallback_not_offered_over_open_dialog(tmp_path: Path) -> No
         await pilot.pause(0.1)
         blocker = PickScreen("unrelated dialog", ["a", "b"])
         await app.push_screen(blocker)
-        await app._offer_debug_fallback("default", "api-1", None, 127, app._ctx_epoch)
+        await app._shell._offer_debug_fallback("default", "api-1", None, 127, app._ctx_epoch)
         await pilot.pause(0.1)
         assert app.screen is blocker  # nothing stacked on top
 

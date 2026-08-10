@@ -9,6 +9,7 @@ unknown runtime simply yields the generic fallback image.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -134,7 +135,7 @@ def recommend_debug_images(
     manifest: dict[str, Any],
     container: str | None,
     *,
-    images_cfg: dict[str, str] | None = None,
+    images_cfg: Mapping[str, str] | None = None,
     default_image: str | None = None,
 ) -> list[DebugImageOption]:
     """Ordered debug-image options for the kubectl debug offer dialog.

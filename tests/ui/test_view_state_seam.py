@@ -20,7 +20,7 @@ from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary
-from korvid.ui.app import AppViewState, KorvidApp
+from korvid.ui.app import AppUiSurface, AppViewState, KorvidApp
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 
@@ -139,3 +139,31 @@ def test_ui_surface_hands_out_no_untyped_screen() -> None:
         if not name.startswith("_") and member.__annotations__.get("return") == "Any"
     ]
     assert offenders == []
+
+
+def test_ui_surface_names_the_terminal_capabilities() -> None:
+    """Suspending the TUI and re-entering it are app-owned capabilities.
+
+    An interactive shell hands the terminal to a child process, so the
+    controller driving it needs `suspend`, `refresh` and the ability to
+    get back onto the message pump from the worker thread. Passing those
+    as three loose callables is the pattern the seams replaced.
+    """
+    missing = [
+        name for name in ("suspend", "refresh", "call_from_thread") if not hasattr(UiSurface, name)
+    ]
+    assert missing == []
+
+
+def test_app_ui_surface_delegates_the_terminal_capabilities() -> None:
+    """The adapter must route to the app, not reimplement."""
+    app = _app()
+    surface: Any = AppUiSurface(app)
+    calls: list[str] = []
+    app.refresh = lambda *a, **k: calls.append("refresh")  # type: ignore[assignment,method-assign]  # spy
+    app.call_from_thread = lambda fn, *a, **k: calls.append("thread")  # type: ignore[assignment,method-assign]  # spy
+
+    surface.refresh()
+    surface.call_from_thread(lambda: None)
+
+    assert calls == ["refresh", "thread"]

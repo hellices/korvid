@@ -134,5 +134,14 @@ class WriteGate(ABC):
         """The current context epoch, captured at the start of a flow."""
 
     @abstractmethod
+    def reads_allowed(self) -> bool:
+        """Whether a read that spawns a cluster stream may start now.
+
+        False (with a notification) during a `:ctx` switch: a stream opened
+        mid-swap attaches to whichever cluster wins while still labelled
+        with the old selection (issue #84).
+        """
+
+    @abstractmethod
     def switching(self) -> bool:
         """Whether a context switch is in flight right now."""

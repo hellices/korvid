@@ -50,7 +50,6 @@ from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.debugimage import (
     FALLBACK_IMAGE,
-    recommend_debug_images,
     same_image_ref,
 )
 from korvid.core.errors import explain_api_error
@@ -130,16 +129,7 @@ from korvid.ui.messages import (
 )
 from korvid.ui.navigation import DrillLevel, NavigationStack
 from korvid.ui.operator_controller import OperatorController
-from korvid.ui.shell import (
-    DEBUG_IMAGE,
-    build_exec_argv,
-    build_node_debug_create_argv,
-    build_pod_attach_argv,
-    build_pod_get_argv,
-    build_pod_wait_argv,
-    build_probe_argv,
-    parse_debug_pod_name,
-)
+from korvid.ui.shell_controller import ShellController, ShellSettings
 from korvid.ui.transfer import TransferController, TransferProgress
 from korvid.ui.ui_surface import ScreenResultT, Severity, UiSurface
 from korvid.ui.view_state import ViewState
@@ -194,22 +184,6 @@ _APPROVAL_TIMEOUT = 120.0
 #: endpoint must never hang a binding handler or an agent turn. On timeout
 #: the check fails open (writes stay approval-gated and audited).
 _PERMISSION_CHECK_TIMEOUT = 10.0
-
-
-def _looks_like_admission_rejection(stderr: str) -> bool:
-    """True when kubectl stderr clearly shows the API server refused the
-    create — only then is it safe to state that no pod was committed.
-
-    Matches the stable phrases of the two refusal shapes: API-server
-    refusals (`Error from server (Forbidden): ... is forbidden: ...`) and
-    admission webhooks (`admission webhook ... denied the request`). The
-    match is deliberately tight — a false positive here suppresses the
-    cleanup hint and can strand a privileged pod, so a bare `forbidden`
-    substring (which could appear in a pod or image name, or quoted inside
-    an unrelated server error) is not enough.
-    """
-    lowered = stderr.lower()
-    return "error from server (forbidden)" in lowered or "denied the request" in lowered
 
 
 def _yaml_equal(a: object, b: object) -> bool:
@@ -717,6 +691,25 @@ class KorvidApp(App[None]):
         #: liveness polling and the off-pump audit queue. The controller owns
         #: that state - nothing else reads it - while run_worker ownership,
         #: the approval gate and the view stay here.
+        self._shell = ShellController(
+            gate=AppWriteGate(self),
+            view=AppViewState(self),
+            ui=AppUiSurface(self),
+            debug=lambda: self._debug,
+            audit=lambda: self._audit,
+            get_manifest=lambda: self._get_manifest,
+            pod_containers=lambda ns, name: self._get_pod_containers(ns, name),
+            node_target=lambda action: self._node_target(action),
+            confirm_screen=lambda *a, **k: self._confirm_screen(*a, **k),
+            target_uid=lambda kind, ns, name: self._target_uid(kind, ns, name),
+            settings=lambda: ShellSettings(
+                kube_context=self.config.kube_context,
+                debug_default_image=self.config.debug_default_image,
+                debug_images=self.config.debug_images,
+                node_shell_image=self.config.node_shell_image,
+                node_shell_namespace=self.config.node_shell_namespace,
+            ),
+        )
         self._forward = ForwardController(
             gate=AppWriteGate(self),
             ui=AppUiSurface(self),
@@ -2148,7 +2141,7 @@ class KorvidApp(App[None]):
                 return
             action, container = result
             if action == "shell":
-                self._run_shell(namespace, name, container)
+                self._shell.run_shell(namespace, name, container)
             else:
                 if self._stream_logs is None:
                     self.notify("Log streaming unavailable", severity="warning")
@@ -2156,6 +2149,14 @@ class KorvidApp(App[None]):
                 self.run_worker(self._open_log_pane(namespace, [(name, container)]))
 
         await self.push_screen(ContainersScreen(name, rows), _on_pick)
+
+    def action_shell(self) -> None:
+        """`s` - exec into the selected pod, or open a node shell.
+
+        Textual resolves `action_*` on the app, so the binding entry point
+        stays here; the flow itself belongs to `ShellController`.
+        """
+        self._shell.shell()
 
     def _reserve_cluster_write(self) -> Callable[[], None]:
         """Count one in-flight cluster mutation; return its idempotent release.
@@ -3300,67 +3301,6 @@ class KorvidApp(App[None]):
             agent_input.focus()
         return True
 
-    def action_shell(self) -> None:
-        """Drop into a shell inside the selected pod via kubectl exec.
-
-        Multi-container pods show a container picker first; if exec fails
-        (typically a distroless image without sh/bash) a `kubectl debug`
-        ephemeral-container fallback is offered. On the nodes view the same
-        key opens a node shell via `kubectl debug node/` behind an approval
-        dialog (issue #46).
-        """
-        kind = self._canonical_kind(self.current_kind)
-        meta = self.aliases.get(kind)
-        # The exec would race the teardown/retarget and could attach to
-        # whichever cluster wins — refuse up front.
-        if not self._ctx_reads_allowed():
-            return
-        if meta is not None and (meta.group, meta.plural) == ("", "nodes"):
-            self.run_worker(self._node_shell_flow())
-            return
-        if kind != "pods":
-            self.notify("Shell is available for pods and nodes", severity="warning")
-            return
-
-        ns, name = self._selected_ns_name()
-        if ns is None or name is None:
-            return
-        namespace = ns
-
-        if shutil.which("kubectl") is None:
-            self.notify(
-                "kubectl not found on PATH — shell-in requires kubectl",
-                severity="error",
-            )
-            return
-
-        containers = self._get_pod_containers(namespace, name)
-        if len(containers) > 1:
-            epoch = self._ctx_epoch
-
-            def _on_pick(container: str | None) -> None:
-                if container is None:
-                    return
-                if self._ctx_switching or epoch != self._ctx_epoch:
-                    # The picker stayed open across a context switch: the
-                    # selection belongs to the old cluster while kubectl
-                    # would now target the new one.
-                    self.notify(
-                        f"shell into {name} cancelled - the kube context"
-                        " changed while the container picker was open",
-                        severity="warning",
-                    )
-                    return
-                self._run_shell(namespace, name, container)
-
-            self.push_screen(
-                PickScreen(f"Container in {name}:", list(containers)),
-                _on_pick,
-            )
-            return
-
-        self._run_shell(namespace, name, containers[0] if containers else None)
-
     async def action_port_forward(self) -> None:
         """Open the port-forward dialog for the selected pod or service (shift+f)."""
         if self.current_kind not in FORWARDABLE_KINDS:
@@ -3423,17 +3363,6 @@ class KorvidApp(App[None]):
     #: Pod controller kinds a re-attach can follow, mapped to their plural.
     #: ReplicaSets are chased one level up so the forward survives rollouts,
     #: not just single pod replacements.
-
-    @staticmethod
-    def _run_interactive(argv: list[str], banner: str) -> int:
-        """Run an interactive subprocess on a cleared screen for a direct feel.
-
-        Suspending Textual drops back to the primary screen, exposing old
-        scrollback (including the command that launched korvid). Clearing
-        first makes it look like we connected straight into the pod.
-        """
-        print(f"\x1b[2J\x1b[H\x1b[2m{banner}\x1b[0m", flush=True)
-        return subprocess.call(argv)
 
     # -- File transfer (issue #47): download/upload over the exec API as a
     # -- tar stream; uploads are approval-gated, both directions audited
@@ -3656,254 +3585,6 @@ class KorvidApp(App[None]):
         cancels it (never the surrounding worker)."""
         return self._transfer.task
 
-    def _run_shell(self, namespace: str, name: str, container: str | None) -> None:
-        """Run kubectl exec; offer the kubectl debug fallback only if sh is missing."""
-        epoch = self._ctx_epoch
-        argv = build_exec_argv(namespace, name, container, context=self.config.kube_context)
-        target = f"{name}/{container}" if container else name
-        with self.suspend():
-            exit_code = self._run_interactive(argv, f"korvid shell -> {target} (exit to return)")
-        self.refresh()
-        if exit_code == 0:
-            return
-
-        # kubectl exec propagates the remote command's exit code, so a non-zero
-        # status can just mean the user's last command failed or they hit Ctrl+C.
-        # Probe non-interactively: if sh runs fine, the shell session was real.
-        # Run in a thread worker so a slow API server can't freeze the UI.
-        def _probe_and_maybe_offer() -> None:
-            try:
-                probe = subprocess.run(
-                    build_probe_argv(namespace, name, container, context=self.config.kube_context),
-                    capture_output=True,
-                    timeout=5,
-                )
-                shell_exists = probe.returncode == 0
-            except (subprocess.TimeoutExpired, OSError):
-                shell_exists = False  # inconclusive — keep offering the fallback
-            if shell_exists:
-                return
-            self.call_from_thread(
-                self._schedule_debug_offer, namespace, name, container, exit_code, epoch
-            )
-
-        self.run_worker(_probe_and_maybe_offer, thread=True)
-
-    def _schedule_debug_offer(
-        self, namespace: str, name: str, container: str | None, exit_code: int, epoch: int
-    ) -> None:
-        """Sync shim for call_from_thread: the offer itself is async because
-        it awaits the RBAC pre-check."""
-        self.run_worker(self._offer_debug_fallback(namespace, name, container, exit_code, epoch))
-
-    async def _offer_debug_fallback(
-        self, namespace: str, name: str, container: str | None, exit_code: int, epoch: int
-    ) -> None:
-        """Ask whether to attach a kubectl debug container after a failed shell."""
-        if self.config.readonly or self._audit is None:
-            # kubectl debug mutates the pod spec (ephemeral container):
-            # never offer a write we would refuse to run.
-            self.notify(
-                "Shell failed and the debug fallback is unavailable"
-                " (read-only mode or no audit log)",
-                severity="warning",
-            )
-            return
-        pods_meta = self.aliases.get("pods")
-        if pods_meta is None:
-            # Fail-open like the other permission paths, but never silently.
-            logger.warning("pods alias missing; skipping debug RBAC pre-check (fail-open)")
-        elif not await self._permitted("debug", pods_meta, namespace, name):
-            # RBAC pre-check (spec debug safety contract): don't offer a
-            # picker the API server would reject; _permitted notified with
-            # "missing permission: patch pods/ephemeralcontainers".
-            return
-        target = f"{name}/{container}" if container else name
-        try:
-            # One manifest fetch serves two purposes: binding the offer to
-            # this pod incarnation (kubectl debug addresses the pod by
-            # namespace/name only, so without the uid a same-named
-            # replacement created while the dialogs are open would receive
-            # the ephemeral container - _run_debug re-checks the uid just
-            # before executing) and runtime detection for the image
-            # recommendation (issue #52). 404 -> the pod is already gone.
-            manifest = await self._debug_manifest(namespace, name)
-        except ApiStatusError:
-            self.notify(
-                f"Debug fallback for {target} not offered - the pod no longer exists.",
-                severity="warning",
-            )
-            return
-        approved_uid: str | None = None
-        if manifest is not None:
-            raw_uid = (manifest.get("metadata") or {}).get("uid")
-            approved_uid = str(raw_uid) if raw_uid else None
-        if self._ctx_switching or epoch != self._ctx_epoch:
-            # The probe/RBAC/manifest awaits crossed a context switch: the
-            # offer describes an old-cluster pod while kubectl debug would
-            # now target the new context.
-            self.notify(
-                f"Debug fallback for {target} cancelled - the kube context changed",
-                severity="warning",
-            )
-            return
-        if len(self.screen_stack) > 1:
-            # The probe/RBAC pre-check ran concurrently with user input: never
-            # stack the offer over a dialog that opened meanwhile.
-            self.notify(
-                f"Debug fallback for {target} not offered - another dialog is open."
-                " Close it and press 's' again to retry.",
-                severity="warning",
-            )
-            return
-        self._pick_debug_image(
-            namespace, name, container, exit_code, approved_uid, manifest or {}, epoch
-        )
-
-    def _pick_debug_image(
-        self,
-        namespace: str,
-        name: str,
-        container: str | None,
-        exit_code: int,
-        approved_uid: str | None,
-        manifest: dict[str, Any],
-        epoch: int,
-    ) -> None:
-        """Debug image picker (issue #52): runtime-aware recommendation first,
-        alternatives after, plus a custom-image prompt."""
-        target = f"{name}/{container}" if container else name
-        options = recommend_debug_images(
-            manifest,
-            container,
-            images_cfg=self.config.debug_images,
-            default_image=self.config.debug_default_image,
-        )
-        prompts = {f"{opt.image}  ({opt.label})": opt.image for opt in options}
-        custom_choice = "Custom image…"
-
-        def _on_image(choice: str | None) -> None:
-            if choice is None:
-                return
-            if choice == custom_choice:
-
-                def _on_custom(image: str | None) -> None:
-                    if image:
-                        self._confirm_debug(
-                            namespace, name, container, exit_code, approved_uid, image, epoch
-                        )
-
-                self.push_screen(ImagePrompt(target), _on_custom)
-                return
-            self._confirm_debug(
-                namespace, name, container, exit_code, approved_uid, prompts[choice], epoch
-            )
-
-        # Choosing an image is read-only: even if input buffered before this
-        # asynchronous picker existed selects an entry, the pod mutation is
-        # still gated by the ConfirmScreen pushed in _confirm_debug, whose
-        # creation-time key cutoff discards such buffered keystrokes.
-        # Air-gapped configs without a matching mapping produce no options:
-        # the picker then offers only the custom-image prompt.
-        title = f"Shell failed in {target} (exit {exit_code}) - choose a debug image."
-        if options:
-            title += f"\nRecommended: {options[0].image} - {options[0].reason}"
-        self.push_screen(
-            PickScreen(title, [*prompts, custom_choice]),
-            _on_image,
-        )
-
-    async def _debug_manifest(self, namespace: str, name: str) -> dict[str, Any] | None:
-        """Pod manifest at debug-offer time (uid binding + runtime detection).
-
-        Same semantics as `_target_uid`: raises `ApiStatusError(404)` when the
-        pod is gone; fails open (`None`) when no manifest source is wired or
-        the lookup fails or times out - the debug stays approval-gated and
-        audited, just without a uid precondition or a runtime recommendation.
-        """
-        if self._get_manifest is None:
-            return None
-        try:
-            return await asyncio.wait_for(
-                self._get_manifest("pods", namespace, name), _UID_LOOKUP_TIMEOUT
-            )
-        except ApiStatusError as exc:
-            if exc.status == 404:
-                raise
-            logger.warning(
-                "manifest lookup for %s/%s failed; offering debug without it", namespace, name
-            )
-            return None
-        except TimeoutError:
-            logger.warning(
-                "manifest lookup for %s/%s timed out; offering debug without it", namespace, name
-            )
-            return None
-        except Exception:
-            # Fail open like _target_uid: an infrastructure error must not
-            # escape the worker and silently swallow the debug offer.
-            logger.exception(
-                "manifest lookup for %s/%s failed; offering debug without it", namespace, name
-            )
-            return None
-
-    def _confirm_debug(
-        self,
-        namespace: str,
-        name: str,
-        container: str | None,
-        exit_code: int,
-        approved_uid: str | None,
-        image: str,
-        epoch: int,
-    ) -> None:
-        """Approval gate for the debug fallback with the chosen image.
-
-        ConfirmScreen, not a generic picker: its creation-time key cutoff
-        discards any input buffered before the prompt existed - a queued
-        Enter or y must never start a pod mutation the user has not seen.
-        """
-        target = f"{name}/{container}" if container else name
-
-        def _on_choice(confirmed: bool | None) -> None:
-            if not confirmed:
-                return
-            if self._ctx_switching or epoch != self._ctx_epoch:
-                # The image picker / approval stayed open across a context
-                # switch: kubectl debug would mutate a same-named pod on the
-                # new cluster (the uid re-check fails open without a uid).
-                self.notify(
-                    f"Debug fallback for {target} cancelled - the kube context changed",
-                    severity="warning",
-                )
-                return
-            self.run_worker(self._run_debug(namespace, name, container, approved_uid, image))
-
-        self.push_screen(
-            self._confirm_screen(
-                f"Shell failed in {target} (exit {exit_code})",
-                f"kubectl debug: attach a {image} debug container to pod"
-                f" {name}{self._write_locus(namespace)} - the target image likely"
-                " has no sh/bash (distroless). Note: the ephemeral container stays"
-                " in the pod spec until restart.",
-            ),
-            _on_choice,
-        )
-
-    @_tracks_cluster_write
-    async def _run_debug(
-        self,
-        namespace: str,
-        name: str,
-        container: str | None,
-        approved_uid: str | None,
-        image: str = DEBUG_IMAGE,
-    ) -> None:
-        """Delegate the gated, audited kubectl debug run to the controller
-        (issue #97 U3c); the decorator keeps the write counted against
-        `:ctx` switching, and worker ownership stays with the callers."""
-        await self._debug.run(namespace, name, container, approved_uid, image)
-
     async def _pod_uid_unchanged(
         self, namespace: str, name: str, approved_uid: str, *, action: str
     ) -> bool:
@@ -3956,7 +3637,9 @@ class KorvidApp(App[None]):
 
         def _on_choice(confirmed: bool | None) -> None:
             if confirmed:
-                self.run_worker(self._run_debug(namespace, name, container, approved_uid, fallback))
+                self.run_worker(
+                    self._shell.run_debug(namespace, name, container, approved_uid, fallback)
+                )
 
         self.push_screen(
             self._confirm_screen(
@@ -5519,412 +5202,6 @@ class KorvidApp(App[None]):
             self._drain_node = None
 
     # -- Node shell (issue #46): privileged debug shell via kubectl debug node/
-
-    async def _node_shell_flow(self) -> None:
-        """`s` on the nodes view: approval-gated `kubectl debug node/` shell.
-
-        The shell runs in a `node-debugger-…` pod with the node's filesystem
-        mounted at `/host` — a privilege escalation, so it always passes the
-        approval gate with that stated explicitly, is audit-logged
-        fail-closed, and the debug pod is deleted when the shell exits.
-        """
-        resolved = self._node_target("node shell")
-        if resolved is None:
-            return
-        ops, meta, name, uid = resolved
-        if shutil.which("kubectl") is None:
-            self.notify("kubectl not found on PATH — node shell requires kubectl", severity="error")
-            return
-        image = self.config.node_shell_image or DEBUG_IMAGE
-        shell_ns = self.config.node_shell_namespace or "default"
-        pods_meta = self.aliases.get("pods")
-        epoch = self._ctx_epoch
-        if pods_meta is None:
-            # Fail-open like the pod-debug pre-check, but never silently.
-            logger.warning("pods alias missing; skipping node-shell RBAC pre-check (fail-open)")
-        elif not await self._permitted("node-shell", pods_meta, shell_ns, ""):
-            return
-        if not self._write_context_intact("node shell", meta, None, name, epoch=epoch):
-            # The RBAC round-trip ran concurrently with user input: the
-            # approval must stay bound to the selection that initiated it,
-            # and never stack over a dialog that opened meanwhile.
-            return
-
-        def _on_choice(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(self._run_node_shell(ops, name, shell_ns, image, uid))
-
-        self.push_screen(
-            self._confirm_screen(
-                f"Node shell on {name}",
-                f"kubectl debug node/{name}: creates a privileged debug pod"
-                f" (image {image}) in namespace {shell_ns} with the node's"
-                " filesystem mounted at /host (uses --profile=sysadmin;"
-                " requires kubectl 1.30+). The pod is deleted when the shell"
-                " exits. This action is audit-logged.",
-            ),
-            _on_choice,
-        )
-
-    @_tracks_cluster_write
-    async def _run_node_shell(
-        self, ops: WriteOps, node: str, namespace: str, image: str, approved_uid: str | None
-    ) -> None:
-        """Run the approved node shell, then delete the debugger pod.
-
-        A cluster write (pod creation via kubectl): the intent record must
-        persist before the subprocess starts, or the shell is blocked.
-        kubectl addresses the node by name only, so the approved node
-        incarnation is re-verified just before creating the pod (like the
-        pod debug path). The pod is created detached (`--attach=false`); its
-        name is parsed from kubectl's creation message and its uid fetched
-        with an exact `kubectl get pod`, so korvid knows precisely which pod
-        it owns: the interactive session then `kubectl attach`es to it, and
-        cleanup deletes exactly that pod with a uid precondition — a debugger
-        another operator starts meanwhile is never touched.
-        """
-        audit = self._audit
-        if audit is None:  # _node_target already refused; defensive re-check
-            return
-        if approved_uid is not None and not await self._node_uid_unchanged(node, approved_uid):
-            return
-        detail = f"privileged node shell (kubectl debug node, image {image}, namespace {namespace})"
-        try:
-            await asyncio.to_thread(self._audit_node_shell, audit, node, detail, "intent")
-        except Exception:
-            logger.exception("audit append failed; blocking node shell")
-            self.notify("Write blocked: audit log unavailable", severity="error")
-            return
-        # The create itself is shielded + settled: cancelling an
-        # asyncio.to_thread await does not stop the kubectl subprocess, so a
-        # cancellation here could otherwise leak a pod that was created
-        # moments later with no finalizer installed.
-        create_task = asyncio.ensure_future(self._create_node_debug_pod(node, namespace, image))
-        try:
-            created = await asyncio.shield(create_task)
-        except asyncio.CancelledError:
-            try:
-                created = await create_task
-            except asyncio.CancelledError:
-                # The create task itself was cancelled outright (e.g. loop
-                # shutdown cancels every task, bypassing the shield): nothing
-                # to settle, but a pod may still appear — leave a trace.
-                logger.warning(
-                    "node shell create cancelled outright; cleanup skipped -"
-                    " check namespace %s for leftover node-debugger pods",
-                    namespace,
-                )
-                raise
-            if isinstance(created, str):
-                await self._audit_create_failure(audit, node, detail, created)
-            else:
-                await self._finalize_node_shell(
-                    ops,
-                    audit,
-                    node,
-                    namespace,
-                    created[0],
-                    created[1],
-                    detail,
-                    "error: interrupted",
-                )
-            raise
-        if isinstance(created, str):  # creation failed or pod unidentifiable
-            await self._audit_create_failure(audit, node, detail, created)
-            return
-        pod_name, pod_uid = created
-        # Everything after a successful create runs under a finalizer:
-        # a worker cancellation, an attach launch error, or Ctrl-C raising
-        # KeyboardInterrupt from subprocess.call must still delete the
-        # privileged host-mounted pod and record the outcome.
-        outcome = "error: interrupted"
-        try:
-            outcome = await self._wait_and_attach_node_shell(node, namespace, pod_name)
-        finally:
-            # Shielded + settled so a cancelled worker still deletes the pod
-            # and records the outcome: shield() raises CancelledError here on
-            # outer cancellation while the finalizer keeps running, so it is
-            # re-awaited before the cancellation propagates.
-            finalize = asyncio.ensure_future(
-                self._finalize_node_shell(
-                    ops, audit, node, namespace, pod_name, pod_uid, detail, outcome
-                )
-            )
-            try:
-                await asyncio.shield(finalize)
-            except asyncio.CancelledError:
-                await finalize
-                raise
-
-    async def _wait_and_attach_node_shell(self, node: str, namespace: str, pod_name: str) -> str:
-        """Wait for the debugger pod, attach interactively, return the outcome.
-
-        Runs entirely under the caller's finalizer, so every exit path —
-        including an attach binary that cannot be launched — leaves the pod
-        deletion and outcome audit to run.
-        """
-        wait_argv = build_pod_wait_argv(namespace, pod_name, context=self.config.kube_context)
-        ready = await self._run_kubectl_ok(wait_argv, timeout=75)
-        if not ready:
-            self.notify(
-                f"Debugger pod {pod_name} did not become Ready — the shell may"
-                " fail to attach (image pull error or admission problem?)",
-                severity="warning",
-            )
-        attach_argv = build_pod_attach_argv(namespace, pod_name, context=self.config.kube_context)
-        try:
-            with self.suspend():
-                exit_code = self._run_interactive(
-                    attach_argv, f"korvid node shell -> {node} (exit to return)"
-                )
-        except SuspendNotSupported:
-            # Non-suspending drivers (e.g. Windows, web): refuse gracefully —
-            # the finalizer still deletes the pod that was just created.
-            self.notify(
-                "node shell unavailable: this environment does not support"
-                " suspending the TUI for an interactive shell",
-                severity="error",
-            )
-            outcome = "error: suspend not supported"
-        except OSError as exc:
-            # kubectl itself could not be launched (removed or not executable
-            # since the create): keep a specific outcome and let the finalizer
-            # delete the pod — an escaping exception would kill the worker and
-            # take the TUI down with it.
-            logger.warning("kubectl attach could not be launched", exc_info=True)
-            self.notify(f"Could not launch kubectl attach: {exc}", severity="error")
-            outcome = "error: attach could not be launched"
-        else:
-            outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
-        self.refresh()
-        return outcome
-
-    async def _audit_create_failure(
-        self, audit: AuditLog, node: str, detail: str, outcome: str
-    ) -> None:
-        """Persist a failed/unidentifiable create outcome; surfaced on
-        failure because the outcome may record a skipped cleanup the user
-        must act on."""
-        try:
-            await asyncio.to_thread(self._audit_node_shell, audit, node, detail, outcome)
-        except Exception:
-            logger.exception("audit append failed after node shell create failure")
-            self.notify("Audit write failed for the node shell attempt", severity="warning")
-
-    async def _finalize_node_shell(
-        self,
-        ops: WriteOps,
-        audit: AuditLog,
-        node: str,
-        namespace: str,
-        pod_name: str,
-        pod_uid: str,
-        detail: str,
-        outcome: str,
-    ) -> None:
-        """Delete the debugger pod and record the outcome — always runs,
-        even when the shell worker was cancelled or interrupted. The audit
-        write is best-effort here: the cluster write already happened, so
-        failing it must not hide the cleanup."""
-        cleanup = await self._delete_node_debug_pod(ops, namespace, pod_name, pod_uid)
-        try:
-            await asyncio.to_thread(
-                self._audit_node_shell, audit, node, detail, f"{outcome}; {cleanup}"
-            )
-        except Exception:
-            logger.exception("audit append failed after node shell")
-            self.notify("Audit write failed for the executed node shell", severity="warning")
-
-    async def _create_node_debug_pod(
-        self, node: str, namespace: str, image: str
-    ) -> tuple[str, str] | str:
-        """Create the node-debugger pod detached; returns (name, uid).
-
-        On failure returns the audit outcome string instead — distinct per
-        cause, because they leave different cluster states: a kubectl launch
-        failure never reached the cluster, a clearly identified admission
-        rejection (where PodSecurity refusals surface, hence the namespace
-        hint) leaves nothing behind, while any other non-zero exit, a
-        timeout, or a create whose output cannot be parsed may have created
-        a pod korvid cannot identify, so the audit records cleanup as
-        skipped and names the namespace to inspect.
-        """
-        argv = build_node_debug_create_argv(
-            node, namespace, context=self.config.kube_context, image=image
-        )
-        try:
-            proc = await asyncio.to_thread(subprocess.run, argv, capture_output=True, timeout=30)
-        except OSError as exc:
-            # kubectl itself could not be launched (removed or not executable
-            # since the PATH check): no request reached the cluster, so no
-            # pod exists and no namespace inspection is needed.
-            logger.warning("kubectl could not be launched for node debug", exc_info=True)
-            self.notify(f"Could not launch kubectl: {exc}", severity="error")
-            return "error: kubectl could not be launched; no pod created"
-        except subprocess.TimeoutExpired:
-            logger.warning("node-debugger pod creation timed out", exc_info=True)
-            self.notify(
-                f"kubectl debug node did not respond — a debugger pod may still have"
-                f" been created; check {namespace} for leftover node-debugger pods",
-                severity="error",
-            )
-            return f"error: pod creation timed out; cleanup skipped: check namespace {namespace}"
-        if proc.returncode != 0:
-            stderr = proc.stderr.decode(errors="replace").strip()
-            logger.warning("node-debugger pod creation failed: %s", stderr)
-            if _looks_like_admission_rejection(stderr):
-                # The API server refused the create: nothing was committed.
-                # The namespace remediation only applies when PodSecurity
-                # did the refusing — an RBAC forbid or an unrelated webhook
-                # denial would make that hint actionably wrong.
-                hint = (
-                    " — the cluster refuses privileged pods (PodSecurity admission);"
-                    " try setting node_shell.namespace to a namespace that allows them"
-                    if "podsecurity" in stderr.lower()
-                    else ""
-                )
-                self.notify(
-                    f"Could not create the debugger pod: {stderr}{hint}",
-                    severity="error",
-                )
-                return "error: pod creation rejected"
-            # A non-zero exit does not prove rejection: the server can commit
-            # the pod and kubectl still fail afterwards (lost response, local
-            # output error) — treat as ambiguous, the pod may exist.
-            self.notify(
-                f"Could not create the debugger pod: {stderr or f'exit {proc.returncode}'}"
-                f" — a pod may still have been created; check {namespace} for"
-                " leftover node-debugger pods",
-                severity="error",
-            )
-            return f"error: pod creation failed; cleanup skipped: check namespace {namespace}"
-        pod_name = parse_debug_pod_name(proc.stdout.decode(errors="replace"))
-        if pod_name is None:
-            # Pod created (exit 0) but unidentifiable: refuse to guess.
-            self.notify(
-                f"kubectl did not report the created pod — check {namespace} for"
-                " leftover node-debugger pods",
-                severity="error",
-            )
-            return (
-                "error: created pod could not be identified;"
-                f" cleanup skipped: check namespace {namespace}"
-            )
-        uid = await self._fetch_created_pod_uid(namespace, pod_name)
-        if uid is None:
-            # Without the uid the cleanup delete would lose its precondition
-            # and could remove a same-name replacement pod: refuse.
-            self.notify(
-                f"kubectl did not report the created pod's uid — check pod"
-                f" {pod_name} in namespace {namespace}",
-                severity="error",
-            )
-            return (
-                "error: created pod could not be identified;"
-                f" cleanup skipped: check namespace {namespace}"
-            )
-        return pod_name, uid
-
-    async def _fetch_created_pod_uid(self, namespace: str, pod_name: str) -> str | None:
-        """Fetch the just-created debugger pod's uid with an exact get.
-
-        `kubectl debug` has no machine-readable output, so after parsing the
-        pod name from its message the uid — required as the cleanup delete's
-        precondition — comes from `kubectl get pod <name> -o json`. Any
-        failure (launch, timeout, non-zero exit, malformed JSON) returns
-        None: the caller treats the pod as unidentifiable rather than guess.
-        """
-        argv = build_pod_get_argv(namespace, pod_name, context=self.config.kube_context)
-        try:
-            proc = await asyncio.to_thread(subprocess.run, argv, capture_output=True, timeout=15)
-        except (subprocess.TimeoutExpired, OSError):
-            logger.warning("could not fetch created debugger pod", exc_info=True)
-            return None
-        if proc.returncode != 0:
-            logger.warning(
-                "created debugger pod fetch failed: %s",
-                proc.stderr.decode(errors="replace").strip(),
-            )
-            return None
-        try:
-            payload = json.loads(proc.stdout)
-        except ValueError:
-            return None
-        item_meta = payload.get("metadata") if isinstance(payload, dict) else None
-        if not isinstance(item_meta, dict):
-            # Valid JSON with an unexpected shape (e.g. metadata is a scalar)
-            # must land in the unidentifiable branch, not raise past the
-            # finalizer while a privileged pod may exist.
-            return None
-        uid = item_meta.get("uid")
-        return uid if isinstance(uid, str) and uid else None
-
-    async def _run_kubectl_ok(self, argv: list[str], timeout: float) -> bool:
-        """Run a non-interactive kubectl helper; True on exit 0."""
-        try:
-            proc = await asyncio.to_thread(
-                subprocess.run, argv, capture_output=True, timeout=timeout
-            )
-        except (subprocess.TimeoutExpired, OSError):
-            logger.warning("kubectl helper failed", exc_info=True)
-            return False
-        return proc.returncode == 0
-
-    async def _node_uid_unchanged(self, name: str, approved_uid: str) -> bool:
-        """Re-verify the approved node incarnation just before the shell
-        launches; notifies and returns False when the node is gone or was
-        replaced under the same name while the dialog was open."""
-        try:
-            current_uid = await self._target_uid("nodes", None, name)
-        except ApiStatusError:
-            self.notify(
-                f"node shell cancelled - node {name} no longer exists.",
-                severity="warning",
-            )
-            return False
-        if current_uid is not None and current_uid != approved_uid:
-            self.notify(
-                f"node shell cancelled - node {name} was replaced since the prompt was shown.",
-                severity="warning",
-            )
-            return False
-        return True
-
-    async def _delete_node_debug_pod(
-        self, ops: WriteOps, namespace: str, pod_name: str, pod_uid: str
-    ) -> str:
-        """Delete exactly the debugger pod this session created (uid
-        precondition), returning the audit note."""
-        pods_meta = self.aliases.get("pods")
-        if pods_meta is None:
-            self.notify(
-                f"Cannot delete debug pod {pod_name} in {namespace} — remove it manually",
-                severity="warning",
-            )
-            return f"cleanup failed for: {pod_name}"
-        try:
-            await ops.delete_object(pods_meta, namespace, pod_name, uid=pod_uid)
-        except Exception:
-            logger.exception("node-debugger pod deletion failed")
-            self.notify(
-                f"Failed to delete debug pod {pod_name} in {namespace} — remove it manually",
-                severity="warning",
-            )
-            return f"cleanup failed for: {pod_name}"
-        return f"cleanup: deleted {pod_name}"
-
-    @staticmethod
-    def _audit_node_shell(audit: AuditLog, node: str, detail: str, outcome: str) -> None:
-        audit.append(
-            action="node-shell",
-            kind="nodes",
-            group="",  # nodes are core/v1
-            version="v1",
-            namespace=None,
-            name=node,
-            detail=detail,
-            outcome=outcome,
-        )
 
     async def action_operator_install(self) -> None:
         """I: on the operator catalog, install the selected package (wizard,
@@ -8486,6 +7763,9 @@ class AppWriteGate(WriteGate):
     def epoch(self) -> int:
         return self._app._ctx_epoch
 
+    def reads_allowed(self) -> bool:
+        return self._app._ctx_reads_allowed()
+
     def switching(self) -> bool:
         return self._app._ctx_switching
 
@@ -8580,8 +7860,20 @@ class AppUiSurface(UiSurface):
         exclusive: bool = False,
         group: str = "default",
         name: str = "",
+        thread: bool = False,
     ) -> Worker[Any]:
-        return self._app.run_worker(work, exclusive=exclusive, group=group, name=name)
+        return self._app.run_worker(
+            work, exclusive=exclusive, group=group, name=name, thread=thread
+        )
+
+    def suspend(self) -> contextlib.AbstractContextManager[None]:
+        return self._app.suspend()
+
+    def refresh(self) -> None:
+        self._app.refresh()
+
+    def call_from_thread(self, callback: Callable[..., Any], *args: Any) -> None:
+        self._app.call_from_thread(callback, *args)
 
     def progress(self, label: str) -> contextlib.AbstractContextManager[None]:
         return self._app._progress(label)

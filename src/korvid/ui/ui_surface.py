@@ -76,6 +76,7 @@ class UiSurface(ABC):
         exclusive: bool = False,
         group: str = "default",
         name: str = "",
+        thread: bool = False,
     ) -> Worker[Any]:
         """Run work off the message pump.
 
@@ -88,6 +89,27 @@ class UiSurface(ABC):
         cluster it was started for. A controller whose work outlives a
         context switch must revalidate through `WriteGate.context_intact`
         or the epoch it captured - the surface will not do it for you.
+        """
+
+    @abstractmethod
+    def suspend(self) -> contextlib.AbstractContextManager[None]:
+        """Hand the terminal to a child process for the wrapped block.
+
+        Textual releases the screen on entry and restores it on exit, so an
+        interactive `kubectl exec` feels like a direct connection. Only the
+        app can do this - it owns the driver.
+        """
+
+    @abstractmethod
+    def refresh(self) -> None:
+        """Repaint after the terminal comes back from a suspended child."""
+
+    @abstractmethod
+    def call_from_thread(self, callback: Callable[..., Any], *args: Any) -> None:
+        """Run *callback* on the message pump from a worker thread.
+
+        Interactive subprocesses are driven off-loop; touching the UI from
+        that thread directly is a data race.
         """
 
     @abstractmethod

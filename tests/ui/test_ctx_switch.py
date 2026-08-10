@@ -881,7 +881,7 @@ async def test_debug_fallback_cancelled_when_context_switched(tmp_path: Path) ->
     app = env.app
     async with app.run_test() as pilot:
         await _first_pod_visible(env, pilot, "pod-a")
-        await app._offer_debug_fallback("default", "pod-a", None, 1, app._ctx_epoch - 1)
+        await app._shell._offer_debug_fallback("default", "pod-a", None, 1, app._ctx_epoch - 1)
         await until(
             pilot,
             lambda: any(
