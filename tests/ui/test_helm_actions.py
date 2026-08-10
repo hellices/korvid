@@ -1219,7 +1219,7 @@ async def test_rollback_target_is_captured_by_the_action_not_the_worker(tmp_path
     async with app.run_test() as pilot:
         await _navigate(pilot, "helmrevisions", "helmrevisions")
         await _rows_listed(pilot, app, 1)
-        with mock.patch.object(app, "_helm_rollback_flow", spy):
+        with mock.patch.object(app._helm_ctl, "rollback", spy):
             await pilot.press("r")
             # captured synchronously: the facts exist before any worker ran
             assert seen == [("web", 2, "default")]
@@ -1603,3 +1603,47 @@ async def test_unchanged_defaults_stay_defaults_across_a_render_failure_retry(
             label="install executed",
         )
         assert helm.values_seen is None  # no -f override was passed
+
+
+async def test_helm_gate_blocks_every_write_precondition(tmp_path: Path) -> None:
+    """Characterization for the extraction in issue #187.
+
+    `HelmController.gate` is the single choke point every helm write flow passes
+    through, and it enforces three separate refusals. Pinning them here as
+    one statement means moving this logic into a controller cannot quietly
+    drop one of them: the flows that call it are covered elsewhere, but
+    nothing asserted the gate's own contract.
+    """
+    helm = FakeHelm()
+
+    readonly_app = make_app(helm=helm, audit_path=tmp_path / "a.jsonl", readonly=True)
+    assert readonly_app._helm_ctl.gate() is None, "read-only mode must refuse helm writes"
+
+    unaudited = make_app(helm=helm, audit_path=None)
+    assert unaudited._helm_ctl.gate() is None, "fail-closed audit must refuse helm writes"
+
+    no_binary = make_app(helm=None, audit_path=tmp_path / "b.jsonl")
+    assert no_binary._helm_ctl.gate() is None, "a missing helm binary must refuse helm writes"
+
+    permitted = make_app(helm=helm, audit_path=tmp_path / "c.jsonl")
+    assert permitted._helm_ctl.gate() is helm, "a fully configured app returns its helm client"
+
+
+async def test_gate_returns_the_client_it_checked(tmp_path: Path) -> None:
+    """The gate must read the helm wrapper once.
+
+    Checking one read and returning another lets a `:ctx` switch that rebinds
+    `KorvidApp._helm` between the two hand back a client the check never saw -
+    including one bound to the previous cluster, which would write there.
+    """
+    first, second = FakeHelm(), FakeHelm()
+    app = make_app(helm=first, audit_path=tmp_path / "audit.jsonl")
+    reads: list[int] = []
+
+    def rebinding_helm() -> HelmCLI:
+        reads.append(1)
+        return first if len(reads) == 1 else second
+
+    app._helm_ctl._helm = rebinding_helm  # simulates a :ctx rebind mid-gate
+
+    assert app._helm_ctl.gate() is first, "returned a client the check never saw"
