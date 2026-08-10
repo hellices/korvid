@@ -1,0 +1,15 @@
+{
+  "campaign": "2026-08-10 local-model matrix (#176)",
+  "cluster": "aks-shared-runners / ollama namespace",
+  "node_sku": "Standard_D32s_v5 (Spot)",
+  "profile": "small",
+  "task_pack": "23 scenarios x 3 repetitions",
+  "journey_pack": "3 journeys, 7 turns, 1 repetition",
+  "prompts_source": "default",
+  "korvid_commit": "bdfb645",
+  "notes": [
+    "ollama memory limit raised from 10Gi to 100Gi: the 30B models OOMKilled at 10Gi and the symptom presented as connection errors",
+    "Spot eviction mid-campaign destroyed one qwen3:30b run and contaminated one devstral run; both re-run",
+    "qwen3-30b and qwen3-32b files are the first (clean) attempt; the second attempt was cancelled as redundant"
+  ]
+}
