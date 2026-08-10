@@ -445,3 +445,37 @@ async def test_gate_run_reserves_the_cluster_write_slot_synchronously(
         finally:
             coro.close()  # keep a failed assert from leaking the coroutine
         assert app._active_cluster_writes == 0, "the reservation outlived the write"
+
+
+async def test_uninstall_write_slot_released_when_coroutine_never_runs(
+    tmp_path: Path,
+) -> None:
+    """A reserved uninstall whose coroutine never starts must not leak.
+
+    The controller reserves synchronously while *building* the coroutine, so
+    the release cannot live only in the body's `finally` - a worker cancelled
+    before start, or an app shutdown, would leave a `+1` behind and wedge
+    every future `:ctx` switch. The weakref finalizer covers that path, and
+    without this test deleting it would still leave the suite green.
+    """
+    import gc
+
+    ops = Recorder()
+    app = make_app({}, {}, tmp_path / "audit.jsonl", write_ops=ops)
+    async with app.run_test():
+        coro = app._olm._operator_apply_uninstall(
+            ops,
+            SUB_META,
+            "operators",
+            "cert-manager",
+            "sub-cert-manager",
+            fetch_kind="subscriptions",
+            csv_meta=None,
+            csv_name="",
+            csv_uid=None,
+        )
+        assert app._active_cluster_writes == 1
+        coro.close()  # unstarted coroutine: the body's finally never executes
+        del coro
+        gc.collect()
+        assert app._active_cluster_writes == 0, "the reservation leaked"
