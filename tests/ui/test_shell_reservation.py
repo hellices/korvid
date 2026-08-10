@@ -106,10 +106,14 @@ def test_a_coroutine_that_never_runs_still_releases_the_slot() -> None:
 
     coro = controller.run_debug("default", "api-1", None, None)
     coro.close()
+    # Asserted here, while `coro` is still referenced and nothing has been
+    # collected: without this the decorator could regress to
+    # collector-based release and the test would stay green.
+    assert gate.events == ["reserve", "release"]
+
     del coro
     gc.collect()
-
-    assert gate.events == ["reserve", "release"]
+    assert gate.events == ["reserve", "release"], "the backstop double-released"
 
 
 def test_the_release_is_idempotent_across_close_and_collection() -> None:
