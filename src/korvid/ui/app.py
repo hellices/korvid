@@ -61,7 +61,6 @@ from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import (
     OWNER_CHAIN_PLURALS,
-    ForwardRecord,
     ForwardRegistry,
     controller_owner,
 )
@@ -720,7 +719,6 @@ class KorvidApp(App[None]):
         #: the approval gate and the view stay here.
         self._forward = ForwardController(
             gate=AppWriteGate(self),
-            view=AppViewState(self),
             ui=AppUiSurface(self),
             forwards=lambda: self._forwards,
             audit=lambda: self._audit,
@@ -1150,7 +1148,7 @@ class KorvidApp(App[None]):
         if self._forwards is not None:
             # Liveness is the point of tracked forwards (issue #38): a toast
             # must fire when one breaks even while :pf is closed.
-            self.set_interval(_FORWARD_POLL_SECONDS, self._forward._poll_forwards)
+            self.set_interval(_FORWARD_POLL_SECONDS, self._forward.poll)
         self._prefetch_namespaces()
         if self._list_contexts is not None:
             # Kubeconfig contexts feed the `:ctx` completion; a local file
@@ -1880,17 +1878,13 @@ class KorvidApp(App[None]):
             # Same quiesce-stop-audit sequence as app exit: in-flight
             # launches land first, stop_all runs off-loop (it polls up to
             # the grace deadline), and every stop is enqueued for audit.
-            stopped = await self._teardown_forwards(self._forwards)
+            stopped = await self._forward.teardown(self._forwards)
             if stopped:
                 self.notify(f"Stopped {len(stopped)} port-forward(s) targeting the old cluster")
         # Old-cluster audit entries resolve their context only at append();
         # flush them before _apply_context_switch re-points the audit log,
         # or they would be written as belonging to the new cluster.
-        worker = self._forward._forward_audit_worker
-        if worker is not None and not worker.is_finished:
-            with contextlib.suppress(Exception):
-                await worker.wait()
-        await self._forward._drain_forward_audits()
+        await self._forward.flush_audits()
         self._drill.clear()
         self.store.clear_all()
         # The hint-events worker holds the old client and its exception path
@@ -1965,10 +1959,10 @@ class KorvidApp(App[None]):
         if self._audit is not None:
             self._audit.set_context(name)
         if self._forwards is not None:
-            # Reopen the registry that _teardown_forwards latched closed;
-            # forwards started from now on target the new cluster.
+            # Reopen the registry that teardown latched closed; forwards
+            # started from now on target the new cluster.
             self._forwards.retarget(name)
-            self._forward._forwards_closing = False
+            self._forward.reopen()
         self.current_kind = "pods"
         self.current_scope = self.config.namespace or "default"
         # Rebind the helm wrapper: it pins --kube-context per instance, and
@@ -2891,7 +2885,7 @@ class KorvidApp(App[None]):
             self._open_proposal_review()
             return
         if head == "pf":
-            self._forward._open_forward_list()
+            self._forward.open_list()
             return
         if head == "operators" and "operators" not in self.aliases:
             # The catalog view only exists where OLM serves PackageManifests;
@@ -3389,7 +3383,7 @@ class KorvidApp(App[None]):
         if ns is None or name is None:
             return
         kind = self.current_kind
-        ports, manifest_ok = await self._forward._forward_prefill_ports(kind, ns, name)
+        ports, manifest_ok = await self._forward.prefill_ports(kind, ns, name)
         if kind == "services" and manifest_ok and not ports:
             # A fetched Service with no TCP ports can never be forwarded —
             # kubectl port-forward is TCP-only. (A failed fetch still opens
@@ -3416,7 +3410,7 @@ class KorvidApp(App[None]):
                 )
                 return
             self.run_worker(
-                self._forward._start_forward(
+                self._forward.start(
                     kind, ns, name, local_port=result[0], remote_port=result[1], epoch=epoch
                 )
             )
@@ -8231,49 +8225,6 @@ class KorvidApp(App[None]):
         empty.update(Text(message))
         empty.display = True
 
-    async def _teardown_forwards(self, registry: ForwardRegistry) -> list[ForwardRecord]:
-        """Stop every forward (app exit / `:ctx` switch), auditing in order.
-
-        Session-scoped by design (issue #38): forwards never outlive the
-        app that started them. stop_all() polls synchronously up to the
-        grace deadline — kept off the closing event loop. It also releases
-        any handshake waiters, so in-flight readiness confirmations resolve
-        promptly; they are awaited before the stops are enqueued so an exit
-        during startup still logs the start entry first (never a stop-only
-        or reversed trail).
-
-        Returns:
-            The stopped records, so a context switch can report the count.
-        """
-        self._forward._forwards_closing = True
-        # Launches and re-attaches whose spawn is still off-loop must land
-        # (and enqueue their start entries) before any stop below is recorded.
-        for launch in list(self._forward._launching_forwards):
-            with contextlib.suppress(Exception):
-                await launch.wait()
-        for done in list(self._forward._reattaching_forwards):
-            with contextlib.suppress(Exception):
-                await done.wait()
-        records = await asyncio.to_thread(registry.stop_all)
-        for confirm in [
-            w for workers in self._forward._confirming_forwards.values() for w in workers
-        ]:
-            with contextlib.suppress(Exception):
-                await confirm.wait()
-        # User stops whose deferred audit worker never got to run (shutdown
-        # cancels workers): their start entries are enqueued by now, so
-        # flushing here keeps the order — user stops, then teardown stops.
-        for spec in self._forward._deferred_stop_audits.values():
-            if self._audit is not None:
-                self._forward._enqueue_forward_audit("port-forward-stop", spec)
-        self._forward._deferred_stop_audits.clear()
-        for record in records:
-            if self._audit is not None:
-                self._forward._enqueue_forward_audit(
-                    "port-forward-stop", record.spec, teardown=True
-                )
-        return records
-
     async def _reap_dispatches(self) -> None:
         """Refuse new foreign UI work and reap in-flight bridge dispatches
         (issue #165): the MCP server stays live until after run_async()
@@ -8326,15 +8277,10 @@ class KorvidApp(App[None]):
         if self._metrics is not None:
             await self._metrics.stop()
         if self._forwards is not None:
-            await self._teardown_forwards(self._forwards)
+            await self._forward.teardown(self._forwards)
         # Flush pending forward audits (e.g. a Ctrl-D pressed right before
-        # quit) so no queued entry is lost: let a mid-drain worker finish,
-        # then drain the remainder directly — workers won't run past here.
-        worker = self._forward._forward_audit_worker
-        if worker is not None and not worker.is_finished:
-            with contextlib.suppress(Exception):
-                await worker.wait()
-        await self._forward._drain_forward_audits()
+        # quit) so no queued entry is lost.
+        await self._forward.flush_audits()
         await self.watch_manager.stop_all()
 
 

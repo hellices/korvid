@@ -11,9 +11,15 @@ maps, the audit queue and its lock. They were only ever touched by these
 methods, so leaving them on the app would have meant injecting eleven more
 accessors to reach data nothing else reads.
 
-The write perimeter, the view and the Textual surface arrive as the three
-named interfaces; `run_worker` stays the app's, so a `:ctx` switch and app
-shutdown still cancel everything this starts.
+The write perimeter and the Textual surface arrive as the named
+interfaces `WriteGate` and `UiSurface`. `ViewState` is deliberately absent:
+a forward is pinned to the target it was started against, so nothing here
+asks what the user is looking at now.
+
+`run_worker` stays the app's, so shutdown cancels what this starts. A
+`:ctx` switch does not - it cancels only the `hint-events` group - so work
+that outlives an await revalidates through the gate rather than assuming
+it was cancelled.
 """
 
 from __future__ import annotations
@@ -25,12 +31,13 @@ import logging
 import threading
 from collections import deque
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import Any
 
 from textual.worker import Worker, get_current_worker
 
 from korvid.core.audit import AuditLog
 from korvid.core.portforward import (
+    WORKLOAD_PLURALS,
     ForwardRecord,
     ForwardRegistry,
     ForwardSpec,
@@ -40,7 +47,6 @@ from korvid.core.portforward import (
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.portforward import forward_target_gvr
 from korvid.ui.ui_surface import UiSurface
-from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.port_forward_screen import ForwardListScreen
 from korvid.ui.write_gate import WriteGate
 
@@ -58,14 +64,12 @@ class ForwardController:
         self,
         *,
         gate: WriteGate,
-        view: ViewState,
         ui: UiSurface,
         forwards: Callable[[], ForwardRegistry | None],
         audit: Callable[[], AuditLog | None],
         get_manifest: Callable[[], Callable[[str, str | None, str], Any] | None],
     ) -> None:
         self._gate = gate
-        self._view = view
         self._ui = ui
         self._forwards_registry = forwards
         self._audit_log = audit
@@ -91,18 +95,65 @@ class ForwardController:
         self._forwards_closing = False
         self._deferred_stop_audits: dict[int, ForwardSpec] = {}
 
-    _WORKLOAD_PLURALS: ClassVar[dict[str, str]] = {
-        "Deployment": "deployments",
-        "ReplicaSet": "replicasets",
-        "ReplicationController": "replicationcontrollers",
-        "StatefulSet": "statefulsets",
-        "DaemonSet": "daemonsets",
-        "Job": "jobs",
-    }
+    async def teardown(self, registry: ForwardRegistry) -> list[ForwardRecord]:
+        """Stop every forward (app exit / `:ctx` switch), auditing in order.
 
-    async def _forward_prefill_ports(
-        self, kind: str, namespace: str, name: str
-    ) -> tuple[list[int], bool]:
+        Session-scoped by design (issue #38): forwards never outlive the
+        app that started them. stop_all() polls synchronously up to the
+        grace deadline — kept off the closing event loop. It also releases
+        any handshake waiters, so in-flight readiness confirmations resolve
+        promptly; they are awaited before the stops are enqueued so an exit
+        during startup still logs the start entry first (never a stop-only
+        or reversed trail).
+
+        Returns:
+            The stopped records, so a context switch can report the count.
+        """
+        self._forwards_closing = True
+        # Launches and re-attaches whose spawn is still off-loop must land
+        # (and enqueue their start entries) before any stop below is recorded.
+        for launch in list(self._launching_forwards):
+            with contextlib.suppress(Exception):
+                await launch.wait()
+        for done in list(self._reattaching_forwards):
+            with contextlib.suppress(Exception):
+                await done.wait()
+        records = await asyncio.to_thread(registry.stop_all)
+        for confirm in [w for workers in self._confirming_forwards.values() for w in workers]:
+            with contextlib.suppress(Exception):
+                await confirm.wait()
+        # User stops whose deferred audit worker never got to run (shutdown
+        # cancels workers): their start entries are enqueued by now, so
+        # flushing here keeps the order — user stops, then teardown stops.
+        for spec in self._deferred_stop_audits.values():
+            if self._audit_log() is not None:
+                self._enqueue_forward_audit("port-forward-stop", spec)
+        self._deferred_stop_audits.clear()
+        for record in records:
+            if self._audit_log() is not None:
+                self._enqueue_forward_audit("port-forward-stop", record.spec, teardown=True)
+        return records
+
+    async def flush_audits(self) -> None:
+        """Drain queued forward audits before the log is re-pointed or lost.
+
+        A mid-drain worker finishes first, then the remainder is drained
+        directly, because workers do not run past teardown. Callers use
+        this before a `:ctx` switch re-points the audit log - entries
+        resolve their context at append(), so an unflushed entry would be
+        written against the wrong cluster.
+        """
+        worker = self._forward_audit_worker
+        if worker is not None and not worker.is_finished:
+            with contextlib.suppress(Exception):
+                await worker.wait()
+        await self._drain_forward_audits()
+
+    def reopen(self) -> None:
+        """Accept forwards again after a `:ctx` switch retargets the registry."""
+        self._forwards_closing = False
+
+    async def prefill_ports(self, kind: str, namespace: str, name: str) -> tuple[list[int], bool]:
         """Declared TCP ports for the forward dialog, plus fetch success.
 
         The success flag lets the caller tell "no TCP ports declared"
@@ -148,10 +199,10 @@ class ForwardController:
                 owner = parent
         if owner is None:
             return None
-        plural = self._WORKLOAD_PLURALS.get(owner[0])
+        plural = WORKLOAD_PLURALS.get(owner[0])
         return f"{plural}/{owner[1]}" if plural is not None else None
 
-    async def _start_forward(
+    async def start(
         self,
         kind: str,
         namespace: str,
@@ -527,7 +578,7 @@ class ForwardController:
         while queue:
             await asyncio.to_thread(_write_head)
 
-    def _open_forward_list(self) -> None:
+    def open_list(self) -> None:
         """`:pf` — the active-forwards screen with stop / re-attach keys."""
         registry = self._forwards_registry()
         if registry is None:
@@ -592,7 +643,7 @@ class ForwardController:
             )
         )
 
-    def _poll_forwards(self) -> None:
+    def poll(self) -> None:
         """Flag newly broken forwards with a toast (once per breakage)."""
         registry = self._forwards_registry()
         if registry is None:  # pragma: no cover - interval only set when present

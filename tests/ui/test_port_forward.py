@@ -848,7 +848,7 @@ async def test_poll_stays_quiet_while_a_confirmation_reports_the_failure(tmp_pat
             )
             # kubectl dies silently while the readiness confirmation still waits.
             procs[0].returncode = 1
-            app._forward._poll_forwards()  # marks it broken and wakes the waiter
+            app._forward.poll()  # marks it broken and wakes the waiter
             await until(
                 pilot,
                 lambda: any("failed to start" in n for n in notices),
@@ -912,7 +912,7 @@ async def test_poll_stays_quiet_while_a_launch_is_still_in_flight(tmp_path: Path
             record = registry.forwards()[0]
             assert record.id not in app._forward._current_confirmations  # still launching
             procs[0].returncode = 1  # kubectl died before the coroutine resumed
-            app._forward._poll_forwards()
+            app._forward.poll()
             assert not any("target gone?" in n for n in notices)
             assert record.id not in app._forward._broken_forwards
             await until(
@@ -973,7 +973,7 @@ async def test_launch_on_another_port_does_not_defer_a_breakage_toast(tmp_path: 
             # The established forward on the *other* port breaks meanwhile.
             procs[0].returncode = 1
             procs[0].stdout.feed(None)
-            app._forward._poll_forwards()
+            app._forward.poll()
             assert any("target gone?" in n for n in notices)  # not deferred
             release.set()
             await until(pilot, lambda: len(procs) == 2, label="gated launch lands")
@@ -1490,13 +1490,13 @@ async def test_quit_during_spawn_still_audits_the_start_first(tmp_path: Path) ->
         async with app.run_test() as pilot:
             # Release the spawn only once teardown has begun — deterministic,
             # unlike a timer that could fire before shutdown on a slow runner.
-            original_teardown = app._teardown_forwards
+            original_teardown = app._forward.teardown
 
-            async def _teardown_and_release(reg: ForwardRegistry) -> None:
+            async def _teardown_and_release(reg: ForwardRegistry) -> list[ForwardRecord]:
                 gate.set()
-                await original_teardown(reg)
+                return await original_teardown(reg)
 
-            app._teardown_forwards = _teardown_and_release  # type: ignore[assignment]  # test hook
+            app._forward.teardown = _teardown_and_release  # type: ignore[assignment,method-assign]  # replacing a bound method on one instance
             await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
@@ -1589,7 +1589,7 @@ async def test_teardown_during_reattach_window_keeps_audit_order(tmp_path: Path)
             # The child dies; the poll marks it broken.
             procs[0].returncode = 1
             procs[0].stdout.feed(None)
-            app._forward._poll_forwards()
+            app._forward.poll()
             await until(pilot, lambda: record.status == "broken", label="marked broken")
             await _open_pf(app, pilot)
             # Signal adoption deterministically: reattach() returns (on the
@@ -2064,7 +2064,7 @@ async def test_forward_worker_cancelled_when_context_switched_mid_lookup() -> No
     async with app.run_test() as pilot:
         await _wait_rows(app, pilot)
         app._forward._resolve_forward_workload = switching_lookup  # type: ignore[method-assign]
-        await app._forward._start_forward(
+        await app._forward.start(
             "pods", "default", "api-1", local_port=18080, remote_port=80, epoch=app._ctx_epoch
         )
         await until(
@@ -2087,7 +2087,7 @@ async def test_forward_worker_refused_when_scheduled_with_stale_epoch() -> None:
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
     async with app.run_test() as pilot:
         await _wait_rows(app, pilot)
-        await app._forward._start_forward(
+        await app._forward.start(
             "pods", "default", "api-1", local_port=18081, remote_port=80, epoch=app._ctx_epoch - 1
         )
         await until(
