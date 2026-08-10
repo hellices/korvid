@@ -127,11 +127,17 @@ tests added before the move where the behaviour is not already pinned.
 3. ~~The `WriteGate` / `ViewState` / `UiSurface` seams~~ — done (#187);
    this is what dropped `HelmController` from 21 dependencies to 6
 4. ~~Port-forward~~ — done (#187)
-5. ~~Shell / debug / node shell~~ — done (#187); the last slice where the
-   balance was clearly positive
+5. ~~Shell / debug / node shell~~ — done (#187)
 
-Stopping here is deliberate, not unfinished work. Measuring the remaining
-areas against the seams:
+Stopping here is a proposal, not a completed criterion. #187 as written
+asks for `app.py` at most 5,000 lines; it is 7,885. Classifying all of
+`KorvidApp` shows that target cannot be met without also moving
+navigation and pane composition, which the same issue says stay on the
+app — extracting every remaining candidate lands at ~5,700.
+
+The argument for stopping is that the property worth having is coupling,
+not line count, and that property is already achieved. Measuring the
+remaining areas against the seams:
 
 - **logs** and **describe** reach into pane composition (`_pane`,
   `_describe_pane`, `_focused_table`, `query_one`). Extracting them behind

@@ -687,10 +687,9 @@ class KorvidApp(App[None]):
         self._edit_text = edit_text
         self._metrics = metrics
         self._forwards = forwards
-        #: port-forward session lifecycle (issue #187): launch, reattach,
-        #: liveness polling and the off-pump audit queue. The controller owns
-        #: that state - nothing else reads it - while run_worker ownership,
-        #: the approval gate and the view stay here.
+        #: interactive sessions (issue #187): pod exec, the kubectl debug
+        #: fallback, and the approval-gated node shell. run_worker ownership
+        #: and the write perimeter stay here.
         self._shell = ShellController(
             gate=AppWriteGate(self),
             view=AppViewState(self),
@@ -710,6 +709,9 @@ class KorvidApp(App[None]):
                 node_shell_namespace=self.config.node_shell_namespace,
             ),
         )
+        #: port-forward session lifecycle (issue #187): launch, reattach,
+        #: liveness polling and the off-pump audit queue. The controller owns
+        #: that state - nothing else reads it.
         self._forward = ForwardController(
             gate=AppWriteGate(self),
             ui=AppUiSurface(self),

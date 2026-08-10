@@ -5,10 +5,18 @@ the ephemeral-container `kubectl debug` fallback offered when that fails
 (typically a distroless image with no shell), and the node shell that runs
 a privileged debug pod behind the approval gate (issue #46).
 
-The security perimeter stays with the app. Approval goes through
-`WriteGate.confirm`, revalidation through `context_intact`, and the audited
-mutation through `run`, so the approval gate and the fail-closed audit rule
-keep exactly one implementation each.
+The security perimeter stays with the app, but note *how*: these flows do
+not use `WriteGate.confirm` / `WriteGate.run`. They build a `ConfirmScreen`
+through the injected factory and drive their own audited subprocess, which
+is what they did before the extraction and is deliberately unchanged here -
+a "no behaviour change" refactor is the wrong place to reroute an approval
+path. What they do share is the rest of the perimeter: `permitted` for the
+RBAC pre-check, `epoch` / `switching` for revalidation across an awaited
+gap, `reads_allowed` to refuse mid-`:ctx` starts, and `reserve_write` so an
+approved shell counts as an in-flight cluster write.
+
+Routing these two lifecycles through a typed gate operation is worth doing;
+it is a behavioural change and belongs in its own review.
 
 Suspending the terminal is why `UiSurface` grew `suspend`, `refresh` and
 `call_from_thread`: an interactive child process takes the screen, and the
@@ -109,9 +117,15 @@ def _tracks_cluster_write(
                 release()
 
         coro = run()
-        # Also release when the coroutine is closed or collected without
-        # ever running (worker cancelled before start, app shutdown): a
-        # leaked reservation would block every future `:ctx` switch.
+        # Release when the coroutine is collected without ever running -
+        # a worker cancelled before its first step, or app shutdown. A
+        # leaked reservation would block every later `:ctx` switch.
+        #
+        # This fires on collection rather than on close(): a coroutine
+        # that never started ignores close(), and priming it to arm the
+        # `finally` instead makes it unawaitable
+        # ("coroutine is being awaited already") wherever a decorated
+        # method is consumed by `await` rather than by a worker Task.
         weakref.finalize(coro, release)
         return coro
 
@@ -247,8 +261,24 @@ class ShellController:
         epoch = self._gate.epoch()
         argv = build_exec_argv(namespace, name, container, context=self._settings().kube_context)
         target = f"{name}/{container}" if container else name
-        with self._ui.suspend():
-            exit_code = self._run_interactive(argv, f"korvid shell -> {target} (exit to return)")
+        try:
+            with self._ui.suspend():
+                exit_code = self._run_interactive(
+                    argv, f"korvid shell -> {target} (exit to return)"
+                )
+        except SuspendNotSupported:
+            # Non-suspending drivers (Windows console, web): refuse rather
+            # than crash the `s` key, exactly as the node path does.
+            self._ui.notify(
+                "shell unavailable: this environment does not support"
+                " suspending the TUI for an interactive shell",
+                severity="error",
+            )
+            return
+        except OSError as exc:
+            # kubectl can vanish between the PATH check and the exec.
+            self._ui.notify(f"shell failed to start kubectl: {exc}", severity="error")
+            return
         self._ui.refresh()
         if exit_code == 0:
             return

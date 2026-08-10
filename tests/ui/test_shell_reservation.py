@@ -13,8 +13,11 @@ after the code looked obviously correct. It is pinned here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 from typing import Any
+
+from textual.app import SuspendNotSupported
 
 from korvid.ui.shell_controller import ShellController, ShellSettings
 
@@ -39,8 +42,14 @@ class _RecordingGate:
 
         return release
 
-    def __getattr__(self, name: str) -> Any:
-        raise AssertionError(f"the reservation test must not need gate.{name}")
+    def epoch(self) -> int:
+        return 0
+
+    def switching(self) -> bool:
+        return False
+
+    def reads_allowed(self) -> bool:
+        return True
 
 
 def _controller(gate: _RecordingGate) -> ShellController:
@@ -79,22 +88,47 @@ def test_the_write_slot_is_reserved_before_the_coroutine_runs() -> None:
         coro.close()
 
 
-def test_closing_an_unrun_coroutine_releases_the_slot() -> None:
-    """A worker cancelled before it starts must not leak the reservation.
+def test_a_coroutine_that_never_runs_still_releases_the_slot() -> None:
+    """A worker cancelled before its first step must not leak the slot.
 
     A leaked +1 blocks every later `:ctx` switch for the session's life.
+
+    The release fires when the coroutine is collected, not when `close()`
+    is called: a coroutine that never started ignores `close()`, and
+    arming its `finally` by priming makes the object unawaitable
+    (`RuntimeError: coroutine is being awaited already`) anywhere a
+    decorated method is consumed by `await` rather than by a worker task.
+    The window is therefore bounded by collection, which under CPython
+    refcounting is the moment the last reference goes away.
     """
     gate = _RecordingGate()
     controller = _controller(gate)
 
     coro = controller.run_debug("default", "api-1", None, None)
     coro.close()
-    # The finalizer fires on collection, not on close: a never-started
-    # coroutine never reaches its own `finally`.
     del coro
     gc.collect()
 
     assert gate.events == ["reserve", "release"]
+
+
+def test_the_release_is_idempotent_across_close_and_collection() -> None:
+    """Both the finalizer and the coroutine's own `finally` may fire.
+
+    The count must move by exactly one either way, or a double release
+    would let a `:ctx` switch proceed while a write is still in flight -
+    the failure mode this counter exists to prevent.
+    """
+    gate = _RecordingGate()
+    controller = _controller(gate)
+
+    coro = controller.run_debug("default", "api-1", None, None)
+    coro.close()
+    del coro
+    gc.collect()
+    gc.collect()
+
+    assert gate.events.count("release") == 1
 
 
 def test_the_slot_is_released_after_the_write_completes() -> None:
@@ -109,3 +143,55 @@ def test_the_slot_is_released_after_the_write_completes() -> None:
     asyncio.run(controller.run_debug("default", "api-1", None, None))
 
     assert gate.events == ["reserve", "release"]
+
+
+def test_pod_shell_refuses_gracefully_when_the_driver_cannot_suspend() -> None:
+    """A non-suspending driver (Windows console, web) must not raise.
+
+    The node-shell path already handles this; the pod path let
+    `SuspendNotSupported` escape and turn the `s` key into a crash.
+    """
+    gate = _RecordingGate()
+    controller = _controller(gate)
+    notices: list[str] = []
+
+    class _Ui:
+        def suspend(self) -> Any:
+            raise SuspendNotSupported("no tty")
+
+        def notify(self, message: str, **kwargs: Any) -> None:
+            notices.append(message)
+
+    controller._ui = _Ui()  # type: ignore[assignment]  # only suspend/notify are reached
+
+    controller.run_shell("default", "api-1", None)
+
+    assert any("suspend" in note for note in notices)
+
+
+def test_pod_shell_reports_a_missing_kubectl_instead_of_raising() -> None:
+    """kubectl can disappear between the PATH check and the exec."""
+    gate = _RecordingGate()
+    controller = _controller(gate)
+    notices: list[str] = []
+
+    class _Ui:
+        def suspend(self) -> Any:
+            return contextlib.nullcontext()
+
+        def refresh(self) -> None:
+            return None
+
+        def notify(self, message: str, **kwargs: Any) -> None:
+            notices.append(message)
+
+    controller._ui = _Ui()  # type: ignore[assignment]  # only these three are reached
+    controller._run_interactive = _raise_oserror  # type: ignore[method-assign]  # simulate a vanished binary
+
+    controller.run_shell("default", "api-1", None)
+
+    assert any("kubectl" in note for note in notices)
+
+
+def _raise_oserror(argv: list[str], banner: str) -> int:
+    raise OSError(2, "No such file or directory")
