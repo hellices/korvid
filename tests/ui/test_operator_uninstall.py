@@ -248,7 +248,7 @@ async def test_apply_uninstall_reserves_the_cluster_write_slot_synchronously(
     ops = Recorder()
     app = make_app({}, {}, tmp_path / "audit.jsonl", write_ops=ops)
     async with app.run_test():
-        coro = app._operator_apply_uninstall(
+        coro = app._olm._operator_apply_uninstall(
             ops,
             SUB_META,
             "operators",

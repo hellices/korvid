@@ -98,6 +98,22 @@ class WriteGate(ABC):
         """
 
     @abstractmethod
+    def reserve_write(self) -> Callable[[], None]:
+        """Reserve an in-flight cluster mutation; returns the release.
+
+        `:ctx` switching consults this count, so the reservation must be
+        taken **synchronously** at the point the write coroutine is
+        *constructed*, not when it starts running: a confirmation callback
+        builds the coroutine and hands it to `run_worker`, which only starts
+        it on a later event-loop iteration, and a `:ctx` processed in that
+        gap must already see the write as in flight.
+
+        The returned release is idempotent, so a coroutine that is closed or
+        collected without ever running cannot leak a reservation and wedge
+        every future `:ctx` switch.
+        """
+
+    @abstractmethod
     def audit_configured(self) -> bool:
         """Whether an audit sink exists.
 
