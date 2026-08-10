@@ -189,6 +189,44 @@ Rules that follow from this:
 - a changed digest with an unchanged prompt file means something else moved
   — a profile change or a tool-schema edit — and the comparison is void.
 
+## Serving Provenance
+
+The prompt fingerprint pins korvid's half of the run. The other half — what
+answered — is pinned by the `meta.serving` block the eval CLI writes:
+
+```json
+"serving": {
+  "model": "qwen3:8b",
+  "engine": {"name": "ollama", "version": "0.5.1"},
+  "digest": "bbb…",
+  "quantization": "Q4_K_M",
+  "context_length": 40960,
+  "parameter_size": "8.0B",
+  "warmup": true,
+  "unavailable": []
+}
+```
+
+This exists because the 2026-08-10 matrix did not have it: the deployment
+served `ollama/ollama:latest`, nothing recorded which version answered, and by
+the time the gap was noticed the node was gone (#235). A future campaign that
+scores differently could not have told a korvid regression from an engine
+upgrade.
+
+Rules that follow:
+
+- a **publishable row requires an empty `unavailable` list**. Anything listed
+  there — `engine`, `digest`, `quantization`, `context_length` — is a field the
+  run could not pin, and the CLI warns on stderr when the list is non-empty;
+- **publishable rows are measured with `--warmup`**, so the first scenario is
+  not charged for paging the weights in. `warmup: false` in an artifact means
+  no warm-up happened, including the case where the request failed;
+- **pin the serving deployment to a released tag.** A floating `:latest` makes
+  the recorded version a coincidence rather than a decision;
+- the block is **omitted entirely** in artifacts written before this capture
+  existed, which is deliberate: absence means "never captured", not "captured
+  and empty".
+
 ## Interpretation Limits
 
 - Task success does not prove conversational usability.

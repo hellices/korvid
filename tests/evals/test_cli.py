@@ -7,6 +7,7 @@ report serialization. The live model round-trip is by definition manual.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -19,14 +20,18 @@ from korvid.evals.__main__ import (
     _parse_args,
     _positive_int,
     _sweep_overrides,
+    capture_serving,
     exit_code,
+    probe_serving,
     prompt_fingerprint,
     provider_factory_from_env,
     report_payload,
     run_payload,
+    warm_up,
 )
 from korvid.evals.grader import GradeResult
 from korvid.evals.runner import RunMetrics, ScenarioReport
+from korvid.evals.serving import ProbeResult, serving_metadata
 from korvid.providers.openai_compat import OpenAICompatProvider
 
 
@@ -266,3 +271,113 @@ def test_source_is_default_for_a_tool_description_that_changes_nothing() -> None
 def test_source_is_override_when_the_prompt_actually_differs() -> None:
     profile, _ = _built(system="You are terse.")
     assert prompt_fingerprint(profile)["source"] == "override"
+
+
+def test_run_payload_omits_serving_when_it_was_not_captured() -> None:
+    """Older artifacts have no serving block; absence must stay meaningful."""
+    profile, overrides = _built()
+    payload = run_payload([_report()], profile=profile, overrides=overrides)
+    assert "serving" not in payload["meta"]
+
+
+def test_run_payload_records_the_serving_block_when_captured() -> None:
+    profile, overrides = _built()
+    serving = serving_metadata(model="qwen3:8b", probe=ProbeResult(version={"version": "0.5.1"}))
+    payload = run_payload([_report()], profile=profile, overrides=overrides, serving=serving)
+    assert payload["meta"]["serving"]["engine"] == {"name": "ollama", "version": "0.5.1"}
+    json.dumps(payload)
+
+
+def test_probe_serving_collects_version_show_and_tags() -> None:
+    calls: list[tuple[str, dict[str, Any] | None]] = []
+
+    async def fetch(url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        calls.append((url, payload))
+        if url.endswith("/api/version"):
+            return {"version": "0.5.1"}
+        if url.endswith("/api/show"):
+            return {"details": {"quantization_level": "Q4_K_M"}}
+        return {"models": [{"name": "qwen3:8b", "digest": "bbb"}]}
+
+    result = asyncio.run(probe_serving("http://host:11434/v1", "qwen3:8b", fetch=fetch))
+    assert [url for url, _ in calls] == [
+        "http://host:11434/api/version",
+        "http://host:11434/api/show",
+        "http://host:11434/api/tags",
+    ]
+    assert calls[1][1] == {"model": "qwen3:8b"}
+    assert result.error is None
+    assert result.version == {"version": "0.5.1"}
+
+
+def test_probe_serving_reports_a_failure_instead_of_propagating_it() -> None:
+    """A metadata probe must never take down a multi-hour campaign."""
+
+    async def fetch(url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        raise OSError("connection refused")
+
+    result = asyncio.run(probe_serving("http://host:11434/v1", "m", fetch=fetch))
+    assert result.error is not None
+    assert "connection refused" in result.error
+    assert result.version is None
+
+
+def test_probe_serving_keeps_the_endpoints_that_did_answer() -> None:
+    async def fetch(url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.5.1"}
+        raise OSError("404 not found")
+
+    result = asyncio.run(probe_serving("http://host:11434/v1", "m", fetch=fetch))
+    assert result.version == {"version": "0.5.1"}
+    assert result.show is None
+    assert result.error is not None
+
+
+def test_warmup_flag_defaults_to_off() -> None:
+    assert _parse_args([]).warmup is False
+    assert _parse_args(["--warmup"]).warmup is True
+
+
+def test_warmup_records_false_when_the_request_failed() -> None:
+    """A warm-up that did not happen must not be recorded as if it had."""
+
+    async def fetch(url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        raise OSError("model not found")
+
+    assert asyncio.run(warm_up("http://host:11434/v1", "m", fetch=fetch)) is False
+
+
+def test_warmup_loads_the_model_and_records_true() -> None:
+    seen: list[tuple[str, dict[str, Any] | None]] = []
+
+    async def fetch(url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        seen.append((url, payload))
+        return {"done": True}
+
+    assert asyncio.run(warm_up("http://host:11434/v1", "m", fetch=fetch)) is True
+    assert seen == [("http://host:11434/api/generate", {"model": "m"})]
+
+
+def test_capture_serving_uses_a_separate_client_for_the_warmup() -> None:
+    """A slow model load must not be charged to the probe's short budget."""
+    used: list[str] = []
+
+    def fetch_named(name: str) -> Any:
+        async def fetch(url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+            used.append(f"{name}:{url.rsplit('/', 1)[-1]}")
+            return {"version": "0.5.1"}
+
+        return fetch
+
+    asyncio.run(
+        capture_serving(
+            "http://host/v1",
+            "m",
+            fetch=fetch_named("probe"),
+            warmup_fetch=fetch_named("warm"),
+            warmup=True,
+        )
+    )
+    assert used[0] == "warm:generate"
+    assert all(entry.startswith("probe:") for entry in used[1:])

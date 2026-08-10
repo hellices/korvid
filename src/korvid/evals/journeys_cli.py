@@ -36,6 +36,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--reps", type=_positive_int, default=3)
     parser.add_argument("--profile", choices=("full", "small"), default="small")
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="load the model before the first scored journey; recorded in the JSON",
+    )
     parser.add_argument("--out", type=Path)
     parser.add_argument("--json", type=Path)
     parser.add_argument(
@@ -110,7 +115,12 @@ async def _run(args: argparse.Namespace) -> list[JourneyReport]:
     return reports
 
 
-def journey_run_payload(reports: list[JourneyReport], *, profile_name: str) -> dict[str, Any]:
+def journey_run_payload(
+    reports: list[JourneyReport],
+    *,
+    profile_name: str,
+    serving: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Journey results with the same provenance envelope as the task pack.
 
     Journey runs are published as scoreboard rows too, so they must record
@@ -125,26 +135,48 @@ def journey_run_payload(reports: list[JourneyReport], *, profile_name: str) -> d
     profile = build_profile(
         profile_name, readonly=True, resize_supported=False, overrides=overrides
     )
-    return {
-        "meta": {
-            "profile": profile.name,
-            # Journeys offer the full profile surface, UI tools included,
-            # so the digest must cover those schemas too.
-            "prompts": prompt_fingerprint(profile, tools=profile.tools),
-        },
-        "journeys": report_payload(reports),
+    meta: dict[str, Any] = {
+        "profile": profile.name,
+        # Journeys offer the full profile surface, UI tools included,
+        # so the digest must cover those schemas too.
+        "prompts": prompt_fingerprint(profile, tools=profile.tools),
     }
+    if serving is not None:
+        meta["serving"] = serving
+    return {"meta": meta, "journeys": report_payload(reports)}
 
 
 def main(argv: list[str] | None = None) -> int:
+    from korvid.evals.__main__ import (
+        PROBE_TIMEOUT_SECONDS,
+        WARMUP_TIMEOUT_SECONDS,
+        capture_serving,
+        httpx_fetch,
+    )
+
     args = _parse_args(argv)
+    serving = asyncio.run(
+        capture_serving(
+            os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),
+            os.environ.get("KORVID_EVAL_MODEL", "").strip(),
+            fetch=httpx_fetch(
+                api_key=os.environ.get("KORVID_EVAL_API_KEY", "").strip(),
+                timeout_seconds=PROBE_TIMEOUT_SECONDS,
+            ),
+            warmup_fetch=httpx_fetch(
+                api_key=os.environ.get("KORVID_EVAL_API_KEY", "").strip(),
+                timeout_seconds=WARMUP_TIMEOUT_SECONDS,
+            ),
+            warmup=args.warmup,
+        )
+    )
     reports = asyncio.run(_run(args))
     markdown = render_markdown(reports)
     print(markdown)
     if args.out:
         args.out.write_text(markdown + "\n")
     if args.json:
-        payload = journey_run_payload(reports, profile_name=args.profile)
+        payload = journey_run_payload(reports, profile_name=args.profile, serving=serving)
         args.json.write_text(json.dumps(payload, indent=2) + "\n")
     return exit_code(reports)
 

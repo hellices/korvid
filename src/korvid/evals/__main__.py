@@ -24,7 +24,7 @@ import json
 import math
 import os
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,7 @@ from korvid.evals.runner import (
     run_scenario,
 )
 from korvid.evals.scenario import Scenario, bundled_scenarios_dir, load_scenarios
+from korvid.evals.serving import ProbeResult, ollama_root, serving_metadata
 from korvid.providers.openai_compat import OpenAICompatProvider
 from korvid.providers.static_creds import StaticHeaderSource
 from korvid.tools.executor import ToolExecutor
@@ -72,6 +73,97 @@ def provider_factory_from_env(env: Mapping[str, str]) -> Callable[[], Any]:
         )
 
     return factory
+
+
+Fetch = Callable[[str, dict[str, Any] | None], Awaitable[dict[str, Any]]]
+
+
+async def probe_serving(base_url: str, model: str, *, fetch: Fetch) -> ProbeResult:
+    """Ask the serving endpoint what it is, without ever failing the run.
+
+    The probe is metadata collection for reproducibility (#235). A campaign
+    that has already spent hours of GPU time must not die because an
+    endpoint does not implement ollama's native API, so every call is
+    tolerated individually and whatever answered is kept.
+    """
+    root = ollama_root(base_url)
+    payloads: dict[str, dict[str, Any] | None] = {"version": None, "show": None, "tags": None}
+    requests: list[tuple[str, str, dict[str, Any] | None]] = [
+        ("version", f"{root}/api/version", None),
+        ("show", f"{root}/api/show", {"model": model}),
+        ("tags", f"{root}/api/tags", None),
+    ]
+    errors: list[str] = []
+    for name, url, body in requests:
+        try:
+            payloads[name] = await fetch(url, body)
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+    return ProbeResult(
+        version=payloads["version"],
+        show=payloads["show"],
+        tags=payloads["tags"],
+        error="; ".join(errors) or None,
+    )
+
+
+def httpx_fetch(*, api_key: str, timeout_seconds: float) -> Fetch:
+    """A `Fetch` backed by the same hardened client the provider uses."""
+
+    async def fetch(url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        import httpx
+
+        from korvid.providers.net import make_client
+
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        async with make_client(None, httpx.Timeout(timeout_seconds, connect=10.0)) as client:
+            response = (
+                await client.get(url, headers=headers)
+                if payload is None
+                else await client.post(url, json=payload, headers=headers)
+            )
+            response.raise_for_status()
+            body = response.json()
+        if not isinstance(body, dict):
+            raise ValueError(f"expected a JSON object from {url}")
+        return body
+
+    return fetch
+
+
+async def capture_serving(
+    base_url: str,
+    model: str,
+    *,
+    fetch: Fetch,
+    warmup: bool,
+    warmup_fetch: Fetch | None = None,
+) -> dict[str, Any]:
+    """Warm up if asked, then record what served the run.
+
+    The warm-up runs first so `/api/show` reports a loaded model. It gets
+    its own fetcher because paging a 30B model off disk takes minutes,
+    while a metadata endpoint that has not answered in seconds is not going
+    to.
+    """
+    warmed = await warm_up(base_url, model, fetch=warmup_fetch or fetch) if warmup else False
+    probe = await probe_serving(base_url, model, fetch=fetch)
+    return serving_metadata(model=model, probe=probe, warmup=warmed)
+
+
+async def warm_up(base_url: str, model: str, *, fetch: Fetch) -> bool:
+    """Load the model before the first scored scenario; report whether it worked.
+
+    Without this the first scenario absorbs however long the weights take to
+    page in, which is not a property of the model's reasoning. Returns
+    `False` when the request failed so the artifact never claims a warm-up
+    that did not happen.
+    """
+    try:
+        await fetch(f"{ollama_root(base_url)}/api/generate", {"model": model})
+    except Exception:
+        return False
+    return True
 
 
 def report_payload(reports: list[ScenarioReport]) -> list[dict[str, Any]]:
@@ -163,15 +255,21 @@ def run_payload(
     *,
     profile: AgentProfile,
     overrides: PromptOverrides,
+    serving: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The full JSON artifact: run metadata plus per-scenario results."""
-    return {
-        "meta": {
-            "profile": profile.name,
-            "prompts": prompt_fingerprint(profile),
-        },
-        "scenarios": report_payload(reports),
+    """The full JSON artifact: run metadata plus per-scenario results.
+
+    `serving` is omitted when it was not captured, so an artifact written
+    before #235 stays distinguishable from one whose probe returned
+    nothing.
+    """
+    meta: dict[str, Any] = {
+        "profile": profile.name,
+        "prompts": prompt_fingerprint(profile),
     }
+    if serving is not None:
+        meta["serving"] = serving
+    return {"meta": meta, "scenarios": report_payload(reports)}
 
 
 def _positive_int(value: str) -> int:
@@ -221,6 +319,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="append this file's contents to the profile's role statement",
     )
     parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help=(
+            "send one throwaway request before the first scored scenario so "
+            "model load time does not land in it; recorded in the result JSON"
+        ),
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -233,6 +339,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="also write per-run metrics as JSON to this file",
     )
     return parser.parse_args(argv)
+
+
+#: Metadata probes must not hold the campaign: an endpoint that has not
+#: answered `/api/version` in this long is not going to.
+PROBE_TIMEOUT_SECONDS = 20.0
+
+#: The warm-up is a real model load, which for a 30B off cold storage is
+#: minutes rather than seconds.
+WARMUP_TIMEOUT_SECONDS = 900.0
 
 
 def _executor_factory(scenario: Scenario) -> Callable[[], ToolExecutor]:
@@ -315,6 +430,26 @@ def main(argv: list[str] | None = None) -> int:
     if not scenarios:
         raise SystemExit(f"no scenario YAML files found in {args.scenarios}")
     overrides = _sweep_overrides(args)
+    serving = asyncio.run(
+        capture_serving(
+            os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),
+            os.environ.get("KORVID_EVAL_MODEL", "").strip(),
+            fetch=httpx_fetch(
+                api_key=os.environ.get("KORVID_EVAL_API_KEY", "").strip(),
+                timeout_seconds=PROBE_TIMEOUT_SECONDS,
+            ),
+            warmup_fetch=httpx_fetch(
+                api_key=os.environ.get("KORVID_EVAL_API_KEY", "").strip(),
+                timeout_seconds=WARMUP_TIMEOUT_SECONDS,
+            ),
+            warmup=args.warmup,
+        )
+    )
+    if serving["unavailable"]:
+        print(
+            f"warning: serving environment not fully pinned: {', '.join(serving['unavailable'])}",
+            file=sys.stderr,
+        )
     reports = asyncio.run(_run_all(scenarios, provider_factory, args.reps, args.profile, overrides))
     markdown = render_markdown(reports)
     print(markdown)
@@ -326,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         profile = build_profile(
             args.profile, readonly=False, resize_supported=True, overrides=overrides
         )
-        payload = run_payload(reports, profile=profile, overrides=overrides)
+        payload = run_payload(reports, profile=profile, overrides=overrides, serving=serving)
         args.json.write_text(json.dumps(payload, indent=2) + "\n")
     return exit_code(reports)
 

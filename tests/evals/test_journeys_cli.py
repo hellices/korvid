@@ -178,3 +178,15 @@ def test_journey_digest_covers_the_ui_tools_it_actually_offers() -> None:
     ui["function"]["description"] = "changed"
     after = prompt_fingerprint(profile, tools=tools)["sha256"]
     assert before != after
+
+
+def test_journey_payload_records_the_serving_block_when_captured() -> None:
+    """Journeys are published rows too, so they need the same pinning (#235)."""
+    serving = {"model": "m", "engine": {"name": "ollama", "version": "0.5.1"}, "unavailable": []}
+    payload = journey_run_payload([], profile_name="small", serving=serving)
+    assert payload["meta"]["serving"]["engine"]["version"] == "0.5.1"
+
+
+def test_journey_payload_omits_serving_when_it_was_not_captured() -> None:
+    payload = journey_run_payload([], profile_name="small")
+    assert "serving" not in payload["meta"]
