@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import http.server
+import ipaddress
 import os
 import ssl
 import threading
@@ -72,7 +73,14 @@ def _mint_ca_and_server_cert(tmp_path: Path) -> tuple[Path, Path, Path]:
         .not_valid_before(now - datetime.timedelta(minutes=5))
         .not_valid_after(now + datetime.timedelta(hours=1))
         .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName("localhost")]),
+            # The IP SAN is what lets the tests connect to 127.0.0.1
+            # directly. Resolving `localhost` is not deterministic: on
+            # Windows it answers ::1 first, the test server binds IPv4 only,
+            # and the connection hangs until the timeout instead of failing
+            # the way the test expects.
+            x509.SubjectAlternativeName(
+                [x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+            ),
             critical=False,
         )
         .add_extension(
@@ -166,7 +174,7 @@ async def test_private_ca_endpoint_needs_the_bundle(tmp_path: Path) -> None:
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    url = f"https://localhost:{port}/"
+    url = f"https://127.0.0.1:{port}/"
     try:
         async with httpx.AsyncClient(timeout=5.0) as default_client:
             with pytest.raises(httpx.ConnectError):
@@ -247,7 +255,7 @@ async def test_verification_failure_names_the_configured_bundle(tmp_path: Path) 
     try:
         async with make_http_client_factory(str(wrong_ca))() as client:
             with pytest.raises(httpx.ConnectError, match=r"network\.ca_bundle") as excinfo:
-                await client.get(f"https://localhost:{port}/")
+                await client.get(f"https://127.0.0.1:{port}/")
         assert str(wrong_ca) in str(excinfo.value)  # the path the user set
     finally:
         server.shutdown()
