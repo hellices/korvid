@@ -27,6 +27,20 @@ from typing import Any
 #: an unknown reference rather than as malformed.
 _CITATION = re.compile(r"\[E([1-9][0-9]*)\]")
 
+#: How each read names its target, mapped to the kind it implies. The
+#: built-in reads disagree - `get_logs` and `diagnose_pod` take `pod`,
+#: `diagnose_pvc` takes `pvc`, `diagnose_service` takes `service` - and a
+#: locator that only understood `name` pointed those citations at nothing.
+#: Stated as a table rather than inferred, so adding a read with a new
+#: target argument is a decision someone makes, not a silent omission;
+#: `test_the_locator_covers_every_registered_cluster_read` fails until it
+#: is made.
+TARGET_ARGUMENTS: dict[str, str] = {
+    "pod": "pods",
+    "pvc": "persistentvolumeclaims",
+    "service": "services",
+}
+
 #: Excerpts ride in the prompt on every later step of the turn, so they
 #: are capped: the issue requires the small-profile budget to survive the
 #: addition of citation metadata.
@@ -107,12 +121,13 @@ class EvidenceLedger:
         if error:
             return None
         ref = f"E{len(self._items) + 1}"
+        kind, name = _locate(arguments)
         self._items[ref] = Evidence(
             ref=ref,
             tool=tool,
-            kind=_text_arg(arguments, "kind") or ("pods" if "pod" in arguments else None),
+            kind=kind,
             namespace=_text_arg(arguments, "namespace"),
-            name=_text_arg(arguments, "name") or _text_arg(arguments, "pod"),
+            name=name,
             container=_text_arg(arguments, "container"),
             excerpt=_excerpt(result, self._excerpt_limit),
         )
@@ -145,6 +160,21 @@ class EvidenceLedger:
             if ref not in bucket:
                 bucket.append(ref)
         return tuple(supported), tuple(unknown)
+
+
+def _locate(arguments: dict[str, Any]) -> tuple[str | None, str | None]:
+    """The (kind, name) a read looked at, however that read spells it.
+
+    `kind`/`name` win when present: a tool that says both is explicit, and
+    a target argument only implies its kind.
+    """
+    kind = _text_arg(arguments, "kind")
+    name = _text_arg(arguments, "name")
+    for argument, implied_kind in TARGET_ARGUMENTS.items():
+        target = _text_arg(arguments, argument)
+        if target is not None:
+            return kind or implied_kind, name or target
+    return kind, name
 
 
 def _text_arg(arguments: dict[str, Any], key: str) -> str | None:

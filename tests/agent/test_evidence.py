@@ -306,3 +306,55 @@ def test_non_ascii_digits_are_malformed_syntax_not_unknown_references() -> None:
 
     assert supported == ()
     assert unknown == ()
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "kind", "name"),
+    [
+        ("diagnose_pod", {"pod": "api-1"}, "pods", "api-1"),
+        ("diagnose_pvc", {"pvc": "data-0"}, "persistentvolumeclaims", "data-0"),
+        ("diagnose_service", {"service": "web"}, "services", "web"),
+        ("get_logs", {"pod": "api-1"}, "pods", "api-1"),
+        ("get_resource", {"kind": "deployments", "name": "web"}, "deployments", "web"),
+        ("list_resources", {"kind": "pods"}, "pods", None),
+    ],
+)
+def test_every_read_locator_names_its_target(
+    tool: str, arguments: dict[str, Any], kind: str, name: str | None
+) -> None:
+    """Each built-in read names its target differently; all must resolve.
+
+    `diagnose_pvc` takes `pvc`, `diagnose_service` takes `service`,
+    `get_logs` takes `pod`. A locator that only understands `name` points
+    a citation at nothing (#192 review).
+    """
+    ledger = EvidenceLedger()
+
+    ref = ledger.record(tool, {"namespace": "prod", **arguments}, "ok")
+    assert ref is not None
+    item = ledger.resolve(ref)
+
+    assert item is not None
+    assert item.kind == kind
+    assert item.name == name
+
+
+def test_the_locator_covers_every_registered_cluster_read() -> None:
+    """A new read tool must not silently produce an unnavigable citation.
+
+    Fails when a `cluster_read` is added whose target argument the locator
+    does not understand, which is the moment to decide what it points at.
+    """
+    from korvid.agent.evidence import TARGET_ARGUMENTS
+    from korvid.tools.registry import TOOLS_BY_NAME
+
+    unhandled = []
+    for tool, definition in TOOLS_BY_NAME.items():
+        if definition.effect != "cluster_read":
+            continue
+        params = set(definition.schema["function"]["parameters"].get("properties", {}))
+        targets = params - {"namespace", "tail_lines", "container"}
+        if targets and not targets & (set(TARGET_ARGUMENTS) | {"kind", "name"}):
+            unhandled.append((tool, sorted(targets)))
+
+    assert unhandled == []
