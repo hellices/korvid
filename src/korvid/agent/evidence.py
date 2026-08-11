@@ -155,18 +155,25 @@ class EvidenceLedger:
         separately rather than dropped - citing the same read twice is not
         extra support, and the issue asks for duplicate references to
         degrade visibly rather than to look like a single clean citation.
+
+        Only *supported* references can repeat. An unknown reference cited
+        twice is unsupported, full stop; reporting it as repeated as well
+        would put two conflicting notes about one reference on screen.
         """
         supported: list[str] = []
         unknown: list[str] = []
         repeated: list[str] = []
         for match in _CITATION.finditer(text):
             ref = f"E{match.group(1)}"
-            bucket = supported if ref in self._items else unknown
-            if ref in bucket:
+            if ref not in self._items:
+                if ref not in unknown:
+                    unknown.append(ref)
+                continue
+            if ref in supported:
                 if ref not in repeated:
                     repeated.append(ref)
                 continue
-            bucket.append(ref)
+            supported.append(ref)
         return tuple(supported), tuple(unknown), tuple(repeated)
 
 
