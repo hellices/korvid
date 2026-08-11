@@ -33,11 +33,21 @@ substring is still not credited.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from korvid.evals.fake_kube import builtin_aliases
 from korvid.evals.scenario import Evidence, Scenario
+
+#: Same grammar korvid mints with: ASCII digits only, so a stray `[E1x]`
+#: is malformed syntax rather than a reference that fails to resolve.
+_CITATION = re.compile(r"\[E([1-9][0-9]*)\]")
+
+#: Sentence split for coverage. Deliberately crude - the denominator only
+#: has to be stable across runs to make the metric comparable.
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
@@ -68,6 +78,59 @@ class GradeResult:
     missing_mentions: tuple[tuple[str, ...], ...]
     forbidden_mentions: tuple[str, ...]
     missing_evidence: tuple[tuple[Evidence, ...], ...]
+
+
+@dataclass(frozen=True)
+class CitationReport:
+    """How well an answer'"'"'s claims point at reads that happened (#192).
+
+    Two numbers, deliberately separate. Precision asks whether the
+    references an answer used are real; coverage asks how much of the
+    answer rests on any reference at all. An answer can score perfectly on
+    one and badly on the other, and the two failures need different fixes:
+    invented references are a protocol problem, uncited claims are a
+    prompting one.
+    """
+
+    #: References the answer used that korvid actually minted.
+    cited: tuple[str, ...]
+    #: References the answer used that resolve to nothing.
+    unsupported: tuple[str, ...]
+    #: Reads the answer never leaned on. Not a failure - an agent may read
+    #: more than it needs - but a run citing none of its reads is a very
+    #: different answer from one citing all of them.
+    uncited_evidence: tuple[str, ...]
+    #: Share of sentences carrying at least one reference.
+    coverage: float
+    #: Share of used references that resolve. None when the answer cited
+    #: nothing: zero of zero is not perfect precision, and reporting it as
+    #: 1.0 would make an entirely uncited answer look maximally honest.
+    precision: float | None
+
+
+def citation_report(answer: str, *, minted: Sequence[str]) -> CitationReport:
+    """Measure the citations in *answer* against the references minted.
+
+    Pure and answer-only: the eval harness has the ledger'"'"'s references,
+    and this does not need the ledger itself.
+    """
+    known = set(minted)
+    used: list[str] = []
+    for match in _CITATION.finditer(answer):
+        ref = f"E{match.group(1)}"
+        if ref not in used:
+            used.append(ref)
+    cited = tuple(ref for ref in used if ref in known)
+    unsupported = tuple(ref for ref in used if ref not in known)
+    sentences = [part for part in _SENTENCE.split(answer) if part.strip()]
+    with_reference = sum(1 for part in sentences if _CITATION.search(part))
+    return CitationReport(
+        cited=cited,
+        unsupported=unsupported,
+        uncited_evidence=tuple(ref for ref in minted if ref not in cited),
+        coverage=with_reference / len(sentences) if sentences else 0.0,
+        precision=len(cited) / len(used) if used else None,
+    )
 
 
 def _tokens(text: str) -> list[str]:

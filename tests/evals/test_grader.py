@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
+from korvid.evals.grader import GradeResult, ToolRecord, citation_report, grade, matches_target
 from korvid.evals.scenario import Evidence, Scenario
 
 _EVIDENCE = Evidence(
@@ -664,3 +664,63 @@ def test_grade_still_scopes_a_negator_within_one_clause() -> None:
     """The fix must not stop negation working where there is no boundary."""
     result = grade(_scenario(), "The container was not OOMKilled at all.", [_record()])
     assert not result.diagnosis_success
+
+
+# -- Citation honesty (issue #192): whether the answer's claims point at
+# -- reads that actually happened.
+
+
+def test_an_answer_with_no_citations_scores_zero_coverage() -> None:
+    """Coverage is the share of sentences carrying a reference.
+
+    Without it, the citation work of #192 cannot be shown to have changed
+    anything - which is the point of measuring it.
+    """
+    report = citation_report("The pod is crash-looping. The image is missing.", minted=("E1",))
+
+    assert report.coverage == 0.0
+    assert report.cited == ()
+
+
+def test_every_sentence_cited_is_full_coverage() -> None:
+    report = citation_report(
+        "The pod is crash-looping [E1]. The image is missing [E2].", minted=("E1", "E2")
+    )
+
+    assert report.coverage == 1.0
+    assert report.precision == 1.0
+
+
+def test_precision_counts_only_references_korvid_minted() -> None:
+    """An invented reference is the failure this metric exists to catch."""
+    report = citation_report("up [E1], node fine [E9]", minted=("E1",))
+
+    assert report.precision == 0.5
+    assert report.unsupported == ("E9",)
+
+
+def test_precision_is_undefined_rather_than_perfect_without_citations() -> None:
+    """Zero of zero is not 100% precision; reporting it as such would make
+    an uncited answer look maximally honest."""
+    report = citation_report("no citations here", minted=("E1",))
+
+    assert report.precision is None
+
+
+def test_a_repeated_citation_does_not_inflate_precision() -> None:
+    report = citation_report("up [E1], still up [E1]", minted=("E1",))
+
+    assert report.precision == 1.0
+    assert report.cited == ("E1",)
+
+
+def test_an_evidence_gap_is_reported_when_reads_go_uncited() -> None:
+    """Reads the answer never leaned on are worth surfacing.
+
+    Not a failure - an agent may read more than it needs - but a run
+    where nothing read is cited is a different kind of answer from one
+    where everything is.
+    """
+    report = citation_report("up [E1]", minted=("E1", "E2", "E3"))
+
+    assert report.uncited_evidence == ("E2", "E3")
