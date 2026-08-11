@@ -15,9 +15,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Coroutine
-from typing import Any
+from typing import Any, TypeVar
 
 from korvid.k8s.discovery import ResourceMeta
+
+_ResultT = TypeVar("_ResultT")
 
 
 class WriteGate(ABC):
@@ -145,3 +147,93 @@ class WriteGate(ABC):
     @abstractmethod
     def switching(self) -> bool:
         """Whether a context switch is in flight right now."""
+
+
+class ReservedWrite(Coroutine[Any, Any, _ResultT]):
+    """A write coroutine that releases its reservation deterministically.
+
+    The slot is reserved synchronously at the call, because a confirmation
+    callback builds the coroutine and hands it to `run_worker`, which starts
+    it on a later loop iteration — a `:ctx` queued in that gap must already
+    see the write in flight.
+
+    Releasing it is the harder half. A coroutine that never started ignores
+    `close()`: it never reaches its own `finally`. Relying on
+    `weakref.finalize` instead ties the release to *collection*, so a closed
+    coroutine that is still referenced holds the reservation, and a leaked
+    `+1` blocks every later `:ctx` switch for the session's lifetime. Under
+    CPython refcounting the two coincide, which is precisely what makes the
+    guarantee easy to break and hard to notice.
+
+    Wrapping the coroutine puts release on every way a write can end
+    without its body running: a cancelled worker Task (which arrives as a
+    thrown `CancelledError`, not a `close()`), an explicit `close()`, and a
+    `send` that terminates the coroutine. None of these depend on the
+    garbage collector. Priming the coroutine to arm its `finally` was tried
+    instead and rejected: a primed coroutine cannot be consumed by `await`
+    at all.
+
+    It is a `collections.abc.Coroutine`, so `inspect.isawaitable` — what
+    Textual's worker dispatches on — and `await` both accept it.
+    """
+
+    def __init__(
+        self,
+        coro: Coroutine[Any, Any, _ResultT],
+        release: Callable[[], None],
+    ) -> None:
+        self._coro = coro
+        self._release = release
+
+    def send(self, value: Any) -> Any:
+        try:
+            return self._coro.send(value)
+        except BaseException:
+            # The coroutine terminated - returned, raised, or was thrown
+            # into and did not catch. A body that ran has already released
+            # from its own `finally`; this covers the one that never did.
+            self._release()
+            raise
+
+    def throw(self, *args: Any, **kwargs: Any) -> Any:
+        """Delegate, and release if the coroutine did not survive it.
+
+        This is the path that matters most. A worker Task cancelled before
+        its first step never reaches `close()`: the loop throws
+        `CancelledError` in, and an unstarted coroutine propagates it
+        without entering the body, so the body's `finally` never runs. The
+        finished Task can keep the wrapper referenced, so the finalizer
+        does not fire either.
+
+        A coroutine that *catches* the exception and suspends again is
+        still running, so it keeps its reservation.
+        """
+        try:
+            return self._coro.throw(*args, **kwargs)
+        except BaseException:
+            self._release()
+            raise
+
+    def close(self) -> None:
+        """Close the wrapped coroutine, then release either way.
+
+        The release is idempotent, so a coroutine that did run — and has
+        already released from its own `finally` — is unaffected.
+        """
+        try:
+            self._coro.close()
+        finally:
+            self._release()
+
+    def __await__(self) -> Any:
+        # `yield from`, not `return self._coro.__await__()`: `await` keeps
+        # only the iterator this returns, and that iterator would reference
+        # the inner coroutine alone. A direct `await app._run_write(...)`
+        # never names the wrapper, so it could be collected mid-flight and
+        # fire its finalizer - releasing the slot underneath a running
+        # mutation. A generator frame holds `self` for the whole await.
+        result = yield from self._coro.__await__()
+        return result
+
+    def __repr__(self) -> str:
+        return f"ReservedWrite({self._coro!r})"

@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gc
+import weakref
 from typing import Any
 
+import pytest
 from textual.app import SuspendNotSupported
 
 from korvid.ui.shell_controller import ShellController, ShellSettings
@@ -93,23 +95,25 @@ def test_a_coroutine_that_never_runs_still_releases_the_slot() -> None:
 
     A leaked +1 blocks every later `:ctx` switch for the session's life.
 
-    The release fires when the coroutine is collected, not when `close()`
-    is called: a coroutine that never started ignores `close()`, and
-    arming its `finally` by priming makes the object unawaitable
-    (`RuntimeError: coroutine is being awaited already`) anywhere a
-    decorated method is consumed by `await` rather than by a worker task.
-    The window is therefore bounded by collection, which under CPython
-    refcounting is the moment the last reference goes away.
+    `close()` releases deterministically: the returned `ReservedWrite`
+    makes it a release point, because a coroutine that never started
+    ignores `close()` and never reaches its own `finally`. Collection is
+    only the backstop, for an object that is neither closed, awaited, nor
+    thrown into.
     """
     gate = _RecordingGate()
     controller = _controller(gate)
 
     coro = controller.run_debug("default", "api-1", None, None)
     coro.close()
+    # Asserted here, while `coro` is still referenced and nothing has been
+    # collected: without this the decorator could regress to
+    # collector-based release and the test would stay green.
+    assert gate.events == ["reserve", "release"]
+
     del coro
     gc.collect()
-
-    assert gate.events == ["reserve", "release"]
+    assert gate.events == ["reserve", "release"], "the backstop double-released"
 
 
 def test_the_release_is_idempotent_across_close_and_collection() -> None:
@@ -200,3 +204,158 @@ def test_pod_shell_reports_a_missing_kubectl_instead_of_raising() -> None:
 
 def _raise_oserror(argv: list[str], banner: str) -> int:
     raise OSError(2, "No such file or directory")
+
+
+async def test_reserved_write_is_still_consumable_by_await() -> None:
+    """The rejected alternative broke exactly this (#237).
+
+    Priming the coroutine to arm its `finally` made it unawaitable, so the
+    wrapper has to stay transparent to `await`, not only to worker Tasks.
+    """
+    from korvid.ui.write_gate import ReservedWrite
+
+    released: list[int] = []
+
+    async def work() -> str:
+        return "done"
+
+    reserved = ReservedWrite(work(), lambda: released.append(1))
+    assert await reserved == "done"
+    # The body has no `finally` of its own, so a release here could only
+    # come from the wrapper double-counting a completed write.
+    assert released == []
+
+
+async def test_closing_a_finished_reserved_write_does_not_double_release() -> None:
+    """A completed write already released from its own `finally`."""
+    from korvid.ui.write_gate import ReservedWrite
+
+    calls: list[int] = []
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            calls.append(1)
+
+    async def work() -> None:
+        try:
+            return None
+        finally:
+            release()
+
+    reserved = ReservedWrite(work(), release)
+    await reserved
+    reserved.close()
+    assert calls == [1]
+
+
+async def test_reserved_write_propagates_a_thrown_exception() -> None:
+    """`throw` must reach the wrapped coroutine, not be swallowed."""
+    from korvid.ui.write_gate import ReservedWrite
+
+    seen: list[str] = []
+
+    async def work() -> None:
+        try:
+            await asyncio.sleep(0)
+        except ValueError:
+            seen.append("caught")
+            raise
+
+    reserved = ReservedWrite(work(), lambda: None)
+    reserved.send(None)
+    with pytest.raises(ValueError, match="boom"):
+        reserved.throw(ValueError("boom"))
+    assert seen == ["caught"]
+
+
+async def test_direct_await_holds_the_reservation_while_suspended() -> None:
+    """The wrapper must survive its own `__await__` (#237 review).
+
+    `await` keeps the iterator `__await__` returns, not the object it came
+    from, and a direct `await app._run_write(...)` never binds the wrapper
+    to a name. Returning the inner coroutine's iterator therefore left
+    nothing referencing the wrapper: a collection while the write was
+    suspended mid-flight would fire the finalizer and release the slot
+    underneath a running mutation.
+    """
+    import gc
+
+    from korvid.ui.write_gate import ReservedWrite
+
+    released: list[str] = []
+    resume = asyncio.Event()
+
+    async def work() -> str:
+        await resume.wait()
+        return "done"
+
+    def build() -> Any:
+        reserved = ReservedWrite(work(), lambda: released.append("release"))
+        weakref.finalize(reserved, released.append, "finalize")
+        return reserved
+
+    async def consume() -> str:
+        # The wrapper is a temporary: nothing names it, exactly like
+        # `await app._run_write(...)`.
+        return await build()  # type: ignore[no-any-return]  # test double
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    gc.collect()
+    assert released == [], "reservation released while the write was in flight"
+    resume.set()
+    assert await task == "done"
+
+
+async def test_cancel_before_the_first_step_releases_the_reservation() -> None:
+    """The scenario the issue is actually about (#237 review round 2).
+
+    A worker Task cancelled before it starts does not reach `close()`: the
+    event loop throws `CancelledError` into the coroutine. An unstarted
+    inner coroutine propagates that without entering the body, so its
+    `finally` never runs, and the finished Task can keep the wrapper
+    referenced so the finalizer does not fire either.
+    """
+    from korvid.ui.write_gate import ReservedWrite
+
+    released: list[str] = []
+
+    async def work() -> None:  # pragma: no cover - never starts
+        await asyncio.sleep(1)
+
+    task = asyncio.create_task(ReservedWrite(work(), lambda: released.append("release")))
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert released == ["release"]
+
+
+async def test_a_caught_throw_that_suspends_stays_reserved() -> None:
+    """Releasing on every `throw` would drop the slot mid-write.
+
+    A coroutine that catches the thrown exception and suspends again is
+    still running, so the write is still in flight.
+    """
+    from korvid.ui.write_gate import ReservedWrite
+
+    released: list[str] = []
+    resume = asyncio.Event()
+
+    async def work() -> str:
+        try:
+            await asyncio.sleep(0)
+        except ValueError:
+            await resume.wait()
+        return "done"
+
+    reserved = ReservedWrite(work(), lambda: released.append("release"))
+    reserved.send(None)
+    reserved.throw(ValueError("boom"))
+    assert released == [], "still suspended inside the write"
+    resume.set()
+    with contextlib.suppress(StopIteration):
+        reserved.send(None)
+    assert released == ["release"]

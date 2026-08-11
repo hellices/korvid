@@ -594,6 +594,32 @@ async def test_write_slot_released_when_coroutine_never_runs() -> None:
         assert app._active_cluster_writes == 0
 
 
+async def test_write_slot_released_by_close_without_waiting_for_collection() -> None:
+    """`close()` must release, not merely make the object collectable (#237).
+
+    `weakref.finalize` fires on collection. A closed coroutine that is still
+    referenced — by a caller that kept it, or under an interpreter that does
+    not refcount — would otherwise hold the reservation and block every
+    later `:ctx` switch for the session's lifetime.
+    """
+    from korvid.ui.app import _tracks_cluster_write
+
+    env = _CtxEnv()
+    app = env.app
+
+    @_tracks_cluster_write
+    async def fake_write(self: KorvidApp) -> None:  # pragma: no cover - never runs
+        raise AssertionError("must not start")
+
+    async with app.run_test():
+        coro = fake_write(app)
+        assert app._active_cluster_writes == 1
+        coro.close()
+        # Deliberately still referenced and no gc.collect().
+        assert app._active_cluster_writes == 0
+        assert coro is not None
+
+
 async def test_total_switch_failure_mentions_stopped_mcp() -> None:
     """When even the recovery swap fails, the operator learns the embedded
     MCP server was stopped for the switch instead of it dying silently."""

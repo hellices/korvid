@@ -159,7 +159,7 @@ from korvid.ui.widgets.status_bar import StatusBar
 from korvid.ui.widgets.telepresence_screen import TelepresenceScreen
 from korvid.ui.widgets.top_bar import KeyEntry, TopBar
 from korvid.ui.widgets.transfer_screen import TransferProgressScreen, TransferScreen
-from korvid.ui.write_gate import WriteGate
+from korvid.ui.write_gate import ReservedWrite, WriteGate
 
 _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
     "pods": PODS_META,
@@ -321,10 +321,9 @@ def _tracks_cluster_write(
         released = False
 
         def release() -> None:
-            # Idempotent: normally fired by run()'s finally, but also by the
-            # GC finalizer when the coroutine is closed or collected without
-            # ever running (worker cancelled before start, app shutdown) —
-            # a leaked +1 would block every future `:ctx` switch.
+            # Idempotent: fired by run()'s finally, by ReservedWrite.close()
+            # for a coroutine that never started, and by the finalizer as a
+            # backstop — a leaked +1 would block every future `:ctx` switch.
             nonlocal released
             if not released:
                 released = True
@@ -336,7 +335,11 @@ def _tracks_cluster_write(
             finally:
                 release()
 
-        coro = run()
+        # Wrapped so a coroutine that never runs releases without waiting
+        # for collection - including the cancelled worker Task, which
+        # arrives as a thrown CancelledError rather than a close. The
+        # finalizer stays as a backstop.
+        coro = ReservedWrite(run(), release)
         weakref.finalize(coro, release)
         return coro
 
