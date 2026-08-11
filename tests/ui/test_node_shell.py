@@ -884,7 +884,6 @@ async def test_node_shell_refused_when_the_context_switches_while_the_dialog_is_
     run_fake, run_calls = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
