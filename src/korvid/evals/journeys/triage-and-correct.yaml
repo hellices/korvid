@@ -42,15 +42,18 @@ turns:
         # grammar the prohibition list had not anticipated - and a list of
         # sentence shapes cannot bound a sentence. One keyword carrying both
         # halves can.
+        # Every alternative binds payments to the *cause*. Symptom-only
+        # bindings ("payments-1 cannot pull") were removed: the pod does
+        # fail to pull, so they were satisfied by "payments-1 cannot pull
+        # its image because tag v99 does not exist" - a diagnosis this
+        # fixture contradicts.
         - [payments is unauthorized, payments-1 is unauthorized,
-           payments cannot pull, payments-1 cannot pull,
            payments-1 unauthorized, payments unauthorized,
            unauthorized for payments, unauthorized for payments-1,
            rejected payments, rejected payments-1,
            payments registry credentials, payments-1 registry credentials,
            payments has unauthorized, payments-1 has unauthorized,
            payments authentication, payments-1 authentication,
-           payments image pull is unauthorized,
            # Article variants: matching is over contiguous tokens, so
            # "payments has an unauthorized ..." misses "payments has
            # unauthorized" by one word. The set of articles is closed, so
@@ -58,9 +61,18 @@ turns:
            # cause can be pinned on the wrong pod, which is why the binding
            # lives on the required side.
            payments has an unauthorized, payments-1 has an unauthorized,
-           payments has a registry, payments-1 has a registry,
            payments has an authentication, payments-1 has an authentication,
-           payments has the unauthorized, payments-1 has the unauthorized]
+           payments has the unauthorized, payments-1 has the unauthorized,
+           payments credentials were rejected,
+           payments-1 credentials were rejected,
+           # The cause reached through the symptom, still bound to the pod:
+           # "payments-1 cannot pull its image: the registry rejected the
+           # credentials as unauthorized". The pull failure alone is not
+           # enough, so the alternative carries the rejection too.
+           payments cannot pull its image the registry rejected,
+           payments-1 cannot pull its image the registry rejected,
+           payments cannot pull its image because the registry rejected,
+           payments-1 cannot pull its image because the registry rejected]
       must_not_mention:
         - [oomkilled, out of memory]
         # The turn says "focus on payments, not checkout", and

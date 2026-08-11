@@ -588,6 +588,9 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
             # Names the configuration without saying anything is wrong with it.
             "invoicer-1 has an environment variable and shipper is degraded.",
             "invoicer-1 is missing its DSN and shipper is down.",
+            # The absence bound to the wrong workload.
+            "Shipper's DATABASE_DSN is missing, but it is still serving;"
+            " invoicer failed for another reason.",
             # "missing" bound to the wrong subject: the invoicer claim is the
             # exact opposite of the fixture, and a standalone absence group
             # let the shipper clause settle it.
@@ -651,6 +654,9 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
             # anticipated - which is why the required cause is bound to its
             # subject instead of the wrong subject being enumerated.
             "payments-1 is failing; checkout-1 suffers an authentication failure.",
+            # Bound to payments, but to the symptom rather than the cause -
+            # and the tag diagnosis contradicts the fixture.
+            "payments-1 cannot pull its image because tag v99 does not exist.",
             "payments-1 was OOMKilled.",
         ),
     ),

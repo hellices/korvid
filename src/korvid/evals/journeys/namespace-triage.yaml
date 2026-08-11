@@ -76,6 +76,20 @@ turns:
       must_not_mention:
         - [shipper is down, shipper is unavailable, complete outage,
            total outage]
+        # The DSN belongs to invoicer. Requiring the absence claim binds it
+        # to the DSN but not to a workload, so "Shipper's DATABASE_DSN is
+        # missing ... invoicer failed for another reason" satisfied the
+        # group while attributing the fault to the wrong one. Binding the
+        # requirement to invoicer instead would reject the natural
+        # phrasing - "invoicer-1 crashloops because DATABASE_DSN is
+        # missing" carries the subject through `because`, not adjacency -
+        # so the misattribution is what is banned.
+        - [shipper dsn, shipper's dsn, shipper database_dsn,
+           shipper's database_dsn, shipper is missing its dsn,
+           shipper is missing its database_dsn, shipper's database url,
+           shipper's environment variable, shipper's env var,
+           shipper's config, shipper's configuration,
+           shipper is missing its config]
         - [oomkilled, out of memory]
       expected_evidence:
         # The container is crashlooping, so the line that names the cause is
