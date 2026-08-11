@@ -1102,11 +1102,11 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
         "uv build --build-constraints scripts/release/build-constraints.txt --require-hashes"
     ) in workflow
     pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text()
-    assert '"hatchling==1.27.0"' in pyproject
+    assert '"hatchling==1.31.0"' in pyproject
     constraints = (
         Path(__file__).parents[1] / "scripts" / "release" / "build-constraints.txt"
     ).read_text()
-    assert "hatchling==1.27.0" in constraints
+    assert "hatchling==1.31.0" in constraints
     assert "--hash=sha256:" in constraints
 
 
