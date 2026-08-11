@@ -39,7 +39,18 @@ turns:
         # attributing the cause to it. "payments-1 is failing; checkout-1
         # is the one with registry credentials problems" satisfied both
         # required groups while naming the wrong pod as the subject.
-        - [checkout]
+        #
+        # Banning the bare subject was worse: it rejected "checkout is not
+        # the cause; payments-1 has unauthorized credentials", because a
+        # negator *after* the match does not scope back over it. Only
+        # misattributing phrasings are banned.
+        - [checkout is the one, checkout-1 is the one, checkout is the cause,
+           checkout-1 is the cause, cause is checkout, blame checkout,
+           checkout is unauthorized, checkout-1 is unauthorized,
+           checkout has the registry, checkout-1 has the registry,
+           checkout has the unauthorized, checkout-1 has the unauthorized,
+           checkout has registry credentials,
+           checkout-1 has registry credentials]
       expected_evidence:
         - tool: diagnose_pod
           args: {pod: payments-1, namespace: shop}

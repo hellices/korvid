@@ -49,13 +49,20 @@ turns:
     grading:
       must_mention:
         # The cause of the crash loop, from the log the fixture does supply.
-        # Split into the thing and its absence. As one group of bare
-        # nouns, "invoicer-1 has an environment variable" satisfied it -
-        # naming the topic rather than stating what is wrong with it.
-        - [dsn, database_dsn, database url, environment variable, env var,
-           config, configuration]
-        - [missing, not set, unset, absent, empty, never set,
-           not provided, blank]
+        # Subject and absence in one keyword. A bare noun group
+        # ("environment variable") was satisfied by naming the topic, and
+        # splitting it into two groups was no better: "DATABASE_DSN is
+        # configured; shipper is missing one replica" satisfied both while
+        # asserting the opposite - a separate absence group binds to
+        # nothing, so any "missing" in the answer settles it.
+        - [dsn is missing, missing dsn, dsn is not set, dsn is unset,
+           database_dsn is missing, missing database_dsn,
+           database_dsn is not set, database url is missing,
+           missing database url, environment variable is missing,
+           missing environment variable, env var is missing,
+           missing env var, config is missing, missing config,
+           configuration is missing, missing configuration,
+           dsn was never set, database_dsn was never set]
         # The comparative judgement the second turn exists to force: shipper
         # is degraded, not down - 2 of 3 replicas are ready.
         - [still serving, still available, partially, reduced capacity,

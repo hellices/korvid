@@ -578,6 +578,11 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
             # Names the configuration without saying anything is wrong with it.
             "invoicer-1 has an environment variable and shipper is degraded.",
             "invoicer-1 is missing its DSN and shipper is down.",
+            # "missing" bound to the wrong subject: the invoicer claim is the
+            # exact opposite of the fixture, and a standalone absence group
+            # let the shipper clause settle it.
+            "DATABASE_DSN is configured; shipper is missing one replica but"
+            " still serving with 2 of 3.",
         ),
     ),
     (
@@ -619,6 +624,10 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
         1,
         (
             "payments-1 cannot pull its image: the registry rejected the credentials as unauthorized.",
+            # Rules the other pod out explicitly. A bare `checkout`
+            # prohibition rejected this: a negator after the match does not
+            # scope back over it.
+            "Checkout is not the cause; payments-1 has unauthorized registry credentials.",
         ),
         (
             # Right words, wrong subject - the turn says focus on payments.

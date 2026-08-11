@@ -239,14 +239,23 @@ def _exculpated(end: int, answer_tokens: list[str], clause_ids: list[int]) -> bo
     return False
 
 
-def _mentions_positively(keyword: str, answer_tokens: list[str], clause_ids: list[int]) -> bool:
+def _mentions_positively(
+    keyword: str,
+    answer_tokens: list[str],
+    clause_ids: list[int],
+    *,
+    exculpation: bool = True,
+) -> bool:
     """True when some match of the keyword is neither under an earlier
     negator's scope nor followed by an all-clear predicate — "the pod is not
     healthy" and "the probe is fine" must both fail to satisfy the claim they
-    name (negative controls catch over-diagnosis)."""
+    name (negative controls catch over-diagnosis).
+
+    `exculpation` is off for a scenario with no fault, where the all-clear is
+    the answer being graded rather than a way of dodging it."""
     return any(
         not _negated(start, answer_tokens, clause_ids)
-        and not _exculpated(end, answer_tokens, clause_ids)
+        and not (exculpation and _exculpated(end, answer_tokens, clause_ids))
         for start, end in _match_spans(keyword, answer_tokens)
     )
 
@@ -361,17 +370,22 @@ def _satisfies(evidence: Evidence, record: ToolRecord) -> bool:
 def grade(scenario: Scenario, answer: str, records: list[ToolRecord]) -> GradeResult:
     """Grade one run: the final answer text plus the recorded tool trace."""
     answer_tokens, clause_ids = _clause_tokens(answer)
+    # A scenario with no fault is graded on an all-clear, so "the endpoints
+    # are healthy" is its answer rather than a way of dodging the question.
+    exculpation = scenario.root_cause != "none"
+
+    def claims(keyword: str) -> bool:
+        return _mentions_positively(keyword, answer_tokens, clause_ids, exculpation=exculpation)
+
     missing_mentions = tuple(
-        group
-        for group in scenario.must_mention
-        if not any(_mentions_positively(alt, answer_tokens, clause_ids) for alt in group)
+        group for group in scenario.must_mention if not any(claims(alt) for alt in group)
     )
     forbidden_mentions = tuple(
         # One violation per group: alternates are spellings of the same
         # claim, and token-run matching makes several of them hit at once.
-        next(alt for alt in group if _mentions_positively(alt, answer_tokens, clause_ids))
+        next(alt for alt in group if claims(alt))
         for group in scenario.must_not_mention
-        if any(_mentions_positively(alt, answer_tokens, clause_ids) for alt in group)
+        if any(claims(alt) for alt in group)
     )
     missing_evidence = tuple(
         group

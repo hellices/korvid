@@ -348,6 +348,24 @@ def test_grade_exculpatory_predicates_cover_the_common_phrasings(answer: str) ->
     assert not grade(scenario, answer, []).diagnosis_success
 
 
+def test_grade_exculpation_is_off_for_a_negative_control() -> None:
+    """ "The service endpoints are healthy" is the *correct* answer when the
+    scenario has no fault.
+
+    Suppressing an entity match because a healthy predicate follows it is
+    right in a fault scenario and exactly wrong in a negative control, where
+    the all-clear is the claim being graded. Without this the bundled
+    `healthy-service-endpoints` scenario rejects its own answer.
+    """
+    scenario = _scenario(
+        root_cause="none",
+        must_mention=(("healthy", "no issues"), ("endpoints", "endpoint")),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    assert grade(scenario, "The service endpoints are healthy.", []).diagnosis_success
+
+
 def test_grade_exculpation_does_not_reach_past_a_scope_breaker() -> None:
     """Exculpation must not swallow a claim in a later clause.
 
