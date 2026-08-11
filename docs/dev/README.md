@@ -10,6 +10,9 @@ opposed to the user-facing feature docs that live directly under
 - [`plans/`](plans/) — dated implementation plans for individual phases
   and slices. Historical once executed; kept for traceability, not
   updated retroactively.
+- [`quality-gates.md`](quality-gates.md) — which checks run locally, in CI,
+  and at release, and why each is placed where it is. Read this before
+  adding a check anywhere.
 - [`contract-tests.md`](contract-tests.md) — the live-cluster contract
   suite and the Korvid test-only AKS infrastructure it runs against.
 - [`ui-controllers.md`](ui-controllers.md) — how `ui/app.py` is being
