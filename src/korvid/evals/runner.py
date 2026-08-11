@@ -39,7 +39,7 @@ from korvid.tools.executor import (
 DEFAULT_REPETITIONS = 3
 
 
-def _eval_tools(profile: AgentProfile) -> list[dict[str, Any]]:
+def _eval_tools(profile: AgentProfile, omit: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
     """Schemas offered to the model for one capability profile (issue #71).
 
     Write schemas are included so a live structured-tool provider can
@@ -48,8 +48,14 @@ def _eval_tools(profile: AgentProfile) -> list[dict[str, Any]]:
     eval runs, so every write call fails at dispatch. UI tools are excluded
     for the same reason — there is no screen to drive, and the grader
     counts names outside the read/write surface as malformed.
+
+    `omit` removes named tools on top of that, so a campaign can measure the
+    same models and scenarios against a deliberately smaller surface (#221).
+    It is the only variable that separates those arms, so it also has to
+    reach the prompt fingerprint - see `prompt_fingerprint(tools=...)`.
     """
-    return [t for t in profile.tools if t["function"]["name"] not in UI_TOOL_NAMES]
+    excluded = UI_TOOL_NAMES | omit
+    return [t for t in profile.tools if t["function"]["name"] not in excluded]
 
 
 class _RecordingExecutor(RecordedExecution):
@@ -233,11 +239,12 @@ async def _run_once(
     executor_factory: Callable[[], Any],
     profile_name: str = "full",
     overrides: PromptOverrides | None = None,
+    omit_tools: frozenset[str] = frozenset(),
 ) -> RunMetrics:
     raw_provider = provider_factory()
     try:
         return await _drive_turn(
-            scenario, raw_provider, executor_factory(), profile_name, overrides
+            scenario, raw_provider, executor_factory(), profile_name, overrides, omit_tools
         )
     finally:
         # Live providers own an httpx client; close it per repetition or a
@@ -284,6 +291,7 @@ async def _drive_turn(
     raw_executor: Any,
     profile_name: str = "full",
     overrides: PromptOverrides | None = None,
+    omit_tools: frozenset[str] = frozenset(),
 ) -> RunMetrics:
     provider = _CountingProvider(raw_provider)
     profile = build_profile(
@@ -293,7 +301,7 @@ async def _drive_turn(
     runtime = AgentRuntime(
         provider,
         executor,
-        tools=_eval_tools(profile),
+        tools=_eval_tools(profile, omit_tools),
         max_iterations=profile.max_iterations,
         max_history_chars=profile.max_history_chars,
         max_result_chars=profile.max_result_chars,
@@ -365,10 +373,13 @@ async def run_scenario(
     repetitions: int = DEFAULT_REPETITIONS,
     profile: str = "full",
     overrides: PromptOverrides | None = None,
+    omit_tools: frozenset[str] = frozenset(),
 ) -> ScenarioReport:
     """Run one scenario ``repetitions`` times with fresh state per run."""
     runs = [
-        await _run_once(scenario, provider_factory, executor_factory, profile, overrides)
+        await _run_once(
+            scenario, provider_factory, executor_factory, profile, overrides, omit_tools
+        )
         for _ in range(repetitions)
     ]
     return ScenarioReport(scenario_id=scenario.id, root_cause=scenario.root_cause, runs=runs)

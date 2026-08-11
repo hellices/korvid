@@ -236,6 +236,35 @@ Rules that follow:
   existed, which is deliberate: absence means "never captured", not "captured
   and empty".
 
+## Measuring the tool surface itself
+
+`--without-tool NAME` (repeatable) drops a tool from the measured surface.
+It exists for the controlled arms of #221: `diagnose_service` and
+`diagnose_pvc` were added to the `small` profile, whose whole premise is a
+small selection space for 3B-14B models, and that cost was never measured.
+Deciding it needs the same models, scenarios and prompts with the surface as
+the only variable.
+
+```bash
+# arm 2 - the shipped small surface
+python -m korvid.evals --profile small --json arm2.json
+
+# arm 3 - the same run without the two diagnostics
+python -m korvid.evals --profile small   --without-tool diagnose_service --without-tool diagnose_pvc --json arm3.json
+```
+
+Rules:
+
+- an unknown name is **refused**, because a typo would silently measure the
+  full surface and publish it as the reduced arm;
+- the omission reaches the prompt fingerprint, so two arms can never claim
+  the same digest;
+- `meta.tools` records `omitted` and `count` by name. Recovering the arm from
+  the digest alone would mean keeping a lookup table outside the artifact,
+  which is the bookkeeping that made the 2026-08-05 rows unusable;
+- dropping a tool is **not** a prompt override: `prompts.source` stays
+  `default`, because the shipped prompts are still the ones in effect.
+
 ## Interpretation Limits
 
 - Task success does not prove conversational usability.
