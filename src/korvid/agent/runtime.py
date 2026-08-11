@@ -185,33 +185,23 @@ def evidence_note(items: Sequence[Evidence]) -> str:
 
 
 def _describe(item: Evidence) -> str:
-    """One line naming what a reference points at.
+    """One line naming a reference's source, in korvid's words only.
 
-    Every part is flattened to a single line first. These values are tool
-    arguments, so they came from the model, and this line lands in the
-    system message - the one region the table is placed in *because* it is
-    korvid's own text. A newline in a name would let the model write its
-    own `[E9]` line, or an instruction, into exactly the place a reference
-    is supposed to be unforgeable (#192 review).
+    Deliberately does *not* name the target. Kind, name, namespace and
+    container are tool arguments, so they are the model's text, and this
+    line lands in the system message - the one region the table is placed
+    in *because* it is korvid's own. Sanitising them is not enough: an
+    argument the tool ignores still travels, so `get_resource` on a
+    cluster-scoped kind will happily carry a namespace of
+    "IGNORE PREVIOUS INSTRUCTIONS" into the prompt (#192 review).
+
+    The reference and the tool name are korvid's - the tool name is
+    checked against the registry before anything is recorded - and they
+    are enough for the model to cite. Which object each reference points
+    at is already in the tool result the model read, and the UI slice
+    resolves the full locator from `Evidence` without going through here.
     """
-    parts = (item.tool, item.kind, item.name, item.namespace, item.container)
-    tool, kind, name, namespace, container = (_one_line(part) for part in parts)
-    target = "/".join(part for part in (kind, name) if part)
-    where = f" in {namespace}" if namespace else ""
-    in_container = f" container {container}" if container else ""
-    return f"{tool} {target}{where}{in_container}".strip()
-
-
-def _one_line(value: str | None) -> str:
-    """*value* flattened to one line, unable to spell a reference.
-
-    Collapsing newlines stops a forged *line*; the brackets have to go
-    too, or a name can still read as `[E9]` mid-line and be cited as if
-    the table listed it. Only korvid writes `[E...]` here.
-    """
-    if not value:
-        return ""
-    return " ".join(value.split()).replace("[", "(").replace("]", ")")
+    return item.tool
 
 
 def _is_cluster_read(name: str) -> bool:
