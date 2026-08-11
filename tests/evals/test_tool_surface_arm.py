@@ -120,3 +120,15 @@ def test_an_unreduced_run_records_the_full_count_and_no_omissions() -> None:
         "omitted": [],
         "count": len(_eval_tools(profile)),  # type: ignore[arg-type]
     }
+
+
+def test_a_ui_only_tool_is_refused_because_dropping_it_is_a_no_op() -> None:
+    """`--without-tool open_logs` would record an omission that never happened.
+
+    `_eval_tools` already removes the UI tools, so naming one changes
+    neither the offered surface nor the digest — but `meta.tools.omitted`
+    would still claim it, and the arm would be published as reduced while
+    being identical to the full one.
+    """
+    with pytest.raises(SystemExit, match="open_logs"):
+        _parse_args(["--profile", "small", "--without-tool", "open_logs"])

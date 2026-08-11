@@ -385,20 +385,24 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _validate_tool_names(names: list[str], profile_name: str) -> None:
-    """Refuse a name the profile does not arm.
+    """Refuse a name that is not on the surface this run actually offers.
 
-    Silently ignoring it would produce a run that claims a reduced surface
-    while having measured the full one - a worse outcome than not running.
+    Checked against `_eval_tools`, not `profile.tools`: the UI tools are
+    already excluded from every eval run, so naming one would drop nothing
+    while `meta.tools.omitted` claimed it did - an arm published as reduced
+    that is byte-identical to the full one. The same reasoning covers a
+    plain typo, which would measure the full surface under the reduced
+    arm's name.
     """
     profile = build_profile(
         profile_name, readonly=False, resize_supported=True, overrides=PromptOverrides()
     )
-    known = {tool["function"]["name"] for tool in profile.tools}
+    known = {tool["function"]["name"] for tool in _eval_tools(profile)}
     unknown = sorted(set(names) - known)
     if unknown:
         raise SystemExit(
-            f"--without-tool: unknown tool(s) {', '.join(unknown)};"
-            f" the {profile_name} profile arms {', '.join(sorted(known))}"
+            f"--without-tool: {', '.join(unknown)} not on the measured surface;"
+            f" the {profile_name} profile offers {', '.join(sorted(known))}"
         )
 
 
