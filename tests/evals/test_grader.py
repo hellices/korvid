@@ -750,3 +750,21 @@ def test_coverage_ignores_blank_and_bullet_only_lines() -> None:
     report = citation_report("- up [E1]\n-\n\n- down [E1]", minted=("E1",))
 
     assert report.coverage == 1.0
+
+
+def test_an_ordered_list_scores_as_its_items() -> None:
+    """`1.` is a list marker, not a claim, and not a sentence end.
+
+    Splitting on the full stop left `1` as its own uncited fragment, so a
+    fully cited ordered list scored 2/3 (#192 review).
+    """
+    report = citation_report("1. pod up [E1]\n2. node fine [E2]", minted=("E1", "E2"))
+
+    assert report.coverage == 1.0
+
+
+def test_a_trailing_citation_belongs_to_the_claim_before_it() -> None:
+    """`pod failed. [E1]` is one cited claim, not a claim plus a stray."""
+    report = citation_report("pod failed. [E1]", minted=("E1",))
+
+    assert report.coverage == 1.0
