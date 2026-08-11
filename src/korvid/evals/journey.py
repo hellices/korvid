@@ -30,7 +30,7 @@ _GRADING_KEYS = frozenset(
         "max_tool_calls",
     }
 )
-_CLUSTER_KEYS = frozenset({"objects", "events", "logs"})
+_CLUSTER_KEYS = frozenset({"objects", "events", "logs", "forbidden"})
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,8 @@ class ConversationJourney:
     objects: tuple[dict[str, Any], ...]
     events: tuple[dict[str, Any], ...]
     logs: dict[str, ContainerLogs]
+    #: Reads the fixture withholds, as `Scenario.forbidden`.
+    forbidden: tuple[dict[str, str], ...] = ()
 
 
 def _positive_int_or_none(value: Any, label: str) -> int | None:
@@ -64,6 +66,78 @@ def _positive_int_or_none(value: Any, label: str) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{label} must be a positive integer")
     return value
+
+
+_FORBIDDEN_KEYS = frozenset({"kind", "namespace", "name", "subresource"})
+
+
+def _deniable_kinds() -> frozenset[str]:
+    """Plural resource names the fake cluster can actually withhold.
+
+    `_deny` compares the plural, so `kind: pod` would load and match
+    nothing - the rule reads as a denial and behaves as an allowance.
+    """
+    from korvid.evals.fake_kube import builtin_aliases
+
+    return frozenset(meta.plural for meta in builtin_aliases().values())
+
+
+#: The kind each subresource can be paired with. `log` only ever reaches
+#: the matcher from a pod log read, so any other pairing is a rule that
+#: cannot fire.
+_SUBRESOURCE_KINDS = {"log": "pods"}
+#: The only subresource the fixture's matcher understands. A rule naming
+#: anything else would load cleanly and deny nothing, so the journey would
+#: publish a score for an evidence gap it never created.
+_FORBIDDEN_SUBRESOURCES = frozenset({"log"})
+
+
+def _check_forbidden_rule(item: dict[str, Any], label: str) -> None:
+    """Reject a rule the matcher could not honour.
+
+    A rule that loads but matches nothing is the worst outcome available
+    here: the journey reports a score for an evidence gap it never created,
+    and the run is indistinguishable from a model that handled the gap well.
+    """
+    _reject_unknown_keys(item, _FORBIDDEN_KEYS, label)
+    if not isinstance(item.get("kind"), str) or not item["kind"]:
+        raise ValueError(f"{label} entries need a 'kind'")
+    if not all(isinstance(value, str) for value in item.values()):
+        raise ValueError(f"{label} values must be strings")
+    if any(not value.strip() for value in item.values()):
+        raise ValueError(f"{label}: blank selector values match no read")
+    if (kind := item["kind"]) not in _deniable_kinds():
+        raise ValueError(
+            f"{label}: kind {kind!r} is not a resource the fixture serves "
+            f"(use the plural name, e.g. 'pods')"
+        )
+    subresource = item.get("subresource")
+    if subresource is None:
+        return
+    if subresource not in _FORBIDDEN_SUBRESOURCES:
+        raise ValueError(
+            f"{label}: unsupported subresource {subresource!r} "
+            f"(known: {sorted(_FORBIDDEN_SUBRESOURCES)})"
+        )
+    if (owner := _SUBRESOURCE_KINDS[subresource]) != kind:
+        raise ValueError(
+            f"{label}: subresource {subresource!r} only applies to {owner!r}, not {kind!r}"
+        )
+
+
+def _forbidden(raw: Any, label: str) -> tuple[dict[str, str], ...]:
+    """Parse withheld-read rules, rejecting anything the matcher would
+    silently ignore - a typo'd key would otherwise widen the denial to a
+    whole kind and quietly change what the journey measures."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise ValueError(f"{label} must be a list of rule mappings")
+    rules: list[dict[str, str]] = []
+    for item in raw:
+        _check_forbidden_rule(item, label)
+        rules.append({str(key): str(value) for key, value in item.items()})
+    return tuple(rules)
 
 
 def _targets(raw: Any, label: str) -> tuple[dict[str, Any], ...]:
@@ -128,6 +202,7 @@ def load_journey(path: Path) -> ConversationJourney:
         objects=objects,
         events=events,
         logs=_logs(cluster.get("logs")),
+        forbidden=_forbidden(cluster.get("forbidden"), f"{path.name}: forbidden"),
     )
 
 

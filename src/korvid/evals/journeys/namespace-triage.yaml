@@ -1,0 +1,213 @@
+id: namespace-triage
+# Two workloads are abnormal at once and they are not equally bad: one is
+# down, the other is degraded but still serving. Naming both is easy;
+# ordering them is the measurement.
+root_cause: crashloop_missing_env
+turns:
+  - user: What looks wrong in namespace orders?
+    screen: "resource view: pods, namespace orders"
+    grading:
+      must_mention:
+        - [invoicer]
+        - [shipper]
+        # The ordering claim itself. Without this group a model that lists
+        # both problems and stops would pass a triage journey, which is the
+        # one thing triage is not.
+        - [invoicer first, start with invoicer, invoicer is worse,
+           invoicer is more urgent, prioritize invoicer, invoicer is the
+           priority, invoicer takes priority, address invoicer first,
+           invoicer is the more severe, invoicer matters more]
+      must_not_mention:
+        # A namespace with two broken workloads is not healthy, and neither
+        # problem is a pull failure.
+        - [healthy namespace, nothing is wrong, no issues, all healthy]
+        # The reverse order, prohibited outright. The positive group above
+        # only requires that "invoicer first" appears somewhere, so an
+        # answer could concede it and then rank shipper above it - the exact
+        # wrong prioritization, in the journey built to measure ordering.
+        - [prioritize shipper, shipper first, shipper is worse,
+           shipper is more urgent, start with shipper,
+           shipper takes priority, address shipper first]
+        - [image pull, imagepullbackoff]
+      expected_evidence:
+        # Two groups, one per workload. Evidence matching is route
+        # independent, so a single invoicer-targeted read satisfied the
+        # first group and `shipper` could then be named without ever having
+        # been observed - in the journey whose subject is discovering both.
+        # The same namespace list satisfies both groups at once.
+        - - tool: list_resources
+            args: {kind: pods, namespace: orders}
+            contains: invoicer-1
+        - - tool: list_resources
+            args: {kind: pods, namespace: orders}
+            contains: shipper-3
+      max_tool_calls: 3
+  - user: >-
+      Confirm the reason for the one you picked, and say whether the other
+      one is still serving traffic.
+    screen: "resource view: pods, namespace orders, selected: invoicer-1"
+    grading:
+      must_mention:
+        # The cause of the crash loop, from the log the fixture does supply.
+        - [dsn, database url, environment variable, env var, missing config,
+           configuration]
+        # The comparative judgement the second turn exists to force: shipper
+        # is degraded, not down - 2 of 3 replicas are ready.
+        - [still serving, still available, partially, reduced capacity,
+           degraded, some replicas, two of three, 2 of 3, 2/3]
+      must_not_mention:
+        - [shipper is down, shipper is unavailable, complete outage,
+           total outage]
+        - [oomkilled, out of memory]
+      expected_evidence:
+        # The container is crashlooping, so the line that names the cause is
+        # in the *previous* log. `get_logs` has no `previous` parameter, so
+        # the diagnostic is the only route to it - which is itself part of
+        # what this turn measures.
+        - - tool: diagnose_pod
+            args: {pod: invoicer-1, namespace: orders}
+            contains: DATABASE_DSN
+        - - tool: get_resource
+            args: {kind: deployments, name: shipper, namespace: orders}
+            contains: "readyReplicas: 2"
+          - tool: diagnose_workload
+            args: {kind: deployments, name: shipper, namespace: orders}
+            contains: "ready=2"
+      max_tool_calls: 4
+cluster:
+  objects:
+    # Down: every replica is crashlooping.
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: invoicer-1
+        namespace: orders
+        uid: pod-invoicer
+        creationTimestamp: "2026-07-27T06:00:00Z"
+      spec:
+        nodeName: node-a
+        containers: [{name: invoicer, image: orders/invoicer:v3}]
+      status:
+        phase: Running
+        conditions: [{type: Ready, status: "False"}]
+        containerStatuses:
+          - name: invoicer
+            ready: false
+            restartCount: 9
+            state:
+              waiting:
+                reason: CrashLoopBackOff
+                message: back-off 5m0s restarting failed container=invoicer
+            lastState:
+              terminated:
+                reason: Error
+                exitCode: 1
+                startedAt: "2026-07-27T07:10:00Z"
+                finishedAt: "2026-07-27T07:10:02Z"
+    - kind: Deployment
+      apiVersion: apps/v1
+      metadata:
+        name: invoicer
+        namespace: orders
+        uid: dep-invoicer
+        creationTimestamp: "2026-07-27T05:00:00Z"
+      spec: {replicas: 1}
+      status: {replicas: 1, readyReplicas: 0, unavailableReplicas: 1}
+    # Degraded: one replica of three is not ready, the service still serves.
+    - kind: Deployment
+      apiVersion: apps/v1
+      metadata:
+        name: shipper
+        namespace: orders
+        uid: dep-shipper
+        creationTimestamp: "2026-07-27T05:00:00Z"
+      spec: {replicas: 3}
+      status: {replicas: 3, readyReplicas: 2, unavailableReplicas: 1}
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: shipper-1
+        namespace: orders
+        uid: pod-shipper-1
+        creationTimestamp: "2026-07-27T05:00:00Z"
+      spec:
+        nodeName: node-a
+        containers: [{name: shipper, image: orders/shipper:v7}]
+      status:
+        phase: Running
+        conditions: [{type: Ready, status: "True"}]
+        containerStatuses:
+          - name: shipper
+            ready: true
+            restartCount: 0
+            state: {running: {startedAt: "2026-07-27T05:00:10Z"}}
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: shipper-2
+        namespace: orders
+        uid: pod-shipper-2
+        creationTimestamp: "2026-07-27T05:00:00Z"
+      spec:
+        nodeName: node-b
+        containers: [{name: shipper, image: orders/shipper:v7}]
+      status:
+        phase: Running
+        conditions: [{type: Ready, status: "True"}]
+        containerStatuses:
+          - name: shipper
+            ready: true
+            restartCount: 0
+            state: {running: {startedAt: "2026-07-27T05:00:11Z"}}
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: shipper-3
+        namespace: orders
+        uid: pod-shipper-3
+        creationTimestamp: "2026-07-27T05:00:00Z"
+      spec:
+        nodeName: node-b
+        containers: [{name: shipper, image: orders/shipper:v7}]
+      status:
+        phase: Running
+        conditions: [{type: Ready, status: "False"}]
+        containerStatuses:
+          - name: shipper
+            ready: false
+            restartCount: 2
+            state: {running: {startedAt: "2026-07-27T07:00:00Z"}}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a, uid: node-a}
+      status: {conditions: [{type: Ready, status: "True"}]}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-b, uid: node-b}
+      status: {conditions: [{type: Ready, status: "True"}]}
+  events:
+    - type: Warning
+      reason: BackOff
+      count: 9
+      lastTimestamp: "2026-07-27T07:15:00Z"
+      message: Back-off restarting failed container invoicer in pod invoicer-1
+      involvedObject:
+        {kind: Pod, name: invoicer-1, namespace: orders, uid: pod-invoicer}
+    - type: Warning
+      reason: Unhealthy
+      count: 4
+      lastTimestamp: "2026-07-27T07:12:00Z"
+      message: 'Readiness probe failed: HTTP probe failed with statuscode: 503'
+      involvedObject:
+        {kind: Pod, name: shipper-3, namespace: orders, uid: pod-shipper-3}
+  logs:
+    orders/invoicer-1/invoicer:
+      current: []
+      previous:
+        - "invoicer: startup failed: DATABASE_DSN is not set"
+    orders/shipper-1/shipper:
+      current: ["shipper ready"]
+    orders/shipper-2/shipper:
+      current: ["shipper ready"]
+    orders/shipper-3/shipper:
+      current: ["warming caches"]

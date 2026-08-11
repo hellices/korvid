@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import pytest
@@ -429,3 +430,104 @@ async def test_endpointslices_are_readable_through_ordinary_reads() -> None:
     )
     assert not got.startswith("ERROR:"), got
     assert "ready: false" in got, got
+
+
+async def test_a_forbidden_read_fails_with_403_like_a_denied_rbac_rule() -> None:
+    """The fixture can withhold a read the way RBAC does.
+
+    Without this the pack cannot measure what a model does when evidence is
+    unavailable rather than absent - the two look identical to a model that
+    never sees a denial, and inventing an answer is the failure mode worth
+    catching.
+    """
+    scenario = _scenario(forbidden=({"kind": "pods", "namespace": "shop", "subresource": "log"},))
+    client = FakeKubeClient(scenario)
+    executor = ToolExecutor(client, builtin_aliases())
+
+    denied = await executor.execute("get_logs", {"pod": "api-1", "namespace": "shop"})
+    assert denied.startswith("ERROR:")
+    assert "forbidden" in denied.lower()
+
+
+async def test_a_forbidden_rule_does_not_withhold_an_unrelated_read() -> None:
+    """Denials are scoped: a pod-log rule leaves manifests readable, which
+    is what makes 'choose an allowed route' a measurable behavior."""
+    scenario = _scenario(forbidden=({"kind": "pods", "namespace": "shop", "subresource": "log"},))
+    executor = ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
+
+    allowed = await executor.execute(
+        "get_resource", {"kind": "pods", "name": "api-1", "namespace": "shop"}
+    )
+    assert not allowed.startswith("ERROR:")
+    assert "api-1" in allowed
+
+
+async def test_an_omitted_subresource_denies_every_read_of_that_object() -> None:
+    """Omitted keys are documented as wildcards, so a rule naming only the
+    kind must cover the log too.
+
+    Otherwise the same rule behaves differently depending on which tool the
+    model reached for, and a fixture author who wrote the obvious "deny all
+    pod reads" rule would still be handing out logs.
+    """
+    scenario = _scenario(forbidden=({"kind": "pods", "namespace": "shop"},))
+    client = FakeKubeClient(scenario)
+
+    # Straight at the client: through `get_logs` the executor reads the pod
+    # manifest first, and that read is denied by the same rule - so the tool
+    # would report a refusal while the log itself stayed readable.
+    with pytest.raises(ApiStatusError, match=r"403|forbidden"):
+        async for _ in client.stream_logs("shop", "api-1", "app"):
+            pass
+
+
+async def test_a_rule_can_withhold_the_event_stream() -> None:
+    """Events are a read surface like any other; a rule naming them that
+    quietly does nothing would misrepresent what the journey measured."""
+    scenario = _scenario(forbidden=({"kind": "events", "namespace": "shop"},))
+    executor = ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
+
+    denied = await executor.execute(
+        "get_events", {"kind": "pods", "name": "api-1", "namespace": "shop"}
+    )
+    assert denied.startswith("ERROR:")
+    assert "403" in denied
+
+
+async def test_a_secrets_rule_also_withholds_the_helm_read() -> None:
+    """Helm releases are read out of helm-owned Secrets.
+
+    That read scans the object table directly, so a `secrets` rule that
+    denied every other route still handed the same data back through the
+    Helm tool - a denial with a way around it measures nothing.
+    """
+    scenario = _scenario(forbidden=({"kind": "secrets", "namespace": "shop"},))
+    client = FakeKubeClient(scenario)
+
+    with pytest.raises(ApiStatusError, match=r"403|forbidden"):
+        await client.list_helm_releases("shop")
+
+
+def test_every_read_entry_point_consults_the_denial_table() -> None:
+    """A new read that skips `_deny` is a hole with no symptom.
+
+    The rule still loads, the journey still runs, and the model quietly gets
+    the evidence the fixture meant to withhold - so the score describes a
+    gap that was never there. Two such holes shipped in this file's first
+    draft (events and Helm releases), which is why this is pinned rather
+    than left to review.
+    """
+    source = inspect.getsource(FakeKubeClient)
+    reads = [
+        name
+        for name, member in inspect.getmembers(FakeKubeClient)
+        if (name.startswith(("list_", "get_", "stream_")) and inspect.isfunction(member))
+    ]
+    assert reads, "no read entry points found - the naming convention changed"
+    for name in reads:
+        body = inspect.getsource(getattr(FakeKubeClient, name))
+        assert "self._deny(" in body, (
+            f"{name} reads the fixture without consulting the denial table; "
+            "a forbidden rule would silently not apply to it"
+        )
+    assert "_deny" in source
