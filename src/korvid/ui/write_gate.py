@@ -61,21 +61,26 @@ class TrackedWrite(Generic[_WriteResult]):
             self._release()
 
     def release(self) -> None:
-        """Hand the slot back for work that will never run.
+        """Hand the slot back for work that never started.
 
-        Idempotent, and safe to call alongside the normal completion path:
-        a double hand-back would let a `:ctx` switch proceed while a write
-        is still in flight, which is the failure the count exists to
-        prevent.
+        A no-op once the work is running, and that restriction is the
+        point. Callers release right after cancelling, before the
+        cancellation has propagated, and a write that is still unwinding -
+        or one that shields part of itself, as the audit path does - is
+        still mutating. Handing its slot back there would let a `:ctx`
+        switch retarget mid-write, which is the failure this count exists
+        to prevent. Started work hands its own slot back from `_drive`.
 
         Work that never started is also closed, so an abandoned write does
-        not surface as a "coroutine was never awaited" warning. Work that
-        *has* started is left alone - it is owned by whatever is driving
-        it, and closing a coroutine out from under its task would corrupt
-        that task's state.
+        not surface as a "coroutine was never awaited" warning. Closing is
+        safe only here: a coroutine closed out from under its driving task
+        would corrupt that task.
+
+        Idempotent - the finalizer may fire afterwards.
         """
-        if not self._started:
-            self._work.close()
+        if self._started:
+            return
+        self._work.close()
         self._release()
 
 

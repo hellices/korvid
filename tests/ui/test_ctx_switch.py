@@ -449,6 +449,41 @@ async def test_a_worker_cancelled_before_it_starts_releases_the_slot() -> None:
         assert retained.cancelled()
 
 
+async def test_releasing_started_work_does_not_unblock_ctx_early() -> None:
+    """A cancelled write that is still unwinding keeps its slot.
+
+    Both cancellation callers release immediately after `cancel()`, before
+    the cancellation has propagated. A write that is still running - or one
+    that shields part of its work, as the audit path does - would otherwise
+    keep mutating while `:ctx` sees zero writes in flight and permits a
+    retarget, which is the exact failure the count exists to prevent.
+    """
+    from korvid.ui.app import _tracks_cluster_write
+
+    env = _CtxEnv()
+    app = env.app
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+
+    @_tracks_cluster_write
+    async def fake_write(self: KorvidApp) -> None:
+        entered.set()
+        await finish.wait()
+
+    async with app.run_test():
+        tracked = fake_write(app)
+        task = asyncio.ensure_future(tracked)
+        await entered.wait()  # the work is running
+
+        tracked.release()  # a caller abandoning work that already started
+        assert app._active_cluster_writes == 1, "the slot was handed back mid-write"
+        assert app._ctx_switch_blocker() is not None
+
+        finish.set()
+        await task
+        assert app._active_cluster_writes == 0
+
+
 async def test_agent_prompt_refused_while_switching() -> None:
     """A prompt submitted mid-switch would run during teardown/retarget with
     the old cluster's screen context — refuse it up front."""
