@@ -21,6 +21,13 @@ turns:
         # A namespace with two broken workloads is not healthy, and neither
         # problem is a pull failure.
         - [healthy namespace, nothing is wrong, no issues, all healthy]
+        # The reverse order, prohibited outright. The positive group above
+        # only requires that "invoicer first" appears somewhere, so an
+        # answer could concede it and then rank shipper above it - the exact
+        # wrong prioritization, in the journey built to measure ordering.
+        - [prioritize shipper, shipper first, shipper is worse,
+           shipper is more urgent, start with shipper,
+           shipper takes priority, address shipper first]
         - [image pull, imagepullbackoff]
       expected_evidence:
         # Two groups, one per workload. Evidence matching is route

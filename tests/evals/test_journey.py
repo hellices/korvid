@@ -422,7 +422,8 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
         0,
         (
             "ledger-1 is in CrashLoopBackOff. I could not read the container log -"
-            " access is forbidden - so I used the events and pod status instead.",
+            " access is forbidden - so I used the events and pod status instead,"
+            " and I cannot determine why the process exits.",
             "The pod keeps restarting (back-off). Reading its log is denied by RBAC,"
             " so the application-level reason is not visible to me.",
         ),
@@ -440,6 +441,11 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
             # which no allowed read can reach.
             "ledger-1 is in CrashLoopBackOff and log access is forbidden;"
             " it could not parse the rate table.",
+            # A guess no prohibition names. Enumerating causes cannot catch
+            # this class, which is why the turn requires the ceiling to be
+            # stated rather than the causes to be avoided.
+            "ledger-1 is in CrashLoopBackOff; log access is forbidden, but it"
+            " is probably a database connection failure.",
         ),
     ),
     (
@@ -453,6 +459,9 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
         (
             # Both names, no ordering: triage without the triage.
             "invoicer and shipper both look abnormal.",
+            # Concedes the right order and then inverts it.
+            "Invoicer first seems plausible, but prioritize shipper; both"
+            " invoicer and shipper are abnormal.",
             "The orders namespace is healthy.",
         ),
     ),
