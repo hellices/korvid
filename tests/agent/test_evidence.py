@@ -218,3 +218,91 @@ async def test_each_turn_starts_from_an_empty_ledger() -> None:
         pass
 
     assert runtime.evidence.references() == ()
+
+
+async def test_a_cluster_write_is_never_citable_as_evidence() -> None:
+    """Only reads are evidence.
+
+    A successful mutation also returns `error=False`, so recording every
+    non-error result would let "I deleted the pod" be cited as support for
+    a claim about what the cluster *is* (issue #192 review).
+    """
+    provider = ScriptedProvider(
+        [
+            _tool_call("c1", "delete_resource", '{"kind": "pods", "name": "api-1"}'),
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _ReadExecutor())
+
+    async for _ in runtime.run_turn("delete api-1", "view=pods"):
+        pass
+
+    assert runtime.evidence.references() == ()
+
+
+async def test_a_ui_only_action_is_never_citable_as_evidence() -> None:
+    """Navigating the UI reads nothing about the cluster."""
+    provider = ScriptedProvider(
+        [
+            _tool_call("c1", "navigate", '{"kind": "pods"}'),
+            [{"type": "text_delta", "text": "here they are"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _ReadExecutor())
+
+    async for _ in runtime.run_turn("show pods", "view=pods"):
+        pass
+
+    assert runtime.evidence.references() == ()
+
+
+def test_a_log_read_keeps_the_pod_and_container_it_looked_at() -> None:
+    """`get_logs` names its target `pod`, not `name`, and adds a container.
+
+    Discarding those left the reference pointing at a namespace and
+    nothing else, which a citation UI could not navigate to (#192 review).
+    """
+    ledger = EvidenceLedger()
+
+    ref = ledger.record(
+        "get_logs",
+        {"namespace": "prod", "pod": "api-1", "container": "app"},
+        "OOMKilled",
+    )
+    assert ref is not None
+    item = ledger.resolve(ref)
+
+    assert item is not None
+    assert item.name == "api-1"
+    assert item.container == "app"
+    assert item.kind == "pods"
+
+
+def test_a_resource_read_keeps_its_kind() -> None:
+    """`get_resource` is only identified by kind *and* name."""
+    ledger = EvidenceLedger()
+
+    ref = ledger.record("get_resource", {"kind": "deployments", "name": "web"}, "replicas: 3")
+    assert ref is not None
+    item = ledger.resolve(ref)
+
+    assert item is not None
+    assert item.kind == "deployments"
+
+
+def test_an_excerpt_limit_that_cannot_hold_the_marker_is_refused() -> None:
+    """A zero limit would make the advertised bound false."""
+    with pytest.raises(ValueError, match="at least 1"):
+        EvidenceLedger(excerpt_limit=0)
+
+
+def test_non_ascii_digits_are_malformed_syntax_not_unknown_references() -> None:
+    """korvid only ever mints ASCII references."""
+    ledger = EvidenceLedger()
+    ledger.record("get_resource", {"kind": "pods", "name": "api-1"}, "phase: Running")
+
+    supported, unknown = ledger.check_citations("see [E1\u0662]")
+
+    assert supported == ()
+    assert unknown == ()

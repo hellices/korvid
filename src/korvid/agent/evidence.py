@@ -19,11 +19,13 @@ import dataclasses
 import re
 from typing import Any
 
-#: `[E12]` and nothing else. Anchored on both sides so `[E1x]`, `[E01]`
-#: and `[E]` are not citations at all, rather than citations that fail to
-#: resolve - a malformed reference is a formatting bug, and reporting it
-#: as "unsupported" would blame the claim for it.
-_CITATION = re.compile(r"\[E([1-9]\d*)\]")
+#: `[E12]` and nothing else. `[E1x]`, `[E01]` and `[E]` are not citations
+#: at all, rather than citations that fail to resolve - a malformed
+#: reference is a formatting bug, and reporting it as "unsupported" would
+#: blame the claim for it. ASCII digits explicitly: `\d` also matches
+#: other Unicode decimal digits, so `[E1٢]` would otherwise be reported as
+#: an unknown reference rather than as malformed.
+_CITATION = re.compile(r"\[E([1-9][0-9]*)\]")
 
 #: Excerpts ride in the prompt on every later step of the turn, so they
 #: are capped: the issue requires the small-profile budget to survive the
@@ -39,12 +41,19 @@ class Evidence:
     what it looked at, and enough of the result to recognise it. The UI
     slice of #192 will navigate from these fields; nothing here depends on
     that having happened yet.
+
+    The locator is normalised across tools that name the same thing
+    differently - `get_logs` takes `pod` where `get_resource` takes
+    `kind` + `name` - because a citation that cannot identify its exact
+    source is not navigable, which is the point of having one.
     """
 
     ref: str
     tool: str
+    kind: str | None
     namespace: str | None
     name: str | None
+    container: str | None
     excerpt: str
 
 
@@ -57,6 +66,10 @@ class EvidenceLedger:
     """
 
     def __init__(self, *, excerpt_limit: int = _DEFAULT_EXCERPT_LIMIT) -> None:
+        if excerpt_limit < 1:
+            # A zero limit cannot hold even the truncation marker, so the
+            # bound this class advertises would be false.
+            raise ValueError("excerpt_limit must be at least 1")
         self._excerpt_limit = excerpt_limit
         self._items: dict[str, Evidence] = {}
 
@@ -97,8 +110,10 @@ class EvidenceLedger:
         self._items[ref] = Evidence(
             ref=ref,
             tool=tool,
+            kind=_text_arg(arguments, "kind") or ("pods" if "pod" in arguments else None),
             namespace=_text_arg(arguments, "namespace"),
-            name=_text_arg(arguments, "name"),
+            name=_text_arg(arguments, "name") or _text_arg(arguments, "pod"),
+            container=_text_arg(arguments, "container"),
             excerpt=_excerpt(result, self._excerpt_limit),
         )
         return ref
@@ -150,4 +165,4 @@ def _excerpt(result: str, limit: int) -> str:
     collapsed = " ".join(result.split())
     if len(collapsed) <= limit:
         return collapsed
-    return collapsed[: max(0, limit - 1)] + "…"
+    return collapsed[: limit - 1] + "…"
