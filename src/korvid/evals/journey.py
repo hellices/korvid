@@ -69,6 +69,10 @@ def _positive_int_or_none(value: Any, label: str) -> int | None:
 
 
 _FORBIDDEN_KEYS = frozenset({"kind", "namespace", "name", "subresource"})
+#: The only subresource the fixture's matcher understands. A rule naming
+#: anything else would load cleanly and deny nothing, so the journey would
+#: publish a score for an evidence gap it never created.
+_FORBIDDEN_SUBRESOURCES = frozenset({"log"})
 
 
 def _forbidden(raw: Any, label: str) -> tuple[dict[str, str], ...]:
@@ -86,6 +90,12 @@ def _forbidden(raw: Any, label: str) -> tuple[dict[str, str], ...]:
             raise ValueError(f"{label} entries need a 'kind'")
         if not all(isinstance(value, str) for value in item.values()):
             raise ValueError(f"{label} values must be strings")
+        subresource = item.get("subresource")
+        if subresource is not None and subresource not in _FORBIDDEN_SUBRESOURCES:
+            raise ValueError(
+                f"{label}: unsupported subresource {subresource!r} "
+                f"(known: {sorted(_FORBIDDEN_SUBRESOURCES)})"
+            )
         rules.append({str(key): str(value) for key, value in item.items()})
     return tuple(rules)
 

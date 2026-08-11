@@ -132,7 +132,11 @@ class FakeKubeClient(ReadOps):
                 continue
             if (rule_name := rule.get("name")) is not None and rule_name != name:
                 continue
-            if rule.get("subresource") != subresource:
+            # Only compare when the rule names one: an omitted key is a
+            # wildcard everywhere else, and a rule reading "deny pods in this
+            # namespace" that still served logs would be a denial the fixture
+            # author did not write.
+            if (rule_sub := rule.get("subresource")) is not None and rule_sub != subresource:
                 continue
             target = f"{kind}/{subresource}" if subresource else kind
             raise ApiStatusError(
@@ -196,6 +200,10 @@ class FakeKubeClient(ReadOps):
         kind: str | None = None,
         uid: str | None = None,
     ) -> list[dict[str, Any]]:
+        # `name` here is the *involved object*, which is the only name an
+        # event read is scoped by. Real RBAC on events stops at the
+        # namespace; a fixture may be narrower.
+        self._deny("events", namespace, name)
         matched: list[dict[str, Any]] = []
         for event in self._events:
             involved = event.get("involvedObject") or {}

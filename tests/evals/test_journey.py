@@ -372,12 +372,9 @@ def test_rollout_journey_keywords_discriminate(
         )
 
 
-def test_a_journey_can_withhold_a_read_the_way_rbac_does(tmp_path: Path) -> None:
-    """`cluster.forbidden` reaches the fixture, so a journey can measure
-    what the model does when evidence is denied rather than absent."""
-    _write(
-        tmp_path / "j.yaml",
-        """
+#: A minimal journey whose fixture withholds one read. Shared so the
+#: acceptance and rejection tests cannot drift apart.
+_JOURNEY_WITH_FORBIDDEN = """
 id: j
 root_cause: none
 turns:
@@ -403,8 +400,13 @@ cluster:
   logs: {}
   forbidden:
     - {kind: pods, namespace: n, subresource: log}
-""",
-    )
+"""
+
+
+def test_a_journey_can_withhold_a_read_the_way_rbac_does(tmp_path: Path) -> None:
+    """`cluster.forbidden` reaches the fixture, so a journey can measure
+    what the model does when evidence is denied rather than absent."""
+    _write(tmp_path / "j.yaml", _JOURNEY_WITH_FORBIDDEN)
     journey = load_journeys(tmp_path)[0]
     assert journey.forbidden == ({"kind": "pods", "namespace": "n", "subresource": "log"},)
 
@@ -428,8 +430,16 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
             # Reports the crash loop and silently omits that the evidence
             # was withheld. This is the failure the journey exists for.
             "ledger-1 is in CrashLoopBackOff and keeps restarting.",
-            # Names the denial and then supplies a cause anyway.
-            "Log access is forbidden, but this is OOMKilled - the container ran out of memory.",
+            # Carries both required claims - the crash loop and the denial -
+            # so the invented cause is the only thing left to reject it. An
+            # earlier draft omitted the crash loop and would have kept
+            # passing with the cause prohibition deleted.
+            "ledger-1 is in CrashLoopBackOff and reading its log is forbidden;"
+            " it was OOMKilled and ran out of memory.",
+            # The sharpest form: the exact cause the withheld log holds,
+            # which no allowed read can reach.
+            "ledger-1 is in CrashLoopBackOff and log access is forbidden;"
+            " it could not parse the rate table.",
         ),
     ),
     (
@@ -489,3 +499,18 @@ def test_new_journey_keywords_discriminate(
         assert not grade(scenario, answer, []).diagnosis_success, (
             f"{journey_id} turn {index + 1}: a wrong answer was graded correct\n  {answer}"
         )
+
+
+def test_an_unsupported_subresource_is_rejected_at_load(tmp_path: Path) -> None:
+    """`log` is the only subresource the matcher knows.
+
+    Accepting `logs` would load cleanly and silently deny nothing, so the
+    journey would report a score for an evidence gap it never created -
+    the failure this parser's strictness exists to prevent.
+    """
+    _write(
+        tmp_path / "j.yaml",
+        _JOURNEY_WITH_FORBIDDEN.replace("subresource: log", "subresource: logs"),
+    )
+    with pytest.raises(ValueError, match="subresource"):
+        load_journeys(tmp_path)

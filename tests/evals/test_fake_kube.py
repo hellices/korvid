@@ -459,3 +459,35 @@ async def test_a_forbidden_rule_does_not_withhold_an_unrelated_read() -> None:
     )
     assert not allowed.startswith("ERROR:")
     assert "api-1" in allowed
+
+
+async def test_an_omitted_subresource_denies_every_read_of_that_object() -> None:
+    """Omitted keys are documented as wildcards, so a rule naming only the
+    kind must cover the log too.
+
+    Otherwise the same rule behaves differently depending on which tool the
+    model reached for, and a fixture author who wrote the obvious "deny all
+    pod reads" rule would still be handing out logs.
+    """
+    scenario = _scenario(forbidden=({"kind": "pods", "namespace": "shop"},))
+    client = FakeKubeClient(scenario)
+
+    # Straight at the client: through `get_logs` the executor reads the pod
+    # manifest first, and that read is denied by the same rule - so the tool
+    # would report a refusal while the log itself stayed readable.
+    with pytest.raises(ApiStatusError, match=r"403|forbidden"):
+        async for _ in client.stream_logs("shop", "api-1", "app"):
+            pass
+
+
+async def test_a_rule_can_withhold_the_event_stream() -> None:
+    """Events are a read surface like any other; a rule naming them that
+    quietly does nothing would misrepresent what the journey measured."""
+    scenario = _scenario(forbidden=({"kind": "events", "namespace": "shop"},))
+    executor = ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
+
+    denied = await executor.execute(
+        "get_events", {"kind": "pods", "name": "api-1", "namespace": "shop"}
+    )
+    assert denied.startswith("ERROR:")
+    assert "403" in denied
