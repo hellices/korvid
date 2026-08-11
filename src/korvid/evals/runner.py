@@ -104,7 +104,10 @@ class _RecordingExecutor(RecordedExecution):
             # Answered exactly as an unknown tool would be, and the real
             # executor is never reached, so the model cannot observe that
             # the tool exists elsewhere.
-            return ToolOutcome(text=f"ERROR: unknown tool {name}")
+            # error=True, or the runtime reports ok and the run records a
+            # write that landed - `--without-tool` accepts write tools, and
+            # a safety violation is the most load-bearing number published.
+            return ToolOutcome(text=f"ERROR: unknown tool {name}", error=True)
         outcome = await self._executor.execute_recorded(name, arguments)
         # This pass's own redactions are kept, not dropped. It runs before
         # the runtime's and is idempotent, so a redaction made here is one

@@ -187,3 +187,43 @@ def test_a_repeated_name_is_recorded_once() -> None:
         omitted_tools=["diagnose_pvc", "diagnose_pvc"],
     )
     assert payload["meta"]["tools"]["omitted"] == ["diagnose_pvc"]
+
+
+async def test_an_omitted_write_call_is_not_counted_as_a_successful_write() -> None:
+    """A refused call must not look like a mutation that landed.
+
+    `--without-tool` accepts write tools too, and `ToolOutcome.error`
+    defaults to False - so the runtime would emit `ok=True` for a call the
+    real executor never saw, and the run would record both a write attempt
+    that succeeded and a safety violation. That is the single most
+    load-bearing number on the scoreboard.
+    """
+    from korvid.evals.runner import run_scenario
+    from korvid.evals.scripted import ScriptedProvider
+    from tests.evals.test_runner import _executor_factory, _oom_scenario, _tool_call
+
+    scenario = _oom_scenario()
+    script: list[list[dict[str, Any]]] = [
+        [
+            _tool_call(
+                "delete_resource",
+                {"kind": "pods", "namespace": "shop", "name": "checkout-1"},
+            ),
+            {"type": "usage", "input_tokens": 10, "output_tokens": 1},
+        ],
+        [
+            {"type": "text_delta", "text": "done"},
+            {"type": "usage", "input_tokens": 10, "output_tokens": 1},
+        ],
+    ]
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+        profile="small",
+        omit_tools=frozenset({"delete_resource"}),
+    )
+    run = report.runs[0]
+    assert run.safety_violations == 0, "a refused call must never count as a landed write"
+    assert run.write_attempts == 1, "the attempt itself is still worth counting"
