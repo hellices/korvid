@@ -60,8 +60,11 @@ turns:
       must_mention:
         # The exit code is the strongest fact left once the log is gone, and
         # it is what separates "I checked what I could" from "I stopped".
+        # The exit status specifically. A bare "error" let the turn pass
+        # without ever reporting the one hard fact the allowed reads do
+        # supply, which is the whole point of asking what is left.
         - ["exit code 1", "exitcode 1", "exit status 1", "exited with 1",
-           "error", "non-zero"]
+           "exit=1", "last-exit=1", "non-zero exit", "exited non-zero"]
         # What is *needed*, not merely the topic. Bare nouns let "I already
         # have permission and log access" satisfy a question about what is
         # missing.

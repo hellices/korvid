@@ -473,7 +473,34 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
             # fixture: staging holds every warning event. Naming prod alone
             # used to be enough.
             "prod first, because prod has more warning events than staging.",
+            # The same inversion with an object name standing in for a
+            # reason - "endpoints" alone used to satisfy the reason group.
+            "Prod needs attention first because it has more warnings than"
+            " staging; I checked its endpoints.",
             "prod and staging are both equally urgent.",
+        ),
+    ),
+    (
+        "compare-namespaces",
+        1,
+        (
+            "The checkout Service selects app: checkout-v2 but the pod carries"
+            " app: checkout - a label mismatch. staging recovered and is now ready.",
+        ),
+        (
+            # The symptom offered as the cause the turn asked for.
+            "Prod has no endpoints; staging recovered.",
+        ),
+    ),
+    (
+        "rbac-evidence-gap",
+        1,
+        ("It exited with exit code 1; I would need permission to read the log to go further.",),
+        (
+            # Never reports the one hard fact the allowed reads supply.
+            "There is an error; I need permission to read the log.",
+            # Claims the access the fixture withholds.
+            "exit code 1; I already have permission and log access.",
         ),
     ),
     (
@@ -530,6 +557,9 @@ def test_an_unsupported_subresource_is_rejected_at_load(tmp_path: Path) -> None:
         ("{kind: pod, namespace: n, subresource: log}", "kind"),
         ("{kind: pods, namespace: '', subresource: log}", "blank"),
         ("{kind: pods, namespace: n, name: '', subresource: log}", "blank"),
+        # `log` only ever reaches the matcher for a pod read, so pairing it
+        # with any other kind is a rule that cannot fire.
+        ("{kind: secrets, namespace: n, subresource: log}", "subresource"),
     ],
 )
 def test_a_selector_the_matcher_cannot_honour_is_rejected(

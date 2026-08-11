@@ -21,9 +21,13 @@ turns:
         # fixture hands staging every warning event - so "prod first because
         # it has more warnings" is both the wrong reason and a factual
         # inversion, and it passed on the name alone.
-        - [no endpoints, endpoints, selector, not reachable, unreachable,
-           cannot serve, not serving, traffic fails, outage, is down,
-           nothing backs, no backing pods, no pods behind]
+        # Bare "endpoints" is not a reason - a model can name the object it
+        # looked at while giving the warning-count rationale. Each
+        # alternative states a consequence or the mismatch itself.
+        - [no endpoints, without endpoints, has no endpoints, not reachable,
+           unreachable, cannot serve, not serving, traffic fails, outage,
+           is down, nothing backs, no backing pods, no pods behind,
+           selector does not match, label mismatch, selects no pods]
       must_not_mention:
         # Choosing staging, or refusing to choose, are the two ways to fail
         # a comparison.
@@ -31,6 +35,13 @@ turns:
            staging is more urgent, start with staging]
         - [both equally, equally urgent, same severity, hard to say which,
            cannot determine which]
+        # The inverted rationale itself, which the right pick would
+        # otherwise carry through unnoticed: staging holds every warning
+        # event here, so ranking prod above it *by warnings* is a false
+        # statement about the cluster.
+        - [prod has more warning, prod has more events,
+           more warnings than staging, more warning events than staging,
+           noisier than staging]
       expected_evidence:
         - - tool: list_resources
             args: {kind: pods, namespace: prod}
@@ -55,8 +66,13 @@ turns:
       must_mention:
         # prod: the Service selects a label no pod carries, so it has no
         # endpoints - traffic fails while every pod looks healthy.
-        - [selector, no endpoints, endpoints, label mismatch,
-           does not match, no matching pods, selects no pods]
+        # The turn asks for the *specific cause*, and the symptom is not
+        # it: "prod has no endpoints" is the thing to be explained. Every
+        # alternative here names the mismatch.
+        - [label mismatch, labels do not match, label does not match,
+           selector does not match, does not match the pod,
+           does not match any pod, no matching pods, selects no pods,
+           selector is wrong, wrong selector, "checkout-v2"]
         # staging: a restart that recovered. Naming it as recovered, rather
         # than as a second outage, is the discrimination being measured.
         - [recovered, resolved, restarted once, back to ready, now ready,
@@ -76,7 +92,13 @@ turns:
         - - tool: get_resource
             args: {kind: endpoints, name: checkout, namespace: prod}
             contains: "subsets: []"
-      max_tool_calls: 3
+        # The other half of a mismatch claim: the label the pod actually
+        # carries. Empty endpoints alone could also mean matching but
+        # unready pods, so without this the claim rests on an assumption.
+        - - tool: get_resource
+            args: {kind: pods, name: checkout-1, namespace: prod}
+            contains: "app: checkout"
+      max_tool_calls: 4
 cluster:
   objects:
     # prod: pods are healthy, the Service points at a label none of them has.
