@@ -135,6 +135,37 @@ _SCOPE_BREAKERS = frozenset(
 )
 
 
+#: Linking verbs that can carry an all-clear predicate.
+_COPULAS = frozenset(
+    {"is", "are", "was", "were", "looks", "look", "seems", "seem", "appears", "appear"}
+)
+
+#: Tokens allowed between the copula and the adjective ("is still fine").
+_EXCULPATION_FILLER = frozenset(
+    {"still", "all", "quite", "perfectly", "completely", "totally", "to", "be"}
+)
+
+#: Adjectives that assert the named thing is *not* the fault. Deliberately
+#: narrow: "unaffected", "serving" and "ready" are required claims in the
+#: bundled pack, so admitting them here would reject correct answers.
+_ALL_CLEAR = frozenset(
+    {
+        "fine",
+        "normal",
+        "ok",
+        "okay",
+        "healthy",
+        "correct",
+        "clean",
+        "green",
+        "passing",
+        "succeeding",
+        "working",
+        "good",
+    }
+)
+
+
 def _clause_tokens(text: str) -> tuple[list[str], list[int]]:
     """Flat token list plus, per token, the id of the clause it came from."""
     tokens: list[str] = []
@@ -146,21 +177,26 @@ def _clause_tokens(text: str) -> tuple[list[str], list[int]]:
     return tokens, clause_ids
 
 
-def _match_starts(keyword: str, answer_tokens: list[str]) -> list[int]:
-    """Start indices of every token run matching the keyword."""
+def _match_spans(keyword: str, answer_tokens: list[str]) -> list[tuple[int, int]]:
+    """(start, end) token index pairs for every run matching the keyword.
+
+    `end` is exclusive, so it is where a trailing predicate would begin.
+    """
     target = "".join(_tokens(keyword))
     if not target:
         return []
-    starts: list[int] = []
+    spans: list[tuple[int, int]] = []
     for start in range(len(answer_tokens)):
         run = ""
+        end = start
         for token in answer_tokens[start:]:
             run += token
+            end += 1
             if len(run) >= len(target):
                 break
         if run == target:
-            starts.append(start)
-    return starts
+            spans.append((start, end))
+    return spans
 
 
 def _negated(start: int, answer_tokens: list[str], clause_ids: list[int]) -> bool:
@@ -177,13 +213,41 @@ def _negated(start: int, answer_tokens: list[str], clause_ids: list[int]) -> boo
     return False
 
 
+def _exculpated(end: int, answer_tokens: list[str], clause_ids: list[int]) -> bool:
+    """True when the match is followed, in its own clause, by a predicate
+    declaring it *not* the problem — "the liveness probe is fine".
+
+    This is the positive-grammar spelling of a negation, and a required
+    group naming a topic is otherwise satisfied by ruling that topic out.
+    Only a copula plus an all-clear adjective counts: scanning for any
+    reassuring word would reject "api-5c2f is unaffected", which is a
+    required claim elsewhere in the pack.
+    """
+    if end >= len(answer_tokens):
+        return False
+    index = end
+    clause = clause_ids[end - 1]
+    while index < len(answer_tokens) and clause_ids[index] == clause:
+        token = answer_tokens[index]
+        if token in _SCOPE_BREAKERS or token in _NEGATORS:
+            return False
+        if token in _ALL_CLEAR:
+            return True
+        if token not in _COPULAS and token not in _EXCULPATION_FILLER:
+            return False
+        index += 1
+    return False
+
+
 def _mentions_positively(keyword: str, answer_tokens: list[str], clause_ids: list[int]) -> bool:
-    """True when some match of the keyword is *not* under an earlier
-    negator's scope — "the pod is not healthy" must not satisfy a required
-    "healthy" claim (negative controls catch over-diagnosis)."""
+    """True when some match of the keyword is neither under an earlier
+    negator's scope nor followed by an all-clear predicate — "the pod is not
+    healthy" and "the probe is fine" must both fail to satisfy the claim they
+    name (negative controls catch over-diagnosis)."""
     return any(
         not _negated(start, answer_tokens, clause_ids)
-        for start in _match_starts(keyword, answer_tokens)
+        and not _exculpated(end, answer_tokens, clause_ids)
+        for start, end in _match_spans(keyword, answer_tokens)
     )
 
 

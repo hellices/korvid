@@ -64,6 +64,13 @@ turns:
            still ready, still up, serving traffic, unaffected]
       must_not_mention:
         - [outage, total failure, all pods are down, no pods running]
+        # "still running" attaches to whichever ReplicaSet the sentence
+        # names, so the required groups were satisfied by "api-7b9d-x1 is
+        # still running, while api-5c2f has already been scaled away" -
+        # the exact inversion this turn exists to catch. Keyword groups
+        # cannot bind a claim to a subject, so the false claim is banned.
+        - [scaled away, scaled down, scaled to zero, has been removed,
+           is gone, no longer serving, stopped serving, was terminated]
       expected_evidence:
         - - tool: get_resource
             args: {kind: replicasets, name: api-5c2f, namespace: edge}

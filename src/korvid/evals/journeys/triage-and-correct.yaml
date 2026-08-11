@@ -13,6 +13,12 @@ turns:
            checkout should be inspected first]
       must_not_mention:
         - [healthy namespace, no issues, no problems]
+        # The reverse order. The positive group only requires that
+        # "checkout first" appears, so an answer could concede it and then
+        # rank payments above it - measured, and it passed.
+        - [payments first, prioritize payments, start with payments,
+           inspect payments first, payments is worse,
+           payments is more urgent, payments takes priority]
       expected_evidence:
         - tool: list_resources
           args: {kind: pods, namespace: shop}
@@ -28,6 +34,12 @@ turns:
         - [unauthorized, authentication, registry credentials]
       must_not_mention:
         - [oomkilled, out of memory]
+        # The turn says "focus on payments, not checkout", and
+        # `forbidden_targets` stops the model *reading* checkout - but not
+        # attributing the cause to it. "payments-1 is failing; checkout-1
+        # is the one with registry credentials problems" satisfied both
+        # required groups while naming the wrong pod as the subject.
+        - [checkout]
       expected_evidence:
         - tool: diagnose_pod
           args: {pod: payments-1, namespace: shop}
@@ -43,7 +55,10 @@ turns:
         - [payments]
         - [credentials, secret, authenticate, authentication]
       must_not_mention:
-        - [increase memory, memory limit]
+        # The wrong remedy in any spelling: "needs more memory" named
+        # neither of the two original phrases and passed.
+        - [increase memory, memory limit, more memory, memory request,
+           raise memory, bump memory, add memory]
       expected_evidence:
         - tool: open_describe
           args: {kind: pods, name: payments-1, namespace: shop}

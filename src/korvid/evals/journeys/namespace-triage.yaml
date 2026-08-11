@@ -49,8 +49,13 @@ turns:
     grading:
       must_mention:
         # The cause of the crash loop, from the log the fixture does supply.
-        - [dsn, database url, environment variable, env var, missing config,
-           configuration]
+        # Split into the thing and its absence. As one group of bare
+        # nouns, "invoicer-1 has an environment variable" satisfied it -
+        # naming the topic rather than stating what is wrong with it.
+        - [dsn, database_dsn, database url, environment variable, env var,
+           config, configuration]
+        - [missing, not set, unset, absent, empty, never set,
+           not provided, blank]
         # The comparative judgement the second turn exists to force: shipper
         # is degraded, not down - 2 of 3 replicas are ready.
         - [still serving, still available, partially, reduced capacity,

@@ -524,6 +524,135 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
             "The log shows the application failing to connect to its database.",
         ),
     ),
+    # The four journeys that predate the pinning rule. Every one of them had
+    # a required group naming a topic instead of a claim.
+    (
+        "healthy-stop",
+        0,
+        ("Both catalog pods are running normally, with no restarts.",),
+        (
+            "catalog-1 is in CrashLoopBackOff.",
+            # Describes the namespace without judging its health, which is
+            # the only thing the turn asks for.
+            "The namespace contains two pods spread over two nodes.",
+        ),
+    ),
+    (
+        "healthy-stop",
+        1,
+        ("No further investigation is needed: catalog-1 has no warning events.",),
+        (
+            "catalog-1 is broken and needs work.",
+            "Keep digging into catalog-1 before deciding anything.",
+        ),
+    ),
+    (
+        "logs-to-events",
+        0,
+        ("gateway-1 restarts because its liveness probe failed with context deadline exceeded.",),
+        (
+            # Names the probe in order to rule it out.
+            "The liveness probe is fine; gateway-1 restarts for another reason.",
+            "gateway-1 was OOMKilled.",
+        ),
+    ),
+    (
+        "logs-to-events",
+        1,
+        (
+            "The kubelet is killing and restarting gateway-1 because the liveness probe failed 27 times.",
+        ),
+        (
+            "The liveness probe is fine; the kubelet restarts the container for another reason.",
+            "The application log is normal, so nothing is happening.",
+        ),
+    ),
+    (
+        "namespace-triage",
+        1,
+        (
+            "invoicer-1 crashloops because DATABASE_DSN is missing from its environment,"
+            " and shipper is degraded but still serving with 2 of 3 replicas.",
+        ),
+        (
+            # Names the configuration without saying anything is wrong with it.
+            "invoicer-1 has an environment variable and shipper is degraded.",
+            "invoicer-1 is missing its DSN and shipper is down.",
+        ),
+    ),
+    (
+        "rollout-owner-chain",
+        0,
+        ("The new ReplicaSet api-7b9d cannot pull its image because tag v27 does not exist.",),
+        (
+            # The symptom and the ReplicaSet, but never the bad tag.
+            "api-7b9d is in ImagePullBackOff.",
+            "The image pull is fine for api-7b9d; tag v27 is correct.",
+        ),
+    ),
+    (
+        "rollout-owner-chain",
+        1,
+        (
+            "The pod belongs to api-7b9d; the previous ReplicaSet api-5c2f is still"
+            " serving traffic with 2 ready replicas.",
+        ),
+        (
+            # Both names and "still running", attached to the wrong subject.
+            "api-7b9d-x1 is still running, while api-5c2f has already been scaled away.",
+            "Every replica is gone - this is a total outage.",
+        ),
+    ),
+    (
+        "triage-and-correct",
+        0,
+        (
+            "checkout-1 and payments-1 both need attention; inspect checkout first, it is crashlooping.",
+        ),
+        (
+            "Both checkout and payments need attention; rather than checkout first, prioritize payments.",
+            "The shop namespace has no issues.",
+        ),
+    ),
+    (
+        "triage-and-correct",
+        1,
+        (
+            "payments-1 cannot pull its image: the registry rejected the credentials as unauthorized.",
+        ),
+        (
+            # Right words, wrong subject - the turn says focus on payments.
+            "payments-1 is failing; checkout-1 is the one with registry credentials problems.",
+            "payments-1 was OOMKilled.",
+        ),
+    ),
+    (
+        "triage-and-correct",
+        2,
+        ("The payments-1 describe pane is on screen; next, fix the registry credentials secret.",),
+        (
+            "payments-1 needs more memory; rotate the secret later.",
+            "Increase the memory limit for payments-1.",
+        ),
+    ),
+    (
+        "tui-follow",
+        0,
+        ("web-1 cannot pull its image because tag v99 does not exist in the registry.",),
+        (
+            "The image pull is fine; web-1 uses tag v99 and works.",
+            "web-1 is failing its readiness probe.",
+        ),
+    ),
+    (
+        "tui-follow",
+        1,
+        # The weight of this turn is the evidence assertion - the bridge must
+        # acknowledge the pane. The text only has to name the pod and not
+        # claim the screen is unreachable.
+        ("The web-1 details are on screen now.",),
+        ("I cannot open that pane for you.",),
+    ),
 )
 
 
@@ -541,6 +670,35 @@ def test_new_journey_keywords_discriminate(
         assert not grade(scenario, answer, []).diagnosis_success, (
             f"{journey_id} turn {index + 1}: a wrong answer was graded correct\n  {answer}"
         )
+
+
+def test_every_journey_turn_pins_an_accepting_and_a_rejecting_answer() -> None:
+    """A turn with no pinned pair is a grading rule nobody has ever exercised.
+
+    Every finding in the #249 review was a keyword group that graded something
+    other than what its comment claimed - a positive phrase inside a group
+    demanding a denial, a prohibition that rejected the truth, a "reason" group
+    satisfied by a bare object name. None was visible by reading the YAML, and
+    each became obvious the moment one specific phrasing was run through the
+    grader. This test makes that exercise mandatory rather than optional.
+    """
+    # An entry with an empty side pins nothing, so presence alone is not the
+    # rule: a turn counts as covered only when both directions are exercised.
+    pinned = {
+        (journey_id, index)
+        for journey_id, index, correct, wrong in _JOURNEY_CASES
+        if correct and wrong
+    }
+    missing = [
+        f"{journey.id} turn {index + 1}"
+        for journey in load_journeys(bundled_journeys_dir())
+        for index in range(len(journey.turns))
+        if (journey.id, index) not in pinned
+    ]
+    assert not missing, (
+        "these turns have no pinned accepting/rejecting phrasings, so their"
+        " grading rules are unverified:\n  " + "\n  ".join(missing)
+    )
 
 
 def test_an_unsupported_subresource_is_rejected_at_load(tmp_path: Path) -> None:
