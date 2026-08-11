@@ -808,3 +808,29 @@ async def test_an_event_citation_on_a_pod_shows_them_without_a_caveat() -> None:
         await pilot.pause()
 
         assert "not shown" not in out.lower()
+
+
+async def test_a_log_citation_resolves_a_pod_outside_the_current_view() -> None:
+    """The cited pod need not be in the table the user is looking at.
+
+    `_get_pod_containers` only searches the current kind and scope, so it
+    returns nothing for a pod elsewhere - and an empty result reopens
+    every container, which is the defect this was meant to fix
+    (#192 review).
+    """
+    app = make_app(manifest_containers=["app", "sidecar"])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        # A namespace the pods pane is not scoped to.
+        ref = runtime.evidence.record(
+            "get_logs", {"pod": "web-1", "namespace": "other-ns"}, "log line"
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert not out.startswith("ERROR:")
+        assert "app" in out
+        assert "sidecar" not in out

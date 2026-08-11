@@ -71,15 +71,6 @@ def test_a_listing_opens_the_list_rather_than_a_single_object() -> None:
     assert target.name is None
 
 
-def test_a_diagnose_read_opens_the_object_it_diagnosed() -> None:
-    """The locator already normalised `pvc`/`service` to kind and name."""
-    target = target_for(_evidence("diagnose_pvc", kind="persistentvolumeclaims", name="data-0"))
-
-    assert target is not None
-    assert target.view == "describe"
-    assert target.kind == "persistentvolumeclaims"
-
-
 def test_a_single_object_view_with_no_object_is_not_navigable() -> None:
     """A read that names nothing cannot be opened, and says so.
 
@@ -165,17 +156,38 @@ def test_a_scoped_listing_is_not_cluster_wide() -> None:
     assert target.all_namespaces is False
 
 
-def test_the_fixed_kind_listings_resolve() -> None:
-    """helm_list_releases and list_operators take no kind argument.
+def test_a_fixed_kind_listing_resolves() -> None:
+    """`helm_list_releases` takes no kind argument but knows its own.
 
-    They were in the table but could never reach it, because the locator
-    leaves kind unset for them - a declaration that disagreed with the
-    runtime (#192 review).
+    It was in the table yet could never reach it, because the locator
+    leaves kind unset - a declaration that disagreed with the runtime
+    (#192 review).
     """
     helm = target_for(_evidence("helm_list_releases", namespace="prod"))
-    operators = target_for(_evidence("list_operators", namespace="prod"))
 
     assert helm is not None
     assert helm.kind == "helmreleases"
-    assert operators is not None
-    assert operators.kind == "operators"
+
+
+def test_a_compound_diagnostic_is_not_claimed_to_be_navigable() -> None:
+    """One view cannot show what a compound read gathered.
+
+    `diagnose_pod` returns owner chain, container states, node and PVC
+    context and log excerpts; `diagnose_workload` embeds child pod
+    diagnoses. Describe shows a manifest and, for pods, events. Opening
+    it and reporting success would tell the user the evidence is on
+    screen when most of it is not (#192 review).
+    """
+    for tool in ("diagnose_pod", "diagnose_pvc", "diagnose_service", "diagnose_workload"):
+        assert target_for(_evidence(tool, kind="pods", name="api-1")) is None, tool
+
+
+def test_an_operator_listing_is_not_claimed_to_be_navigable() -> None:
+    """`operators` is not a stable alias for this evidence.
+
+    Discovery leaves the alias bound to a real `Operator` kind when one
+    claims it, so the citation could open an unrelated table; and the
+    read combines installed subscriptions with the package catalog, which
+    no single list view shows.
+    """
+    assert target_for(_evidence("list_operators", namespace="prod")) is None

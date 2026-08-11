@@ -38,16 +38,26 @@ class _Route:
 #: Stated as a table rather than inferred from the name, so a new read
 #: tool is classified deliberately; `test_every_registered_read_is_classified`
 #: fails until it is.
-NAVIGABLE_TOOLS: dict[str, _Route] = {
-    "diagnose_pod": _Route("describe", events=True),
-    "diagnose_pvc": _Route("describe", events=True),
-    "diagnose_service": _Route("describe", events=True),
-    "diagnose_workload": _Route("describe", events=True),
+NAVIGABLE_TOOLS: dict[str, _Route | None] = {
+    # Compound diagnostics gather more than any one view shows: owner
+    # chains, container states, node and PVC context, log excerpts, and -
+    # for the workload case - whole child-pod diagnoses. Opening describe
+    # and reporting success would tell the user the cited evidence is on
+    # screen when most of it is not (#192 review). None until there is a
+    # view that can show a diagnosis.
+    "diagnose_pod": None,
+    "diagnose_pvc": None,
+    "diagnose_service": None,
+    "diagnose_workload": None,
     "get_events": _Route("describe", events=True),
     "get_logs": _Route("logs"),
     "get_resource": _Route("describe"),
     "helm_list_releases": _Route("list", fixed_kind="helmreleases"),
-    "list_operators": _Route("list", fixed_kind="operators"),
+    # `operators` is not a stable alias: discovery leaves it bound to a
+    # real Operator kind when one claims it, so the citation could open an
+    # unrelated table. The read also merges installed subscriptions with
+    # the package catalog, which no single list shows.
+    "list_operators": None,
     "list_resources": _Route("list"),
 }
 
@@ -82,9 +92,10 @@ class EvidenceTarget:
 def target_for(evidence: Evidence) -> EvidenceTarget | None:
     """Where selecting this citation should go, or None if nowhere.
 
-    None for a tool this mapping does not know - a plugin read that has
-    not been classified - and for a single-object view with no object to
-    show. Both are better reported than guessed.
+    None for a tool this mapping does not know (a plugin read that has not
+    been classified), for a read deliberately marked unnavigable because
+    no view can show what it gathered, and for a single-object view with
+    no object to show. All three are better reported than guessed.
     """
     route = NAVIGABLE_TOOLS.get(evidence.tool)
     if route is None:

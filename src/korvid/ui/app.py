@@ -6316,8 +6316,17 @@ class KorvidApp(App[None]):
             # The read defaulted to the pod's first container. Opening
             # every container would show streams that were not the
             # evidence, and could scroll the cited one away.
-            containers = self._get_pod_containers(target.namespace, target.name)
-            container = containers[0] if containers else None
+            #
+            # Resolved from the live manifest, not the store: the cited pod
+            # is often outside the pane's kind and scope, where the store
+            # lookup finds nothing and the fallback reopens everything.
+            try:
+                triples = await self._agent_pod_triples(target.namespace, target.name)
+            except ApiStatusError as exc:
+                return (
+                    f"ERROR: {explain_api_error(exc.status, exc.reason, 'pods', target.namespace)}"
+                )
+            container = triples[0][2] if triples and triples[0][2] else None
         return await self.agent_open_logs(target.name, target.namespace, container=container)
 
     async def _open_evidence_describe(self, ref: str, target: EvidenceTarget) -> str:
