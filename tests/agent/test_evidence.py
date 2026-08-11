@@ -339,6 +339,23 @@ def test_every_read_locator_names_its_target(
     assert item.name == name
 
 
+def test_an_empty_target_argument_produces_no_locator() -> None:
+    """A blank target must not imply a kind it cannot name.
+
+    `{"pod": ""}` would otherwise mint `kind="pods"` with `name=None` - a
+    reference pointing at nothing.
+    """
+    ledger = EvidenceLedger()
+
+    ref = ledger.record("get_logs", {"namespace": "prod", "pod": ""}, "ok")
+    assert ref is not None
+    item = ledger.resolve(ref)
+
+    assert item is not None
+    assert item.kind is None
+    assert item.name is None
+
+
 def test_the_locator_covers_every_registered_cluster_read() -> None:
     """A new read tool must not silently produce an unnavigable citation.
 
@@ -348,13 +365,17 @@ def test_the_locator_covers_every_registered_cluster_read() -> None:
     from korvid.agent.evidence import TARGET_ARGUMENTS
     from korvid.tools.registry import TOOLS_BY_NAME
 
+    handled = set(TARGET_ARGUMENTS) | {"kind", "name"}
     unhandled = []
     for tool, definition in TOOLS_BY_NAME.items():
         if definition.effect != "cluster_read":
             continue
         params = set(definition.schema["function"]["parameters"].get("properties", {}))
-        targets = params - {"namespace", "tail_lines", "container"}
-        if targets and not targets & (set(TARGET_ARGUMENTS) | {"kind", "name"}):
-            unhandled.append((tool, sorted(targets)))
+        # Difference, not intersection: a schema like {kind, name, node}
+        # intersects `handled` and would pass while `_locate` silently
+        # ignores `node`, which is the omission this guard exists to catch.
+        unknown = params - {"namespace", "tail_lines", "container"} - handled
+        if unknown:
+            unhandled.append((tool, sorted(unknown)))
 
     assert unhandled == []
