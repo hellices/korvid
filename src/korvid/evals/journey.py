@@ -30,7 +30,7 @@ _GRADING_KEYS = frozenset(
         "max_tool_calls",
     }
 )
-_CLUSTER_KEYS = frozenset({"objects", "events", "logs"})
+_CLUSTER_KEYS = frozenset({"objects", "events", "logs", "forbidden"})
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,8 @@ class ConversationJourney:
     objects: tuple[dict[str, Any], ...]
     events: tuple[dict[str, Any], ...]
     logs: dict[str, ContainerLogs]
+    #: Reads the fixture withholds, as `Scenario.forbidden`.
+    forbidden: tuple[dict[str, str], ...] = ()
 
 
 def _positive_int_or_none(value: Any, label: str) -> int | None:
@@ -64,6 +66,28 @@ def _positive_int_or_none(value: Any, label: str) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{label} must be a positive integer")
     return value
+
+
+_FORBIDDEN_KEYS = frozenset({"kind", "namespace", "name", "subresource"})
+
+
+def _forbidden(raw: Any, label: str) -> tuple[dict[str, str], ...]:
+    """Parse withheld-read rules, rejecting anything the matcher would
+    silently ignore - a typo'd key would otherwise widen the denial to a
+    whole kind and quietly change what the journey measures."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise ValueError(f"{label} must be a list of rule mappings")
+    rules: list[dict[str, str]] = []
+    for item in raw:
+        _reject_unknown_keys(item, _FORBIDDEN_KEYS, label)
+        if not isinstance(item.get("kind"), str) or not item["kind"]:
+            raise ValueError(f"{label} entries need a 'kind'")
+        if not all(isinstance(value, str) for value in item.values()):
+            raise ValueError(f"{label} values must be strings")
+        rules.append({str(key): str(value) for key, value in item.items()})
+    return tuple(rules)
 
 
 def _targets(raw: Any, label: str) -> tuple[dict[str, Any], ...]:
@@ -128,6 +152,7 @@ def load_journey(path: Path) -> ConversationJourney:
         objects=objects,
         events=events,
         logs=_logs(cluster.get("logs")),
+        forbidden=_forbidden(cluster.get("forbidden"), f"{path.name}: forbidden"),
     )
 
 

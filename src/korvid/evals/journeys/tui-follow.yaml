@@ -1,0 +1,105 @@
+id: tui-follow
+# The other journeys measure what the model concludes. This one measures
+# whether it puts the operator in front of the evidence: korvid is a TUI,
+# and an answer that names a log without opening it leaves the person to
+# find it again by hand.
+root_cause: image_pull_typo
+turns:
+  - user: >-
+      The web pod in namespace front will not start. Find out why.
+    screen: "resource view: pods, namespace front, selected: web-1"
+    grading:
+      must_mention:
+        - [imagepullbackoff, errimagepull, image pull, cannot pull,
+           could not pull, failed to pull, unable to pull]
+        - [v99, wrong tag, bad tag, tag does not exist, nonexistent tag,
+           typo, no such tag, manifest unknown]
+      must_not_mention:
+        - [oomkilled, out of memory]
+        - [readiness probe, liveness probe]
+      expected_evidence:
+        - - tool: diagnose_pod
+            args: {pod: web-1, namespace: front}
+            contains: ImagePullBackOff
+          - tool: get_events
+            args: {kind: pods, name: web-1, namespace: front}
+            contains: manifest unknown
+      max_tool_calls: 3
+  - user: Put the failing pod's details on screen so I can read them myself.
+    screen: "resource view: pods, namespace front, selected: web-1"
+    grading:
+      must_mention:
+        - [web-1]
+      must_not_mention:
+        # An assistant that describes the screen it did not open is worse
+        # than one that admits it cannot: the operator looks for a pane
+        # that is not there.
+        - [cannot open, unable to open, no access to the screen,
+           i cannot show, cannot display]
+      expected_evidence:
+        # A UI tool, not a read: the assertion is that the screen changed.
+        # `open_describe` is graded on the bridge's acknowledgement, so a
+        # model that merely says it opened the pane does not satisfy it.
+        - - tool: open_describe
+            args: {kind: pods, name: web-1, namespace: front}
+            contains: opened describe
+      max_tool_calls: 2
+  - user: Now show me the log for that container.
+    screen: "resource view: pods, namespace front, selected: web-1"
+    grading:
+      must_mention:
+        - [web-1, log]
+      must_not_mention:
+        # The container never started, so there is no application log to
+        # summarize. Producing one is invention.
+        - [the log shows, according to the log, the log says,
+           log output shows]
+      expected_evidence:
+        - - tool: open_logs
+            args: {pod: web-1, namespace: front}
+            contains: opened logs
+      max_tool_calls: 2
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: web-1
+        namespace: front
+        uid: pod-web
+        creationTimestamp: "2026-07-27T06:00:00Z"
+      spec:
+        nodeName: node-a
+        containers: [{name: web, image: shop/web:v99}]
+      status:
+        phase: Pending
+        conditions: [{type: Ready, status: "False"}]
+        containerStatuses:
+          - name: web
+            ready: false
+            restartCount: 0
+            state:
+              waiting:
+                reason: ImagePullBackOff
+                message: Back-off pulling image "shop/web:v99"
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a, uid: node-a}
+      status: {conditions: [{type: Ready, status: "True"}]}
+  events:
+    - type: Warning
+      reason: Failed
+      count: 6
+      lastTimestamp: "2026-07-27T07:30:00Z"
+      message: >-
+        Failed to pull image "shop/web:v99": manifest unknown: manifest
+        unknown
+      involvedObject:
+        {kind: Pod, name: web-1, namespace: front, uid: pod-web}
+  # The container never ran, so there is no log to fetch. Opening the pane
+  # is still the right action - it is how the operator sees that for
+  # themselves - which is why the third turn grades the screen, not a
+  # summary.
+  logs:
+    front/web-1/web:
+      current: []

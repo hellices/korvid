@@ -38,6 +38,9 @@ class _ClusterFixture(Protocol):
     @property
     def logs(self) -> dict[str, ContainerLogs]: ...
 
+    @property
+    def forbidden(self) -> tuple[dict[str, str], ...]: ...
+
 
 def _rebase(value: Any, delta: timedelta) -> Any:
     """Deep-copy `value`, shifting every RFC 3339 timestamp by `delta` and
@@ -107,6 +110,36 @@ class FakeKubeClient(ReadOps):
         delta = datetime.now(UTC) - SCENARIO_NOW
         self._objects: list[dict[str, Any]] = [_rebase(obj, delta) for obj in scenario.objects]
         self._events: list[dict[str, Any]] = [_rebase(event, delta) for event in scenario.events]
+        self._forbidden = tuple(scenario.forbidden)
+
+    def _deny(
+        self,
+        kind: str,
+        namespace: str | None,
+        name: str | None = None,
+        subresource: str | None = None,
+    ) -> None:
+        """Raise 403 when a rule covers this read.
+
+        Omitted rule keys are wildcards, so one rule can withhold a whole
+        kind in a namespace the way a missing RBAC rule does. `kind` is
+        compared on the plural resource name, which is what a Role names.
+        """
+        for rule in self._forbidden:
+            if rule.get("kind", "").lower() not in {kind.lower(), ""}:
+                continue
+            if (rule_ns := rule.get("namespace")) is not None and rule_ns != namespace:
+                continue
+            if (rule_name := rule.get("name")) is not None and rule_name != name:
+                continue
+            if rule.get("subresource") != subresource:
+                continue
+            target = f"{kind}/{subresource}" if subresource else kind
+            raise ApiStatusError(
+                403,
+                f'{target} is forbidden: User "eval" cannot get resource '
+                f'"{target}" in API group "" in the namespace "{namespace}"',
+            )
 
     def _matches(self, manifest: dict[str, Any], meta: ResourceMeta, namespace: str | None) -> bool:
         if str(manifest.get("kind") or "") != meta.kind:
@@ -117,6 +150,7 @@ class FakeKubeClient(ReadOps):
         return True
 
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
+        self._deny(meta.plural, namespace)
         return [
             summary_for(meta.kind, manifest, group=meta.group)
             for manifest in self._objects
@@ -126,6 +160,7 @@ class FakeKubeClient(ReadOps):
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
     ) -> dict[str, Any]:
+        self._deny(meta.plural, namespace, name)
         for manifest in self._objects:
             metadata = manifest.get("metadata") or {}
             if self._matches(manifest, meta, namespace) and str(metadata.get("name")) == name:
@@ -194,6 +229,7 @@ class FakeKubeClient(ReadOps):
         follow: bool = True,
         tail_lines: int = 200,
     ) -> AsyncIterator[LogLine]:
+        self._deny("pods", namespace, pod, "log")
         resolved = self._resolve_container(namespace, pod, container)
         logs = self._scenario.logs.get(f"{namespace}/{pod}/{resolved}")
         if logs is None:

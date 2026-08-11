@@ -1,0 +1,165 @@
+id: compare-namespaces
+# Both namespaces have a warning. Only one has an outage. The failure this
+# journey exists to catch is severity-by-count: `staging` has more warning
+# events, and `prod` is the one that is down.
+root_cause: service_selector_mismatch
+turns:
+  - user: >-
+      Compare namespaces prod and staging. Which one needs attention first,
+      and why?
+    screen: "resource view: pods, all namespaces"
+    grading:
+      must_mention:
+        - [prod]
+        - [staging]
+        # The ordering, stated. `prod` is not merely mentioned first - it
+        # has to be chosen.
+        - [prod first, prod needs attention, prod is worse, prioritize prod,
+           prod is more urgent, start with prod, prod takes priority,
+           prod is the priority, address prod first]
+      must_not_mention:
+        # Choosing staging, or refusing to choose, are the two ways to fail
+        # a comparison.
+        - [staging first, prioritize staging, staging is worse,
+           staging is more urgent, start with staging]
+        - [both equally, equally urgent, same severity, hard to say which,
+           cannot determine which]
+      expected_evidence:
+        - - tool: list_resources
+            args: {kind: pods, namespace: prod}
+            contains: checkout-1
+        - - tool: list_resources
+            args: {kind: pods, namespace: staging}
+            contains: sandbox-1
+      max_tool_calls: 4
+  - user: >-
+      Give me the specific cause in the namespace you picked, and say what
+      is actually wrong in the other one.
+    screen: "resource view: services, namespace prod"
+    grading:
+      must_mention:
+        # prod: the Service selects a label no pod carries, so it has no
+        # endpoints - traffic fails while every pod looks healthy.
+        - [selector, no endpoints, endpoints, label mismatch,
+           does not match, no matching pods, selects no pods]
+        # staging: a restart that recovered. Naming it as recovered, rather
+        # than as a second outage, is the discrimination being measured.
+        - [recovered, resolved, restarted once, back to ready, now ready,
+           now running, healthy again, not currently failing, no longer]
+      must_not_mention:
+        - [staging is down, staging outage, staging is broken]
+        - [oomkilled, image pull, imagepullbackoff]
+      expected_evidence:
+        # The mismatch itself, by either route: the selector the Service
+        # declares, or the empty endpoints that result from it.
+        - - tool: get_resource
+            args: {kind: services, name: checkout, namespace: prod}
+            contains: "app: checkout-v2"
+          - tool: diagnose_service
+            args: {service: checkout, namespace: prod}
+            contains: selector
+        - - tool: get_resource
+            args: {kind: endpoints, name: checkout, namespace: prod}
+            contains: "subsets: []"
+      max_tool_calls: 3
+cluster:
+  objects:
+    # prod: pods are healthy, the Service points at a label none of them has.
+    - kind: Service
+      apiVersion: v1
+      metadata:
+        name: checkout
+        namespace: prod
+        uid: svc-checkout
+        creationTimestamp: "2026-07-27T05:00:00Z"
+      spec:
+        selector: {app: checkout-v2}
+        ports: [{port: 80, targetPort: 8080, protocol: TCP}]
+    # Empty on purpose: the Service selects `app: checkout-v2` and the pod
+    # carries `app: checkout`, so nothing backs it.
+    - kind: Endpoints
+      apiVersion: v1
+      metadata:
+        name: checkout
+        namespace: prod
+        uid: ep-checkout
+        creationTimestamp: "2026-07-27T05:00:00Z"
+      subsets: []
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: checkout-1
+        namespace: prod
+        uid: pod-checkout
+        labels: {app: checkout}
+        creationTimestamp: "2026-07-27T05:00:00Z"
+      spec:
+        nodeName: node-a
+        containers: [{name: checkout, image: shop/checkout:v1}]
+      status:
+        phase: Running
+        podIP: 10.0.0.11
+        conditions: [{type: Ready, status: "True"}]
+        containerStatuses:
+          - name: checkout
+            ready: true
+            restartCount: 0
+            state: {running: {startedAt: "2026-07-27T05:00:05Z"}}
+    # staging: one restart, hours ago, already back to Ready.
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: sandbox-1
+        namespace: staging
+        uid: pod-sandbox
+        labels: {app: sandbox}
+        creationTimestamp: "2026-07-27T02:00:00Z"
+      spec:
+        nodeName: node-b
+        containers: [{name: sandbox, image: lab/sandbox:v5}]
+      status:
+        phase: Running
+        podIP: 10.0.1.11
+        conditions: [{type: Ready, status: "True"}]
+        containerStatuses:
+          - name: sandbox
+            ready: true
+            restartCount: 1
+            state: {running: {startedAt: "2026-07-27T03:00:00Z"}}
+            lastState:
+              terminated:
+                reason: Error
+                exitCode: 1
+                startedAt: "2026-07-27T02:00:00Z"
+                finishedAt: "2026-07-27T02:59:00Z"
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a, uid: node-a}
+      status: {conditions: [{type: Ready, status: "True"}]}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-b, uid: node-b}
+      status: {conditions: [{type: Ready, status: "True"}]}
+  events:
+    # Deliberately lopsided: staging carries more warnings than prod, and
+    # prod is still the answer. A model counting events picks wrong.
+    - type: Warning
+      reason: BackOff
+      count: 3
+      lastTimestamp: "2026-07-27T02:50:00Z"
+      message: Back-off restarting failed container sandbox in pod sandbox-1
+      involvedObject:
+        {kind: Pod, name: sandbox-1, namespace: staging, uid: pod-sandbox}
+    - type: Warning
+      reason: Unhealthy
+      count: 5
+      lastTimestamp: "2026-07-27T02:55:00Z"
+      message: 'Readiness probe failed: connection refused'
+      involvedObject:
+        {kind: Pod, name: sandbox-1, namespace: staging, uid: pod-sandbox}
+  logs:
+    prod/checkout-1/checkout:
+      current: ["checkout listening on 8080"]
+    staging/sandbox-1/sandbox:
+      current: ["sandbox ready"]
+      previous: ["sandbox: transient startup error"]

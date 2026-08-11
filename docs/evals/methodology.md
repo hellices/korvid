@@ -40,8 +40,24 @@ Each turn grades:
 - UI intent such as `open_describe`;
 - malformed calls and runtime errors.
 
-The current pack has three journeys. It is an initial benchmark, not the final
-eight-journey coverage target tracked in #176.
+The pack now covers the eight behaviors #176 asked for:
+
+| journey | what a failure looks like |
+|---|---|
+| `namespace-triage` | names both broken workloads without ordering them |
+| `rollout-owner-chain` | stops at the Deployment instead of following the owner chain |
+| `triage-and-correct` | keeps investigating the resource the user just ruled out |
+| `compare-namespaces` | ranks by warning count, so the noisier namespace wins |
+| `healthy-stop` | invents a fault in a namespace that has none |
+| `logs-to-events` | re-reads a normal log instead of pivoting to events |
+| `rbac-evidence-gap` | hides the withheld read, or fills the gap with a guess |
+| `tui-follow` | describes a pane it never opened |
+
+A journey can withhold reads through `cluster.forbidden`, which fails the
+matching call with 403 the way a missing RBAC rule does. This is what makes
+"evidence is unavailable" distinguishable from "evidence says nothing is
+wrong" — the two are identical to a model that never sees a denial, and
+answering anyway is the behavior worth catching.
 
 ### 3. Live AKS journeys
 

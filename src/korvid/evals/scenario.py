@@ -78,6 +78,12 @@ class Scenario:
     events: tuple[dict[str, Any], ...] = ()
     #: ``namespace/pod/container`` → log tails.
     logs: dict[str, ContainerLogs] = field(default_factory=dict)
+    #: Reads the fixture withholds the way an RBAC rule does. Each entry
+    #: matches on ``kind`` plus optional ``namespace``, ``name`` and
+    #: ``subresource`` (``log``); omitted keys are wildcards. A matching
+    #: read fails 403 instead of returning data, which is what separates
+    #: "evidence is unavailable" from "evidence says nothing is wrong".
+    forbidden: tuple[dict[str, str], ...] = ()
 
 
 def _require_str(data: dict[str, Any], key: str) -> str:
