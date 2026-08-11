@@ -8,7 +8,7 @@ from typing import Any
 
 from korvid.agent.runtime import AgentRuntime
 from korvid.core.config import KorvidConfig
-from korvid.core.store import ResourceStore, Summary
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.logs import LogLine
@@ -726,3 +726,85 @@ async def test_a_citation_with_nowhere_to_go_says_so() -> None:
         out = await app.open_evidence(ref)
 
         assert out.startswith("ERROR:")
+
+
+async def test_a_log_citation_opens_the_container_the_read_used() -> None:
+    """The read defaulted to the pod's first container; so does the citation."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_logs", {"pod": "web-1", "namespace": "default"}, "log line"
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert not out.startswith("ERROR:")
+        # The pod's first container, as the read itself defaulted to -
+        # not every container, which would show streams that were not
+        # the cited evidence.
+        assert "main" in out
+
+
+async def test_a_cluster_wide_list_citation_opens_all_namespaces() -> None:
+    """An omitted namespace on a listing means every namespace.
+
+    Forwarding None would instead keep the pane's current scope, so the
+    citation would open a narrower view than the evidence covered.
+    """
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record("list_resources", {"kind": "pods"}, "web-1")
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert not out.startswith("ERROR:")
+        assert app.current_scope == ALL_NAMESPACES
+
+
+async def test_an_event_citation_on_a_non_pod_says_what_is_shown() -> None:
+    """Describe fetches events for pods only, so the citation says so.
+
+    Silently opening a manifest with none of the cited events, while the
+    answer claims the events support it, is the failure mode: the user
+    would look for evidence that is not on screen (#192 review).
+    """
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_events",
+            {"kind": "deployments", "name": "web", "namespace": "default"},
+            "BackOff",
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert "events are not shown" in out.lower()
+
+
+async def test_an_event_citation_on_a_pod_shows_them_without_a_caveat() -> None:
+    """The pod case is the one describe actually renders events for."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_events", {"kind": "pods", "name": "web-1", "namespace": "default"}, "BackOff"
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert "not shown" not in out.lower()

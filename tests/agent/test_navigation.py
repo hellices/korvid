@@ -80,13 +80,14 @@ def test_a_diagnose_read_opens_the_object_it_diagnosed() -> None:
     assert target.kind == "persistentvolumeclaims"
 
 
-def test_evidence_without_a_target_is_not_navigable() -> None:
+def test_a_single_object_view_with_no_object_is_not_navigable() -> None:
     """A read that names nothing cannot be opened, and says so.
 
     Better than guessing: a citation that opens the wrong object is worse
     than one that reports it cannot be followed.
     """
-    assert target_for(_evidence("helm_list_releases", namespace="prod")) is None
+    assert target_for(_evidence("get_resource", kind="pods", namespace="prod")) is None
+    assert target_for(_evidence("get_logs", namespace="prod")) is None
 
 
 def test_an_unknown_tool_is_not_navigable() -> None:
@@ -116,3 +117,65 @@ def test_a_target_needs_a_view() -> None:
     """An empty view would make the citation open nothing at all."""
     with pytest.raises(ValueError, match="view"):
         EvidenceTarget(view="", kind="pods", name="api-1", namespace=None, container=None)
+
+
+def test_a_log_citation_keeps_the_container_the_read_defaulted_to() -> None:
+    """An omitted container is resolved by the executor, not left open.
+
+    `get_logs` without a container reads the pod's *first* container. If
+    the citation opens every container, the user is shown streams that
+    were not the evidence, and the cited one can be scrolled away
+    (#192 review).
+    """
+    target = target_for(_evidence("get_logs", kind="pods", name="api-1", namespace="prod"))
+
+    assert target is not None
+    assert target.container is None
+    assert target.needs_container_resolution is True
+
+
+def test_an_events_citation_says_it_needs_events() -> None:
+    """Describe fetches events for pods only.
+
+    Routing a Deployment event citation to describe would open a manifest
+    with none of the cited events on it while claiming otherwise.
+    """
+    pod = target_for(_evidence("get_events", kind="pods", name="api-1", namespace="prod"))
+    deployment = target_for(_evidence("get_events", kind="deployments", name="web", namespace="p"))
+
+    assert pod is not None
+    assert deployment is not None
+    assert pod.expects_events is True
+    assert deployment.expects_events is True
+
+
+def test_a_cluster_wide_listing_is_marked_as_such() -> None:
+    """An omitted namespace means every namespace, not the current one."""
+    target = target_for(_evidence("list_resources", kind="pods"))
+
+    assert target is not None
+    assert target.view == "list"
+    assert target.all_namespaces is True
+
+
+def test_a_scoped_listing_is_not_cluster_wide() -> None:
+    target = target_for(_evidence("list_resources", kind="pods", namespace="prod"))
+
+    assert target is not None
+    assert target.all_namespaces is False
+
+
+def test_the_fixed_kind_listings_resolve() -> None:
+    """helm_list_releases and list_operators take no kind argument.
+
+    They were in the table but could never reach it, because the locator
+    leaves kind unset for them - a declaration that disagreed with the
+    runtime (#192 review).
+    """
+    helm = target_for(_evidence("helm_list_releases", namespace="prod"))
+    operators = target_for(_evidence("list_operators", namespace="prod"))
+
+    assert helm is not None
+    assert helm.kind == "helmreleases"
+    assert operators is not None
+    assert operators.kind == "operators"

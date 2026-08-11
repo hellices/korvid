@@ -45,7 +45,7 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker
 
 from korvid.agent.events import AgentError, AgentEvent, ToolCallFinished, ToolCallStarted
-from korvid.agent.navigation import target_for
+from korvid.agent.navigation import EvidenceTarget, target_for
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig, ViewConfig
@@ -6299,16 +6299,43 @@ class KorvidApp(App[None]):
         if target is None:
             return f"ERROR: {ref} has no view to open ({item.tool})"
         if target.view == "logs":
-            if target.name is None or target.namespace is None:
-                return f"ERROR: {ref} does not name a pod to stream"
-            return await self.agent_open_logs(
-                target.name, target.namespace, container=target.container
-            )
+            return await self._open_evidence_logs(ref, target)
         if target.view == "list":
-            return await self.agent_navigate(target.kind or "", namespace=target.namespace)
+            # A listing with no namespace covered every namespace; `None`
+            # would instead be read as "keep the pane's current scope".
+            scope = ALL_NAMESPACES if target.all_namespaces else target.namespace
+            return await self.agent_navigate(target.kind or "", namespace=scope)
+        return await self._open_evidence_describe(ref, target)
+
+    async def _open_evidence_logs(self, ref: str, target: EvidenceTarget) -> str:
+        """Stream the container the cited read actually looked at."""
+        if target.name is None or target.namespace is None:
+            return f"ERROR: {ref} does not name a pod to stream"
+        container = target.container
+        if target.needs_container_resolution:
+            # The read defaulted to the pod's first container. Opening
+            # every container would show streams that were not the
+            # evidence, and could scroll the cited one away.
+            containers = self._get_pod_containers(target.namespace, target.name)
+            container = containers[0] if containers else None
+        return await self.agent_open_logs(target.name, target.namespace, container=container)
+
+    async def _open_evidence_describe(self, ref: str, target: EvidenceTarget) -> str:
+        """Describe the cited object, saying so when its events are absent."""
         if target.kind is None or target.name is None:  # narrowed for typing
             return f"ERROR: {ref} does not name an object to describe"
-        return await self.agent_open_describe(target.kind, target.name, target.namespace)
+        opened = await self.agent_open_describe(target.kind, target.name, target.namespace)
+        if opened.startswith("ERROR:"):
+            return opened
+        if target.expects_events and self._canonical_kind(target.kind) != "pods":
+            # Describe fetches events for pods only, so the cited events
+            # are not on the screen this just opened. Saying so beats the
+            # user hunting for evidence that is not there.
+            return (
+                f"{opened} (note: this evidence includes events, and korvid"
+                " shows events for pods only - the events are not shown here)"
+            )
+        return opened
 
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
         if self._approval_dialog_active():

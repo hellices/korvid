@@ -5,7 +5,7 @@ screen. Deciding *which* screen is a pure mapping from what was read, so
 it lives here rather than in the app: the UI asks one question and gets
 one answer, and the answer is testable without a running Textual app.
 
-Reads that name no single object return None. That is deliberate — a
+Reads that name no single object return None. That is deliberate - a
 citation that opens the wrong resource is worse than one that reports it
 cannot be followed.
 """
@@ -16,27 +16,39 @@ import dataclasses
 
 from korvid.agent.evidence import Evidence
 
+
+@dataclasses.dataclass(frozen=True)
+class _Route:
+    """How one read's citation is opened."""
+
+    view: str
+    #: Kind for reads that take no `kind` argument, so the locator cannot
+    #: supply one. Without this those entries were unreachable: the table
+    #: said "list" and the runtime always returned None (#192 review).
+    fixed_kind: str | None = None
+    #: The read renders events, which the target view must fetch.
+    events: bool = False
+
+
 #: Which view each cluster read is best shown in.
 #:
 #: "describe" for reads about one object, because korvid's describe view
-#: already renders both the manifest and the object's events - so a
-#: `get_events` citation lands where those events are, without a second
-#: view that shows only half the story.
+#: renders the manifest and - for pods - the object's events.
 #:
 #: Stated as a table rather than inferred from the name, so a new read
 #: tool is classified deliberately; `test_every_registered_read_is_classified`
 #: fails until it is.
-NAVIGABLE_TOOLS: dict[str, str] = {
-    "diagnose_pod": "describe",
-    "diagnose_pvc": "describe",
-    "diagnose_service": "describe",
-    "diagnose_workload": "describe",
-    "get_events": "describe",
-    "get_logs": "logs",
-    "get_resource": "describe",
-    "helm_list_releases": "list",
-    "list_operators": "list",
-    "list_resources": "list",
+NAVIGABLE_TOOLS: dict[str, _Route] = {
+    "diagnose_pod": _Route("describe", events=True),
+    "diagnose_pvc": _Route("describe", events=True),
+    "diagnose_service": _Route("describe", events=True),
+    "diagnose_workload": _Route("describe", events=True),
+    "get_events": _Route("describe", events=True),
+    "get_logs": _Route("logs"),
+    "get_resource": _Route("describe"),
+    "helm_list_releases": _Route("list", fixed_kind="helmreleases"),
+    "list_operators": _Route("list", fixed_kind="operators"),
+    "list_resources": _Route("list"),
 }
 
 
@@ -49,6 +61,18 @@ class EvidenceTarget:
     name: str | None
     namespace: str | None
     container: str | None
+    #: The read left the container to the executor, which picks the pod's
+    #: *first* one. Opening every container would show streams that were
+    #: not the evidence, so the caller resolves the same default.
+    needs_container_resolution: bool = False
+    #: The cited evidence includes events, so the target view has to fetch
+    #: them - describe does so for pods only, and a citation that promises
+    #: events must not open a manifest without them.
+    expects_events: bool = False
+    #: The read was not namespace-scoped, which for a listing means every
+    #: namespace. `None` alone cannot say this: the app reads a missing
+    #: namespace as "keep the current scope".
+    all_namespaces: bool = False
 
     def __post_init__(self) -> None:
         if not self.view:
@@ -58,22 +82,26 @@ class EvidenceTarget:
 def target_for(evidence: Evidence) -> EvidenceTarget | None:
     """Where selecting this citation should go, or None if nowhere.
 
-    None for three cases, all of which are better reported than guessed:
-    a tool this mapping does not know (a plugin read that has not been
-    classified), a listing with no kind to list, and a single-object view
-    with no object to show.
+    None for a tool this mapping does not know - a plugin read that has
+    not been classified - and for a single-object view with no object to
+    show. Both are better reported than guessed.
     """
-    view = NAVIGABLE_TOOLS.get(evidence.tool)
-    if view is None:
+    route = NAVIGABLE_TOOLS.get(evidence.tool)
+    if route is None:
         return None
-    if evidence.kind is None:
+    kind = route.fixed_kind or evidence.kind
+    if kind is None:
         return None
-    if view != "list" and evidence.name is None:
+    is_list = route.view == "list"
+    if not is_list and evidence.name is None:
         return None
     return EvidenceTarget(
-        view=view,
-        kind=evidence.kind,
-        name=None if view == "list" else evidence.name,
+        view=route.view,
+        kind=kind,
+        name=None if is_list else evidence.name,
         namespace=evidence.namespace,
         container=evidence.container,
+        needs_container_resolution=route.view == "logs" and evidence.container is None,
+        expects_events=route.events,
+        all_namespaces=is_list and evidence.namespace is None,
     )
