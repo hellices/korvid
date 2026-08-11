@@ -6,12 +6,14 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
+from korvid.agent.runtime import AgentRuntime
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.tools.executor import RecordedExecution
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.log_pane import LogPane
@@ -646,3 +648,81 @@ async def test_agent_open_logs_reports_panel_truncation() -> None:
         await pilot.pause()
         assert not out.startswith("ERROR:")
         assert f"first {MAX_PANELS} of {total}" in out
+
+
+def _with_runtime(app: KorvidApp) -> AgentRuntime:
+    """Attach a minimal runtime so the app has an evidence ledger.
+
+    The citation entry point reads the ledger off the live runtime; this
+    harness does not otherwise need an agent.
+    """
+    runtime = AgentRuntime(_SilentProvider(), _NoToolExecutor())
+    app._agent_runtime = runtime
+    return runtime
+
+
+class _SilentProvider:
+    @property
+    def name(self) -> str:
+        return "silent"
+
+    async def complete(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, stream: bool = True
+    ) -> AsyncIterator[dict[str, Any]]:  # pragma: no cover - never driven here
+        yield {"type": "done"}
+
+
+class _NoToolExecutor(RecordedExecution):
+    async def execute(
+        self, name: str, arguments: dict[str, Any]
+    ) -> str:  # pragma: no cover - never driven here
+        return ""
+
+
+async def test_opening_a_citation_shows_the_evidence_it_points_at() -> None:
+    """Selecting [E1] puts the read that supports the claim on screen.
+
+    The whole point of a reference is that it can be followed; a citation
+    the user cannot open is decoration (issue #192).
+    """
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_resource", {"kind": "pods", "name": "web-1", "namespace": "default"}, "ok"
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert isinstance(app.screen, DescribeScreen)
+        assert not out.startswith("ERROR:")
+
+
+async def test_opening_an_unknown_citation_reports_it() -> None:
+    """A reference korvid never minted resolves to nothing, visibly."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _with_runtime(app)
+
+        out = await app.open_evidence("E9")
+
+        assert out.startswith("ERROR:")
+        assert "E9" in out
+
+
+async def test_a_citation_with_nowhere_to_go_says_so() -> None:
+    """Better than opening the wrong object."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record("helm_list_releases", {"namespace": "default"}, "ok")
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+
+        assert out.startswith("ERROR:")

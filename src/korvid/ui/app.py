@@ -45,6 +45,7 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker
 
 from korvid.agent.events import AgentError, AgentEvent, ToolCallFinished, ToolCallStarted
+from korvid.agent.navigation import target_for
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig, ViewConfig
@@ -6276,6 +6277,38 @@ class KorvidApp(App[None]):
 
     def _mark_agent_action(self, summary: str) -> None:
         self.notify(summary, title="agent", severity="information", timeout=3)
+
+    async def open_evidence(self, ref: str) -> str:
+        """Open the read a citation points at (issue #192).
+
+        The reference is resolved against the ledger, never against the
+        answer text: a model that writes `[E9]` cannot make korvid open
+        anything, because `E9` is not something korvid minted.
+
+        Reuses the agent's own view entry points, so a citation cannot
+        reach a screen the agent itself is not allowed to open - the
+        approval-dialog guard included.
+        """
+        runtime = self.agent_runtime
+        if runtime is None:
+            return "ERROR: the agent is not configured in this session"
+        item = runtime.evidence.resolve(ref)
+        if item is None:
+            return f"ERROR: {ref} is not evidence from this turn"
+        target = target_for(item)
+        if target is None:
+            return f"ERROR: {ref} has no view to open ({item.tool})"
+        if target.view == "logs":
+            if target.name is None or target.namespace is None:
+                return f"ERROR: {ref} does not name a pod to stream"
+            return await self.agent_open_logs(
+                target.name, target.namespace, container=target.container
+            )
+        if target.view == "list":
+            return await self.agent_navigate(target.kind or "", namespace=target.namespace)
+        if target.kind is None or target.name is None:  # narrowed for typing
+            return f"ERROR: {ref} does not name an object to describe"
+        return await self.agent_open_describe(target.kind, target.name, target.namespace)
 
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
         if self._approval_dialog_active():
