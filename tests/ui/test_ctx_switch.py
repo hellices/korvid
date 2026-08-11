@@ -11,6 +11,8 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
@@ -917,6 +919,52 @@ async def test_debug_fallback_cancelled_when_context_switched(tmp_path: Path) ->
             label="debug fallback epoch refusal",
         )
         assert len(app.screen_stack) == 1
+
+
+async def test_debug_fallback_refused_when_the_context_switches_during_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-check at offer time is not the last gap (#236).
+
+    The approval dialog is itself an awaited gap. `kubectl debug` addresses
+    the pod by name, and the uid re-check fails open when no uid is known,
+    so an approval answered after a switch would attach an ephemeral
+    container to a same-named pod on the new cluster.
+    """
+    from korvid.ui.widgets.confirm_screen import ConfirmScreen
+
+    env = _CtxEnv(audit_path=tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        started: list[tuple[str, ...]] = []
+
+        async def _record(
+            namespace: str,
+            name: str,
+            container: str | None,
+            approved_uid: str | None,
+            image: str = "busybox",
+        ) -> None:  # pragma: no cover - must never run
+            started.append((namespace, name, image))
+
+        monkeypatch.setattr(app._shell, "run_debug", _record)
+        app._shell._confirm_debug("default", "pod-a", None, 1, None, "busybox", app._ctx_epoch)
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+        app._ctx_epoch += 1
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any(
+                "debug fallback" in n.message and "kube context changed" in n.message
+                for n in app._notifications
+            ),
+            label="stale approval refusal",
+        )
+        # The warning alone proves nothing: without this, deleting the
+        # callback's `return` would still pass while kubectl debug ran
+        # against the new context.
+        assert started == []
 
 
 async def test_switch_adopts_context_namespace_as_session_default() -> None:

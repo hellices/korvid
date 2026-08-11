@@ -702,7 +702,6 @@ class KorvidApp(App[None]):
             get_manifest=lambda: self._get_manifest,
             pod_containers=lambda ns, name: self._get_pod_containers(ns, name),
             node_target=lambda action: self._node_target(action),
-            confirm_screen=lambda *a, **k: self._confirm_screen(*a, **k),
             target_uid=lambda kind, ns, name: self._target_uid(kind, ns, name),
             settings=lambda: ShellSettings(
                 kube_context=self.config.kube_context,
@@ -4417,6 +4416,50 @@ class KorvidApp(App[None]):
             _done,
         )
 
+    async def _push_interactive_confirmation(
+        self,
+        title: str,
+        operation: str,
+        *,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        epoch: int,
+        op_factory: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Approval for an operation that runs as an interactive subprocess.
+
+        `ConfirmScreen`, like every other write: its creation-time key
+        cutoff discards input buffered before the prompt existed, so a
+        queued Enter can never approve a privileged pod the user has not
+        seen.
+
+        The dialog is an awaited gap, so the epoch is rechecked on the way
+        out. Without it an approval left open across a `:ctx` switch would
+        start the subprocess against whichever cluster is current when the
+        user finally answers - and for these flows kubectl addresses the
+        target by name, so a same-named node or pod elsewhere would be
+        accepted.
+
+        The intent audit belongs to the operation here, not to the gate:
+        these flows record the pod kubectl actually created, its uid, and
+        the session outcome, which `_run_write` cannot know.
+        """
+
+        def _done(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            if self._ctx_switching or epoch != self._ctx_epoch:
+                self.notify(
+                    f"{action} {self._gvr_label(meta)}/{name} cancelled - the kube context changed",
+                    severity="warning",
+                )
+                return
+            self.run_worker(op_factory())
+
+        await self.push_screen(self._confirm_screen(title, operation), _done)
+
     async def action_delete_resource(self) -> None:
         """Ctrl-D: delete the selected resource behind a layered confirmation
         (cluster-scoped kinds require typing the resource name). On the helm
@@ -7725,6 +7768,29 @@ class AppWriteGate(WriteGate):
             preview=preview,
             preview_title=preview_title,
             managed_note=managed_note,
+        )
+
+    async def confirm_interactive(
+        self,
+        title: str,
+        operation: str,
+        *,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        epoch: int,
+        op_factory: Callable[[], Awaitable[None]],
+    ) -> None:
+        await self._app._push_interactive_confirmation(
+            title,
+            operation,
+            action=action,
+            meta=meta,
+            namespace=namespace,
+            name=name,
+            epoch=epoch,
+            op_factory=op_factory,
         )
 
     def context_intact(

@@ -864,3 +864,39 @@ async def test_suspend_not_supported_refuses_gracefully_and_cleans_up(
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     ours = [e for e in entries if e["action"] == "node-shell"]
     assert ours[-1]["outcome"].startswith("error: suspend not supported")
+
+
+async def test_node_shell_refused_when_the_context_switches_while_the_dialog_is_open(
+    tmp_path: Path,
+) -> None:
+    """The approval is bound to the cluster it was asked about (#236).
+
+    `kubectl debug node/` addresses the node by name, so an approval left
+    open across a `:ctx` switch would start a privileged pod - with the
+    host filesystem mounted at /host - on whichever cluster is current when
+    the user finally presses y. The uid re-check cannot save this: a
+    same-named node elsewhere has its own uid, and the flow fails open when
+    no uid is known.
+    """
+    rec = DeleteRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    run_fake, run_calls = _kubectl_run()
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test() as pilot:
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            app._ctx_epoch += 1  # a switch completed while the dialog was open
+            await pilot.press("y")
+            await until(
+                pilot,
+                lambda: any(
+                    "node shell" in n.message and "kube context changed" in n.message
+                    for n in app._notifications
+                ),
+                label="stale approval refusal",
+            )
+    assert call_records == []
+    assert not any("debug" in argv for argv in run_calls)
+    assert not audit_path.is_file() or "intent" not in audit_path.read_text()

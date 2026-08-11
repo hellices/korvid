@@ -5,18 +5,17 @@ the ephemeral-container `kubectl debug` fallback offered when that fails
 (typically a distroless image with no shell), and the node shell that runs
 a privileged debug pod behind the approval gate (issue #46).
 
-The security perimeter stays with the app, but note *how*: these flows do
-not use `WriteGate.confirm` / `WriteGate.run`. They build a `ConfirmScreen`
-through the injected factory and drive their own audited subprocess, which
-is what they did before the extraction and is deliberately unchanged here -
-a "no behaviour change" refactor is the wrong place to reroute an approval
-path. What they do share is the rest of the perimeter: `permitted` for the
-RBAC pre-check, `epoch` / `switching` for revalidation across an awaited
-gap, `reads_allowed` to refuse mid-`:ctx` starts, and `reserve_write` so an
-approved shell counts as an in-flight cluster write.
-
-Routing these two lifecycles through a typed gate operation is worth doing;
-it is a behavioural change and belongs in its own review.
+The security perimeter stays with the app. Approval goes through
+`WriteGate.confirm_interactive` (issue #236) rather than a `ConfirmScreen`
+built here: these flows cannot use `WriteGate.confirm`, whose contract is
+"audit the intent, then await the operation", because their approved form
+is a subprocess that suspends the app and audits facts the gate cannot
+know - the pod kubectl actually created, its uid, and the session outcome.
+So the split is deliberate: the gate owns the dialog and the revalidation
+after it, the flow owns its own fail-closed audit and its decorated,
+reserved coroutine. The rest of the perimeter is shared as before -
+`permitted` for the RBAC pre-check, `epoch` / `switching` for revalidation
+across an awaited gap, and `reads_allowed` to refuse mid-`:ctx` starts.
 
 Suspending the terminal is why `UiSurface` grew `suspend`, `refresh` and
 `call_from_thread`: an interactive child process takes the screen, and the
@@ -59,7 +58,7 @@ from korvid.ui.shell import (
 )
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
-from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt
+from korvid.ui.widgets.confirm_screen import ImagePrompt
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.write_gate import ReservedWrite, WriteGate
 
@@ -164,7 +163,6 @@ class ShellController:
         get_manifest: Callable[[], Callable[..., Any] | None],
         pod_containers: Callable[[str, str], tuple[str, ...]],
         node_target: Callable[[str], tuple[WriteOps, ResourceMeta, str, str | None] | None],
-        confirm_screen: Callable[..., ConfirmScreen],
         settings: Callable[[], ShellSettings],
         target_uid: Callable[[str, str | None, str], Awaitable[str | None]],
     ) -> None:
@@ -176,7 +174,6 @@ class ShellController:
         self._get_manifest_fn = get_manifest
         self._pod_containers = pod_containers
         self._node_target_fn = node_target
-        self._confirm_screen_fn = confirm_screen
         # Read at call time: a `:ctx` switch retargets kube_context.
         self._settings = settings
         self._target_uid_fn = target_uid
@@ -422,7 +419,7 @@ class ShellController:
 
         # Choosing an image is read-only: even if input buffered before this
         # asynchronous picker existed selects an entry, the pod mutation is
-        # still gated by the ConfirmScreen pushed in _confirm_debug, whose
+        # still gated by the approval dialog _confirm_debug asks for, whose
         # creation-time key cutoff discards such buffered keystrokes.
         # Air-gapped configs without a matching mapping produce no options:
         # the picker then offers only the custom-image prompt.
@@ -481,35 +478,37 @@ class ShellController:
     ) -> None:
         """Approval gate for the debug fallback with the chosen image.
 
-        ConfirmScreen, not a generic picker: its creation-time key cutoff
-        discards any input buffered before the prompt existed - a queued
-        Enter or y must never start a pod mutation the user has not seen.
+        Goes through the gate rather than pushing a dialog here, so the
+        approval and the epoch recheck after it have one implementation
+        shared with the node shell (#236).
         """
         target = f"{name}/{container}" if container else name
-
-        def _on_choice(confirmed: bool | None) -> None:
-            if not confirmed:
-                return
-            if self._gate.switching() or epoch != self._gate.epoch():
-                # The image picker / approval stayed open across a context
-                # switch: kubectl debug would mutate a same-named pod on the
-                # new cluster (the uid re-check fails open without a uid).
-                self._ui.notify(
-                    f"Debug fallback for {target} cancelled - the kube context changed",
-                    severity="warning",
-                )
-                return
-            self._ui.run_worker(self.run_debug(namespace, name, container, approved_uid, image))
-
-        self._ui.push_screen(
-            self._confirm_screen_fn(
+        pods_meta = self._view.aliases().get("pods")
+        if pods_meta is None:
+            # Without the meta there is no gate call to make, and starting a
+            # pod mutation outside the gate is not an option.
+            self._ui.notify(
+                "Debug fallback unavailable: the pods resource is unknown", severity="error"
+            )
+            return
+        # The gate owns the dialog and the post-approval epoch recheck: the
+        # picker/approval may stay open across a context switch, and kubectl
+        # debug would then mutate a same-named pod on the new cluster (the
+        # uid re-check fails open without a uid).
+        self._ui.run_worker(
+            self._gate.confirm_interactive(
                 f"Shell failed in {target} (exit {exit_code})",
                 f"kubectl debug: attach a {image} debug container to pod"
                 f" {name}{self._view.write_locus(namespace)} - the target image likely"
                 " has no sh/bash (distroless). Note: the ephemeral container stays"
                 " in the pod spec until restart.",
-            ),
-            _on_choice,
+                action="debug fallback",
+                meta=pods_meta,
+                namespace=namespace,
+                name=name,
+                epoch=epoch,
+                op_factory=lambda: self.run_debug(namespace, name, container, approved_uid, image),
+            )
         )
 
     @_tracks_cluster_write
@@ -562,20 +561,19 @@ class ShellController:
             # and never stack over a dialog that opened meanwhile.
             return
 
-        def _on_choice(confirmed: bool | None) -> None:
-            if confirmed:
-                self._ui.run_worker(self._run_node_shell(ops, name, shell_ns, image, uid))
-
-        self._ui.push_screen(
-            self._confirm_screen_fn(
-                f"Node shell on {name}",
-                f"kubectl debug node/{name}: creates a privileged debug pod"
-                f" (image {image}) in namespace {shell_ns} with the node's"
-                " filesystem mounted at /host (uses --profile=sysadmin;"
-                " requires kubectl 1.30+). The pod is deleted when the shell"
-                " exits. This action is audit-logged.",
-            ),
-            _on_choice,
+        await self._gate.confirm_interactive(
+            f"Node shell on {name}",
+            f"kubectl debug node/{name}: creates a privileged debug pod"
+            f" (image {image}) in namespace {shell_ns} with the node's"
+            " filesystem mounted at /host (uses --profile=sysadmin;"
+            " requires kubectl 1.30+). The pod is deleted when the shell"
+            " exits. This action is audit-logged.",
+            action="node shell",
+            meta=meta,
+            namespace=shell_ns,
+            name=name,
+            epoch=epoch,
+            op_factory=lambda: self._run_node_shell(ops, name, shell_ns, image, uid),
         )
 
     @_tracks_cluster_write

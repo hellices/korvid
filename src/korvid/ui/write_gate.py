@@ -51,6 +51,45 @@ class WriteGate(ABC):
         """
 
     @abstractmethod
+    async def confirm_interactive(
+        self,
+        title: str,
+        operation: str,
+        *,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        epoch: int,
+        op_factory: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Approve an operation whose approved form is an interactive subprocess.
+
+        `confirm` suits a write that is an API call: the gate audits the
+        intent and awaits the operation. The shell flows - the debug
+        fallback and `kubectl debug node/` - cannot use it, because the
+        approved operation suspends the app and audits facts the gate
+        cannot know: the pod kubectl actually created, its uid, and the
+        session's exit outcome. They audit those themselves, fail-closed,
+        and reserve the write on their own decorated coroutine.
+
+        What they must not own is the approval. This is the single
+        implementation of that half, so both journeys carry the same
+        checked keywords, and the revalidation after the dialog cannot be
+        forgotten by a future edit: the dialog is an awaited gap, and an
+        approval left open across a `:ctx` switch would otherwise start a
+        privileged pod on whichever cluster is current when the user
+        finally presses y.
+
+        Args:
+            epoch: captured before the dialog is pushed. A switch that
+                started or completed while it was open invalidates the
+                approval.
+            op_factory: builds the operation only on approval, so a
+                declined dialog constructs nothing.
+        """
+
+    @abstractmethod
     def context_intact(
         self,
         action: str,
