@@ -135,6 +135,38 @@ _SCOPE_BREAKERS = frozenset(
 )
 
 
+#: Linking verbs that can carry an all-clear predicate.
+_COPULAS = frozenset(
+    {"is", "are", "was", "were", "looks", "look", "seems", "seem", "appears", "appear"}
+)
+
+#: Tokens allowed between the copula and the adjective ("is still fine").
+_EXCULPATION_FILLER = frozenset(
+    {"still", "all", "quite", "perfectly", "completely", "totally", "to", "be"}
+)
+
+#: Adjectives that assert the named thing is *not* the fault. Deliberately
+#: narrow: "unaffected", "serving" and "ready" are required claims in the
+#: bundled pack, so admitting them here would reject correct answers. For
+#: the same reason "working" and "good" are absent - "the liveness probe is
+#: working too slowly and timing out" is a fault claim, and exculpating it
+#: would drop the very diagnosis being graded.
+_ALL_CLEAR = frozenset(
+    {
+        "fine",
+        "normal",
+        "ok",
+        "okay",
+        "healthy",
+        "correct",
+        "clean",
+        "green",
+        "passing",
+        "succeeding",
+    }
+)
+
+
 def _clause_tokens(text: str) -> tuple[list[str], list[int]]:
     """Flat token list plus, per token, the id of the clause it came from."""
     tokens: list[str] = []
@@ -146,21 +178,26 @@ def _clause_tokens(text: str) -> tuple[list[str], list[int]]:
     return tokens, clause_ids
 
 
-def _match_starts(keyword: str, answer_tokens: list[str]) -> list[int]:
-    """Start indices of every token run matching the keyword."""
+def _match_spans(keyword: str, answer_tokens: list[str]) -> list[tuple[int, int]]:
+    """(start, end) token index pairs for every run matching the keyword.
+
+    `end` is exclusive, so it is where a trailing predicate would begin.
+    """
     target = "".join(_tokens(keyword))
     if not target:
         return []
-    starts: list[int] = []
+    spans: list[tuple[int, int]] = []
     for start in range(len(answer_tokens)):
         run = ""
+        end = start
         for token in answer_tokens[start:]:
             run += token
+            end += 1
             if len(run) >= len(target):
                 break
         if run == target:
-            starts.append(start)
-    return starts
+            spans.append((start, end))
+    return spans
 
 
 def _negated(start: int, answer_tokens: list[str], clause_ids: list[int]) -> bool:
@@ -177,13 +214,50 @@ def _negated(start: int, answer_tokens: list[str], clause_ids: list[int]) -> boo
     return False
 
 
-def _mentions_positively(keyword: str, answer_tokens: list[str], clause_ids: list[int]) -> bool:
-    """True when some match of the keyword is *not* under an earlier
-    negator's scope — "the pod is not healthy" must not satisfy a required
-    "healthy" claim (negative controls catch over-diagnosis)."""
+def _exculpated(end: int, answer_tokens: list[str], clause_ids: list[int]) -> bool:
+    """True when the match is followed, in its own clause, by a predicate
+    declaring it *not* the problem — "the liveness probe is fine".
+
+    This is the positive-grammar spelling of a negation, and a required
+    group naming a topic is otherwise satisfied by ruling that topic out.
+    Only a copula plus an all-clear adjective counts: scanning for any
+    reassuring word would reject "api-5c2f is unaffected", which is a
+    required claim elsewhere in the pack.
+    """
+    if end >= len(answer_tokens):
+        return False
+    index = end
+    clause = clause_ids[end - 1]
+    while index < len(answer_tokens) and clause_ids[index] == clause:
+        token = answer_tokens[index]
+        if token in _SCOPE_BREAKERS or token in _NEGATORS:
+            return False
+        if token in _ALL_CLEAR:
+            return True
+        if token not in _COPULAS and token not in _EXCULPATION_FILLER:
+            return False
+        index += 1
+    return False
+
+
+def _mentions_positively(
+    keyword: str,
+    answer_tokens: list[str],
+    clause_ids: list[int],
+    *,
+    exculpation: bool = True,
+) -> bool:
+    """True when some match of the keyword is neither under an earlier
+    negator's scope nor followed by an all-clear predicate — "the pod is not
+    healthy" and "the probe is fine" must both fail to satisfy the claim they
+    name (negative controls catch over-diagnosis).
+
+    `exculpation` is off for a scenario with no fault, where the all-clear is
+    the answer being graded rather than a way of dodging it."""
     return any(
         not _negated(start, answer_tokens, clause_ids)
-        for start in _match_starts(keyword, answer_tokens)
+        and not (exculpation and _exculpated(end, answer_tokens, clause_ids))
+        for start, end in _match_spans(keyword, answer_tokens)
     )
 
 
@@ -297,17 +371,31 @@ def _satisfies(evidence: Evidence, record: ToolRecord) -> bool:
 def grade(scenario: Scenario, answer: str, records: list[ToolRecord]) -> GradeResult:
     """Grade one run: the final answer text plus the recorded tool trace."""
     answer_tokens, clause_ids = _clause_tokens(answer)
+    # Polarity is not symmetric here. A scenario with no fault is graded on
+    # an all-clear, so "the endpoints are healthy" is its required answer
+    # rather than a way of dodging the question - exculpation must not
+    # suppress it. A *forbidden* keyword is the opposite in every scenario:
+    # "the image pull looks normal" rules the pull out, and counting it as a
+    # positive diagnosis would reject the answer for saying the truth.
+    requires_all_clear = scenario.root_cause == "none"
+
+    def claims(keyword: str) -> bool:
+        return _mentions_positively(
+            keyword, answer_tokens, clause_ids, exculpation=not requires_all_clear
+        )
+
+    def diagnoses(keyword: str) -> bool:
+        return _mentions_positively(keyword, answer_tokens, clause_ids, exculpation=True)
+
     missing_mentions = tuple(
-        group
-        for group in scenario.must_mention
-        if not any(_mentions_positively(alt, answer_tokens, clause_ids) for alt in group)
+        group for group in scenario.must_mention if not any(claims(alt) for alt in group)
     )
     forbidden_mentions = tuple(
         # One violation per group: alternates are spellings of the same
         # claim, and token-run matching makes several of them hit at once.
-        next(alt for alt in group if _mentions_positively(alt, answer_tokens, clause_ids))
+        next(alt for alt in group if diagnoses(alt))
         for group in scenario.must_not_mention
-        if any(_mentions_positively(alt, answer_tokens, clause_ids) for alt in group)
+        if any(diagnoses(alt) for alt in group)
     )
     missing_evidence = tuple(
         group

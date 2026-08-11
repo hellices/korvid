@@ -307,6 +307,127 @@ def test_grade_negation_scope_covers_longer_rule_outs() -> None:
     assert result.forbidden_mentions == ()
 
 
+def test_grade_exculpatory_predicate_does_not_satisfy_a_required_claim() -> None:
+    """ "The liveness probe is fine" must not satisfy a required "liveness
+    probe" claim.
+
+    A required group naming a *topic* rather than a *claim* is satisfied by
+    saying the topic is not the problem - the exact opposite of what the
+    group exists to require. The grader already refuses "not X"; declaring X
+    healthy is the same assertion in positive grammar, and it appeared in
+    four of the eight bundled journeys.
+    """
+    scenario = _scenario(
+        must_mention=(("liveness probe",),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    exculpated = grade(scenario, "The liveness probe is fine; look elsewhere.", [])
+    assert not exculpated.diagnosis_success
+    assert exculpated.missing_mentions == (("liveness probe",),)
+    asserted = grade(scenario, "The liveness probe failed 27 times.", [])
+    assert asserted.diagnosis_success
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The image pull looks normal.",
+        "The image pull seems correct.",
+        "The image pull is ok.",
+        "The image pull appears healthy.",
+    ],
+)
+def test_grade_exculpatory_predicates_cover_the_common_phrasings(answer: str) -> None:
+    """One spelling of "it is fine" closed is no help if the others are open."""
+    scenario = _scenario(
+        must_mention=(("image pull",),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    assert not grade(scenario, answer, []).diagnosis_success
+
+
+def test_grade_exculpation_is_off_for_a_negative_control() -> None:
+    """ "The service endpoints are healthy" is the *correct* answer when the
+    scenario has no fault.
+
+    Suppressing an entity match because a healthy predicate follows it is
+    right in a fault scenario and exactly wrong in a negative control, where
+    the all-clear is the claim being graded. Without this the bundled
+    `healthy-service-endpoints` scenario rejects its own answer.
+    """
+    scenario = _scenario(
+        root_cause="none",
+        must_mention=(("healthy", "no issues"), ("endpoints", "endpoint")),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    assert grade(scenario, "The service endpoints are healthy.", []).diagnosis_success
+
+
+def test_grade_exculpation_stays_on_for_forbidden_keywords() -> None:
+    """Polarity is not symmetric.
+
+    In a negative control the required all-clear must survive, but a
+    *forbidden* keyword ruled out with an all-clear predicate is still ruled
+    out: "the image pull looks normal" is not a positive image-pull
+    diagnosis. Disabling exculpation for the whole scenario rejected the
+    correct answer for telling the truth.
+    """
+    scenario = _scenario(
+        root_cause="none",
+        must_mention=(("healthy",),),
+        must_not_mention=(("image pull",),),
+        expected_evidence=(),
+    )
+    result = grade(scenario, "Everything is healthy; the image pull looks normal.", [])
+    assert result.forbidden_mentions == ()
+    assert result.diagnosis_success
+
+
+def test_grade_does_not_exculpate_a_qualified_fault_claim() -> None:
+    """ "The liveness probe is working too slowly and timing out" is a fault
+    claim. `working` is reassuring only until the qualifier arrives, so it
+    is not in the all-clear set at all."""
+    scenario = _scenario(
+        must_mention=(("liveness probe",),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    answer = "The liveness probe is working too slowly and timing out."
+    assert grade(scenario, answer, []).diagnosis_success
+
+
+def test_grade_exculpation_does_not_reach_past_a_scope_breaker() -> None:
+    """Exculpation must not swallow a claim in a later clause.
+
+    "The image pull failed and the node is fine" asserts the pull failure;
+    a rule that scanned forward without stopping would drop it, which is the
+    mirror of the mistake being fixed - rejecting the truth to catch a lie.
+    """
+    scenario = _scenario(
+        must_mention=(("image pull",),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    assert grade(scenario, "The image pull failed and the node is fine.", []).diagnosis_success
+
+
+def test_grade_exculpation_leaves_a_still_serving_claim_intact() -> None:
+    """ "api-5c2f is unaffected" is a required claim in the rollout journey.
+
+    Treating every reassuring adjective as exculpatory would reject it. Only
+    predicates that say *this is not the problem* count.
+    """
+    scenario = _scenario(
+        must_mention=(("api-5c2f",),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    assert grade(scenario, "The old ReplicaSet api-5c2f is unaffected.", []).diagnosis_success
+
+
 def test_grade_negation_stops_at_sentence_boundaries() -> None:
     """A negator in the previous sentence must not negate this one."""
     scenario = _scenario(

@@ -63,6 +63,31 @@ denial that quietly allows everything. This is what makes
 wrong" — the two are identical to a model that never sees a denial, and
 answering anyway is the behavior worth catching.
 
+#### Every turn is pinned in both directions
+
+A grading rule nobody has run is a guess. `_JOURNEY_CASES` in
+`tests/evals/test_journey.py` holds, for every turn of every bundled
+journey, at least one answer that must be **accepted** and one that must be
+**rejected**, and a test refuses to let a turn ship without both.
+
+This exists because the rules failed in a consistent way. A required group
+that lists a *topic* rather than a *claim* is satisfied by ruling that topic
+out: "the liveness probe is fine" satisfied a group requiring the model to
+report a liveness probe failure, in four of the eight journeys. Related
+shapes: a group of bare nouns (`configuration`, `endpoints`) is satisfied by
+naming the subject rather than saying what is wrong with it; a positive
+ordering requirement with no mirror prohibition lets an answer concede the
+right order and then rank the other way; and keyword groups cannot bind a
+claim to a subject, so "api-7b9d-x1 is still running, while api-5c2f has
+been scaled away" satisfied a turn asking whether the *old* ReplicaSet still
+serves.
+
+The grader now treats an all-clear predicate (`is fine`, `looks normal`,
+`seems correct`) as the positive-grammar spelling of a negation, so it no
+longer credits a required claim to an answer that rules it out. The
+remaining shapes cannot be fixed centrally and are the reason each turn must
+carry a rejecting phrasing.
+
 ### 3. Live AKS journeys
 
 The live journey targets actual Kubernetes resources in the dedicated

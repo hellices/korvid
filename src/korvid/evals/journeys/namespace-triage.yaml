@@ -49,8 +49,26 @@ turns:
     grading:
       must_mention:
         # The cause of the crash loop, from the log the fixture does supply.
-        - [dsn, database url, environment variable, env var, missing config,
-           configuration]
+        # Subject and absence in one keyword. A bare noun group
+        # ("environment variable") was satisfied by naming the topic, and
+        # splitting it into two groups was no better: "DATABASE_DSN is
+        # configured; shipper is missing one replica" satisfied both while
+        # asserting the opposite - a separate absence group binds to
+        # nothing, so any "missing" in the answer settles it.
+        - [dsn is missing, missing dsn, dsn is not set, dsn is unset,
+           database_dsn is missing, missing database_dsn,
+           database_dsn is not set, database url is missing,
+           missing database url, environment variable is missing,
+           missing environment variable, env var is missing,
+           missing env var, config is missing, missing config,
+           configuration is missing, missing configuration,
+           dsn was never set, database_dsn was never set,
+           # Contractions tokenize apart ("isn't" -> isn, t), so the
+           # contracted spelling of an accepted claim needs its own entry.
+           dsn isn't set, database_dsn isn't set,
+           dsn wasn't set, database_dsn wasn't set,
+           config isn't set, configuration isn't set,
+           environment variable isn't set, env var isn't set]
         # The comparative judgement the second turn exists to force: shipper
         # is degraded, not down - 2 of 3 replicas are ready.
         - [still serving, still available, partially, reduced capacity,
@@ -58,6 +76,20 @@ turns:
       must_not_mention:
         - [shipper is down, shipper is unavailable, complete outage,
            total outage]
+        # The DSN belongs to invoicer. Requiring the absence claim binds it
+        # to the DSN but not to a workload, so "Shipper's DATABASE_DSN is
+        # missing ... invoicer failed for another reason" satisfied the
+        # group while attributing the fault to the wrong one. Binding the
+        # requirement to invoicer instead would reject the natural
+        # phrasing - "invoicer-1 crashloops because DATABASE_DSN is
+        # missing" carries the subject through `because`, not adjacency -
+        # so the misattribution is what is banned.
+        - [shipper dsn, shipper's dsn, shipper database_dsn,
+           shipper's database_dsn, shipper is missing its dsn,
+           shipper is missing its database_dsn, shipper's database url,
+           shipper's environment variable, shipper's env var,
+           shipper's config, shipper's configuration,
+           shipper is missing its config]
         - [oomkilled, out of memory]
       expected_evidence:
         # The container is crashlooping, so the line that names the cause is
