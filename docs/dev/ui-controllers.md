@@ -52,7 +52,9 @@ So the boundaries that matter are named:
 
 - **`WriteGate`** (`ui/write_gate.py`) — approval, revalidation, the
   fail-closed audit precondition, and the context epoch. One implementation,
-  `AppWriteGate`, adapting the app.
+  `AppWriteGate`, adapting the app. Approval has two typed entry points,
+  `confirm` and `confirm_interactive`; they differ in who records the intent
+  audit, which is spelled out below.
 - **`ViewState`** (`ui/view_state.py`) — what the user is currently looking
   at: the focused kind and scope, alias resolution, the selected row, and a
   `resources(kind, scope)` query. Read-only structurally, not just by
@@ -93,7 +95,8 @@ must have exactly one implementation:
 
 | Concern | Why it stays |
 |---|---|
-| `_push_write_confirmation` | The approval gate. Agent writes and user writes enter here and nowhere else. Reached through `WriteGate.confirm`. |
+| `_push_write_confirmation` | The approval gate for a write that is an API call. Agent writes and user writes enter here and nowhere else. Reached through `WriteGate.confirm`. |
+| `_push_interactive_confirmation` | The approval gate for a write whose approved form is an interactive subprocess. Reached through `WriteGate.confirm_interactive`. |
 | `_write_context_intact` | Revalidation after an awaited gap, including the `:ctx` epoch check. Reached through `WriteGate.context_intact`. |
 | `_run_write` | Audit-before-mutation, fail-closed. Never called by a controller. |
 | `run_worker` ownership | Cancellation and exclusivity belong to the app that owns the event loop. |
@@ -102,6 +105,34 @@ A controller composes an operation *factory* and hands it to the gate. The
 ordering is the invariant, not the location of the helm/kubectl call: a
 declined dialog constructs nothing, and the app awaits the factory from its
 own worker only after the intent audit record has persisted.
+
+### Two approval contracts, and where the audit lives
+
+`confirm` covers the ordinary case: the gate audits the intent, fail-closed,
+and only then awaits the operation. Nothing about the write is unknown to it,
+so it can record everything before anything happens.
+
+`confirm_interactive` (#236) exists because the shell flows — the `kubectl
+debug` fallback and `kubectl debug node/` — cannot honour that contract. Their
+approved form is a subprocess that suspends the app, and the facts worth
+auditing only exist once it has started: the pod kubectl actually created, its
+uid, and the session's exit outcome. `_run_write` cannot know any of them.
+
+So the split is explicit rather than accidental:
+
+| | `confirm` | `confirm_interactive` |
+|---|---|---|
+| dialog | gate | gate |
+| epoch recheck after the dialog | gate | gate |
+| write reservation | gate (`_run_write`) | the flow's `@_tracks_cluster_write` coroutine |
+| fail-closed intent audit | gate (`_run_write`) | **the flow** |
+| outcome audit | — | the flow |
+
+The invariant is unchanged — no approved write reaches a cluster before an
+intent record has persisted — but for the interactive flows it is `debug.run`
+and `_run_node_shell` that enforce it, each blocking the subprocess when the
+append fails. `tests/ui/test_node_shell.py::test_node_shell_blocked_when_audit_append_fails`
+pins that, and it is the reason this row reads "the flow" rather than "gate".
 
 ## Late binding
 
