@@ -222,7 +222,7 @@ class AuditLog:
         version: str = "",
         detail: str = "",
         outcome: str = "success",
-        context: str | None | _UnsetType = _UNSET,
+        context: str | _UnsetType | None = _UNSET,
     ) -> None:
         """Append one entry; `context` binds it to a specific cluster.
 

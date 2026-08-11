@@ -51,7 +51,7 @@ class _Host(App[None]):
         super().__init__()
         self.configurator = configurator
         self.current_profile = current_profile
-        self.result: AgentSettings | None | str = "unset"
+        self.result: AgentSettings | str | None = "unset"
 
     def on_mount(self) -> None:
         def _done(res: AgentSettings | None) -> None:
@@ -312,7 +312,7 @@ async def test_save_failure_after_apply_warns_about_restart_revert() -> None:
     class _ApplyHost(App[None]):
         def __init__(self) -> None:
             super().__init__()
-            self.result: AgentSettings | None | str = "unset"
+            self.result: AgentSettings | str | None = "unset"
 
         def on_mount(self) -> None:
             def _done(res: AgentSettings | None) -> None:
@@ -376,7 +376,7 @@ async def test_apply_failure_keeps_wizard_open_and_skips_save() -> None:
     class ApplyHost(App[None]):
         def __init__(self) -> None:
             super().__init__()
-            self.result: AgentSettings | None | str = "unset"
+            self.result: AgentSettings | str | None = "unset"
 
         def on_mount(self) -> None:
             def _done(res: AgentSettings | None) -> None:

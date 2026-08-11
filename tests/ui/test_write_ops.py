@@ -470,7 +470,7 @@ _EDIT_MANIFEST: dict[str, Any] = {
 
 
 def _edit_fixtures(
-    edited: str | None | Callable[[str], str],
+    edited: str | Callable[[str], str] | None,
 ) -> tuple[
     Callable[..., Awaitable[dict[str, Any]]], Callable[[str], Awaitable[str | None]], list[str]
 ]:
