@@ -16,12 +16,43 @@ updates:
     groups:
       # One pull request per group keeps the review loop bounded: a routine
       # dev-tool bump does not deserve the same attention as a runtime one.
-      dev-tooling:
-        dependency-type: development
-        update-types: [minor, patch]
+      #
+      # Grouped by name rather than by `dependency-type`: the uv updater
+      # reports every dependency as production, so a development group would
+      # match nothing and the runtime group would quietly absorb the dev
+      # tools it exists to separate. The runtime list is the project
+      # dependencies plus every extra - keep it in step with pyproject.toml.
       runtime:
-        dependency-type: production
-        update-types: [minor, patch]
+        patterns:
+          - textual
+          - kubernetes_asyncio
+          - kubernetes-asyncio
+          - pyyaml
+          - rich
+          - regex
+          - httpx
+          - keyring
+          - mcp
+          - anyio
+          - starlette
+          - uvicorn
+          - azure-identity
+      dev-tooling:
+        patterns: ["*"]
+        exclude-patterns:
+          - textual
+          - kubernetes_asyncio
+          - kubernetes-asyncio
+          - pyyaml
+          - rich
+          - regex
+          - httpx
+          - keyring
+          - mcp
+          - anyio
+          - starlette
+          - uvicorn
+          - azure-identity
 
   # Action pins. Every `uses:` in this repository is pinned to a commit SHA,
   # which is what makes a supply-chain review meaningful and also what makes
