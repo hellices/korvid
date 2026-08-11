@@ -1011,5 +1011,7 @@ def test_the_markdown_report_shows_citation_quality() -> None:
 
     rendered = render_markdown([report])
 
-    assert "citations" in rendered.lower()
-    assert "50.0%" in rendered  # one of two references resolved
+    # The whole cell, not just one number: asserting on precision alone
+    # would let coverage be dropped, or the two swapped, without failing.
+    assert "cite precision/coverage" in rendered
+    assert "| 50.0% / 100.0% |" in rendered

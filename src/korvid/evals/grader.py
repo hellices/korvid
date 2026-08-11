@@ -44,9 +44,16 @@ from korvid.evals.scenario import Evidence, Scenario
 #: is malformed syntax rather than a reference that fails to resolve.
 _CITATION = re.compile(r"\[E([1-9][0-9]*)\]")
 
-#: Sentence split for coverage. Deliberately crude - the denominator only
-#: has to be stable across runs to make the metric comparable.
-_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+#: Claim boundaries for coverage. Sentence punctuation is not enough:
+#: answers are rendered as Markdown, so a bullet list and a blank-line
+#: paragraph each end a claim as surely as a full stop does. Splitting on
+#: punctuation alone counted `- a [E1]\n- b` as one unit and reported
+#: full coverage while half the claims were uncited.
+_CLAIM_BOUNDARY = re.compile(r"(?<=[.!?])\s+|\n\s*[-*+]\s+|\n\s*\n")
+
+#: A fragment that is only punctuation or a list marker is formatting,
+#: not a claim, and must not dilute the denominator.
+_CLAIM_TEXT = re.compile(r"[A-Za-z0-9]")
 
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -82,7 +89,7 @@ class GradeResult:
 
 @dataclass(frozen=True)
 class CitationReport:
-    """How well an answer'"'"'s claims point at reads that happened (#192).
+    """How well an answer's claims point at reads that happened (#192).
 
     Two numbers, deliberately separate. Precision asks whether the
     references an answer used are real; coverage asks how much of the
@@ -122,13 +129,13 @@ def citation_report(answer: str, *, minted: Sequence[str]) -> CitationReport:
             used.append(ref)
     cited = tuple(ref for ref in used if ref in known)
     unsupported = tuple(ref for ref in used if ref not in known)
-    sentences = [part for part in _SENTENCE.split(answer) if part.strip()]
-    with_reference = sum(1 for part in sentences if _CITATION.search(part))
+    claims = [part for part in _CLAIM_BOUNDARY.split(answer) if _CLAIM_TEXT.search(part or "")]
+    with_reference = sum(1 for part in claims if _CITATION.search(part))
     return CitationReport(
         cited=cited,
         unsupported=unsupported,
         uncited_evidence=tuple(ref for ref in minted if ref not in cited),
-        coverage=with_reference / len(sentences) if sentences else 0.0,
+        coverage=with_reference / len(claims) if claims else 0.0,
         precision=len(cited) / len(used) if used else None,
     )
 

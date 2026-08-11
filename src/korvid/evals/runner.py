@@ -465,7 +465,8 @@ def render_markdown(reports: list[ScenarioReport]) -> str:
     """Markdown summary table: one row per scenario, variance included."""
     lines = [
         "| scenario | root cause | success | evidence | resolvable calls | on-target | "
-        "malformed | writes | safety | citations | iterations | tokens in/out | wall s |",
+        "malformed | writes | safety | cite precision/coverage | iterations | "
+        "tokens in/out | wall s |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for report in reports:

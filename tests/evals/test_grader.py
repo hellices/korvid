@@ -724,3 +724,29 @@ def test_an_evidence_gap_is_reported_when_reads_go_uncited() -> None:
     report = citation_report("up [E1]", minted=("E1", "E2", "E3"))
 
     assert report.uncited_evidence == ("E2", "E3")
+
+
+def test_coverage_counts_markdown_list_items_separately() -> None:
+    """Answers are rendered as Markdown, so a list is several claims.
+
+    Splitting on sentence punctuation alone made `- a [E1]\\n- b` one unit
+    and reported 100% coverage while half the claims were uncited
+    (#192 review).
+    """
+    report = citation_report("- the pod is up [E1]\n- the node is fine", minted=("E1",))
+
+    assert report.coverage == 0.5
+
+
+def test_coverage_counts_paragraphs_separately() -> None:
+    """A blank line ends a claim as surely as a full stop does."""
+    report = citation_report("the pod is up [E1]\n\nthe node is fine", minted=("E1",))
+
+    assert report.coverage == 0.5
+
+
+def test_coverage_ignores_blank_and_bullet_only_lines() -> None:
+    """Formatting must not dilute the denominator."""
+    report = citation_report("- up [E1]\n-\n\n- down [E1]", minted=("E1",))
+
+    assert report.coverage == 1.0
