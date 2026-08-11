@@ -280,6 +280,7 @@ def run_payload(
     profile: AgentProfile,
     overrides: PromptOverrides,
     serving: dict[str, Any] | None = None,
+    omitted_tools: list[str] | None = None,
 ) -> dict[str, Any]:
     """The full JSON artifact: run metadata plus per-scenario results.
 
@@ -287,9 +288,16 @@ def run_payload(
     before #235 stays distinguishable from one whose probe returned
     nothing.
     """
+    # De-duplicated: the flag is repeatable, and naming a tool twice still
+    # removed one tool.
+    omitted = sorted(set(omitted_tools or []))
+    offered = _eval_tools(profile, frozenset(omitted))
     meta: dict[str, Any] = {
         "profile": profile.name,
-        "prompts": prompt_fingerprint(profile),
+        "prompts": prompt_fingerprint(profile, tools=offered),
+        # Named, not left to be inferred from the digest: recovering the arm
+        # from a hash means keeping a lookup table outside the artifact.
+        "tools": {"omitted": omitted, "count": len(offered)},
     }
     if serving is not None:
         meta["serving"] = serving
@@ -343,6 +351,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="append this file's contents to the profile's role statement",
     )
     parser.add_argument(
+        "--without-tool",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "drop a tool from the measured surface, repeatable; for the "
+            "controlled arms of issue #221. An unknown name is refused, "
+            "because a typo would silently measure the full surface"
+        ),
+    )
+    parser.add_argument(
         "--warmup",
         action="store_true",
         help=(
@@ -362,7 +381,31 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="also write per-run metrics as JSON to this file",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    _validate_tool_names(args.without_tool, args.profile)
+    return args
+
+
+def _validate_tool_names(names: list[str], profile_name: str) -> None:
+    """Refuse a name that is not on the surface this run actually offers.
+
+    Checked against `_eval_tools`, not `profile.tools`: the UI tools are
+    already excluded from every eval run, so naming one would drop nothing
+    while `meta.tools.omitted` claimed it did - an arm published as reduced
+    that is byte-identical to the full one. The same reasoning covers a
+    plain typo, which would measure the full surface under the reduced
+    arm's name.
+    """
+    profile = build_profile(
+        profile_name, readonly=False, resize_supported=True, overrides=PromptOverrides()
+    )
+    known = {tool["function"]["name"] for tool in _eval_tools(profile)}
+    unknown = sorted(set(names) - known)
+    if unknown:
+        raise SystemExit(
+            f"--without-tool: {', '.join(unknown)} not on the measured surface;"
+            f" the {profile_name} profile offers {', '.join(sorted(known))}"
+        )
 
 
 #: Metadata probes must not hold the campaign: an endpoint that has not
@@ -387,6 +430,7 @@ async def _run_all(
     repetitions: int,
     profile: str,
     overrides: PromptOverrides,
+    omit_tools: frozenset[str] = frozenset(),
 ) -> list[ScenarioReport]:
     reports: list[ScenarioReport] = []
     for scenario in scenarios:
@@ -399,6 +443,7 @@ async def _run_all(
                 repetitions=repetitions,
                 profile=profile,
                 overrides=overrides,
+                omit_tools=omit_tools,
             )
         )
     return reports
@@ -474,7 +519,16 @@ def main(argv: list[str] | None = None) -> int:
             f"warning: serving environment not fully pinned: {', '.join(serving['unavailable'])}",
             file=sys.stderr,
         )
-    reports = asyncio.run(_run_all(scenarios, provider_factory, args.reps, args.profile, overrides))
+    reports = asyncio.run(
+        _run_all(
+            scenarios,
+            provider_factory,
+            args.reps,
+            args.profile,
+            overrides,
+            frozenset(args.without_tool),
+        )
+    )
     markdown = render_markdown(reports)
     print(markdown)
     if args.out is not None:
@@ -485,7 +539,13 @@ def main(argv: list[str] | None = None) -> int:
         profile = build_profile(
             args.profile, readonly=False, resize_supported=True, overrides=overrides
         )
-        payload = run_payload(reports, profile=profile, overrides=overrides, serving=serving)
+        payload = run_payload(
+            reports,
+            profile=profile,
+            overrides=overrides,
+            serving=serving,
+            omitted_tools=args.without_tool,
+        )
         args.json.write_text(json.dumps(payload, indent=2) + "\n")
     return exit_code(reports)
 
