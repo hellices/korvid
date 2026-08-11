@@ -418,12 +418,12 @@ async def test_write_slot_reserved_before_worker_starts() -> None:
 async def test_a_worker_cancelled_before_it_starts_releases_the_slot() -> None:
     """A cancelled write worker must not block `:ctx` for the session.
 
-    The reservation is released by the coroutine's `finally`, or - when the
-    coroutine never runs - by a finalizer that only fires on collection. An
-    app that keeps the Worker (`self._drain_worker = run_worker(...)`) keeps
-    the coroutine alive through it, so the slot is never given back and
-    every later context switch is refused with "a cluster write is in
-    progress".
+    The slot is handed back explicitly here, while the caller still holds
+    the handle. That is the point: the old failure mode was a finalizer
+    that only fired on collection, and an app keeping the worker
+    (`self._drain_worker = run_worker(...)`) keeps the coroutine alive
+    through it - so the slot was never given back and every later context
+    switch was refused with "a cluster write is in progress" (issue #237).
     """
     from korvid.ui.app import _tracks_cluster_write
 
