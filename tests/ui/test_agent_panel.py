@@ -459,3 +459,67 @@ async def test_header_profile_marker_survives_turn_complete() -> None:
         await pilot.pause()
         header = str(app.query_one("#agent-header", Static).render())
         assert "[small]" in header
+
+
+async def test_unsupported_citations_are_marked_after_the_answer() -> None:
+    """An invented reference has to be visible, not left looking sourced.
+
+    The answer text stays exactly as the model wrote it; the warning is
+    appended as korvid's own note (issue #192).
+    """
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("what is wrong?")
+        panel.apply_event(TextDelta(text="the pod is up [E1] and the node is fine [E9]"))
+        panel.apply_event(
+            TurnComplete(
+                input_tokens=1,
+                output_tokens=2,
+                estimated=False,
+                cited=("E1",),
+                uncited=("E9",),
+            )
+        )
+        await pilot.pause()
+
+        text = _log_text(app)
+        assert "the pod is up [E1] and the node is fine [E9]" in text
+        assert "E9" in text
+        assert "unsupported" in text.lower()
+
+
+async def test_a_repeated_citation_is_marked() -> None:
+    """Repetition is reported, since it is not extra support."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("what is wrong?")
+        panel.apply_event(TextDelta(text="up [E1], still up [E1]"))
+        panel.apply_event(
+            TurnComplete(
+                input_tokens=1,
+                output_tokens=2,
+                estimated=False,
+                cited=("E1",),
+                duplicated=("E1",),
+            )
+        )
+        await pilot.pause()
+
+        assert "cited more than once" in _log_text(app).lower()
+
+
+async def test_a_clean_answer_gets_no_citation_note() -> None:
+    """No noise when every citation resolves."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("what is wrong?")
+        panel.apply_event(TextDelta(text="the pod is up [E1]"))
+        panel.apply_event(
+            TurnComplete(input_tokens=1, output_tokens=2, estimated=False, cited=("E1",))
+        )
+        await pilot.pause()
+
+        assert "unsupported" not in _log_text(app).lower()
