@@ -366,7 +366,12 @@ class AgentRuntime:
         place so later turns describe the new environment (cloud provider
         note) and the new capability-gated tool set (e.g. ``resize_pod``),
         instead of the cluster the runtime was originally built against.
+
+        Evidence does *not* survive. A reference read from the old cluster
+        would still resolve, and opening it would show a same-named object
+        in the new one as though it were the cited evidence (issue #192).
         """
+        self._evidence.start_turn()
         # A new surface is a new set of declarations to honour: the ones
         # for tools it no longer offers simply do not apply, and anything
         # it does offer must still resolve or construction-time validation

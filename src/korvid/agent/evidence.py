@@ -60,6 +60,14 @@ class Evidence:
     differently - `get_logs` takes `pod` where `get_resource` takes
     `kind` + `name` - because a citation that cannot identify its exact
     source is not navigable, which is the point of having one.
+
+    It identifies the object by name, not by incarnation. `get_events`
+    scopes its read to the live object's UID, so a pod deleted and
+    recreated under the same name between the read and the citation would
+    be opened as though it were the cited evidence. Fixing that needs the
+    UID to travel out of the executor on the tool result, which is a
+    change to the `tools/` contract rather than something this layer can
+    recover - tracked separately.
     """
 
     ref: str

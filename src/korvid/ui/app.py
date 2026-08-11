@@ -45,6 +45,7 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker
 
 from korvid.agent.events import AgentError, AgentEvent, ToolCallFinished, ToolCallStarted
+from korvid.agent.navigation import EvidenceTarget, target_for
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig, ViewConfig
@@ -6276,6 +6277,74 @@ class KorvidApp(App[None]):
 
     def _mark_agent_action(self, summary: str) -> None:
         self.notify(summary, title="agent", severity="information", timeout=3)
+
+    async def open_evidence(self, ref: str) -> str:
+        """Open the read a citation points at (issue #192).
+
+        The reference is resolved against the ledger, never against the
+        answer text: a model that writes `[E9]` cannot make korvid open
+        anything, because `E9` is not something korvid minted.
+
+        Reuses the agent's own view entry points, so a citation cannot
+        reach a screen the agent itself is not allowed to open - the
+        approval-dialog guard included.
+        """
+        runtime = self.agent_runtime
+        if runtime is None:
+            return "ERROR: the agent is not configured in this session"
+        item = runtime.evidence.resolve(ref)
+        if item is None:
+            return f"ERROR: {ref} is not evidence from this turn"
+        target = target_for(item)
+        if target is None:
+            return f"ERROR: {ref} has no view to open ({item.tool})"
+        if target.view == "logs":
+            return await self._open_evidence_logs(ref, target)
+        if target.view == "list":
+            # A listing with no namespace covered every namespace; `None`
+            # would instead be read as "keep the pane's current scope".
+            scope = ALL_NAMESPACES if target.all_namespaces else target.namespace
+            return await self.agent_navigate(target.kind or "", namespace=scope)
+        return await self._open_evidence_describe(ref, target)
+
+    async def _open_evidence_logs(self, ref: str, target: EvidenceTarget) -> str:
+        """Stream the container the cited read actually looked at."""
+        if target.name is None or target.namespace is None:
+            return f"ERROR: {ref} does not name a pod to stream"
+        container = target.container
+        if target.needs_container_resolution:
+            # The read defaulted to the pod's first container. Opening
+            # every container would show streams that were not the
+            # evidence, and could scroll the cited one away.
+            #
+            # Resolved from the live manifest, not the store: the cited pod
+            # is often outside the pane's kind and scope, where the store
+            # lookup finds nothing and the fallback reopens everything.
+            try:
+                triples = await self._agent_pod_triples(target.namespace, target.name)
+            except ApiStatusError as exc:
+                return (
+                    f"ERROR: {explain_api_error(exc.status, exc.reason, 'pods', target.namespace)}"
+                )
+            container = triples[0][2] if triples and triples[0][2] else None
+        return await self.agent_open_logs(target.name, target.namespace, container=container)
+
+    async def _open_evidence_describe(self, ref: str, target: EvidenceTarget) -> str:
+        """Describe the cited object, saying so when its events are absent."""
+        if target.kind is None or target.name is None:  # narrowed for typing
+            return f"ERROR: {ref} does not name an object to describe"
+        opened = await self.agent_open_describe(target.kind, target.name, target.namespace)
+        if opened.startswith("ERROR:"):
+            return opened
+        if target.expects_events and self._canonical_kind(target.kind) != "pods":
+            # Describe fetches events for pods only, so the cited events
+            # are not on the screen this just opened. Saying so beats the
+            # user hunting for evidence that is not there.
+            return (
+                f"{opened} (note: this evidence includes events, and korvid"
+                " shows events for pods only - the events are not shown here)"
+            )
+        return opened
 
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
         if self._approval_dialog_active():

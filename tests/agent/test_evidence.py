@@ -675,3 +675,22 @@ def test_the_note_stays_within_its_stated_budget() -> None:
 def test_no_reads_means_no_prompt_overhead_at_all() -> None:
     """A turn that reads nothing pays nothing for the citation protocol."""
     assert evidence_note([]) == ""
+
+
+def test_retargeting_to_another_cluster_clears_the_ledger() -> None:
+    """Evidence does not survive a `:ctx` switch.
+
+    History survives a retarget, but a reference must not: `E1` read from
+    one cluster would otherwise still resolve, and opening it would show
+    a same-named object in the *new* cluster as though it were the cited
+    evidence (#192 review).
+    """
+    provider = ScriptedProvider([])
+    runtime = AgentRuntime(provider, _ReadExecutor())
+    runtime.evidence.record("get_resource", {"kind": "pods", "name": "api-1"}, "ok")
+    assert runtime.evidence.references() == ("E1",)
+
+    runtime.retarget(tools=[], cluster_context=None)
+
+    assert runtime.evidence.references() == ()
+    assert "[E1]" not in str(runtime._messages[0]["content"])

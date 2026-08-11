@@ -6,12 +6,14 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
+from korvid.agent.runtime import AgentRuntime
 from korvid.core.config import KorvidConfig
-from korvid.core.store import ResourceStore, Summary
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.tools.executor import RecordedExecution
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.log_pane import LogPane
@@ -646,3 +648,189 @@ async def test_agent_open_logs_reports_panel_truncation() -> None:
         await pilot.pause()
         assert not out.startswith("ERROR:")
         assert f"first {MAX_PANELS} of {total}" in out
+
+
+def _with_runtime(app: KorvidApp) -> AgentRuntime:
+    """Attach a minimal runtime so the app has an evidence ledger.
+
+    The citation entry point reads the ledger off the live runtime; this
+    harness does not otherwise need an agent.
+    """
+    runtime = AgentRuntime(_SilentProvider(), _NoToolExecutor())
+    app._agent_runtime = runtime
+    return runtime
+
+
+class _SilentProvider:
+    @property
+    def name(self) -> str:
+        return "silent"
+
+    async def complete(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, stream: bool = True
+    ) -> AsyncIterator[dict[str, Any]]:  # pragma: no cover - never driven here
+        yield {"type": "done"}
+
+
+class _NoToolExecutor(RecordedExecution):
+    async def execute(
+        self, name: str, arguments: dict[str, Any]
+    ) -> str:  # pragma: no cover - never driven here
+        return ""
+
+
+async def test_opening_a_citation_shows_the_evidence_it_points_at() -> None:
+    """Selecting [E1] puts the read that supports the claim on screen.
+
+    The whole point of a reference is that it can be followed; a citation
+    the user cannot open is decoration (issue #192).
+    """
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_resource", {"kind": "pods", "name": "web-1", "namespace": "default"}, "ok"
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert isinstance(app.screen, DescribeScreen)
+        assert not out.startswith("ERROR:")
+
+
+async def test_opening_an_unknown_citation_reports_it() -> None:
+    """A reference korvid never minted resolves to nothing, visibly."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _with_runtime(app)
+
+        out = await app.open_evidence("E9")
+
+        assert out.startswith("ERROR:")
+        assert "E9" in out
+
+
+async def test_a_citation_with_nowhere_to_go_says_so() -> None:
+    """Better than opening the wrong object."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record("helm_list_releases", {"namespace": "default"}, "ok")
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+
+        assert out.startswith("ERROR:")
+
+
+async def test_a_log_citation_opens_the_container_the_read_used() -> None:
+    """The read defaulted to the pod's first container; so does the citation."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_logs", {"pod": "web-1", "namespace": "default"}, "log line"
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert not out.startswith("ERROR:")
+        # The pod's first container, as the read itself defaulted to -
+        # not every container, which would show streams that were not
+        # the cited evidence.
+        assert "main" in out
+
+
+async def test_a_cluster_wide_list_citation_opens_all_namespaces() -> None:
+    """An omitted namespace on a listing means every namespace.
+
+    Forwarding None would instead keep the pane's current scope, so the
+    citation would open a narrower view than the evidence covered.
+    """
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record("list_resources", {"kind": "pods"}, "web-1")
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert not out.startswith("ERROR:")
+        assert app.current_scope == ALL_NAMESPACES
+
+
+async def test_an_event_citation_on_a_non_pod_says_what_is_shown() -> None:
+    """Describe fetches events for pods only, so the citation says so.
+
+    Silently opening a manifest with none of the cited events, while the
+    answer claims the events support it, is the failure mode: the user
+    would look for evidence that is not on screen (#192 review).
+    """
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_events",
+            {"kind": "deployments", "name": "web", "namespace": "default"},
+            "BackOff",
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert "events are not shown" in out.lower()
+
+
+async def test_an_event_citation_on_a_pod_shows_them_without_a_caveat() -> None:
+    """The pod case is the one describe actually renders events for."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_events", {"kind": "pods", "name": "web-1", "namespace": "default"}, "BackOff"
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert "not shown" not in out.lower()
+
+
+async def test_a_log_citation_resolves_a_pod_outside_the_current_view() -> None:
+    """The cited pod need not be in the table the user is looking at.
+
+    `_get_pod_containers` only searches the current kind and scope, so it
+    returns nothing for a pod elsewhere - and an empty result reopens
+    every container, which is the defect this was meant to fix
+    (#192 review).
+    """
+    app = make_app(manifest_containers=["app", "sidecar"])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        # A namespace the pods pane is not scoped to.
+        ref = runtime.evidence.record(
+            "get_logs", {"pod": "web-1", "namespace": "other-ns"}, "log line"
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert not out.startswith("ERROR:")
+        assert "app" in out
+        assert "sidecar" not in out
