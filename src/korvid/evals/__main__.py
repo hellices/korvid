@@ -288,7 +288,9 @@ def run_payload(
     before #235 stays distinguishable from one whose probe returned
     nothing.
     """
-    omitted = sorted(omitted_tools or [])
+    # De-duplicated: the flag is repeatable, and naming a tool twice still
+    # removed one tool.
+    omitted = sorted(set(omitted_tools or []))
     offered = _eval_tools(profile, frozenset(omitted))
     meta: dict[str, Any] = {
         "profile": profile.name,

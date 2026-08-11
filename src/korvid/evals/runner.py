@@ -77,18 +77,34 @@ class _RecordingExecutor(RecordedExecution):
     inventory the payload inspector would export.
     """
 
-    def __init__(self, executor: object, max_result_chars: int | None = None) -> None:
+    def __init__(
+        self,
+        executor: object,
+        max_result_chars: int | None = None,
+        omit: frozenset[str] = frozenset(),
+    ) -> None:
         # Scenario and journey packs hand over whatever they built; this is
         # the composition point that turns it into the contract the runtime
         # requires, so the runtime itself never has to guess (PR #197).
         self._executor = as_recorded(executor)
         self._max_result_chars = max_result_chars
+        # Names dropped from the offered surface for this run (#221).
+        # Hiding a schema is not removing a tool: the runtime dispatches
+        # whatever name the provider returns and the executor resolves
+        # every registry read, so a model that remembers the tool would
+        # otherwise still get its answer and contaminate the reduced arm.
+        self._omit = omit
         self.records: list[ToolRecord] = []
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         return (await self.execute_recorded(name, arguments)).text
 
     async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        if name in self._omit:
+            # Answered exactly as an unknown tool would be, and the real
+            # executor is never reached, so the model cannot observe that
+            # the tool exists elsewhere.
+            return ToolOutcome(text=f"ERROR: unknown tool {name}")
         outcome = await self._executor.execute_recorded(name, arguments)
         # This pass's own redactions are kept, not dropped. It runs before
         # the runtime's and is idempotent, so a redaction made here is one
@@ -209,12 +225,18 @@ def _value_matches_schema(value: Any, json_type: str) -> bool:
     return isinstance(value, expected)
 
 
-def _is_malformed(name: str, raw_arguments: str) -> bool:
+def _is_malformed(name: str, raw_arguments: str, omit: frozenset[str] = frozenset()) -> bool:
     """Schema-level validation of one tool call, from the raw call the model
     emitted: undecodable or non-mapping arguments, a tool name that was never
     offered (offered write tools are exempt — they are tracked separately as
     write attempts), a missing required parameter, or a declared parameter of
-    the wrong type."""
+    the wrong type.
+
+    A name dropped from this run's surface counts as never offered, which
+    is the signal the reduced arm exists to capture: whether the model
+    still reaches for a tool it was not given (#221)."""
+    if name in omit:
+        return True
     try:
         parsed = json.loads(raw_arguments or "{}")
     except json.JSONDecodeError:
@@ -265,12 +287,15 @@ class _TurnTally:
     write_attempts: int = 0
     safety_violations: int = 0
     error: str | None = None
+    #: Names dropped from this run's surface; calling one is a malformed
+    #: call, because the model was never offered it (#221).
+    omit: frozenset[str] = frozenset()
 
     def note(self, event: Any) -> None:
         if isinstance(event, TextDelta):
             self.answer += event.text
         elif isinstance(event, ToolCallStarted):
-            if _is_malformed(event.name, event.arguments):
+            if _is_malformed(event.name, event.arguments, self.omit):
                 self.malformed += 1
         elif isinstance(event, ToolCallFinished):
             self.tool_calls += 1
@@ -297,7 +322,9 @@ async def _drive_turn(
     profile = build_profile(
         profile_name, readonly=False, resize_supported=True, overrides=overrides
     )
-    executor = _RecordingExecutor(raw_executor, max_result_chars=profile.max_result_chars)
+    executor = _RecordingExecutor(
+        raw_executor, max_result_chars=profile.max_result_chars, omit=omit_tools
+    )
     runtime = AgentRuntime(
         provider,
         executor,
@@ -309,7 +336,7 @@ async def _drive_turn(
         strict_history_budget=profile.strict_history_budget,
         system_prompt=profile.system_prompt,
     )
-    tally = _TurnTally()
+    tally = _TurnTally(omit=omit_tools)
     started = time.monotonic()
     async for event in runtime.run_turn(scenario.question, scenario.screen):
         tally.note(event)
@@ -331,8 +358,9 @@ async def _drive_turn(
         1
         for record in executor.records
         if record.name in _READ_REQUIRED
+        and record.name not in omit_tools
         and not record.result.startswith("ERROR:")
-        and not _is_malformed(record.name, json.dumps(record.arguments))
+        and not _is_malformed(record.name, json.dumps(record.arguments), omit_tools)
     )
     # Issue #69's correct-tool + correct-argument rate: a call is on-target
     # when it is an offered *read* tool whose arguments name one of the
@@ -343,6 +371,7 @@ async def _drive_turn(
         1
         for record in executor.records
         if record.name in _READ_REQUIRED
+        and record.name not in omit_tools
         and any(
             matches_target(alt, record) for group in scenario.expected_evidence for alt in group
         )

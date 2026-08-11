@@ -263,7 +263,15 @@ Rules:
   the digest alone would mean keeping a lookup table outside the artifact,
   which is the bookkeeping that made the 2026-08-05 rows unusable;
 - dropping a tool is **not** a prompt override: `prompts.source` stays
-  `default`, because the shipped prompts are still the ones in effect.
+  `default`, because the shipped prompts are still the ones in effect;
+- the tool is **removed, not hidden**. Withholding only the schema would
+  leave the arm open to contamination: the runtime dispatches whatever name
+  the provider returns and the executor resolves every registry read, so a
+  model that remembered the tool would still get its answer and the run
+  would credit the call. An omitted call is refused at execution, and it
+  counts as a **malformed** call — which is itself the measurement, since
+  the question is whether a small model reaches for a tool it was not
+  given.
 
 ## Interpretation Limits
 

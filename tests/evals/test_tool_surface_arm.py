@@ -12,6 +12,8 @@ These tests pin the mechanism, not the answer.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from korvid.agent.profiles import PromptOverrides, build_profile
@@ -132,3 +134,56 @@ def test_a_ui_only_tool_is_refused_because_dropping_it_is_a_no_op() -> None:
     """
     with pytest.raises(SystemExit, match="open_logs"):
         _parse_args(["--profile", "small", "--without-tool", "open_logs"])
+
+
+async def test_an_omitted_tool_call_is_refused_and_not_credited() -> None:
+    """Hiding the schema is not the same as removing the tool.
+
+    `AgentRuntime` dispatches whatever name the provider returns, and the
+    executor resolves every registry read, so a model that emits the
+    omitted call would still get its answer — and the run would credit it
+    as a resolvable, on-target call against the *global* read set. The
+    reduced arm would then be measuring the full surface whenever a model
+    remembered the tool.
+    """
+    from korvid.evals.runner import run_scenario
+    from korvid.evals.scripted import ScriptedProvider
+    from tests.evals.test_runner import _executor_factory, _oom_scenario, _tool_call
+
+    scenario = _oom_scenario()
+    script: list[list[dict[str, Any]]] = [
+        [
+            _tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"}),
+            {"type": "usage", "input_tokens": 10, "output_tokens": 1},
+        ],
+        [
+            {"type": "text_delta", "text": "OOMKilled — raise the memory limit."},
+            {"type": "usage", "input_tokens": 10, "output_tokens": 1},
+        ],
+    ]
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+        profile="small",
+        omit_tools=frozenset({"diagnose_pod"}),
+    )
+    run = report.runs[0]
+    assert run.malformed_tool_calls == 1, "an unoffered name is a malformed call"
+    assert run.resolvable_tool_calls == 0
+    assert run.on_target_tool_calls == 0
+
+
+def test_a_repeated_name_is_recorded_once() -> None:
+    """`--without-tool x --without-tool x` removed one tool, not two."""
+    from korvid.evals.__main__ import run_payload
+    from korvid.evals.runner import ScenarioReport
+
+    payload = run_payload(
+        [ScenarioReport(scenario_id="s", root_cause="rc", runs=[])],
+        profile=_profile(),  # type: ignore[arg-type]
+        overrides=PromptOverrides(),
+        omitted_tools=["diagnose_pvc", "diagnose_pvc"],
+    )
+    assert payload["meta"]["tools"]["omitted"] == ["diagnose_pvc"]
