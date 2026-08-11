@@ -51,6 +51,37 @@ class WriteGate(ABC):
         """
 
     @abstractmethod
+    async def confirm_session(
+        self,
+        title: str,
+        operation: str,
+        *,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        epoch: int,
+        start: Callable[[], None],
+    ) -> None:
+        """Approve an interactive session that audits its own outcome.
+
+        The sibling of `confirm`, for the flows whose approved operation is
+        a subprocess rather than an API call: `kubectl debug` and the node
+        shell run the mutation themselves and write their own audit trail,
+        so routing them through `run` would duplicate the intent record.
+
+        What they must not have is their *own* approval. A dialog is the
+        only place a cluster write is authorised, and the authorisation is
+        bound to the cluster the prompt was raised for: `epoch` is
+        re-checked after the user answers, so an approval cannot be applied
+        to a cluster the user never saw. Flows that built their own dialog
+        each had to remember that, and one of them did not (issue #236).
+
+        `start` is called only on approval, and only if the context still
+        holds. It is deliberately synchronous - the caller owns the worker.
+        """
+
+    @abstractmethod
     def context_intact(
         self,
         action: str,

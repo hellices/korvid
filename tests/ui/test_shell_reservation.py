@@ -72,7 +72,6 @@ def _controller(gate: _RecordingGate) -> ShellController:
         get_manifest=lambda: None,
         pod_containers=lambda ns, name: (),
         node_target=lambda action: None,
-        confirm_screen=unused,
         target_uid=unused,
         settings=lambda: settings,
     )

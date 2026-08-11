@@ -5,18 +5,18 @@ the ephemeral-container `kubectl debug` fallback offered when that fails
 (typically a distroless image with no shell), and the node shell that runs
 a privileged debug pod behind the approval gate (issue #46).
 
-The security perimeter stays with the app, but note *how*: these flows do
-not use `WriteGate.confirm` / `WriteGate.run`. They build a `ConfirmScreen`
-through the injected factory and drive their own audited subprocess, which
-is what they did before the extraction and is deliberately unchanged here -
-a "no behaviour change" refactor is the wrong place to reroute an approval
-path. What they do share is the rest of the perimeter: `permitted` for the
-RBAC pre-check, `epoch` / `switching` for revalidation across an awaited
-gap, `reads_allowed` to refuse mid-`:ctx` starts, and `reserve_write` so an
-approved shell counts as an in-flight cluster write.
+The security perimeter stays with the app. Approval goes through
+`WriteGate.confirm_session` - the sibling of `confirm` for operations that
+are a subprocess rather than an API call, and that therefore write their
+own audit trail instead of going through `run`. The rest of the perimeter
+is shared too: `permitted` for the RBAC pre-check, `epoch` / `switching`
+for revalidation across an awaited gap, `reads_allowed` to refuse a
+mid-`:ctx` start, and `reserve_write` so an approved shell counts as an
+in-flight cluster write.
 
-Routing these two lifecycles through a typed gate operation is worth doing;
-it is a behavioural change and belongs in its own review.
+Both flows used to build their own dialog, and the re-check binding an
+approval to the cluster it was raised for lived in whichever one
+remembered it - the node shell did not (issue #236).
 
 Suspending the terminal is why `UiSurface` grew `suspend`, `refresh` and
 `call_from_thread`: an interactive child process takes the screen, and the
@@ -59,7 +59,7 @@ from korvid.ui.shell import (
 )
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
-from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt
+from korvid.ui.widgets.confirm_screen import ImagePrompt
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.write_gate import ReservedWrite, WriteGate
 
@@ -164,7 +164,6 @@ class ShellController:
         get_manifest: Callable[[], Callable[..., Any] | None],
         pod_containers: Callable[[str, str], tuple[str, ...]],
         node_target: Callable[[str], tuple[WriteOps, ResourceMeta, str, str | None] | None],
-        confirm_screen: Callable[..., ConfirmScreen],
         settings: Callable[[], ShellSettings],
         target_uid: Callable[[str, str | None, str], Awaitable[str | None]],
     ) -> None:
@@ -176,7 +175,6 @@ class ShellController:
         self._get_manifest_fn = get_manifest
         self._pod_containers = pod_containers
         self._node_target_fn = node_target
-        self._confirm_screen_fn = confirm_screen
         # Read at call time: a `:ctx` switch retargets kube_context.
         self._settings = settings
         self._target_uid_fn = target_uid
@@ -410,14 +408,18 @@ class ShellController:
 
                 def _on_custom(image: str | None) -> None:
                     if image:
-                        self._confirm_debug(
-                            namespace, name, container, exit_code, approved_uid, image, epoch
+                        self._ui.run_worker(
+                            self._confirm_debug(
+                                namespace, name, container, exit_code, approved_uid, image, epoch
+                            )
                         )
 
                 self._ui.push_screen(ImagePrompt(target), _on_custom)
                 return
-            self._confirm_debug(
-                namespace, name, container, exit_code, approved_uid, prompts[choice], epoch
+            self._ui.run_worker(
+                self._confirm_debug(
+                    namespace, name, container, exit_code, approved_uid, prompts[choice], epoch
+                )
             )
 
         # Choosing an image is read-only: even if input buffered before this
@@ -469,7 +471,7 @@ class ShellController:
             )
             return None
 
-    def _confirm_debug(
+    async def _confirm_debug(
         self,
         namespace: str,
         name: str,
@@ -486,30 +488,23 @@ class ShellController:
         Enter or y must never start a pod mutation the user has not seen.
         """
         target = f"{name}/{container}" if container else name
+        pods_meta = self._view.aliases()["pods"]
 
-        def _on_choice(confirmed: bool | None) -> None:
-            if not confirmed:
-                return
-            if self._gate.switching() or epoch != self._gate.epoch():
-                # The image picker / approval stayed open across a context
-                # switch: kubectl debug would mutate a same-named pod on the
-                # new cluster (the uid re-check fails open without a uid).
-                self._ui.notify(
-                    f"Debug fallback for {target} cancelled - the kube context changed",
-                    severity="warning",
-                )
-                return
+        def _start() -> None:
             self._ui.run_worker(self.run_debug(namespace, name, container, approved_uid, image))
 
-        self._ui.push_screen(
-            self._confirm_screen_fn(
-                f"Shell failed in {target} (exit {exit_code})",
-                f"kubectl debug: attach a {image} debug container to pod"
-                f" {name}{self._view.write_locus(namespace)} - the target image likely"
-                " has no sh/bash (distroless). Note: the ephemeral container stays"
-                " in the pod spec until restart.",
-            ),
-            _on_choice,
+        await self._gate.confirm_session(
+            f"Shell failed in {target} (exit {exit_code})",
+            f"kubectl debug: attach a {image} debug container to pod"
+            f" {name}{self._view.write_locus(namespace)} - the target image likely"
+            " has no sh/bash (distroless). Note: the ephemeral container stays"
+            " in the pod spec until restart.",
+            action="debug",
+            meta=pods_meta,
+            namespace=namespace,
+            name=name,
+            epoch=epoch,
+            start=_start,
         )
 
     @_tracks_cluster_write
@@ -562,20 +557,22 @@ class ShellController:
             # and never stack over a dialog that opened meanwhile.
             return
 
-        def _on_choice(confirmed: bool | None) -> None:
-            if confirmed:
-                self._ui.run_worker(self._run_node_shell(ops, name, shell_ns, image, uid))
+        def _start() -> None:
+            self._ui.run_worker(self._run_node_shell(ops, name, shell_ns, image, uid))
 
-        self._ui.push_screen(
-            self._confirm_screen_fn(
-                f"Node shell on {name}",
-                f"kubectl debug node/{name}: creates a privileged debug pod"
-                f" (image {image}) in namespace {shell_ns} with the node's"
-                " filesystem mounted at /host (uses --profile=sysadmin;"
-                " requires kubectl 1.30+). The pod is deleted when the shell"
-                " exits. This action is audit-logged.",
-            ),
-            _on_choice,
+        await self._gate.confirm_session(
+            f"Node shell on {name}",
+            f"kubectl debug node/{name}: creates a privileged debug pod"
+            f" (image {image}) in namespace {shell_ns} with the node's"
+            " filesystem mounted at /host (uses --profile=sysadmin;"
+            " requires kubectl 1.30+). The pod is deleted when the shell"
+            " exits. This action is audit-logged.",
+            action="node shell",
+            meta=meta,
+            namespace=None,
+            name=name,
+            epoch=epoch,
+            start=_start,
         )
 
     @_tracks_cluster_write

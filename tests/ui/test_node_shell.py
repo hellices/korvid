@@ -271,6 +271,34 @@ async def test_confirmed_node_shell_creates_waits_attaches_and_audits(tmp_path: 
     assert ours[-1]["outcome"].startswith("success")
 
 
+async def test_node_shell_approved_after_a_context_change_is_refused(tmp_path: Path) -> None:
+    """Approval must stay bound to the cluster the prompt was raised for.
+
+    The pod-debug fallback re-checks the context epoch inside its approval
+    callback; the node shell - which creates a *privileged* pod with the
+    host filesystem mounted - did not, because each flow built its own
+    approval instead of sharing one (issue #236). The uid re-check behind it
+    fails open when the node summary carries no uid.
+    """
+    rec = DeleteRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    run_fake, run_calls = _kubectl_run()
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            app._ctx_epoch += 1  # a context switch landed while the prompt was up
+            await pilot.press("y")
+            await pilot.pause(0.2)
+
+    assert run_calls == [], "a privileged debug pod was created for the wrong cluster"
+    assert call_records == []
+    assert not audit_path.exists() or "node-shell" not in audit_path.read_text()
+
+
 async def test_node_shell_deletes_exactly_its_own_pod(tmp_path: Path) -> None:
     """The pod created by this invocation (name+uid from the detached
     create) is the only thing deleted — never a namespace-wide guess that

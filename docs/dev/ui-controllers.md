@@ -94,6 +94,7 @@ must have exactly one implementation:
 | Concern | Why it stays |
 |---|---|
 | `_push_write_confirmation` | The approval gate. Agent writes and user writes enter here and nowhere else. Reached through `WriteGate.confirm`. |
+| `_push_session_confirmation` | The same gate for approved *sessions* - `kubectl debug`, the node shell - whose operation is a subprocess that audits itself. Reached through `WriteGate.confirm_session`. |
 | `_write_context_intact` | Revalidation after an awaited gap, including the `:ctx` epoch check. Reached through `WriteGate.context_intact`. |
 | `_run_write` | Audit-before-mutation, fail-closed. Never called by a controller. |
 | `run_worker` ownership | Cancellation and exclusivity belong to the app that owns the event loop. |

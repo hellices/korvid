@@ -702,7 +702,6 @@ class KorvidApp(App[None]):
             get_manifest=lambda: self._get_manifest,
             pod_containers=lambda ns, name: self._get_pod_containers(ns, name),
             node_target=lambda action: self._node_target(action),
-            confirm_screen=lambda *a, **k: self._confirm_screen(*a, **k),
             target_uid=lambda kind, ns, name: self._target_uid(kind, ns, name),
             settings=lambda: ShellSettings(
                 kube_context=self.config.kube_context,
@@ -4417,6 +4416,42 @@ class KorvidApp(App[None]):
             _done,
         )
 
+    async def _push_session_confirmation(
+        self,
+        title: str,
+        operation: str,
+        *,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        epoch: int,
+        start: Callable[[], None],
+    ) -> None:
+        """Approval for an interactive session that audits itself (issue #236).
+
+        Same dialog and the same "one place authorises a write" rule as
+        `_push_write_confirmation`; what differs is that the approved
+        operation is a subprocess which writes its own audit trail, so
+        there is no `_run_write` to launch here.
+        """
+
+        def _done(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            if self._ctx_switching or epoch != self._ctx_epoch:
+                # The prompt stayed open across a context switch: kubectl
+                # would act on a same-named target in the new cluster.
+                self.notify(
+                    f"{action} on {name} cancelled - the kube context changed"
+                    " while the prompt was open",
+                    severity="warning",
+                )
+                return
+            start()
+
+        await self.push_screen(self._confirm_screen(title, operation), _done)
+
     async def action_delete_resource(self) -> None:
         """Ctrl-D: delete the selected resource behind a layered confirmation
         (cluster-scoped kinds require typing the resource name). On the helm
@@ -7743,6 +7778,29 @@ class AppWriteGate(WriteGate):
         self, action: str, meta: ResourceMeta, namespace: str | None, name: str
     ) -> bool:
         return await self._app._permitted(action, meta, namespace, name)
+
+    async def confirm_session(
+        self,
+        title: str,
+        operation: str,
+        *,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        epoch: int,
+        start: Callable[[], None],
+    ) -> None:
+        await self._app._push_session_confirmation(
+            title,
+            operation,
+            action=action,
+            meta=meta,
+            namespace=namespace,
+            name=name,
+            epoch=epoch,
+            start=start,
+        )
 
     def run(
         self,

@@ -515,6 +515,31 @@ async def test_shell_exec_failure_no_declines_debug(tmp_path: Path) -> None:
             mock_call.assert_called_once()  # only the failed exec; no debug
 
 
+async def test_debug_approved_after_a_context_change_is_refused(tmp_path: Path) -> None:
+    """The debug fallback's approval is bound to the cluster it was raised for.
+
+    Sibling of the node-shell case: both now share one approval contract,
+    so neither can forget the re-check (issue #236).
+    """
+    app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1) as mock_call,
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            app._ctx_epoch += 1  # a context switch landed while the prompt was up
+            await pilot.press("y")
+            await pilot.pause(0.2)
+            mock_call.assert_called_once()  # only the failed exec; no debug
+
+
 def test_build_probe_argv() -> None:
     result = build_probe_argv("kube-system", "coredns-abc", "coredns")
     assert result == [
