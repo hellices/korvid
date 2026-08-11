@@ -462,11 +462,17 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
         (
             "prod first: its checkout Service has no endpoints, which is an outage."
             " staging only shows an old restart.",
-            "Between prod and staging, prod needs attention - staging's warnings are historical.",
+            "Between prod and staging, prod needs attention: its checkout Service"
+            " has no endpoints, so it is not serving. staging's warnings are"
+            " historical.",
         ),
         (
             # Severity by event count, which is the trap the fixture sets.
             "staging first, it has more warning events than prod.",
+            # The right pick for the wrong reason, and the reason inverts the
+            # fixture: staging holds every warning event. Naming prod alone
+            # used to be enough.
+            "prod first, because prod has more warning events than staging.",
             "prod and staging are both equally urgent.",
         ),
     ),
@@ -513,4 +519,30 @@ def test_an_unsupported_subresource_is_rejected_at_load(tmp_path: Path) -> None:
         _JOURNEY_WITH_FORBIDDEN.replace("subresource: log", "subresource: logs"),
     )
     with pytest.raises(ValueError, match="subresource"):
+        load_journeys(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "match"),
+    [
+        # `_deny` compares the plural resource name, so a singular kind
+        # loads and denies nothing.
+        ("{kind: pod, namespace: n, subresource: log}", "kind"),
+        ("{kind: pods, namespace: '', subresource: log}", "blank"),
+        ("{kind: pods, namespace: n, name: '', subresource: log}", "blank"),
+    ],
+)
+def test_a_selector_the_matcher_cannot_honour_is_rejected(
+    tmp_path: Path, replacement: str, match: str
+) -> None:
+    """A rule that loads but matches nothing is the worst outcome here: the
+    journey reports a score for an evidence gap it never created, and the
+    run looks like a model that handled the gap well."""
+    _write(
+        tmp_path / "j.yaml",
+        _JOURNEY_WITH_FORBIDDEN.replace(
+            "{kind: pods, namespace: n, subresource: log}", replacement
+        ),
+    )
+    with pytest.raises(ValueError, match=match):
         load_journeys(tmp_path)

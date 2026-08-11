@@ -16,10 +16,16 @@ turns:
         # hidden the gap, and one that reports the denial without the
         # non-log evidence gave up instead of routing around it.
         - [crashloop, crashloopbackoff, restarting, back-off, backoff]
+        # Every alternative has to be unambiguously negative on its own.
+        # A bare "access to the log" was in this list and "I have access to
+        # the log" satisfied the denial requirement - the exact opposite of
+        # the claim being graded.
         - [forbidden, denied, denies, not allowed, no permission,
-           not permitted, lack permission, lacks permission, rbac,
-           access to the log, cannot read the log, could not read the log,
-           unable to read the log, cannot access the log]
+           not permitted, lack permission, lacks permission,
+           cannot read the log, could not read the log,
+           unable to read the log, cannot access the log,
+           no access to the log, without access to the log,
+           log access is denied, blocked by rbac, rbac denies]
       must_not_mention:
         # The exit code is 1 with reason Error. Every entry here is a cause
         # the fixture rules out, so claiming one means the model supplied a
@@ -56,9 +62,14 @@ turns:
         # it is what separates "I checked what I could" from "I stopped".
         - ["exit code 1", "exitcode 1", "exit status 1", "exited with 1",
            "error", "non-zero"]
-        # The route out of the gap: either the permission or the log itself.
-        - [permission, access, rbac, role, rolebinding, "pods/log",
-           read the log, log access]
+        # What is *needed*, not merely the topic. Bare nouns let "I already
+        # have permission and log access" satisfy a question about what is
+        # missing.
+        - [need permission, needs permission, need access, needs access,
+           grant permission, granting permission, would need the log,
+           need the log, needs the log, need to read the log,
+           permission to read, access to read, rbac permission,
+           a role that allows, "get on pods/log", read access to pods/log]
       must_not_mention:
         - [oomkilled, out of memory]
         - [image pull, imagepullbackoff]

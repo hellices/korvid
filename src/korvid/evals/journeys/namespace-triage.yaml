@@ -23,9 +23,17 @@ turns:
         - [healthy namespace, nothing is wrong, no issues, all healthy]
         - [image pull, imagepullbackoff]
       expected_evidence:
+        # Two groups, one per workload. Evidence matching is route
+        # independent, so a single invoicer-targeted read satisfied the
+        # first group and `shipper` could then be named without ever having
+        # been observed - in the journey whose subject is discovering both.
+        # The same namespace list satisfies both groups at once.
         - - tool: list_resources
             args: {kind: pods, namespace: orders}
             contains: invoicer-1
+        - - tool: list_resources
+            args: {kind: pods, namespace: orders}
+            contains: shipper-3
       max_tool_calls: 3
   - user: >-
       Confirm the reason for the one you picked, and say whether the other

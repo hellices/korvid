@@ -69,6 +69,19 @@ def _positive_int_or_none(value: Any, label: str) -> int | None:
 
 
 _FORBIDDEN_KEYS = frozenset({"kind", "namespace", "name", "subresource"})
+
+
+def _deniable_kinds() -> frozenset[str]:
+    """Plural resource names the fake cluster can actually withhold.
+
+    `_deny` compares the plural, so `kind: pod` would load and match
+    nothing - the rule reads as a denial and behaves as an allowance.
+    """
+    from korvid.evals.fake_kube import builtin_aliases
+
+    return frozenset(meta.plural for meta in builtin_aliases().values())
+
+
 #: The only subresource the fixture's matcher understands. A rule naming
 #: anything else would load cleanly and deny nothing, so the journey would
 #: publish a score for an evidence gap it never created.
@@ -90,6 +103,13 @@ def _forbidden(raw: Any, label: str) -> tuple[dict[str, str], ...]:
             raise ValueError(f"{label} entries need a 'kind'")
         if not all(isinstance(value, str) for value in item.values()):
             raise ValueError(f"{label} values must be strings")
+        if any(not value.strip() for value in item.values()):
+            raise ValueError(f"{label}: blank selector values match no read")
+        if (kind := item["kind"]) not in _deniable_kinds():
+            raise ValueError(
+                f"{label}: kind {kind!r} is not a resource the fixture serves "
+                f"(use the plural name, e.g. 'pods')"
+            )
         subresource = item.get("subresource")
         if subresource is not None and subresource not in _FORBIDDEN_SUBRESOURCES:
             raise ValueError(

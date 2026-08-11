@@ -17,6 +17,13 @@ turns:
         - [prod first, prod needs attention, prod is worse, prioritize prod,
            prod is more urgent, start with prod, prod takes priority,
            prod is the priority, address prod first]
+        # The reason, not just the pick. The turn asks "and why?", and the
+        # fixture hands staging every warning event - so "prod first because
+        # it has more warnings" is both the wrong reason and a factual
+        # inversion, and it passed on the name alone.
+        - [no endpoints, endpoints, selector, not reachable, unreachable,
+           cannot serve, not serving, traffic fails, outage, is down,
+           nothing backs, no backing pods, no pods behind]
       must_not_mention:
         # Choosing staging, or refusing to choose, are the two ways to fail
         # a comparison.
@@ -31,6 +38,14 @@ turns:
         - - tool: list_resources
             args: {kind: pods, namespace: staging}
             contains: sandbox-1
+        # The prod outage itself has to have been observed, or the right
+        # pick could rest on a guess.
+        - - tool: get_resource
+            args: {kind: endpoints, name: checkout, namespace: prod}
+            contains: "subsets: []"
+          - tool: diagnose_service
+            args: {service: checkout, namespace: prod}
+            contains: EndpointSlice
       max_tool_calls: 4
   - user: >-
       Give me the specific cause in the namespace you picked, and say what

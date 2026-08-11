@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import pytest
@@ -491,3 +492,42 @@ async def test_a_rule_can_withhold_the_event_stream() -> None:
     )
     assert denied.startswith("ERROR:")
     assert "403" in denied
+
+
+async def test_a_secrets_rule_also_withholds_the_helm_read() -> None:
+    """Helm releases are read out of helm-owned Secrets.
+
+    That read scans the object table directly, so a `secrets` rule that
+    denied every other route still handed the same data back through the
+    Helm tool - a denial with a way around it measures nothing.
+    """
+    scenario = _scenario(forbidden=({"kind": "secrets", "namespace": "shop"},))
+    client = FakeKubeClient(scenario)
+
+    with pytest.raises(ApiStatusError, match=r"403|forbidden"):
+        await client.list_helm_releases("shop")
+
+
+def test_every_read_entry_point_consults_the_denial_table() -> None:
+    """A new read that skips `_deny` is a hole with no symptom.
+
+    The rule still loads, the journey still runs, and the model quietly gets
+    the evidence the fixture meant to withhold - so the score describes a
+    gap that was never there. Two such holes shipped in this file's first
+    draft (events and Helm releases), which is why this is pinned rather
+    than left to review.
+    """
+    source = inspect.getsource(FakeKubeClient)
+    reads = [
+        name
+        for name, member in inspect.getmembers(FakeKubeClient)
+        if (name.startswith(("list_", "get_", "stream_")) and inspect.isfunction(member))
+    ]
+    assert reads, "no read entry points found - the naming convention changed"
+    for name in reads:
+        body = inspect.getsource(getattr(FakeKubeClient, name))
+        assert "self._deny(" in body, (
+            f"{name} reads the fixture without consulting the denial table; "
+            "a forbidden rule would silently not apply to it"
+        )
+    assert "_deny" in source

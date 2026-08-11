@@ -176,6 +176,10 @@ class FakeKubeClient(ReadOps):
 
     async def list_helm_releases(self, namespace: str | None) -> list[HelmReleaseSummary]:
         """Latest revision per release from helm-owned Secrets in the scenario."""
+        # This route reads Secrets without going through `get_object`, so it
+        # needs its own check - otherwise a secrets rule denies every other
+        # path and hands the same data back through the Helm tool.
+        self._deny("secrets", namespace)
         latest: dict[tuple[str, str], HelmReleaseSummary] = {}
         for manifest in self._objects:
             if str(manifest.get("type") or "") != HELM_SECRET_TYPE:

@@ -54,7 +54,11 @@ The pack now covers the eight behaviors #176 asked for:
 | `tui-follow` | describes a pane it never opened |
 
 A journey can withhold reads through `cluster.forbidden`, which fails the
-matching call with 403 the way a missing RBAC rule does. This is what makes
+matching call with 403 the way a missing RBAC rule does. Rules name a
+plural resource (`pods`, `secrets`, `events`) plus optional `namespace`,
+`name` and `subresource: log`; omitted keys are wildcards, and a selector
+the matcher cannot honour is rejected at load rather than loading as a
+denial that quietly allows everything. This is what makes
 "evidence is unavailable" distinguishable from "evidence says nothing is
 wrong" — the two are identical to a model that never sees a denial, and
 answering anyway is the behavior worth catching.
