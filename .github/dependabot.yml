@@ -1,0 +1,36 @@
+version: 2
+
+updates:
+  # Python dependencies, resolved through uv.lock.
+  #
+  # Runtime vulnerabilities already fail CI: the `security` job audits the
+  # locked runtime resolution with pip-audit. Nothing audits the dev group,
+  # because dev packages do not ship in the wheel - but they do run in CI
+  # with the repository checked out, and nine GitPython advisories sat open
+  # because an alert with no path to a pull request is not a process.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One pull request per group keeps the review loop bounded: a routine
+      # dev-tool bump does not deserve the same attention as a runtime one.
+      dev-tooling:
+        dependency-type: development
+        update-types: [minor, patch]
+      runtime:
+        dependency-type: production
+        update-types: [minor, patch]
+
+  # Action pins. Every `uses:` in this repository is pinned to a commit SHA,
+  # which is what makes a supply-chain review meaningful and also what makes
+  # the pins invisible to a human reader - they cannot tell a current pin
+  # from a two-year-old one without looking each up.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
