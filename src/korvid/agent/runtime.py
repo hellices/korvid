@@ -168,17 +168,22 @@ def evidence_note(items: Sequence[Evidence]) -> str:
     checked against what the ledger minted - but the two should not look
     alike.
 
+    Each row names only the tool, which several reads may share, so the
+    note says what the number means: references are minted in read order,
+    so `[E2]` is the second read of the turn. That is korvid's fact about
+    its own ledger - the alternative discriminator, the target, is the
+    model's text and is exactly what must not be here.
+
     One short line per read, so the cost is bounded by the number of tool
     calls a turn may make.
     """
     if not items:
         return ""
     lines = [
-        "Evidence you may cite. Reference each diagnostic claim to the reads"
-        " that support it, as [E1]. Cite only these references: anything else"
-        " is unsupported and is shown to the user as such. Say plainly when"
-        " the evidence does not settle a question instead of citing a read"
-        " that does not."
+        "Evidence you may cite, in the order you read it ([E1] is your first"
+        " read this turn). Cite these references for each diagnostic claim;"
+        " any other is shown to the user as unsupported. Say so plainly when"
+        " the evidence does not settle a question."
     ]
     lines.extend(f"[{item.ref}] {_describe(item)}" for item in items)
     return "\n".join(lines)

@@ -624,3 +624,54 @@ def test_model_supplied_text_never_reaches_the_system_message() -> None:
     # It still has to be usable: the reference and its tool are korvid's.
     assert "[E1]" in note
     assert "get_resource" in note
+
+
+def test_repeated_uses_of_one_tool_are_distinguishable() -> None:
+    """Identical rows make the reference unusable.
+
+    Three `get_resource` reads that all render as `[En] get_resource`
+    leave the model unable to tell which reference is which, so it can
+    attach the wrong one and `check_citations` still calls it supported
+    (#192 review). The distinguishing part has to be korvid's, not the
+    model's: a call ordinal, not the resource name.
+    """
+    ledger = EvidenceLedger()
+    for name in ("api-1", "api-2", "api-3"):
+        ledger.record("get_resource", {"kind": "pods", "name": name}, "ok")
+
+    items = [item for ref in ledger.references() if (item := ledger.resolve(ref)) is not None]
+    rows = [line for line in evidence_note(items).splitlines() if line.startswith("[E")]
+
+    assert len(rows) == 3
+    assert len(set(rows)) == 3, "the model cannot tell these references apart"
+    for name in ("api-1", "api-2", "api-3"):
+        assert name not in "".join(rows)
+    # The rows differ only by reference number, so what that number means
+    # has to be stated: it is the order the reads happened in, which is
+    # korvid's fact about its own ledger rather than anything the model
+    # supplied.
+    assert "order" in evidence_note(items).lower()
+
+
+def test_the_note_stays_within_its_stated_budget() -> None:
+    """The table is prompt overhead on every request of a turn.
+
+    The issue requires small-profile prompts to stay bounded after
+    citation metadata is added, and the header alone once cost 383
+    characters - enough to push an existing history-growth test over its
+    limit. Pinned so a later edit to the wording is a deliberate trade.
+    """
+    ledger = EvidenceLedger()
+    for index in range(10):
+        ledger.record("get_resource", {"kind": "pods", "name": f"api-{index}"}, "ok")
+
+    items = [item for ref in ledger.references() if (item := ledger.resolve(ref)) is not None]
+    header, *rows = evidence_note(items).splitlines()
+
+    assert len(header) <= 260
+    assert all(len(row) <= 40 for row in rows)
+
+
+def test_no_reads_means_no_prompt_overhead_at_all() -> None:
+    """A turn that reads nothing pays nothing for the citation protocol."""
+    assert evidence_note([]) == ""
