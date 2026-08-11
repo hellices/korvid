@@ -8,7 +8,8 @@ unsupported claim look sourced.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import AsyncGenerator
+from typing import Any, cast
 
 import pytest
 
@@ -95,7 +96,9 @@ def test_citations_are_split_into_supported_and_unknown() -> None:
     ledger = EvidenceLedger()
     ledger.record("get_pod", {"name": "api-1"}, "phase: Running")
 
-    supported, unknown = ledger.check_citations("The pod is up [E1], and the node is fine [E9].")
+    supported, unknown, _repeated = ledger.check_citations(
+        "The pod is up [E1], and the node is fine [E9]."
+    )
 
     assert supported == ("E1",)
     assert unknown == ("E9",)
@@ -106,21 +109,22 @@ def test_malformed_citation_syntax_is_not_treated_as_a_citation() -> None:
     ledger = EvidenceLedger()
     ledger.record("get_pod", {"name": "api-1"}, "phase: Running")
 
-    supported, unknown = ledger.check_citations("see [E], [E1x], [] and [E01]")
+    supported, unknown, _repeated = ledger.check_citations("see [E], [E1x], [] and [E01]")
 
     assert supported == ()
     assert unknown == ()
 
 
-def test_a_repeated_citation_is_reported_once() -> None:
-    """Duplicates are a formatting artefact, not extra support."""
+def test_a_repeated_citation_is_listed_once_and_flagged() -> None:
+    """Repetition is not extra support, but it is not invisible either."""
     ledger = EvidenceLedger()
     ledger.record("get_pod", {"name": "api-1"}, "phase: Running")
 
-    supported, unknown = ledger.check_citations("[E1] and again [E1]")
+    supported, unknown, repeated = ledger.check_citations("[E1] and again [E1]")
 
     assert supported == ("E1",)
     assert unknown == ()
+    assert repeated == ("E1",)
 
 
 def test_the_ledger_is_scoped_to_one_turn() -> None:
@@ -303,7 +307,7 @@ def test_non_ascii_digits_are_malformed_syntax_not_unknown_references() -> None:
     ledger = EvidenceLedger()
     ledger.record("get_resource", {"kind": "pods", "name": "api-1"}, "phase: Running")
 
-    supported, unknown = ledger.check_citations("see [E1\u0662]")
+    supported, unknown, _repeated = ledger.check_citations("see [E1\u0662]")
 
     assert supported == ()
     assert unknown == ()
@@ -481,3 +485,66 @@ async def test_the_answer_text_is_never_rewritten() -> None:
 
     answer = [m for m in runtime._messages if m.get("role") == "assistant"][-1]
     assert answer["content"] == "up [E1] and healthy [E9]"
+
+
+async def test_the_stale_table_is_gone_before_the_turn_is_budgeted() -> None:
+    """Clearing the ledger must clear the note it advertises.
+
+    `run_turn` trims history and runs the size preflight *before* the
+    first request is prepared. A note left over from the previous turn is
+    counted against those budgets, so a prompt that now fits could still
+    be rejected or cost a retained turn (#192 review).
+    """
+    provider = ScriptedProvider(
+        [
+            _tool_call("c1", "get_resource", '{"kind": "pods", "name": "api-1"}'),
+            [{"type": "text_delta", "text": "up [E1]"}, {"type": "done"}],
+            [{"type": "text_delta", "text": "nothing to add"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _ReadExecutor())
+
+    async for _ in runtime.run_turn("first", "view=pods"):
+        pass
+    assert "[E1]" in str(runtime._messages[0]["content"])
+
+    # Observe the note at the moment `_trim_history` runs, which is what
+    # the budget sees. Asserting after the first event is too late: the
+    # request preparation refreshes it either way.
+    seen: list[str] = []
+    original_trim = runtime._trim_history
+
+    def _spy() -> None:
+        seen.append(str(runtime._messages[0]["content"]))
+        original_trim()
+
+    runtime._trim_history = _spy  # type: ignore[method-assign]  # test spy
+
+    # One step only: far enough to have trimmed, without driving the
+    # whole turn. The generator is closed explicitly so nothing is left
+    # suspended when the test returns.
+    turn = runtime.run_turn("second", "view=pods")
+    try:
+        await anext(turn)
+    finally:
+        await cast("AsyncGenerator[Any, None]", turn).aclose()
+
+    assert seen, "the turn should have trimmed history"
+    assert "[E1]" not in seen[0], "the stale table was still counted against the budget"
+
+
+async def test_a_repeated_citation_is_reported_as_a_duplicate() -> None:
+    """Collapsing duplicates silently loses the degradation the issue wants."""
+    provider = ScriptedProvider(
+        [
+            _tool_call("c1", "get_resource", '{"kind": "pods", "name": "api-1"}'),
+            [{"type": "text_delta", "text": "up [E1], still up [E1]"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _ReadExecutor())
+
+    events = [e async for e in runtime.run_turn("what is wrong?", "view=pods")]
+
+    complete = next(e for e in events if isinstance(e, TurnComplete))
+    assert complete.cited == ("E1",)
+    assert complete.duplicated == ("E1",)

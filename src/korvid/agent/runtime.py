@@ -917,11 +917,16 @@ class AgentRuntime:
         screen_context: str,
     ) -> AsyncIterator[AgentEvent]:
         """Async generator: run one conversation turn, yielding events until done."""
-        self._trim_history()
-        self._turn_base = len(self._messages)
+        # Before the trim and the size preflight, not after: both budget
+        # `_messages[0]`, and last turn's table is neither citable nor
+        # free - counting it can cost a retained turn (#192 review).
+        #
         # A citation must resolve to evidence read for *this* question:
         # last turn's pod may since have been replaced.
         self._evidence.start_turn()
+        self._refresh_evidence_note()
+        self._trim_history()
+        self._turn_base = len(self._messages)
         turn_in = 0
         turn_out = 0
         # Token counts are exact only when EVERY iteration reported usage;
@@ -1044,7 +1049,7 @@ class AgentRuntime:
                     # The answer is checked, never edited: deleting an
                     # unsupported citation would delete the evidence that
                     # the claim was unsourced (issue #192).
-                    cited, uncited = self._evidence.check_citations(
+                    cited, uncited, duplicated = self._evidence.check_citations(
                         str(assistant_msg.get("content") or "")
                     )
                     yield TurnComplete(
@@ -1053,6 +1058,7 @@ class AgentRuntime:
                         estimated=usage_missing,
                         cited=cited,
                         uncited=uncited,
+                        duplicated=duplicated,
                     )
                     return
 

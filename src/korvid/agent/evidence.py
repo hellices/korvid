@@ -141,25 +141,33 @@ class EvidenceLedger:
         """Every reference minted this turn, in the order they were read."""
         return tuple(self._items)
 
-    def check_citations(self, text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """Split the citations in *text* into supported and unknown.
+    def check_citations(
+        self, text: str
+    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        """Split the citations in *text* into supported, unknown, repeated.
 
-        Reports rather than rewrites: the caller shows both, so an
+        Reports rather than rewrites: the caller shows all three, so an
         unsupported citation is visible instead of being silently deleted
         along with the claim it was attached to.
 
-        Duplicates collapse - citing the same read twice is a formatting
-        artefact, not extra support - and each list keeps first-mention
-        order so the caller can point at where the problem is.
+        Each reference appears once per list, in first-mention order, so
+        the caller can point at where the problem is. Repeats are listed
+        separately rather than dropped - citing the same read twice is not
+        extra support, and the issue asks for duplicate references to
+        degrade visibly rather than to look like a single clean citation.
         """
         supported: list[str] = []
         unknown: list[str] = []
+        repeated: list[str] = []
         for match in _CITATION.finditer(text):
             ref = f"E{match.group(1)}"
             bucket = supported if ref in self._items else unknown
-            if ref not in bucket:
-                bucket.append(ref)
-        return tuple(supported), tuple(unknown)
+            if ref in bucket:
+                if ref not in repeated:
+                    repeated.append(ref)
+                continue
+            bucket.append(ref)
+        return tuple(supported), tuple(unknown), tuple(repeated)
 
 
 def _locate(arguments: dict[str, Any]) -> tuple[str | None, str | None]:

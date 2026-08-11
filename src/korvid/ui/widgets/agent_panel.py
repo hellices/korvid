@@ -324,6 +324,7 @@ class AgentPanel(Vertical):
             self.query_one("#agent-input", Input).disabled = False
         elif isinstance(event, TurnComplete):
             self._end_stream()
+            self._note_citation_problems(event)
             self._stop_flush_timer()
             self._clear_status()
             self.query_one("#agent-input", Input).disabled = False
@@ -386,6 +387,31 @@ class AgentPanel(Vertical):
         self._stream_widget.set_content(Text(self._stream_text), self._stream_text)
         chat = self.query_one("#agent-chat", VerticalScroll)
         chat.call_after_refresh(chat.scroll_end, animate=False)
+
+    def _note_citation_problems(self, event: TurnComplete) -> None:
+        """Mark citations that do not hold up, without touching the answer.
+
+        korvid's own note, appended after the model's text rather than
+        edited into it: deleting an unsupported citation would delete the
+        evidence that the claim was unsourced (issue #192).
+        """
+        problems: list[str] = []
+        if event.uncited:
+            problems.append(
+                f"unsupported citation: {', '.join(event.uncited)}"
+                " — no such evidence was read this turn"
+            )
+        if event.duplicated:
+            problems.append(
+                f"cited more than once: {', '.join(event.duplicated)}"
+                " — repetition is not additional support"
+            )
+        if not problems:
+            return
+        note = "\n".join(problems)
+        self._mount_entry(
+            ChatEntry(Text(note, style="yellow"), raw=note, classes="agent-msg citation-note")
+        )
 
     def _end_stream(self) -> None:
         if self._stream_widget is not None and self._stream_text:

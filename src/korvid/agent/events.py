@@ -36,6 +36,10 @@ class TurnComplete:
     #: Reported, never edited out: removing an unsupported citation would
     #: also remove the evidence that the claim was unsourced.
     uncited: tuple[str, ...] = ()
+    #: References the answer cited more than once. Repetition is not extra
+    #: support, and collapsing it silently would make a duplicated
+    #: citation look like a single clean one.
+    duplicated: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
