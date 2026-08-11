@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from korvid.agent.events import TurnComplete
 from korvid.agent.evidence import EvidenceLedger
 from korvid.agent.runtime import AgentRuntime
 from korvid.tools.executor import RecordedExecution, ToolOutcome
@@ -379,3 +380,104 @@ def test_the_locator_covers_every_registered_cluster_read() -> None:
             unhandled.append((tool, sorted(unknown)))
 
     assert unhandled == []
+
+
+async def test_the_model_is_told_which_references_it_may_cite() -> None:
+    """A model can only cite a reference it was shown.
+
+    The ledger mints `E1`; unless the mapping reaches the model, it has
+    nothing to put in brackets and any citation it writes is invented. It
+    travels on the system message, not with the result: a structured
+    result is re-serialised from its parsed document, so a marker written
+    into it is dropped and one written around it stops the document
+    parsing (issue #192).
+    """
+    provider = ScriptedProvider(
+        [
+            _tool_call("c1", "get_resource", '{"kind": "pods", "name": "api-1"}'),
+            [{"type": "text_delta", "text": "running [E1]"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _ReadExecutor())
+
+    async for _ in runtime.run_turn("what is wrong?", "view=pods"):
+        pass
+
+    system = str(provider.calls[-1][0]["content"])
+    assert "[E1]" in system
+    assert "get_resource" in system
+    assert "api-1" in system
+
+
+async def test_a_turn_with_no_reads_offers_nothing_to_cite() -> None:
+    """Nothing was read, so no reference is advertised."""
+    provider = ScriptedProvider(
+        [
+            _tool_call("c1", "navigate", '{"kind": "pods"}'),
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _ReadExecutor())
+
+    async for _ in runtime.run_turn("show pods", "view=pods"):
+        pass
+
+    assert "[E" not in str(provider.calls[-1][0]["content"])
+
+
+async def test_an_unsupported_citation_is_reported_with_the_turn() -> None:
+    """An invented reference must reach the UI, not be silently dropped.
+
+    The issue is explicit that unsupported citations degrade *visibly*:
+    rewriting the model's text would hide that the claim was unsourced.
+    """
+    provider = ScriptedProvider(
+        [
+            _tool_call("c1", "get_resource", '{"kind": "pods", "name": "api-1"}'),
+            [
+                {"type": "text_delta", "text": "up [E1], node is fine [E9]"},
+                {"type": "done"},
+            ],
+        ]
+    )
+    runtime = AgentRuntime(provider, _ReadExecutor())
+
+    events = [e async for e in runtime.run_turn("what is wrong?", "view=pods")]
+
+    complete = next(e for e in events if isinstance(e, TurnComplete))
+    assert complete.cited == ("E1",)
+    assert complete.uncited == ("E9",)
+
+
+async def test_a_fully_sourced_answer_reports_no_unsupported_citations() -> None:
+    """The clean case still says which reads the answer leaned on."""
+    provider = ScriptedProvider(
+        [
+            _tool_call("c1", "get_resource", '{"kind": "pods", "name": "api-1"}'),
+            [{"type": "text_delta", "text": "up [E1]"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _ReadExecutor())
+
+    events = [e async for e in runtime.run_turn("what is wrong?", "view=pods")]
+
+    complete = next(e for e in events if isinstance(e, TurnComplete))
+    assert complete.cited == ("E1",)
+    assert complete.uncited == ()
+
+
+async def test_the_answer_text_is_never_rewritten() -> None:
+    """Report, do not edit: the user sees exactly what the model said."""
+    provider = ScriptedProvider(
+        [
+            _tool_call("c1", "get_resource", '{"kind": "pods", "name": "api-1"}'),
+            [{"type": "text_delta", "text": "up [E1] and healthy [E9]"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _ReadExecutor())
+
+    async for _ in runtime.run_turn("what is wrong?", "view=pods"):
+        pass
+
+    answer = [m for m in runtime._messages if m.get("role") == "assistant"][-1]
+    assert answer["content"] == "up [E1] and healthy [E9]"

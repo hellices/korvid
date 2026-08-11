@@ -17,7 +17,7 @@ from korvid.agent.events import (
     TurnComplete,
     TurnInterrupted,
 )
-from korvid.agent.evidence import EvidenceLedger
+from korvid.agent.evidence import Evidence, EvidenceLedger
 from korvid.agent.outbound import (
     OutboundPolicy,
     OutboundPolicyError,
@@ -148,6 +148,50 @@ def _parsed_arguments(arguments: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def evidence_note(items: Sequence[Evidence]) -> str:
+    """The reference table the model needs in order to cite anything.
+
+    A model can only cite a reference it has been shown, so the mapping
+    from `E<n>` to what was read has to reach it somehow. It goes in the
+    system message rather than alongside each result for two reasons.
+
+    A `structured_yaml` result is re-serialised from its parsed document
+    on every request, so anything written into it - a YAML comment
+    included - is dropped before the model sees it, and anything written
+    *around* it stops the document parsing and the policy rejects the
+    request. Neither is a place a reference can live.
+
+    The second reason is better: the system message is korvid's own text.
+    Putting the table there keeps it out of the region the prompt calls
+    untrusted, so a log line claiming to be `E4` is not sitting next to
+    the real table. Trust still does not rest on that - a citation is
+    checked against what the ledger minted - but the two should not look
+    alike.
+
+    One short line per read, so the cost is bounded by the number of tool
+    calls a turn may make.
+    """
+    if not items:
+        return ""
+    lines = [
+        "Evidence you may cite. Reference each diagnostic claim to the reads"
+        " that support it, as [E1]. Cite only these references: anything else"
+        " is unsupported and is shown to the user as such. Say plainly when"
+        " the evidence does not settle a question instead of citing a read"
+        " that does not."
+    ]
+    lines.extend(f"[{item.ref}] {_describe(item)}" for item in items)
+    return "\n".join(lines)
+
+
+def _describe(item: Evidence) -> str:
+    """One line naming what a reference points at."""
+    target = "/".join(part for part in (item.kind, item.name) if part)
+    where = f" in {item.namespace}" if item.namespace else ""
+    container = f" container {item.container}" if item.container else ""
+    return f"{item.tool} {target}{where}{container}".strip()
+
+
 def _is_cluster_read(name: str) -> bool:
     """Whether `name` reads cluster state, per the tool registry.
 
@@ -235,6 +279,9 @@ class AgentRuntime:
         # oversized completed turns dropped at trim time. Off by default so
         # the full profile keeps the pre-profile runtime behavior exactly.
         self._strict_history_budget = strict_history_budget
+        #: The composed prompt without the per-request evidence table, so
+        #: the table can be restated without recomposing everything.
+        self._base_prompt = prompt
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
         # Redactions applied to screen text and tool results *before* they
         # entered history, keyed by the exact sanitized content they were
@@ -319,15 +366,13 @@ class AgentRuntime:
         self._tools_chars = len(json.dumps(self._tools))
         # A different tool surface is a different per-request overhead.
         self._outbound = self._build_policy(self._max_history_chars)
-        self._messages[0] = {
-            "role": "system",
-            "content": compose_system_prompt(
-                tools,
-                cluster_context,
-                system_prompt=self._system_prompt_override,
-                ui_prompt=self._ui_prompt_override,
-            ),
-        }
+        self._base_prompt = compose_system_prompt(
+            tools,
+            cluster_context,
+            system_prompt=self._system_prompt_override,
+            ui_prompt=self._ui_prompt_override,
+        )
+        self._refresh_evidence_note()
 
     @property
     def total_tokens(self) -> tuple[int, int]:
@@ -415,7 +460,7 @@ class AgentRuntime:
 
     async def _tool_result(
         self, name: str, arguments: str
-    ) -> tuple[str, tuple[RedactionRecord, ...], bool]:
+    ) -> tuple[str, tuple[RedactionRecord, ...], bool, str | None]:
         """Run one tool call and return what history may keep of it.
 
         Whether the text is a failure is the producer's to state, never
@@ -469,9 +514,28 @@ class AgentRuntime:
         # Recorded after sanitisation so a citation's excerpt matches what
         # the model was actually shown - evidence the user cannot find in
         # the transcript would be worse than no citation.
+        ref = None
         if _is_cluster_read(name):
-            self._evidence.record(name, parsed or {}, text, error=errored)
-        return text, records, errored
+            ref = self._evidence.record(name, parsed or {}, text, error=errored)
+        return text, records, errored, ref
+
+    def _refresh_evidence_note(self) -> None:
+        """Re-state the citable references on the system message.
+
+        Rebuilt per request rather than appended to: the table changes as
+        reads land, and the turn boundary clears it, so the model is never
+        offered a reference that no longer resolves.
+        """
+        items = [
+            item
+            for ref in self._evidence.references()
+            if (item := self._evidence.resolve(ref)) is not None
+        ]
+        note = evidence_note(items)
+        self._messages[0] = {
+            "role": "system",
+            "content": f"{self._base_prompt}\n\n{note}" if note else self._base_prompt,
+        }
 
     def _truncate_history(self, start: int) -> None:
         """Drop history from `start` on, and the records that described it.
@@ -603,7 +667,7 @@ class AgentRuntime:
             arguments = str(tc["arguments"])
             yield ToolCallStarted(call_id=call_id, name=name, arguments=arguments)
             try:
-                result, ingress_records, errored = await self._tool_result(name, arguments)
+                result, ingress_records, errored, _ref = await self._tool_result(name, arguments)
             except OutboundPolicyError:
                 # A blocked result is not reportable to the model: close
                 # the call the UI is showing, then let it reach run_turn's
@@ -726,6 +790,7 @@ class AgentRuntime:
         the turn is rejected with a message the user can act on.
         """
         while True:
+            self._refresh_evidence_note()
             self._forget_dropped_provenance()
             ingress, tool_errors = self._provenance_by_index()
             try:
@@ -976,10 +1041,18 @@ class AgentRuntime:
                     self._total_in += turn_in
                     self._total_out += turn_out
                     self._estimated = self._estimated or usage_missing
+                    # The answer is checked, never edited: deleting an
+                    # unsupported citation would delete the evidence that
+                    # the claim was unsourced (issue #192).
+                    cited, uncited = self._evidence.check_citations(
+                        str(assistant_msg.get("content") or "")
+                    )
                     yield TurnComplete(
                         input_tokens=turn_in,
                         output_tokens=turn_out,
                         estimated=usage_missing,
+                        cited=cited,
+                        uncited=uncited,
                     )
                     return
 
