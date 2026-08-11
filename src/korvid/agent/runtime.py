@@ -17,6 +17,7 @@ from korvid.agent.events import (
     TurnComplete,
     TurnInterrupted,
 )
+from korvid.agent.evidence import EvidenceLedger
 from korvid.agent.outbound import (
     OutboundPolicy,
     OutboundPolicyError,
@@ -250,6 +251,15 @@ class AgentRuntime:
         # so a rollback deletes exactly that turn even after recovery
         # trimming shifted everything down.
         self._turn_base = len(self._messages)
+        #: Reads of the turn in flight, addressable by the references an
+        #: answer may cite. korvid mints them so a provider cannot invent
+        #: support for a claim (issue #192).
+        self._evidence = EvidenceLedger()
+
+    @property
+    def evidence(self) -> EvidenceLedger:
+        """The current turn's citable reads."""
+        return self._evidence
 
     def _build_policy(self, max_history_chars: int) -> OutboundPolicy:
         limit = self._max_request_chars
@@ -439,6 +449,10 @@ class AgentRuntime:
             error=errored,
             result_format=self._result_formats.get(name),
         )
+        # Recorded after sanitisation so a citation's excerpt matches what
+        # the model was actually shown - evidence the user cannot find in
+        # the transcript would be worse than no citation (issue #192).
+        self._evidence.record(name, parsed or {}, text, error=errored)
         return text, records, errored
 
     def _truncate_history(self, start: int) -> None:
@@ -822,6 +836,9 @@ class AgentRuntime:
         """Async generator: run one conversation turn, yielding events until done."""
         self._trim_history()
         self._turn_base = len(self._messages)
+        # A citation must resolve to evidence read for *this* question:
+        # last turn's pod may since have been replaced.
+        self._evidence.start_turn()
         turn_in = 0
         turn_out = 0
         # Token counts are exact only when EVERY iteration reported usage;
