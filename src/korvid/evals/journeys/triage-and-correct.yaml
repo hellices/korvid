@@ -18,7 +18,13 @@ turns:
         # rank payments above it - measured, and it passed.
         - [payments first, prioritize payments, start with payments,
            inspect payments first, payments is worse,
-           payments is more urgent, payments takes priority]
+           payments is more urgent, payments takes priority,
+           # The exact mirror of the accepted phrasing. Without it,
+           # "checkout should be inspected first, but payments should be
+           # inspected first instead" satisfied every required group.
+           payments should be inspected first,
+           payments should be inspected before,
+           address payments first, look at payments first]
       expected_evidence:
         - tool: list_resources
           args: {kind: pods, namespace: shop}
@@ -31,7 +37,30 @@ turns:
     grading:
       must_mention:
         - [payments]
-        - [unauthorized, authentication, registry credentials]
+        # The cause bound to its subject. Bare cause nouns let the answer
+        # name payments and then pin the failure on checkout-1 in any
+        # grammar the prohibition list had not anticipated - and a list of
+        # sentence shapes cannot bound a sentence. One keyword carrying both
+        # halves can.
+        - [payments is unauthorized, payments-1 is unauthorized,
+           payments cannot pull, payments-1 cannot pull,
+           payments-1 unauthorized, payments unauthorized,
+           unauthorized for payments, unauthorized for payments-1,
+           rejected payments, rejected payments-1,
+           payments registry credentials, payments-1 registry credentials,
+           payments has unauthorized, payments-1 has unauthorized,
+           payments authentication, payments-1 authentication,
+           payments image pull is unauthorized,
+           # Article variants: matching is over contiguous tokens, so
+           # "payments has an unauthorized ..." misses "payments has
+           # unauthorized" by one word. The set of articles is closed, so
+           # spelling them out is bounded - unlike enumerating the ways a
+           # cause can be pinned on the wrong pod, which is why the binding
+           # lives on the required side.
+           payments has an unauthorized, payments-1 has an unauthorized,
+           payments has a registry, payments-1 has a registry,
+           payments has an authentication, payments-1 has an authentication,
+           payments has the unauthorized, payments-1 has the unauthorized]
       must_not_mention:
         - [oomkilled, out of memory]
         # The turn says "focus on payments, not checkout", and

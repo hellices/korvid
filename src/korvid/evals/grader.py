@@ -147,7 +147,10 @@ _EXCULPATION_FILLER = frozenset(
 
 #: Adjectives that assert the named thing is *not* the fault. Deliberately
 #: narrow: "unaffected", "serving" and "ready" are required claims in the
-#: bundled pack, so admitting them here would reject correct answers.
+#: bundled pack, so admitting them here would reject correct answers. For
+#: the same reason "working" and "good" are absent - "the liveness probe is
+#: working too slowly and timing out" is a fault claim, and exculpating it
+#: would drop the very diagnosis being graded.
 _ALL_CLEAR = frozenset(
     {
         "fine",
@@ -160,8 +163,6 @@ _ALL_CLEAR = frozenset(
         "green",
         "passing",
         "succeeding",
-        "working",
-        "good",
     }
 )
 
@@ -370,12 +371,21 @@ def _satisfies(evidence: Evidence, record: ToolRecord) -> bool:
 def grade(scenario: Scenario, answer: str, records: list[ToolRecord]) -> GradeResult:
     """Grade one run: the final answer text plus the recorded tool trace."""
     answer_tokens, clause_ids = _clause_tokens(answer)
-    # A scenario with no fault is graded on an all-clear, so "the endpoints
-    # are healthy" is its answer rather than a way of dodging the question.
-    exculpation = scenario.root_cause != "none"
+    # Polarity is not symmetric here. A scenario with no fault is graded on
+    # an all-clear, so "the endpoints are healthy" is its required answer
+    # rather than a way of dodging the question - exculpation must not
+    # suppress it. A *forbidden* keyword is the opposite in every scenario:
+    # "the image pull looks normal" rules the pull out, and counting it as a
+    # positive diagnosis would reject the answer for saying the truth.
+    requires_all_clear = scenario.root_cause == "none"
 
     def claims(keyword: str) -> bool:
-        return _mentions_positively(keyword, answer_tokens, clause_ids, exculpation=exculpation)
+        return _mentions_positively(
+            keyword, answer_tokens, clause_ids, exculpation=not requires_all_clear
+        )
+
+    def diagnoses(keyword: str) -> bool:
+        return _mentions_positively(keyword, answer_tokens, clause_ids, exculpation=True)
 
     missing_mentions = tuple(
         group for group in scenario.must_mention if not any(claims(alt) for alt in group)
@@ -383,9 +393,9 @@ def grade(scenario: Scenario, answer: str, records: list[ToolRecord]) -> GradeRe
     forbidden_mentions = tuple(
         # One violation per group: alternates are spellings of the same
         # claim, and token-run matching makes several of them hit at once.
-        next(alt for alt in group if claims(alt))
+        next(alt for alt in group if diagnoses(alt))
         for group in scenario.must_not_mention
-        if any(claims(alt) for alt in group)
+        if any(diagnoses(alt) for alt in group)
     )
     missing_evidence = tuple(
         group

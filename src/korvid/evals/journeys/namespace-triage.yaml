@@ -62,7 +62,13 @@ turns:
            missing environment variable, env var is missing,
            missing env var, config is missing, missing config,
            configuration is missing, missing configuration,
-           dsn was never set, database_dsn was never set]
+           dsn was never set, database_dsn was never set,
+           # Contractions tokenize apart ("isn't" -> isn, t), so the
+           # contracted spelling of an accepted claim needs its own entry.
+           dsn isn't set, database_dsn isn't set,
+           dsn wasn't set, database_dsn wasn't set,
+           config isn't set, configuration isn't set,
+           environment variable isn't set, env var isn't set]
         # The comparative judgement the second turn exists to force: shipper
         # is degraded, not down - 2 of 3 replicas are ready.
         - [still serving, still available, partially, reduced capacity,

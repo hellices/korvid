@@ -343,12 +343,19 @@ _ROLLOUT_CASES: tuple[tuple[int, tuple[str, ...], tuple[str, ...]], ...] = (
 )
 
 
-def _turn_scenario(turn: JourneyTurn) -> Scenario:
+def _turn_scenario(turn: JourneyTurn, root_cause: str = "r") -> Scenario:
+    """The scenario the runner grades a turn against.
+
+    `root_cause` matters: the grader treats a scenario with no fault as one
+    whose answer *is* an all-clear. Hardcoding a fault here graded
+    `healthy-stop` under the opposite polarity from production, so its pins
+    proved nothing about how it is actually scored - pass `journey.root_cause`.
+    """
     return Scenario(
         id="x",
         question="q",
         screen="s",
-        root_cause="r",
+        root_cause=root_cause,
         must_mention=turn.must_mention,
         must_not_mention=turn.must_not_mention,
     )
@@ -361,7 +368,7 @@ def test_rollout_journey_keywords_discriminate(
     journey = next(
         item for item in load_journeys(bundled_journeys_dir()) if item.id == "rollout-owner-chain"
     )
-    scenario = _turn_scenario(journey.turns[index])
+    scenario = _turn_scenario(journey.turns[index], journey.root_cause)
     for answer in correct:
         assert grade(scenario, answer, []).diagnosis_success, (
             f"turn {index + 1}: a correct answer was graded wrong\n  {answer}"
@@ -573,6 +580,9 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
         (
             "invoicer-1 crashloops because DATABASE_DSN is missing from its environment,"
             " and shipper is degraded but still serving with 2 of 3 replicas.",
+            # Contracted spelling of the same claim.
+            "invoicer-1 crashloops because DATABASE_DSN isn't set, and shipper"
+            " is degraded but still serving with 2 of 3 replicas.",
         ),
         (
             # Names the configuration without saying anything is wrong with it.
@@ -616,6 +626,8 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
         ),
         (
             "Both checkout and payments need attention; rather than checkout first, prioritize payments.",
+            # Concedes the accepted wording and then mirrors it.
+            "checkout should be inspected first, but payments should be inspected first instead.",
             "The shop namespace has no issues.",
         ),
     ),
@@ -628,10 +640,17 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
             # prohibition rejected this: a negator after the match does not
             # scope back over it.
             "Checkout is not the cause; payments-1 has unauthorized registry credentials.",
+            # An article between the subject and the cause. Token matching
+            # is contiguous, so binding the two must tolerate "a"/"an"/"the".
+            "payments has an unauthorized registry authentication failure.",
         ),
         (
             # Right words, wrong subject - the turn says focus on payments.
             "payments-1 is failing; checkout-1 is the one with registry credentials problems.",
+            # The same misattribution in a grammar no prohibition list
+            # anticipated - which is why the required cause is bound to its
+            # subject instead of the wrong subject being enumerated.
+            "payments-1 is failing; checkout-1 suffers an authentication failure.",
             "payments-1 was OOMKilled.",
         ),
     ),
@@ -670,7 +689,7 @@ def test_new_journey_keywords_discriminate(
     journey_id: str, index: int, correct: tuple[str, ...], wrong: tuple[str, ...]
 ) -> None:
     journey = next(item for item in load_journeys(bundled_journeys_dir()) if item.id == journey_id)
-    scenario = _turn_scenario(journey.turns[index])
+    scenario = _turn_scenario(journey.turns[index], journey.root_cause)
     for answer in correct:
         assert grade(scenario, answer, []).diagnosis_success, (
             f"{journey_id} turn {index + 1}: a correct answer was graded wrong\n  {answer}"

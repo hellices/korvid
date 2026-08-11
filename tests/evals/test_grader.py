@@ -366,6 +366,39 @@ def test_grade_exculpation_is_off_for_a_negative_control() -> None:
     assert grade(scenario, "The service endpoints are healthy.", []).diagnosis_success
 
 
+def test_grade_exculpation_stays_on_for_forbidden_keywords() -> None:
+    """Polarity is not symmetric.
+
+    In a negative control the required all-clear must survive, but a
+    *forbidden* keyword ruled out with an all-clear predicate is still ruled
+    out: "the image pull looks normal" is not a positive image-pull
+    diagnosis. Disabling exculpation for the whole scenario rejected the
+    correct answer for telling the truth.
+    """
+    scenario = _scenario(
+        root_cause="none",
+        must_mention=(("healthy",),),
+        must_not_mention=(("image pull",),),
+        expected_evidence=(),
+    )
+    result = grade(scenario, "Everything is healthy; the image pull looks normal.", [])
+    assert result.forbidden_mentions == ()
+    assert result.diagnosis_success
+
+
+def test_grade_does_not_exculpate_a_qualified_fault_claim() -> None:
+    """ "The liveness probe is working too slowly and timing out" is a fault
+    claim. `working` is reassuring only until the qualifier arrives, so it
+    is not in the all-clear set at all."""
+    scenario = _scenario(
+        must_mention=(("liveness probe",),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    answer = "The liveness probe is working too slowly and timing out."
+    assert grade(scenario, answer, []).diagnosis_success
+
+
 def test_grade_exculpation_does_not_reach_past_a_scope_breaker() -> None:
     """Exculpation must not swallow a claim in a later clause.
 
