@@ -522,6 +522,7 @@ async def test_debug_approved_after_a_context_change_is_refused(tmp_path: Path) 
     so neither can forget the re-check (issue #236).
     """
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
+    notices: list[str] = []
     with (
         patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
         patch("korvid.ui.app.subprocess.call", return_value=1) as mock_call,
@@ -529,6 +530,13 @@ async def test_debug_approved_after_a_context_change_is_refused(tmp_path: Path) 
         patch.object(type(app), "suspend", return_value=_noop_cm()),
     ):
         async with app.run_test() as pilot:
+            original_notify = app.notify
+
+            def _spy(message: str, **kwargs: Any) -> None:
+                notices.append(message)
+                original_notify(message, **kwargs)
+
+            app.notify = _spy  # type: ignore[method-assign]  # test spy
             await pilot.pause(0.1)
             await pilot.press("s")
             await until(pilot, lambda: isinstance(app.screen, PickScreen))
@@ -536,7 +544,13 @@ async def test_debug_approved_after_a_context_change_is_refused(tmp_path: Path) 
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
             app._ctx_epoch += 1  # a context switch landed while the prompt was up
             await pilot.press("y")
-            await pilot.pause(0.2)
+            # Observe the refusal itself: a fixed sleep would also pass if the
+            # approval callback simply had not run yet.
+            await until(
+                pilot,
+                lambda: any("kube context changed" in note for note in notices),
+                label="approval refused",
+            )
             mock_call.assert_called_once()  # only the failed exec; no debug
 
 

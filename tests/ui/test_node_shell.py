@@ -284,15 +284,29 @@ async def test_node_shell_approved_after_a_context_change_is_refused(tmp_path: P
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     run_fake, run_calls = _kubectl_run()
+    notices: list[str] = []
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
+            original_notify = app.notify
+
+            def _spy(message: str, **kwargs: Any) -> None:
+                notices.append(message)
+                original_notify(message, **kwargs)
+
+            app.notify = _spy  # type: ignore[method-assign]  # test spy
             await pilot.pause(0.1)
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
             app._ctx_epoch += 1  # a context switch landed while the prompt was up
             await pilot.press("y")
-            await pilot.pause(0.2)
+            # Observe the refusal itself: a fixed sleep would also pass if the
+            # approval callback simply had not run yet.
+            await until(
+                pilot,
+                lambda: any("kube context changed" in note for note in notices),
+                label="approval refused",
+            )
 
     assert run_calls == [], "a privileged debug pod was created for the wrong cluster"
     assert call_records == []
