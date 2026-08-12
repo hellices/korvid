@@ -294,6 +294,25 @@ def test_the_relock_workflow_uses_the_parsing_guard_in_both_jobs() -> None:
         assert "scripts/check_lock_hosts.py" in scripts, f"{job} does not verify the lock"
 
 
+def test_the_lock_can_actually_be_staged_from_the_sparse_checkout() -> None:
+    """The trust anchor and the file being committed pull in opposite ways.
+
+    Taking the validator from `main` means a sparse checkout containing only
+    `scripts/check_lock_hosts.py` — and `uv.lock` then sits outside the
+    sparse definition, where plain `git add` refuses to stage it. Every run
+    with a changed lock would fail at the last step, after doing all the
+    work. Reproduced locally before fixing.
+    """
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "relock.yml").read_text())
+    steps = workflow["jobs"]["propose"]["steps"]
+    sparse = any("sparse-checkout" in str(step.get("with", {})) for step in steps)
+    commit = next(step for step in steps if "gh pr create" in step.get("run", ""))
+    if sparse:
+        assert "git add --sparse uv.lock" in commit["run"], (
+            "a sparse checkout cannot stage uv.lock without --sparse"
+        )
+
+
 def test_pyproject_pins_no_alternate_package_index() -> None:
     """An index pinned here redirects every resolution in the repository.
 
