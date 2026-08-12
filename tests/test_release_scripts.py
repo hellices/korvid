@@ -793,6 +793,7 @@ def _metadata_text(
     include_entra: bool = True,
     include_keyring: bool = True,
     include_urls: bool = True,
+    urls_block: str | None = None,
     content_type: str | None = "text/markdown",
     body: str = (
         "# korvid\n\nAI-native Kubernetes TUI - a keyboard-first cockpit with an"
@@ -814,6 +815,8 @@ def _metadata_text(
         if include_urls
         else ""
     )
+    if urls_block is not None:
+        urls = urls_block
     described = f"Description-Content-Type: {content_type}\n" if content_type else ""
     return (
         "Metadata-Version: 2.4\n"
@@ -905,6 +908,57 @@ def test_artifact_metadata_requires_the_project_urls(tmp_path: Path) -> None:
     dist = _fake_dist(tmp_path, _metadata_text(include_urls=False))
     with pytest.raises(ValueError, match="Project-URL"):
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+@pytest.mark.parametrize(
+    "urls",
+    [
+        pytest.param("Project-URL: Homepage\n", id="no-delimiter"),
+        pytest.param("Project-URL: Homepage,\n", id="empty-url"),
+        pytest.param("Project-URL: Homepage,    \n", id="blank-url"),
+    ],
+)
+def test_artifact_metadata_rejects_a_project_url_with_no_destination(
+    tmp_path: Path, urls: str
+) -> None:
+    """A label alone is not a link.
+
+    Splitting on the comma and keeping the left side meant `Project-URL:
+    Homepage` satisfied the requirement while pointing nowhere - the check
+    passed on metadata that renders an empty sidebar.
+    """
+    dist = _fake_dist(tmp_path, _metadata_text(urls_block=urls))
+    with pytest.raises(ValueError, match="Project-URL"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+@pytest.mark.parametrize(
+    ("content_type", "accepted"),
+    [
+        pytest.param("text/markdown", True, id="bare"),
+        pytest.param("text/markdown; charset=UTF-8", True, id="charset"),
+        pytest.param("text/markdown; variant=GFM", True, id="variant"),
+        pytest.param("TEXT/Markdown", True, id="case-insensitive"),
+        pytest.param("text/markdown-broken", False, id="lookalike"),
+        pytest.param("text/x-rst", False, id="rst"),
+        pytest.param("text/plain", False, id="plain"),
+    ],
+)
+def test_artifact_metadata_matches_the_media_type_exactly(
+    tmp_path: Path, content_type: str, accepted: bool
+) -> None:
+    """`startswith("text/markdown")` also accepts `text/markdown-broken`.
+
+    PyPI would render that as plain text, so a fail-closed check that
+    approves it is worse than none - it reports success on the one property
+    that cannot be fixed after upload.
+    """
+    dist = _fake_dist(tmp_path, _metadata_text(content_type=content_type))
+    if accepted:
+        assert check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"]) == 0
+    else:
+        with pytest.raises(ValueError, match="Description-Content-Type"):
+            check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
 # --- SBOM completeness ------------------------------------------------------
@@ -1438,7 +1492,10 @@ def test_release_docs_runbook_lists_and_cleans_the_os_keyring_credential() -> No
 def test_release_readme_discloses_the_retained_os_keyring_credential() -> None:
     readme = " ".join(_readme().split())
     assert "OS keyring credential (`korvid` / `github-oauth`)" in readme
-    assert "cleanup is explicit and opt-in in the [release runbook](" in readme
+    assert (
+        "cleanup is explicit and opt-in in the [release runbook]"
+        "(https://github.com/hellices/korvid/blob/main/docs/release.md)"
+    ) in readme
 
 
 def test_release_docs_runbook_marks_recovery_boundaries_and_first_release_upgrade_limit() -> None:

@@ -41,10 +41,15 @@ def _validate_project_page(artifact: Path, metadata: Message) -> None:
     that page until the next release.
     """
     content_type = metadata.get("Description-Content-Type")
-    if content_type is None or not content_type.startswith("text/markdown"):
+    # Compare the media type exactly. `startswith` also accepts
+    # `text/markdown-broken`, which PyPI renders as plain text - a
+    # fail-closed check that approves it is worse than no check, because it
+    # reports success on the one property that cannot be fixed after upload.
+    media_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if media_type != "text/markdown":
         raise ValueError(
             f"{artifact.name}: Description-Content-Type is {content_type!r};"
-            " PyPI renders anything else as plain text"
+            " PyPI renders anything but text/markdown as plain text"
         )
     body = metadata.get_payload()
     description = body if isinstance(body, str) else ""
@@ -55,7 +60,14 @@ def _validate_project_page(artifact: Path, metadata: Message) -> None:
             f"{artifact.name}: the long description is empty or truncated;"
             " it is the PyPI project page"
         )
-    urls = {entry.split(",", 1)[0].strip() for entry in metadata.get_all("Project-URL", [])}
+    # A label alone is not a link: `Project-URL: Homepage` and
+    # `Project-URL: Homepage,` both name the entry while pointing nowhere,
+    # and either would render an empty sidebar.
+    urls = set()
+    for entry in metadata.get_all("Project-URL", []):
+        label, _, target = entry.partition(",")
+        if target.strip():
+            urls.add(label.strip())
     required = {"Homepage", "Source", "Issues"}
     missing_urls = required - urls
     if missing_urls:
