@@ -122,7 +122,7 @@ for file in /tmp/korvid-overview-after/*.mmd; do
 done
 ```
 
-Expected: two successful renders. Inspect both ONGs and confirm:
+Expected: two successful renders. Inspect both rendered images and confirm:
 
 - the stable boundary is visually central;
 - Agent and MCP are peers, not parent/child;
@@ -217,4 +217,3 @@ git add docs/overview.md docs/dev/specs/2026-08-12-korvid-architecture.md
 git commit -m "docs: align overview copy with modular adapters" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
-
