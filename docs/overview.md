@@ -15,32 +15,32 @@ Three shapes, one binary, one safety model.
 
 ```mermaid
 flowchart TB
-    M["<b>your editor's assistant</b><br/>VS Code Copilot Chat · Claude Code · Cursor · Zed"]
+    M["<b>your editor's assistant</b><br/>VS Code Copilot Chat<br/>Claude Code · Cursor · Zed"]
+    P["<b>a model, wherever you want it</b><br/>Copilot · Azure · Anthropic · OpenAI<br/>Ollama or any OpenAI-compatible endpoint"]
 
-    subgraph L3[" &nbsp; + korvid[mcp] &nbsp; "]
-        MS["<b>MCP server</b><br/>same reads · same UI driving<br/><i>writes: propose only</i>"]
+    subgraph X1[" &nbsp; optional: + korvid[mcp] &nbsp; "]
+        MS["<b>MCP server</b><br/>same reads · same UI driving<br/><i>writes: propose only, opt-in</i>"]
     end
 
-    subgraph L2[" &nbsp; + korvid[agent] &nbsp; "]
-        A["<b>Ctrl-A chat panel</b><br/>knows what you are looking at<br/>reads the cluster · drives the UI<br/><i>writes: request only</i>"]
+    subgraph X2[" &nbsp; optional: + korvid[agent] &nbsp; "]
+        A["<b>Ctrl-A chat panel</b><br/>knows what you are looking at<br/><i>writes: request only</i>"]
     end
 
-    subgraph L1[" &nbsp; korvid &nbsp; — the cockpit, on its own &nbsp; "]
+    subgraph BASE[" &nbsp; korvid &nbsp; — the cockpit, complete on its own &nbsp; "]
         T["<b>browse · filter · describe · live logs</b><br/>port-forward · file transfer · exec<br/><i>writes: your keystroke</i>"]
     end
 
-    P["<b>a model, wherever you want it</b><br/>Copilot · Azure · Anthropic · OpenAI<br/>Ollama or any OpenAI-compatible endpoint"]
     K[("your kubeconfig")]
 
     M <--> MS
-    MS --> T
-    A --> T
-    A <--> P
+    P <--> A
+    MS -->|"reads · drives the UI"| T
+    A -->|"reads · drives the UI"| T
     T --> K
 
-    style L1 fill:#22543d,color:#fff,stroke:#1a202c,stroke-width:2px
-    style L2 fill:#553c9a,color:#fff,stroke:#1a202c,stroke-width:2px
-    style L3 fill:#2c5282,color:#fff,stroke:#1a202c,stroke-width:2px
+    style BASE fill:#22543d,color:#fff,stroke:#1a202c,stroke-width:2px
+    style X1 fill:#2c5282,color:#fff,stroke:#1a202c,stroke-dasharray: 6 4
+    style X2 fill:#553c9a,color:#fff,stroke:#1a202c,stroke-dasharray: 6 4
     style T fill:#f7fafc,color:#1a202c
     style A fill:#f7fafc,color:#1a202c
     style MS fill:#f7fafc,color:#1a202c
@@ -49,15 +49,23 @@ flowchart TB
     style K fill:#edf2f7,color:#1a202c,stroke-dasharray: 4 4
 ```
 
-Each layer is optional and additive. The cockpit never depends on the agent;
-the agent never depends on MCP. Install what you want:
+Neither box above is required, and neither implies the other.
+
+The two extras are **independent**, not a ladder. Each adds to the cockpit on
+its own: `korvid[mcp]` gives an editor's assistant cluster sight without
+installing an embedded agent at all, and `korvid[agent]` needs no MCP. Install
+what you want:
 
 ```sh
 uv tool install korvid                 # cockpit only
 uv tool install 'korvid[agent]'        # + embedded AI agent
 uv tool install 'korvid[mcp]'          # + MCP server for external agents
-uv tool install 'korvid[all]'          # everything
+uv tool install 'korvid[all]'          # both of the above (= agent,mcp)
 ```
+
+Entra ID authentication for Azure OpenAI is a separate extra —
+`korvid[agent,entra]` — because it pulls in the Azure identity stack that only
+Entra users need. `[all]` does *not* include it.
 
 (`pipx` works the same way. Pin a version for a reproducible install — see the
 [README](../README.md) for the current one.)
@@ -81,9 +89,11 @@ everything it installed. Split into two panes. Sort on live data. Pods show
 live CPU/MEM against their enforced limits, and a troubled pod explains itself
 before you open anything.
 
-Beyond browsing: live log tailing, port-forwards that survive a pod restart and
-tell you when they break, file transfer in and out of containers without the
-`kubectl` binary, and `exec` into a shell.
+Beyond browsing: live log tailing, port-forwards that notice when their target
+pod dies — flipping to `broken` with a toast, and re-attachable in place with
+one key, instead of failing silently the way a hand-run `kubectl port-forward`
+does — file transfer in and out of containers without the `kubectl` binary, and
+`exec` into a shell.
 
 **What it needs:** a kubeconfig. No AI, no network beyond your cluster, no
 account anywhere.
