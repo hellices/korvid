@@ -83,22 +83,7 @@ jobs:
       # of the job is producing a lock nobody can regenerate locally, and an
       # unverified one is worth less than none.
       - name: Refuse a lock that names anything but PyPI
-        run: |
-          # Extract the *value* of each URL-valued field and match the whole
-          # value. Matching the line instead would accept
-          # `url = "https://evil.example/?next=https://pypi.org/simple"`,
-          # whose serving host is not PyPI at all.
-          if grep -oE '(url|registry|index) = "[^"]*"' uv.lock \
-             | sed -E 's/^[a-z]+ = "//; s/"$//' \
-             | grep -vE '^https://(files\.pythonhosted\.org|pypi\.org)/' \
-             | grep -q .; then
-            echo "uv.lock names a non-PyPI host:"
-            grep -oE '(url|registry|index) = "[^"]*"' uv.lock \
-              | sed -E 's/^[a-z]+ = "//; s/"$//' \
-              | grep -vE '^https://(files\.pythonhosted\.org|pypi\.org)/' \
-              | sort -u
-            exit 1
-          fi
+        run: python scripts/check_lock_hosts.py uv.lock
 
       - name: Verify the project still resolves and passes the gate
         # Deliberately the whole gate, not just the tests. The pull request
@@ -153,20 +138,10 @@ jobs:
       # before running the suite, and code from the dependencies it just
       # installed could have rewritten the file afterwards - the check and
       # the upload are not the same instant. This runs in a workspace that
-      # ran none of that code, and before the token is exposed.
+      # ran none of that code, and before the token is exposed. The checker
+      # comes from this clean checkout, not from the artifact.
       - name: Refuse a lock that names anything but PyPI
-        run: |
-          if grep -oE '(url|registry|index) = "[^"]*"' uv.lock \
-             | sed -E 's/^[a-z]+ = "//; s/"$//' \
-             | grep -vE '^https://(files\.pythonhosted\.org|pypi\.org)/' \
-             | grep -q .; then
-            echo "uv.lock names a non-PyPI host:"
-            grep -oE '(url|registry|index) = "[^"]*"' uv.lock \
-              | sed -E 's/^[a-z]+ = "//; s/"$//' \
-              | grep -vE '^https://(files\.pythonhosted\.org|pypi\.org)/' \
-              | sort -u
-            exit 1
-          fi
+        run: python scripts/check_lock_hosts.py uv.lock
 
       - name: Open a pull request with the verified lock
         env:

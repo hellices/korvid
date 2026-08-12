@@ -94,7 +94,7 @@ def test_the_relock_workflow_verifies_the_lock_it_produces() -> None:
     it. The gate below is therefore the full one, not just the tests.
     """
     workflow = (_ROOT / ".github" / "workflows" / "relock.yml").read_text()
-    assert "files\\.pythonhosted\\.org|pypi\\.org" in workflow
+    assert "scripts/check_lock_hosts.py" in workflow
     assert "uv sync --locked" in workflow
     for step in ("ruff check", "ruff format --check", "mypy src/", "tach check", "pytest"):
         assert step in workflow, f"the relock job skips {step}; CI will not run it either"
@@ -161,25 +161,6 @@ def test_the_lock_is_revalidated_after_the_code_that_could_rewrite_it_ran() -> N
     guard = next(i for i, name in enumerate(names) if "anything but PyPI" in name)
     exposed = next(i for i, step in enumerate(steps) if "GH_TOKEN" in str(step.get("env", {})))
     assert guard < exposed, "the write token is exposed before the lock is re-checked"
-
-
-def test_the_relock_guard_matches_the_url_value_not_the_line() -> None:
-    """A line can contain an allowed host without being served by it.
-
-    `url = "https://evil.example/?next=https://pypi.org/simple"` satisfies a
-    line-wise grep while its serving host is not PyPI at all, so the check
-    extracts each value and anchors the match at its start.
-    """
-    workflow = (_ROOT / ".github" / "workflows" / "relock.yml").read_text()
-    assert "sed -E 's/^[a-z]+ = \"//; s/\"$//'" in workflow, (
-        "the check must extract each URL value before matching it"
-    )
-    anchored = re.findall(r"grep -vE '(\^?)https://\(files", workflow)
-    assert anchored, "the PyPI allow-list grep is missing"
-    assert all(caret == "^" for caret in anchored), (
-        "the allow-list must be anchored: an unanchored match accepts"
-        ' url = "https://evil.example/?next=https://pypi.org/simple"'
-    )
 
 
 def test_pyproject_pins_no_alternate_package_index() -> None:
