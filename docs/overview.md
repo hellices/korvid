@@ -14,39 +14,41 @@ Three shapes, one binary, one safety model.
 ## The shape
 
 ```mermaid
-flowchart TB
-    M["<b>your editor's assistant</b><br/>VS Code Copilot Chat<br/>Claude Code · Cursor · Zed"]
-    P["<b>a model, wherever you want it</b><br/>Copilot · Azure · Anthropic · OpenAI<br/>Ollama or any OpenAI-compatible endpoint"]
+flowchart LR
+    HUMAN["👤 Human operator"]
+    MODEL["🤖 Model / provider<br/>Copilot · Azure · Anthropic<br/>OpenAI · Ollama · compatible"]
+    CLIENT["🖥 Editor / external assistant<br/>VS Code · Claude Code<br/>Cursor · Zed"]
+    CLUSTER[("☸ Kubeconfig +<br/>cluster")]
 
-    subgraph X1[" &nbsp; optional: + korvid[mcp] &nbsp; "]
-        MS["<b>MCP server</b><br/>same reads · same UI driving<br/><i>writes: propose only, opt-in</i>"]
+    subgraph KORVID["KORVID — stable capability boundary"]
+        direction LR
+        TUI["TUI adapter<br/><b>INCLUDED</b><br/>browse · filter · describe<br/>logs · port-forward · exec"]
+        AGENT["Agent adapter<br/><b>OPTIONAL</b> korvid[agent]<br/>Ctrl-A chat panel<br/>context-aware reads"]
+        CORE["Observe · diagnose · navigate<br/>approval-gated operations<br/>audit log · secret masking"]
+        MCP["MCP adapter<br/><b>OPTIONAL</b> korvid[mcp]<br/>read + UI-drive over MCP<br/>write proposals opt-in"]
+        K8S["Kubernetes adapter<br/><b>INCLUDED</b><br/>kubernetes.aio"]
+
+        TUI --> CORE
+        AGENT --> CORE
+        MCP --> CORE
+        CORE --> K8S
     end
 
-    subgraph X2[" &nbsp; optional: + korvid[agent] &nbsp; "]
-        A["<b>Ctrl-A chat panel</b><br/>knows what you are looking at<br/><i>writes: request only</i>"]
-    end
+    HUMAN --> TUI
+    MODEL --> AGENT
+    CLIENT --> MCP
+    K8S --> CLUSTER
 
-    subgraph BASE[" &nbsp; korvid &nbsp; — the cockpit, complete on its own &nbsp; "]
-        T["<b>browse · filter · describe · live logs</b><br/>port-forward · file transfer · exec<br/><i>writes: your keystroke</i>"]
-    end
-
-    K[("your kubeconfig")]
-
-    M <--> MS
-    P <--> A
-    MS -->|"reads · drives the UI"| T
-    A -->|"reads · drives the UI"| T
-    T --> K
-
-    style BASE fill:#22543d,color:#fff,stroke:#1a202c,stroke-width:2px
-    style X1 fill:#2c5282,color:#fff,stroke:#1a202c,stroke-dasharray: 6 4
-    style X2 fill:#553c9a,color:#fff,stroke:#1a202c,stroke-dasharray: 6 4
-    style T fill:#f7fafc,color:#1a202c
-    style A fill:#f7fafc,color:#1a202c
-    style MS fill:#f7fafc,color:#1a202c
-    style M fill:#edf2f7,color:#1a202c,stroke-dasharray: 4 4
-    style P fill:#edf2f7,color:#1a202c,stroke-dasharray: 4 4
-    style K fill:#edf2f7,color:#1a202c,stroke-dasharray: 4 4
+    style KORVID fill:#1a202c,color:#e2e8f0,stroke:#4a5568,stroke-width:2px
+    style CORE fill:#2d3748,color:#e2e8f0,stroke:#4a5568
+    style TUI fill:#22543d,color:#fff,stroke:#276749
+    style K8S fill:#22543d,color:#fff,stroke:#276749
+    style AGENT fill:#553c9a,color:#fff,stroke:#6b46c1
+    style MCP fill:#2c5282,color:#fff,stroke:#3182ce
+    style HUMAN fill:#edf2f7,color:#1a202c,stroke:#a0aec0,stroke-dasharray: 4 4
+    style MODEL fill:#edf2f7,color:#1a202c,stroke:#a0aec0,stroke-dasharray: 4 4
+    style CLIENT fill:#edf2f7,color:#1a202c,stroke:#a0aec0,stroke-dasharray: 4 4
+    style CLUSTER fill:#edf2f7,color:#1a202c,stroke:#a0aec0,stroke-dasharray: 4 4
 ```
 
 Neither box above is required, and neither implies the other.
@@ -142,21 +144,74 @@ deliberately — and it stays off until you turn it on.
 
 ---
 
-## The one rule all three share
+## Four valid compositions
 
 ```mermaid
 flowchart LR
-    U["you"] -->|keystroke| G
-    A["embedded agent"] -->|requests| G
-    M["MCP client"] -->|"proposes<br/>(opt-in)"| G["approval dialog<br/><i>preview where the operation has one</i>"]
-    G -->|approved| AU["audit log"]
-    AU -->|written durably| W["the cluster changes"]
-    AU -.->|cannot be written| X["blocked"]
+    subgraph C1["korvid  —  cockpit only"]
+        direction TB
+        C1T["TUI\nINCLUDED"]
+        C1R["Core"]
+        C1K["K8s\nINCLUDED"]
+        C1T --> C1R --> C1K
+    end
 
-    style G fill:#744210,color:#fff
-    style X fill:#742a2a,color:#fff
-    style W fill:#22543d,color:#fff
+    subgraph C2["korvid[agent]  —  + embedded AI"]
+        direction TB
+        C2A["Agent\nOPTIONAL"]
+        C2T["TUI\nINCLUDED"]
+        C2R["Core"]
+        C2K["K8s\nINCLUDED"]
+        C2A --> C2R
+        C2T --> C2R --> C2K
+    end
+
+    subgraph C3["korvid[mcp]  —  + MCP server"]
+        direction TB
+        C3M["MCP\nOPTIONAL"]
+        C3T["TUI\nINCLUDED"]
+        C3R["Core"]
+        C3K["K8s\nINCLUDED"]
+        C3M --> C3R
+        C3T --> C3R --> C3K
+    end
+
+    subgraph C4["korvid[all]  —  agent + MCP  (entra optional beside agent)"]
+        direction TB
+        C4A["Agent\nOPTIONAL"]
+        C4M["MCP\nOPTIONAL"]
+        C4T["TUI\nINCLUDED"]
+        C4R["Core"]
+        C4K["K8s\nINCLUDED"]
+        C4A --> C4R
+        C4M --> C4R
+        C4T --> C4R --> C4K
+    end
+
+    style C1T fill:#22543d,color:#fff,stroke:#276749
+    style C1R fill:#2d3748,color:#e2e8f0,stroke:#4a5568
+    style C1K fill:#22543d,color:#fff,stroke:#276749
+
+    style C2T fill:#22543d,color:#fff,stroke:#276749
+    style C2A fill:#553c9a,color:#fff,stroke:#6b46c1
+    style C2R fill:#2d3748,color:#e2e8f0,stroke:#4a5568
+    style C2K fill:#22543d,color:#fff,stroke:#276749
+
+    style C3T fill:#22543d,color:#fff,stroke:#276749
+    style C3M fill:#2c5282,color:#fff,stroke:#3182ce
+    style C3R fill:#2d3748,color:#e2e8f0,stroke:#4a5568
+    style C3K fill:#22543d,color:#fff,stroke:#276749
+
+    style C4T fill:#22543d,color:#fff,stroke:#276749
+    style C4A fill:#553c9a,color:#fff,stroke:#6b46c1
+    style C4M fill:#2c5282,color:#fff,stroke:#3182ce
+    style C4R fill:#2d3748,color:#e2e8f0,stroke:#4a5568
+    style C4K fill:#22543d,color:#fff,stroke:#276749
 ```
+
+---
+
+## The one rule all four share
 
 **Nothing changes your cluster without a human keystroke, and nothing changes
 it unlogged.**
