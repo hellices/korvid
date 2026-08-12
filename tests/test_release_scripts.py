@@ -1328,8 +1328,26 @@ def test_pypi_metadata_gives_the_project_page_its_sidebar_links() -> None:
     assert urls["Source"] == repo
     assert urls["Issues"] == f"{repo}/issues"
     assert urls["Release notes"] == f"{repo}/releases"
-    assert urls["Documentation"] == f"{repo}/blob/main/docs/README.md"
+    assert urls["Documentation"] == f"{repo}/blob/main/docs/tui.md"
     assert urls["Security"] == f"{repo}/blob/main/SECURITY.md"
+
+
+def test_every_sidebar_link_to_a_repository_file_points_at_a_real_file() -> None:
+    """A sidebar link is only useful if it resolves.
+
+    `Documentation` pointed at `docs/README.md`, which does not exist - a
+    404 on the PyPI project page, and nothing in the repository would have
+    noticed. Checking the exact strings is not enough; the targets that name
+    a file in this repository are resolved against the working tree.
+    """
+    root = Path(__file__).parents[1]
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+    prefix = "https://github.com/hellices/korvid/blob/main/"
+    for label, url in pyproject["project"]["urls"].items():
+        if not url.startswith(prefix):
+            continue
+        target = root / url[len(prefix) :]
+        assert target.is_file(), f"[project.urls] {label} points at a missing file: {url}"
 
 
 def test_pypi_metadata_declares_audience_and_supported_pythons() -> None:
@@ -1350,6 +1368,32 @@ def test_pypi_metadata_declares_audience_and_supported_pythons() -> None:
     for minor in ("11", "12", "13"):
         assert f"Programming Language :: Python :: 3.{minor}" in classifiers
     assert pyproject["project"]["keywords"]
+
+
+def test_every_absolute_repository_link_resolves_to_a_real_path() -> None:
+    """Absolute links do not fail loudly - they 404 for the reader.
+
+    Rewriting the README's relative links for PyPI moved every one of them
+    out of reach of any tooling that checks paths, so the targets are
+    resolved back against the working tree here. The release notes get the
+    same treatment: they are published to a page nobody can edit in place.
+    """
+    root = Path(__file__).parents[1]
+    prefixes = (
+        "https://github.com/hellices/korvid/blob/main/",
+        "https://github.com/hellices/korvid/tree/main/",
+        "https://raw.githubusercontent.com/hellices/korvid/main/",
+    )
+    documents = {"README.md": _readme(), "release notes": _release_notes()}
+    broken: list[str] = []
+    for name, text in documents.items():
+        for url in re.findall(r"\]\(([^)]+)\)", text):
+            for prefix in prefixes:
+                if url.startswith(prefix):
+                    target = root / url[len(prefix) :].split("#")[0]
+                    if not target.exists():
+                        broken.append(f"{name}: {url}")
+    assert not broken, f"links to paths that do not exist: {broken}"
 
 
 def test_readme_has_no_relative_links_because_pypi_cannot_follow_them() -> None:
