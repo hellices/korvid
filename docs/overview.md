@@ -46,7 +46,7 @@ flowchart TB
     style MS fill:#f7fafc,color:#1a202c
     style M fill:#edf2f7,color:#1a202c,stroke-dasharray: 4 4
     style P fill:#edf2f7,color:#1a202c,stroke-dasharray: 4 4
-    style K fill:#edf2f7,color:#1a202c
+    style K fill:#edf2f7,color:#1a202c,stroke-dasharray: 4 4
 ```
 
 Each layer is optional and additive. The cockpit never depends on the agent;
@@ -100,9 +100,12 @@ It reads the cluster through read-only tools (manifests, logs, events, compound
 diagnostics) and **drives the UI itself**. "Show me the crashing pod's logs"
 does not print a suggestion; it navigates, filters, and opens the log pane.
 
-Every claim it makes carries a reference to the read behind it, and selecting
-that reference opens the actual view. An answer you cannot check is a guess
-with better grammar.
+Its answers cite the reads behind them, and selecting a citation opens the
+actual view. korvid validates the citations that appear — an invented reference
+is reported rather than quietly accepted — but it cannot make a model cite
+everything it says, so an uncited sentence is exactly that: uncited. The point
+is that the checkable parts *are* checkable. An answer you cannot check at all
+is a guess with better grammar.
 
 **What it needs:** a provider. GitHub Copilot, Azure OpenAI, Anthropic, OpenAI,
 a local Ollama, or any OpenAI-compatible endpoint. A `small` profile targets
@@ -120,9 +123,12 @@ Your editor's assistant gains cluster sight: it can list, describe, read logs,
 run diagnostics, and move korvid's UI so you watch what it looks at.
 
 **What it cannot do:** change anything. Cluster writes are not on the MCP
-surface at all — not gated there, *absent*. An MCP client can leave a write
-**proposal**, which a human reviews and approves in korvid. That is the whole
-automation story over MCP, deliberately.
+surface at all — not gated there, *absent*.
+
+If you opt in with `mcp.write_proposals: true` (off by default), a client gains
+one further ability: leaving a write **proposal** for a human to review and
+approve inside korvid. That is the whole automation story over MCP,
+deliberately — and it stays off until you turn it on.
 
 ---
 
@@ -132,7 +138,7 @@ automation story over MCP, deliberately.
 flowchart LR
     U["you"] -->|keystroke| G
     A["embedded agent"] -->|requests| G
-    M["MCP client"] -->|proposes| G["approval dialog<br/><i>with a dry-run preview</i>"]
+    M["MCP client"] -->|"proposes<br/>(opt-in)"| G["approval dialog<br/><i>preview where the operation has one</i>"]
     G -->|approved| AU["audit log"]
     AU -->|written durably| W["the cluster changes"]
     AU -.->|cannot be written| X["blocked"]
@@ -145,17 +151,29 @@ flowchart LR
 **Nothing changes your cluster without a human keystroke, and nothing changes
 it unlogged.**
 
+Most dialogs show a preview of what will change — a server-side dry-run diff
+for Kubernetes API writes, a rendered manifest for Helm. Some operations have
+none to show (a file upload into a pod), and a preview that times out does not
+hold the dialog hostage. The preview is a courtesy; the dialog and the audit
+entry are the guarantee.
+
 Not "the agent is instructed not to". Not "you can turn on confirmations". The
 write path *goes through* the dialog — there is no second route, for you, for
 the agent, or for an MCP client, and a write whose audit record cannot be
 written does not happen at all.
 
-Add `--readonly` to remove writes entirely, or mark production contexts to
-require typing the resource name before a dialog will accept approval.
+Add `--readonly` to remove writes entirely, or mark production contexts as
+protected: every confirmation then requires typing the **context** name instead
+of a single `y` — and the operations that already demand the resource name
+(cluster-scoped deletes, node drains) keep that stronger gate.
 
-Secrets are masked before anything reaches a model, and `:ai payload` shows you
-exactly what was sent — a boundary you cannot inspect is a promise, not a
-control.
+`Secret` values and the credential patterns korvid recognises are masked before
+anything reaches the **embedded** agent's provider, and `:ai payload` shows you
+what was sent — a boundary you cannot inspect is a promise, not a control. Two
+honest limits: a secret that only your application knows is a secret, sitting in
+a log line, may pass undetected; and an external MCP client applies its own data
+policy, not korvid's. [`threat-model.md`](threat-model.md) is specific about
+both.
 
 ---
 
