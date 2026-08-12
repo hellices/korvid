@@ -110,6 +110,23 @@ def test_the_relock_pull_request_says_ci_has_not_run() -> None:
     assert "empty commit" in workflow
 
 
+def test_the_relock_job_holds_no_write_credential_while_it_runs_the_code() -> None:
+    """This job installs and executes the dependencies it is updating.
+
+    A persisted `contents: write` token would sit on disk while `uv sync`
+    resolves and the suite runs, reachable by anything in that tree — so a
+    compromised dependency could push before the verification that would
+    have caught it. The credential is configured in the push step instead,
+    after the checks it must not be able to skip.
+    """
+    workflow = (_ROOT / ".github" / "workflows" / "relock.yml").read_text()
+    assert "persist-credentials: false" in workflow
+    assert "persist-credentials: true" not in workflow
+    setup = workflow.index("gh auth setup-git")
+    for check in ("uv sync --locked", "uv run pytest"):
+        assert workflow.index(check) < setup, f"{check} runs after git is authenticated"
+
+
 def test_pyproject_pins_no_alternate_package_index() -> None:
     """An index pinned here redirects every resolution in the repository.
 

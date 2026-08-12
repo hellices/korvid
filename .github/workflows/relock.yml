@@ -49,10 +49,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ inputs.base }}
-          # The push below uses the checkout credential deliberately; the
-          # branch it writes is a throwaway `relock/*` that only a pull
-          # request can land.
-          persist-credentials: true
+          # No credential on disk while `uv sync` resolves and the suite
+          # runs. This job installs and executes the very dependencies it is
+          # updating, so a persisted `contents: write` token would be
+          # reachable by anything in that tree. Git auth is configured in
+          # the push step, after the verification it would otherwise be
+          # able to skip.
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
         with:
           version: "0.10.9"
@@ -104,6 +107,9 @@ jobs:
           fi
           target="${PACKAGE:-all dependencies}"
           branch="relock/$(date +%Y%m%d-%H%M%S)"
+          # Git gets a credential only here, after the lock has been
+          # verified and the suite has run.
+          gh auth setup-git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
