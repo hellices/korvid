@@ -245,7 +245,11 @@ jobs:
             echo "approve pull requests' being off - an API-invisible switch."
             echo
             echo "Nothing is lost. Open it by hand:"
-            echo "  gh pr create --base $BASE --head $branch"
+            # %q, not interpolation: git allows ';' and other shell
+            # metacharacters in a ref name, and $BASE is a dispatch input.
+            # The real call above quotes them; a line meant to be pasted
+            # has to escape them.
+            printf '  gh pr create --base %q --head %q\n' "$BASE" "$branch"
             echo
             echo "That also has the side effect of starting CI, which a"
             echo "GITHUB_TOKEN-opened pull request would not have done."

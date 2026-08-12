@@ -347,16 +347,32 @@ def test_the_relock_workflow_survives_a_repository_that_forbids_bot_pull_request
     _, _, after = workflow.partition("if ! gh pr create")
     failure_branch, _, _ = after.partition("exit 1")
     printed = "\n".join(
-        line for line in failure_branch.splitlines() if line.strip().startswith("echo ")
+        line
+        for line in failure_branch.splitlines()
+        if line.strip().startswith(("echo ", "printf "))
     )
     assert "Allow GitHub Actions to create and" in printed, (
         "the operator is not told which setting refused the pull request"
     )
-    assert "gh pr create --base $BASE --head $branch" in printed, (
+    assert "gh pr create --base" in printed, (
         "the manual remedy must be printed with the real branch name"
     )
     assert "$branch" in failure_branch
     assert "Nothing is lost" in printed
+    # The claim is only true if the branch is already on the remote when
+    # creation is attempted. Reordering these would leave the message
+    # intact and the work lost.
+    assert workflow.index('git push origin "$branch"') < workflow.index("if ! gh pr create"), (
+        "the branch must be pushed before the pull request can fail"
+    )
+    # The printed line gets pasted into a shell, so it must be escaped
+    # rather than interpolated: git allows ';' in a ref name, and $BASE is
+    # a dispatch input.
+    assert "gh pr create --base $BASE --head $branch" not in printed, (
+        "an unescaped base ref lets a branch name run extra shell commands"
+    )
+    assert "printf" in printed, "render the copyable command with shell escaping"
+    assert "%q" in printed, "render the copyable command with shell escaping"
 
 
 def test_pyproject_pins_no_alternate_package_index() -> None:
