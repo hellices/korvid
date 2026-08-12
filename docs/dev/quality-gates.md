@@ -6,12 +6,41 @@ is repeated later only where trusting the earlier layer would be unsound.
 
 ## 1. Every commit — local, `pre-commit`
 
-`ruff`, `ruff-format`, `typos`, `validate-pyproject`, `mypy`, and the
-repository's own `no-bare-type-ignore` hook.
+`ruff`, `ruff-format`, `typos`, `validate-pyproject`, `mypy`, and two
+repository hooks: `no-bare-type-ignore` and `no-private-index-in-lock`.
 
 These are fast enough to run on staged files, so nothing slow lives here.
 The same hooks run again in CI over **all** files (`pre-commit` job), which
 is what makes `--no-verify` an unusable shortcut rather than a quiet one.
+
+### Working behind a corporate package mirror
+
+`uv` records both the artifact URL and the index that served it, so one
+`uv lock` behind `UV_INDEX_URL`, a `~/.config/uv/uv.toml`, or a `pip.conf`
+rewrites the whole lockfile to a host only that network can reach.
+
+The lock is only the symptom. Configuration redirects every resolution —
+CI's included — while the lock stays byte-for-byte clean, so three surfaces
+are guarded:
+
+| surface | guard |
+| --- | --- |
+| `uv.lock` URLs and registries | `no-private-index-in-lock` hook, `test_lockfile_names_no_host_other_than_pypi` |
+| `[tool.uv]` index pins in `pyproject.toml` | `test_pyproject_pins_no_alternate_package_index` |
+| a repository-level `uv.toml` | `test_repository_declares_no_uv_configuration_file` |
+
+Behind a mirror, work with `uv sync --frozen --dev --all-extras` and do not
+re-lock. If a lock genuinely must change:
+
+```sh
+git checkout uv.lock          # discard the rewritten lock
+UV_INDEX_URL= uv lock         # re-lock against PyPI directly
+```
+
+If PyPI is unreachable from your machine, do not work around it here — let
+CI regenerate the lock, or update it from a machine with direct access. A
+lock is a supply-chain artifact; a convenient one that points somewhere else
+is worse than none.
 
 ## 2. Before pushing — local, `make check`
 
