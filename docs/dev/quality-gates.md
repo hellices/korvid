@@ -57,13 +57,24 @@ Measured on a machine configured for a mirror:
 Then confirm before committing: every `url` and `registry` in the lock must
 name `files.pythonhosted.org` or `pypi.org`.
 
-If PyPI is unreachable from your machine, do not work around it here. No CI
-workflow regenerates the lock — every job consumes the committed one
-(`uv sync --locked`, `uv export --frozen`) — so the options are a machine
-with direct access, or **Dependabot**, which opens lock updates against
-PyPI on its own schedule (`.github/dependabot.yml`). A lock is a
-supply-chain artifact; a convenient one that points somewhere else is worse
-than none.
+If PyPI is unreachable from your machine, do not work around it here — and
+you do not have to. `uv lock` fetches wheel *metadata* from
+`files.pythonhosted.org`, so a TLS-intercepted machine cannot produce a
+usable lock at all: locking through the mirror names the mirror, and this
+repository rejects that. Three paths out, in order of preference:
+
+1. **Dependabot** (`.github/dependabot.yml`) — routine bumps, on a schedule,
+   resolved against PyPI. Nothing to do.
+2. **The `Relock` workflow** (`.github/workflows/relock.yml`) — a manual
+   dispatch for the deliberate changes Dependabot will not make, such as
+   taking a major version that needs source edits in the same pull request.
+   It locks on a runner with direct access, **re-checks that the lock names
+   only PyPI**, runs `uv sync --locked` and the suite against it, and opens
+   a pull request. It never writes to `main`.
+3. A machine with direct PyPI access.
+
+A lock is a supply-chain artifact; a convenient one that points somewhere
+else is worse than none.
 
 ## 2. Before pushing — local, `make check`
 

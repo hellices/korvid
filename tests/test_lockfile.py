@@ -69,6 +69,33 @@ def test_lockfile_records_both_the_artifact_url_and_the_serving_registry() -> No
     assert re.search(r'\bregistry\s*=\s*"https://pypi\.org/simple"', lock)
 
 
+def test_a_relock_path_exists_for_machines_that_cannot_reach_pypi() -> None:
+    """The guards above have to leave a way forward.
+
+    `uv lock` fetches wheel metadata from `files.pythonhosted.org`, so a
+    TLS-intercepted machine cannot produce an acceptable lock at all — it
+    can only produce one this repository rejects. Guarding the lock without
+    providing a route to update it would make a legitimate dependency change
+    impossible rather than careful.
+    """
+    workflow = (_ROOT / ".github" / "workflows" / "relock.yml").read_text()
+    assert "uv lock --upgrade-package" in workflow
+    assert "gh pr create" in workflow, "the lock must arrive through review, not a push to main"
+
+
+def test_the_relock_workflow_verifies_the_lock_it_produces() -> None:
+    """A lock nobody can regenerate locally is exactly the one to check.
+
+    The runner should resolve from PyPI, so this never fires — which is the
+    point: an unverified lock produced by automation is worth less than
+    none, because no human can reproduce it to disagree.
+    """
+    workflow = (_ROOT / ".github" / "workflows" / "relock.yml").read_text()
+    assert "files\\.pythonhosted\\.org|pypi\\.org" in workflow
+    assert "uv sync --locked" in workflow
+    assert "uv run pytest" in workflow
+
+
 def test_pyproject_pins_no_alternate_package_index() -> None:
     """An index pinned here redirects every resolution in the repository.
 
