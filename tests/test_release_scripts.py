@@ -1221,6 +1221,22 @@ def test_release_stages_written_notes_rather_than_a_generated_commit_list() -> N
     assert 'if [ ! -f "$NOTES" ]' in workflow
 
 
+def test_release_rewrites_the_notes_of_a_draft_it_resumes() -> None:
+    """The recovery path validated assets and trusted the body.
+
+    A draft can exist from an earlier run, or be created by hand before the
+    tag is pushed. Resuming one only compared its files, so a body nobody
+    reviewed - or a stale one from a previous attempt - would be published
+    verbatim while the reviewed notes file sat unused. The notes are part of
+    the release, so the resumed draft is rewritten from the file.
+    """
+    workflow = _release_workflow()
+    assert 'gh release edit "$TAG" --repo "$REPO" \\' in workflow
+    assert workflow.count('--notes-file "$NOTES"') == 2, (
+        "both the create and the resume path must take the body from the notes file"
+    )
+
+
 def test_release_notes_exist_for_the_version_being_shipped() -> None:
     notes = _release_notes()
     version = _project_version()
