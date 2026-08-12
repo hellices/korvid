@@ -129,11 +129,24 @@ class ToolOutcome:
     which is content: a valid document whose first line said `ERROR:`
     skipped the structural redaction pass — the only one that can see a
     nested `kind: Secret` or a credential env sibling (PR #197 review).
+
+    `incarnation` identifies *which* object the read looked at, not just
+    which name. `get_events` already scopes to the live UID; without it
+    on the result, a pod deleted and recreated under the same name is
+    opened as though it were the cited evidence, silently (#250). Optional
+    because listings have no single incarnation to promise.
+
+    `container` is the one the read actually streamed, including the
+    default `get_logs` resolves when the argument is omitted. Re-deriving
+    that rule downstream is a second implementation of the same choice,
+    and the two can disagree.
     """
 
     text: str
     redactions: tuple[RedactionRecord, ...] = field(default=())
     error: bool = False
+    incarnation: str | None = None
+    container: str | None = None
 
 
 class RecordedExecution(ABC):
@@ -748,7 +761,11 @@ class ToolExecutor(RecordedExecution):
             return ToolOutcome(text=cap_result(f"{ERROR_PREFIX} {exc}"), error=True)
         if isinstance(result, ToolOutcome):
             return ToolOutcome(
-                text=cap_result(result.text), redactions=result.redactions, error=result.error
+                text=cap_result(result.text),
+                redactions=result.redactions,
+                error=result.error,
+                incarnation=result.incarnation,
+                container=result.container,
             )
         return ToolOutcome(text=cap_result(result))
 
@@ -992,13 +1009,14 @@ class ToolExecutor(RecordedExecution):
             raise ToolResultBlocked("the result is too deeply nested to redact") from exc
         return ToolOutcome(text=text, redactions=tuple(records))
 
-    async def _get_logs(self, args: dict[str, Any]) -> str:
+    async def _get_logs(self, args: dict[str, Any]) -> ToolOutcome:
         pod = _reject_slash_name(str(args["pod"]), "pod")
         namespace = _reject_slash_name(str(args["namespace"]), "namespace")
         container: str = str(args.get("container") or "")
         raw_tail = args.get("tail_lines", 100)
         tail_lines = max(1, min(500, int(raw_tail)))
 
+        uid: str | None = None
         if not container:
             pods_meta = self._aliases.get("pods") or self._aliases.get("pod")
             if pods_meta is not None:
@@ -1008,15 +1026,20 @@ class ToolExecutor(RecordedExecution):
                 ].get("name")
                 if first_container:
                     container = str(first_container)
+                raw_uid = (pod_manifest.get("metadata") or {}).get("uid")
+                uid = str(raw_uid) if raw_uid else None
 
         lines: list[str] = []
         async for log_line in self._kube.stream_logs(
             namespace, pod, container, follow=False, tail_lines=tail_lines
         ):
             lines.append(log_line.text)
-        return "\n".join(lines)
+        # The resolved container and the pod this read streamed from both
+        # travel with the result: a citation must reopen the same stream,
+        # not re-run the defaulting rule against a replacement (#250).
+        return ToolOutcome(text="\n".join(lines), incarnation=uid, container=container or None)
 
-    async def _get_events(self, args: dict[str, Any]) -> str:
+    async def _get_events(self, args: dict[str, Any]) -> ToolOutcome:
         kind = str(args["kind"]).strip().lower()
         namespace = _reject_slash_name(str(args["namespace"]), "namespace")
         name = _reject_slash_name(str(args["name"]), "name")
@@ -1036,8 +1059,11 @@ class ToolExecutor(RecordedExecution):
             raw_uid = (manifest.get("metadata") or {}).get("uid")
             uid = str(raw_uid) if raw_uid else None
         events = await self._kube.list_events_for(namespace, name, kind=meta.kind, uid=uid)
+        # The UID travels with the result: the scoping decision is made
+        # here, and a citation cannot re-derive which incarnation was read
+        # once the object has been replaced (#250).
         if not events:
-            return "(no events)"
+            return ToolOutcome(text="(no events)", incarnation=uid)
         parts: list[str] = []
         for ev in events:
             ev_type = str(ev.get("type") or "")
@@ -1045,7 +1071,7 @@ class ToolExecutor(RecordedExecution):
             count = int(ev.get("count") or 1)
             message = str(ev.get("message") or "")
             parts.append(f"{ev_type} {reason} ({count}x): {message}")
-        return "\n".join(parts)
+        return ToolOutcome(text="\n".join(parts), incarnation=uid)
 
     #: Log lines fetched per troubled container before excerpting.
     _DIAGNOSE_LOG_TAIL = 200

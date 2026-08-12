@@ -3891,3 +3891,60 @@ async def test_events_gap_immediate_class_executor_returns_incomplete() -> None:
     )
     rule_ids = [f["rule_id"] for f in document.get("findings", [])]
     assert "pvc.provisioning_pending" not in rule_ids
+
+
+async def test_get_events_reports_the_incarnation_it_scoped_to() -> None:
+    """The UID must leave the executor, or a citation cannot check it.
+
+    `get_events` already scopes to the live object's UID so events belong
+    to one incarnation. Keeping that UID inside the handler means a pod
+    recreated under the same name is opened as though it were the cited
+    evidence (#250).
+    """
+    outcome = await make_executor(FakeEventKube()).execute_recorded(
+        "get_events", {"kind": "Pod", "namespace": "d", "name": "web"}
+    )
+
+    assert outcome.incarnation == "abc-123"
+
+
+async def test_get_events_reports_no_incarnation_when_the_object_is_gone() -> None:
+    """A read that fell back to name scope has no incarnation to promise."""
+
+    class GoneKube(FakeEventKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            raise ApiStatusError(404, "NotFound")
+
+    outcome = await make_executor(GoneKube()).execute_recorded(
+        "get_events", {"kind": "pods", "namespace": "d", "name": "web"}
+    )
+
+    assert outcome.incarnation is None
+
+
+async def test_get_logs_reports_the_container_it_resolved() -> None:
+    """The reader picked a container; the citation must not pick again.
+
+    `get_logs` with no container streams the pod's *first* one. Re-deriving
+    that rule at open time is a second implementation of the same choice,
+    and the two can disagree (#250).
+    """
+
+    kube = FakeLogKube()
+    kube.manifest["metadata"]["uid"] = "pod-uid"
+
+    outcome = await make_executor(kube).execute_recorded(
+        "get_logs", {"pod": "web", "namespace": "d"}
+    )
+
+    assert outcome.container == "app"
+    assert outcome.incarnation == "pod-uid"
+
+
+async def test_get_logs_with_an_explicit_container_reports_it_unchanged() -> None:
+    """No resolution happened, so nothing may be invented about identity."""
+    outcome = await make_executor(FakeLogKube()).execute_recorded(
+        "get_logs", {"pod": "web", "namespace": "d", "container": "sidecar"}
+    )
+
+    assert outcome.container == "sidecar"

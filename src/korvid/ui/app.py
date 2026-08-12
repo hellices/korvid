@@ -6298,14 +6298,44 @@ class KorvidApp(App[None]):
         target = target_for(item)
         if target is None:
             return f"ERROR: {ref} has no view to open ({item.tool})"
-        if target.view == "logs":
-            return await self._open_evidence_logs(ref, target)
         if target.view == "list":
             # A listing with no namespace covered every namespace; `None`
             # would instead be read as "keep the pane's current scope".
             scope = ALL_NAMESPACES if target.all_namespaces else target.namespace
             return await self.agent_navigate(target.kind or "", namespace=scope)
-        return await self._open_evidence_describe(ref, target)
+        replaced = await self._evidence_was_replaced(target)
+        if target.view == "logs":
+            opened = await self._open_evidence_logs(ref, target)
+        else:
+            opened = await self._open_evidence_describe(ref, target)
+        if replaced and not opened.startswith("ERROR:"):
+            # Opened anyway: the user asked to see it, and the current
+            # object is usually what they need next. Saying nothing is the
+            # failure - the claim was about an object that no longer
+            # exists (#250).
+            return (
+                f"{opened} (warning: this object was replaced since the cited read —"
+                " what is on screen is a new instance, not the evidence)"
+            )
+        return opened
+
+    async def _evidence_was_replaced(self, target: EvidenceTarget) -> bool:
+        """Whether the live object is a different instance from the cited one.
+
+        Only ever answers yes on a positive identification: no recorded
+        incarnation, no manifest access, or a lookup failure all mean
+        "cannot tell", and a warning nobody can trust is worse than none.
+        """
+        if target.incarnation is None or self._get_manifest is None:
+            return False
+        if target.kind is None or target.name is None:
+            return False
+        try:
+            manifest = await self._get_manifest(target.kind, target.namespace, target.name)
+        except Exception:
+            return False
+        live = (manifest.get("metadata") or {}).get("uid")
+        return bool(live) and str(live) != target.incarnation
 
     async def _open_evidence_logs(self, ref: str, target: EvidenceTarget) -> str:
         """Stream the container the cited read actually looked at."""

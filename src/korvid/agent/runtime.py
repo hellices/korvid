@@ -459,7 +459,7 @@ class AgentRuntime:
 
     async def _execute_tool(
         self, name: str, arguments: dict[str, Any]
-    ) -> tuple[str, tuple[RedactionRecord, ...], bool]:
+    ) -> tuple[str, tuple[RedactionRecord, ...], bool, str | None, str | None]:
         """Run one tool, taking the producer redaction trail it reports.
 
         Producer-side redaction happens before the size bound, so it is
@@ -478,7 +478,13 @@ class AgentRuntime:
             # block means one rollback path — history truncated to the turn
             # base, records purged, the last successful snapshot standing.
             raise ToolResultBlockedError(str(exc)) from exc
-        return outcome.text, outcome.redactions, outcome.error
+        return (
+            outcome.text,
+            outcome.redactions,
+            outcome.error,
+            outcome.incarnation,
+            outcome.container,
+        )
 
     async def _tool_result(
         self, name: str, arguments: str
@@ -508,12 +514,20 @@ class AgentRuntime:
         """
         produced: tuple[RedactionRecord, ...] = ()
         errored = True
+        incarnation: str | None = None
+        container: str | None = None
         parsed = _parsed_arguments(arguments)
         if parsed is None:
             result = "ERROR: bad arguments"
         else:
             try:
-                result, produced, errored = await self._execute_tool(name, parsed)
+                (
+                    result,
+                    produced,
+                    errored,
+                    incarnation,
+                    container,
+                ) = await self._execute_tool(name, parsed)
             except OutboundPolicyError:
                 raise
             except Exception as exc:  # defensive: executor contract is never-raise
@@ -538,7 +552,14 @@ class AgentRuntime:
         # the transcript would be worse than no citation.
         ref = None
         if _is_cluster_read(name):
-            ref = self._evidence.record(name, parsed or {}, text, error=errored)
+            ref = self._evidence.record(
+                name,
+                parsed or {},
+                text,
+                error=errored,
+                incarnation=incarnation,
+                container=container,
+            )
         return text, records, errored, ref
 
     def _refresh_evidence_note(self) -> None:

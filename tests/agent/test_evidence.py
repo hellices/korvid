@@ -694,3 +694,51 @@ def test_retargeting_to_another_cluster_clears_the_ledger() -> None:
 
     assert runtime.evidence.references() == ()
     assert "[E1]" not in str(runtime._messages[0]["content"])
+
+
+def test_evidence_remembers_which_incarnation_was_read() -> None:
+    """A name is not an identity: pods are recreated under the same one.
+
+    Without the incarnation the ledger cannot tell, at open time, that the
+    object on screen is a replacement for the one the claim was about
+    (#250).
+    """
+    ledger = EvidenceLedger()
+
+    ref = ledger.record(
+        "get_events", {"kind": "Pod", "namespace": "d", "name": "web"}, "BackOff", incarnation="u-1"
+    )
+
+    assert ref is not None
+    item = ledger.resolve(ref)
+    assert item is not None
+    assert item.incarnation == "u-1"
+
+
+def test_a_read_with_no_incarnation_records_none() -> None:
+    """Listings identify no single object, and must not claim to."""
+    ledger = EvidenceLedger()
+
+    ref = ledger.record("list_resources", {"kind": "Pod"}, "web-1")
+
+    assert ref is not None
+    resolved = ledger.resolve(ref)
+    assert resolved is not None
+    assert resolved.incarnation is None
+
+
+def test_the_container_a_read_resolved_is_what_the_citation_carries() -> None:
+    """The argument was omitted; the read still streamed one container.
+
+    Recording only the argument leaves the citation to re-run the
+    defaulting rule at open time - a second implementation of the same
+    choice, which can disagree with the first (#250).
+    """
+    ledger = EvidenceLedger()
+
+    ref = ledger.record("get_logs", {"pod": "web", "namespace": "d"}, "line", container="app")
+
+    assert ref is not None
+    item = ledger.resolve(ref)
+    assert item is not None
+    assert item.container == "app"
