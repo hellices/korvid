@@ -21,6 +21,8 @@ import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import yaml
+
 #: The only hosts the lockfile may name.
 _ALLOWED_LOCK_HOSTS = frozenset({"files.pythonhosted.org", "pypi.org"})
 
@@ -111,20 +113,56 @@ def test_the_relock_pull_request_says_ci_has_not_run() -> None:
 
 
 def test_the_relock_job_holds_no_write_credential_while_it_runs_the_code() -> None:
-    """This job installs and executes the dependencies it is updating.
+    """The job that executes the new dependencies cannot write anything.
 
-    A persisted `contents: write` token would sit on disk while `uv sync`
-    resolves and the suite runs, reachable by anything in that tree — so a
-    compromised dependency could push before the verification that would
-    have caught it. The credential is configured in the push step instead,
-    after the checks it must not be able to skip.
+    Delaying authentication within one job is not enough: a dependency or a
+    test can leave an executable `.git/hooks/pre-push` behind, and that hook
+    runs later with the token in scope. So generation and verification are
+    read-only, and the push happens in a separate job from a clean checkout
+    that carries nothing across but `uv.lock` itself.
+    """
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "relock.yml").read_text())
+    jobs = workflow["jobs"]
+    assert jobs["relock"]["permissions"] == {"contents": "read"}
+    assert jobs["propose"]["permissions"] == {
+        "contents": "write",
+        "pull-requests": "write",
+    }
+    relock_steps = yaml.safe_dump(jobs["relock"]["steps"])
+    for command in ("uv lock", "uv sync --locked", "uv run pytest"):
+        assert command in relock_steps, f"{command} must run in the read-only job"
+    propose_steps = jobs["propose"]["steps"]
+    for step in propose_steps:
+        script = step.get("run", "")
+        # Only the commands the job would execute: the pull-request body it
+        # writes legitimately *mentions* `uv sync --locked` when reporting
+        # what the read-only job verified.
+        commands = [line.strip() for line in script.splitlines() if line.startswith("    ")]
+        for command in commands:
+            assert not command.startswith(("uv ", "python ", "pytest")), (
+                f"the write-token job executes {command!r}"
+            )
+    assert "persist-credentials: false" in yaml.safe_dump(workflow)
+    assert "persist-credentials: true" not in yaml.safe_dump(workflow)
+
+
+def test_the_relock_guard_matches_the_url_value_not_the_line() -> None:
+    """A line can contain an allowed host without being served by it.
+
+    `url = "https://evil.example/?next=https://pypi.org/simple"` satisfies a
+    line-wise grep while its serving host is not PyPI at all, so the check
+    extracts each value and anchors the match at its start.
     """
     workflow = (_ROOT / ".github" / "workflows" / "relock.yml").read_text()
-    assert "persist-credentials: false" in workflow
-    assert "persist-credentials: true" not in workflow
-    setup = workflow.index("gh auth setup-git")
-    for check in ("uv sync --locked", "uv run pytest"):
-        assert workflow.index(check) < setup, f"{check} runs after git is authenticated"
+    assert "sed -E 's/^[a-z]+ = \"//; s/\"$//'" in workflow, (
+        "the check must extract each URL value before matching it"
+    )
+    anchored = re.findall(r"grep -vE '(\^?)https://\(files", workflow)
+    assert anchored, "the PyPI allow-list grep is missing"
+    assert all(caret == "^" for caret in anchored), (
+        "the allow-list must be anchored: an unanchored match accepts"
+        ' url = "https://evil.example/?next=https://pypi.org/simple"'
+    )
 
 
 def test_pyproject_pins_no_alternate_package_index() -> None:

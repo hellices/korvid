@@ -40,11 +40,18 @@ permissions:
   contents: read
 
 jobs:
+  # Read-only. This job installs and executes the dependencies it is
+  # updating, so it must not be able to write anything: delaying
+  # authentication would not be enough, because a dependency or a test can
+  # leave an executable `.git/hooks/pre-push` behind and that hook would run
+  # later with the token in scope. The write happens in a separate job, from
+  # a clean checkout, with only `uv.lock` carried across.
   relock:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+    outputs:
+      changed: ${{ steps.changed.outputs.changed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -77,9 +84,19 @@ jobs:
       # unverified one is worth less than none.
       - name: Refuse a lock that names anything but PyPI
         run: |
-          if grep -nE '(url|registry|index) = "https?://' uv.lock \
-             | grep -vE 'https://(files\.pythonhosted\.org|pypi\.org)/'; then
-            echo "uv.lock names a non-PyPI host"
+          # Extract the *value* of each URL-valued field and match the whole
+          # value. Matching the line instead would accept
+          # `url = "https://evil.example/?next=https://pypi.org/simple"`,
+          # whose serving host is not PyPI at all.
+          if grep -oE '(url|registry|index) = "[^"]*"' uv.lock \
+             | sed -E 's/^[a-z]+ = "//; s/"$//' \
+             | grep -vE '^https://(files\.pythonhosted\.org|pypi\.org)/' \
+             | grep -q .; then
+            echo "uv.lock names a non-PyPI host:"
+            grep -oE '(url|registry|index) = "[^"]*"' uv.lock \
+              | sed -E 's/^[a-z]+ = "//; s/"$//' \
+              | grep -vE '^https://(files\.pythonhosted\.org|pypi\.org)/' \
+              | sort -u
             exit 1
           fi
 
@@ -95,20 +112,51 @@ jobs:
           uv run tach check
           uv run pytest -q
 
-      - name: Open a pull request with the result
+      - name: Report whether the lock actually moved
+        id: changed
+        run: |
+          if git diff --quiet -- uv.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "uv.lock is already up to date; nothing to do"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: steps.changed.outputs.changed == 'true'
+        with:
+          name: relocked-lock
+          path: uv.lock
+          if-no-files-found: error
+
+  # Write-only. A clean checkout, none of the updated dependencies
+  # installed, and nothing from the previous job except the one file it
+  # produced - so no code that ran during verification can reach this token
+  # or plant a hook that would.
+  propose:
+    needs: relock
+    if: needs.relock.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.base }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: relocked-lock
+
+      - name: Open a pull request with the verified lock
         env:
           GH_TOKEN: ${{ github.token }}
           PACKAGE: ${{ inputs.package }}
           BASE: ${{ inputs.base }}
         run: |
-          if git diff --quiet -- uv.lock; then
-            echo "uv.lock is already up to date; nothing to do"
-            exit 0
-          fi
           target="${PACKAGE:-all dependencies}"
           branch="relock/$(date +%Y%m%d-%H%M%S)"
-          # Git gets a credential only here, after the lock has been
-          # verified and the suite has run.
           gh auth setup-git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

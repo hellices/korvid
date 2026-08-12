@@ -68,10 +68,17 @@ repository rejects that. Three paths out, in order of preference:
 2. **The `Relock` workflow** (`.github/workflows/relock.yml`) — a manual
    dispatch for the deliberate changes Dependabot will not make, such as
    taking a major version that needs source edits in the same pull request.
-   It locks on a runner with direct access, **re-checks that the lock names
-   only PyPI**, and runs the whole gate against it — `uv sync --locked`,
-   ruff, the format check, mypy, `tach`, the suite — before opening a pull
-   request. It never writes to `main`.
+   It runs as two jobs on purpose:
+
+   - `relock` is **read-only**. It locks on a runner with direct access,
+     asserts every `url`/`registry`/`index` *value* begins with a PyPI
+     origin, and runs the whole gate against the result — `uv sync
+     --locked`, ruff, the format check, mypy, `tach`, the suite. It installs
+     and executes the dependencies it is updating, so it holds no token that
+     could write anything.
+   - `propose` takes only `uv.lock` across, from a clean checkout, and opens
+     the pull request. Nothing that ran during verification can reach its
+     credential or plant a `pre-push` hook that would.
 
    It runs the gate itself because it has to: GitHub suppresses the
    workflow events raised by `GITHUB_TOKEN`, so the pull request it opens
