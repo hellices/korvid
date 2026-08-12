@@ -163,6 +163,34 @@ def test_the_lock_is_revalidated_after_the_code_that_could_rewrite_it_ran() -> N
     assert guard < exposed, "the write token is exposed before the lock is re-checked"
 
 
+def test_the_committed_bytes_are_the_bytes_that_were_verified() -> None:
+    """A PyPI-only lock is not necessarily *this* PyPI-only lock.
+
+    The hostname check alone would accept a different, valid, PyPI-only
+    file substituted by code running during the gate — the shape would pass
+    while the bytes nobody verified got committed. The digest is taken
+    before any resolved code runs and checked on both sides of the artifact
+    boundary.
+    """
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "relock.yml").read_text())
+    relock, propose = workflow["jobs"]["relock"], workflow["jobs"]["propose"]
+    assert "digest" in relock["outputs"], "the verified digest is never published"
+
+    names = [step.get("name", "") for step in relock["steps"]]
+    recorded = next(i for i, name in enumerate(names) if "digest" in name)
+    gate = next(i for i, name in enumerate(names) if "passes the gate" in name)
+    assert recorded < gate, "the digest is taken after the code that could rewrite the lock"
+
+    relock_scripts = " ".join(step.get("run", "") for step in relock["steps"])
+    assert "sha256sum --check --strict" in relock_scripts, (
+        "the producing job never re-checks the lock it verified"
+    )
+    propose_scripts = " ".join(step.get("run", "") for step in propose["steps"])
+    assert "sha256sum --check --strict" in propose_scripts, (
+        "the committing job trusts the artifact's shape but not its identity"
+    )
+
+
 def test_pyproject_pins_no_alternate_package_index() -> None:
     """An index pinned here redirects every resolution in the repository.
 

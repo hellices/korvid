@@ -71,14 +71,19 @@ repository rejects that. Three paths out, in order of preference:
    It runs as two jobs on purpose:
 
    - `relock` is **read-only**. It locks on a runner with direct access,
-     asserts every `url`/`registry`/`index` *value* begins with a PyPI
-     origin, and runs the whole gate against the result — `uv sync
-     --locked`, ruff, the format check, mypy, `tach`, the suite. It installs
-     and executes the dependencies it is updating, so it holds no token that
-     could write anything.
-   - `propose` takes only `uv.lock` across, from a clean checkout, and opens
-     the pull request. Nothing that ran during verification can reach its
-     credential or plant a `pre-push` hook that would.
+     asserts every `url`/`registry`/`index` value names a PyPI origin
+     (`scripts/check_lock_hosts.py`, which parses the TOML so unreadable or
+     empty input fails rather than passing silently), records the lock's
+     SHA-256 **before** anything else runs, and then runs the whole gate —
+     `uv sync --locked`, ruff, the format check, mypy, `tach`, the suite. It
+     installs and executes the dependencies it is updating, so it holds no
+     token that could write anything, and it re-checks the digest afterwards
+     in case that code edited the lock underneath it.
+   - `propose` takes only `uv.lock` across, from a clean checkout, re-runs
+     the host check with *its own* copy of the checker, and matches the
+     digest before the token is exposed. Nothing that ran during
+     verification can reach its credential, plant a `pre-push` hook, or
+     substitute a different lock that merely looks acceptable.
 
    It runs the gate itself because it has to: GitHub suppresses the
    workflow events raised by `GITHUB_TOKEN`, so the pull request it opens
