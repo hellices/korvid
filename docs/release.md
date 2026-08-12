@@ -1,14 +1,19 @@
-# korvid v0.1.1 release runbook
+# korvid v0.1.2 release runbook
 
 This runbook is intentionally narrow: it covers the **first** public release,
-`v0.1.1`. `v0.1.0` remains immutable, unpublished audit history after its
+`v0.1.2`. `v0.1.0` remains immutable, unpublished audit history after its
 protected tag workflow failed before build, attestation, staging, PyPI publication, or GitHub Release creation.
-`v0.1.1` is the first public release. This runbook is honest about what the workflow proves, what is irreversible,
+`v0.1.1` is unpublished audit history for a different reason: it built and
+staged, then stopped at `publish-pypi` because no PyPI Trusted Publisher had
+been registered. Its draft GitHub Release was never finalized, and its tag is
+immutable, so the fix is a new version rather than a retry — `v0.1.2`, which
+also carries 35 commits of work that landed after `v0.1.1` was tagged.
+This runbook is honest about what the workflow proves, what is irreversible,
 and which recovery paths are safe to retry.
 
 ## One-time repository and publisher bindings
 
-Before anyone publishes `v0.1.1`, confirm these external trust boundaries:
+Before anyone publishes `v0.1.2`, confirm these external trust boundaries:
 
 - GitHub tag protection covers `refs/tags/v*` with an immutable rule: only
   trusted release maintainers may create tags, and tag update/deletion is
@@ -23,6 +28,38 @@ Before anyone publishes `v0.1.1`, confirm these external trust boundaries:
 
 Those bindings are required because the in-workflow checks are defense in depth,
 not a substitute for the external trust boundary.
+
+### Registering the PyPI Trusted Publisher
+
+This is the step `v0.1.1` died on, and it cannot be done from CI: it needs an
+authenticated session on pypi.org. Because the project does not exist on PyPI
+yet, it is registered as a **pending** publisher — PyPI creates the project on
+the first successful upload.
+
+1. Sign in at <https://pypi.org/account/login/>. Two-factor authentication must
+   be enabled on the account; PyPI requires it for anyone who can publish.
+2. Open <https://pypi.org/manage/account/publishing/>.
+3. Under **Add a new pending publisher**, choose the **GitHub** tab and enter:
+
+   | field | value |
+   | --- | --- |
+   | PyPI Project Name | `korvid` |
+   | Owner | `hellices` |
+   | Repository name | `korvid` |
+   | Workflow name | `release.yml` |
+   | Environment name | `release` |
+
+4. Submit. The publisher appears under **Pending publishers**.
+
+Every field is matched exactly against the OIDC token GitHub mints for the job.
+`release.yml` is the file name, not a path and not the workflow's display name;
+`release` is the environment the `publish-pypi` job declares. A mismatch in any
+field fails the upload with `invalid-publisher`, which is a rejection by PyPI
+rather than a bug in this repository — re-check the five values before
+changing anything here.
+
+No API token is created, and none should be: the workflow authenticates by
+short-lived OIDC exchange, so there is no long-lived credential to leak.
 
 ## Irreversible boundaries
 
@@ -70,19 +107,19 @@ pre-publication **tag revalidation** performed by
 a protected environment approval, and irreversible external side effects. A
 green dry run therefore **reduces but does not eliminate** first-publication
 risk: the staging, publication, and finalization path is first exercised for
-real during `v0.1.1`.
+real during `v0.1.2`.
 
 The dry run's source policy compares the checked-out `HEAD` against the live
 `origin/main`, which the workflow re-fetches explicitly after checkout. A stale
 dispatch SHA is rejected.
 
-## Publish `v0.1.1`
+## Publish `v0.1.2`
 
 Create the annotated tag from the reviewed commit, then push only that tag:
 
 ```sh
-git tag -a v0.1.1 COMMIT -m "korvid v0.1.1"
-git push origin refs/tags/v0.1.1
+git tag -a v0.1.2 COMMIT -m "korvid v0.1.2"
+git push origin refs/tags/v0.1.2
 RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')
 gh run watch "$RUN_ID" --exit-status
 ```
@@ -96,7 +133,7 @@ publishing the final GitHub Release.
 The workflow is intentionally idempotent only inside a narrow boundary:
 
 - If the staged draft release already exists **and** the rerun proves the staged assets are byte-identical, it is safe to resume the idempotent workflow only when the staged assets match.
-- If PyPI already has `0.1.1` but the matching draft release is missing, or if
+- If PyPI already has `0.1.2` but the matching draft release is missing, or if
   the staged assets differ, stop and diagnose.
 - Do **not** attempt recovery by deleting or moving a published tag/version.
 
@@ -106,10 +143,10 @@ After the workflow succeeds, download the release artifacts and verify the wheel
 attestation from GitHub:
 
 ```sh
-gh release download v0.1.1 --dir dist/v0.1.1
-gh attestation verify dist/v0.1.1/korvid-0.1.1-py3-none-any.whl --repo hellices/korvid
-gh attestation verify dist/v0.1.1/SHA256SUMS --repo hellices/korvid
-(cd dist/v0.1.1 && shasum --algorithm 256 --check SHA256SUMS)
+gh release download v0.1.2 --dir dist/v0.1.2
+gh attestation verify dist/v0.1.2/korvid-0.1.2-py3-none-any.whl --repo hellices/korvid
+gh attestation verify dist/v0.1.2/SHA256SUMS --repo hellices/korvid
+(cd dist/v0.1.2 && shasum --algorithm 256 --check SHA256SUMS)
 ```
 
 The attestation check establishes the provenance of `SHA256SUMS`; the final
@@ -120,23 +157,23 @@ command then verifies every downloaded release asset against that manifest.
 The simplest first-release install is the full feature set:
 
 ```sh
-python -m pip install 'korvid[all]==0.1.1'
+python -m pip install 'korvid[all]==0.1.2'
 ```
 
-During the brief window between this workflow landing on `main` and `v0.1.1`
+During the brief window between this workflow landing on `main` and `v0.1.2`
 appearing on PyPI, install from source instead:
 
 ```sh
 python -m pip install 'korvid[all] @ git+https://github.com/hellices/korvid'
 ```
 
-Once `v0.1.1` is published, PyPI is the release path and the source install is
+Once `v0.1.2` is published, PyPI is the release path and the source install is
 only a fallback for unreleased code.
 
 If you already installed `korvid`, `korvid[agent]`, or `korvid[mcp]`, rerun your package manager with the full desired extra set rather than assuming it will expand extras in place. With pip, the explicit reinstall/extra-expansion command is:
 
 ```sh
-python -m pip install --upgrade 'korvid[all]==0.1.1'
+python -m pip install --upgrade 'korvid[all]==0.1.2'
 ```
 
 With other installers, use their reinstall/upgrade equivalent or uninstall
@@ -240,15 +277,15 @@ The package uninstall command does not run that cleanup for you.
 
 ## First-release limitation
 
-v0.1.1 cannot prove a cross-version PyPI upgrade because there is no earlier
+v0.1.2 cannot prove a cross-version PyPI upgrade because there is no earlier
 PyPI release to upgrade from. The release workflow proves fresh installs of the
 base, `agent`, `mcp`, and `all` variants plus package uninstall; it does not
 yet prove upgrading an older published wheel in place. The next release must
-validate upgrading from `0.1.1` before claiming a cross-version PyPI upgrade
+validate upgrading from `0.1.2` before claiming a cross-version PyPI upgrade
 path.
 
 Nor can any dry run prove the publication path itself. Attestation, staging,
 PyPI upload, finalization, compare-assets recovery, and pre-publication tag
-revalidation are exercised for the first time during the real `v0.1.1` push.
+revalidation are exercised for the first time during the real `v0.1.2` push.
 Plan the first release as a supervised operation with a maintainer watching the
 run, not as a rehearsed one.

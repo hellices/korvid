@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1075,6 +1076,19 @@ def _security_policy() -> str:
     return (Path(__file__).parents[1] / "SECURITY.md").read_text()
 
 
+def _project_version() -> str:
+    """The version the release workflow will demand the tag match.
+
+    Read rather than hardcoded: the runbook and the README have to name the
+    version actually being shipped, and pinning the expected string in the
+    test only moves the drift one file further away.
+    """
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text()
+    match = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
+    assert match is not None, "pyproject.toml has no project version"
+    return match.group(1)
+
+
 def test_linux_bundle_pins_and_names_the_manylinux_2_28_baseline() -> None:
     workflow = _release_workflow()
     assert "manylinux_2_28_x86_64@sha256:" in workflow
@@ -1139,13 +1153,27 @@ def test_release_docs_require_immutable_protected_tags() -> None:
 
 
 def test_release_docs_readme_pins_first_release_install_and_links_the_runbook() -> None:
+    version = _project_version()
     readme = _readme()
-    assert "python -m pip install 'korvid[all]==0.1.1'" in readme
-    assert "v0.1.1 is the first public PyPI release" in readme
+    assert f"python -m pip install 'korvid[all]=={version}'" in readme
+    assert f"v{version} is the first public PyPI release" in readme
     assert "docs/release.md" in readme
 
 
+def test_release_docs_never_pin_a_version_other_than_the_project_version() -> None:
+    """An install line naming a version nobody will publish is worse than no
+    install line: it fails for the reader with a resolver error rather than a
+    correction. The same holds for the runbook's tag commands."""
+    version = _project_version()
+    for name, text in (("README.md", _readme()), ("docs/release.md", _release_runbook())):
+        pinned = set(re.findall(r"korvid[^\s'\"]*==([0-9]+\.[0-9]+\.[0-9]+)", text))
+        assert pinned <= {version}, f"{name} pins {sorted(pinned - {version})}, not {version}"
+        tagged = set(re.findall(r"refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)", text))
+        assert tagged <= {version}, f"{name} tags {sorted(tagged - {version})}, not {version}"
+
+
 def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -> None:
+    version = _project_version()
     runbook = _release_runbook()
     assert "refs/tags/v*" in runbook
     assert "`release`" in runbook
@@ -1153,14 +1181,15 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     assert "`hellices/korvid`" in runbook
     assert "gh workflow run Release --ref main" in runbook
     assert 'gh run watch "$RUN_ID" --exit-status' in runbook
-    assert 'git tag -a v0.1.1 COMMIT -m "korvid v0.1.1"' in runbook
-    assert "git push origin refs/tags/v0.1.1" in runbook
-    assert "gh release download v0.1.1 --dir dist/v0.1.1" in runbook
+    assert f'git tag -a v{version} COMMIT -m "korvid v{version}"' in runbook
+    assert f"git push origin refs/tags/v{version}" in runbook
+    assert f"gh release download v{version} --dir dist/v{version}" in runbook
     assert (
-        "gh attestation verify dist/v0.1.1/korvid-0.1.1-py3-none-any.whl --repo hellices/korvid"
+        f"gh attestation verify dist/v{version}/korvid-{version}-py3-none-any.whl"
+        " --repo hellices/korvid"
     ) in runbook
-    assert ("gh attestation verify dist/v0.1.1/SHA256SUMS --repo hellices/korvid") in runbook
-    assert ("cd dist/v0.1.1 && shasum --algorithm 256 --check SHA256SUMS") in runbook
+    assert (f"gh attestation verify dist/v{version}/SHA256SUMS --repo hellices/korvid") in runbook
+    assert (f"cd dist/v{version} && shasum --algorithm 256 --check SHA256SUMS") in runbook
     assert "PyPI publication is irreversible" in runbook
     assert "annotated tag publication is irreversible" in runbook
 
@@ -1181,7 +1210,7 @@ def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> N
     assert "~/.local/state/korvid/audit.jsonl.lock" in runbook
     assert "~/.local/share/korvid/logs" in runbook
     assert "~/.local/share/korvid/agent-payloads" in runbook
-    assert "python -m pip install 'korvid[all]==0.1.1'" in runbook
+    assert f"python -m pip install 'korvid[all]=={_project_version()}'" in runbook
     assert "python -m pip uninstall -y korvid" in runbook
     assert "opt-in cleanup" in runbook
     assert "rerun your package manager with the full desired extra set" in runbook
@@ -1209,25 +1238,52 @@ def test_release_readme_discloses_the_retained_os_keyring_credential() -> None:
 
 
 def test_release_docs_runbook_marks_recovery_boundaries_and_first_release_upgrade_limit() -> None:
+    version = _project_version()
     runbook = _release_runbook()
     assert "Deleting or moving a published tag/version is not rollback" in runbook
     assert "resume the idempotent workflow only when the staged assets match" in runbook
     assert "stop and diagnose" in runbook
-    assert "v0.1.1 cannot prove a cross-version PyPI upgrade" in runbook
-    assert "validate upgrading from `0.1.1`" in runbook
+    assert f"v{version} cannot prove a cross-version PyPI upgrade" in runbook
+    assert f"validate upgrading from `{version}`" in runbook
 
 
-def test_release_docs_preserve_failed_v0_1_0_as_unpublished_audit_history() -> None:
+def test_release_docs_preserve_failed_tags_as_unpublished_audit_history() -> None:
+    """Neither earlier tag published, and each stopped somewhere different.
+
+    Collapsing them into "the earlier attempts failed" would lose the only
+    thing that matters for the next attempt: `v0.1.1` got all the way to
+    `publish-pypi` and was rejected for a missing trusted publisher, so the
+    build path is proven and the registration is not.
+    """
     runbook = _release_runbook()
     assert "`v0.1.0` remains immutable, unpublished audit history" in runbook
     assert "before build, attestation, staging, PyPI publication, or GitHub Release" in runbook
-    assert "`v0.1.1` is the first public release" in runbook
+    assert "`v0.1.1` is unpublished audit history" in runbook
+    assert "stopped at `publish-pypi`" in runbook
+    assert "no PyPI Trusted Publisher had" in runbook
 
 
-def test_security_policy_starts_supported_releases_at_v0_1_1() -> None:
+def test_release_docs_runbook_gives_the_five_trusted_publisher_claims() -> None:
+    """The registration is the one release step that cannot be automated, and
+    every field is matched exactly against the OIDC token. A runbook that says
+    "register a trusted publisher" without the values is why `v0.1.1` stopped."""
+    runbook = " ".join(_release_runbook().split())
+    assert "https://pypi.org/manage/account/publishing/" in runbook
+    assert "| PyPI Project Name | `korvid` |" in runbook
+    assert "| Owner | `hellices` |" in runbook
+    assert "| Repository name | `korvid` |" in runbook
+    assert "| Workflow name | `release.yml` |" in runbook
+    assert "| Environment name | `release` |" in runbook
+    assert "pending" in runbook
+    assert "Two-factor authentication must be enabled" in runbook
+    assert "No API token is created" in runbook
+
+
+def test_security_policy_starts_supported_releases_at_the_project_version() -> None:
+    version = _project_version()
     policy = _security_policy()
-    assert "Before the first public `v0.1.1` release" in policy
-    assert "Once `v0.1.1` publishes" in policy
+    assert f"Before the first public `v{version}` release" in policy
+    assert f"Once `v{version}` publishes" in policy
 
 
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:

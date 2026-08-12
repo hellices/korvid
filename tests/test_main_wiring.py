@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 
+import korvid
 from korvid.__main__ import _close_provider_in_background
 from korvid.agent.setup import AgentSettings
 from korvid.tools.executor import UIBridge
@@ -1022,7 +1023,7 @@ def test_main_module_version_exits_before_startup(
     with pytest.raises(SystemExit, match="0"):
         main_mod.main()
 
-    assert capsys.readouterr().out.strip() == "korvid 0.1.1"
+    assert capsys.readouterr().out.strip() == f"korvid {korvid.__version__}"
 
 
 def test_protected_context_name_glob_match(monkeypatch: pytest.MonkeyPatch) -> None:
