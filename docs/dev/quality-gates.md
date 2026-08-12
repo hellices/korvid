@@ -57,10 +57,13 @@ Measured on a machine configured for a mirror:
 Then confirm before committing: every `url` and `registry` in the lock must
 name `files.pythonhosted.org` or `pypi.org`.
 
-If PyPI is unreachable from your machine, do not work around it here — let
-CI regenerate the lock, or update it from a machine with direct access. A
-lock is a supply-chain artifact; a convenient one that points somewhere else
-is worse than none.
+If PyPI is unreachable from your machine, do not work around it here. No CI
+workflow regenerates the lock — every job consumes the committed one
+(`uv sync --locked`, `uv export --frozen`) — so the options are a machine
+with direct access, or **Dependabot**, which opens lock updates against
+PyPI on its own schedule (`.github/dependabot.yml`). A lock is a
+supply-chain artifact; a convenient one that points somewhere else is worse
+than none.
 
 ## 2. Before pushing — local, `make check`
 
