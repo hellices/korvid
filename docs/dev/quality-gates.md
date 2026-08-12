@@ -16,8 +16,10 @@ is what makes `--no-verify` an unusable shortcut rather than a quiet one.
 ### Working behind a corporate package mirror
 
 `uv` records both the artifact URL and the index that served it, so one
-`uv lock` behind `UV_INDEX_URL`, a `~/.config/uv/uv.toml`, or a `pip.conf`
-rewrites the whole lockfile to a host only that network can reach.
+`uv lock` behind `UV_INDEX_URL`, a project `uv.toml`, or a user-level
+`~/.config/uv/uv.toml` rewrites the whole lockfile to a host only that
+network can reach. (`pip.conf` is not a trigger — uv ignores pip's
+configuration entirely.)
 
 The lock is only the symptom. Configuration redirects every resolution —
 CI's included — while the lock stays byte-for-byte clean, so three surfaces
@@ -33,9 +35,13 @@ Behind a mirror, work with `uv sync --frozen --dev --all-extras` and do not
 re-lock. If a lock genuinely must change:
 
 ```sh
-git checkout uv.lock          # discard the rewritten lock
-UV_INDEX_URL= uv lock         # re-lock against PyPI directly
+git checkout uv.lock                      # discard the rewritten lock
+UV_INDEX_URL= uv lock --no-config         # re-lock against PyPI directly
 ```
+
+`--no-config` matters as much as clearing the variable: without it, uv still
+discovers `~/.config/uv/uv.toml`, and the recovery command recreates the
+mirrored lock it was meant to repair.
 
 If PyPI is unreachable from your machine, do not work around it here — let
 CI regenerate the lock, or update it from a machine with direct access. A

@@ -13,7 +13,9 @@ and never re-lock. `uv lock` rewrites every artefact URL in `uv.lock` to
 whichever index resolved it, so re-locking behind a mirror pins ~1,700
 URLs to a host only that network can reach — breaking CI and every
 outside contributor. A pre-commit hook rejects such a lock; if the lock
-genuinely must change, re-lock against public PyPI.
+genuinely must change, re-lock with `UV_INDEX_URL= uv lock --no-config`.
+`--no-config` is not optional: without it uv still reads
+`~/.config/uv/uv.toml` and produces the same mirrored lock.
 
 ## Development Commands
 
