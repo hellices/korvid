@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make [`docs/overview.md`](../../../overview.md) read as a durable product
+Make [`docs/overview.md`](../../overview.md) read as a durable product
 concept, not as a runtime flow or a stack of implementation layers.
 
 The reader should understand in one glance:

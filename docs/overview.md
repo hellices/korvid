@@ -20,13 +20,13 @@ flowchart LR
     CLIENT["🖥 Editor / external assistant<br/>VS Code · Claude Code<br/>Cursor · Zed"]
     CLUSTER[("☸ Kubeconfig +<br/>cluster")]
 
-    subgraph KORVID["KORVID — stable capability boundary"]
+    subgraph KORVID["KORVID — product boundary"]
         direction LR
         TUI["TUI adapter<br/><b>INCLUDED</b><br/>browse · filter · describe<br/>logs · port-forward · exec"]
         AGENT["Agent adapter<br/><b>OPTIONAL</b> korvid[agent]<br/>Ctrl-A chat panel<br/>context-aware reads"]
         CORE["Observe · diagnose · navigate<br/>approval-gated operations<br/>audit log · secret masking"]
         MCP["MCP adapter<br/><b>OPTIONAL</b> korvid[mcp]<br/>read + UI-drive over MCP<br/>write proposals opt-in"]
-        K8S["Kubernetes adapter<br/><b>INCLUDED</b><br/>kubernetes.aio"]
+        K8S["Kubernetes adapter<br/><b>INCLUDED</b><br/>watch · read · apply"]
 
         TUI --> CORE
         AGENT --> CORE
@@ -35,7 +35,7 @@ flowchart LR
     end
 
     HUMAN --> TUI
-    MODEL --> AGENT
+    MODEL <--> AGENT
     CLIENT --> MCP
     K8S --> CLUSTER
 
@@ -54,7 +54,7 @@ flowchart LR
 The center is a product contract, not the `src/korvid/core/` package. Every
 adapter gets the same cluster reads, UI control, approval gate, and audit.
 
-Neither box above is required, and neither implies the other.
+Neither optional adapter is required, and neither implies the other.
 
 The two extras are **independent**, not a ladder. Each adds to the cockpit on
 its own: `korvid[mcp]` gives an editor's assistant cluster sight without
@@ -149,16 +149,22 @@ deliberately — and it stays off until you turn it on.
 
 ## Four valid compositions
 
+Four installs, four shapes — the two optional adapters occupy independent ports.
+
 ```mermaid
 flowchart TB
     subgraph ROW1["  "]
         direction LR
-        subgraph C1["korvid  —  cockpit only"]
+        subgraph C4["korvid[all]  —  agent + MCP"]
             direction TB
-            C1T["TUI<br/>INCLUDED"]
-            C1R["Core"]
-            C1K["K8s<br/>INCLUDED"]
-            C1T --> C1R --> C1K
+            C4A["Agent<br/>OPTIONAL"]
+            C4M["MCP<br/>OPTIONAL"]
+            C4T["TUI<br/>INCLUDED"]
+            C4R["Core"]
+            C4K["K8s<br/>INCLUDED"]
+            C4A --> C4R
+            C4M --> C4R
+            C4T --> C4R --> C4K
         end
 
         subgraph C2["korvid[agent]  —  + embedded AI"]
@@ -184,16 +190,12 @@ flowchart TB
             C3T --> C3R --> C3K
         end
 
-        subgraph C4["korvid[all]  —  agent + MCP"]
+        subgraph C1["korvid  —  cockpit only"]
             direction TB
-            C4A["Agent<br/>OPTIONAL"]
-            C4M["MCP<br/>OPTIONAL"]
-            C4T["TUI<br/>INCLUDED"]
-            C4R["Core"]
-            C4K["K8s<br/>INCLUDED"]
-            C4A --> C4R
-            C4M --> C4R
-            C4T --> C4R --> C4K
+            C1T["TUI<br/>INCLUDED"]
+            C1R["Core"]
+            C1K["K8s<br/>INCLUDED"]
+            C1T --> C1R --> C1K
         end
     end
 
