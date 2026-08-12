@@ -230,7 +230,8 @@ def test_symlink_or_skip_propagates_unrelated_errors(
 def test_readme_links_windows_contributor_notes() -> None:
     readme = _readme()
 
-    assert "[Windows contributor notes](docs/windows.md)" in readme
+    assert "[Windows contributor notes](" in readme
+    assert "docs/windows.md" in readme
 
 
 def test_windows_doc_records_verified_support_contract() -> None:

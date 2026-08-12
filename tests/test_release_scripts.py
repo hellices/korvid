@@ -792,6 +792,14 @@ def _metadata_text(
     version: str = "1.2.3",
     include_entra: bool = True,
     include_keyring: bool = True,
+    include_urls: bool = True,
+    content_type: str | None = "text/markdown",
+    body: str = (
+        "# korvid\n\nAI-native Kubernetes TUI - a keyboard-first cockpit with an"
+        " embedded agent that can read your cluster, explain what it found, and"
+        " carry out changes only behind an explicit approval gate. Runs on"
+        " Linux, macOS and Windows against any reachable kube context.\n"
+    ),
 ) -> str:
     entra = (
         'Provides-Extra: entra\nRequires-Dist: azure-identity>=1.19; extra == "entra"\n'
@@ -799,10 +807,20 @@ def _metadata_text(
         else ""
     )
     keyring = 'Requires-Dist: keyring>=25.7.0; extra == "agent"\n' if include_keyring else ""
+    urls = (
+        "Project-URL: Homepage, https://github.com/hellices/korvid\n"
+        "Project-URL: Source, https://github.com/hellices/korvid\n"
+        "Project-URL: Issues, https://github.com/hellices/korvid/issues\n"
+        if include_urls
+        else ""
+    )
+    described = f"Description-Content-Type: {content_type}\n" if content_type else ""
     return (
         "Metadata-Version: 2.4\n"
         "Name: korvid\n"
         f"Version: {version}\n"
+        f"{urls}"
+        f"{described}"
         "Provides-Extra: agent\n"
         "Provides-Extra: mcp\n"
         f"{entra}"
@@ -820,6 +838,7 @@ def _metadata_text(
         'Requires-Dist: starlette>=0.36; extra == "all"\n'
         'Requires-Dist: uvicorn>=0.30; extra == "all"\n'
         "\n"
+        f"{body}"
     )
 
 
@@ -857,6 +876,34 @@ def test_artifact_metadata_rejects_a_partial_extra_dependency_set(
 ) -> None:
     dist = _fake_dist(tmp_path, _metadata_text(include_keyring=False))
     with pytest.raises(ValueError, match="keyring"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_artifact_metadata_requires_the_pypi_project_page_fields(tmp_path: Path) -> None:
+    """The long description is the PyPI project page.
+
+    An artifact can carry a correct version and a correct dependency set and
+    still land on PyPI as a blank page - `Description-Content-Type` missing
+    makes PyPI fall back to plain text, and an absent body renders nothing
+    at all. Neither is recoverable: a released version cannot be reuploaded.
+    """
+    dist = _fake_dist(tmp_path, _metadata_text(body=""))
+    with pytest.raises(ValueError, match="long description"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_artifact_metadata_requires_a_markdown_content_type(tmp_path: Path) -> None:
+    dist = _fake_dist(tmp_path, _metadata_text(content_type=None))
+    with pytest.raises(ValueError, match="Description-Content-Type"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_artifact_metadata_requires_the_project_urls(tmp_path: Path) -> None:
+    """`[project.urls]` is what builds PyPI's sidebar. Losing it silently is
+    easy - a stray edit to pyproject drops the whole table - and the result
+    is a project page with nowhere to click through to the source."""
+    dist = _fake_dist(tmp_path, _metadata_text(include_urls=False))
+    with pytest.raises(ValueError, match="Project-URL"):
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
@@ -1152,12 +1199,131 @@ def test_release_docs_require_immutable_protected_tags() -> None:
     assert "protected tags only" in readme
 
 
+def _release_notes() -> str:
+    path = Path(__file__).parents[1] / "docs" / "release-notes" / f"v{_project_version()}.md"
+    assert path.is_file(), f"{path.name} is missing; the release stages notes from this file"
+    return path.read_text()
+
+
+def test_release_stages_written_notes_rather_than_a_generated_commit_list() -> None:
+    """`--generate-notes` lists merged pull requests.
+
+    For a first public release that produces a page of "bump the runtime
+    group with 3 updates" - accurate, and useless to someone deciding
+    whether to install. Notes are written per version and the workflow
+    fails if the file for the tag is missing, so the release cannot quietly
+    fall back to the generated list.
+    """
+    workflow = _release_workflow()
+    assert "--generate-notes \\" not in workflow, "the release still falls back to generated notes"
+    assert '--notes-file "$NOTES"' in workflow
+    assert 'NOTES="docs/release-notes/${TAG}.md"' in workflow
+    assert 'if [ ! -f "$NOTES" ]' in workflow
+
+
+def test_release_notes_exist_for_the_version_being_shipped() -> None:
+    notes = _release_notes()
+    version = _project_version()
+    assert f"# korvid v{version}" in notes
+    assert "## Install" in notes
+    assert f"korvid[all]=={version}" in notes
+    assert "## Verify" in notes
+    assert "gh attestation verify" in notes
+
+
+def test_release_notes_state_the_security_posture_the_project_claims() -> None:
+    """Every write goes through an approval gate and a fail-closed audit log.
+
+    That is the whole argument for running an agent against a live cluster,
+    so a release note that omits it is selling a different product than the
+    one being shipped.
+    """
+    notes = " ".join(_release_notes().split())
+    assert "approval" in notes
+    assert "audit" in notes
+    assert "read-only" in notes or "read only" in notes
+
+
+def test_pypi_metadata_gives_the_project_page_its_sidebar_links() -> None:
+    """PyPI builds its sidebar from `[project.urls]`, and korvid had none.
+
+    A project page with no Source or Issues link asks the reader to guess
+    where the code lives, on the one page where a stranger decides whether
+    to trust the package.
+    """
+    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    urls = pyproject["project"]["urls"]
+    repo = "https://github.com/hellices/korvid"
+    assert urls["Homepage"] == repo
+    assert urls["Source"] == repo
+    assert urls["Issues"] == f"{repo}/issues"
+    assert urls["Release notes"] == f"{repo}/releases"
+    assert urls["Documentation"] == f"{repo}/blob/main/docs/README.md"
+    assert urls["Security"] == f"{repo}/blob/main/SECURITY.md"
+
+
+def test_pypi_metadata_declares_audience_and_supported_pythons() -> None:
+    """Trove classifiers are how PyPI search and filtering find a package.
+
+    The Python versions are stated one by one on purpose: `requires-python`
+    is what installers enforce, but the classifier list is what a human
+    reads, and the CI matrix is the thing that actually proves them.
+    """
+    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    classifiers = pyproject["project"]["classifiers"]
+    assert "Environment :: Console :: Curses" in classifiers
+    assert "Intended Audience :: System Administrators" in classifiers
+    assert "Topic :: System :: Systems Administration" in classifiers
+    assert "License :: OSI Approved :: Apache Software License" not in classifiers, (
+        "PEP 639 forbids a License classifier alongside the SPDX `license` field"
+    )
+    for minor in ("11", "12", "13"):
+        assert f"Programming Language :: Python :: 3.{minor}" in classifiers
+    assert pyproject["project"]["keywords"]
+
+
+def test_readme_has_no_relative_links_because_pypi_cannot_follow_them() -> None:
+    """The README is the PyPI project page (`readme = "README.md"`).
+
+    PyPI renders it outside the repository, so a relative target such as
+    `docs/mcp.md` becomes a dead link and `docs/assets/demo.gif` becomes a
+    broken image - on the page that has to sell the project. Anchors are
+    fine: they resolve inside the rendered document.
+    """
+    readme = _readme()
+    targets = re.findall(r"\]\(([^)]+)\)", readme)
+    relative = [t for t in targets if not t.startswith(("http://", "https://", "#"))]
+    assert not relative, f"README links PyPI cannot resolve: {sorted(set(relative))}"
+
+
 def test_release_docs_readme_pins_first_release_install_and_links_the_runbook() -> None:
     version = _project_version()
     readme = _readme()
     assert f"python -m pip install 'korvid[all]=={version}'" in readme
     assert f"v{version} is the first public PyPI release" in readme
     assert "docs/release.md" in readme
+
+
+def test_readme_recommends_an_isolated_install_for_an_application() -> None:
+    """`pip install` is the wrong first instruction for a CLI application.
+
+    It drops korvid and its dependency tree into whatever environment
+    happens to be active, and it fails outright when the active interpreter
+    is older than 3.11 - the default on macOS and on most enterprise Linux.
+    `uv tool install` and `pipx` isolate the application and put `korvid` on
+    PATH, and uv fetches a suitable interpreter, so the version requirement
+    stops being the reader's problem.
+    """
+    version = _project_version()
+    readme = _readme()
+    quick_start = readme[readme.index("## Quick start") : readme.index("## Installation")]
+    assert f"uv tool install 'korvid[all]=={version}'" in quick_start
+    assert f"pipx install 'korvid[all]=={version}'" in quick_start
+    pip_index = quick_start.find("python -m pip install")
+    assert pip_index == -1 or quick_start.index("uv tool install") < pip_index, (
+        "the quick start leads with pip; an isolated install must come first"
+    )
+    assert "3.11" in readme
 
 
 #: Tags that exist, will never be published, and must keep being named in the
@@ -1256,7 +1422,7 @@ def test_release_docs_runbook_lists_and_cleans_the_os_keyring_credential() -> No
 def test_release_readme_discloses_the_retained_os_keyring_credential() -> None:
     readme = " ".join(_readme().split())
     assert "OS keyring credential (`korvid` / `github-oauth`)" in readme
-    assert "cleanup is explicit and opt-in in the [release runbook](docs/release.md)" in readme
+    assert "cleanup is explicit and opt-in in the [release runbook](" in readme
 
 
 def test_release_docs_runbook_marks_recovery_boundaries_and_first_release_upgrade_limit() -> None:

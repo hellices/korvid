@@ -5,6 +5,28 @@ description = "AI-native Kubernetes TUI"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
+keywords = ["kubernetes", "tui", "terminal", "k8s", "sre", "ai", "agent", "mcp"]
+classifiers = [
+    # No License classifier: PEP 639 forbids one alongside the SPDX
+    # `license` field above, and hatchling rejects the combination.
+    "Development Status :: 4 - Beta",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "Topic :: System :: Systems Administration",
+    "Topic :: System :: Clustering",
+    "Topic :: Utilities",
+    # Stated one by one because this list is what a human reads; the CI
+    # matrix is what actually proves them.
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Typing :: Typed",
+]
+
 dependencies = [
     "textual>=8.0",
     "kubernetes_asyncio>=32.0",
@@ -15,6 +37,16 @@ dependencies = [
 
 [project.scripts]
 korvid = "korvid.cli:main"
+
+# PyPI builds the project page's sidebar from these. Without them a stranger
+# deciding whether to trust the package has nowhere to click.
+[project.urls]
+Homepage = "https://github.com/hellices/korvid"
+Source = "https://github.com/hellices/korvid"
+Issues = "https://github.com/hellices/korvid/issues"
+"Release notes" = "https://github.com/hellices/korvid/releases"
+Documentation = "https://github.com/hellices/korvid/blob/main/docs/README.md"
+Security = "https://github.com/hellices/korvid/blob/main/SECURITY.md"
 
 [project.optional-dependencies]
 # Embedded AI agent: provider HTTP adapters + OS-keychain credential storage.
