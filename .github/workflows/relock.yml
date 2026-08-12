@@ -1,0 +1,234 @@
+name: Relock
+
+# Regenerate `uv.lock` from a runner with direct PyPI access.
+#
+# `uv lock` needs to fetch wheel metadata from files.pythonhosted.org, so a
+# contributor behind a TLS-intercepting corporate proxy cannot produce a
+# usable lock at all: locking through the mirror rewrites every URL to an
+# internal host, which `no-private-index-in-lock` and tests/test_lockfile.py
+# both reject - correctly, but that leaves no way forward. Dependabot covers
+# routine bumps; this covers the deliberate ones, such as taking a major
+# version that needs source changes in the same pull request.
+#
+# It pushes a branch and opens a pull request. It never writes to main, and
+# the lock it produces is verified *inside this job* — because it has to be.
+# GitHub suppresses the workflow events raised by `GITHUB_TOKEN`, so the pull
+# request this opens will not start CI on its own. Rather than introduce a
+# PAT or an app installation for the privilege of triggering ourselves, the
+# job runs the checks that matter before the branch exists: the same lint,
+# type-check, layer and test gate CI would run, plus the PyPI-only assertion
+# that is the whole reason this workflow is trusted.
+#
+# A reviewer must still push an empty commit (or close and reopen the pull
+# request) to get the full matrix — Windows and the other interpreters — and
+# the pull request body says so rather than implying it happened.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Package to upgrade (blank = re-resolve everything)"
+        required: false
+        type: string
+      base:
+        description: "Branch to lock on top of"
+        required: false
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Read-only. This job installs and executes the dependencies it is
+  # updating, so it must not be able to write anything: delaying
+  # authentication would not be enough, because a dependency or a test can
+  # leave an executable `.git/hooks/pre-push` behind and that hook would run
+  # later with the token in scope. The write happens in a separate job, from
+  # a clean checkout, with only `uv.lock` carried across.
+  relock:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.changed.outputs.changed }}
+      digest: ${{ steps.changed.outputs.digest }}
+      base_sha: ${{ steps.base.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.base }}
+          # No credential on disk while `uv sync` resolves and the suite
+          # runs. This job installs and executes the very dependencies it is
+          # updating, so a persisted `contents: write` token would be
+          # reachable by anything in that tree. Git auth is configured in
+          # the push step, after the verification it would otherwise be
+          # able to skip.
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          version: "0.10.9"
+          enable-cache: false
+
+      # The lock is resolved and tested against *this* commit. If the branch
+      # advances while the gate runs, committing onto the new tip would pair
+      # an untested source revision with a lock generated for the old one -
+      # while the pull request reports that the suite passed.
+      - name: Pin the revision this lock is generated for
+        id: base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Regenerate the lock
+        env:
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          if [ -n "$PACKAGE" ]; then
+            uv lock --upgrade-package "$PACKAGE"
+          else
+            uv lock --upgrade
+          fi
+
+      # The guard that makes this workflow safe to trust. A GitHub runner
+      # resolves from PyPI, so this should never fire - but the whole point
+      # of the job is producing a lock nobody can regenerate locally, and an
+      # unverified one is worth less than none.
+      - name: Refuse a lock that names anything but PyPI
+        run: python scripts/check_lock_hosts.py uv.lock
+
+      # Pin the exact bytes before any of the resolved code runs. The
+      # hostname check alone would accept a *different* PyPI-only lock
+      # substituted afterwards - one nothing verified - so the digest, not
+      # the shape, is what `propose` commits against.
+      - name: Record whether the lock moved, and its digest
+        id: changed
+        run: |
+          if git diff --quiet -- uv.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "uv.lock is already up to date; nothing to do"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$(sha256sum uv.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify the project still resolves and passes the gate
+        # Deliberately the whole gate, not just the tests. The pull request
+        # this opens cannot start CI (see the note at the top), so whatever
+        # is not checked here is not checked before a human reads it.
+        run: |
+          uv sync --locked --dev --all-extras
+          uv run ruff check src/ tests/
+          uv run ruff format --check src/ tests/
+          uv run mypy src/
+          uv run tach check
+          uv run pytest -q
+
+      # Fails the job if the code it just ran edited the lock underneath it.
+      - name: Confirm the lock is still the file that was verified
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          DIGEST: ${{ steps.changed.outputs.digest }}
+        run: echo "$DIGEST  uv.lock" | sha256sum --check --strict
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: steps.changed.outputs.changed == 'true'
+        with:
+          name: relocked-lock
+          path: uv.lock
+          if-no-files-found: error
+
+  # Write-only. A clean checkout, none of the updated dependencies
+  # installed, and nothing from the previous job except the one file it
+  # produced - so no code that ran during verification can reach this token
+  # or plant a hook that would.
+  propose:
+    needs: relock
+    if: needs.relock.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # `main`, not `inputs.base`. The base branch is the thing being
+      # evaluated, so taking the validator from it lets a branch ship a
+      # no-op `check_lock_hosts.py` alongside an index redirect and have
+      # the digest chain faithfully carry an unvalidated lock. The trust
+      # anchor has to sit outside what is under review.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+          sparse-checkout: scripts/check_lock_hosts.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: relocked-lock
+
+      # Re-check what actually arrived. The other job validated the lock
+      # before running the suite, and code from the dependencies it just
+      # installed could have rewritten the file afterwards - the check and
+      # the upload are not the same instant. This runs in a workspace that
+      # ran none of that code, and before the token is exposed. The checker
+      # comes from this clean checkout, not from the artifact.
+      - name: Refuse a lock that names anything but PyPI
+        run: python scripts/check_lock_hosts.py uv.lock
+
+      # The digest was taken before any resolved code ran. Matching it here
+      # is what makes "verified" mean these bytes rather than some other
+      # PyPI-only lock substituted afterwards.
+      - name: Confirm these are the bytes the other job verified
+        env:
+          DIGEST: ${{ needs.relock.outputs.digest }}
+        run: echo "$DIGEST  uv.lock" | sha256sum --check --strict
+
+      - name: Open a pull request with the verified lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ inputs.package }}
+          BASE: ${{ inputs.base }}
+          BASE_SHA: ${{ needs.relock.outputs.base_sha }}
+        run: |
+          target="${PACKAGE:-all dependencies}"
+          branch="relock/$(date +%Y%m%d-%H%M%S)"
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Branch from the exact commit the lock was resolved and tested
+          # against, not from whatever the base branch points at now.
+          git fetch --depth 1 origin "$BASE_SHA"
+          git checkout -b "$branch" "$BASE_SHA"
+          # --sparse: the checkout includes only the validator, so uv.lock
+          # is outside the sparse definition and a plain `git add` refuses
+          # to stage it.
+          git add --sparse uv.lock
+          git commit -m "build: relock ${target}
+
+          Regenerated by the Relock workflow, which runs on a runner with
+          direct PyPI access. Locking is not possible from a machine behind
+          a TLS-intercepting mirror: the resulting lock names the mirror,
+          and the repository rejects that.
+          "
+          git push origin "$branch"
+          gh pr create \
+            --base "$BASE" \
+            --head "$branch" \
+            --title "build: relock ${target}" \
+            --body "Regenerated \`uv.lock\` on a runner with direct PyPI access.
+
+          Resolved and verified against \`$BASE_SHA\`, and committed onto that
+          exact revision — so the lock and the source it was tested with are
+          the same pair, even if \`$BASE\` moved meanwhile.
+
+          Verified in the job that produced it, before this pull request
+          existed: every \`url\`, \`registry\` and \`index\` in the lock names
+          PyPI, \`uv sync --locked\` succeeds against it, and ruff, the format
+          check, mypy, tach and the test suite all pass on Linux/3.12.
+
+          **CI has not run on this branch and will not start by itself.**
+          GitHub suppresses the workflow events raised by \`GITHUB_TOKEN\`, so
+          the checks above are all that has happened. Push an empty commit,
+          or close and reopen this pull request, to get the full matrix —
+          Windows, the other interpreters and the security audit — before
+          merging. CodeQL only runs for pull requests targeting \`main\`, so
+          a relock onto any other base will not get it at all.
+
+          Opened by the \`Relock\` workflow."

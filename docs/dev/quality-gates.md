@@ -57,13 +57,47 @@ Measured on a machine configured for a mirror:
 Then confirm before committing: every `url` and `registry` in the lock must
 name `files.pythonhosted.org` or `pypi.org`.
 
-If PyPI is unreachable from your machine, do not work around it here. No CI
-workflow regenerates the lock — every job consumes the committed one
-(`uv sync --locked`, `uv export --frozen`) — so the options are a machine
-with direct access, or **Dependabot**, which opens lock updates against
-PyPI on its own schedule (`.github/dependabot.yml`). A lock is a
-supply-chain artifact; a convenient one that points somewhere else is worse
-than none.
+If PyPI is unreachable from your machine, do not work around it here — and
+you do not have to. `uv lock` fetches wheel *metadata* from
+`files.pythonhosted.org`, so a TLS-intercepted machine cannot produce a
+usable lock at all: locking through the mirror names the mirror, and this
+repository rejects that. Three paths out, in order of preference:
+
+1. **Dependabot** (`.github/dependabot.yml`) — routine bumps, on a schedule,
+   resolved against PyPI. Nothing to do.
+2. **The `Relock` workflow** (`.github/workflows/relock.yml`) — a manual
+   dispatch for the deliberate changes Dependabot will not make, such as
+   taking a major version that needs source edits in the same pull request.
+   It runs as two jobs on purpose:
+
+   - `relock` is **read-only**. It locks on a runner with direct access,
+     asserts every `url`/`registry`/`index` value names a PyPI origin
+     (`scripts/check_lock_hosts.py`, which parses the TOML so unreadable or
+     empty input fails rather than passing silently), records the lock's
+     SHA-256 **before** anything else runs, and then runs the whole gate —
+     `uv sync --locked`, ruff, the format check, mypy, `tach`, the suite. It
+     installs and executes the dependencies it is updating, so it holds no
+     token that could write anything, and it re-checks the digest afterwards
+     in case that code edited the lock underneath it.
+   - `propose` takes only `uv.lock` across, checks out **`main`** (not the
+     base branch — a branch must not supply the validator that clears it),
+     re-runs the host check with that trusted copy, and matches the digest
+     before the token is exposed. Nothing that ran during verification can
+     reach its credential, plant a `pre-push` hook, or substitute a
+     different lock that merely looks acceptable.
+
+   It runs the gate itself because it has to: GitHub suppresses the
+   workflow events raised by `GITHUB_TOKEN`, so the pull request it opens
+   **does not start CI**. Push an empty commit to that branch to get the
+   full matrix — Windows, the other interpreters, the security audit —
+   before merging; the pull request body says so too. CodeQL is triggered
+   only for pull requests targeting `main`
+   (`.github/workflows/codeql.yml`), so a relock onto another base does not
+   get it even then.
+3. A machine with direct PyPI access.
+
+A lock is a supply-chain artifact; a convenient one that points somewhere
+else is worse than none.
 
 ## 2. Before pushing — local, `make check`
 
