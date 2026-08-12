@@ -130,6 +130,10 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
   embedded-provider boundary, what is redacted, the MCP and plugin trust
   boundaries, and the residual risks that are not mitigated. See
   [`SECURITY.md`](https://github.com/hellices/korvid/blob/main/SECURITY.md) to report a vulnerability privately.
+- **[Architecture](https://github.com/hellices/korvid/blob/main/docs/dev/specs/2026-08-12-korvid-architecture.md)** — how the pieces
+  hold each other honest: the layer map, the write path a model cannot
+  bypass, the single provider choke point, and how a claim becomes
+  checkable evidence. Diagrams, and the tensions the design still has.
 
 ## Status
 
