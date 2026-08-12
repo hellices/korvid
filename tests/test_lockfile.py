@@ -330,6 +330,35 @@ def test_the_relock_pull_request_does_not_promise_codeql_it_cannot_deliver() -> 
     assert "CodeQL only runs for pull requests targeting" in workflow
 
 
+def test_the_relock_workflow_survives_a_repository_that_forbids_bot_pull_requests() -> None:
+    """`gh pr create` fails when Actions may not open pull requests.
+
+    Observed on the first real dispatch: the branch pushed and the lock was
+    verified, then `createPullRequest` was refused by a repository setting
+    the API cannot even read. Exiting there would discard verified work for
+    a reason nobody can fix from inside the job, so it reports the setting
+    and the one command that finishes the job by hand.
+    """
+    workflow = (_ROOT / ".github" / "workflows" / "relock.yml").read_text()
+    assert "if ! gh pr create" in workflow, "a refused pull request aborts without explanation"
+    # Assert against the branch that actually runs, not the whole file: a
+    # comment mentioning the setting would otherwise satisfy this while the
+    # job died silently.
+    _, _, after = workflow.partition("if ! gh pr create")
+    failure_branch, _, _ = after.partition("exit 1")
+    printed = "\n".join(
+        line for line in failure_branch.splitlines() if line.strip().startswith("echo ")
+    )
+    assert "Allow GitHub Actions to create and" in printed, (
+        "the operator is not told which setting refused the pull request"
+    )
+    assert "gh pr create --base $BASE --head $branch" in printed, (
+        "the manual remedy must be printed with the real branch name"
+    )
+    assert "$branch" in failure_branch
+    assert "Nothing is lost" in printed
+
+
 def test_pyproject_pins_no_alternate_package_index() -> None:
     """An index pinned here redirects every resolution in the repository.
 

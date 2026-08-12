@@ -86,6 +86,13 @@ repository rejects that. Three paths out, in order of preference:
      reach its credential, plant a `pre-push` hook, or substitute a
      different lock that merely looks acceptable.
 
+   One repository setting is a prerequisite: **Settings → Actions → "Allow
+   GitHub Actions to create and approve pull requests"**. With it off,
+   `gh pr create` is refused and the API cannot even read the flag. The
+   workflow still pushes and verifies the branch, then prints the setting
+   and the one command that opens the pull request by hand — which has the
+   side effect of starting CI, so nothing is lost either way.
+
    It runs the gate itself because it has to: GitHub suppresses the
    workflow events raised by `GITHUB_TOKEN`, so the pull request it opens
    **does not start CI**. Push an empty commit to that branch to get the
