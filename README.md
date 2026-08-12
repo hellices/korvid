@@ -90,6 +90,10 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
 
 ## Features
 
+- **[What korvid is](https://github.com/hellices/korvid/blob/main/docs/overview.md)** — the shape of the thing in two
+  diagrams: a cockpit that works on its own, an agent you can add, and an
+  MCP surface that lets your editor's assistant see the cluster. Start here
+  if you are deciding whether korvid fits.
 - **[Keybindings](https://github.com/hellices/korvid/blob/main/docs/keybindings.md)** — every key by context, plus
   remapping via `keybindings:` config.
 - **[Browsing the cluster](https://github.com/hellices/korvid/blob/main/docs/tui.md)** — custom columns from labels /

@@ -12,7 +12,10 @@ Where an invariant is enforced by a *mechanism* rather than by discipline, the
 mechanism is named — that distinction is the main subject of this document.
 
 **Audience.** Contributors deciding where a change belongs, and reviewers
-deciding whether a change is safe. If you want to *use* korvid, read the
+deciding whether a change is safe. If you want the *concept* rather than the
+construction — what korvid is, and how installing an extra changes what it can
+do — read [`docs/overview.md`](../../overview.md), which stays true across
+refactors that will date this document. If you want to *use* korvid, read the
 [README](../../../README.md). If you want the AI data boundary specifically,
 read [`docs/threat-model.md`](../../threat-model.md), which goes deeper on
 that one seam than this overview does.
@@ -502,6 +505,7 @@ surface, and no amount of client-side cleverness makes it one.
 |---|---|
 | [`2026-07-23-korvid-tui-design.md`](2026-07-23-korvid-tui-design.md) | Original intent and the product spec |
 | [`2026-07-24-korvid-engineering-standards.md`](2026-07-24-korvid-engineering-standards.md) | Coding standards, review expectations |
+| [`docs/overview.md`](../../overview.md) | The product concept: the three install shapes and the one safety rule |
 | [`docs/threat-model.md`](../../threat-model.md) | The AI data boundary in depth, incl. residual risk |
 | [`docs/ops.md`](../../ops.md) | Write safety, port-forward and transfer from the user's side |
 | [`docs/agent.md`](../../agent.md) | Provider setup, profiles, prompt configuration |
