@@ -7,7 +7,7 @@ keyboard-first Kubernetes cockpit that needs nothing but a kubeconfig. Add an
 extra and it gains an embedded AI agent. Add another and it becomes a tool
 *other* AI clients can drive.
 
-Three shapes, one binary, one safety model.
+One core, independent adapters, one safety model.
 
 ---
 
@@ -147,46 +147,58 @@ deliberately — and it stays off until you turn it on.
 ## Four valid compositions
 
 ```mermaid
-flowchart LR
-    subgraph C1["korvid  —  cockpit only"]
-        direction TB
-        C1T["TUI\nINCLUDED"]
-        C1R["Core"]
-        C1K["K8s\nINCLUDED"]
-        C1T --> C1R --> C1K
+flowchart TB
+    subgraph ROW1["  "]
+        direction LR
+        subgraph C1["korvid  —  cockpit only"]
+            direction TB
+            C1T["TUI<br/>INCLUDED"]
+            C1R["Core"]
+            C1K["K8s<br/>INCLUDED"]
+            C1T --> C1R --> C1K
+        end
+
+        subgraph C2["korvid[agent]  —  + embedded AI"]
+            direction TB
+            C2A["Agent<br/>OPTIONAL"]
+            C2T["TUI<br/>INCLUDED"]
+            C2R["Core"]
+            C2K["K8s<br/>INCLUDED"]
+            C2A --> C2R
+            C2T --> C2R --> C2K
+        end
     end
 
-    subgraph C2["korvid[agent]  —  + embedded AI"]
-        direction TB
-        C2A["Agent\nOPTIONAL"]
-        C2T["TUI\nINCLUDED"]
-        C2R["Core"]
-        C2K["K8s\nINCLUDED"]
-        C2A --> C2R
-        C2T --> C2R --> C2K
+    subgraph ROW2["  "]
+        direction LR
+        subgraph C3["korvid[mcp]  —  + MCP server"]
+            direction TB
+            C3M["MCP<br/>OPTIONAL"]
+            C3T["TUI<br/>INCLUDED"]
+            C3R["Core"]
+            C3K["K8s<br/>INCLUDED"]
+            C3M --> C3R
+            C3T --> C3R --> C3K
+        end
+
+        subgraph C4["korvid[all]  —  agent + MCP"]
+            direction TB
+            C4A["Agent<br/>OPTIONAL"]
+            C4M["MCP<br/>OPTIONAL"]
+            C4T["TUI<br/>INCLUDED"]
+            C4R["Core"]
+            C4K["K8s<br/>INCLUDED"]
+            C4A --> C4R
+            C4M --> C4R
+            C4T --> C4R --> C4K
+        end
     end
 
-    subgraph C3["korvid[mcp]  —  + MCP server"]
-        direction TB
-        C3M["MCP\nOPTIONAL"]
-        C3T["TUI\nINCLUDED"]
-        C3R["Core"]
-        C3K["K8s\nINCLUDED"]
-        C3M --> C3R
-        C3T --> C3R --> C3K
-    end
+    NOTE["korvid[agent,entra] is a separate<br/>auth extra — not included in [all]"]
 
-    subgraph C4["korvid[all]  —  agent + MCP  (entra optional beside agent)"]
-        direction TB
-        C4A["Agent\nOPTIONAL"]
-        C4M["MCP\nOPTIONAL"]
-        C4T["TUI\nINCLUDED"]
-        C4R["Core"]
-        C4K["K8s\nINCLUDED"]
-        C4A --> C4R
-        C4M --> C4R
-        C4T --> C4R --> C4K
-    end
+    style ROW1 fill:none,stroke:none
+    style ROW2 fill:none,stroke:none
+    style NOTE fill:#fffbeb,color:#92400e,stroke:#d97706,stroke-dasharray: 4 4
 
     style C1T fill:#22543d,color:#fff,stroke:#276749
     style C1R fill:#2d3748,color:#e2e8f0,stroke:#4a5568
