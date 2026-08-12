@@ -33,11 +33,33 @@ substring is still not credited.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from korvid.evals.fake_kube import builtin_aliases
 from korvid.evals.scenario import Evidence, Scenario
+
+#: Same grammar korvid mints with: ASCII digits only, so a stray `[E1x]`
+#: is malformed syntax rather than a reference that fails to resolve.
+_CITATION = re.compile(r"\[E([1-9][0-9]*)\]")
+
+#: List markers, removed before splitting so an ordered list's `1.` is
+#: not read as the end of a sentence - which left `1` as its own uncited
+#: fragment and scored a fully cited list at 2/3.
+_LIST_MARKER = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+", re.MULTILINE)
+
+#: Claim boundaries for coverage. Sentence punctuation is not enough:
+#: answers are rendered as Markdown, so a list item and a blank-line
+#: paragraph each end a claim as surely as a full stop does. Splitting on
+#: punctuation alone counted `- a [E1]\n- b` as one unit and reported
+#: full coverage while half the claims were uncited.
+_CLAIM_BOUNDARY = re.compile(r"(?<=[.!?])[ \t]+|\n+")
+
+#: A fragment that is only punctuation or a bare reference is formatting
+#: or a trailing citation, not a claim of its own.
+_CLAIM_TEXT = re.compile(r"[A-Za-z0-9]")
+
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
@@ -68,6 +90,84 @@ class GradeResult:
     missing_mentions: tuple[tuple[str, ...], ...]
     forbidden_mentions: tuple[str, ...]
     missing_evidence: tuple[tuple[Evidence, ...], ...]
+
+
+@dataclass(frozen=True)
+class CitationReport:
+    """How well an answer's claims point at reads that happened (#192).
+
+    Two numbers, deliberately separate. Precision asks whether the
+    references an answer used are real; coverage asks how much of the
+    answer rests on any reference at all. An answer can score perfectly on
+    one and badly on the other, and the two failures need different fixes:
+    invented references are a protocol problem, uncited claims are a
+    prompting one.
+    """
+
+    #: References the answer used that korvid actually minted.
+    cited: tuple[str, ...]
+    #: References the answer used that resolve to nothing.
+    unsupported: tuple[str, ...]
+    #: Reads the answer never leaned on. Not a failure - an agent may read
+    #: more than it needs - but a run citing none of its reads is a very
+    #: different answer from one citing all of them.
+    uncited_evidence: tuple[str, ...]
+    #: Share of *claims* carrying at least one reference. A claim is a
+    #: sentence, a list item or a paragraph, because answers are rendered
+    #: as Markdown and a bullet ends a claim as surely as a full stop.
+    coverage: float
+    #: Share of used references that resolve. None when the answer cited
+    #: nothing: zero of zero is not perfect precision, and reporting it as
+    #: 1.0 would make an entirely uncited answer look maximally honest.
+    precision: float | None
+
+
+def citation_report(answer: str, *, minted: Sequence[str]) -> CitationReport:
+    """Measure the citations in *answer* against the references minted.
+
+    Pure and answer-only: the eval harness has the ledger's references,
+    and this does not need the ledger itself.
+    """
+    known = set(minted)
+    used: list[str] = []
+    for match in _CITATION.finditer(answer):
+        ref = f"E{match.group(1)}"
+        if ref not in used:
+            used.append(ref)
+    cited = tuple(ref for ref in used if ref in known)
+    unsupported = tuple(ref for ref in used if ref not in known)
+    claims = _claims(answer)
+    with_reference = sum(1 for part in claims if _CITATION.search(part))
+    return CitationReport(
+        cited=cited,
+        unsupported=unsupported,
+        uncited_evidence=tuple(ref for ref in minted if ref not in cited),
+        coverage=with_reference / len(claims) if claims else 0.0,
+        precision=len(cited) / len(used) if used else None,
+    )
+
+
+def _claims(answer: str) -> list[str]:
+    """Split *answer* into the claims coverage is measured over.
+
+    A fragment holding only a reference is folded into the claim before
+    it: `pod failed. [E1]` is one cited claim, not a claim plus a stray
+    citation, and counting it as two halved the score of a correctly
+    cited answer.
+    """
+    claims: list[str] = []
+    for part in _CLAIM_BOUNDARY.split(_LIST_MARKER.sub("", answer)):
+        fragment = (part or "").strip()
+        if not fragment:
+            continue
+        if not _CLAIM_TEXT.search(_CITATION.sub("", fragment)):
+            # Only a reference (or only punctuation): attach it to the
+            # claim it trails, or drop it when nothing precedes it.
+            if claims:
+                claims[-1] = f"{claims[-1]} {fragment}"
+            continue
+        claims.append(fragment)
+    return claims
 
 
 def _tokens(text: str) -> list[str]:

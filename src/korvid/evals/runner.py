@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import statistics
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -24,7 +24,14 @@ from korvid.agent.events import (
 from korvid.agent.outbound import sanitize_recorded_tool_result
 from korvid.agent.profiles import AgentProfile, PromptOverrides, build_profile
 from korvid.agent.runtime import AgentRuntime
-from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
+from korvid.evals.grader import (
+    CitationReport,
+    GradeResult,
+    ToolRecord,
+    citation_report,
+    grade,
+    matches_target,
+)
 from korvid.evals.scenario import Scenario
 from korvid.tools.executor import (
     READ_TOOLS,
@@ -158,6 +165,8 @@ class RunMetrics:
     """One repetition's grade plus behavioral metrics from the event stream."""
 
     grade: GradeResult
+    #: How well the answer's claims cited the reads behind them (#192).
+    citations: CitationReport
     #: Text streamed after the last tool call — the final answer segment.
     answer: str
     iterations: int
@@ -381,6 +390,9 @@ async def _drive_turn(
     )
     return RunMetrics(
         grade=grade_result,
+        # Measured against what the runtime actually minted, so an
+        # invented reference scores worse than citing nothing (#192).
+        citations=citation_report(tally.answer, minted=runtime.evidence.references()),
         answer=tally.answer,
         iterations=provider.completions,
         tool_calls=tally.tool_calls,
@@ -434,12 +446,28 @@ def _mean_sd(values: list[float]) -> str:
     return f"{mean:.1f}±{statistics.stdev(values):.1f}"
 
 
+def _citation_cell(runs: Sequence[RunMetrics]) -> str:
+    """Citation precision and coverage for one scenario's runs (#192).
+
+    Precision is over runs that cited anything: averaging an undefined
+    precision as zero would punish an uncited answer twice, once in each
+    column, and the two failures are different.
+    """
+    scored = [run.citations.precision for run in runs if run.citations.precision is not None]
+    coverage = sum(run.citations.coverage for run in runs) / len(runs) if runs else 0.0
+    if not scored:
+        return f"— / {100 * coverage:.1f}%"
+    precision = sum(scored) / len(scored)
+    return f"{100 * precision:.1f}% / {100 * coverage:.1f}%"
+
+
 def render_markdown(reports: list[ScenarioReport]) -> str:
     """Markdown summary table: one row per scenario, variance included."""
     lines = [
         "| scenario | root cause | success | evidence | resolvable calls | on-target | "
-        "malformed | writes | safety | iterations | tokens in/out | wall s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "malformed | writes | safety | cite precision/coverage | iterations | "
+        "tokens in/out | wall s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for report in reports:
         runs = report.runs
@@ -464,11 +492,12 @@ def render_markdown(reports: list[ScenarioReport]) -> str:
         # as billing-exact numbers in model comparisons.
         token_mark = "~" if any(run.tokens_estimated for run in runs) else ""
         wall = _fmt_seconds([run.wall_time_s for run in runs])
+        citations = _citation_cell(runs)
         lines.append(
             f"| {report.scenario_id} | {report.root_cause} | {report.successes}/{n} |"
             f" {report.evidence_hits}/{n} | {resolvable}/{total_calls}{resolvable_rate} |"
             f" {on_target}/{total_calls}{on_target_rate} |"
-            f" {malformed}/{total_calls}{rate} | {writes} | {safety} |"
+            f" {malformed}/{total_calls}{rate} | {writes} | {safety} | {citations} |"
             f" {iterations} | {token_mark}{tokens_in}/{tokens_out} | {wall} |"
         )
     return "\n".join(lines)

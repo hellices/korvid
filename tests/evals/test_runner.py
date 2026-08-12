@@ -16,6 +16,7 @@ import pytest
 from korvid.agent.profiles import PromptOverrides
 from korvid.agent.prompts import SYSTEM_PROMPT
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
+from korvid.evals.grader import CitationReport, citation_report
 from korvid.evals.runner import ScenarioReport, render_markdown, run_scenario
 from korvid.evals.scenario import ContainerLogs, Evidence, Scenario
 from korvid.evals.scripted import ScriptedProvider
@@ -85,6 +86,11 @@ def _oom_scenario() -> Scenario:
             )
         },
     )
+
+
+def _no_citations() -> CitationReport:
+    """An answer that cited nothing - the shape these fixtures assume."""
+    return citation_report("", minted=())
 
 
 def _tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -397,6 +403,7 @@ def test_render_markdown_summarizes_reports() -> None:
 
     grade_ok = GradeResult(True, True, (), (), ())
     run = RunMetrics(
+        citations=_no_citations(),
         grade=grade_ok,
         answer="OOMKilled",
         iterations=2,
@@ -504,6 +511,7 @@ def test_render_markdown_marks_estimated_token_totals() -> None:
     from korvid.evals.runner import RunMetrics
 
     run = RunMetrics(
+        citations=_no_citations(),
         grade=GradeResult(True, True, (), (), ()),
         answer="OOMKilled",
         iterations=1,
@@ -927,3 +935,83 @@ async def test_run_scenario_without_overrides_uses_the_shipped_prompt() -> None:
     )
     assert seen
     assert all(prompt.startswith(SYSTEM_PROMPT) for prompt in seen), seen
+
+
+async def test_a_run_reports_how_well_its_answer_cited_its_reads() -> None:
+    """The citation work of #192 is only worth keeping if it can be measured.
+
+    Precision comes from the answer checked against the references the
+    runtime actually minted, so a model that invents `[E9]` scores worse
+    than one that cites nothing at all.
+    """
+    scenario = _oom_scenario()
+    script: list[list[dict[str, Any]]] = [
+        [
+            _tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"}),
+            {"type": "usage", "input_tokens": 40, "output_tokens": 5},
+        ],
+        [
+            {
+                "type": "text_delta",
+                "text": (
+                    "The app container was OOMKilled (exit code 137) and is in"
+                    " CrashLoopBackOff [E1]. The node is fine [E9]."
+                ),
+            },
+            {"type": "usage", "input_tokens": 60, "output_tokens": 15},
+        ],
+    ]
+
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+
+    citations = report.runs[0].citations
+    assert citations.cited == ("E1",)
+    assert citations.unsupported == ("E9",)
+    assert citations.precision == 0.5
+
+
+def test_the_markdown_report_shows_citation_quality() -> None:
+    """A metric nobody reads is not a metric.
+
+    Precision and coverage go in the same table as the other per-scenario
+    numbers, so a run can be compared against another at a glance.
+    """
+    from korvid.evals.grader import GradeResult
+    from korvid.evals.runner import RunMetrics
+
+    run = RunMetrics(
+        citations=citation_report("up [E1]. node fine [E9].", minted=("E1", "E2")),
+        grade=GradeResult(
+            diagnosis_success=True,
+            evidence_fetched=True,
+            missing_mentions=(),
+            forbidden_mentions=(),
+            missing_evidence=(),
+        ),
+        answer="up [E1]. node fine [E9].",
+        iterations=2,
+        tool_calls=1,
+        resolvable_tool_calls=1,
+        on_target_tool_calls=1,
+        malformed_tool_calls=0,
+        write_attempts=0,
+        safety_violations=0,
+        input_tokens=10,
+        output_tokens=5,
+        tokens_estimated=False,
+        wall_time_s=0.1,
+        error=None,
+    )
+    report = ScenarioReport(scenario_id="oom-killed", root_cause="oom_killed", runs=[run])
+
+    rendered = render_markdown([report])
+
+    # The whole cell, not just one number: asserting on precision alone
+    # would let coverage be dropped, or the two swapped, without failing.
+    assert "cite precision/coverage" in rendered
+    assert "| 50.0% / 100.0% |" in rendered

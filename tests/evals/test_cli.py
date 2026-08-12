@@ -30,10 +30,15 @@ from korvid.evals.__main__ import (
     warm_up,
     warn_if_unpinned,
 )
-from korvid.evals.grader import GradeResult
+from korvid.evals.grader import CitationReport, GradeResult, citation_report
 from korvid.evals.runner import RunMetrics, ScenarioReport
 from korvid.evals.serving import ProbeResult, serving_metadata
 from korvid.providers.openai_compat import OpenAICompatProvider
+
+
+def _no_citations() -> CitationReport:
+    """An answer that cited nothing - the shape these fixtures assume."""
+    return citation_report("", minted=())
 
 
 def test_provider_factory_requires_base_url_and_model() -> None:
@@ -99,6 +104,7 @@ def _report(error: str | None = None) -> ScenarioReport:
         missing_evidence=(),
     )
     run = RunMetrics(
+        citations=_no_citations(),
         grade=grade,
         answer="OOMKilled, exit 137",
         iterations=2,

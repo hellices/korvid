@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
+from korvid.evals.grader import GradeResult, ToolRecord, citation_report, grade, matches_target
 from korvid.evals.scenario import Evidence, Scenario
 
 _EVIDENCE = Evidence(
@@ -785,3 +785,107 @@ def test_grade_still_scopes_a_negator_within_one_clause() -> None:
     """The fix must not stop negation working where there is no boundary."""
     result = grade(_scenario(), "The container was not OOMKilled at all.", [_record()])
     assert not result.diagnosis_success
+
+
+# -- Citation honesty (issue #192): whether the answer's claims point at
+# -- reads that actually happened.
+
+
+def test_an_answer_with_no_citations_scores_zero_coverage() -> None:
+    """Coverage is the share of sentences carrying a reference.
+
+    Without it, the citation work of #192 cannot be shown to have changed
+    anything - which is the point of measuring it.
+    """
+    report = citation_report("The pod is crash-looping. The image is missing.", minted=("E1",))
+
+    assert report.coverage == 0.0
+    assert report.cited == ()
+
+
+def test_every_sentence_cited_is_full_coverage() -> None:
+    report = citation_report(
+        "The pod is crash-looping [E1]. The image is missing [E2].", minted=("E1", "E2")
+    )
+
+    assert report.coverage == 1.0
+    assert report.precision == 1.0
+
+
+def test_precision_counts_only_references_korvid_minted() -> None:
+    """An invented reference is the failure this metric exists to catch."""
+    report = citation_report("up [E1], node fine [E9]", minted=("E1",))
+
+    assert report.precision == 0.5
+    assert report.unsupported == ("E9",)
+
+
+def test_precision_is_undefined_rather_than_perfect_without_citations() -> None:
+    """Zero of zero is not 100% precision; reporting it as such would make
+    an uncited answer look maximally honest."""
+    report = citation_report("no citations here", minted=("E1",))
+
+    assert report.precision is None
+
+
+def test_a_repeated_citation_does_not_inflate_precision() -> None:
+    report = citation_report("up [E1], still up [E1]", minted=("E1",))
+
+    assert report.precision == 1.0
+    assert report.cited == ("E1",)
+
+
+def test_an_evidence_gap_is_reported_when_reads_go_uncited() -> None:
+    """Reads the answer never leaned on are worth surfacing.
+
+    Not a failure - an agent may read more than it needs - but a run
+    where nothing read is cited is a different kind of answer from one
+    where everything is.
+    """
+    report = citation_report("up [E1]", minted=("E1", "E2", "E3"))
+
+    assert report.uncited_evidence == ("E2", "E3")
+
+
+def test_coverage_counts_markdown_list_items_separately() -> None:
+    """Answers are rendered as Markdown, so a list is several claims.
+
+    Splitting on sentence punctuation alone made `- a [E1]\\n- b` one unit
+    and reported 100% coverage while half the claims were uncited
+    (#192 review).
+    """
+    report = citation_report("- the pod is up [E1]\n- the node is fine", minted=("E1",))
+
+    assert report.coverage == 0.5
+
+
+def test_coverage_counts_paragraphs_separately() -> None:
+    """A blank line ends a claim as surely as a full stop does."""
+    report = citation_report("the pod is up [E1]\n\nthe node is fine", minted=("E1",))
+
+    assert report.coverage == 0.5
+
+
+def test_coverage_ignores_blank_and_bullet_only_lines() -> None:
+    """Formatting must not dilute the denominator."""
+    report = citation_report("- up [E1]\n-\n\n- down [E1]", minted=("E1",))
+
+    assert report.coverage == 1.0
+
+
+def test_an_ordered_list_scores_as_its_items() -> None:
+    """`1.` is a list marker, not a claim, and not a sentence end.
+
+    Splitting on the full stop left `1` as its own uncited fragment, so a
+    fully cited ordered list scored 2/3 (#192 review).
+    """
+    report = citation_report("1. pod up [E1]\n2. node fine [E2]", minted=("E1", "E2"))
+
+    assert report.coverage == 1.0
+
+
+def test_a_trailing_citation_belongs_to_the_claim_before_it() -> None:
+    """`pod failed. [E1]` is one cited claim, not a claim plus a stray."""
+    report = citation_report("pod failed. [E1]", minted=("E1",))
+
+    assert report.coverage == 1.0
