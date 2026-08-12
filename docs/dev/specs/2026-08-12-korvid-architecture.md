@@ -29,7 +29,7 @@ to each:
 |---|---|
 | The model claims something the cluster never said | Every read mints an **evidence reference**; the answer cites them, and the citation opens the actual view |
 | The model executes something destructive | A write is **unreachable** from model output — it can only *request*, and only a human keystroke on a visible dialog completes it |
-| The model leaks secrets to a third party | One **fail-closed choke point** every provider-bound byte crosses, with redaction one layer below it |
+| The model leaks secrets to a third party | One **fail-closed choke point** every model-facing message and tool result crosses, with redaction one layer below it |
 
 None of these are policies written in a contributing guide. Each is a
 structure that makes the wrong thing hard to express: an unapproved write path
@@ -120,9 +120,13 @@ a validator can check the combinations. `_validate_write_policy()` rejects, at
   nothing trains users to dismiss dialogs);
 - a `write_proposal` on any surface other than `mcp_proposal`.
 
-`_WRITE_ENTRYPOINT = "agent_request_write"` names the *only* bridge method
-allowed to receive a cluster write, and a dispatch-key validator confirms every
-tool's target actually exists on the class its effect implies.
+That is half the import-time guarantee. The other half is
+`validate_dispatch_targets()`, which resolves every tool's dispatch key against
+the class its effect implies — reads on the executor, `ui_only` on the bridge —
+and enforces `_WRITE_ENTRYPOINT = "agent_request_write"` as the *only* bridge
+method a cluster write may dispatch to. `_validate_write_policy` says a write
+must be approved; `validate_dispatch_targets` says it must go through the one
+method that does the approving. Neither alone is sufficient.
 
 The current registry, by construction:
 
@@ -158,16 +162,16 @@ sequenceDiagram
     E->>A: agent_request_write(...)
     Note over A: the ONLY write entrypoint
     A->>K: SelfSubjectAccessReview (fails open)
-    A->>K: fetch manifest → capture UID
+    A->>K: fetch manifest → UID if available
     A->>K: write with dryRun=All → diff
     A->>U: ConfirmScreen (dry-run preview shown)
-    Note over U: keystrokes older than the<br/>dialog are discarded
+    Note over U: <b>approving</b> keystrokes older<br/>than the dialog are discarded
     U-->>A: y
     A->>AU: append intent record
     alt audit write fails
         AU--xA: raise
         A--xM: "blocked: audit log unavailable"
-        Note over A: mutation coroutine closed,<br/>never awaited
+        Note over A: op_factory never called —<br/>no mutation is ever built
     else audit durable
         A->>K: execute mutation
         A->>AU: append outcome
@@ -178,14 +182,20 @@ Four properties are worth stating explicitly, because each closes a hole that a
 simpler design leaves open:
 
 **The approval is a keystroke, not a function call.** `ConfirmScreen` records
-its construction time and discards any key event older than itself. A burst of
-buffered input — from a paste, a held key, or an impatient user — cannot answer
-a dialog that did not exist when those keys were pressed. Both the `y`/`n` path
-and the typed-name path filter on the same timestamp.
+its construction time and discards any *approving* key event older than itself.
+A burst of buffered input — from a paste, a held key, or an impatient user —
+cannot approve a dialog that did not exist when those keys were pressed. The
+`y` shortcut and `FreshKeysInput`'s typed-name path both filter on that
+timestamp; **`n` deliberately does not**. The asymmetry is the design: a stale
+keystroke must never approve, and a stale keystroke that declines costs the
+user a retry, which is the safe direction to fail.
 
 **Audit is written *before* the mutation, and failure cancels it.** The intent
-record lands first; if it cannot be written, the pending mutation coroutine is
-closed and the call returns `blocked: audit log unavailable`. The log itself is
+record lands first; if it cannot be written, `_run_write_inner` returns
+`blocked: audit log unavailable` **without calling `op_factory()`** — the
+mutation is never constructed, let alone sent. Taking a factory rather than a
+coroutine is what makes that possible: there is no half-created operation to
+clean up. The log itself is
 `fsync`-ed with the parent directory synced and an interprocess lock, so a
 crash or a second korvid session cannot tear a record. Fail-closed here means
 *the write does not happen*, not *the write happens unlogged*.
@@ -195,9 +205,13 @@ route to audit. The only difference is provenance recorded in the audit detail
 (`requested by agent`), which is precisely the difference you want visible
 afterwards.
 
-**The UID travels with the request.** The manifest fetch captures the target's
-UID before approval, so a pod deleted and recreated under the same name while
-the dialog was open is not silently mutated in its replacement's stead.
+**The UID travels with the request — when it can be had.** The manifest fetch
+before approval captures the target's UID, so a pod deleted and recreated under
+the same name while the dialog was open is not silently mutated in its
+replacement's stead. `_target_manifest` is fail-open: missing wiring, a
+timeout or an infrastructure error yields `None`, and the write proceeds
+without the precondition rather than becoming unavailable. It narrows the race
+where the lookup succeeds; it does not close it in general.
 
 The RBAC pre-check deliberately **fails open**: a cluster that refuses
 `SelfSubjectAccessReview` should not become unusable, and the API server
@@ -208,7 +222,11 @@ a clear warning — not a security control, and the code says so.
 
 ## 5. The provider boundary: one place, fail-closed
 
-Everything bound for an embedded LLM crosses `agent/outbound.py`. The split
+Every model-facing `messages` and `tools` payload crosses `agent/outbound.py`
+before a provider request is built. Transport fields a provider adds
+afterwards — `model`, streaming options, auth headers — are outside it; the
+boundary governs *content the model sees and produces*, which is where the
+leak risk lives. The split
 with `core/redaction.py` one layer down is deliberate and worth understanding:
 
 - **What must never leave** lives in `core/redaction.py`, so the tool executor
@@ -337,18 +355,26 @@ flowchart LR
     WM -->|ADDED/MODIFIED/DELETED| RS["ResourceStore"]
     RS --> TBL["table widget"]
     RS --> HINT["troubled-pod hints"]
-    WM -.reconnect + resync.-> API
+    WM -.reconnect: clear + fresh LIST.-> API
 ```
 
 `ResourceStore` holds the current object set per (kind, scope); `WatchManager`
 feeds it from the API's watch stream and handles reconnection. The UI renders
 from the store, never from a request in flight, which is why filtering and
-sorting stay instant on a live cluster — and why a dropped watch degrades to
-stale data with a visible indicator rather than a frozen table.
+sorting stay instant on a live cluster.
 
-Everything the agent can see about your screen — view, namespace, selection,
-filter — is derived from this same store, so the agent's idea of "what you are
-looking at" cannot drift from what is rendered.
+A dropped watch does **not** leave stale rows on screen: `WatchManager` clears
+the bucket and re-LISTs before resuming, so the table briefly empties and then
+refills with current state. When retries are exhausted the app surfaces a
+`Watch failed` error. Showing nothing and saying so beats showing a cluster
+state that stopped being true minutes ago.
+
+What the agent can see about your screen — view, namespace, selection, filter —
+is assembled by `_screen_context` at the moment it is needed, reading pane
+state, the focused table and app state directly (only the rows themselves come
+from the store). It is not a cached summary handed over earlier, which is what
+keeps the agent's idea of "what you are looking at" from drifting away from
+what is rendered.
 
 ---
 
@@ -389,7 +415,8 @@ The distinction between *checked* and *reviewed* is the point of this table.
 | Layer graph is acyclic and declared | `tach.toml` + CI | build |
 | A cluster write requires user confirmation | `_validate_write_policy` | **import** |
 | Cluster writes are not exposed on MCP | `_validate_write_policy` | **import** |
-| Every tool's dispatch target exists | registry dispatch validator | **import** |
+| A write dispatches only via `agent_request_write` | `validate_dispatch_targets` | **import** |
+| Every tool's dispatch target exists on its class | `validate_dispatch_targets` | **import** |
 | An unwritten audit record blocks the write | `_run_write_inner` | runtime |
 | Only fresh keystrokes confirm a dialog | `ConfirmScreen` / `FreshKeysInput` | runtime |
 | Provider-bound data crosses one policy | `agent/outbound.py` | runtime (request refused) |
