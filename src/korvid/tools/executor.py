@@ -110,6 +110,22 @@ class ToolResultBlocked(Exception):
     """
 
 
+def incarnation_of(manifest: Any) -> str | None:
+    """The object's UID, or None for anything that is not plainly one.
+
+    Total by design: identity is a *bonus* on a read, and a malformed
+    document must reach the redaction refusal rather than crash here
+    (#250 review) - the credential path is fail-closed.
+    """
+    if not isinstance(manifest, dict):
+        return None
+    metadata = manifest.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    uid = metadata.get("uid")
+    return str(uid) if uid else None
+
+
 @dataclass(frozen=True, slots=True)
 class ToolOutcome:
     """One tool result plus the redactions applied while producing it.
@@ -1007,7 +1023,14 @@ class ToolExecutor(RecordedExecution):
             # (PR #197 review). The message is a constant: it names the
             # shape that failed, never the document.
             raise ToolResultBlocked("the result is too deeply nested to redact") from exc
-        return ToolOutcome(text=text, redactions=tuple(records))
+        # This *is* the document returned, so its identity is not a guess:
+        # the commonest citation can now tell a replacement from the
+        # object the claim was about (#250).
+        return ToolOutcome(
+            text=text,
+            redactions=tuple(records),
+            incarnation=incarnation_of(manifest),
+        )
 
     async def _get_logs(self, args: dict[str, Any]) -> ToolOutcome:
         pod = _reject_slash_name(str(args["pod"]), "pod")
@@ -1016,7 +1039,6 @@ class ToolExecutor(RecordedExecution):
         raw_tail = args.get("tail_lines", 100)
         tail_lines = max(1, min(500, int(raw_tail)))
 
-        uid: str | None = None
         if not container:
             pods_meta = self._aliases.get("pods") or self._aliases.get("pod")
             if pods_meta is not None:
@@ -1026,18 +1048,18 @@ class ToolExecutor(RecordedExecution):
                 ].get("name")
                 if first_container:
                     container = str(first_container)
-                raw_uid = (pod_manifest.get("metadata") or {}).get("uid")
-                uid = str(raw_uid) if raw_uid else None
 
         lines: list[str] = []
         async for log_line in self._kube.stream_logs(
             namespace, pod, container, follow=False, tail_lines=tail_lines
         ):
             lines.append(log_line.text)
-        # The resolved container and the pod this read streamed from both
-        # travel with the result: a citation must reopen the same stream,
-        # not re-run the defaulting rule against a replacement (#250).
-        return ToolOutcome(text="\n".join(lines), incarnation=uid, container=container or None)
+        # No incarnation: the manifest lookup and the log stream are two
+        # separate name-based reads, so a pod recreated between them would
+        # return the replacement's lines under the old UID - a false
+        # identity is worse than none. The resolved container is reported,
+        # because that much this read does know (#250 review).
+        return ToolOutcome(text="\n".join(lines), container=container or None)
 
     async def _get_events(self, args: dict[str, Any]) -> ToolOutcome:
         kind = str(args["kind"]).strip().lower()
@@ -1056,8 +1078,7 @@ class ToolExecutor(RecordedExecution):
                 raise
             manifest = None
         if manifest is not None:
-            raw_uid = (manifest.get("metadata") or {}).get("uid")
-            uid = str(raw_uid) if raw_uid else None
+            uid = incarnation_of(manifest)
         events = await self._kube.list_events_for(namespace, name, kind=meta.kind, uid=uid)
         # The UID travels with the result: the scoping decision is made
         # here, and a citation cannot re-derive which incarnation was read

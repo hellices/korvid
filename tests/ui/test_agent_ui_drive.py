@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from korvid.agent.runtime import AgentRuntime
@@ -54,7 +54,7 @@ def make_app(
     manifest_containers: list[str] | None = None,
     manifest_init_containers: list[str] | None = None,
     manifest_ephemeral_containers: list[str] | None = None,
-    manifest_uid: str | None = None,
+    manifest_uid: str | Callable[[], str] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -77,7 +77,7 @@ def make_app(
             spec["ephemeralContainers"] = [{"name": c} for c in manifest_ephemeral_containers]
         metadata: dict[str, Any] = {"name": name, "namespace": namespace}
         if manifest_uid is not None:
-            metadata["uid"] = manifest_uid
+            metadata["uid"] = manifest_uid() if callable(manifest_uid) else manifest_uid
         return {"kind": "Pod", "metadata": metadata, "spec": spec}
 
     async def stream_logs(
@@ -880,3 +880,31 @@ async def test_opening_a_citation_for_the_same_object_is_not_flagged() -> None:
         await pilot.pause()
 
         assert "replaced" not in out.lower()
+
+
+async def test_a_replacement_between_the_check_and_the_open_is_still_reported() -> None:
+    """Checking identity in a separate fetch leaves the same race open.
+
+    The check used to run against its own fetch, so a pod replaced between
+    that fetch and the one the opener displayed was shown without a word -
+    the quiet failure this change exists to remove, with a smaller window.
+    The verdict now comes from the manifest actually put on screen, so the
+    first lookup this test serves is the displayed one (#250 review).
+    """
+    uids = iter(["uid-new"])
+    app = make_app(manifest_uid=lambda: next(uids, "uid-new"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_resource",
+            {"kind": "pods", "name": "web-1", "namespace": "default"},
+            "ok",
+            incarnation="uid-old",
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert "replaced" in out.lower()

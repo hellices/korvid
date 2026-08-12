@@ -3930,15 +3930,11 @@ async def test_get_logs_reports_the_container_it_resolved() -> None:
     and the two can disagree (#250).
     """
 
-    kube = FakeLogKube()
-    kube.manifest["metadata"]["uid"] = "pod-uid"
-
-    outcome = await make_executor(kube).execute_recorded(
+    outcome = await make_executor(FakeLogKube()).execute_recorded(
         "get_logs", {"pod": "web", "namespace": "d"}
     )
 
     assert outcome.container == "app"
-    assert outcome.incarnation == "pod-uid"
 
 
 async def test_get_logs_with_an_explicit_container_reports_it_unchanged() -> None:
@@ -3948,3 +3944,57 @@ async def test_get_logs_with_an_explicit_container_reports_it_unchanged() -> Non
     )
 
     assert outcome.container == "sidecar"
+
+
+async def test_get_resource_reports_the_incarnation_it_fetched() -> None:
+    """The most-cited read had no identity at all.
+
+    `get_resource` holds the exact manifest, so it knows which instance it
+    returned. Dropping the UID left the commonest citation unable to
+    detect a replacement - the failure this change exists to remove
+    (#250 review).
+    """
+    kube = FakeKube()
+    kube.manifest = {"kind": "Pod", "metadata": {"name": "web", "uid": "res-uid"}}
+
+    outcome = await make_executor(kube).execute_recorded(
+        "get_resource", {"kind": "pods", "namespace": "d", "name": "web"}
+    )
+
+    assert outcome.incarnation == "res-uid"
+
+
+async def test_get_logs_does_not_claim_an_identity_it_cannot_vouch_for() -> None:
+    """The manifest lookup and the log stream are two name-based reads.
+
+    A pod recreated between them returns the replacement's lines under the
+    old UID, which downstream would treat as a positive identification and
+    warn about the wrong thing. The container it resolved is still
+    reported - that much it does know (#250 review).
+    """
+    kube = FakeLogKube()
+    kube.manifest["metadata"]["uid"] = "pod-uid"
+
+    outcome = await make_executor(kube).execute_recorded(
+        "get_logs", {"pod": "web", "namespace": "d"}
+    )
+
+    assert outcome.incarnation is None
+    assert outcome.container == "app"
+
+
+async def test_a_malformed_manifest_still_blocks_rather_than_crashing() -> None:
+    """Identity extraction must not pre-empt the redaction refusal.
+
+    A document whose `metadata` is not a mapping made the UID lookup raise
+    before `_mask_manifest` ran, turning a `ToolResultBlocked` refusal
+    into an ordinary error - the credential path this repo treats as
+    fail-closed (#250 review).
+    """
+    kube = FakeKube()
+    kube.manifest = _UNREDACTABLE_SECRET
+
+    with pytest.raises(ToolResultBlocked, match="could not redact the result"):
+        await make_executor(kube).execute_recorded(
+            "get_resource", {"kind": "pods", "name": "s", "namespace": "d"}
+        )
