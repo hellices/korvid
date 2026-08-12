@@ -13,7 +13,11 @@ and never re-lock. `uv lock` rewrites every artefact URL in `uv.lock` to
 whichever index resolved it, so re-locking behind a mirror pins ~1,700
 URLs to a host only that network can reach — breaking CI and every
 outside contributor. A pre-commit hook rejects such a lock; if the lock
-genuinely must change, re-lock against public PyPI.
+genuinely must change, re-lock with **both** the config and the environment
+neutralised — see [`docs/dev/quality-gates.md`](docs/dev/quality-gates.md)
+for the exact command. `--no-config` alone is not enough: it ignores
+`~/.config/uv/uv.toml` but not `UV_INDEX`/`UV_DEFAULT_INDEX`, and even an
+explicit `--default-index` loses to `UV_INDEX`.
 
 ## Development Commands
 
