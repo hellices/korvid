@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from korvid.agent.runtime import AgentRuntime
@@ -54,6 +54,7 @@ def make_app(
     manifest_containers: list[str] | None = None,
     manifest_init_containers: list[str] | None = None,
     manifest_ephemeral_containers: list[str] | None = None,
+    manifest_uid: str | Callable[[], str] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -74,11 +75,10 @@ def make_app(
             spec["initContainers"] = [{"name": c} for c in manifest_init_containers]
         if manifest_ephemeral_containers:
             spec["ephemeralContainers"] = [{"name": c} for c in manifest_ephemeral_containers]
-        return {
-            "kind": "Pod",
-            "metadata": {"name": name, "namespace": namespace},
-            "spec": spec,
-        }
+        metadata: dict[str, Any] = {"name": name, "namespace": namespace}
+        if manifest_uid is not None:
+            metadata["uid"] = manifest_uid() if callable(manifest_uid) else manifest_uid
+        return {"kind": "Pod", "metadata": metadata, "spec": spec}
 
     async def stream_logs(
         namespace: str, pod: str, container: str, **kwargs: Any
@@ -834,3 +834,77 @@ async def test_a_log_citation_resolves_a_pod_outside_the_current_view() -> None:
         assert not out.startswith("ERROR:")
         assert "app" in out
         assert "sidecar" not in out
+
+
+async def test_opening_a_citation_for_a_replaced_object_says_so() -> None:
+    """A recreated pod is not the evidence, however identical the name.
+
+    The cited read was scoped to one incarnation. Showing the replacement
+    without a word is the quiet failure #250 exists to remove - the user
+    would read the new object's state as support for a claim about the
+    old one.
+    """
+    app = make_app(manifest_uid="uid-new")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_events",
+            {"kind": "pods", "name": "web-1", "namespace": "default"},
+            "BackOff",
+            incarnation="uid-old",
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert "replaced" in out.lower()
+
+
+async def test_opening_a_citation_for_the_same_object_is_not_flagged() -> None:
+    """The warning has to be rare, or it stops being read."""
+    app = make_app(manifest_uid="uid-same")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_events",
+            {"kind": "pods", "name": "web-1", "namespace": "default"},
+            "BackOff",
+            incarnation="uid-same",
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert "replaced" not in out.lower()
+
+
+async def test_a_replacement_between_the_check_and_the_open_is_still_reported() -> None:
+    """Checking identity in a separate fetch leaves the same race open.
+
+    The check used to run against its own fetch, so a pod replaced between
+    that fetch and the one the opener displayed was shown without a word -
+    the quiet failure this change exists to remove, with a smaller window.
+    The verdict now comes from the manifest actually put on screen, so the
+    first lookup this test serves is the displayed one (#250 review).
+    """
+    uids = iter(["uid-new"])
+    app = make_app(manifest_uid=lambda: next(uids, "uid-new"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        runtime = _with_runtime(app)
+        ref = runtime.evidence.record(
+            "get_resource",
+            {"kind": "pods", "name": "web-1", "namespace": "default"},
+            "ok",
+            incarnation="uid-old",
+        )
+        assert ref is not None
+
+        out = await app.open_evidence(ref)
+        await pilot.pause()
+
+        assert "replaced" in out.lower()

@@ -95,7 +95,7 @@ from korvid.k8s.portforward import FORWARDABLE_KINDS
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.telepresence import TelepresenceCLI, TelepresenceError
 from korvid.k8s.writes import WriteOps, restart_stamp
-from korvid.tools.executor import UIBridge
+from korvid.tools.executor import UIBridge, incarnation_of
 from korvid.tools.follow import FOLLOWABLE_TOOLS, mirror_read
 from korvid.tools.proposals import (
     ProposalClosedError,
@@ -650,6 +650,8 @@ class KorvidApp(App[None]):
         #: changed under it.
         self._ctx_switch_note: str | None = None
         self._get_manifest = get_manifest
+        #: Identity of the object the last evidence open actually displayed.
+        self._displayed_incarnation: str | None = None
         self._get_helm_components = get_helm_components
         self._get_events = get_events
         self._stream_logs = stream_logs
@@ -6298,14 +6300,43 @@ class KorvidApp(App[None]):
         target = target_for(item)
         if target is None:
             return f"ERROR: {ref} has no view to open ({item.tool})"
-        if target.view == "logs":
-            return await self._open_evidence_logs(ref, target)
         if target.view == "list":
             # A listing with no namespace covered every namespace; `None`
             # would instead be read as "keep the pane's current scope".
             scope = ALL_NAMESPACES if target.all_namespaces else target.namespace
             return await self.agent_navigate(target.kind or "", namespace=scope)
-        return await self._open_evidence_describe(ref, target)
+        self._displayed_incarnation = None
+        if target.view == "logs":
+            opened = await self._open_evidence_logs(ref, target)
+        else:
+            opened = await self._open_evidence_describe(ref, target)
+        replaced = self._displayed_is_a_replacement(target)
+        if replaced and not opened.startswith("ERROR:"):
+            # Opened anyway: the user asked to see it, and the current
+            # object is usually what they need next. Saying nothing is the
+            # failure - the claim was about an object that no longer
+            # exists (#250).
+            return (
+                f"{opened} (warning: this object was replaced since the cited read —"
+                " what is on screen is a new instance, not the evidence)"
+            )
+        return opened
+
+    def _displayed_is_a_replacement(self, target: EvidenceTarget) -> bool:
+        """Whether what was just displayed is a different instance.
+
+        Compared against the manifest the opener actually put on screen,
+        not a separate lookup: a second fetch could disagree with the
+        display, which would either miss a replacement or warn about one
+        the user is not looking at.
+
+        Only ever answers yes on a positive identification. No recorded
+        incarnation, or a view that showed no identifiable object, means
+        "cannot tell" - a warning nobody can trust is worse than none.
+        """
+        if target.incarnation is None or self._displayed_incarnation is None:
+            return False
+        return self._displayed_incarnation != target.incarnation
 
     async def _open_evidence_logs(self, ref: str, target: EvidenceTarget) -> str:
         """Stream the container the cited read actually looked at."""
@@ -6645,6 +6676,10 @@ class KorvidApp(App[None]):
             await self._show_describe(share, title, manifest, events)
         except Exception as exc:
             return f"ERROR: {exc}"
+        # The identity of what is *actually* displayed, recorded after the
+        # display succeeded: checking a separate fetch beforehand leaves
+        # the same race it was meant to close, only narrower (#250 review).
+        self._displayed_incarnation = incarnation_of(manifest)
         self._mark_agent_action(f"describe → {title}")
         return f"describe screen opened for {title} — manifest and events are on screen"
 

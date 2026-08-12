@@ -83,6 +83,10 @@ class EvidenceTarget:
     #: namespace. `None` alone cannot say this: the app reads a missing
     #: namespace as "keep the current scope".
     all_namespaces: bool = False
+    #: The object identity the cited read was scoped to, when it had one.
+    #: The opener compares it against the live object so a pod recreated
+    #: under the same name is reported rather than shown silently (#250).
+    incarnation: str | None = None
 
     def __post_init__(self) -> None:
         if not self.view:
@@ -115,4 +119,7 @@ def target_for(evidence: Evidence) -> EvidenceTarget | None:
         needs_container_resolution=route.view == "logs" and evidence.container is None,
         expects_events=route.events,
         all_namespaces=is_list and evidence.namespace is None,
+        # A listing identifies no single object, so its incarnation - if a
+        # producer ever set one - would not be the thing on screen.
+        incarnation=None if is_list else evidence.incarnation,
     )

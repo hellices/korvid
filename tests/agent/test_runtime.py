@@ -28,6 +28,7 @@ from korvid.tools.executor import (
     READ_TOOLS,
     RecordedExecution,
     ToolExecutor,
+    ToolOutcome,
     as_recorded,
 )
 from korvid.tools.registry import CustomToolResult
@@ -3786,3 +3787,41 @@ async def test_a_blocked_repeated_key_leaves_the_session_usable() -> None:
     assert not [event for event in recovered if isinstance(event, AgentError)]
     assert runtime.latest_outbound_payload is not None
     assert "Y2EtY2VydGlmaWNhdGUtYm9keQ==" not in runtime.latest_outbound_payload.payload_json
+
+
+async def test_the_incarnation_a_read_reports_reaches_the_ledger() -> None:
+    """The UID must survive the boundary, or the citation cannot check it.
+
+    The executor scopes `get_events` to one incarnation; if the runtime
+    drops that on the way to the ledger, opening the citation after the
+    pod was recreated shows the replacement silently (#250).
+    """
+
+    class IncarnationExecutor(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "BackOff"
+
+        async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            return ToolOutcome(text="BackOff", incarnation="uid-1")
+
+    p = ScriptedProvider(
+        [
+            [
+                {
+                    "type": "tool_call",
+                    "id": "c1",
+                    "name": "get_events",
+                    "arguments": '{"kind": "Pod", "namespace": "d", "name": "web"}',
+                },
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, IncarnationExecutor())
+
+    await collect(runtime, "events?")
+
+    item = runtime.evidence.resolve("E1")
+    assert item is not None
+    assert item.incarnation == "uid-1"

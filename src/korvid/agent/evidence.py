@@ -61,13 +61,11 @@ class Evidence:
     `kind` + `name` - because a citation that cannot identify its exact
     source is not navigable, which is the point of having one.
 
-    It identifies the object by name, not by incarnation. `get_events`
-    scopes its read to the live object's UID, so a pod deleted and
-    recreated under the same name between the read and the citation would
-    be opened as though it were the cited evidence. Fixing that needs the
-    UID to travel out of the executor on the tool result, which is a
-    change to the `tools/` contract rather than something this layer can
-    recover - tracked separately.
+    `incarnation` is the UID the read was scoped to, where the producing
+    tool knew one. A name is not an identity: a pod deleted and recreated
+    under the same name would otherwise be opened as though it were the
+    cited evidence. Optional, because a listing identifies no single
+    object and must not claim to (#250).
     """
 
     ref: str
@@ -77,6 +75,7 @@ class Evidence:
     name: str | None
     container: str | None
     excerpt: str
+    incarnation: str | None = None
 
 
 class EvidenceLedger:
@@ -106,6 +105,8 @@ class EvidenceLedger:
         result: str,
         *,
         error: bool = False,
+        incarnation: str | None = None,
+        container: str | None = None,
     ) -> str | None:
         """Mint a reference for a successful read, or None for a failure.
 
@@ -120,6 +121,11 @@ class EvidenceLedger:
                 so the citation identifies a target, not just a tool.
             result: the model-visible text.
             error: whether the producer classified this as a failure.
+            incarnation: the object identity the read was scoped to, when
+                the producing tool knew one.
+            container: the container the read actually streamed, which is
+                not always the one in `arguments` - `get_logs` resolves a
+                default the citation must reuse rather than re-derive.
 
         Raises:
             ValueError: if `tool` is empty.
@@ -136,8 +142,9 @@ class EvidenceLedger:
             kind=kind,
             namespace=_text_arg(arguments, "namespace"),
             name=name,
-            container=_text_arg(arguments, "container"),
+            container=container or _text_arg(arguments, "container"),
             excerpt=_excerpt(result, self._excerpt_limit),
+            incarnation=incarnation,
         )
         return ref
 
