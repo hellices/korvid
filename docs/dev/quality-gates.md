@@ -35,13 +35,27 @@ Behind a mirror, work with `uv sync --frozen --dev --all-extras` and do not
 re-lock. If a lock genuinely must change:
 
 ```sh
-git checkout uv.lock                      # discard the rewritten lock
-UV_INDEX_URL= uv lock --no-config         # re-lock against PyPI directly
+git checkout uv.lock          # discard the rewritten lock
+env -u UV_INDEX -u UV_DEFAULT_INDEX -u UV_INDEX_URL \
+    -u UV_EXTRA_INDEX_URL -u UV_FIND_LINKS \
+    uv lock --no-config       # re-lock against PyPI directly
 ```
 
-`--no-config` matters as much as clearing the variable: without it, uv still
-discovers `~/.config/uv/uv.toml`, and the recovery command recreates the
-mirrored lock it was meant to repair.
+Both halves are needed, and neither is enough alone. `--no-config` stops uv
+discovering `~/.config/uv/uv.toml`; clearing the variables stops
+`UV_INDEX`/`UV_DEFAULT_INDEX` doing the same job through the environment.
+Measured on a machine configured for a mirror:
+
+| command | resulting lock host |
+| --- | --- |
+| `uv lock` | the mirror |
+| `UV_INDEX_URL= uv lock` | the mirror |
+| `UV_INDEX_URL= uv lock --no-config` | the mirror, if `UV_INDEX` is set |
+| `uv lock --no-config --default-index https://pypi.org/simple` | **still the mirror** — `UV_INDEX` outranks the flag |
+| the command above | `files.pythonhosted.org` |
+
+Then confirm before committing: every `url` and `registry` in the lock must
+name `files.pythonhosted.org` or `pypi.org`.
 
 If PyPI is unreachable from your machine, do not work around it here — let
 CI regenerate the lock, or update it from a machine with direct access. A
