@@ -69,8 +69,15 @@ repository rejects that. Three paths out, in order of preference:
    dispatch for the deliberate changes Dependabot will not make, such as
    taking a major version that needs source edits in the same pull request.
    It locks on a runner with direct access, **re-checks that the lock names
-   only PyPI**, runs `uv sync --locked` and the suite against it, and opens
-   a pull request. It never writes to `main`.
+   only PyPI**, and runs the whole gate against it — `uv sync --locked`,
+   ruff, the format check, mypy, `tach`, the suite — before opening a pull
+   request. It never writes to `main`.
+
+   It runs the gate itself because it has to: GitHub suppresses the
+   workflow events raised by `GITHUB_TOKEN`, so the pull request it opens
+   **does not start CI**. Push an empty commit to that branch to get the
+   full matrix (Windows, the other interpreters, CodeQL) before merging —
+   the pull request body says so too.
 3. A machine with direct PyPI access.
 
 A lock is a supply-chain artifact; a convenient one that points somewhere

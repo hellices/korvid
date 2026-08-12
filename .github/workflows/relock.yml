@@ -11,8 +11,17 @@ name: Relock
 # version that needs source changes in the same pull request.
 #
 # It pushes a branch and opens a pull request. It never writes to main, and
-# the lock it produces goes through the same review and the same CI as any
-# other change.
+# the lock it produces is verified *inside this job* — because it has to be.
+# GitHub suppresses the workflow events raised by `GITHUB_TOKEN`, so the pull
+# request this opens will not start CI on its own. Rather than introduce a
+# PAT or an app installation for the privilege of triggering ourselves, the
+# job runs the checks that matter before the branch exists: the same lint,
+# type-check, layer and test gate CI would run, plus the PyPI-only assertion
+# that is the whole reason this workflow is trusted.
+#
+# A reviewer must still push an empty commit (or close and reopen the pull
+# request) to get the full matrix — Windows and the other interpreters — and
+# the pull request body says so rather than implying it happened.
 
 on:
   workflow_dispatch:
@@ -71,10 +80,17 @@ jobs:
             exit 1
           fi
 
-      - name: Verify the project still resolves and its tests pass
+      - name: Verify the project still resolves and passes the gate
+        # Deliberately the whole gate, not just the tests. The pull request
+        # this opens cannot start CI (see the note at the top), so whatever
+        # is not checked here is not checked before a human reads it.
         run: |
           uv sync --locked --dev --all-extras
-          uv run pytest -q -x
+          uv run ruff check src/ tests/
+          uv run ruff format --check src/ tests/
+          uv run mypy src/
+          uv run tach check
+          uv run pytest -q
 
       - name: Open a pull request with the result
         env:
@@ -106,8 +122,16 @@ jobs:
             --title "build: relock ${target}" \
             --body "Regenerated \`uv.lock\` on a runner with direct PyPI access.
 
-          Verified in the job before this pull request existed: every \`url\`,
-          \`registry\` and \`index\` in the lock names PyPI, \`uv sync --locked\`
-          succeeds against it, and the test suite passes.
+          Verified in the job that produced it, before this pull request
+          existed: every \`url\`, \`registry\` and \`index\` in the lock names
+          PyPI, \`uv sync --locked\` succeeds against it, and ruff, the format
+          check, mypy, tach and the test suite all pass on Linux/3.12.
+
+          **CI has not run on this branch and will not start by itself.**
+          GitHub suppresses the workflow events raised by \`GITHUB_TOKEN\`, so
+          the checks above are all that has happened. Push an empty commit,
+          or close and reopen this pull request, to get the full matrix —
+          Windows, the other interpreters, CodeQL and the security audit —
+          before merging.
 
           Opened by the \`Relock\` workflow."

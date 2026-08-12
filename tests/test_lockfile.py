@@ -86,14 +86,28 @@ def test_a_relock_path_exists_for_machines_that_cannot_reach_pypi() -> None:
 def test_the_relock_workflow_verifies_the_lock_it_produces() -> None:
     """A lock nobody can regenerate locally is exactly the one to check.
 
-    The runner should resolve from PyPI, so this never fires — which is the
-    point: an unverified lock produced by automation is worth less than
-    none, because no human can reproduce it to disagree.
+    It also has to be checked *here*. GitHub suppresses the workflow events
+    raised by `GITHUB_TOKEN`, so the pull request this opens does not start
+    CI — whatever the job skips is not checked at all before a human reads
+    it. The gate below is therefore the full one, not just the tests.
     """
     workflow = (_ROOT / ".github" / "workflows" / "relock.yml").read_text()
     assert "files\\.pythonhosted\\.org|pypi\\.org" in workflow
     assert "uv sync --locked" in workflow
-    assert "uv run pytest" in workflow
+    for step in ("ruff check", "ruff format --check", "mypy src/", "tach check", "pytest"):
+        assert step in workflow, f"the relock job skips {step}; CI will not run it either"
+
+
+def test_the_relock_pull_request_says_ci_has_not_run() -> None:
+    """Claiming "goes through the same CI" would be a comfortable lie.
+
+    A reviewer who believes the checks ran is worse off than one told they
+    did not, so the pull request body has to say it plainly and name the
+    remedy.
+    """
+    workflow = (_ROOT / ".github" / "workflows" / "relock.yml").read_text()
+    assert "CI has not run on this branch" in workflow
+    assert "empty commit" in workflow
 
 
 def test_pyproject_pins_no_alternate_package_index() -> None:
