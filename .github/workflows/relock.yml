@@ -53,6 +53,7 @@ jobs:
     outputs:
       changed: ${{ steps.changed.outputs.changed }}
       digest: ${{ steps.changed.outputs.digest }}
+      base_sha: ${{ steps.base.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -68,6 +69,14 @@ jobs:
         with:
           version: "0.10.9"
           enable-cache: false
+
+      # The lock is resolved and tested against *this* commit. If the branch
+      # advances while the gate runs, committing onto the new tip would pair
+      # an untested source revision with a lock generated for the old one -
+      # while the pull request reports that the suite passed.
+      - name: Pin the revision this lock is generated for
+        id: base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Regenerate the lock
         env:
@@ -176,17 +185,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PACKAGE: ${{ inputs.package }}
           BASE: ${{ inputs.base }}
+          BASE_SHA: ${{ needs.relock.outputs.base_sha }}
         run: |
           target="${PACKAGE:-all dependencies}"
           branch="relock/$(date +%Y%m%d-%H%M%S)"
           gh auth setup-git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # The checkout is `main` (it supplies the trusted validator), and
-          # the sparse cone excludes everything else, so branch from the
-          # base ref explicitly rather than from whatever is on disk.
-          git fetch --depth 1 origin "$BASE"
-          git checkout -b "$branch" FETCH_HEAD
+          # Branch from the exact commit the lock was resolved and tested
+          # against, not from whatever the base branch points at now.
+          git fetch --depth 1 origin "$BASE_SHA"
+          git checkout -b "$branch" "$BASE_SHA"
           git add uv.lock
           git commit -m "build: relock ${target}
 
@@ -201,6 +210,10 @@ jobs:
             --head "$branch" \
             --title "build: relock ${target}" \
             --body "Regenerated \`uv.lock\` on a runner with direct PyPI access.
+
+          Resolved and verified against \`$BASE_SHA\`, and committed onto that
+          exact revision — so the lock and the source it was tested with are
+          the same pair, even if \`$BASE\` moved meanwhile.
 
           Verified in the job that produced it, before this pull request
           existed: every \`url\`, \`registry\` and \`index\` in the lock names

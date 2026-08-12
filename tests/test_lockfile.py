@@ -213,6 +213,26 @@ def test_the_validator_comes_from_a_revision_that_is_not_under_review() -> None:
         )
 
 
+def test_the_lock_is_committed_onto_the_revision_it_was_tested_against() -> None:
+    """A branch name is not a revision.
+
+    The lock is resolved and exercised against the commit `relock` checked
+    out. Re-resolving the branch name afterwards can land it on a newer tip,
+    pairing an untested source revision with a lock generated for the old
+    one — while the pull request reports that the suite passed.
+    """
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "relock.yml").read_text())
+    assert "base_sha" in workflow["jobs"]["relock"]["outputs"], (
+        "the tested revision is never published"
+    )
+    propose = workflow["jobs"]["propose"]["steps"]
+    commit_step = next(step for step in propose if "gh pr create" in step.get("run", ""))
+    assert "BASE_SHA" in str(commit_step.get("env", {}))
+    assert 'git checkout -b "$branch" "$BASE_SHA"' in commit_step["run"], (
+        "the commit is branched from a moving ref rather than the tested revision"
+    )
+
+
 def test_pyproject_pins_no_alternate_package_index() -> None:
     """An index pinned here redirects every resolution in the repository.
 
