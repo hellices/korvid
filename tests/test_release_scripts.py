@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -791,6 +792,15 @@ def _metadata_text(
     version: str = "1.2.3",
     include_entra: bool = True,
     include_keyring: bool = True,
+    include_urls: bool = True,
+    urls_block: str | None = None,
+    content_type: str | None = "text/markdown",
+    body: str = (
+        "# korvid\n\nAI-native Kubernetes TUI - a keyboard-first cockpit with an"
+        " embedded agent that can read your cluster, explain what it found, and"
+        " carry out changes only behind an explicit approval gate. Runs on"
+        " Linux, macOS and Windows against any reachable kube context.\n"
+    ),
 ) -> str:
     entra = (
         'Provides-Extra: entra\nRequires-Dist: azure-identity>=1.19; extra == "entra"\n'
@@ -798,10 +808,22 @@ def _metadata_text(
         else ""
     )
     keyring = 'Requires-Dist: keyring>=25.7.0; extra == "agent"\n' if include_keyring else ""
+    urls = (
+        "Project-URL: Homepage, https://github.com/hellices/korvid\n"
+        "Project-URL: Source, https://github.com/hellices/korvid\n"
+        "Project-URL: Issues, https://github.com/hellices/korvid/issues\n"
+        if include_urls
+        else ""
+    )
+    if urls_block is not None:
+        urls = urls_block
+    described = f"Description-Content-Type: {content_type}\n" if content_type else ""
     return (
         "Metadata-Version: 2.4\n"
         "Name: korvid\n"
         f"Version: {version}\n"
+        f"{urls}"
+        f"{described}"
         "Provides-Extra: agent\n"
         "Provides-Extra: mcp\n"
         f"{entra}"
@@ -819,6 +841,7 @@ def _metadata_text(
         'Requires-Dist: starlette>=0.36; extra == "all"\n'
         'Requires-Dist: uvicorn>=0.30; extra == "all"\n'
         "\n"
+        f"{body}"
     )
 
 
@@ -857,6 +880,85 @@ def test_artifact_metadata_rejects_a_partial_extra_dependency_set(
     dist = _fake_dist(tmp_path, _metadata_text(include_keyring=False))
     with pytest.raises(ValueError, match="keyring"):
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_artifact_metadata_requires_the_pypi_project_page_fields(tmp_path: Path) -> None:
+    """The long description is the PyPI project page.
+
+    An artifact can carry a correct version and a correct dependency set and
+    still land on PyPI as a blank page - `Description-Content-Type` missing
+    makes PyPI fall back to plain text, and an absent body renders nothing
+    at all. Neither is recoverable: a released version cannot be reuploaded.
+    """
+    dist = _fake_dist(tmp_path, _metadata_text(body=""))
+    with pytest.raises(ValueError, match="long description"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_artifact_metadata_requires_a_markdown_content_type(tmp_path: Path) -> None:
+    dist = _fake_dist(tmp_path, _metadata_text(content_type=None))
+    with pytest.raises(ValueError, match="Description-Content-Type"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_artifact_metadata_requires_the_project_urls(tmp_path: Path) -> None:
+    """`[project.urls]` is what builds PyPI's sidebar. Losing it silently is
+    easy - a stray edit to pyproject drops the whole table - and the result
+    is a project page with nowhere to click through to the source."""
+    dist = _fake_dist(tmp_path, _metadata_text(include_urls=False))
+    with pytest.raises(ValueError, match="Project-URL"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+@pytest.mark.parametrize(
+    "urls",
+    [
+        pytest.param("Project-URL: Homepage\n", id="no-delimiter"),
+        pytest.param("Project-URL: Homepage,\n", id="empty-url"),
+        pytest.param("Project-URL: Homepage,    \n", id="blank-url"),
+    ],
+)
+def test_artifact_metadata_rejects_a_project_url_with_no_destination(
+    tmp_path: Path, urls: str
+) -> None:
+    """A label alone is not a link.
+
+    Splitting on the comma and keeping the left side meant `Project-URL:
+    Homepage` satisfied the requirement while pointing nowhere - the check
+    passed on metadata that renders an empty sidebar.
+    """
+    dist = _fake_dist(tmp_path, _metadata_text(urls_block=urls))
+    with pytest.raises(ValueError, match="Project-URL"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+@pytest.mark.parametrize(
+    ("content_type", "accepted"),
+    [
+        pytest.param("text/markdown", True, id="bare"),
+        pytest.param("text/markdown; charset=UTF-8", True, id="charset"),
+        pytest.param("text/markdown; variant=GFM", True, id="variant"),
+        pytest.param("TEXT/Markdown", True, id="case-insensitive"),
+        pytest.param("text/markdown-broken", False, id="lookalike"),
+        pytest.param("text/x-rst", False, id="rst"),
+        pytest.param("text/plain", False, id="plain"),
+    ],
+)
+def test_artifact_metadata_matches_the_media_type_exactly(
+    tmp_path: Path, content_type: str, accepted: bool
+) -> None:
+    """`startswith("text/markdown")` also accepts `text/markdown-broken`.
+
+    PyPI would render that as plain text, so a fail-closed check that
+    approves it is worse than none - it reports success on the one property
+    that cannot be fixed after upload.
+    """
+    dist = _fake_dist(tmp_path, _metadata_text(content_type=content_type))
+    if accepted:
+        assert check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"]) == 0
+    else:
+        with pytest.raises(ValueError, match="Description-Content-Type"):
+            check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
 # --- SBOM completeness ------------------------------------------------------
@@ -1075,6 +1177,19 @@ def _security_policy() -> str:
     return (Path(__file__).parents[1] / "SECURITY.md").read_text()
 
 
+def _project_version() -> str:
+    """The version the release workflow will demand the tag match.
+
+    Read rather than hardcoded: the runbook and the README have to name the
+    version actually being shipped, and pinning the expected string in the
+    test only moves the drift one file further away.
+    """
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text()
+    match = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
+    assert match is not None, "pyproject.toml has no project version"
+    return match.group(1)
+
+
 def test_linux_bundle_pins_and_names_the_manylinux_2_28_baseline() -> None:
     workflow = _release_workflow()
     assert "manylinux_2_28_x86_64@sha256:" in workflow
@@ -1138,14 +1253,229 @@ def test_release_docs_require_immutable_protected_tags() -> None:
     assert "protected tags only" in readme
 
 
-def test_release_docs_readme_pins_first_release_install_and_links_the_runbook() -> None:
+def _release_notes() -> str:
+    path = Path(__file__).parents[1] / "docs" / "release-notes" / f"v{_project_version()}.md"
+    assert path.is_file(), f"{path.name} is missing; the release stages notes from this file"
+    return path.read_text()
+
+
+def test_release_stages_written_notes_rather_than_a_generated_commit_list() -> None:
+    """`--generate-notes` lists merged pull requests.
+
+    For a first public release that produces a page of "bump the runtime
+    group with 3 updates" - accurate, and useless to someone deciding
+    whether to install. Notes are written per version and the workflow
+    fails if the file for the tag is missing, so the release cannot quietly
+    fall back to the generated list.
+    """
+    workflow = _release_workflow()
+    assert "--generate-notes \\" not in workflow, "the release still falls back to generated notes"
+    assert '--notes-file "$NOTES"' in workflow
+    assert 'NOTES="docs/release-notes/${TAG}.md"' in workflow
+    assert 'if [ ! -f "$NOTES" ]' in workflow
+
+
+def test_release_rewrites_the_notes_of_a_draft_it_resumes() -> None:
+    """The recovery path validated assets and trusted the body.
+
+    A draft can exist from an earlier run, or be created by hand before the
+    tag is pushed. Resuming one only compared its files, so a body nobody
+    reviewed - or a stale one from a previous attempt - would be published
+    verbatim while the reviewed notes file sat unused. The notes are part of
+    the release, so the resumed draft is rewritten from the file.
+    """
+    workflow = _release_workflow()
+    assert 'gh release edit "$TAG" --repo "$REPO" \\' in workflow
+    assert workflow.count('--notes-file "$NOTES"') == 2, (
+        "both the create and the resume path must take the body from the notes file"
+    )
+
+
+def test_release_notes_exist_for_the_version_being_shipped() -> None:
+    notes = _release_notes()
+    version = _project_version()
+    assert f"# korvid v{version}" in notes
+    assert "## Install" in notes
+    assert f"korvid[all]=={version}" in notes
+    assert "## Verify" in notes
+    assert "gh attestation verify" in notes
+
+
+def test_release_notes_state_the_security_posture_the_project_claims() -> None:
+    """Every write goes through an approval gate and a fail-closed audit log.
+
+    That is the whole argument for running an agent against a live cluster,
+    so a release note that omits it is selling a different product than the
+    one being shipped.
+    """
+    notes = " ".join(_release_notes().split())
+    assert "approval" in notes
+    assert "audit" in notes
+    assert "read-only" in notes or "read only" in notes
+
+
+def test_pypi_metadata_gives_the_project_page_its_sidebar_links() -> None:
+    """PyPI builds its sidebar from `[project.urls]`, and korvid had none.
+
+    A project page with no Source or Issues link asks the reader to guess
+    where the code lives, on the one page where a stranger decides whether
+    to trust the package.
+    """
+    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    urls = pyproject["project"]["urls"]
+    repo = "https://github.com/hellices/korvid"
+    assert urls["Homepage"] == repo
+    assert urls["Source"] == repo
+    assert urls["Issues"] == f"{repo}/issues"
+    assert urls["Release notes"] == f"{repo}/releases"
+    assert urls["Documentation"] == f"{repo}/blob/main/docs/tui.md"
+    assert urls["Security"] == f"{repo}/blob/main/SECURITY.md"
+
+
+def test_every_sidebar_link_to_a_repository_file_points_at_a_real_file() -> None:
+    """A sidebar link is only useful if it resolves.
+
+    `Documentation` pointed at `docs/README.md`, which does not exist - a
+    404 on the PyPI project page, and nothing in the repository would have
+    noticed. Checking the exact strings is not enough; the targets that name
+    a file in this repository are resolved against the working tree.
+    """
+    root = Path(__file__).parents[1]
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+    prefix = "https://github.com/hellices/korvid/blob/main/"
+    for label, url in pyproject["project"]["urls"].items():
+        if not url.startswith(prefix):
+            continue
+        target = root / url[len(prefix) :]
+        assert target.is_file(), f"[project.urls] {label} points at a missing file: {url}"
+
+
+def test_pypi_metadata_declares_audience_and_supported_pythons() -> None:
+    """Trove classifiers are how PyPI search and filtering find a package.
+
+    The Python versions are stated one by one on purpose: `requires-python`
+    is what installers enforce, but the classifier list is what a human
+    reads, and the CI matrix is the thing that actually proves them.
+    """
+    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    classifiers = pyproject["project"]["classifiers"]
+    assert "Environment :: Console :: Curses" in classifiers
+    assert "Intended Audience :: System Administrators" in classifiers
+    assert "Topic :: System :: Systems Administration" in classifiers
+    assert "License :: OSI Approved :: Apache Software License" not in classifiers, (
+        "PEP 639 forbids a License classifier alongside the SPDX `license` field"
+    )
+    for minor in ("11", "12", "13"):
+        assert f"Programming Language :: Python :: 3.{minor}" in classifiers
+    assert pyproject["project"]["keywords"]
+
+
+def test_every_absolute_repository_link_resolves_to_a_real_path() -> None:
+    """Absolute links do not fail loudly - they 404 for the reader.
+
+    Rewriting the README's relative links for PyPI moved every one of them
+    out of reach of any tooling that checks paths, so the targets are
+    resolved back against the working tree here. The release notes get the
+    same treatment: they are published to a page nobody can edit in place.
+    """
+    root = Path(__file__).parents[1]
+    prefixes = (
+        "https://github.com/hellices/korvid/blob/main/",
+        "https://github.com/hellices/korvid/tree/main/",
+        "https://raw.githubusercontent.com/hellices/korvid/main/",
+    )
+    documents = {"README.md": _readme(), "release notes": _release_notes()}
+    broken: list[str] = []
+    for name, text in documents.items():
+        for url in re.findall(r"\]\(([^)]+)\)", text):
+            for prefix in prefixes:
+                if url.startswith(prefix):
+                    target = root / url[len(prefix) :].split("#")[0]
+                    if not target.exists():
+                        broken.append(f"{name}: {url}")
+    assert not broken, f"links to paths that do not exist: {broken}"
+
+
+def test_readme_has_no_relative_links_because_pypi_cannot_follow_them() -> None:
+    """The README is the PyPI project page (`readme = "README.md"`).
+
+    PyPI renders it outside the repository, so a relative target such as
+    `docs/mcp.md` becomes a dead link and `docs/assets/demo.gif` becomes a
+    broken image - on the page that has to sell the project. Anchors are
+    fine: they resolve inside the rendered document.
+    """
     readme = _readme()
-    assert "python -m pip install 'korvid[all]==0.1.1'" in readme
-    assert "v0.1.1 is the first public PyPI release" in readme
+    targets = re.findall(r"\]\(([^)]+)\)", readme)
+    relative = [t for t in targets if not t.startswith(("http://", "https://", "#"))]
+    assert not relative, f"README links PyPI cannot resolve: {sorted(set(relative))}"
+
+
+def test_release_docs_readme_pins_first_release_install_and_links_the_runbook() -> None:
+    version = _project_version()
+    readme = _readme()
+    assert f"python -m pip install 'korvid[all]=={version}'" in readme
+    assert f"v{version} is the first public PyPI release" in readme
     assert "docs/release.md" in readme
 
 
+def test_readme_recommends_an_isolated_install_for_an_application() -> None:
+    """`pip install` is the wrong first instruction for a CLI application.
+
+    It drops korvid and its dependency tree into whatever environment
+    happens to be active, and it fails outright when the active interpreter
+    is older than 3.11 - the default on macOS and on most enterprise Linux.
+    `uv tool install` and `pipx` isolate the application and put `korvid` on
+    PATH, and uv fetches a suitable interpreter, so the version requirement
+    stops being the reader's problem.
+    """
+    version = _project_version()
+    readme = _readme()
+    quick_start = readme[readme.index("## Quick start") : readme.index("## Installation")]
+    assert f"uv tool install 'korvid[all]=={version}'" in quick_start
+    assert f"pipx install 'korvid[all]=={version}'" in quick_start
+    pip_index = quick_start.find("python -m pip install")
+    assert pip_index == -1 or quick_start.index("uv tool install") < pip_index, (
+        "the quick start leads with pip; an isolated install must come first"
+    )
+    assert "3.11" in readme
+
+
+#: Tags that exist, will never be published, and must keep being named in the
+#: docs as exactly what they are. `v0.1.0` failed before build; `v0.1.1` built
+#: and staged, then stopped at `publish-pypi` for a missing trusted publisher.
+#: Nothing else belongs here: this list is the escape hatch for the guard
+#: below, so an entry is a statement that a released version number was burned.
+_UNPUBLISHED_TAGS = frozenset({"0.1.0", "0.1.1"})
+
+
+def test_release_docs_never_name_a_version_other_than_the_project_version() -> None:
+    """No stale version survives anywhere in the release documents.
+
+    Restricting this to `==` pins and `refs/tags` was too narrow: the wheel
+    filename in the README's attestation command and the runbook's recovery
+    condition ("PyPI already has X") name the version in plain text, and a
+    reader following either one after a bump is following a lie.
+
+    Every `X.Y.Z` in both documents must therefore be the version being
+    shipped, or one of the burned tags in `_UNPUBLISHED_TAGS`. That will fail
+    the first time a document legitimately refers to a *previously published*
+    release - which is the intended behaviour, because someone then has to
+    look at the line and decide rather than let it rot.
+    """
+    version = _project_version()
+    allowed = _UNPUBLISHED_TAGS | {version}
+    for name, text in (("README.md", _readme()), ("docs/release.md", _release_runbook())):
+        found = set(re.findall(r"\b[0-9]+\.[0-9]+\.[0-9]+\b", text))
+        stale = found - allowed
+        assert not stale, (
+            f"{name} names {sorted(stale)}; the project version is {version} and the"
+            f" only other versions the docs may name are {sorted(_UNPUBLISHED_TAGS)}"
+        )
+        assert version in found, f"{name} never names the version being shipped ({version})"
+
+
 def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -> None:
+    version = _project_version()
     runbook = _release_runbook()
     assert "refs/tags/v*" in runbook
     assert "`release`" in runbook
@@ -1153,14 +1483,15 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     assert "`hellices/korvid`" in runbook
     assert "gh workflow run Release --ref main" in runbook
     assert 'gh run watch "$RUN_ID" --exit-status' in runbook
-    assert 'git tag -a v0.1.1 COMMIT -m "korvid v0.1.1"' in runbook
-    assert "git push origin refs/tags/v0.1.1" in runbook
-    assert "gh release download v0.1.1 --dir dist/v0.1.1" in runbook
+    assert f'git tag -a v{version} COMMIT -m "korvid v{version}"' in runbook
+    assert f"git push origin refs/tags/v{version}" in runbook
+    assert f"gh release download v{version} --dir dist/v{version}" in runbook
     assert (
-        "gh attestation verify dist/v0.1.1/korvid-0.1.1-py3-none-any.whl --repo hellices/korvid"
+        f"gh attestation verify dist/v{version}/korvid-{version}-py3-none-any.whl"
+        " --repo hellices/korvid"
     ) in runbook
-    assert ("gh attestation verify dist/v0.1.1/SHA256SUMS --repo hellices/korvid") in runbook
-    assert ("cd dist/v0.1.1 && shasum --algorithm 256 --check SHA256SUMS") in runbook
+    assert (f"gh attestation verify dist/v{version}/SHA256SUMS --repo hellices/korvid") in runbook
+    assert (f"cd dist/v{version} && shasum --algorithm 256 --check SHA256SUMS") in runbook
     assert "PyPI publication is irreversible" in runbook
     assert "annotated tag publication is irreversible" in runbook
 
@@ -1181,7 +1512,7 @@ def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> N
     assert "~/.local/state/korvid/audit.jsonl.lock" in runbook
     assert "~/.local/share/korvid/logs" in runbook
     assert "~/.local/share/korvid/agent-payloads" in runbook
-    assert "python -m pip install 'korvid[all]==0.1.1'" in runbook
+    assert f"python -m pip install 'korvid[all]=={_project_version()}'" in runbook
     assert "python -m pip uninstall -y korvid" in runbook
     assert "opt-in cleanup" in runbook
     assert "rerun your package manager with the full desired extra set" in runbook
@@ -1205,29 +1536,59 @@ def test_release_docs_runbook_lists_and_cleans_the_os_keyring_credential() -> No
 def test_release_readme_discloses_the_retained_os_keyring_credential() -> None:
     readme = " ".join(_readme().split())
     assert "OS keyring credential (`korvid` / `github-oauth`)" in readme
-    assert "cleanup is explicit and opt-in in the [release runbook](docs/release.md)" in readme
+    assert (
+        "cleanup is explicit and opt-in in the [release runbook]"
+        "(https://github.com/hellices/korvid/blob/main/docs/release.md)"
+    ) in readme
 
 
 def test_release_docs_runbook_marks_recovery_boundaries_and_first_release_upgrade_limit() -> None:
+    version = _project_version()
     runbook = _release_runbook()
     assert "Deleting or moving a published tag/version is not rollback" in runbook
     assert "resume the idempotent workflow only when the staged assets match" in runbook
     assert "stop and diagnose" in runbook
-    assert "v0.1.1 cannot prove a cross-version PyPI upgrade" in runbook
-    assert "validate upgrading from `0.1.1`" in runbook
+    assert f"v{version} cannot prove a cross-version PyPI upgrade" in runbook
+    assert f"validate upgrading from `{version}`" in runbook
 
 
-def test_release_docs_preserve_failed_v0_1_0_as_unpublished_audit_history() -> None:
+def test_release_docs_preserve_failed_tags_as_unpublished_audit_history() -> None:
+    """Neither earlier tag published, and each stopped somewhere different.
+
+    Collapsing them into "the earlier attempts failed" would lose the only
+    thing that matters for the next attempt: `v0.1.1` got all the way to
+    `publish-pypi` and was rejected for a missing trusted publisher, so the
+    build path is proven and the registration is not.
+    """
     runbook = _release_runbook()
     assert "`v0.1.0` remains immutable, unpublished audit history" in runbook
     assert "before build, attestation, staging, PyPI publication, or GitHub Release" in runbook
-    assert "`v0.1.1` is the first public release" in runbook
+    assert "`v0.1.1` is unpublished audit history" in runbook
+    assert "stopped at `publish-pypi`" in runbook
+    assert "no PyPI Trusted Publisher had" in runbook
 
 
-def test_security_policy_starts_supported_releases_at_v0_1_1() -> None:
+def test_release_docs_runbook_gives_the_five_trusted_publisher_claims() -> None:
+    """The registration is the one release step that cannot be automated, and
+    every field is matched exactly against the OIDC token. A runbook that says
+    "register a trusted publisher" without the values is why `v0.1.1` stopped."""
+    runbook = " ".join(_release_runbook().split())
+    assert "https://pypi.org/manage/account/publishing/" in runbook
+    assert "| PyPI Project Name | `korvid` |" in runbook
+    assert "| Owner | `hellices` |" in runbook
+    assert "| Repository name | `korvid` |" in runbook
+    assert "| Workflow name | `release.yml` |" in runbook
+    assert "| Environment name | `release` |" in runbook
+    assert "pending" in runbook
+    assert "Two-factor authentication must be enabled" in runbook
+    assert "No API token is created" in runbook
+
+
+def test_security_policy_starts_supported_releases_at_the_project_version() -> None:
+    version = _project_version()
     policy = _security_policy()
-    assert "Before the first public `v0.1.1` release" in policy
-    assert "Once `v0.1.1` publishes" in policy
+    assert f"Before the first public `v{version}` release" in policy
+    assert f"Once `v{version}` publishes" in policy
 
 
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:

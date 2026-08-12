@@ -402,6 +402,15 @@ jobs:
           VERSION: ${{ needs.verify.outputs.version }}
           REPO: ${{ github.repository }}
         run: |
+          # Notes are written, not generated: `--generate-notes` produces a
+          # list of merged pull requests, which tells a reader what changed
+          # in the repository rather than what changed for them. Fail closed
+          # if the file is missing so a release cannot fall back to it.
+          NOTES="docs/release-notes/${TAG}.md"
+          if [ ! -f "$NOTES" ]; then
+            echo "missing release notes: $NOTES"
+            exit 1
+          fi
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             draft=$(gh release view "$TAG" --repo "$REPO" \
               --json isDraft --jq .isDraft)
@@ -413,6 +422,14 @@ jobs:
             gh release download "$TAG" --repo "$REPO" --dir existing-release
             python scripts/release/compare_assets.py \
               release-files existing-release
+            # Assets matching is not enough. A draft can survive an earlier
+            # run or be created by hand before the tag is pushed, and its
+            # body would then be published verbatim while the reviewed notes
+            # file sat unused. The notes are part of the release, so the
+            # resumed draft is rewritten from the file rather than trusted.
+            gh release edit "$TAG" --repo "$REPO" \
+              --title "korvid $TAG" \
+              --notes-file "$NOTES"
           else
             status=$(curl --silent --show-error --output /dev/null \
               --write-out '%{http_code}' \
@@ -428,7 +445,7 @@ jobs:
               --repo "$REPO" \
               --title "korvid $TAG" \
               --verify-tag \
-              --generate-notes \
+              --notes-file "$NOTES" \
               --draft
           fi
 

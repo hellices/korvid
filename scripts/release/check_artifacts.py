@@ -33,6 +33,50 @@ def _sdist_metadata(path: Path) -> Message:
         return email.message_from_bytes(extracted.read())
 
 
+def _validate_project_page(artifact: Path, metadata: Message) -> None:
+    """The fields that decide whether PyPI shows a page or a blank slab.
+
+    None of this is recoverable after the fact: a released version number
+    cannot be reuploaded, so a package that lands with no description keeps
+    that page until the next release.
+    """
+    content_type = metadata.get("Description-Content-Type")
+    # Compare the media type exactly. `startswith` also accepts
+    # `text/markdown-broken`, which PyPI renders as plain text - a
+    # fail-closed check that approves it is worse than no check, because it
+    # reports success on the one property that cannot be fixed after upload.
+    media_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if media_type != "text/markdown":
+        raise ValueError(
+            f"{artifact.name}: Description-Content-Type is {content_type!r};"
+            " PyPI renders anything but text/markdown as plain text"
+        )
+    body = metadata.get_payload()
+    description = body if isinstance(body, str) else ""
+    if not description.strip():
+        description = metadata.get("Description", "") or ""
+    if len(description.strip()) < 200:
+        raise ValueError(
+            f"{artifact.name}: the long description is empty or truncated;"
+            " it is the PyPI project page"
+        )
+    # A label alone is not a link: `Project-URL: Homepage` and
+    # `Project-URL: Homepage,` both name the entry while pointing nowhere,
+    # and either would render an empty sidebar.
+    urls = set()
+    for entry in metadata.get_all("Project-URL", []):
+        label, _, target = entry.partition(",")
+        if target.strip():
+            urls.add(label.strip())
+    required = {"Homepage", "Source", "Issues"}
+    missing_urls = required - urls
+    if missing_urls:
+        raise ValueError(
+            f"{artifact.name}: missing Project-URL entries: {sorted(missing_urls)};"
+            " PyPI builds the project sidebar from them"
+        )
+
+
 def _validate_metadata(
     artifact: Path,
     metadata: Message,
@@ -45,6 +89,7 @@ def _validate_metadata(
         raise ValueError(
             f"{artifact.name}: metadata version {actual_version!r} does not match {version!r}"
         )
+    _validate_project_page(artifact, metadata)
     provided = set(metadata.get_all("Provides-Extra", []))
     missing = set(expected_dependencies) - provided
     if missing:
