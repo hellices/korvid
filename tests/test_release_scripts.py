@@ -1160,16 +1160,38 @@ def test_release_docs_readme_pins_first_release_install_and_links_the_runbook() 
     assert "docs/release.md" in readme
 
 
-def test_release_docs_never_pin_a_version_other_than_the_project_version() -> None:
-    """An install line naming a version nobody will publish is worse than no
-    install line: it fails for the reader with a resolver error rather than a
-    correction. The same holds for the runbook's tag commands."""
+#: Tags that exist, will never be published, and must keep being named in the
+#: docs as exactly what they are. `v0.1.0` failed before build; `v0.1.1` built
+#: and staged, then stopped at `publish-pypi` for a missing trusted publisher.
+#: Nothing else belongs here: this list is the escape hatch for the guard
+#: below, so an entry is a statement that a released version number was burned.
+_UNPUBLISHED_TAGS = frozenset({"0.1.0", "0.1.1"})
+
+
+def test_release_docs_never_name_a_version_other_than_the_project_version() -> None:
+    """No stale version survives anywhere in the release documents.
+
+    Restricting this to `==` pins and `refs/tags` was too narrow: the wheel
+    filename in the README's attestation command and the runbook's recovery
+    condition ("PyPI already has X") name the version in plain text, and a
+    reader following either one after a bump is following a lie.
+
+    Every `X.Y.Z` in both documents must therefore be the version being
+    shipped, or one of the burned tags in `_UNPUBLISHED_TAGS`. That will fail
+    the first time a document legitimately refers to a *previously published*
+    release - which is the intended behaviour, because someone then has to
+    look at the line and decide rather than let it rot.
+    """
     version = _project_version()
+    allowed = _UNPUBLISHED_TAGS | {version}
     for name, text in (("README.md", _readme()), ("docs/release.md", _release_runbook())):
-        pinned = set(re.findall(r"korvid[^\s'\"]*==([0-9]+\.[0-9]+\.[0-9]+)", text))
-        assert pinned <= {version}, f"{name} pins {sorted(pinned - {version})}, not {version}"
-        tagged = set(re.findall(r"refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)", text))
-        assert tagged <= {version}, f"{name} tags {sorted(tagged - {version})}, not {version}"
+        found = set(re.findall(r"\b[0-9]+\.[0-9]+\.[0-9]+\b", text))
+        stale = found - allowed
+        assert not stale, (
+            f"{name} names {sorted(stale)}; the project version is {version} and the"
+            f" only other versions the docs may name are {sorted(_UNPUBLISHED_TAGS)}"
+        )
+        assert version in found, f"{name} never names the version being shipped ({version})"
 
 
 def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -> None:
