@@ -89,8 +89,11 @@ repository rejects that. Three paths out, in order of preference:
    It runs the gate itself because it has to: GitHub suppresses the
    workflow events raised by `GITHUB_TOKEN`, so the pull request it opens
    **does not start CI**. Push an empty commit to that branch to get the
-   full matrix (Windows, the other interpreters, CodeQL) before merging —
-   the pull request body says so too.
+   full matrix — Windows, the other interpreters, the security audit —
+   before merging; the pull request body says so too. CodeQL is triggered
+   only for pull requests targeting `main`
+   (`.github/workflows/codeql.yml`), so a relock onto another base does not
+   get it even then.
 3. A machine with direct PyPI access.
 
 A lock is a supply-chain artifact; a convenient one that points somewhere

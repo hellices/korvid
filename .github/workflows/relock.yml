@@ -227,7 +227,8 @@ jobs:
           GitHub suppresses the workflow events raised by \`GITHUB_TOKEN\`, so
           the checks above are all that has happened. Push an empty commit,
           or close and reopen this pull request, to get the full matrix —
-          Windows, the other interpreters, CodeQL and the security audit —
-          before merging.
+          Windows, the other interpreters and the security audit — before
+          merging. CodeQL only runs for pull requests targeting \`main\`, so
+          a relock onto any other base will not get it at all.
 
           Opened by the \`Relock\` workflow."

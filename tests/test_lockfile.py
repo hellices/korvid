@@ -313,6 +313,23 @@ def test_the_lock_can_actually_be_staged_from_the_sparse_checkout() -> None:
         )
 
 
+def test_the_relock_pull_request_does_not_promise_codeql_it_cannot_deliver() -> None:
+    """CodeQL runs only for pull requests targeting `main`.
+
+    The workflow accepts any `base`, so telling a reviewer that an empty
+    commit brings CodeQL is false for every other base — and a false
+    remedy is worse than none, because it stops them looking.
+    """
+    codeql = yaml.safe_load((_ROOT / ".github" / "workflows" / "codeql.yml").read_text())
+    # `on` parses as the boolean True in YAML 1.1.
+    triggers = codeql.get("on", codeql.get(True))
+    assert triggers["pull_request"]["branches"] == ["main"], (
+        "CodeQL's trigger changed; the relock wording may now be wrong in the other direction"
+    )
+    workflow = (_ROOT / ".github" / "workflows" / "relock.yml").read_text()
+    assert "CodeQL only runs for pull requests targeting" in workflow
+
+
 def test_pyproject_pins_no_alternate_package_index() -> None:
     """An index pinned here redirects every resolution in the repository.
 
