@@ -46,7 +46,7 @@ flowchart TD
     AGENT["<b>agent/</b><br/>loop · outbound policy<br/>evidence · prompts · profiles"]
     TOOLS["<b>tools/</b><br/>registry · executor<br/>diagnose · proposals"]
     CORE["<b>core/</b><br/>store · watch · audit · redaction<br/>portforward · transfer"]
-    K8S["<b>k8s/</b> — imports no korvid code<br/>async client · reads · writes · discovery"]
+    K8S["<b>k8s/</b> — imports no other korvid layer<br/>async client · reads · writes · discovery"]
     PROV["<b>providers/</b><br/>Copilot · Azure · Anthropic<br/>OpenAI · Ollama"]
     MCP["<b>mcp/</b><br/>server adapter"]
     EVALS["<b>evals/</b><br/>scenarios · grader · runner"]
@@ -78,9 +78,15 @@ It is a required CI check, so the layering cannot rot by accident.
 
 Two properties of this graph carry most of the weight:
 
-**`k8s/` depends on nothing.** It is the only module that talks to the API
-server, and it imports no korvid code. That is what makes every layer above it
+**`k8s/` depends on no other layer.** It owns the in-process async API client
+and imports only its own submodules, which is what makes every layer above it
 testable without a cluster — the 4,700-test suite runs offline in ~13 minutes.
+
+It is not, however, the only path to a cluster: the terminal-bound flows in
+`ui/shell_controller.py` shell out to `kubectl` for `exec` and `debug`, because
+those need a real TTY handed to the user's terminal. That is a deliberate
+exception, not an oversight — but it means "all cluster I/O lives in `k8s/`" is
+the goal, not an invariant you can rely on.
 
 **Textual appears in exactly one layer.** `core/`, `tools/`, `agent/` and
 `k8s/` are plain async Python. This is not tidiness for its own sake: it is why
@@ -95,9 +101,16 @@ imports them lazily and degrades to a `None` wiring when the extra is missing �
 unless the feature was explicitly requested, in which case startup fails with an
 install hint rather than silently disabling it.
 
-All wiring happens in `__main__.py`. There is no DI container and no service
-locator: dependencies are constructor arguments, assembled once, at one place
-you can read top to bottom.
+**Cross-layer** wiring happens in `__main__.py`: which provider, which
+executor, which bridge, assembled once at one place you can read top to bottom.
+There is no DI container and no service locator — dependencies are constructor
+arguments.
+
+`KorvidApp.__init__` then composes the UI's own controllers (shell, forward,
+transfer, operator, helm) from what it was given. That is intra-layer
+composition, not a second wiring root: nothing there decides which layer talks
+to which. Worth knowing before you go looking for a controller's construction
+in `__main__.py` and fail to find it.
 
 ---
 
@@ -139,7 +152,16 @@ The current registry, by construction:
 
 The consequence worth internalising: **you cannot add an unapproved write by
 being careless.** A `ToolDef` with `effect="cluster_write"` and
-`approval="none"` does not fail review — it fails `import korvid`.
+`approval="none"` does not fail review — it raises `ValueError` the moment
+`korvid.tools.registry` is imported, which startup and the test suite both do
+before anything else can run. (`import korvid` alone does not: the package
+`__init__` defines only `__version__`.) You can reproduce it in one line:
+
+```python
+>>> from korvid.tools.registry import ToolDef, _validate_write_policy
+>>> _validate_write_policy(ToolDef(..., effect="cluster_write", approval="none"))
+ValueError: cluster write 'x' requires the approval gate
+```
 
 ---
 
@@ -197,8 +219,11 @@ mutation is never constructed, let alone sent. Taking a factory rather than a
 coroutine is what makes that possible: there is no half-created operation to
 clean up. The log itself is
 `fsync`-ed with the parent directory synced and an interprocess lock, so a
-crash or a second korvid session cannot tear a record. Fail-closed here means
-*the write does not happen*, not *the write happens unlogged*.
+second korvid session cannot interleave records. A crash *can* still leave a
+torn trailing line — `_repair_torn_tail` exists precisely because it can — but
+that is a different failure from the one this guards: the mutation does not run
+unless the append returned successfully. Fail-closed here means *the write does
+not happen*, not *the write happens unlogged*.
 
 **Agent and human writes share one path.** There is no separate agent write
 route to audit. The only difference is provenance recorded in the audit detail
@@ -263,8 +288,12 @@ and each output position must still carry its input's `role` and `content` —
 compared against a baseline taken *before* the hook ran, because comparing
 against the copy the hook was given would check a mutated list against itself.
 
-What the user can verify: `:ai payload` shows the exact bytes, and can export
-them. A boundary you cannot inspect is a promise, not a control.
+What the user can verify: `:ai payload` shows the exact sanitized model-facing
+inputs the boundary produced, and can export them. Not the literal wire bytes —
+the provider still adds `model` and streaming options, and the HTTP client does
+the serialization — but it is the part where cluster data could leak, which is
+the part worth inspecting. A boundary you cannot inspect is a promise, not a
+control.
 
 ---
 
@@ -318,8 +347,11 @@ reasons and averaging them hides which one you have.
 
 ## 7. The eval harness: the part that keeps the rest honest
 
-`evals/` runs the real agent loop against scripted cluster fixtures with a
-scripted provider — no network, no cluster, deterministic. It exists because
+`evals/` runs the **real** agent loop against scripted cluster fixtures. The
+cluster side is always fixture-backed, so no run needs a cluster. The provider
+side has two modes: a scripted provider (no network, deterministic — this is
+what CI runs) and a live provider, which is how the local-model matrix is
+produced and is neither offline nor reproducible bit-for-bit. It exists because
 "the agent got better" is otherwise unfalsifiable.
 
 ```mermaid
