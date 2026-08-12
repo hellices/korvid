@@ -34,10 +34,10 @@ flowchart LR
         CORE --> K8S
     end
 
-    HUMAN --> TUI
+    HUMAN <--> TUI
     MODEL <--> AGENT
-    CLIENT --> MCP
-    K8S --> CLUSTER
+    CLIENT <--> MCP
+    K8S <--> CLUSTER
 
     style KORVID fill:#1a202c,color:#e2e8f0,stroke:#4a5568,stroke-width:2px
     style CORE fill:#2d3748,color:#e2e8f0,stroke:#4a5568
@@ -52,7 +52,11 @@ flowchart LR
 ```
 
 The center is a product contract, not the `src/korvid/core/` package. Every
-adapter gets the same cluster reads, UI control, approval gate, and audit.
+adapter shares cluster reads and UI control. Any write request that reaches
+korvid — from the TUI, the embedded agent, or an MCP write proposal — passes
+through the approval gate and is logged. MCP itself exposes read and UI-drive
+tools; write proposals are opt-in and handled inside korvid, not by the MCP
+client.
 
 Neither optional adapter is required, and neither implies the other.
 
@@ -151,6 +155,14 @@ deliberately — and it stays off until you turn it on.
 
 Four installs, four shapes — the two optional adapters occupy independent ports.
 
+<!-- LAYOUT NOTE (Mermaid 11 nested-subgraph rendering):
+     The subgraph declaration order below is C4 → C2 (ROW1) then C3 → C1 (ROW2).
+     Mermaid 11 renders nested subgraphs in reverse declaration order within each
+     row, so this intentional "reversed" source order produces the desired
+     rendered grid: cockpit (C1) top-left, Agent (C2) top-right, MCP (C3)
+     bottom-left, all (C4) bottom-right.
+     Do NOT "tidy" the source order to alphabetical/logical sequence — doing so
+     silently reverses the grid without any visible warning. -->
 ```mermaid
 flowchart TB
     subgraph ROW1["  "]
