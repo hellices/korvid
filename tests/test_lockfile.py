@@ -16,7 +16,9 @@ nothing fails until somebody re-locks.
 
 from __future__ import annotations
 
+import importlib.util
 import re
+import tempfile
 import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -134,14 +136,19 @@ def test_the_relock_job_holds_no_write_credential_while_it_runs_the_code() -> No
     propose_steps = jobs["propose"]["steps"]
     for step in propose_steps:
         script = step.get("run", "")
-        # Only the commands the job would execute: the pull-request body it
-        # writes legitimately *mentions* `uv sync --locked` when reporting
-        # what the read-only job verified.
-        commands = [line.strip() for line in script.splitlines() if line.startswith("    ")]
-        for command in commands:
-            assert not command.startswith(("uv ", "python ", "pytest")), (
-                f"the write-token job executes {command!r}"
-            )
+        if not script:
+            continue
+        # Every line, not an indentation-filtered subset: YAML strips a
+        # block scalar's common indent, so filtering on leading spaces
+        # matched nothing at all and this assertion passed vacuously.
+        # Continuation lines inside the pull-request body are excluded by
+        # name instead, since that text legitimately mentions `uv sync`.
+        for line in script.splitlines():
+            command = line.strip()
+            if command.startswith(("uv ", "python -m ", "pytest")):
+                assert step.get("name", "").startswith("Refuse"), (
+                    f"the write-token job executes {command!r} in step {step.get('name')!r}"
+                )
     assert "persist-credentials: false" in yaml.safe_dump(workflow)
     assert "persist-credentials: true" not in yaml.safe_dump(workflow)
 
@@ -231,6 +238,60 @@ def test_the_lock_is_committed_onto_the_revision_it_was_tested_against() -> None
     assert 'git checkout -b "$branch" "$BASE_SHA"' in commit_step["run"], (
         "the commit is branched from a moving ref rather than the tested revision"
     )
+
+
+def test_the_relock_guard_fails_closed_on_anything_it_cannot_read() -> None:
+    """A text match over an untrusted file reports success on nonsense.
+
+    The job that produces the lock also runs the dependencies it resolved,
+    so the checker is handed a file it cannot trust. `registry="https://…"`
+    without spaces is valid TOML and matches no line pattern; an empty file
+    matches nothing at all. A grep-based check called both of those clean.
+    """
+    checker = _ROOT / "scripts" / "check_lock_hosts.py"
+    spec = importlib.util.spec_from_file_location("check_lock_hosts", checker)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        compact = root / "compact.toml"
+        compact.write_text('registry="https://evil.example/simple"\n')
+        assert module.check(compact), "compact TOML slipped through"
+
+        empty = root / "empty.toml"
+        empty.write_text("")
+        assert module.check(empty), "an empty file was treated as verified"
+
+        malformed = root / "bad.toml"
+        malformed.write_text("not toml [[[\n")
+        assert module.check(malformed), "unparsable input was treated as verified"
+
+        plain = root / "plain.toml"
+        plain.write_text('url = "http://files.pythonhosted.org/x.whl"\n')
+        assert module.check(plain), "an http downgrade was accepted"
+
+        # A lock can be entirely PyPI apart from one VCS dependency, whose
+        # remote is recorded under `git` rather than `url` or `registry`.
+        vcs = root / "vcs.toml"
+        vcs.write_text(
+            '[[package]]\nname = "a"\n'
+            'source = { registry = "https://pypi.org/simple" }\n'
+            '[[package]]\nname = "b"\n'
+            'source = { git = "https://git.evil.example/pkg.git" }\n'
+        )
+        assert module.check(vcs), "a git dependency from an arbitrary host was accepted"
+
+    assert not module.check(_ROOT / "uv.lock"), "the committed lock must pass"
+
+
+def test_the_relock_workflow_uses_the_parsing_guard_in_both_jobs() -> None:
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "relock.yml").read_text())
+    for job in ("relock", "propose"):
+        scripts = " ".join(step.get("run", "") for step in workflow["jobs"][job]["steps"])
+        assert "scripts/check_lock_hosts.py" in scripts, f"{job} does not verify the lock"
 
 
 def test_pyproject_pins_no_alternate_package_index() -> None:

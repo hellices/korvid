@@ -24,8 +24,11 @@ ALLOWED_HOSTS = frozenset({"files.pythonhosted.org", "pypi.org"})
 
 #: Keys whose values are URLs. `uv` writes `url` for an artifact and
 #: `registry` for the index that served it; `index` appears when a project
-#: pins one, which this repository never does.
-URL_KEYS = frozenset({"url", "registry", "index"})
+#: pins one, which this repository never does. `git` is how a VCS
+#: dependency records its remote — a lock can be entirely PyPI apart from
+#: one package pulled from an arbitrary Git server, and omitting it here
+#: would let that through while this reports "PyPI only".
+URL_KEYS = frozenset({"url", "registry", "index", "git"})
 
 
 def _walk(node: Any) -> list[tuple[str, str]]:
