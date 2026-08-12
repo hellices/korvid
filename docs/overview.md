@@ -51,6 +51,9 @@ flowchart LR
     style CLUSTER fill:#edf2f7,color:#1a202c,stroke:#a0aec0,stroke-dasharray: 4 4
 ```
 
+The center is a product contract, not the `src/korvid/core/` package. Every
+adapter gets the same cluster reads, UI control, approval gate, and audit.
+
 Neither box above is required, and neither implies the other.
 
 The two extras are **independent**, not a ladder. Each adds to the cockpit on
@@ -79,7 +82,7 @@ explicitly requested a feature is the one behaviour worth failing over.
 
 ---
 
-## Layer 1 — the cockpit
+## Base — the cockpit
 
 **What it is:** a terminal UI for operating a cluster, built for people who
 would rather not remember `kubectl` flag order.
@@ -102,7 +105,7 @@ account anywhere.
 
 ---
 
-## Layer 2 — an agent inside the cockpit
+## Agent module — an agent inside the cockpit
 
 **What it is:** `Ctrl-A` opens a chat panel that already knows what you are
 looking at — view, namespace, selection, filter. You do not describe your
@@ -126,7 +129,7 @@ people who would rather their production incidents not leave the building.
 
 ---
 
-## Layer 3 — korvid as a tool for other agents
+## MCP module — korvid as a tool for other agents
 
 **What it is:** the same read and UI-driving tools, exposed over MCP so an
 external agent can use them. VS Code Copilot Chat, Claude Code, Cursor, Zed.
@@ -258,7 +261,7 @@ both.
 
 Three convictions, each visible in the structure above:
 
-**An operator's tool should work without AI.** Layer 1 is complete on its own.
+**An operator's tool should work without AI.** The base cockpit is complete on its own.
 The agent is an addition to a working cockpit, not the reason it exists — so
 your cluster tooling does not stop working when a provider is down, a token
 expires, or a policy forbids sending cluster data anywhere.
