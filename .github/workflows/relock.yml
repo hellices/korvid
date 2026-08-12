@@ -139,10 +139,17 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      # `main`, not `inputs.base`. The base branch is the thing being
+      # evaluated, so taking the validator from it lets a branch ship a
+      # no-op `check_lock_hosts.py` alongside an index redirect and have
+      # the digest chain faithfully carry an unvalidated lock. The trust
+      # anchor has to sit outside what is under review.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ inputs.base }}
+          ref: main
           persist-credentials: false
+          sparse-checkout: scripts/check_lock_hosts.py
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: relocked-lock
@@ -175,7 +182,11 @@ jobs:
           gh auth setup-git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
+          # The checkout is `main` (it supplies the trusted validator), and
+          # the sparse cone excludes everything else, so branch from the
+          # base ref explicitly rather than from whatever is on disk.
+          git fetch --depth 1 origin "$BASE"
+          git checkout -b "$branch" FETCH_HEAD
           git add uv.lock
           git commit -m "build: relock ${target}
 

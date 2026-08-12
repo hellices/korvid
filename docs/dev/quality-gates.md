@@ -79,11 +79,12 @@ repository rejects that. Three paths out, in order of preference:
      installs and executes the dependencies it is updating, so it holds no
      token that could write anything, and it re-checks the digest afterwards
      in case that code edited the lock underneath it.
-   - `propose` takes only `uv.lock` across, from a clean checkout, re-runs
-     the host check with *its own* copy of the checker, and matches the
-     digest before the token is exposed. Nothing that ran during
-     verification can reach its credential, plant a `pre-push` hook, or
-     substitute a different lock that merely looks acceptable.
+   - `propose` takes only `uv.lock` across, checks out **`main`** (not the
+     base branch — a branch must not supply the validator that clears it),
+     re-runs the host check with that trusted copy, and matches the digest
+     before the token is exposed. Nothing that ran during verification can
+     reach its credential, plant a `pre-push` hook, or substitute a
+     different lock that merely looks acceptable.
 
    It runs the gate itself because it has to: GitHub suppresses the
    workflow events raised by `GITHUB_TOKEN`, so the pull request it opens

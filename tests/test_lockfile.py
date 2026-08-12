@@ -191,6 +191,28 @@ def test_the_committed_bytes_are_the_bytes_that_were_verified() -> None:
     )
 
 
+def test_the_validator_comes_from_a_revision_that_is_not_under_review() -> None:
+    """A branch must not supply the check that clears it.
+
+    `inputs.base` is the thing being evaluated. Running its copy of
+    `check_lock_hosts.py` lets a branch ship a no-op validator beside an
+    index redirect, after which the digest chain faithfully carries an
+    unvalidated lock — every downstream check passes because the check
+    itself was replaced. The trust anchor has to sit outside the change.
+    """
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "relock.yml").read_text())
+    checkouts = [
+        step["with"]
+        for step in workflow["jobs"]["propose"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/checkout")
+    ]
+    assert checkouts, "the committing job never checks anything out"
+    for options in checkouts:
+        assert options["ref"] == "main", (
+            "the committing job takes the validator from the branch under review"
+        )
+
+
 def test_pyproject_pins_no_alternate_package_index() -> None:
     """An index pinned here redirects every resolution in the repository.
 
