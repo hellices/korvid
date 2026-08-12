@@ -31,11 +31,12 @@ repos:
         # mirror with `uv sync --frozen`; if the lock genuinely must change,
         # re-lock against public PyPI.
         #
-        # Written as "every url/registry value that is NOT public PyPI"
-        # rather than a list of known-bad hosts: an allow-list of the two
-        # fields a mirror is known to rewrite would pass the next field uv
-        # adds, and http:// or a new private host would slip through a
-        # deny-list.
+        # Covers the two fields uv writes URLs into today, `url` and
+        # `registry`, and allows only public PyPI in them - so a new private
+        # host or an http:// value is rejected without another patch. It is
+        # *not* future-proof against a differently-named field: if uv starts
+        # writing one, this pattern needs extending. Verified, not assumed -
+        # renaming the field in a sabotaged lock passes.
         entry: '(url|registry) = "(?!https://(files\.pythonhosted\.org|pypi\.org)/)'
         files: '^uv\.lock$'
       - id: no-bare-type-ignore
