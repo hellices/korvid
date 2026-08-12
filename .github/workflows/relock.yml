@@ -149,6 +149,25 @@ jobs:
         with:
           name: relocked-lock
 
+      # Re-check what actually arrived. The other job validated the lock
+      # before running the suite, and code from the dependencies it just
+      # installed could have rewritten the file afterwards - the check and
+      # the upload are not the same instant. This runs in a workspace that
+      # ran none of that code, and before the token is exposed.
+      - name: Refuse a lock that names anything but PyPI
+        run: |
+          if grep -oE '(url|registry|index) = "[^"]*"' uv.lock \
+             | sed -E 's/^[a-z]+ = "//; s/"$//' \
+             | grep -vE '^https://(files\.pythonhosted\.org|pypi\.org)/' \
+             | grep -q .; then
+            echo "uv.lock names a non-PyPI host:"
+            grep -oE '(url|registry|index) = "[^"]*"' uv.lock \
+              | sed -E 's/^[a-z]+ = "//; s/"$//' \
+              | grep -vE '^https://(files\.pythonhosted\.org|pypi\.org)/' \
+              | sort -u
+            exit 1
+          fi
+
       - name: Open a pull request with the verified lock
         env:
           GH_TOKEN: ${{ github.token }}

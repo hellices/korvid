@@ -146,6 +146,23 @@ def test_the_relock_job_holds_no_write_credential_while_it_runs_the_code() -> No
     assert "persist-credentials: true" not in yaml.safe_dump(workflow)
 
 
+def test_the_lock_is_revalidated_after_the_code_that_could_rewrite_it_ran() -> None:
+    """Validating before `pytest` leaves a window.
+
+    The read-only job checks the lock, then installs and runs the very
+    dependencies it just resolved — any of which could rewrite `uv.lock`
+    before the upload. The check and the upload are not the same instant, so
+    the file is checked again in the clean job, in a workspace that ran none
+    of that code, and before `GH_TOKEN` is exposed.
+    """
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "relock.yml").read_text())
+    steps = workflow["jobs"]["propose"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    guard = next(i for i, name in enumerate(names) if "anything but PyPI" in name)
+    exposed = next(i for i, step in enumerate(steps) if "GH_TOKEN" in str(step.get("env", {})))
+    assert guard < exposed, "the write token is exposed before the lock is re-checked"
+
+
 def test_the_relock_guard_matches_the_url_value_not_the_line() -> None:
     """A line can contain an allowed host without being served by it.
 
