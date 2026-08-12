@@ -22,6 +22,16 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      - id: no-private-index-in-lock
+        name: "No private index URLs in uv.lock"
+        language: pygrep
+        # `uv lock` rewrites every artefact URL to whichever index resolved
+        # it. Re-locking behind a corporate mirror rewrites all of them to a
+        # host only that network can reach, which breaks CI and every
+        # outside contributor. Work behind a mirror with `uv sync --frozen`;
+        # if the lock genuinely must change, re-lock against public PyPI.
+        entry: 'url = "https://(?!files\.pythonhosted\.org/|pypi\.org/)'
+        files: '^uv\.lock$'
       - id: no-bare-type-ignore
         name: "No bare 'type: ignore'"
         language: pygrep

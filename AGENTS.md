@@ -8,6 +8,13 @@ korvid is an AI-native Kubernetes TUI (Python 3.11+, Textual). Design doc: `docs
 uv sync --dev --all-extras
 ```
 
+**Behind a corporate mirror**, use `uv sync --frozen --dev --all-extras`
+and never re-lock. `uv lock` rewrites every artefact URL in `uv.lock` to
+whichever index resolved it, so re-locking behind a mirror pins ~1,700
+URLs to a host only that network can reach — breaking CI and every
+outside contributor. A pre-commit hook rejects such a lock; if the lock
+genuinely must change, re-lock against public PyPI.
+
 ## Development Commands
 
 ```bash
