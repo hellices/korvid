@@ -70,6 +70,8 @@ uv tool install korvid                 # cockpit only
 uv tool install 'korvid[agent]'        # + embedded AI agent
 uv tool install 'korvid[mcp]'          # + MCP server for external agents
 uv tool install 'korvid[all]'          # both of the above (= agent,mcp)
+
+brew install hellices/korvid/korvid    # macOS/Linux, no Python needed (= agent)
 ```
 
 Entra ID authentication for Azure OpenAI is a separate extra —

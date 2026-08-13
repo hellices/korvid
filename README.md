@@ -61,6 +61,17 @@ uv tool install 'korvid[all]==0.1.2'    # or: pipx install 'korvid[all]==0.1.2'
 korvid                                  # uses your current kubeconfig context
 ```
 
+On macOS or Linux with Homebrew, this works too and needs no Python at all:
+
+```sh
+brew install hellices/korvid/korvid
+```
+
+The formula builds against Homebrew's own Python, so your system
+interpreter does not matter. It installs the agent stack but **not**
+`[mcp]`, which would put an HTTP server on the machine: install from PyPI
+if you want that.
+
 korvid is an application, not a library, so install it in its own
 environment. `uv tool` and `pipx` both do that and put `korvid` on your PATH.
 Prefer `uv` if you have neither: korvid needs **Python 3.11+**, which is
