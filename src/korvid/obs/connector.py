@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from math import isfinite
-from typing import Literal
+from typing import Any, Literal
 
 from korvid.core.secrets import MASK_PLACEHOLDER
 
@@ -108,11 +108,18 @@ class QueryScope:
     pod: str | None = None
 
     def describe(self) -> str:
-        parts = [f"namespace={self.namespace}"]
+        """The scope as one header line, with every value flattened.
+
+        Scope values are model-supplied tool arguments, and the header is
+        korvid's own claim about the result. A value carrying a newline
+        would add a line to the provenance block — a citation could then
+        arrive with a `truncated: no` the connector never made.
+        """
+        parts = [f"namespace={flatten(self.namespace)}"]
         if self.workload:
-            parts.append(f"workload={self.workload}")
+            parts.append(f"workload={flatten(self.workload)}")
         if self.pod:
-            parts.append(f"pod={self.pod}")
+            parts.append(f"pod={flatten(self.pod)}")
         return " ".join(parts)
 
 
@@ -223,6 +230,16 @@ def masked_labels(labels: Mapping[str, str], mask: frozenset[str]) -> dict[str, 
     }
 
 
+def flatten(value: str) -> str:
+    """`value` on one line: every character that could end a line becomes a space.
+
+    `str.isprintable()` is False for every line and paragraph separator
+    Unicode defines, not only `\n` and `\r`, so the check is the whole
+    rule rather than a list someone has to keep complete.
+    """
+    return "".join(char if char.isprintable() else " " for char in value)
+
+
 def mask_in(text: str, secrets: Iterable[str]) -> str:
     """`text` with each configured-sensitive value replaced.
 
@@ -242,7 +259,9 @@ def mask_in(text: str, secrets: Iterable[str]) -> str:
 
 
 def _labels(labels: Mapping[str, str]) -> str:
-    return " ".join(f"{key}={value}" for key, value in sorted(labels.items()))
+    # Flattened for the same reason the header is: a label value is the
+    # backend's text, and a newline in one would forge a line of korvid's.
+    return " ".join(f"{flatten(key)}={flatten(value)}" for key, value in sorted(labels.items()))
 
 
 def _header(
@@ -266,56 +285,94 @@ def _header(
     ]
 
 
-def render_metrics(result: MetricResult) -> str:
+def _rendered(
+    header_fields: dict[str, Any],
+    entries: list[str],
+    empty_note: str,
+    *,
+    truncated: bool,
+    limit: int | None,
+) -> str:
+    """Header plus as many entries as `limit` allows, honest about the rest.
+
+    The header is never dropped: provenance is what a citation needs, and
+    entries are what it can afford to lose. If any entry is dropped the
+    header says `truncated: yes`, so a result cut to fit can never read as
+    complete — which is what a downstream cap left behind (PR #280
+    review).
+    """
+    kept: list[str] = []
+    dropped = False
+    if limit is None:
+        kept = entries
+    else:
+        # Rendered with truncation already assumed, so admitting an entry
+        # can never push the header over the budget afterwards.
+        budget = limit - len("\n".join(_header(**header_fields, truncated=True))) - 2
+        for entry in entries:
+            if len(entry) + 1 > budget:
+                dropped = True
+                break
+            kept.append(entry)
+            budget -= len(entry) + 1
+    lines = _header(**header_fields, truncated=truncated or dropped)
+    if not kept:
+        lines.append(empty_note if not entries else "every entry was dropped to fit the budget")
+        return "\n".join(lines)
+    lines.append("")
+    lines.extend(kept)
+    return "\n".join(lines)
+
+
+def render_metrics(result: MetricResult, *, limit: int | None = None) -> str:
     """The model-facing text for a metric answer.
 
     Every field a claim citing this result would need to be checked is on
     the page: which backend answered, what was asked, over what window,
     and whether the answer was capped.
     """
-    lines = _header(
-        source=result.source,
-        endpoint=result.endpoint,
-        scope=result.scope,
-        window_minutes=result.window_minutes,
-        query=result.query,
+    return _rendered(
+        {
+            "source": result.source,
+            "endpoint": result.endpoint,
+            "scope": result.scope,
+            "window_minutes": result.window_minutes,
+            "query": result.query,
+            "extra": (
+                f"signal: {result.signal}",
+                f"unit: {result.unit}",
+                *((f"observed at: {result.observed_at}",) if result.observed_at else ()),
+            ),
+        },
+        [
+            f"{_labels(series.labels) or '(no labels)'}  {series.value:g} {result.unit}"
+            for series in result.series
+        ],
+        "no series matched this scope and window",
         truncated=result.truncated,
-        extra=(
-            f"signal: {result.signal}",
-            f"unit: {result.unit}",
-            *((f"observed at: {result.observed_at}",) if result.observed_at else ()),
-        ),
+        limit=limit,
     )
-    if not result.series:
-        lines.append("no series matched this scope and window")
-        return "\n".join(lines)
-    lines.append("")
-    for series in result.series:
-        label_text = _labels(series.labels) or "(no labels)"
-        lines.append(f"{label_text}  {series.value:g} {result.unit}")
-    return "\n".join(lines)
 
 
-def render_logs(result: LogResult) -> str:
+def render_logs(result: LogResult, *, limit: int | None = None) -> str:
     """The model-facing text for a log answer."""
-    lines = _header(
-        source=result.source,
-        endpoint=result.endpoint,
-        scope=result.scope,
-        window_minutes=result.window_minutes,
-        query=result.query,
+    return _rendered(
+        {
+            "source": result.source,
+            "endpoint": result.endpoint,
+            "scope": result.scope,
+            "window_minutes": result.window_minutes,
+            "query": result.query,
+            "extra": (f"lines: {len(result.lines)}",),
+        },
+        [
+            f"{f'{entry.timestamp} {_labels(entry.labels)}'.rstrip()}  {entry.line}"
+            for entry in result.lines
+        ],
+        "no log lines matched this scope and window",
         truncated=result.truncated,
-        extra=(f"lines: {len(result.lines)}",),
+        limit=limit,
     )
-    if not result.lines:
-        lines.append("no log lines matched this scope and window")
-        return "\n".join(lines)
-    lines.append("")
-    for entry in result.lines:
-        label_text = _labels(entry.labels)
-        prefix = f"{entry.timestamp} {label_text}".rstrip()
-        lines.append(f"{prefix}  {entry.line}")
-    return "\n".join(lines)
 
 
 class MetricsConnector(ABC):

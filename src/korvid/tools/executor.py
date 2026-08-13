@@ -440,6 +440,14 @@ def _query_scope(args: Mapping[str, Any]) -> QueryScope:
     )
 
 
+#: Rendering budget for an external read, under `MAX_RESULT_CHARS` with
+#: room for the redaction placeholders the projection may add. Applied
+#: while the result is *built*, so a result cut to fit reports
+#: `truncated: yes` — `cap_result` downstream would leave the header
+#: claiming the answer was complete (PR #280 review).
+_OBSERVABILITY_RENDER_CHARS = MAX_RESULT_CHARS - 1000
+
+
 def _projected(text: str, path: str, *, error: bool = False) -> ToolOutcome:
     """An external read's rendered result, masked before it leaves here.
 
@@ -1164,7 +1172,7 @@ class ToolExecutor(RecordedExecution):
             result = await self._metrics.query(signal=signal, scope=scope, window_minutes=window)
         except ConnectorError as exc:
             return _connector_failure(exc, "metrics")
-        return _projected(render_metrics(result), "metrics")
+        return _projected(render_metrics(result, limit=_OBSERVABILITY_RENDER_CHARS), "metrics")
 
     async def _search_logs(self, args: dict[str, Any]) -> ToolOutcome:
         """Centralized log lines from the configured logs backend."""
@@ -1181,7 +1189,7 @@ class ToolExecutor(RecordedExecution):
             )
         except ConnectorError as exc:
             return _connector_failure(exc, "logs")
-        return _projected(render_logs(result), "logs")
+        return _projected(render_logs(result, limit=_OBSERVABILITY_RENDER_CHARS), "logs")
 
     async def _get_events(self, args: dict[str, Any]) -> ToolOutcome:
         kind = str(args["kind"]).strip().lower()

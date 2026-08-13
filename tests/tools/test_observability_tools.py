@@ -299,3 +299,19 @@ class TestResultProjection:
         )
         assert outcome.error is True
         assert outcome.text.startswith("ERROR: [permission]")
+
+    async def test_a_result_that_must_be_cut_says_so_rather_than_being_cut_downstream(
+        self,
+    ) -> None:
+        """The executor's ingest cap would otherwise contradict `truncated: no`."""
+        connector = FakeLogs()
+        connector.line = "y" * 40_000
+        result = await _executor(logs=connector).execute("search_logs", {"namespace": "prod"})
+        assert "truncated: yes" in result.splitlines()
+        assert "endpoint: loki.example.com" in result.splitlines()
+
+    async def test_a_small_result_is_untouched(self) -> None:
+        connector = FakeLogs()
+        connector.line = "boom"
+        result = await _executor(logs=connector).execute("search_logs", {"namespace": "prod"})
+        assert "truncated: no" in result.splitlines()
