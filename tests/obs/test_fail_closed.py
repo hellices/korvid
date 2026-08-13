@@ -1096,3 +1096,64 @@ class TestRoundElevenFindings:
         with pytest.raises(ConnectorError, match="not a regular file") as caught:
             await resolve_token_async(token_env=None, token_file=str(path), source="loki")
         assert caught.value.kind == "config"
+
+
+class TestRoundFourteenFindings:
+    async def test_a_numeric_token_echoed_as_a_sample_value_is_not_rendered(self) -> None:
+        """A sample value is text until korvid parses it, so it is scrubbed first."""
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "status": "success",
+                            "data": {
+                                "resultType": "vector",
+                                "result": [
+                                    {"metric": {"pod": "a"}, "value": [1786000000, "123456789"]},
+                                    {"metric": {"pod": "b"}, "value": [1786000000, "2.5"]},
+                                ],
+                            },
+                        },
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+            token_env="TOK",
+        )
+        import os
+
+        os.environ["TOK"] = "123456789"
+        try:
+            result = await connector.query(signal="cpu", scope=QueryScope(namespace="prod"))
+        finally:
+            del os.environ["TOK"]
+        assert [s.labels["pod"] for s in result.series] == ["b"]
+
+    async def test_an_ordinary_sample_value_is_untouched(self) -> None:
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "status": "success",
+                            "data": {
+                                "resultType": "vector",
+                                "result": [{"metric": {"pod": "a"}, "value": [1786000000, "0.25"]}],
+                            },
+                        },
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+        )
+        result = await connector.query(signal="cpu", scope=QueryScope(namespace="prod"))
+        assert result.series[0].value == pytest.approx(0.25)

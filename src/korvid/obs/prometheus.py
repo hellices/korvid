@@ -192,7 +192,12 @@ def _series(row: Any, mask: frozenset[str], answer: Answer) -> Series | None:
     if not isinstance(sample, list) or len(sample) != 2:
         return None
     try:
-        value = float(sample[1])
+        # Scrubbed *before* parsing: a sample arrives as text, and a
+        # numeric bearer token echoed as one would otherwise become a
+        # float and be rendered straight back. A masked sample no longer
+        # parses, so it drops out like any other unusable row (PR #280
+        # review).
+        value = float(answer.scrub(sample[1]) if isinstance(sample[1], str) else sample[1])
     except (TypeError, ValueError):
         return None
     if not isfinite(value):

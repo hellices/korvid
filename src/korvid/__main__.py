@@ -206,10 +206,6 @@ def _build_observability(config: KorvidConfig) -> ObservabilityWiring:
         # `QueryLimits`). Neither should reach the user as a traceback,
         # and both mean the same thing to them.
         raise SystemExit(f"korvid: observability configuration is unusable: {exc}") from exc
-        # A refusal the config parser did not reach (a connector-level
-        # invariant, or a directly-constructed backend): actionable text
-        # rather than a traceback at startup.
-        raise SystemExit(f"korvid: observability configuration is unusable: {exc}") from exc
 
 
 def _validate_observability(
