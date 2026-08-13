@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from time import monotonic
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -21,6 +21,7 @@ from korvid.ui.messages import ResourcesUpdated
 from korvid.ui.widgets.resource_table import ResourceTable
 from tests.performance import replay as replay_module
 from tests.performance.metrics import BenchmarkRecorder, RunManifest
+from tests.performance.pacing import sample_paced_schedule
 from tests.performance.profile import Burst, FailureInjection, WorkloadProfile
 from tests.performance.replay import (
     MeasuredKorvidApp,
@@ -129,6 +130,7 @@ async def test_replay_passes_the_configured_input_ack_timeout(
     """The cursor probe's bound is a run knob, not a constant buried in the
     harness: a slower cluster or a deliberately short abort budget must reach
     `measure_cursor_input` from the same options object the run was given."""
+    schedule = sample_paced_schedule(monkeypatch, pairs=3)
     timeouts: list[float] = []
     original = replay_module.measure_cursor_input
 
@@ -143,21 +145,21 @@ async def test_replay_passes_the_configured_input_ack_timeout(
         seed=186,
         object_count=20,
         namespace_count=4,
-        steady_events_per_second=10,
+        steady_events_per_second=20,
         duration_seconds=1,
         bursts=(),
         failures=(),
     )
 
-    report = await run_replay(
-        profile, ReplayOptions(time_scale=0, input_ack_timeout=2.5, input_sample_pairs=3)
-    )
+    report = await run_replay(profile, schedule.options(input_ack_timeout=2.5))
 
     assert timeouts == [2.5] * 6
     assert report.input_latency.count == 6
 
 
-async def test_replay_takes_the_configured_number_of_cursor_sample_pairs() -> None:
+async def test_replay_takes_the_configured_number_of_cursor_sample_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A percentile over two samples is a point observation, not a percentile.
     The pair count is configurable so the published input figure rests on a
     usable sample size, and each pair is a `down`/`up` round trip so the
@@ -169,15 +171,73 @@ async def test_replay_takes_the_configured_number_of_cursor_sample_pairs() -> No
         seed=186,
         object_count=20,
         namespace_count=4,
+        steady_events_per_second=20,
+        duration_seconds=1,
+        bursts=(),
+        failures=(),
+    )
+    schedule = sample_paced_schedule(monkeypatch, pairs=4)
+
+    report = await run_replay(profile, schedule.options())
+
+    assert report.input_latency.count == 8
+
+
+async def test_replay_keeps_emitting_churn_events_throughout_input_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Input latency is only meaningful against a *moving* update stream, so
+    the harness must never hold the schedule after the first event and sample
+    a frozen table.
+
+    The interleave is decided by injected seams, never by wall time: the
+    schedule's inter-event sleep waits for a permit that each completed cursor
+    sample releases, so the emitted-event count observed at successive samples
+    keeps climbing instead of freezing at the first event.
+    """
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-input-during-churn",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
         steady_events_per_second=10,
         duration_seconds=1,
         bursts=(),
         failures=(),
     )
+    pairs = 3
+    total_samples = 2 * pairs
+    schedule = sample_paced_schedule(monkeypatch, pairs=pairs)
 
-    report = await run_replay(profile, ReplayOptions(time_scale=0, input_sample_pairs=4))
+    sources: list[Any] = []
+    original_source = replay_module._ReplaySource
 
-    assert report.input_latency.count == 8
+    def capturing_source(*args: Any, **kwargs: Any) -> Any:
+        source = original_source(*args, **kwargs)
+        sources.append(source)
+        return source
+
+    snapshots: list[int] = []
+    paced_measure = replay_module.measure_cursor_input
+
+    async def spy(*args: Any, **kwargs: Any) -> float:
+        elapsed = await paced_measure(*args, **kwargs)
+        snapshots.append(sources[0].emitted_events)
+        return elapsed
+
+    monkeypatch.setattr(replay_module, "_ReplaySource", capturing_source)
+    monkeypatch.setattr(replay_module, "measure_cursor_input", spy)
+
+    report = await run_replay(profile, schedule.options())
+
+    assert len(snapshots) == total_samples
+    assert report.input_latency.count == total_samples
+    # The decisive claim: churn is not gated to a single event for the whole
+    # probe. More than one event reaches the store while sampling is running.
+    assert snapshots[-1] - snapshots[0] >= 2
+    assert snapshots == sorted(snapshots)
+    assert report.churn_started_before_input
 
 
 async def test_replay_rejects_input_sampling_when_churn_finishes_early() -> None:
@@ -222,7 +282,9 @@ async def test_replay_rejects_a_non_positive_input_sample_pair_count() -> None:
         await run_replay(profile, ReplayOptions(time_scale=0, input_sample_pairs=0))
 
 
-async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:
+async def test_replay_uses_real_app_and_reaches_expected_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     profile = WorkloadProfile(
         schema_version=1,
         id="test",
@@ -234,7 +296,7 @@ async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:
         bursts=(),
         failures=(),
     )
-    report = await run_replay(profile, ReplayOptions(time_scale=0))
+    report = await run_replay(profile, sample_paced_schedule(monkeypatch).options())
     events = scheduled_events(profile)
     oracle = summary_digest(apply_events(initial_pods(profile), events))
     assert report.object_count == 100
@@ -249,12 +311,16 @@ async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:
     assert report.api.operations.get("get", 0) == 0
 
 
-async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
+async def test_replay_time_scale_1_uses_relative_inter_event_delays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """time_scale=1 must use inter-event delays, not absolute offsets.
 
     Virtual-time seam: `monotonic_fn` returns a shared virtual clock and
     `async_sleep` advances that clock then yields via `asyncio.sleep(0)`,
     so the test completes in ~0 s of wall time regardless of profile length.
+    Each scheduled sleep additionally waits for a completed cursor sample, so
+    the schedule outlives the input probe without changing a single delay.
 
     Sensitivity: with 60 events at 20 eps over 3 s, correct sleeps sum exactly
     to the final 2.95 s offset. The historical absolute-offset bug sums every
@@ -271,28 +337,18 @@ async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
         bursts=(),
         failures=(),
     )
-    virtual_time: list[float] = [0.0]
-    sleep_delays: list[float] = []
+    schedule = sample_paced_schedule(monkeypatch)
 
-    def virtual_monotonic() -> float:
-        return virtual_time[0]
-
-    async def virtual_sleep(delay: float) -> None:
-        sleep_delays.append(delay)
-        virtual_time[0] += delay
-        await asyncio.sleep(0)  # yield to event loop without real wall time
-
-    report = await run_replay(
-        profile,
-        ReplayOptions(time_scale=1, monotonic_fn=virtual_monotonic, async_sleep=virtual_sleep),
-    )
-    assert sum(sleep_delays) == pytest.approx(scheduled_events(profile)[-1].offset_seconds)
+    report = await run_replay(profile, schedule.options())
+    assert sum(schedule.delays) == pytest.approx(scheduled_events(profile)[-1].offset_seconds)
     assert report.dropped_updates == 0
     assert report.object_count == 20
     assert report.expected_digest == report.final_digest
 
 
-async def test_replay_gone_reconnects_and_digest_matches() -> None:
+async def test_replay_gone_reconnects_and_digest_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """gone at event 5 triggers one reconnect/re-LIST; final digest drops stale rows."""
     profile = WorkloadProfile(
         schema_version=1,
@@ -305,7 +361,7 @@ async def test_replay_gone_reconnects_and_digest_matches() -> None:
         bursts=(),
         failures=(FailureInjection(kind="gone", at_event=5),),
     )
-    report = await run_replay(profile, ReplayOptions(time_scale=0))
+    report = await run_replay(profile, sample_paced_schedule(monkeypatch).options())
     events = scheduled_events(profile)
     # The gone failure event itself is not applied as a watch event; filter it
     # from the apply_events oracle so it matches the actual replay outcome.
@@ -322,7 +378,9 @@ async def test_replay_gone_reconnects_and_digest_matches() -> None:
     assert report.api.relists == 1
 
 
-async def test_replay_gone_reconnects_with_time_scale_1() -> None:
+async def test_replay_gone_reconnects_with_time_scale_1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """HTTP 410 reconnect with time_scale=1 must use elapsed-based delay, not absolute offsets.
 
     Virtual-time seam: same `monotonic_fn` / `async_sleep` pattern as
@@ -346,29 +404,17 @@ async def test_replay_gone_reconnects_with_time_scale_1() -> None:
         bursts=(),
         failures=(FailureInjection(kind="gone", at_event=5),),
     )
-    virtual_time: list[float] = [0.0]
-    sleep_delays: list[float] = []
+    schedule = sample_paced_schedule(monkeypatch)
 
-    def virtual_monotonic() -> float:
-        return virtual_time[0]
-
-    async def virtual_sleep(delay: float) -> None:
-        sleep_delays.append(delay)
-        virtual_time[0] += delay
-        await asyncio.sleep(0)  # yield to event loop without real wall time
-
-    report = await run_replay(
-        profile,
-        ReplayOptions(time_scale=1, monotonic_fn=virtual_monotonic, async_sleep=virtual_sleep),
-    )
+    report = await run_replay(profile, schedule.options())
 
     events = scheduled_events(profile)
     failure_sequence = profile.failures[0].at_event
     first_post_reconnect_delay = (
         events[failure_sequence].offset_seconds - events[failure_sequence - 1].offset_seconds
     )
-    assert sum(sleep_delays) == pytest.approx(events[-1].offset_seconds)
-    assert sleep_delays[failure_sequence - 1] == pytest.approx(first_post_reconnect_delay)
+    assert sum(schedule.delays) == pytest.approx(events[-1].offset_seconds)
+    assert schedule.delays[failure_sequence - 1] == pytest.approx(first_post_reconnect_delay)
     assert report.expected_digest == report.final_digest
     assert report.dropped_updates == 0
     assert report.api.operations["list"] == 2
@@ -377,7 +423,9 @@ async def test_replay_gone_reconnects_with_time_scale_1() -> None:
     assert report.api.relists == 1
 
 
-async def test_replay_throttled_reconnects_and_digest_matches() -> None:
+async def test_replay_throttled_reconnects_and_digest_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A 429 ends one watch connection; `WatchManager` retries, the source
     re-LISTs from its tracked state, and the run still reaches the oracle
     digest with zero drops. The throttled event itself is never delivered."""
@@ -392,7 +440,7 @@ async def test_replay_throttled_reconnects_and_digest_matches() -> None:
         bursts=(),
         failures=(FailureInjection(kind="throttled", at_event=5),),
     )
-    report = await run_replay(profile, ReplayOptions(time_scale=0))
+    report = await run_replay(profile, sample_paced_schedule(monkeypatch).options())
     events = scheduled_events(profile)
     applied = tuple(e for e in events if e.sequence != 5)
     oracle = summary_digest(apply_events(initial_pods(profile), applied))
@@ -408,7 +456,9 @@ async def test_replay_throttled_reconnects_and_digest_matches() -> None:
     assert report.api.relists == 0
 
 
-async def test_replay_slow_delays_without_dropping_or_reconnecting() -> None:
+async def test_replay_slow_delays_without_dropping_or_reconnecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`slow` delays one event by one steady-rate tick and still delivers it:
     no reconnect, no drop, and the stall is real extra time.
 
@@ -430,21 +480,9 @@ async def test_replay_slow_delays_without_dropping_or_reconnecting() -> None:
         bursts=(),
         failures=(FailureInjection(kind="slow", at_event=40),),
     )
-    virtual_time: list[float] = [0.0]
-    sleep_delays: list[float] = []
+    schedule = sample_paced_schedule(monkeypatch)
 
-    def virtual_monotonic() -> float:
-        return virtual_time[0]
-
-    async def virtual_sleep(delay: float) -> None:
-        sleep_delays.append(delay)
-        virtual_time[0] += delay
-        await asyncio.sleep(0)
-
-    report = await run_replay(
-        profile,
-        ReplayOptions(time_scale=1, monotonic_fn=virtual_monotonic, async_sleep=virtual_sleep),
-    )
+    report = await run_replay(profile, schedule.options())
     events = scheduled_events(profile)
     oracle = summary_digest(apply_events(initial_pods(profile), events))
 
@@ -454,7 +492,7 @@ async def test_replay_slow_delays_without_dropping_or_reconnecting() -> None:
     assert report.api.operations["watch_open"] == 1
     assert report.api.reconnects == 0
     # The injected 1/20s stall is an *extra* sleep on top of the schedule.
-    assert sum(sleep_delays) == pytest.approx(events[-1].offset_seconds + 1 / 20)
+    assert sum(schedule.delays) == pytest.approx(events[-1].offset_seconds + 1 / 20)
 
 
 async def test_replay_forbidden_aborts_with_an_explicit_terminal_error() -> None:
@@ -522,7 +560,9 @@ async def test_measured_app_counts_only_resource_update_renders() -> None:
     assert report.rendered_updates == 1
 
 
-async def test_replay_measures_list_phase_separately_from_watch_events() -> None:
+async def test_replay_measures_list_phase_separately_from_watch_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Initial LIST rows must not be counted as event-to-render samples; they
     are timed as a separate LIST-to-populated-table startup phase, so replay
     p95 is comparable with the live watch-only event-to-render metric."""
@@ -537,7 +577,7 @@ async def test_replay_measures_list_phase_separately_from_watch_events() -> None
         bursts=(),
         failures=(),
     )
-    report = await run_replay(profile, ReplayOptions(time_scale=0))
+    report = await run_replay(profile, sample_paced_schedule(monkeypatch).options())
 
     # 10 scheduled watch events, and *only* those, are event-to-render samples.
     assert len(scheduled_events(profile)) == 10
@@ -551,7 +591,9 @@ async def test_replay_measures_list_phase_separately_from_watch_events() -> None
     assert report.phases.process_start_to_interactive_seconds >= 0.0
 
 
-async def test_replay_records_post_burst_drain_and_backlog_depth() -> None:
+async def test_replay_records_post_burst_drain_and_backlog_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A burst produces a measurable backlog and a post-burst drain sample."""
     profile = WorkloadProfile(
         schema_version=1,
@@ -564,7 +606,7 @@ async def test_replay_records_post_burst_drain_and_backlog_depth() -> None:
         bursts=(Burst(start_second=1, duration_seconds=1, events_per_second=40),),
         failures=(),
     )
-    report = await run_replay(profile, ReplayOptions(time_scale=0))
+    report = await run_replay(profile, sample_paced_schedule(monkeypatch).options())
 
     assert report.phases.max_backlog_depth >= 1
     assert report.phases.post_burst_drain_seconds != ()
@@ -596,7 +638,9 @@ def test_build_manifest_marks_unresolved_offline_sha_as_unknown(
     assert manifest.korvid_sha == "unknown"
 
 
-async def test_replay_metrics_unavailable_keeps_resource_navigation_healthy() -> None:
+async def test_replay_metrics_unavailable_keeps_resource_navigation_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`metrics_unavailable` records evidence on the metrics read path while the
     resource watch/render reaches the oracle digest with zero drops - proving
     navigation is independent of the metrics poller."""
@@ -611,7 +655,7 @@ async def test_replay_metrics_unavailable_keeps_resource_navigation_healthy() ->
         bursts=(),
         failures=(FailureInjection(kind="metrics_unavailable", at_event=5),),
     )
-    report = await run_replay(profile, ReplayOptions(time_scale=0))
+    report = await run_replay(profile, sample_paced_schedule(monkeypatch).options())
     events = scheduled_events(profile)
     oracle = summary_digest(apply_events(initial_pods(profile), events))
 
@@ -625,7 +669,9 @@ async def test_replay_metrics_unavailable_keeps_resource_navigation_healthy() ->
     assert "/apis/metrics.k8s.io/v1beta1/pods" in report.api.paths
 
 
-async def test_replay_slow_logs_do_not_block_resource_progress() -> None:
+async def test_replay_slow_logs_do_not_block_resource_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`slow_logs` records evidence on the log read path and adds no delay to
     the resource schedule - resource watch/render progress is independent of log
     consumption."""
@@ -640,21 +686,9 @@ async def test_replay_slow_logs_do_not_block_resource_progress() -> None:
         bursts=(),
         failures=(FailureInjection(kind="slow_logs", at_event=40),),
     )
-    virtual_time: list[float] = [0.0]
-    sleep_delays: list[float] = []
+    schedule = sample_paced_schedule(monkeypatch)
 
-    def virtual_monotonic() -> float:
-        return virtual_time[0]
-
-    async def virtual_sleep(delay: float) -> None:
-        sleep_delays.append(delay)
-        virtual_time[0] += delay
-        await asyncio.sleep(0)
-
-    report = await run_replay(
-        profile,
-        ReplayOptions(time_scale=1, monotonic_fn=virtual_monotonic, async_sleep=virtual_sleep),
-    )
+    report = await run_replay(profile, schedule.options())
     events = scheduled_events(profile)
     oracle = summary_digest(apply_events(initial_pods(profile), events))
 
@@ -664,10 +698,12 @@ async def test_replay_slow_logs_do_not_block_resource_progress() -> None:
     assert report.api.reconnects == 0
     assert report.failures_injected["slow_logs"] == 1
     # A slow log stream adds no extra sleep to the resource schedule.
-    assert sum(sleep_delays) == pytest.approx(events[-1].offset_seconds)
+    assert sum(schedule.delays) == pytest.approx(events[-1].offset_seconds)
 
 
-async def test_replay_does_not_re_mark_bursts_after_a_watch_reconnect() -> None:
+async def test_replay_does_not_re_mark_bursts_after_a_watch_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A reconnect must not replay burst boundaries that already passed.
 
     `_ReplaySource` restarts at `_next_event_index` on a new generation. With
@@ -689,7 +725,7 @@ async def test_replay_does_not_re_mark_bursts_after_a_watch_reconnect() -> None:
         failures=(FailureInjection(kind="gone", at_event=50),),
     )
 
-    report = await run_replay(profile, ReplayOptions(time_scale=0))
+    report = await run_replay(profile, sample_paced_schedule(monkeypatch).options())
 
     assert report.api.reconnects == 1  # the schedule really was interrupted
     assert len(report.phases.post_burst_drain_seconds) == len(profile.bursts)

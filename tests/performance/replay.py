@@ -253,7 +253,6 @@ class _ReplaySource:
         churn_ready: asyncio.Event,
         churn_start: asyncio.Event,
         churn_done: asyncio.Event,
-        input_sampling_done: asyncio.Event,
         failures: dict[int, FailureInjection],
     ) -> None:
         self._profile = profile
@@ -263,7 +262,6 @@ class _ReplaySource:
         self._churn_ready = churn_ready
         self._churn_start = churn_start
         self._churn_done = churn_done
-        self._input_sampling_done = input_sampling_done
         self._failures = failures
         self._generation = 0
         self._next_event_index = 0
@@ -409,8 +407,6 @@ class _ReplaySource:
             yield (event.event_type, event.summary)
             self.emitted_events += 1
             self._next_event_index = i + 1
-            if i == 0 and len(self._events) > 1:
-                await self._input_sampling_done.wait()
 
         self._churn_done.set()
         # Stay open like a real watch stream so WatchManager does not reconnect.
@@ -656,7 +652,6 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
     churn_ready = asyncio.Event()
     churn_start = asyncio.Event()
     churn_done = asyncio.Event()
-    input_sampling_done = asyncio.Event()
 
     source = _ReplaySource(
         profile,
@@ -666,7 +661,6 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
         churn_ready,
         churn_start,
         churn_done,
-        input_sampling_done,
         failures,
     )
     watch_manager = WatchManager(store, source, retry_delay=0.0)
@@ -731,7 +725,6 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                     and source.terminal_failure is None
                 ),
             )
-            input_sampling_done.set()
 
             # Wait for all events to be emitted and all renders to complete.
             await wait_for(
@@ -752,7 +745,6 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                     table, cast(Iterable[PodSummary], store.get("pods", ALL_NAMESPACES))
                 )
     finally:
-        input_sampling_done.set()
         process_samples = await sampler.stop()
         await watch_manager.stop_all()
 
