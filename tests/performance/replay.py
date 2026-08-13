@@ -134,6 +134,10 @@ class ReplayOptions:
         time_scale: Multiplier applied to every scheduled-event sleep.
             0 skips all sleeps (fastest); 1.0 replays at real time.
         sample_interval: Seconds between process-memory samples.
+        input_ack_timeout: Seconds the cursor probe waits for the table to
+            acknowledge an injected key before failing the run. Bounded so a
+            saturated client aborts with a named timeout instead of hanging;
+            raise it for a slow remote cluster, lower it to fail fast.
         monotonic_fn: Monotonic clock callable injected for testing.
             Production runs leave this `None` (uses `time.monotonic`).
         async_sleep: Async sleep callable injected for testing.
@@ -145,6 +149,7 @@ class ReplayOptions:
 
     time_scale: float = 1.0
     sample_interval: float = 1.0
+    input_ack_timeout: float = 5.0
     monotonic_fn: Callable[[], float] | None = field(default=None, hash=False, compare=False)
     async_sleep: Callable[[float], Awaitable[None]] | None = field(
         default=None, hash=False, compare=False
@@ -625,9 +630,17 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                 )
             churn_started_before_input = source.emitted_events > 0
             if source.terminal_failure is None:
-                recorder.record_input(await measure_cursor_input(pilot, table, "down"))
+                recorder.record_input(
+                    await measure_cursor_input(
+                        pilot, table, "down", timeout=options.input_ack_timeout
+                    )
+                )
             if source.terminal_failure is None:
-                recorder.record_input(await measure_cursor_input(pilot, table, "up"))
+                recorder.record_input(
+                    await measure_cursor_input(
+                        pilot, table, "up", timeout=options.input_ack_timeout
+                    )
+                )
 
             # Wait for all events to be emitted and all renders to complete.
             await wait_for(

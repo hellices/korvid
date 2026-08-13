@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from time import monotonic
+from typing import cast
 
 import pytest
 
@@ -18,6 +19,7 @@ from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.ui.messages import ResourcesUpdated
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.performance import replay as replay_module
 from tests.performance.metrics import BenchmarkRecorder, RunManifest
 from tests.performance.profile import Burst, FailureInjection, WorkloadProfile
 from tests.performance.replay import (
@@ -83,6 +85,43 @@ async def test_measure_cursor_input_times_out_when_cursor_cannot_move() -> None:
 
         with pytest.raises(WaitTimeout, match=r"down.*row 0.*0\.01s"):
             await measure_cursor_input(pilot, table, "down", timeout=0.01)
+
+
+def test_replay_options_default_the_input_ack_timeout() -> None:
+    assert ReplayOptions().input_ack_timeout == 5.0
+    assert ReplayOptions(input_ack_timeout=0.25).input_ack_timeout == 0.25
+
+
+async def test_replay_passes_the_configured_input_ack_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cursor probe's bound is a run knob, not a constant buried in the
+    harness: a slower cluster or a deliberately short abort budget must reach
+    `measure_cursor_input` from the same options object the run was given."""
+    timeouts: list[float] = []
+    original = replay_module.measure_cursor_input
+
+    async def spy(*args: object, **kwargs: object) -> float:
+        timeouts.append(cast(float, kwargs["timeout"]))
+        return await original(*args, **kwargs)  # type: ignore[arg-type]  # test spy
+
+    monkeypatch.setattr(replay_module, "measure_cursor_input", spy)
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-input-ack",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=10,
+        duration_seconds=1,
+        bursts=(),
+        failures=(),
+    )
+
+    report = await run_replay(profile, ReplayOptions(time_scale=0, input_ack_timeout=2.5))
+
+    assert timeouts == [2.5, 2.5]
+    assert report.input_latency.count == 2
 
 
 async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:

@@ -1080,6 +1080,37 @@ async def test_run_live_replay_full_happy_path_matches_cluster_digest() -> None:
     assert report.churn_started_before_input
 
 
+async def test_churn_failed_reports_only_a_finished_task_that_did_not_succeed() -> None:
+    """One predicate, used before each cursor sample: a churn task that is
+    still running (or finished cleanly) must not suppress the measurement,
+    while a crashed or cancelled one must."""
+
+    async def never() -> None:
+        await asyncio.Event().wait()
+
+    async def fine() -> None:
+        return None
+
+    async def boom() -> None:
+        raise RuntimeError("churn died")
+
+    running = asyncio.create_task(never())
+    assert live._churn_failed(running) is False
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert live._churn_failed(running) is True
+
+    finished = asyncio.create_task(fine())
+    await finished
+    assert live._churn_failed(finished) is False
+
+    crashed = asyncio.create_task(boom())
+    with pytest.raises(RuntimeError, match="churn died"):
+        await crashed
+    assert live._churn_failed(crashed) is True
+
+
 async def test_run_live_replay_aborts_and_still_closes_clients_on_guard_failure() -> None:
     """A guard failure mid-churn (a real API server's `test` op rejection)
     must propagate as `ApiStatusError` *and* still close the harness/app-path

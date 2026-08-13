@@ -1089,6 +1089,18 @@ async def drive_live_churn(
         raise _first_error(group_error) from None
 
 
+def _churn_failed(task: asyncio.Task[None]) -> bool:
+    """Whether the churn task has already finished *badly*.
+
+    A cursor sample taken after churn crashed or was cancelled would time
+    out on a table nothing is updating, and record that timeout as input
+    latency. A task that is still running, or that finished cleanly, is not
+    a reason to skip the measurement. Named once so both samples ask the
+    same question.
+    """
+    return task.done() and (task.cancelled() or task.exception() is not None)
+
+
 async def _cancel_and_drain(task: asyncio.Task[None]) -> None:
     """Cancel *task* and wait for it to finish before any client is closed.
 
@@ -1380,14 +1392,18 @@ async def _run_measured_window(
                 )
             state.churn_started_before_input = state.progress.started > 0
 
-            if not (
-                churn_task.done() and (churn_task.cancelled() or churn_task.exception() is not None)
-            ):
-                recorder.record_input(await measure_cursor_input(pilot, table, "down", now=now))
-            if not (
-                churn_task.done() and (churn_task.cancelled() or churn_task.exception() is not None)
-            ):
-                recorder.record_input(await measure_cursor_input(pilot, table, "up", now=now))
+            if not _churn_failed(churn_task):
+                recorder.record_input(
+                    await measure_cursor_input(
+                        pilot, table, "down", now=now, timeout=options.input_ack_timeout
+                    )
+                )
+            if not _churn_failed(churn_task):
+                recorder.record_input(
+                    await measure_cursor_input(
+                        pilot, table, "up", now=now, timeout=options.input_ack_timeout
+                    )
+                )
 
             # UI-at-scale evidence: drive the scoped scenarios (filter, sort,
             # namespace switch, split pane, describe, multi-log) through the
