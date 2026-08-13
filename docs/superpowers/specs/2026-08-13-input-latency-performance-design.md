@@ -110,9 +110,15 @@ Replay and live qualification will both use this helper. It will not call
 sample is active. The probe remains test-only; production input handling is
 unchanged.
 
-The down/up pair remains the input sample so the selected resource returns to
-its original position. The initial table has 1,000 rows, so both movements are
-well-defined.
+### Sample size
+
+The `down`/`up` pair remains the input sample unit so the selected resource
+returns to its original position. The initial table has 1,000 rows, so both
+movements are well-defined. The number of pairs is a run knob
+(`ReplayOptions.input_sample_pairs`, `--input-sample-pairs` on both commands),
+defaulting to 25 pairs — 50 samples. A percentile over two samples is a point
+observation, not a percentile; the default is large enough for a usable p95
+while staying short next to the churn schedule it runs inside.
 
 ### Metrics and diagnostic overhead
 
@@ -122,34 +128,27 @@ artifacts rather than the acceptance environment for the 100 ms input budget:
 `cProfile` instruments every Python call and materially changes compositor
 cost. Before/after diagnostic profiles must use the same instrumentation.
 
-### K9s comparison
+### Acceptance workload
 
-The exact comparison requires the dedicated `aks-korvid-contract-test` cluster,
-which is not currently present in the active Azure subscription and whose
-kubeconfig endpoint no longer resolves. The installed comparator is K9s
-0.50.18.
-
-When the cluster is restored, run at least three alternating Korvid/K9s trials
-on the same host and terminal dimensions against the versioned
-`aks-live-1k.json` schedule. Use isolated K9s state directories, `--readonly`,
-all namespaces, the Pods view, and a fixed two-second refresh. Run the existing
-guarded mutation driver externally so neither client owns workload generation.
-
-Stock K9s cannot expose informer-receipt-to-draw timestamps, rendered-update
-digests, or backlog depth. A valid direct comparison therefore covers common
-observable metrics only: startup, cursor acknowledgement, process CPU, RSS,
-achieved churn, and final cluster state. Event-to-render comparison requires an
-ephemeral instrumented K9s build and must not be inferred from PTY output.
+The acceptance result is measured against
+`tests/performance/profiles/steady-24eps-1k.json`: 1,000 Pods across 20
+namespaces, 30 seconds of burst-free churn at 24 events/s, seed 186. It is
+committed to the repository so the published number is reproducible by anyone,
+and it is deliberately burst-free and failure-free — the cursor probe measures
+interaction under steady churn.
 
 ## Error handling
 
 - Key injection fails explicitly if no active driver exists.
 - Cursor acknowledgement uses a monotonic deadline and names the key and
   expected row in its timeout.
+- A non-positive sample-pair count is rejected at both harness entry points,
+  before any cluster identity, ownership, or mutation work, and by both CLI
+  parsers.
 - The live workload keeps all existing identity, ownership, UID, and guarded
   mutation checks.
-- An unavailable K9s target is reported as a blocked comparison, never as a
-  passing or estimated result.
+- An unmeasured live result is reported as unmeasured, never as a passing or
+  estimated one.
 
 ## Testing and verification
 
@@ -161,18 +160,22 @@ ephemeral instrumented K9s build and must not be inferred from PTY output.
 3. Preserve tests for deletion above the cursor, deletion of the selected row,
    sorting, and viewport restoration.
 4. Add input-probe tests for down/up acknowledgement and timeout behavior.
-5. Run the targeted resource-table and performance replay/live tests.
-6. Run Ruff and mypy on changed files; run Tach only if imports cross package
+5. Add tests that the sample-pair count and acknowledgement timeout are
+   validated and propagated by both CLI commands into both harnesses.
+6. Add a profile test pinning the committed acceptance workload.
+7. Run the targeted resource-table and performance replay/live tests.
+8. Run Ruff and mypy on changed files; run Tach only if imports cross package
    boundaries.
-7. Rerun the 1,000-Pod, 24-events/second replay without `cProfile` for the input
+9. Rerun the 1,000-Pod, 24-events/second replay without `cProfile` for the input
    acceptance result and with `cProfile` for an apples-to-apples CPU profile.
-8. Confirm zero dropped updates, a matching final digest, and no event-latency
-   regression.
+10. Confirm zero dropped updates, a matching final digest, and no event-latency
+    regression.
 
 ## Non-goals
 
 - Replacing Textual's compositor or `DataTable`.
 - Introducing a global render frame-rate cap.
-- Claiming an exact K9s event-to-render result from stock K9s.
+- Publishing an unverified live cursor-input result, or inferring one from a
+  deterministic replay.
 - Provisioning or mutating an Azure cluster that fails the existing live-run
   identity and ownership gates.

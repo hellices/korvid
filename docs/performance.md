@@ -45,8 +45,8 @@ waits, each bounded at one second. Under this workload the client is
 CPU-saturated, so both waits run to their one-second ceiling regardless of how
 fast the cursor actually moved: the numbers are the test driver's quiescence
 heuristic plus a ~2 s constant, not user-visible input latency. They are
-retained here only to invalidate them; do not compare them to any budget, to
-K9s, or to the corrected figures below.
+retained here only to invalidate them; do not compare them to any budget or to
+any corrected figure.
 
 **The corrected metric** — everything reported as cursor-input latency from
 this point on — is the interval from injecting one key event into the running
@@ -54,7 +54,10 @@ app to the `ResourceTable` cursor row being observed on its new index. It is a
 state acknowledgement, not a terminal paint: it excludes the emulator's own
 draw, and it excludes every driver idle heuristic. It is emitted as
 `latency.input` in the metrics JSON and as "Input latency p95 (key injection to
-cursor-row acknowledgement)" in the markdown report.
+cursor-row acknowledgement)" in the markdown report. The probe takes
+`--input-sample-pairs` `down`/`up` round trips (25 pairs — 50 samples — by
+default, each pair returning the cursor to its original row), so the reported
+percentile is a percentile rather than a point observation.
 
 Supporting numbers: event-to-render p50 266 → 156 ms, p99 659 → 356 ms, max
 1,628 → 714 ms; max backlog depth 42 → 39; achieved churn 23.18 → 23.996 ev/s
@@ -85,36 +88,41 @@ mutates it, so a shared instance would corrupt unrelated rows.
 
 ## Corrected deterministic 1,000-pod replay
 
-Local, deterministic replay of the same 1,000-pod / 24-events-per-second
-workload on macOS arm64 / Python 3.12 / 10 cores, using the corrected cursor
-probe. This is a replay, not a cluster run: it exercises the real app, watch
-manager, store and table, but not the API server, the watch decoder, or a real
-terminal, so it does not replace the live table above.
+The corrected probe has been exercised against a local, deterministic replay of
+the 1,000-pod / 24-events-per-second workload committed as
+[`tests/performance/profiles/steady-24eps-1k.json`](../tests/performance/profiles/steady-24eps-1k.json)
+(1,000 Pods across 20 namespaces, 30 seconds of burst-free churn at 24
+events/s). That replay exercises the real app, watch manager, store and table,
+but not the API server, the watch decoder, or a real terminal, so it can never
+replace the live table above.
 
-| Metric | Baseline replay | Corrected replay |
-|---|---:|---:|
-| Cursor-input p95 | 2,206 ms (invalid, `Pilot.press`) | **7.7 ms** (n=2) |
-| Event-to-render p95 | 156 ms | 5.3 ms |
-| Sampled CPU max | 99.2% | 61.5% |
-| Peak RSS | 187 MiB | 133 MiB |
-| LIST to populated table | 593 ms | 213 ms |
-| Process start to interactive | 922 ms | 330 ms |
-| Final digest match | true | true |
-| Dropped updates | 0 | 0 |
+Reproduce it with:
 
-The same run under `cProfile` reports 76.7 ms cursor-input p95 and 98.2% CPU
-max: profiling instruments every Python call and materially changes compositor
-cost, so profiles are diagnostic artifacts only, never the acceptance
-environment for the 100 ms input budget. Before/after profiles must use
-identical instrumentation to be comparable.
+```bash
+python -m tests.performance.cli replay \
+  --profile tests/performance/profiles/steady-24eps-1k.json \
+  --json <artifact-dir>/steady-24eps-1k.json \
+  --out <artifact-dir>/steady-24eps-1k.md
+```
 
-That corrected replay p95 is computed from exactly two samples — one `down`
-and one `up`. It is preliminary acceptance-smoke evidence that the harness now
-measures state acknowledgement instead of `Pilot.press()` idle waits, not a
-statistically robust long-run percentile.
+What that replay establishes is qualitative and holds across runs: the digest
+matches, no update is dropped, and the corrected cursor probe now reports a
+figure in the single-digit-millisecond range instead of the ~2.2 s
+`Pilot.press` artifact it replaced. **No point estimate from it is published
+here.** Successive local runs on an unpinned developer machine differ, and
+quoting one run's percentile as *the* number is how the withdrawn figures above
+came to be trusted in the first place. The authoritative numbers are the live
+ones, and the live cursor-input result has not been re-measured with the
+corrected probe yet (see "Known limits").
 
-Two production changes produced the difference, both in the in-place table
-diff: an unchanged cursor is no longer re-seated after every watch tick (a
+Profiled runs are not comparable to unprofiled ones: `cProfile` instruments
+every Python call and materially changes compositor cost, which alone moves the
+measured cursor figure by an order of magnitude. Profiles are diagnostic
+artifacts only, never the acceptance environment for the 100 ms input budget,
+and before/after profiles must use identical instrumentation to be comparable.
+
+Two production changes drive the difference, both in the in-place table diff: an
+unchanged cursor is no longer re-seated after every watch tick (a
 `move_cursor()` to the same coordinate is repaint work), and a batch of cell
 updates requests at most one repaint, and none at all when no changed row
 intersects the painted viewport. Off-screen rows still update their data
@@ -123,23 +131,12 @@ value — and the row repaints as soon as it scrolls into view.
 
 ## Known limits
 
-**The live cursor-input result is unmeasured, not slow.** The only live
-figures ever taken (2,311 ms / 2,447 ms) came from the invalid `Pilot.press`
-probe described above and have been withdrawn. The corrected probe currently
-has a deterministic replay result only. Rerunning it live — and the exact K9s
-comparison — is blocked: the dedicated `aks-korvid-contract-test` cluster is
-absent from the active Azure subscription (`ResourceGroupNotFound`) and its
-kubeconfig endpoint no longer resolves. No live cursor number is estimated
-from the replay, and none is inferred from K9s.
-
-**A valid K9s comparison covers common observables only.** The installed
-comparator is K9s 0.50.18. Stock K9s cannot expose informer-receipt-to-draw
-timestamps, rendered-update digests, or backlog depth, so a direct comparison
-is limited to startup, cursor acknowledgement, process CPU, RSS, achieved
-churn, and final cluster state — run alternating trials on the same host,
-terminal size and workload schedule, with the mutation driver external to both
-clients. Event-to-render comparison would require an instrumented K9s build
-and must not be inferred from PTY output.
+**The live cursor-input result is unmeasured, not slow.** The only live figures
+ever taken (2,311 ms / 2,447 ms) came from the invalid `Pilot.press` probe
+described above and have been withdrawn. The corrected probe has a
+deterministic replay result only; no live cursor number is estimated from it.
+Until the live run is repeated, korvid makes **no claim** that the 100 ms
+cursor-input budget is met against a real cluster.
 
 **Event-to-render p95 misses its budget live, but the budget and the
 measurement do not line up.** The budget is written at 20 events/s; the live

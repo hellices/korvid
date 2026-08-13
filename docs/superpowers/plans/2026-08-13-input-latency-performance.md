@@ -16,7 +16,9 @@
 - Use a bounded monotonic timeout and fail explicitly if no test driver exists.
 - Keep live cluster identity, ownership, UID, and guarded-mutation gates unchanged.
 - Acceptance uses the unprofiled replay; `cProfile` remains diagnostic because it materially changes compositor cost.
-- Do not claim a stock-K9s event-to-render metric.
+- Do not publish an unverified live result, and do not infer one from a deterministic replay.
+- The acceptance workload is a committed profile, and every documented command uses repository-relative profile paths and a configurable `<artifact-dir>` for outputs.
+- The reported input percentile rests on a configurable number of `down`/`up` sample pairs, never on a single pair.
 
 ## File Structure
 
@@ -26,6 +28,8 @@
 - Modify `tests/performance/live.py`: use the same probe in guarded live replay.
 - Modify `tests/performance/test_replay.py`: test successful acknowledgement and bounded timeout.
 - Verify `tests/performance/test_live.py`: preserve the injected-clock contract.
+- Add `tests/performance/profiles/steady-24eps-1k.json`: the committed acceptance workload the published result is measured against.
+- Modify `tests/performance/cli.py`: expose and validate the cursor-probe knobs on both `replay` and `replay-live`.
 
 ---
 
@@ -302,15 +306,15 @@ git commit -m "fix: measure direct cursor acknowledgement" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
 
-### Task 3: Requalify and record comparison limits
+### Task 3: Requalify the corrected measurement
 
 **Files:**
 - Verify only: no repository file changes required.
-- Artifacts: `/Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/`
+- Artifacts: `<artifact-dir>/`
 
 **Interfaces:**
 - Consumes: the committed production and harness changes from Tasks 1 and 2.
-- Produces: reproducible before/after JSON, Markdown, and `pstats` evidence plus an explicit K9s execution/blocker record.
+- Produces: reproducible before/after JSON, Markdown, and `pstats` evidence from the committed acceptance profile.
 
 - [ ] **Step 1: Run the unprofiled acceptance replay**
 
@@ -318,9 +322,9 @@ Run:
 
 ```bash
 .venv/bin/python -m tests.performance.cli replay \
-  --profile /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/steady-24eps-1k.json \
-  --json /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/optimized-24eps.json \
-  --out /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/optimized-24eps.md
+  --profile tests/performance/profiles/steady-24eps-1k.json \
+  --json <artifact-dir>/optimized-24eps.json \
+  --out <artifact-dir>/optimized-24eps.md
 ```
 
 Expected: digest match is `true`, dropped updates are `0`, and cursor-input p95 is below `0.100s`.
@@ -331,11 +335,11 @@ Run:
 
 ```bash
 .venv/bin/python -m tests.performance.cli replay \
-  --profile /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/steady-24eps-1k.json \
-  --json /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/optimized-profiled-24eps.json \
-  --out /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/optimized-profiled-24eps.md \
-  --cpu-profile /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/optimized-24eps.pstats \
-  --allocation-snapshot /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/optimized-24eps-alloc.txt
+  --profile tests/performance/profiles/steady-24eps-1k.json \
+  --json <artifact-dir>/optimized-profiled-24eps.json \
+  --out <artifact-dir>/optimized-profiled-24eps.md \
+  --cpu-profile <artifact-dir>/optimized-24eps.pstats \
+  --allocation-snapshot <artifact-dir>/optimized-24eps-alloc.txt
 ```
 
 Expected: digest match is `true`, dropped updates are `0`, and the corrected profiled cursor metric no longer contains the two one-second Pilot waits.
@@ -366,22 +370,7 @@ Run:
 
 Expected: all commands exit 0.
 
-- [ ] **Step 4: Verify the K9s comparator and live-target blocker**
-
-Run:
-
-```bash
-/opt/homebrew/bin/k9s version --short
-kubectl config get-contexts aks-korvid-contract-test
-az aks show \
-  --resource-group rg-korvid-contract-test \
-  --name aks-korvid-contract-test \
-  --query '{id:id,state:powerState.code}' -o json
-```
-
-Expected in the current environment: K9s reports `0.50.18`; the kubeconfig context exists but its endpoint does not resolve; Azure reports that the dedicated cluster/resource group is absent. Record the direct K9s comparison as blocked, not passed or estimated.
-
-- [ ] **Step 5: Review final repository state**
+- [ ] **Step 4: Review final repository state**
 
 Run:
 
@@ -448,15 +437,15 @@ cell writes.
 
 **Files:**
 - Verify only: no repository file changes required.
-- Artifacts: `/Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/`
+- Artifacts: `<artifact-dir>/`
 
 - [ ] **Step 1: Run the final unprofiled acceptance replay**
 
 ```bash
 .venv/bin/python -m tests.performance.cli replay \
-  --profile /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/steady-24eps-1k.json \
-  --json /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-24eps.json \
-  --out /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-24eps.md
+  --profile tests/performance/profiles/steady-24eps-1k.json \
+  --json <artifact-dir>/final-24eps.json \
+  --out <artifact-dir>/final-24eps.md
 ```
 
 Expected: cursor-input p95 is below `0.100s`, digest match is `true`, and
@@ -466,11 +455,11 @@ dropped updates are `0`.
 
 ```bash
 .venv/bin/python -m tests.performance.cli replay \
-  --profile /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/steady-24eps-1k.json \
-  --json /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-profiled-24eps.json \
-  --out /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-profiled-24eps.md \
-  --cpu-profile /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-24eps.pstats \
-  --allocation-snapshot /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-24eps-alloc.txt
+  --profile tests/performance/profiles/steady-24eps-1k.json \
+  --json <artifact-dir>/final-profiled-24eps.json \
+  --out <artifact-dir>/final-profiled-24eps.md \
+  --cpu-profile <artifact-dir>/final-24eps.pstats \
+  --allocation-snapshot <artifact-dir>/final-24eps-alloc.txt
 ```
 
 Expected: digest match is `true`, dropped updates are `0`, and the corrected
@@ -506,18 +495,53 @@ cursor metric contains no Pilot idle waits.
 
 Expected: every command exits `0`.
 
-- [ ] **Step 4: Reconfirm the K9s blocker without mutating infrastructure**
+### Task 6: Make the acceptance measurement reproducible and statistically usable
+
+**Files:**
+- Add: `tests/performance/profiles/steady-24eps-1k.json`
+- Modify: `tests/performance/replay.py`, `tests/performance/live.py`, `tests/performance/cli.py`
+- Test: `tests/performance/test_profile.py`, `tests/performance/test_cli.py`, `tests/performance/test_replay.py`, `tests/performance/test_live.py`
+- Docs: `docs/performance.md`, `README.md`, and this plan plus its design spec
+
+**Interfaces:**
+- Produces: `ReplayOptions.input_sample_pairs` (positive int, default 25) and
+  `validate_input_sample_pairs(options)`, plus
+  `sample_cursor_input(pilot, table, recorder, *, pairs, now, timeout, aborted)`
+  shared by both harnesses.
+- Produces: `--input-ack-timeout FLOAT` and `--input-sample-pairs INT` on both
+  `replay` and `replay-live`, validated as positive and forwarded into both
+  `ReplayOptions` constructions.
+- Preserves: cursor identity (each pair is a self-cancelling `down`/`up` round
+  trip), the abort predicate before every sample, live identity/ownership
+  gates, and artifact validation.
+
+- [ ] **Step 1: Commit the acceptance profile**
+
+The published input-latency result must be reproducible from the repository, so
+the workload it is measured against is versioned rather than session-local:
+schema 1, id `steady-24eps-1k`, seed 186, 1,000 objects, 20 namespaces, 24
+events/s, 30 seconds, no bursts and no failure injections.
+
+- [ ] **Step 2: Replace the n=2 input sample**
+
+Two samples cannot support a percentile. The probe takes
+`options.input_sample_pairs` `down`/`up` pairs, re-asking the abort predicate
+before each individual sample, and every pair returns the cursor to its
+original row so the row, freshness, and digest checks that follow are
+unaffected by the count.
+
+- [ ] **Step 3: Verify**
 
 ```bash
-/opt/homebrew/bin/k9s version --short
-kubectl config get-contexts aks-korvid-contract-test
-az aks show \
-  --resource-group rg-korvid-contract-test \
-  --name aks-korvid-contract-test \
-  --query '{id:id,state:powerState.code}' -o json
-kubectl --context aks-korvid-contract-test get namespaces --request-timeout=5s
+.venv/bin/python -m pytest -p no:tach \
+  tests/performance/test_profile.py \
+  tests/performance/test_cli.py \
+  tests/performance/test_replay.py \
+  tests/performance/test_live.py \
+  tests/performance/test_metrics.py -q
+.venv/bin/ruff check tests/performance/ src/korvid/
+.venv/bin/ruff format --check tests/performance/ src/korvid/
+.venv/bin/mypy src/korvid tests/performance
 ```
 
-Expected in the current environment: K9s is `0.50.18`, while the AKS resource
-group is absent and the kubeconfig endpoint does not resolve. Record the direct
-comparison as blocked, not passed or estimated.
+Expected: every command exits `0`.
