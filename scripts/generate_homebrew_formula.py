@@ -97,13 +97,12 @@ def resolve_resources(lock_path: Path, extras: tuple[str, ...] = DEFAULT_EXTRAS)
             continue
         visited.add((name, extra))
         seen.add(name)
+        # An extra adds dependencies, it does not replace them:
+        # `textual` needs `markdown-it-py[linkify]`, which means
+        # markdown-it-py's own requirements *and* `linkify-it-py`.
+        edges = list(package.get("dependencies", []))
         if extra:
-            # An extra requested on an edge adds dependencies without
-            # adding a package: `textual` needs `markdown-it-py[linkify]`,
-            # and `linkify-it-py` is reachable no other way.
-            edges = package.get("optional-dependencies", {}).get(extra, [])
-        else:
-            edges = package.get("dependencies", [])
+            edges += package.get("optional-dependencies", {}).get(extra, [])
         pending.extend(_reachable(edges))
 
     resources = []

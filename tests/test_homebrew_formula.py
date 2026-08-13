@@ -359,3 +359,52 @@ def test_an_unchanged_branch_still_reaches_the_pull_request() -> None:
     assert commands.index("git diff --cached --quiet") < commands.index("gh pr list"), (
         "the diff check should precede the pull-request lookup"
     )
+
+
+def test_an_extra_augments_a_package_rather_than_replacing_it(tmp_path: Path) -> None:
+    """`foo[bar]` means foo *and* bar, not bar instead of foo.
+
+    A package reached only through an extra must still contribute its
+    ordinary dependencies. The real lock hides this - `rich` also reaches
+    `markdown-it-py` without the extra, so its plain edges get followed
+    anyway - hence a fixture where the only path is the extra.
+    """
+    lock = tmp_path / "uv.lock"
+    digest = "a" * 64
+    lock.write_text(
+        f"""
+version = 1
+
+[[package]]
+name = "korvid"
+version = "0.0.0"
+source = {{ editable = "." }}
+dependencies = [{{ name = "solo", extra = ["fancy"] }}]
+
+[[package]]
+name = "solo"
+version = "1.0"
+source = {{ registry = "https://pypi.org/simple" }}
+dependencies = [{{ name = "ordinary" }}]
+sdist = {{ url = "https://files.pythonhosted.org/solo.tar.gz", hash = "sha256:{digest}" }}
+
+[package.optional-dependencies]
+fancy = [{{ name = "extraonly" }}]
+
+[[package]]
+name = "ordinary"
+version = "1.0"
+source = {{ registry = "https://pypi.org/simple" }}
+sdist = {{ url = "https://files.pythonhosted.org/ordinary.tar.gz", hash = "sha256:{digest}" }}
+
+[[package]]
+name = "extraonly"
+version = "1.0"
+source = {{ registry = "https://pypi.org/simple" }}
+sdist = {{ url = "https://files.pythonhosted.org/extraonly.tar.gz", hash = "sha256:{digest}" }}
+""",
+        encoding="utf-8",
+    )
+    names = {r.name for r in resolve_resources(lock, extras=())}
+    assert "extraonly" in names, "the extra's own dependency is missing"
+    assert "ordinary" in names, "an extra replaced the package's normal dependencies"
