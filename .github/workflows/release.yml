@@ -522,3 +522,113 @@ jobs:
             exit 1
           fi
           gh release edit "$TAG" --repo "$REPO" --draft=false --latest
+
+  homebrew-formula:
+    # The formula is generated from the uv.lock the release was tested
+    # against, so it can only be produced after that source is published.
+    needs: [verify, publish-pypi, finalize-github-release]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Revalidate the remote tag before generating the formula
+        env:
+          TAG: ${{ github.ref_name }}
+          EXPECTED_COMMIT: ${{ needs.verify.outputs.source_commit }}
+        run: |
+          git fetch --force origin \
+            "+refs/tags/$TAG:refs/tags/$TAG" \
+            "refs/heads/main:refs/remotes/origin/main"
+          python scripts/release/check_source.py "$TAG" origin/main \
+            --expected-commit "$EXPECTED_COMMIT"
+      - name: Generate korvid.rb from the published sdist and this tag's lock
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python scripts/generate_homebrew_formula.py \
+            --version "${TAG#v}" --lock uv.lock -o korvid.rb
+          ruby -c korvid.rb
+      - name: Attach the formula to the release
+        # Uploaded before any attempt to reach the tap: a missing token
+        # must not cost the artifact, which is reproducible only from this
+        # tag's lock.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: gh release upload "$TAG" korvid.rb --repo "$REPO" --clobber
+      - name: Open the formula bump on the tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not set, so the tap cannot be updated"
+            echo "from here - GITHUB_TOKEN is scoped to this repository alone."
+            echo
+            echo "The formula is attached to the release and is correct."
+            echo "Finish by hand:"
+            printf '  gh release download %q --repo %q --pattern korvid.rb\n' \
+              "$TAG" "$REPO"
+            echo "  # then commit it to hellices/homebrew-korvid as Formula/korvid.rb"
+            exit 0
+          fi
+          version="${TAG#v}"
+          branch="bump-korvid-${version}"
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/hellices/homebrew-korvid.git" tap
+          cd tap
+          # A shallow clone of one branch has no origin/main to compare
+          # the resumed branch against.
+          git fetch --depth 1 origin main:refs/remotes/origin/main
+          # Resume rather than restart. A rerun happens because something
+          # after the push failed, and branching from main again would be
+          # rejected as non-fast-forward before reaching the retry.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch --depth 1 origin "$branch:refs/remotes/origin/$branch"
+            git switch -c "$branch" "origin/$branch"
+          else
+            git switch -c "$branch"
+          fi
+          mkdir -p Formula
+          cp ../korvid.rb Formula/korvid.rb
+          # Staged before comparing: `git diff` and `commit -a` both ignore
+          # untracked files, so a tap that has no formula yet - a fresh tap,
+          # or one recovering from a deletion - would look up to date and
+          # commit nothing.
+          git add Formula/korvid.rb
+          if git diff --cached --quiet; then
+            # Nothing to commit means one of two very different things.
+            # Compared against main - not against the branch - because on
+            # the rerun this path exists for, the branch already carries
+            # the formula and only main can say whether it landed.
+            if git diff --quiet "origin/main" -- Formula/korvid.rb; then
+              echo "the tap already carries this formula"
+              exit 0
+            fi
+            echo "the branch is already up to date; checking the pull request"
+          else
+            git -c user.name=github-actions[bot] \
+                -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+                commit -m "korvid ${version}"
+          fi
+          # The lease is what keeps "resume" from meaning "overwrite":
+          # a branch someone edited by hand rejects the push instead of
+          # losing the edit.
+          git push --force-with-lease origin "$branch"
+          if [ -n "$(gh pr list --repo hellices/homebrew-korvid \
+                       --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            echo "the bump is already open; the push above updated it"
+            exit 0
+          fi
+          gh pr create --repo hellices/homebrew-korvid \
+            --base main --head "$branch" \
+            --title "korvid ${version}" \
+            --body "Generated by the korvid release workflow from the uv.lock that ${TAG} was tested against."
