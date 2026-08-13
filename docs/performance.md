@@ -141,8 +141,9 @@ value — and the row repaints as soon as it scrolls into view.
 Run `i279-20260813-1620` exercised the same checked-in
 `steady-24eps-1k` profile against the dedicated AKS cluster: 1,000 Running,
 Ready Pods across 20 namespaces, 720 guarded metadata mutations in 30 seconds,
-and 50 cursor samples while churn was active. This is a live qualification
-smoke run, not a replacement for the 31-minute endurance result above.
+and 50 cursor samples after churn dispatch began. This run predates the
+watch-receipt gate described below, so its cursor result is preliminary
+dispatch-gated evidence, not a live budget verdict.
 
 | Metric | Budget | Result | |
 |---|---:|---:|---|
@@ -152,7 +153,7 @@ smoke run, not a replacement for the 31-minute endurance result above.
 | Process start to interactive | ≤ 10 s | 1.55 s | pass |
 | Peak RSS | ≤ 512 MiB | 236 MiB | pass |
 | Achieved churn | 24 ev/s | 24.06 ev/s (720/720) | pass |
-| Cursor-input p95 | ≤ 100 ms | 7 ms (n=50) | pass |
+| Cursor-input p95 | ≤ 100 ms | 7 ms (n=50), dispatch-gated | preliminary |
 | Event-to-render p95 | ≤ 250 ms @ 20 ev/s | **n/a for this workload** | not measured |
 
 **Event-to-render was not measured by this run, and its 250 ms budget is
@@ -186,15 +187,13 @@ completion p95" — the string "Event to render" never appears in such a report.
 `latency.event_to_render` becoming nullable is why the JSON `schema_version`
 is `2`.
 
-"50 cursor samples while churn was active" means active at the *application*,
-not merely dispatched: the live harness opens its own watch on the churned
-namespaces and does not take the first cursor sample until it has recorded an
-owned `MODIFIED` event arriving on that stream. Gating on mutation dispatch
-would not do — the driver counts a mutation as started before the `PATCH` is
-awaited, so a sample taken then could land on a still-idle table and report an
-idle-input percentile as an under-churn one. If no owned watch event arrives
-within the initial-render timeout, the run fails loudly instead of publishing
-that number.
+The current harness requires activity at the *application*, not merely at the
+mutation driver: it opens its own watch and does not take the first cursor
+sample until an owned `MODIFIED` event arrives. Run `i279-20260813-1620`
+predates that gate and began sampling after mutation dispatch, which occurs
+before the `PATCH` is awaited. Its 7 ms result therefore cannot establish that
+the table was already receiving churn. A repeat under the current gate is
+required before the live cursor budget can be called passed.
 
 The driver completed all 720 requested mutations in 29.92 seconds
 (24.06 events/s), with no mutation throttles. A separate run with `cProfile`
@@ -204,11 +203,11 @@ completion p95 carries the same metadata-only caveat as above).
 
 ## Known limits
 
-**The corrected live result is a 30-second smoke qualification.** It establishes
-that the corrected cursor-input budget passes against the real API server at a
-steady 24 events/s, but it does not establish long-session memory slope,
-credential refresh, or burst-drain behavior. The 31-minute endurance run has not
-yet been repeated with the corrected input probe and current render path.
+**The corrected live cursor budget remains unqualified.** The 30-second run
+establishes cluster topology, achieved churn, digest, drops, startup, and memory,
+but its cursor samples were dispatch-gated. It must be repeated with the current
+watch-receipt gate. The 31-minute endurance run also has not been repeated with
+the corrected input probe and current render path.
 
 **Event-to-render is unqualified live.** The live churn workload is
 metadata-only and changes no rendered cell, so the 250 ms budget has no live
