@@ -237,11 +237,6 @@ class TestUrlIsParsedNotPrefixMatched:
         _, _, warnings = _load(tmp_path, {"prometheus": {"url": "https://user:hunter2@"}})
         assert not any("hunter2" in w for w in warnings)
 
-    def test_a_url_with_a_hostname_and_userinfo_is_accepted(self, tmp_path: Path) -> None:
-        """Discouraged, but the connector reports only the host."""
-        prometheus, _, _ = _load(tmp_path, {"prometheus": {"url": "https://user:pw@p.example.com"}})
-        assert isinstance(prometheus, ObservabilityBackend)
-
 
 class TestTimeoutIsFinite:
     @pytest.mark.parametrize("value", [".inf", ".nan"])
@@ -340,3 +335,61 @@ class TestMaskLabels:
         assert isinstance(loki, ObservabilityBackend)
         assert loki.mask_labels == ("tenant",)
         assert any("mask_labels" in w for w in warnings)
+
+
+class TestUrlUserinfoIsAnInlineCredential:
+    """Round-4 review: `https://user:pw@host` is a credential in config.yaml.
+
+    The HTTP client would send it as Basic auth, which is exactly the
+    inline-credential shape `token:`/`password:` are rejected for.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://user:hunter2@p.example.com",
+            "https://user@p.example.com",
+            "https://:hunter2@p.example.com",
+        ],
+    )
+    def test_a_url_carrying_a_credential_disables_the_backend(
+        self, tmp_path: Path, url: str
+    ) -> None:
+        prometheus, _, warnings = _load(tmp_path, {"prometheus": {"url": url}})
+        assert prometheus is None
+        assert any("token_env" in w for w in warnings)
+
+    def test_the_warning_does_not_echo_the_credential(self, tmp_path: Path) -> None:
+        _, _, warnings = _load(
+            tmp_path, {"prometheus": {"url": "https://user:hunter2@p.example.com"}}
+        )
+        assert not any("hunter2" in w for w in warnings)
+
+    def test_a_plain_url_is_still_accepted(self, tmp_path: Path) -> None:
+        prometheus, _, _ = _load(tmp_path, {"prometheus": {"url": "https://p.example.com/base"}})
+        assert isinstance(prometheus, ObservabilityBackend)
+
+
+class TestLabelNamesAreValidatedInConfig:
+    @pytest.mark.parametrize("name", ['app"} or {x', "app name", "app-name", "1app"])
+    def test_a_mapping_to_an_invalid_label_name_disables_the_backend(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        _, loki, warnings = _load(
+            tmp_path,
+            {"loki": {"url": "https://l.example.com", "label_mappings": {"workload": name}}},
+        )
+        assert loki is None
+        assert any("label name" in w for w in warnings)
+
+    def test_a_conventional_label_name_is_accepted(self, tmp_path: Path) -> None:
+        _, loki, _ = _load(
+            tmp_path,
+            {
+                "loki": {
+                    "url": "https://l.example.com",
+                    "label_mappings": {"workload": "k8s_app_name"},
+                }
+            },
+        )
+        assert isinstance(loki, ObservabilityBackend)

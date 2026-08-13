@@ -50,6 +50,16 @@ _SECRET_SEGMENT_TOKEN_SEQS: tuple[tuple[str, ...], ...] = tuple(
 
 _PROVIDER_SEPARATOR_RE = re.compile(r"[-_.]+")
 
+#: The Prometheus/LogQL label-name grammar. A mapped name is interpolated
+#: into a selector as an identifier, so it cannot be escaped the way a
+#: value is — it has to match the grammar or be refused.
+_LABEL_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+#: Sentinel recorded for a rejected label name, so the backend is disabled
+#: rather than quietly falling back to a default that would query the
+#: wrong label.
+_INVALID_LABEL = "\x00invalid"
+
 
 def _canonicalize_provider_name(name: str) -> str:
     """Canonicalize a provider name: lowercase, collapse [-_.] to hyphens, strip.
@@ -416,6 +426,16 @@ def _observability_url(value: Any, label: str, warnings: list[str]) -> str | Non
         # on screen.
         warnings.append(f"{label}.url: names no host — the backend is disabled")
         return None
+    if "@" in parsed.netloc:
+        # `https://user:pw@host` is an inline credential wearing a URL's
+        # clothes: the HTTP client sends it as Basic auth. Rejected for
+        # the same reason a `token:` key is (issue #193, PR #280 review).
+        warnings.append(
+            f"{label}.url: must not carry a username or password — use `token_env`"
+            f" (environment variable name) or `token_file` (path)."
+            f" The backend is disabled."
+        )
+        return None
     return url
 
 
@@ -507,6 +527,13 @@ def _observability_label_mappings(value: Any, label: str, warnings: list[str]) -
                 f"{label}.label_mappings.{scope_field}: must be a non-empty label name — ignored"
             )
             continue
+        if not _LABEL_NAME_RE.match(name):
+            warnings.append(
+                f"{label}.label_mappings.{scope_field}: {name!r} is not a usable label name"
+                f" (a label name must match [a-zA-Z_][a-zA-Z0-9_]*) — the backend is disabled"
+            )
+            mappings[scope_field] = _INVALID_LABEL
+            continue
         mappings[scope_field] = name
     return mappings
 
@@ -565,6 +592,8 @@ def _parse_observability_backend(
     url = _observability_url(value.get("url"), label, warnings)
     rejected = _observability_rejections(value, label, warnings)
     mappings = _observability_label_mappings(value.get("label_mappings"), label, warnings)
+    if _INVALID_LABEL in mappings.values():
+        return None, warnings
     collision = _colliding_label_mapping(mappings)
     if collision is not None:
         name, fields = collision

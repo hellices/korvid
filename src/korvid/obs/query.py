@@ -21,6 +21,19 @@ from korvid.obs.connector import SIGNALS, ConnectorError
 #: enough that a hostile value cannot bloat the query the backend parses.
 MAX_VALUE_CHARS = 512
 
+#: The Prometheus/LogQL label-name grammar. Names come from configuration
+#: (`label_mappings`), not from the model — but configuration is still
+#: text that lands in a selector unescaped, and a name cannot be escaped
+#: the way a value can: it is an identifier, not a string literal. So it
+#: is checked against the grammar instead (PR #280 review).
+_LABEL_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def valid_label_name(name: str) -> bool:
+    """Whether `name` is a label name both query languages accept."""
+    return bool(_LABEL_NAME.match(name))
+
+
 _ESCAPES = {
     "\\": "\\\\",
     '"': '\\"',
@@ -103,6 +116,11 @@ def escape_regex_value(value: str) -> str:
 
 
 def _validate(label: str, value: str) -> None:
+    if not valid_label_name(label):
+        raise ConnectorError(
+            "config",
+            f"{label!r} is not a usable label name; a label name must match [a-zA-Z_][a-zA-Z0-9_]*",
+        )
     if not value:
         raise ConnectorError("config", f"label {label!r} has an empty value")
     if len(value) > MAX_VALUE_CHARS:

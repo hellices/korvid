@@ -149,3 +149,32 @@ class TestBuildMetricQuery:
         query = build_metric_query("cpu", SCOPE, window_minutes=5)
         assert "[5m]" in query
         assert "[30m]" not in query
+
+
+class TestLabelNamesAreValidated:
+    """Round-4 review: a label *name* is configuration, and it was interpolated.
+
+    Values were escaped from the first commit, but `label_mappings` names
+    reach the selector verbatim, so a configured name could close the
+    selector and open another one.
+    """
+
+    def test_a_name_that_would_close_the_selector_is_refused(self) -> None:
+        with pytest.raises(ConnectorError, match="label name") as caught:
+            build_selector({'namespace="prod"} or {namespace': "x"})
+        assert caught.value.kind == "config"
+
+    @pytest.mark.parametrize(
+        "name", ['a"b', "a b", "a-b", "a.b", "1abc", "", "a}b", "a,b", "a=b", "a\nb"]
+    )
+    def test_only_the_label_grammar_is_accepted(self, name: str) -> None:
+        with pytest.raises(ConnectorError, match="label name"):
+            build_selector({name: "x"})
+
+    @pytest.mark.parametrize("name", ["namespace", "_private", "k8s_app_name", "A9"])
+    def test_a_conventional_label_name_is_accepted(self, name: str) -> None:
+        assert f'{name}="x"' in build_selector({name: "x"})
+
+    def test_a_regex_matcher_name_is_validated_too(self) -> None:
+        with pytest.raises(ConnectorError, match="label name"):
+            build_selector({"namespace": "prod"}, regex={'pod"} or up{a': "x"})

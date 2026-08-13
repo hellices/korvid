@@ -61,6 +61,15 @@ warning** rather than half-configured when its `url` is missing, is not
 `http(s)://`, or names no host — `https://user:pw@` passes a prefix check
 and has no host at all, so the URL is parsed, not prefix-matched.
 
+A `url` carrying a username or password disables the backend too: the HTTP
+client would send it as Basic auth, which is an inline credential in
+`config.yaml` wearing a URL's clothes. Use `token_env` or `token_file`.
+
+A `label_mappings` name that is not a valid label name — anything outside
+`[a-zA-Z_][a-zA-Z0-9_]*` — disables the backend. A name is an identifier in
+the query, not a string literal, so unlike a value it cannot be escaped;
+it has to match the grammar or be refused.
+
 Two scope fields mapped to the same backend label also disable the backend.
 A selector maps label to value, so `namespace: app` together with
 `workload: app` leaves one matcher and the search would silently cover
