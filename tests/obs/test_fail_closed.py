@@ -1157,3 +1157,77 @@ class TestRoundFourteenFindings:
         )
         result = await connector.query(signal="cpu", scope=QueryScope(namespace="prod"))
         assert result.series[0].value == pytest.approx(0.25)
+
+
+class TestTheScopeIsNormalisedBeforeUse:
+    """Round-15 review: an ignored scope field must not act as if it applied.
+
+    `pod` takes precedence over `workload`, so a workload supplied
+    alongside a pod constrains nothing. Treating it as a masked value
+    scrubbed matching text out of the *result* — a masked `workload`
+    label with the value `ERROR` would erase `ERROR` from every log line —
+    and the reported scope described a constraint that was never applied.
+    """
+
+    async def test_an_ignored_workload_does_not_scrub_the_log_lines(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {
+                        "resultType": "streams",
+                        "result": [{"stream": {"pod": "api-1"}, "values": [["1", "ERROR: boom"]]}],
+                    },
+                },
+            ),
+            label_mappings={"namespace": "namespace", "pod": "pod", "workload": "customer"},
+            mask_labels=frozenset({"customer"}),
+        )
+        result = await connector.search(
+            scope=QueryScope(namespace="prod", workload="ERROR", pod="api-1")
+        )
+        assert result.lines[0].line == "ERROR: boom"
+
+    async def test_an_ignored_workload_is_not_reported_as_scope(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200, json={"status": "success", "data": {"resultType": "streams", "result": []}}
+            )
+        )
+        result = await connector.search(
+            scope=QueryScope(namespace="prod", workload="api", pod="api-1")
+        )
+        assert result.scope.workload is None
+        assert result.scope.pod == "api-1"
+        assert "workload=" not in result.scope.describe()
+
+    async def test_a_workload_alone_is_still_reported(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200, json={"status": "success", "data": {"resultType": "streams", "result": []}}
+            )
+        )
+        result = await connector.search(scope=QueryScope(namespace="prod", workload="api"))
+        assert result.scope.workload == "api"
+
+    async def test_prometheus_normalises_the_scope_too(self) -> None:
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={"status": "success", "data": {"resultType": "vector", "result": []}},
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+        )
+        result = await connector.query(
+            signal="cpu", scope=QueryScope(namespace="prod", workload="api", pod="api-1")
+        )
+        assert result.scope.workload is None
+        assert 'pod="api-1"' in result.query

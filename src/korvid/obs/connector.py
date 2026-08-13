@@ -107,6 +107,21 @@ class QueryScope:
     workload: str | None = None
     pod: str | None = None
 
+    def effective(self) -> QueryScope:
+        """The scope as it will actually constrain the query.
+
+        A pod takes precedence over a workload, so a workload supplied
+        alongside one constrains nothing. Normalising once, here, keeps
+        every later use honest: the query, the reported scope and the set
+        of configured-sensitive values all describe the same thing. Left
+        un-normalised, an ignored workload named `ERROR` under a masked
+        label erased `ERROR` from every returned log line (PR #280
+        review).
+        """
+        if self.pod and self.workload:
+            return QueryScope(namespace=self.namespace, pod=self.pod)
+        return self
+
     def describe(self) -> str:
         """The scope as one header line, with every value flattened.
 

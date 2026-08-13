@@ -90,6 +90,7 @@ class PrometheusConnector(MetricsConnector):
             ConnectorError: for an unknown signal, an over-long window, an
                 unusable credential, or any transport/backend failure.
         """
+        scope = scope.effective()
         window = resolve_window(window_minutes, self._http.limits)
         unit = metric_unit(signal)
         exact, regex = scope_matchers(scope)

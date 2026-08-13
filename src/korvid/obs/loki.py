@@ -101,6 +101,7 @@ class LokiConnector(LogsConnector):
             ConnectorError: for an over-long window or limit, an unusable
                 credential, or any transport/backend failure.
         """
+        scope = scope.effective()
         window = resolve_window(window_minutes, self._http.limits)
         line_limit = resolve_limit(limit, maximum=self._http.limits.max_lines, label="lines")
         query = f"{self._selector(scope)}{build_line_filter(contains)}"
