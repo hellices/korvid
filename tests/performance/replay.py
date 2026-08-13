@@ -509,6 +509,12 @@ async def measure_cursor_input(
         expected_row = start_row + {"down": 1, "up": -1}[key]
     except KeyError as exc:
         raise ValueError("cursor input measurement supports only 'down' and 'up'") from exc
+    row_count = table.row_count
+    if not 0 <= expected_row < row_count:
+        raise ValueError(
+            f"cursor input measurement key {key!r} from start row {start_row} "
+            f"expected row {expected_row} outside valid range 0..{row_count - 1}"
+        )
     app = pilot.app
     driver = app._driver
     if driver is None:
@@ -716,6 +722,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                 table,
                 recorder,
                 pairs=options.input_sample_pairs,
+                now=options.monotonic_fn if options.monotonic_fn is not None else monotonic,
                 timeout=options.input_ack_timeout,
                 aborted=lambda: source.terminal_failure is not None,
                 incomplete=lambda: (

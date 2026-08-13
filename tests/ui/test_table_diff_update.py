@@ -266,7 +266,8 @@ async def test_visible_width_growth_requests_immediate_repaint() -> None:
 async def test_offscreen_width_growth_still_repaints() -> None:
     # Off-screen growth does not take the plain-refresh path: absorbing the
     # wider column sets `_require_update_dimensions`, and Textual's idle
-    # dimension pass republishes `virtual_size`, which repaints via layout.
+    # dimension pass republishes `virtual_size`, which repaints via layout
+    # without any unrelated scroll/sort/table operation to wake it up.
     app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
@@ -274,6 +275,7 @@ async def test_offscreen_width_growth_still_repaints() -> None:
         await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
         status = table.ordered_columns[2]
         original_width = status.content_width
+        original_virtual_width = table.virtual_size.width
         calls = _spy_refresh(table)
 
         app.store.apply_event(
@@ -283,6 +285,11 @@ async def test_offscreen_width_growth_still_repaints() -> None:
             pilot,
             lambda: status.content_width > original_width,
             label="offscreen width absorbed",
+        )
+        await until(
+            pilot,
+            lambda: table.virtual_size.width > original_virtual_width,
+            label="virtual width republished from idle layout",
         )
 
         assert _plain_refreshes(calls) == []

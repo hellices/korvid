@@ -8,6 +8,7 @@ update accounting, and API telemetry.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from time import monotonic
 from typing import Any, cast
@@ -106,15 +107,69 @@ async def test_measure_cursor_input_ignores_unrelated_cursor_row_change(
         assert table.cursor_row == 2
 
 
-async def test_measure_cursor_input_times_out_when_cursor_cannot_move() -> None:
-    app = make_app([_pod("only")])
+async def test_measure_cursor_input_times_out_when_a_valid_move_is_not_acknowledged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = make_app([_pod("alpha"), _pod("beta")])
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
-        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
         table.focus()
+        driver = pilot.app._driver
+        assert driver is not None
+
+        def swallow_send(_event: object) -> None:
+            return None
+
+        monkeypatch.setattr(driver, "send_message", swallow_send)
 
         with pytest.raises(WaitTimeout, match=r"down.*row 0.*0\.01s"):
             await measure_cursor_input(pilot, table, "down", timeout=0.01)
+
+
+@pytest.mark.parametrize(
+    ("key", "start_row", "expected_row"),
+    [("up", 0, -1), ("down", 1, 2)],
+)
+async def test_measure_cursor_input_rejects_out_of_bounds_expected_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    start_row: int,
+    expected_row: int,
+) -> None:
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        table.focus()
+        table.move_cursor(row=start_row)
+        driver = pilot.app._driver
+        assert driver is not None
+
+        def fail_send(_event: object) -> None:
+            pytest.fail("measure_cursor_input should reject impossible rows before sending input")
+
+        monkeypatch.setattr(driver, "send_message", fail_send)
+
+        message = (
+            f"cursor input measurement key {key!r} from start row {start_row} "
+            f"expected row {expected_row} outside valid range 0..1"
+        )
+        with pytest.raises(ValueError, match=re.escape(message)):
+            await measure_cursor_input(pilot, table, key)
+
+
+async def test_measure_cursor_input_rejects_unsupported_keys() -> None:
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        table.focus()
+
+        with pytest.raises(
+            ValueError, match="cursor input measurement supports only 'down' and 'up'"
+        ):
+            await measure_cursor_input(pilot, table, "left")
 
 
 def test_replay_options_default_the_input_probe_knobs() -> None:
@@ -155,6 +210,40 @@ async def test_replay_passes_the_configured_input_ack_timeout(
 
     assert timeouts == [2.5] * 6
     assert report.input_latency.count == 6
+
+
+@pytest.mark.parametrize("use_injected_clock", [False, True])
+async def test_replay_passes_its_monotonic_clock_to_cursor_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+    use_injected_clock: bool,
+) -> None:
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-input-clock",
+        seed=186,
+        object_count=2,
+        namespace_count=1,
+        steady_events_per_second=0,
+        duration_seconds=1,
+        bursts=(),
+        failures=(),
+    )
+    seen: list[object] = []
+
+    async def fake_sample_cursor_input(
+        *args: object, now: object = monotonic, **kwargs: object
+    ) -> None:
+        seen.append(now)
+
+    injected_clock = (lambda: 123.0) if use_injected_clock else None
+    monkeypatch.setattr(replay_module, "sample_cursor_input", fake_sample_cursor_input)
+
+    await run_replay(
+        profile,
+        ReplayOptions(time_scale=0, input_sample_pairs=1, monotonic_fn=injected_clock),
+    )
+
+    assert seen == [injected_clock or monotonic]
 
 
 async def test_replay_takes_the_configured_number_of_cursor_sample_pairs(
