@@ -463,6 +463,20 @@ def test_cli_reports_one_object_input_sampling_error_without_traceback(
     assert "Traceback" not in stderr
 
 
+def test_cli_reports_zero_event_input_sampling_error_without_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = cli.main(["replay", "--profile", str(profile_path(tmp_path))])
+
+    assert exit_code == 1
+    stderr = capsys.readouterr().err
+    assert stderr == (
+        "error during replay: performance input sampling requires at least one scheduled churn event\n"
+    )
+    assert "Traceback" not in stderr
+
+
 def test_cli_writes_seed_manifests_yaml(tmp_path: Path) -> None:
     output_path = tmp_path / "seed.yaml"
 

@@ -103,6 +103,7 @@ from tests.performance.replay import (
     resolve_korvid_sha,
     sample_cursor_input,
     validate_input_sample_pairs,
+    validate_input_sampling_profile,
     wait_for,
 )
 from tests.performance.workload import ScheduledEvent, scheduled_events, summary_digest
@@ -1493,6 +1494,7 @@ async def run_live_replay(
     # rewritten with `dataclasses.replace` (the CLI's `--duration`), which
     # bypasses `load_profile` entirely.
     validate_profile(profile)
+    validate_input_sampling_profile(profile)
 
     active_limits = limits if limits is not None else LiveLimits()
     active_deps = deps if deps is not None else _default_dependencies(context)

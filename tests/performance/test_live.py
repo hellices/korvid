@@ -2330,6 +2330,32 @@ async def test_run_live_replay_rejects_a_non_positive_input_sample_pair_count() 
         )
 
 
+async def test_run_live_replay_rejects_zero_event_profiles_before_external_work() -> None:
+    """Zero-event live profiles must fail before identity, ownership, or SHA work."""
+    deps = LiveDependencies(
+        command_runner=_never_called("command_runner"),
+        active_context=_never_called("active_context"),
+        context_host=_never_called("context_host"),
+        kube_client_factory=_never_called("kube_client_factory"),
+        harness_kube_client_factory=_never_called("harness_kube_client_factory"),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+        resolve_sha=_never_called("resolve_sha"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="performance input sampling requires at least one scheduled churn event",
+    ):
+        await run_live_replay(
+            dataclasses.replace(_tiny_live_profile(), steady_events_per_second=0),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
 async def test_run_live_replay_rejects_a_profile_whose_bursts_escape_its_duration() -> None:
     """A profile rewritten with `dataclasses.replace` (the CLI's `--duration`)
     never passes through `load_profile`; the invariants are re-checked here,

@@ -47,7 +47,12 @@ from tests.performance.metrics import (
     RunManifest,
     ScenarioResult,
 )
-from tests.performance.profile import FailureInjection, WorkloadProfile, burst_end_offsets
+from tests.performance.profile import (
+    FailureInjection,
+    WorkloadProfile,
+    burst_end_offsets,
+    planned_event_count,
+)
 from tests.performance.workload import (
     ScheduledEvent,
     apply_events,
@@ -559,14 +564,18 @@ def validate_input_sampling_profile(profile: WorkloadProfile) -> None:
 
     The replay harness measures input latency as `down`/`up` cursor round trips
     during churn. With fewer than two rows the first `down` move is impossible,
-    so the benchmark must fail as a profile contract error before the Textual
-    app starts. `load_profile` intentionally stays generic: other consumers can
-    still use a schema-valid one-object `WorkloadProfile`.
+    and with no scheduled churn events the probe records only idle cursor moves.
+    Both are profile contract errors that must fail before app startup or any
+    live-cluster external work. `load_profile` intentionally stays generic:
+    other consumers can still use a schema-valid profile that this benchmark
+    rejects.
     """
     if profile.object_count < 2:
         raise ValueError(
             f"performance input sampling requires object_count >= 2; got {profile.object_count}"
         )
+    if planned_event_count(profile) < 1:
+        raise ValueError("performance input sampling requires at least one scheduled churn event")
 
 
 def input_sampling_incomplete_message(pairs: int) -> str:

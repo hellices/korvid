@@ -223,7 +223,7 @@ async def test_replay_passes_its_monotonic_clock_to_cursor_sampling(
         seed=186,
         object_count=2,
         namespace_count=1,
-        steady_events_per_second=0,
+        steady_events_per_second=1,
         duration_seconds=1,
         bursts=(),
         failures=(),
@@ -652,8 +652,7 @@ async def test_replay_forbidden_aborts_with_an_explicit_terminal_error() -> None
 
 
 async def test_replay_churn_started_before_input_is_false_without_any_events() -> None:
-    """The flag must be a real emitted-event signal: a profile that schedules
-    no churn at all cannot claim churn was active during input measurement."""
+    """Zero-event profiles cannot publish cursor samples against an idle table."""
     profile = WorkloadProfile(
         schema_version=1,
         id="test-no-churn",
@@ -665,11 +664,13 @@ async def test_replay_churn_started_before_input_is_false_without_any_events() -
         bursts=(),
         failures=(),
     )
-    report = await run_replay(profile, ReplayOptions(time_scale=0))
 
     assert scheduled_events(profile) == ()
-    assert not report.churn_started_before_input
-    assert report.input_latency.count > 0
+    with pytest.raises(
+        ValueError,
+        match="performance input sampling requires at least one scheduled churn event",
+    ):
+        await run_replay(profile, ReplayOptions(time_scale=0))
 
 
 async def test_measured_app_counts_only_resource_update_renders() -> None:
