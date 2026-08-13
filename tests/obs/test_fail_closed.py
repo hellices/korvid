@@ -268,23 +268,20 @@ class TestTokenHygiene:
 
 
 class TestErrorsNeverEchoUserinfo:
-    async def test_a_transport_failure_message_scrubs_the_url_credential(self) -> None:
-        """httpx error text can carry the request URL, userinfo included."""
+    async def test_a_transport_failure_message_is_still_actionable(self) -> None:
+        """A URL cannot carry userinfo any more, but the error must still say why."""
 
         def responder(request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectError(
-                "failed connecting to https://user:hunter2@x.example.com", request=request
-            )
+            raise httpx.ConnectError("nodename nor servname provided", request=request)
 
         backend = HttpBackend(
-            "https://user:hunter2@x.example.com",
+            "https://x.example.com",
             source="prometheus",
             client=httpx.AsyncClient(transport=httpx.MockTransport(responder)),
             limits=QueryLimits(),
         )
-        with pytest.raises(ConnectorError) as caught:
+        with pytest.raises(ConnectorError, match="nodename") as caught:
             await backend.get_json("/x", {})
-        assert "hunter2" not in str(caught.value)
         assert caught.value.kind == "network"
 
 
@@ -661,3 +658,107 @@ class TestSecretsAreScrubbedFromEverythingThatComesBack:
         )
         with pytest.raises(ConnectorError, match="prod"):
             await connector.search(scope=QueryScope(namespace="prod"))
+
+
+class TestEveryEncodedFormOfASecretIsCovered:
+    """Round-6 review: a value reaches the query in more than one encoding.
+
+    A workload becomes a *regex* matcher, so `api.v1` travels as
+    `api\\.v1`; a value containing a quote travels string-escaped. Masking
+    the raw form alone leaves the form that was actually sent.
+    """
+
+    async def test_a_regex_escaped_workload_is_masked_in_the_query(self) -> None:
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={"status": "success", "data": {"resultType": "vector", "result": []}},
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+            mask_labels=frozenset({"pod"}),
+        )
+        result = await connector.query(
+            signal="cpu", scope=QueryScope(namespace="prod", workload="api.v1")
+        )
+        assert "api.v1" not in result.query
+        assert "api\\.v1" not in result.query
+
+    async def test_a_regex_escaped_workload_is_masked_in_a_backend_error(self) -> None:
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={"status": "error", "error": 'parse error near "api\\.v1.*"'},
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+            mask_labels=frozenset({"pod"}),
+        )
+        with pytest.raises(ConnectorError) as caught:
+            await connector.query(
+                signal="cpu", scope=QueryScope(namespace="prod", workload="api.v1")
+            )
+        assert "api\\.v1" not in str(caught.value)
+
+    async def test_a_string_escaped_scope_value_is_masked_in_a_loki_query(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200, json={"status": "success", "data": {"resultType": "streams", "result": []}}
+            ),
+            label_mappings={"namespace": "namespace", "pod": "pod", "workload": "customer"},
+            mask_labels=frozenset({"customer"}),
+        )
+        result = await connector.search(scope=QueryScope(namespace="prod", workload='ac"me'))
+        assert 'ac\\"me' not in result.query
+        assert 'ac"me' not in result.query
+
+
+class TestUserinfoIsRefusedAtTheTransportBoundary:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://user:hunter2@x.example.com",
+            "https://user@x.example.com",
+        ],
+    )
+    def test_a_url_carrying_a_credential_is_refused(self, url: str) -> None:
+        """The HTTP client turns userinfo into a Basic `Authorization` header."""
+        with pytest.raises(ConnectorError, match="token_env") as caught:
+            HttpBackend(
+                url,
+                source="prometheus",
+                client=httpx.AsyncClient(),
+                limits=QueryLimits(),
+            )
+        assert caught.value.kind == "config"
+
+    def test_the_refusal_does_not_echo_the_credential(self) -> None:
+        with pytest.raises(ConnectorError) as caught:
+            HttpBackend(
+                "https://user:hunter2@x.example.com",
+                source="prometheus",
+                client=httpx.AsyncClient(),
+                limits=QueryLimits(),
+            )
+        assert "hunter2" not in str(caught.value)
+
+    def test_a_plain_url_is_accepted(self) -> None:
+        backend = HttpBackend(
+            "https://x.example.com",
+            source="prometheus",
+            client=httpx.AsyncClient(),
+            limits=QueryLimits(),
+        )
+        assert backend.endpoint == "x.example.com"

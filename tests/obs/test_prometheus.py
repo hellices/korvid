@@ -121,14 +121,14 @@ class TestRequestShape:
         result = await connector.query(signal="cpu", scope=SCOPE)
         assert result.endpoint == "prom.example.com"
 
-    async def test_userinfo_in_the_url_never_reaches_the_result(self) -> None:
+    async def test_a_url_carrying_a_credential_is_refused_outright(self) -> None:
+        """It would be sent as Basic auth — an inline credential, not a URL."""
         client, _ = _client(_ok(_vector()))
-        connector = PrometheusConnector(
-            "https://user:hunter2@prom.example.com", client=client, limits=QueryLimits()
-        )
-        result = await connector.query(signal="cpu", scope=SCOPE)
-        assert result.endpoint == "prom.example.com"
-        assert "hunter2" not in result.endpoint
+        with pytest.raises(ConnectorError, match="token_env") as caught:
+            PrometheusConnector(
+                "https://user:hunter2@prom.example.com", client=client, limits=QueryLimits()
+            )
+        assert "hunter2" not in str(caught.value)
 
 
 class TestCredentials:

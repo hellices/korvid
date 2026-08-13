@@ -27,7 +27,7 @@ from korvid.obs.connector import (
     resolve_window,
 )
 from korvid.obs.http import HttpBackend
-from korvid.obs.query import build_metric_query, escape_label_value, metric_unit
+from korvid.obs.query import build_metric_query, encoded_forms, metric_unit
 
 SOURCE = "prometheus"
 
@@ -97,10 +97,8 @@ class PrometheusConnector(MetricsConnector):
         # Computed before the request: a backend that refuses the query
         # usually quotes it back, and a failure never reaches the
         # success-path projection (round-5 review).
-        secrets = self._masked_scope_values(scope)
-        payload = await self._http.get_json(
-            "/api/v1/query", {"query": query}, secrets=_with_escaped(secrets)
-        )
+        secrets = encoded_forms(self._masked_scope_values(scope))
+        payload = await self._http.get_json("/api/v1/query", {"query": query}, secrets=secrets)
         data = self._http.require_success(payload)
         self._http.require_result_type(data, "vector")
         series, truncated, observed_at = self._parse(data)
@@ -145,17 +143,6 @@ class PrometheusConnector(MetricsConnector):
                 break
             parsed.append(entry)
         return tuple(parsed), truncated, observed_at
-
-
-def _with_escaped(values: tuple[str, ...]) -> tuple[str, ...]:
-    """Each value and the escaped form the query actually carried."""
-    forms: list[str] = []
-    for value in values:
-        forms.append(value)
-        escaped = escape_label_value(value)
-        if escaped != value:
-            forms.append(escaped)
-    return tuple(forms)
 
 
 def _observed_at(row: Any) -> str | None:

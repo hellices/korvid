@@ -12,7 +12,7 @@ PromQL and LogQL share selector syntax, so one builder serves both.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from korvid.obs.connector import SIGNALS, ConnectorError
@@ -180,6 +180,25 @@ def build_line_filter(contains: str | None) -> str:
             "config", f"log filter is too long ({len(contains)} > {MAX_VALUE_CHARS})"
         )
     return f' |= "{escape_label_value(contains)}"'
+
+
+def encoded_forms(values: Sequence[str]) -> tuple[str, ...]:
+    """Every form a value takes on its way into a query.
+
+    A value reaches a selector in more than one encoding: literally, as a
+    quoted string literal, and — for a workload, which becomes a regex
+    matcher — regex-escaped as well. Masking the raw form alone leaves the
+    form that was actually sent, which is also the form a backend quotes
+    back in a parse error (PR #280 review).
+    """
+    forms: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        for form in (value, escape_label_value(value), escape_regex_value(value)):
+            if form not in forms:
+                forms.append(form)
+    return tuple(forms)
 
 
 def metric_unit(signal: str) -> str:

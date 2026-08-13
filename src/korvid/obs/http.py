@@ -84,14 +84,17 @@ class HttpBackend:
         self._token_file = token_file
         self._extra_headers = dict(headers or {})
         self._gate = asyncio.Semaphore(limits.max_concurrency)
-        #: Credential material in the configured URL. Transport errors
-        #: quote the request URL, so it has to be scrubbed out of anything
-        #: that becomes a tool result.
-        self._userinfo = _userinfo(url)
-
-    def _scrubbed(self, text: str) -> str:
-        """`text` with any URL credential replaced, for a message that ships."""
-        return text.replace(self._userinfo, "***") if self._userinfo else text
+        if _userinfo(url):
+            # httpx turns `https://user:pw@host` into a Basic
+            # `Authorization` header, so this is an inline credential
+            # wearing a URL's clothes. Config rejects it; refused here too
+            # because a connector can be built directly, and the message
+            # names the supported settings rather than the value.
+            raise ConnectorError(
+                "config",
+                f"{source}: the configured url must not carry a username or password"
+                f" — use `token_env` (environment variable name) or `token_file` (path)",
+            )
 
     @property
     def max_concurrency(self) -> int:
@@ -195,7 +198,7 @@ class HttpBackend:
         except httpx.HTTPError as exc:
             raise ConnectorError(
                 "network",
-                f"{self.endpoint} is unreachable: {mask_in(self._scrubbed(str(exc)), secrets)}",
+                f"{self.endpoint} is unreachable: {mask_in(str(exc), secrets)}",
             ) from exc
 
     def _raise_for_status(self, response: httpx.Response) -> None:
