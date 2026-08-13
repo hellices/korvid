@@ -574,6 +574,11 @@ def input_sampling_incomplete_message(pairs: int) -> str:
     return f"input sampling incomplete: churn finished before all {pairs} cursor sample pairs completed"
 
 
+def replay_churn_completion_timeout(profile: WorkloadProfile, options: ReplayOptions) -> float:
+    """Bound the final drain wait by the scaled schedule plus render grace."""
+    return profile.duration_seconds * options.time_scale + _REPLAY_CHURN_COMPLETION_GRACE_SECONDS
+
+
 async def sample_cursor_input(
     pilot: Any,
     table: ResourceTable,
@@ -761,10 +766,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                     source.terminal_failure is not None
                     or (churn_done.is_set() and recorder.pending_count() == 0)
                 ),
-                timeout=(
-                    profile.duration_seconds * options.time_scale
-                    + _REPLAY_CHURN_COMPLETION_GRACE_SECONDS
-                ),
+                timeout=replay_churn_completion_timeout(profile, options),
                 label="churn complete and all events rendered",
                 recorder=recorder,
             )
