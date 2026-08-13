@@ -8,7 +8,8 @@ result, error message or audit record can carry one.
 
 from __future__ import annotations
 
-from pathlib import Path
+import asyncio
+import os
 
 from korvid.obs.connector import ConnectorError
 
@@ -60,8 +61,6 @@ def resolve_token(
             missing or unreadable. The message names the variable or path
             and never the value.
     """
-    import os
-
     lookup = getenv if callable(getenv) else os.environ.get
     if token_env and token_file:
         raise ConnectorError(
@@ -83,7 +82,7 @@ def resolve_token(
         return _validated(token, f"environment variable {token_env}", source)
     if token_file:
         try:
-            value = Path(token_file).read_text(encoding="utf-8")
+            value = _read_token_file(token_file)
         except OSError as exc:
             raise ConnectorError(
                 "config", f"{source}: token file {token_file!r} could not be read: {exc.strerror}"
@@ -91,15 +90,60 @@ def resolve_token(
         except ValueError as exc:
             # UnicodeDecodeError is a ValueError, not an OSError: a binary
             # or non-UTF-8 file would otherwise escape as an unexpected
-            # exception rather than an actionable config error.
-            raise ConnectorError(
-                "config", f"{source}: token file {token_file!r} could not be read as UTF-8 text"
-            ) from exc
+            # exception rather than an actionable config error. The size
+            # bound raises ValueError too, and says so.
+            reason = (
+                f"is too large ({exc})"
+                if "larger than" in str(exc)
+                else "could not be read as UTF-8 text"
+            )
+            raise ConnectorError("config", f"{source}: token file {token_file!r} {reason}") from exc
         token = value.strip()
         if not token:
             raise ConnectorError("config", f"{source}: token file {token_file!r} is empty")
         return _validated(token, f"token file {token_file!r}", source)
     return None
+
+
+#: A bearer token is a header value; anything approaching this size is a
+#: mistake, a device, or a runaway file. Reading it in full would be the
+#: first thing to go wrong (PR #280 review).
+MAX_TOKEN_FILE_BYTES = 64 * 1024
+
+
+def _read_token_file(token_file: str) -> str:
+    """The token file's text, bounded.
+
+    Raises:
+        OSError: the file could not be opened or read.
+        ValueError: the contents are not UTF-8, or the file is too large.
+    """
+    with open(token_file, "rb") as handle:  # bounded read, not a path helper
+        raw = handle.read(MAX_TOKEN_FILE_BYTES + 1)
+    if len(raw) > MAX_TOKEN_FILE_BYTES:
+        raise ValueError(f"larger than {MAX_TOKEN_FILE_BYTES} bytes")
+    return raw.decode("utf-8")
+
+
+async def resolve_token_async(
+    *, token_env: str | None, token_file: str | None, source: str, getenv: object = None
+) -> str | None:
+    """`resolve_token`, with the file read moved off the event loop.
+
+    A synchronous read of a FIFO, a device, or a file on a stalled network
+    mount holds the loop, and the `asyncio.timeout` that is supposed to
+    bound the call cannot fire while it does — so the one guarantee the
+    timeout exists to make would be the one it could not keep.
+    """
+    if token_file and not token_env:
+        return await asyncio.to_thread(
+            resolve_token,
+            token_env=token_env,
+            token_file=token_file,
+            source=source,
+            getenv=getenv,
+        )
+    return resolve_token(token_env=token_env, token_file=token_file, source=source, getenv=getenv)
 
 
 def _validated(token: str, where: str, source: str) -> str:

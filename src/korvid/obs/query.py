@@ -31,7 +31,9 @@ _LABEL_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 def valid_label_name(name: str) -> bool:
     """Whether `name` is a label name both query languages accept."""
-    return bool(_LABEL_NAME.match(name))
+    # `fullmatch`, not `match`: with `$` alone, "namespace\n" is accepted
+    # because `$` may match just before a final newline (PR #280 review).
+    return bool(_LABEL_NAME.fullmatch(name))
 
 
 _ESCAPES = {
@@ -66,11 +68,18 @@ _TEMPLATES: dict[str, _Signal] = {
     "cpu": _Signal(
         "sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{selector}[{range}]))",
         "cores",
+        # cAdvisor emits a pod-level total with an empty container name
+        # alongside the per-container series; summing both double-counts.
+        suffix='container!=""',
     ),
     "memory": _Signal(
-        "max by (namespace, pod) (max_over_time(container_memory_working_set_bytes{selector}"
+        # `sum`, not `max`: `max_over_time` is per series, so `max by`
+        # reported the largest single container rather than the pod. A pod
+        # with two containers at 100 MiB each read as 100 MiB.
+        "sum by (namespace, pod) (max_over_time(container_memory_working_set_bytes{selector}"
         "[{range}]))",
         "bytes",
+        suffix='container!=""',
     ),
     "restarts": _Signal(
         "sum by (namespace, pod) (increase(kube_pod_container_status_restarts_total{selector}"
@@ -249,4 +258,7 @@ def build_metric_query(
     """
     entry = _template(signal)
     selector = build_selector(exact, regex, suffix=entry.suffix)
-    return entry.template.replace("{selector}", selector).replace("{range}", f"{window_minutes}m")
+    # `{range}` first: a scope value may legitimately contain the literal
+    # text `{range}`, and substituting it after the selector went in would
+    # rewrite the value and query a different scope (PR #280 review).
+    return entry.template.replace("{range}", f"{window_minutes}m").replace("{selector}", selector)

@@ -84,7 +84,11 @@ flowchart LR
   through `OutboundPolicy` or any embedded provider at all.
 - **Observability connectors (a new outbound boundary)** — when
   `observability.prometheus`/`observability.loki` are configured, korvid
-  makes outbound HTTPS requests to endpoints the *user* named. korvid
+  makes outbound HTTP(S) requests to endpoints the *user* named. TLS
+  verification cannot be disabled, but a plaintext `http://` endpoint is
+  accepted, because a cluster-local Prometheus is an ordinary deployment;
+  configuring a credential for one produces a startup warning, since the
+  token then crosses the network in the clear. korvid
   composes every query from a closed catalogue: the model supplies label
   values and one plain log substring, never a query, and each value is
   escaped for the string literal it lands in, so it cannot add a matcher
@@ -95,8 +99,12 @@ flowchart LR
   timeout, time window, result-size, response-byte and concurrency bound,
   and a truncated answer says so. TLS verification cannot be disabled —
   see [`docs/observability.md`](observability.md). What comes *back* is
-  untrusted text like any pod log: it is redacted on the way to a
-  provider by the same `OutboundPolicy` pass.
+  untrusted text like any pod log, and it is projected in `ToolExecutor`
+  — before **either** consumer sees it — because MCP does not pass
+  through `OutboundPolicy` at all. That pass masks credential-shaped text
+  and the label values named in `mask_labels`, on the success and failure
+  paths alike; the embedded agent's provider request then gets the usual
+  `OutboundPolicy` pass on top.
 - **Filesystem exports** — `:ai payload` → export and private log-text
   exports write owner-restricted (`0600`) files under
   `$XDG_DATA_HOME/korvid/` only (`agent-payloads/` and `logs/`

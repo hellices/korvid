@@ -535,7 +535,7 @@ def _observability_label_mappings(value: Any, label: str, warnings: list[str]) -
                 f"{label}.label_mappings.{scope_field}: must be a non-empty label name — ignored"
             )
             continue
-        if not _LABEL_NAME_RE.match(name):
+        if not _LABEL_NAME_RE.fullmatch(name):
             warnings.append(
                 f"{label}.label_mappings.{scope_field}: {name!r} is not a usable label name"
                 f" (a label name must match [a-zA-Z_][a-zA-Z0-9_]*) — the backend is disabled"
@@ -613,6 +613,17 @@ def _parse_observability_backend(
         rejected = True
     if url is None or rejected:
         return None, warnings
+    token_env = _opt_str(value.get("token_env"))
+    token_file = _opt_str(value.get("token_file"))
+    if url.startswith("http://") and (token_env or token_file):
+        # Allowed, because a cluster-local Prometheus over http is an
+        # ordinary deployment — but a bearer token on that connection
+        # crosses the network in the clear, and the user should decide
+        # that knowingly rather than by omission.
+        warnings.append(
+            f"{label}: a credential is configured for a plaintext http:// endpoint —"
+            f" the token will cross the network unencrypted"
+        )
     defaults = ObservabilityBackend(url=url)
     max_window = _observability_int(
         value, "max_window_minutes", defaults.max_window_minutes, label, warnings
@@ -629,8 +640,8 @@ def _parse_observability_backend(
     return (
         ObservabilityBackend(
             url=url,
-            token_env=_opt_str(value.get("token_env")),
-            token_file=_opt_str(value.get("token_file")),
+            token_env=token_env,
+            token_file=token_file,
             tenant=_opt_str(value.get("tenant")),
             timeout_seconds=_observability_timeout(value, label, warnings),
             default_window_minutes=default_window,

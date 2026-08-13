@@ -16,7 +16,7 @@ import pytest
 
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.obs.connector import ConnectorError, QueryLimits, QueryScope
-from korvid.obs.credentials import resolve_token
+from korvid.obs.credentials import resolve_token, resolve_token_async
 from korvid.obs.http import HttpBackend, endpoint_host
 from korvid.obs.loki import LokiConnector
 from korvid.obs.query import build_selector
@@ -920,3 +920,73 @@ class TestTheBaseUrlIsOnlyAnOrigin:
             url, source="prometheus", client=httpx.AsyncClient(), limits=QueryLimits()
         )
         assert backend.endpoint == "x.example.com"
+
+
+class TestRoundNineFindings:
+    async def test_a_token_file_read_cannot_block_the_event_loop(self) -> None:
+        """The surrounding `asyncio.timeout` cannot fire while a sync read holds the loop."""
+        ticks = 0
+
+        async def heartbeat() -> None:
+            nonlocal ticks
+            for _ in range(50):
+                await asyncio.sleep(0)
+                ticks += 1
+
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".tok", delete=False) as handle:
+            handle.write("a-token")
+            path = handle.name
+        beat = asyncio.create_task(heartbeat())
+        await resolve_token_async(token_env=None, token_file=path, source="loki")
+        await beat
+        assert ticks == 50
+
+    async def test_an_oversized_token_file_is_refused_rather_than_read(
+        self, tmp_path: Path
+    ) -> None:
+        """A device or a runaway file must not be pulled into memory."""
+        path = tmp_path / "token"
+        path.write_text("x" * 200_000)
+        with pytest.raises(ConnectorError, match="too large") as caught:
+            await resolve_token_async(token_env=None, token_file=str(path), source="loki")
+        assert caught.value.kind == "config"
+
+    @pytest.mark.parametrize("name", ["namespace\n", "app\n", "_x\n"])
+    def test_a_label_name_with_a_trailing_newline_is_refused(self, name: str) -> None:
+        """`$` matches before a final newline; only a full match is the grammar."""
+        from korvid.obs.query import valid_label_name
+
+        assert not valid_label_name(name)
+
+    def test_a_scope_value_cannot_be_rewritten_by_the_range_substitution(self) -> None:
+        """A namespace literally named `team-{range}` must reach the backend intact."""
+        from korvid.obs.query import build_metric_query
+
+        query = build_metric_query("cpu", {"namespace": "team-{range}"}, window_minutes=30)
+        assert 'namespace="team-{range}"' in query
+        assert "[30m]" in query
+
+    def test_the_memory_signal_totals_a_pods_containers(self) -> None:
+        """`max by` reports the largest container, not the pod."""
+        from korvid.obs.query import build_metric_query
+
+        query = build_metric_query("memory", {"namespace": "prod"}, window_minutes=30)
+        assert query.startswith("sum by (namespace, pod)")
+
+    @pytest.mark.parametrize("signal", ["cpu", "memory"])
+    def test_container_signals_exclude_the_pod_level_series(self, signal: str) -> None:
+        """cAdvisor emits a pod total with an empty container name; counting it doubles."""
+        from korvid.obs.query import build_metric_query
+
+        query = build_metric_query(signal, {"namespace": "prod"}, window_minutes=30)
+        assert 'container!=""' in query
+
+    @pytest.mark.parametrize(
+        "url", ["ftp://x.example.com", "x.example.com", "https://", "https://x.example.com:bad"]
+    )
+    def test_the_transport_validates_the_whole_origin(self, url: str) -> None:
+        with pytest.raises(ConnectorError) as caught:
+            HttpBackend(url, source="prometheus", client=httpx.AsyncClient(), limits=QueryLimits())
+        assert caught.value.kind == "config"

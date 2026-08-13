@@ -198,6 +198,10 @@ config that sets one disables the backend with a warning pointing at
 `network.ca_bundle` — a user who believes they turned verification off and
 did not is worse off than one who is told no.
 
+A plaintext `http://` endpoint is accepted — a cluster-local Prometheus is
+an ordinary deployment — but configuring a credential for one produces a
+startup warning, because the token then crosses the network in the clear.
+
 Corporate CAs use the same `network.ca_bundle` setting the agent providers
 use; see [air-gapped operation](airgap.md). The connectors get their HTTP
 client from the composition root, built with that one trust builder, so

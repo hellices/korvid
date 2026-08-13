@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from korvid.obs.connector import ConnectorError, QueryLimits, mask_in
-from korvid.obs.credentials import resolve_token
+from korvid.obs.credentials import resolve_token_async
 
 
 def endpoint_host(url: str) -> str:
@@ -66,18 +66,31 @@ class Answer:
 
 
 def _require_origin(url: str, source: str) -> None:
-    """Refuse a base URL that is a whole request rather than an origin.
+    """Refuse a base URL that is not a usable origin.
 
-    The API path is appended to it, so `https://host/base?x=1` puts
-    `/api/v1/query` inside the query string and every request quietly
-    targets the wrong endpoint — the worst kind of failure, because it
-    can still answer (round-8 review).
+    Everything a URL can be wrong about is refused here as one actionable
+    `config` error rather than surfacing later as a `network` failure or a
+    raw `ValueError`. In particular the API path is appended to this, so
+    `https://host/base?x=1` puts `/api/v1/query` inside the query string
+    and every request quietly targets the wrong endpoint — the worst kind
+    of failure, because such a request can still answer (round-8 review).
 
     Raises:
-        ConnectorError: `config` when the URL carries a query string,
-            fragment or path parameters.
+        ConnectorError: `config` for an unparsable URL, a scheme other
+            than http(s), a missing host, an unusable port, or a query
+            string, fragment or path parameters.
     """
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+        host, port = parsed.hostname, parsed.port
+    except ValueError as exc:
+        raise ConnectorError("config", f"{source}: the configured url is unusable: {exc}") from exc
+    if parsed.scheme not in ("http", "https"):
+        raise ConnectorError("config", f"{source}: the configured url must use http:// or https://")
+    if not host:
+        raise ConnectorError("config", f"{source}: the configured url names no host")
+    if port is not None and not 0 < port < 65536:
+        raise ConnectorError("config", f"{source}: the configured url has an unusable port")
     if parsed.query or parsed.fragment or "?" in url or "#" in url:
         raise ConnectorError(
             "config",
@@ -107,14 +120,6 @@ class HttpBackend:
         headers: Mapping[str, str] | None = None,
     ) -> None:
         self.source = source
-        self.url = url.rstrip("/")
-        self.endpoint = endpoint_host(url)
-        self.limits = limits
-        self._client = client
-        self._token_env = token_env
-        self._token_file = token_file
-        self._extra_headers = dict(headers or {})
-        self._gate = asyncio.Semaphore(limits.max_concurrency)
         _require_origin(url, source)
         if _userinfo(url):
             # httpx turns `https://user:pw@host` into a Basic
@@ -127,6 +132,14 @@ class HttpBackend:
                 f"{source}: the configured url must not carry a username or password"
                 f" — use `token_env` (environment variable name) or `token_file` (path)",
             )
+        self.url = url.rstrip("/")
+        self.endpoint = endpoint_host(url)
+        self.limits = limits
+        self._client = client
+        self._token_env = token_env
+        self._token_file = token_file
+        self._extra_headers = dict(headers or {})
+        self._gate = asyncio.Semaphore(limits.max_concurrency)
 
     @property
     def max_concurrency(self) -> int:
@@ -137,9 +150,9 @@ class HttpBackend:
         """Close the injected client."""
         await self._client.aclose()
 
-    def _headers(self) -> tuple[dict[str, str], str | None]:
+    async def _headers(self) -> tuple[dict[str, str], str | None]:
         headers = {"accept": "application/json", **self._extra_headers}
-        token = resolve_token(
+        token = await resolve_token_async(
             token_env=self._token_env, token_file=self._token_file, source=self.source
         )
         if token:
@@ -177,7 +190,7 @@ class HttpBackend:
         scrub: tuple[str, ...] = tuple(secrets)
         try:
             async with asyncio.timeout(self.limits.timeout_seconds):
-                headers, token = self._headers()
+                headers, token = await self._headers()
                 # The token is held only for this call: a backend that
                 # echoes an opaque token in an error, a label or a log line
                 # defeats pattern redaction, and only an exact match can

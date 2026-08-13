@@ -416,3 +416,29 @@ class TestUrlIsAnOriginNotARequest:
             tmp_path, {"prometheus": {"url": "https://p.example.com/prometheus"}}
         )
         assert isinstance(prometheus, ObservabilityBackend)
+
+
+class TestPlaintextEndpointsAreAllowedButFlagged:
+    def test_a_token_over_plaintext_http_warns(self, tmp_path: Path) -> None:
+        """A local Prometheus over http is normal; sending a bearer token over it is not."""
+        prometheus, _, warnings = _load(
+            tmp_path,
+            {"prometheus": {"url": "http://p.example.com", "token_env": "PROM_TOKEN"}},
+        )
+        assert isinstance(prometheus, ObservabilityBackend)
+        assert any("http://" in w and "token" in w for w in warnings)
+
+    def test_plaintext_without_a_credential_is_silent(self, tmp_path: Path) -> None:
+        prometheus, _, warnings = _load(tmp_path, {"prometheus": {"url": "http://localhost:9090"}})
+        assert isinstance(prometheus, ObservabilityBackend)
+        assert warnings == ()
+
+    def test_a_label_name_with_a_trailing_newline_disables_the_backend(
+        self, tmp_path: Path
+    ) -> None:
+        _, loki, warnings = _load(
+            tmp_path,
+            {"loki": {"url": "https://l.example.com", "label_mappings": {"workload": "app\n"}}},
+        )
+        assert loki is None
+        assert any("label name" in w for w in warnings)
