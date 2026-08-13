@@ -45,9 +45,17 @@ from starlette.types import Receive, Scope, Send
 
 from korvid.core.audit import interprocess_lock
 from korvid.core.mcp import MCPControllerBase
-from korvid.tools.executor import PROPOSAL_TOOL_NAMES, ToolExecutor, UIBridge
+from korvid.tools.executor import (
+    PROPOSAL_TOOL_NAMES,
+    ToolExecutor,
+    ToolOutcome,
+    ToolResultBlocked,
+    UIBridge,
+    cap_result,
+)
 from korvid.tools.follow import mirror_read, read_summary
 from korvid.tools.registry import TOOLS_BY_NAME
+from korvid.tools.structured import ERROR_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -206,11 +214,14 @@ class KorvidMCPServer:
         built-in agent loop reads, so a model can act on the reason. But
         ``is_error`` is the spec's own signal for that case, not a
         transport-level failure, and a host that trusts it would otherwise
-        record a refused proposal as a successful call. Flag it whenever
-        the domain result uses the ``ERROR:`` contract.
+        record a refused proposal as a successful call.
+
+        The verdict comes from whoever produced the text, never from the
+        text: ``get_logs`` returns raw log lines, so a pod logging
+        ``ERROR: connection refused`` must not be reported as a failed
+        call. Pre-dispatch refusals have no producer and say so themselves.
         """
-        content = await self.call_tool(params.name, params.arguments, ctx=ctx)
-        failed = any(item.text.startswith("ERROR:") for item in content)
+        content, failed = await self._dispatch(params.name, params.arguments, ctx)
         return types.CallToolResult(content=list(content), is_error=failed)
 
     async def list_tools(self) -> list[types.Tool]:
@@ -231,7 +242,17 @@ class KorvidMCPServer:
         *,
         ctx: ServerRequestContext[Any] | None = None,
     ) -> list[types.TextContent]:
-        """MCP ``tools/call``: dispatch through the shared executor.
+        """MCP ``tools/call``: the model-visible content of one dispatch."""
+        content, _ = await self._dispatch(name, arguments, ctx)
+        return content
+
+    async def _dispatch(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None,
+        ctx: ServerRequestContext[Any] | None = None,
+    ) -> tuple[list[types.TextContent], bool]:
+        """Dispatch one tool call: its content, and whether it failed.
 
         Discovery is not an authorization boundary - callers choose ``name``
         freely and the shared :class:`ToolExecutor` also knows the write
@@ -243,9 +264,8 @@ class KorvidMCPServer:
         see (same contract as the built-in agent loop).
         """
         if name not in self._tool_names:
-            return [
-                types.TextContent(type="text", text=f"ERROR: tool not available over MCP: {name}")
-            ]
+            text = f"ERROR: tool not available over MCP: {name}"
+            return [types.TextContent(type="text", text=text)], True
         # Underscore-prefixed keys are reserved for server-side injection
         # (transport identity); strip whatever the caller sent so nothing in
         # the executor ever trusts caller-controlled identity metadata.
@@ -253,20 +273,27 @@ class KorvidMCPServer:
         if name in PROPOSAL_TOOL_NAMES:
             error = self._authorize_proposal_call(args)
             if error is not None:
-                return [types.TextContent(type="text", text=error)]
+                return [types.TextContent(type="text", text=error)], True
             client_name, client_version = self._client_info(ctx)
             args["_session_id"] = self._session_id
             args["_client_name"] = client_name
             args["_client_version"] = client_version
-        result = await self._executor.execute(name, args)
-        self._surface_read(name, args, result, ctx)
-        return [types.TextContent(type="text", text=result)]
+        try:
+            outcome = await self._executor.execute_recorded(name, args)
+        except ToolResultBlocked as exc:
+            # `execute_recorded` raises this so the agent can stop its turn;
+            # an MCP host has no turn to stop, and this boundary must not
+            # start raising (PR #197 review). The string names the shape
+            # that failed, never the document behind it.
+            outcome = ToolOutcome(text=cap_result(f"{ERROR_PREFIX} {exc}"), error=True)
+        self._surface_read(name, args, outcome, ctx)
+        return [types.TextContent(type="text", text=outcome.text)], outcome.error
 
     def _surface_read(
         self,
         name: str,
         args: dict[str, Any],
-        result: str,
+        outcome: ToolOutcome,
         ctx: ServerRequestContext[Any] | None = None,
     ) -> None:
         """Follow mode (issue #153): make external cluster reads visible.
@@ -278,6 +305,10 @@ class KorvidMCPServer:
         degrade to a transient activity note so the read is still seen.
         ``ui_only`` tools already move the screen visibly; surfacing them
         again would be noise.
+
+        Success is the producer's verdict, not the prefix of the text - a
+        pod that logs ``ERROR:`` on its first line still deserves its
+        mirror.
         """
         tool = TOOLS_BY_NAME.get(name)
         if tool is None or tool.effect != "cluster_read":
@@ -287,7 +318,7 @@ class KorvidMCPServer:
             ui is not None
             and self._follow_enabled is not None
             and self._follow_enabled()
-            and not result.startswith("ERROR:")
+            and not outcome.error
         ):
             task = asyncio.create_task(self._mirror_or_note(ui, name, args, ctx))
             self._follow_tasks.add(task)

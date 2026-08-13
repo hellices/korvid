@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 import yaml
+from mcp import types
 
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
@@ -23,7 +24,13 @@ from korvid.mcp.server import (
     _replace_atomically,
     default_endpoint_path,
 )
-from korvid.tools.executor import PROPOSAL_TOOLS, READ_TOOLS, UI_TOOLS, ToolExecutor
+from korvid.tools.executor import (
+    PROPOSAL_TOOLS,
+    READ_TOOLS,
+    UI_TOOLS,
+    ToolExecutor,
+    ToolOutcome,
+)
 from korvid.tools.structured import load_structured_document
 from tests.platforms import POSIX
 from tests.tools.test_executor import (
@@ -40,16 +47,22 @@ from tests.tools.test_executor import (
 
 
 class RecordingExecutor(ToolExecutor):
-    """ToolExecutor that records dispatches instead of touching a cluster."""
+    """ToolExecutor that records dispatches instead of touching a cluster.
+
+    `execute_recorded` is the canonical method - `ToolExecutor.execute`
+    delegates to it - so overriding that one keeps the fake on the same
+    contract as the real executor, including the producer's `error` bit.
+    """
 
     def __init__(self) -> None:
-        super().__init__(kube=None, aliases={"pods": PODS_META})  # type: ignore[arg-type]  # execute() is overridden; kube is never touched
+        super().__init__(kube=None, aliases={"pods": PODS_META})  # type: ignore[arg-type]  # dispatch is overridden; kube is never touched
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.result = "ok"
+        self.error = False
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+    async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
         self.calls.append((name, arguments))
-        return self.result
+        return ToolOutcome(text=self.result, error=self.error)
 
 
 def make_server(
@@ -318,6 +331,7 @@ async def test_failed_read_is_not_mirrored() -> None:
     the failure is still surfaced as activity."""
     executor = RecordingExecutor()
     executor.result = "ERROR: boom"
+    executor.error = True
     ui = FakeBridge()
     notes: list[str] = []
     server = make_follow_server(executor, ui, note_activity=notes.append)
@@ -325,6 +339,26 @@ async def test_failed_read_is_not_mirrored() -> None:
     await _drain_follow(server)
     assert ui.calls == []
     assert len(notes) == 1
+
+
+async def test_a_successful_read_whose_text_begins_with_error_is_still_mirrored() -> None:
+    """Follow mode must read the producer's verdict, not the first line.
+
+    `get_logs` returns raw log lines, so a pod logging `ERROR: connection
+    refused` produces a perfectly successful read. Inferring failure from
+    the prefix would silently drop its mirror - the read still happened,
+    and issue #153 exists to make external reads visible.
+    """
+    executor = RecordingExecutor()
+    executor.result = "ERROR: connection refused"
+    executor.error = False
+    ui = FakeBridge()
+    notes: list[str] = []
+    server = make_follow_server(executor, ui, note_activity=notes.append)
+    await server.call_tool("list_resources", {"kind": "pods"})
+    await _drain_follow(server)
+    assert ui.calls != [], "a successful read was treated as a failure and not mirrored"
+    assert notes == []
 
 
 async def test_ui_only_tools_are_neither_mirrored_nor_noted() -> None:
@@ -1112,6 +1146,16 @@ async def test_mcp_gets_a_safe_error_when_redaction_blocks_a_result() -> None:
 
     assert content[0].text.startswith("ERROR:")
     assert "cmF3LXNlY3JldA==" not in content[0].text
+    # The adapter must convert the raised block into a flagged result, not
+    # let it escape: `execute_recorded` raises where `execute` did not.
+    result = await server._on_call_tool(
+        None,  # type: ignore[arg-type]  # identity is not consulted on this path
+        types.CallToolRequestParams(
+            name="get_resource", arguments={"kind": "pods", "name": "s", "namespace": "d"}
+        ),
+    )
+    assert result.is_error is True
+    assert "cmF3LXNlY3JldA==" not in str(result.content[0])
 
 
 async def test_mcp_bounded_manifests_still_name_their_object() -> None:
@@ -1226,3 +1270,57 @@ async def test_client_identity_is_threaded_from_the_request_context() -> None:
     args = executor.calls[0][1]
     assert args["_client_name"] == "probe-host"
     assert args["_client_version"] == "9.9.9"
+
+
+async def test_a_log_line_beginning_with_error_is_not_a_failed_call(tmp_path: Path) -> None:
+    """`is_error` must come from the producer, never from the text.
+
+    `ToolOutcome.error` exists precisely because successful content can
+    begin with `ERROR:` — `get_logs` returns raw log lines, and a pod that
+    logs `ERROR: connection refused` would otherwise be reported to every
+    MCP host as a failed tool call.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    executor = RecordingExecutor()
+    executor.result = "ERROR: connection refused\nERROR: retrying"
+    server = make_server(executor, port=0, endpoint_path=tmp_path / "e.json")
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        async with (
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool("get_logs", {"pod": "api-0", "namespace": "prod"})
+            assert getattr(result.content[0], "text", "").startswith("ERROR: connection refused")
+            assert result.is_error is False, "a successful read was reported as a failed call"
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    assert executor.calls != []
+
+
+async def test_a_refusal_before_dispatch_is_flagged_as_an_error() -> None:
+    """Refusals never reach a producer, so nothing else can supply the bit.
+
+    Both pre-dispatch exits — a name outside the configured surface and a
+    failed capability check — have to mark themselves.
+    """
+    from mcp import types as mcp_types
+
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    for arguments in (
+        {"kind": "pods", "name": "x"},
+        {**_PROPOSE_ARGS, "capability": "wrong"},
+    ):
+        name = "delete_resource" if "kind" in arguments else "propose_write"
+        result = await server._on_call_tool(
+            None,  # type: ignore[arg-type]  # identity is not consulted on a refusal
+            mcp_types.CallToolRequestParams(name=name, arguments=arguments),
+        )
+        assert result.is_error is True, f"{name} refusal was reported as a successful call"
+    assert executor.calls == []
