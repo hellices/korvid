@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from korvid.obs.connector import SIGNALS, ConnectorError
 
@@ -28,35 +29,51 @@ _ESCAPES = {
     "\t": "\\t",
 }
 
-#: One entry per `Signal`. `{selector}` receives the rendered selector and
-#: `{range}` the window; nothing else is interpolated. Metric names are the
-#: cAdvisor/kube-state-metrics/Prometheus-client conventions, which is what
-#: makes this a catalogue rather than a query surface: a cluster whose
-#: metrics are named differently gets an empty result, not a wrong one.
-_TEMPLATES: dict[str, tuple[str, str]] = {
-    "cpu": (
+
+@dataclass(frozen=True, slots=True)
+class _Signal:
+    """One catalogue entry.
+
+    `template` interpolates `{selector}` and `{range}` and nothing else.
+    `suffix` is korvid-owned matcher text placed inside the selector — it
+    is part of what the signal *means*, never model input, and it goes
+    through the same builder rather than editing a rendered selector.
+    """
+
+    template: str
+    unit: str
+    suffix: str = ""
+
+
+#: One entry per `Signal`. Metric names are the cAdvisor /
+#: kube-state-metrics / Prometheus-client conventions, which is what makes
+#: this a catalogue rather than a query surface: a cluster whose metrics
+#: are named differently gets an empty result, not a wrong one.
+_TEMPLATES: dict[str, _Signal] = {
+    "cpu": _Signal(
         "sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{selector}[{range}]))",
         "cores",
     ),
-    "memory": (
+    "memory": _Signal(
         "max by (namespace, pod) (max_over_time(container_memory_working_set_bytes{selector}"
         "[{range}]))",
         "bytes",
     ),
-    "restarts": (
+    "restarts": _Signal(
         "sum by (namespace, pod) (increase(kube_pod_container_status_restarts_total{selector}"
         "[{range}]))",
         "restarts",
     ),
-    "request_rate": (
+    "request_rate": _Signal(
         "sum by (namespace, pod) (rate(http_requests_total{selector}[{range}]))",
         "requests/s",
     ),
-    "error_rate": (
-        "sum by (namespace, pod) (rate(http_requests_total{selector_with_5xx}[{range}]))",
+    "error_rate": _Signal(
+        "sum by (namespace, pod) (rate(http_requests_total{selector}[{range}]))",
         "requests/s",
+        suffix='code=~"5.."',
     ),
-    "latency_p95": (
+    "latency_p95": _Signal(
         "histogram_quantile(0.95, sum by (namespace, pod, le) "
         "(rate(http_request_duration_seconds_bucket{selector}[{range}])))",
         "seconds",
@@ -153,10 +170,10 @@ def metric_unit(signal: str) -> str:
     Raises:
         ConnectorError: `config` for a signal outside the catalogue.
     """
-    return _template(signal)[1]
+    return _template(signal).unit
 
 
-def _template(signal: str) -> tuple[str, str]:
+def _template(signal: str) -> _Signal:
     entry = _TEMPLATES.get(signal)
     if entry is None:
         raise ConnectorError(
@@ -165,17 +182,24 @@ def _template(signal: str) -> tuple[str, str]:
     return entry
 
 
-def build_metric_query(signal: str, selector: str, window_minutes: int) -> str:
-    """Render the catalogue query for `signal` over `selector`.
+def build_metric_query(
+    signal: str,
+    exact: Mapping[str, str],
+    regex: Mapping[str, str] | None = None,
+    *,
+    window_minutes: int,
+) -> str:
+    """Render the catalogue query for `signal` over a Kubernetes scope.
+
+    The selector is built here rather than passed in, so a signal that
+    needs an extra matcher (the 5xx class for `error_rate`) declares it as
+    a suffix instead of anyone editing a rendered selector afterwards.
 
     Raises:
-        ConnectorError: `config` for a signal outside the catalogue. The
-            unknown name is quoted in the message and never interpolated
-            into a query.
+        ConnectorError: `config` for a signal outside the catalogue, or
+            for an unusable scope. The unknown signal name is quoted in
+            the message and never interpolated into a query.
     """
-    template, _unit = _template(signal)
-    window = f"{window_minutes}m"
-    if "{selector_with_5xx}" in template:
-        with_5xx = selector[:-1] + ', code=~"5.."}' if selector.endswith("}") else selector
-        return template.replace("{selector_with_5xx}", with_5xx).replace("{range}", window)
-    return template.replace("{selector}", selector).replace("{range}", window)
+    entry = _template(signal)
+    selector = build_selector(exact, regex, suffix=entry.suffix)
+    return entry.template.replace("{selector}", selector).replace("{range}", f"{window_minutes}m")

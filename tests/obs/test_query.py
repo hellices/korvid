@@ -107,13 +107,14 @@ class TestBuildLineFilter:
         assert build_line_filter("   ") == ""
 
 
-class TestBuildMetricQuery:
-    def _scope_selector(self) -> str:
-        return build_selector({"namespace": "prod"})
+#: The scope every metric-query test asks about.
+SCOPE = {"namespace": "prod"}
 
+
+class TestBuildMetricQuery:
     @pytest.mark.parametrize("signal", SIGNALS)
     def test_every_declared_signal_renders_a_query(self, signal: str) -> None:
-        query = build_metric_query(signal, self._scope_selector(), 30)
+        query = build_metric_query(signal, SCOPE, window_minutes=30)
         assert "[30m]" in query
         assert 'namespace="prod"' in query
 
@@ -121,17 +122,30 @@ class TestBuildMetricQuery:
     def test_every_declared_signal_declares_a_unit(self, signal: str) -> None:
         assert metric_unit(signal)
 
+    def test_a_signal_that_needs_an_extra_matcher_declares_it_in_the_selector(self) -> None:
+        """The 5xx class is part of what `error_rate` means, not an edit."""
+        query = build_metric_query("error_rate", SCOPE, window_minutes=30)
+        assert 'code=~"5.."' in query
+        assert skeleton(query).count("{") == 1
+
+    def test_a_signal_without_an_extra_matcher_gets_none(self) -> None:
+        assert "code" not in build_metric_query("cpu", SCOPE, window_minutes=30)
+
     def test_an_unknown_signal_is_refused_and_the_message_lists_the_known_ones(self) -> None:
         with pytest.raises(ConnectorError, match="cpu") as caught:
-            build_metric_query("exfiltrate", self._scope_selector(), 30)
+            build_metric_query("exfiltrate", SCOPE, window_minutes=30)
         assert caught.value.kind == "config"
 
     def test_the_signal_name_is_not_interpolated_into_the_query(self) -> None:
         """An unknown signal must not become a query fragment."""
         with pytest.raises(ConnectorError, match="unknown signal"):
-            build_metric_query('cpu"} or up{a="', self._scope_selector(), 30)
+            build_metric_query('cpu"} or up{a="', SCOPE, window_minutes=30)
+
+    def test_a_regex_matcher_reaches_the_rendered_query(self) -> None:
+        query = build_metric_query("cpu", SCOPE, {"pod": "api-"}, window_minutes=30)
+        assert 'pod=~"' in query
 
     def test_the_window_is_the_only_numeric_input(self) -> None:
-        query = build_metric_query("cpu", self._scope_selector(), 5)
+        query = build_metric_query("cpu", SCOPE, window_minutes=5)
         assert "[5m]" in query
         assert "[30m]" not in query

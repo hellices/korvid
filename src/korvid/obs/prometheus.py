@@ -24,7 +24,7 @@ from korvid.obs.connector import (
     resolve_window,
 )
 from korvid.obs.http import HttpBackend
-from korvid.obs.query import build_metric_query, build_selector, metric_unit
+from korvid.obs.query import build_metric_query, metric_unit
 
 SOURCE = "prometheus"
 
@@ -88,7 +88,7 @@ class PrometheusConnector(MetricsConnector):
         window = resolve_window(window_minutes, self._http.limits)
         unit = metric_unit(signal)
         exact, regex = scope_matchers(scope)
-        query = build_metric_query(signal, build_selector(exact, regex), window)
+        query = build_metric_query(signal, exact, regex, window_minutes=window)
         payload = await self._http.get_json("/api/v1/query", {"query": query})
         data = self._http.require_success(payload)
         series, truncated = self._parse(data)
