@@ -551,16 +551,35 @@ class ResourceTable(DataTable[str | Text]):
             self.remove_row(key)
         columns = self.ordered_columns
         touched: list[tuple[str, list[str | Text]]] = []
+        repaint = False
         for key, cells in pending:
             if key not in current_set:
                 self.add_row(*cells, key=key)
                 touched.append((key, cells))
             elif self._patch_row(key, cells, columns):
                 touched.append((key, cells))
+                repaint = repaint or self._row_is_visible(key)
         self._emitted = dict(pending)
         if touched:
-            self._absorb_widths(touched)
+            grew = self._absorb_widths(touched)
+            if repaint and not grew:
+                self.refresh()
         return True
+
+    def _row_is_visible(self, key: str) -> bool:
+        """Whether the row keyed by *key* intersects the current viewport."""
+        row_index = self.get_row_index(key)
+        fixed_count = min(self.fixed_rows, self.row_count)
+        if row_index < fixed_count:
+            return True
+        fixed_height = sum(row.height for row in self.ordered_rows[:fixed_count])
+        header_height = self.header_height if self.show_header else 0
+        viewport_height = max(self.size.height - header_height - fixed_height, 0)
+        row_region = self._get_row_region(row_index)
+        row_top = row_region.y - header_height - fixed_height
+        visible_top = int(self.scroll_y)
+        visible_bottom = visible_top + viewport_height
+        return row_region.height + row_top > visible_top and row_top < visible_bottom
 
     def _patch_row(self, key: str, cells: list[str | Text], columns: list[Column]) -> bool:
         """Update an existing row's changed cells; True when any cell moved."""
@@ -570,13 +589,16 @@ class ResourceTable(DataTable[str | Text]):
         if old_cells is None:
             old_cells = self.get_row(key)
         changed = False
+        row_key = RowKey(key)
         for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
             if not _cells_equal(old_cell, new_cell):
-                self.update_cell(key, column.key, new_cell, update_width=False)
+                self._data[row_key][column.key] = new_cell
                 changed = True
+        if changed:
+            self._update_count += 1
         return changed
 
-    def _absorb_widths(self, rows: Iterable[tuple[str, list[str | Text]]]) -> None:
+    def _absorb_widths(self, rows: Iterable[tuple[str, list[str | Text]]]) -> bool:
         """Grow the column widths from cells this widget is holding anyway.
 
         `DataTable` derives column widths from `on_idle`, and to do so it
@@ -597,6 +619,7 @@ class ResourceTable(DataTable[str | Text]):
         widths = [column.content_width for column in columns]
         limit = len(widths)
         absorbed = self._absorbed
+        grew = False
         for key, cells in rows:
             absorbed.add(key)
             for index, cell in enumerate(cells):
@@ -615,6 +638,8 @@ class ResourceTable(DataTable[str | Text]):
                 # recomputes the virtual size from the dimension pass, which
                 # `update_cell(update_width=False)` does not schedule.
                 self._require_update_dimensions = True
+                grew = True
+        return grew
 
     def remove_row(self, row_key: RowKey | str) -> None:
         """Forget the absorption record for a row that is going away.
