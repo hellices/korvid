@@ -1047,3 +1047,52 @@ class TestRoundTenFindings:
         assert [s.labels["pod"] for s in result.series] == ["good"]
         assert result.observed_at is not None
         assert not result.observed_at.startswith("2001")
+
+
+class TestRoundElevenFindings:
+    def test_a_partial_mapping_that_collides_with_a_default_is_refused(self) -> None:
+        """`workload -> namespace` collides only once the defaults fill in.
+
+        `_selector` falls back to the default `namespace` mapping, so the
+        namespace matcher is overwritten by the workload and the search
+        covers every namespace — the collision the check exists to stop.
+        """
+        with pytest.raises(ConnectorError, match="namespace") as caught:
+            _loki(
+                lambda request: httpx.Response(200, json={}),
+                label_mappings={"workload": "namespace"},
+            )
+        assert caught.value.kind == "config"
+
+    async def test_a_partial_mapping_without_a_collision_still_works(self) -> None:
+        recorded: list[httpx.Request] = []
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            recorded.append(request)
+            return httpx.Response(
+                200, json={"status": "success", "data": {"resultType": "streams", "result": []}}
+            )
+
+        connector = _loki(responder, label_mappings={"workload": "service"})
+        await connector.search(scope=QueryScope(namespace="prod", workload="api"))
+        query = recorded[0].url.params["query"]
+        assert 'namespace="prod"' in query
+        assert 'service="api"' in query
+
+    @pytest.mark.parametrize("kind", ["fifo", "directory"])
+    async def test_a_token_file_that_is_not_a_regular_file_is_refused(
+        self, tmp_path: Path, kind: str
+    ) -> None:
+        """Opening a FIFO blocks forever, and a worker thread cannot be cancelled."""
+        import os
+
+        path = tmp_path / "token"
+        if kind == "fifo":
+            if not hasattr(os, "mkfifo"):
+                pytest.skip("no FIFOs on this platform")
+            os.mkfifo(path)
+        else:
+            path.mkdir()
+        with pytest.raises(ConnectorError, match="not a regular file") as caught:
+            await resolve_token_async(token_env=None, token_file=str(path), source="loki")
+        assert caught.value.kind == "config"

@@ -442,3 +442,24 @@ class TestPlaintextEndpointsAreAllowedButFlagged:
         )
         assert loki is None
         assert any("label name" in w for w in warnings)
+
+    @pytest.mark.parametrize("scheme", ["HTTP", "Http", "hTTp"])
+    def test_the_plaintext_warning_reads_the_parsed_scheme(
+        self, tmp_path: Path, scheme: str
+    ) -> None:
+        """URL schemes are case-insensitive; `HTTP://` is still cleartext."""
+        prometheus, _, warnings = _load(
+            tmp_path,
+            {"prometheus": {"url": f"{scheme}://p.example.com", "token_env": "PROM_TOKEN"}},
+        )
+        assert isinstance(prometheus, ObservabilityBackend)
+        assert any("unencrypted" in w for w in warnings)
+
+    @pytest.mark.parametrize("scheme", ["HTTPS", "Https"])
+    def test_an_upper_case_https_url_does_not_warn(self, tmp_path: Path, scheme: str) -> None:
+        prometheus, _, warnings = _load(
+            tmp_path,
+            {"prometheus": {"url": f"{scheme}://p.example.com", "token_env": "PROM_TOKEN"}},
+        )
+        assert isinstance(prometheus, ObservabilityBackend)
+        assert warnings == ()

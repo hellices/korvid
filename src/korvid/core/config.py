@@ -615,7 +615,9 @@ def _parse_observability_backend(
         return None, warnings
     token_env = _opt_str(value.get("token_env"))
     token_file = _opt_str(value.get("token_file"))
-    if url.startswith("http://") and (token_env or token_file):
+    # The parsed scheme, not the spelling: URL schemes are
+    # case-insensitive, so `HTTP://` is cleartext too.
+    if urlsplit(url).scheme == "http" and (token_env or token_file):
         # Allowed, because a cluster-local Prometheus over http is an
         # ordinary deployment — but a bearer token on that connection
         # crosses the network in the clear, and the user should decide

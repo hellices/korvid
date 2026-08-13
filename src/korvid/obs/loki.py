@@ -204,7 +204,13 @@ def _validated_mappings(label_mappings: Mapping[str, str] | None) -> dict[str, s
     the second assignment overwrites the first and the query silently
     covers everything the dropped matcher was excluding.
     """
-    mappings = dict(label_mappings or DEFAULT_LABEL_MAPPINGS)
+    # Defaults merged *before* the check: a partial mapping such as
+    # `{"workload": "namespace"}` collides with nothing on its own, but
+    # `_selector` fills the rest in from the defaults and the workload
+    # then overwrites the namespace matcher — the search widens to every
+    # namespace, which is the collision this exists to stop (PR #280
+    # review). The config parser already merges first; this did not.
+    mappings = {**DEFAULT_LABEL_MAPPINGS, **(label_mappings or {})}
     by_label: dict[str, list[str]] = {}
     for scope_field, name in mappings.items():
         by_label.setdefault(name, []).append(scope_field)

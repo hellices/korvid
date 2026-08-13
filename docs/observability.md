@@ -170,7 +170,8 @@ pattern can recognise.
 A token is **named** in config, never stored there:
 
 - `token_env` — the name of an environment variable
-- `token_file` — a path
+- `token_file` — a path to a regular file (a FIFO or device is refused:
+  opening one can block forever, and the read cannot be cancelled)
 
 Exactly one of the two. Setting both disables the backend rather than
 guessing which credential to send. Setting an inline `token:`,

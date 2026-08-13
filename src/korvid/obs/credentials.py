@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from stat import S_ISREG
 
 from korvid.obs.connector import ConnectorError
 
@@ -92,11 +93,13 @@ def resolve_token(
             # or non-UTF-8 file would otherwise escape as an unexpected
             # exception rather than an actionable config error. The size
             # bound raises ValueError too, and says so.
-            reason = (
-                f"is too large ({exc})"
-                if "larger than" in str(exc)
-                else "could not be read as UTF-8 text"
-            )
+            detail = str(exc)
+            if "larger than" in detail:
+                reason = f"is too large ({detail})"
+            elif "regular file" in detail:
+                reason = "is not a regular file"
+            else:
+                reason = "could not be read as UTF-8 text"
             raise ConnectorError("config", f"{source}: token file {token_file!r} {reason}") from exc
         token = value.strip()
         if not token:
@@ -114,10 +117,20 @@ MAX_TOKEN_FILE_BYTES = 64 * 1024
 def _read_token_file(token_file: str) -> str:
     """The token file's text, bounded.
 
+    The file must be a regular file, checked before it is opened: opening
+    a FIFO with no writer blocks forever, and the worker thread this runs
+    on cannot be cancelled — the timeout would return while the thread
+    stayed occupied, and enough of those exhaust the executor (PR #280
+    review). A stalled network mount can still hold a worker; that is a
+    residual, and it needs no special file type to reach.
+
     Raises:
         OSError: the file could not be opened or read.
-        ValueError: the contents are not UTF-8, or the file is too large.
+        ValueError: it is not a regular file, its contents are not UTF-8,
+            or it is too large.
     """
+    if not S_ISREG(os.stat(token_file).st_mode):
+        raise ValueError("is not a regular file")
     with open(token_file, "rb") as handle:  # bounded read, not a path helper
         raw = handle.read(MAX_TOKEN_FILE_BYTES + 1)
     if len(raw) > MAX_TOKEN_FILE_BYTES:
