@@ -56,11 +56,24 @@ _REPLAY_TIME_SCALE_ERROR = (
     "--time-scale must be finite and >= 1.0: cursor sampling requires real-time-or-slower churn"
 )
 
+# v2: `latency.event_to_render` became nullable. It is populated only when the
+# run's samples really are event-to-render (deterministic replay, which churns
+# rendered cells); a metadata-only workload publishes its samples under
+# `latency.watch_to_diff_completion` instead, discriminated by
+# `latency.update_latency_kind`. A v1 consumer that assumed
+# `latency.event_to_render` was always an object would misread a live artifact,
+# so the version is bumped rather than silently reshaped.
+_SCHEMA_VERSION = 2
+
 
 def _to_benchmark_report(replay: ReplayReport) -> BenchmarkReport:
     return BenchmarkReport(
         manifest=replay.manifest,
-        event_to_render=replay.event_to_render,
+        update_latency=replay.update_latency,
+        # The qualifier travels with the samples: without it the artifact would
+        # publish a metadata-only, no-op-diff figure under the rendered-frame
+        # metric name the 250 ms budget is stated against.
+        update_latency_kind=replay.update_latency_kind,
         input_latency=replay.input_latency,
         process=replay.process,
         api=replay.api,
@@ -373,7 +386,10 @@ def _write_outputs(args: argparse.Namespace, replay: ReplayReport) -> int:
         if args.out_path:
             Path(args.out_path).write_text(markdown)
         if args.json_path:
-            payload: dict[str, Any] = {"schema_version": 1, **report_payload(benchmark)}
+            payload: dict[str, Any] = {
+                "schema_version": _SCHEMA_VERSION,
+                **report_payload(benchmark),
+            }
             Path(args.json_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
     except OSError as exc:
         print(f"error writing report: {exc}", file=sys.stderr)

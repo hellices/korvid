@@ -24,7 +24,7 @@ from korvid.ui.messages import ResourcesUpdated
 from korvid.ui.widgets.resource_table import ResourceTable, _cells_equal
 from tests.performance import replay as replay_module
 from tests.performance.manifests import TICK_LABEL
-from tests.performance.metrics import BenchmarkRecorder, RunManifest
+from tests.performance.metrics import BenchmarkRecorder, RunManifest, UpdateLatencyKind
 from tests.performance.pacing import sample_paced_schedule
 from tests.performance.profile import Burst, FailureInjection, WorkloadProfile
 from tests.performance.replay import (
@@ -745,7 +745,7 @@ async def test_measured_app_counts_only_resource_update_renders() -> None:
 
 
 async def test_metadata_only_event_records_a_render_sample_without_changing_cells() -> None:
-    """`event_to_render` times recorder completion, not a visible repaint.
+    """The update-latency metric times recorder completion, not a repaint.
 
     The live 24 ev/s workload patches only `korvid.dev/performance-tick`, a
     label no Pod column renders. The in-place diff therefore finds no changed
@@ -753,8 +753,9 @@ async def test_metadata_only_event_records_a_render_sample_without_changing_cell
     still calls `record_render`, so the recorded sample spans event receipt to
     *no-op* table-diff completion. That number is real, but it is not a
     rendered-frame measurement and must never be published against the
-    event-to-render budget for a metadata-only workload. Replay is different:
-    its churn rewrites phase/ready/restarts, which are rendered cells.
+    event-to-render budget for a metadata-only workload - which is exactly what
+    `UpdateLatencyKind` records. Replay is different: its churn rewrites
+    phase/ready/restarts, which are rendered cells.
     """
     recorder = BenchmarkRecorder()
     store = ResourceStore()
@@ -789,7 +790,7 @@ async def test_metadata_only_event_records_a_render_sample_without_changing_cell
 
     report = recorder.report(_manifest_for_test(), (), final_digest="d")
     assert report.render_passes == 1
-    assert report.event_to_render.count == 1
+    assert report.update_latency.count == 1
 
 
 async def test_replay_measures_list_phase_separately_from_watch_events(
@@ -813,7 +814,11 @@ async def test_replay_measures_list_phase_separately_from_watch_events(
 
     # 10 scheduled watch events, and *only* those, are event-to-render samples.
     assert len(scheduled_events(profile)) == 10
-    assert report.event_to_render.count == 10
+    assert report.update_latency.count == 10
+    # Deterministic replay churns phase/ready/restarts - rendered cells - so
+    # its samples really are event-to-render and keep the key/label the
+    # published 250 ms render budget is stated against.
+    assert report.update_latency_kind is UpdateLatencyKind.EVENT_TO_RENDER
     assert report.rendered_updates == 10
 
     # The LIST-to-populated-table and startup phases are measured explicitly.

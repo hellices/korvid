@@ -43,7 +43,12 @@ from tests.performance.live import (
     run_live_replay,
 )
 from tests.performance.manifests import build_seed_manifests
-from tests.performance.metrics import BenchmarkRecorder
+from tests.performance.metrics import (
+    BenchmarkRecorder,
+    UpdateLatencyKind,
+    render_markdown,
+    report_payload,
+)
 from tests.performance.pacing import sample_paced_schedule
 from tests.performance.profile import Burst, WorkloadProfile
 from tests.performance.replay import ReplayOptions
@@ -1324,8 +1329,401 @@ async def test_run_live_replay_records_at_receipt_when_the_patch_ack_lags(
     assert report.churn is not None
     # Every churned event is still rendered exactly once, and none of them is
     # left pending by the record-at-receipt ordering.
-    assert report.event_to_render.count == report.churn.observed_events
+    assert report.update_latency.count == report.churn.observed_events
     assert report.expected_digest == report.final_digest
+
+
+async def test_run_live_replay_publishes_a_metadata_only_update_metric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live churn workload patches only `TICK_LABEL`, which no Pod column
+    renders, so its samples end at a *no-op* diff. The report - and every
+    artifact built from it - must say so instead of publishing the figure under
+    the rendered-frame metric name the 250 ms budget is stated against."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(namespaces, pods, RUN_ID)
+
+    report = await run_live_replay(
+        _paced_live_profile(),
+        sample_paced_schedule(monkeypatch).options(),
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert report.update_latency_kind is UpdateLatencyKind.WATCH_TO_DIFF_COMPLETION
+    assert report.update_latency.count > 0
+
+    latency = report_payload(_report_as_benchmark(report))["latency"]
+    assert isinstance(latency, dict)
+    assert latency["update_latency_kind"] == "watch_to_diff_completion"
+    assert latency["event_to_render"] is None
+    watch_to_diff = latency["watch_to_diff_completion"]
+    assert isinstance(watch_to_diff, dict)
+    assert watch_to_diff["count"] == report.update_latency.count
+
+    markdown = render_markdown(_report_as_benchmark(report))
+    assert "- Watch receipt to diff completion p95:" in markdown
+    assert "Event to render" not in markdown
+
+
+# ---------------------------------------------------------------------------
+# C1b: cursor sampling is gated on a real watch receipt, not on patch dispatch
+# ---------------------------------------------------------------------------
+
+
+class _CountingPilot:
+    """Pilot stand-in for `until`, which spends a *virtual* pause budget.
+
+    `until` decrements its remaining timeout by the step it asked for rather
+    than by measured elapsed time, so a `pause` that merely yields makes the
+    poll count exactly `timeout / 0.05` - deterministic, with no wall time and
+    no timing assertion.
+    """
+
+    def __init__(self, *, on_pause: Callable[[int], None] | None = None) -> None:
+        self.pauses = 0
+        self._on_pause = on_pause
+
+    async def pause(self, delay: float = 0.0) -> None:
+        self.pauses += 1
+        if self._on_pause is not None:
+            self._on_pause(self.pauses)
+        await asyncio.sleep(0)
+
+
+async def _never_finishing_churn() -> None:
+    await asyncio.Event().wait()
+
+
+async def _failing_churn() -> None:
+    raise ApiStatusError(422, "test operation failed for guarded patch")
+
+
+async def test_make_live_watch_source_signals_the_first_owned_watch_receipt() -> None:
+    """The signal the input probe waits on must be set by *watch receipt* of an
+    owned `MODIFIED` event - never by the LIST phase, a foreign namespace, or a
+    Pod that does not carry this run's ownership labels."""
+    run_id = "run1"
+    _, pods = _build_fake_topology(run_id, 2, 4)
+    kube = _FakeKubeClient({}, pods)
+    recorder = BenchmarkRecorder()
+    receipt = asyncio.Event()
+    expected_namespaces = frozenset(namespace for namespace, _name in pods)
+    source = make_live_watch_source(
+        kube,
+        expected_namespaces,
+        run_id=run_id,
+        recorder=recorder,
+        watch_receipt=receipt,
+    )
+
+    agen = source("pods", "*")
+    try:
+        for _ in range(len(pods)):
+            await agen.__anext__()
+        assert not receipt.is_set()
+
+        owned = next(iter(pods.values()))
+        foreign = PodSummary(
+            name="stray",
+            namespace="default",
+            phase="Running",
+            ready="1/1",
+            restarts=0,
+            node="node-x",
+        )
+        kube.events.put_nowait(("MODIFIED", foreign))
+        kube.events.put_nowait(("MODIFIED", dataclasses.replace(owned, labels=())))
+        kube.events.put_nowait(("ADDED", owned))
+        # The foreign-namespace event is filtered out entirely; the unowned
+        # MODIFIED and the owned ADDED are both yielded but neither is churn
+        # this run caused.
+        await agen.__anext__()
+        await agen.__anext__()
+        assert not receipt.is_set()
+
+        kube.events.put_nowait(("MODIFIED", owned))
+        await agen.__anext__()
+        assert receipt.is_set()
+    finally:
+        assert isinstance(agen, AsyncGenerator)
+        await agen.aclose()
+
+
+async def test_wait_for_first_watch_receipt_blocks_until_the_receipt_arrives() -> None:
+    """Cursor sampling may only begin once the application has actually
+    received an owned watch event, so the wait must not return while churn is
+    merely dispatched."""
+    receipt = asyncio.Event()
+    churn_task = asyncio.create_task(_never_finishing_churn())
+    pilot = _CountingPilot(on_pause=lambda count: receipt.set() if count == 3 else None)
+
+    try:
+        observed = await live.wait_for_first_watch_receipt(
+            pilot,
+            watch_receipt=receipt,
+            churn_task=churn_task,
+            timeout=5.0,
+            recorder=BenchmarkRecorder(),
+        )
+    finally:
+        churn_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await churn_task
+
+    assert observed is True
+    assert pilot.pauses == 3
+
+
+async def test_wait_for_first_watch_receipt_returns_false_when_churn_dies_first() -> None:
+    """A churn task that died before any watch event must end the wait at once
+    and report "no receipt" - the caller aborts the probe rather than timing
+    out on a table nothing is updating."""
+    receipt = asyncio.Event()
+    churn_task = asyncio.create_task(_failing_churn())
+    await asyncio.sleep(0)
+    pilot = _CountingPilot()
+
+    observed = await live.wait_for_first_watch_receipt(
+        pilot,
+        watch_receipt=receipt,
+        churn_task=churn_task,
+        timeout=5.0,
+        recorder=BenchmarkRecorder(),
+    )
+
+    assert observed is False
+    assert pilot.pauses == 0
+    assert isinstance(churn_task.exception(), ApiStatusError)
+
+
+async def test_wait_for_first_watch_receipt_times_out_when_nothing_ever_arrives() -> None:
+    """Neither a receipt nor a finished churn task is a hang: the bounded wait
+    fails by name."""
+    churn_task = asyncio.create_task(_never_finishing_churn())
+    pilot = _CountingPilot()
+
+    try:
+        with pytest.raises(WaitTimeout, match="owned watch event"):
+            await live.wait_for_first_watch_receipt(
+                pilot,
+                watch_receipt=asyncio.Event(),
+                churn_task=churn_task,
+                timeout=0.1,
+                recorder=BenchmarkRecorder(),
+            )
+    finally:
+        churn_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await churn_task
+
+    assert pilot.pauses == 2
+
+
+class _WithheldWatchMutationClient(_FakeMutationClient):
+    """Applies the guarded patch but withholds the watch event until released.
+
+    Models the real race the review named: `progress.started` is incremented
+    before `patch_pod_labels_guarded` is awaited, so mutation dispatch proves
+    nothing about the application having seen a single watch event.
+    """
+
+    def __init__(
+        self,
+        kube: Callable[[], _FakeKubeClient],
+        run_id: str,
+        *,
+        release: asyncio.Event,
+    ) -> None:
+        super().__init__(kube, run_id)
+        self._release = release
+
+    async def _apply(self, namespace: str, name: str, *, uid: str, tick: str) -> None:
+        await self._release.wait()
+        await super()._apply(namespace, name, uid=uid, tick=tick)
+
+
+async def _poll_until(
+    predicate: Callable[[], bool],
+    run: asyncio.Task[Any],
+    *,
+    label: str,
+    attempts: int = 1000,
+) -> None:
+    """Poll *predicate* while *run* is still going, or fail by name.
+
+    Bounded so a broken run surfaces its own failure instead of hanging the
+    test; nothing here asserts on how long anything took.
+    """
+    for _ in range(attempts):
+        if predicate():
+            return
+        if run.done():
+            await run
+            raise AssertionError(f"the live run finished before {label}")
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{label} never happened")
+
+
+async def test_run_live_replay_does_not_sample_input_before_the_first_watch_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The decisive claim: with the watch event withheld, cursor sampling must
+    not start even though every gate the old code used (mutation dispatched,
+    churn task alive) is already satisfied.
+
+    The observation window below is not a timing assertion - the assertions are
+    on *what was observed*, never on how long it took. It exists because
+    `until` polls through the real Textual pilot, so a run gated on mutation
+    dispatch would have entered sampling within it.
+    """
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    app_clients: list[_FakeKubeClient] = []
+    mutation_clients: list[_WithheldWatchMutationClient] = []
+    release = asyncio.Event()
+
+    def mutation_factory(run_id_arg: str) -> _WithheldWatchMutationClient:
+        client = _WithheldWatchMutationClient(lambda: app_clients[-1], run_id_arg, release=release)
+        mutation_clients.append(client)
+        return client
+
+    deps = _happy_deps(
+        namespaces,
+        pods,
+        RUN_ID,
+        app_clients=app_clients,
+        mutation_client_factory=mutation_factory,
+    )
+
+    pairs = 3
+    schedule = sample_paced_schedule(monkeypatch, pairs=pairs)
+
+    backlog_at_sampling: list[int] = []
+    real_sample = replay_mod.sample_cursor_input
+
+    async def spy(pilot: Any, table: Any, recorder: BenchmarkRecorder, **kwargs: Any) -> None:
+        backlog_at_sampling.append(recorder.phases().max_backlog_depth)
+        await real_sample(pilot, table, recorder, **kwargs)
+
+    monkeypatch.setattr(live, "sample_cursor_input", spy)
+
+    run = asyncio.create_task(
+        run_live_replay(
+            _paced_live_profile(),
+            schedule.options(),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+    )
+    try:
+        await _poll_until(
+            lambda: bool(mutation_clients) and bool(mutation_clients[0].calls),
+            run,
+            label="the first guarded patch was dispatched",
+        )
+        for _ in range(6):
+            await asyncio.sleep(0.05)
+        assert backlog_at_sampling == []
+    finally:
+        release.set()
+
+    report = await run
+
+    assert backlog_at_sampling != []
+    assert backlog_at_sampling[0] >= 1
+    assert report.input_latency.count == 2 * pairs
+    assert report.churn_started_before_input
+
+
+async def test_run_live_replay_propagates_churn_failure_before_any_watch_receipt() -> None:
+    """Churn that dies before the first watch receipt must abort the run with
+    the underlying API status, not sit out the receipt wait and report a
+    timeout - and never hang."""
+
+    class _AlwaysFailingMutationClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def connect(self) -> None:
+            return None
+
+        async def patch_pod_labels_guarded(
+            self, namespace: str, name: str, *, uid: str, tick: str
+        ) -> None:
+            raise ApiStatusError(422, "test operation failed for guarded patch")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(
+        namespaces,
+        pods,
+        RUN_ID,
+        mutation_client_factory=lambda _run_id: _AlwaysFailingMutationClient(),
+    )
+    monotonic_fn, async_sleep = _virtual_clock()
+
+    with pytest.raises(ApiStatusError, match="test operation failed"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(
+                time_scale=1.0,
+                monotonic_fn=monotonic_fn,
+                async_sleep=async_sleep,
+                input_sample_pairs=2,
+            ),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+            limits=LiveLimits(initial_render_timeout_seconds=30.0),
+        )
+
+
+async def test_run_live_replay_fails_when_churn_completes_without_a_watch_receipt() -> None:
+    """Churn that completed cleanly while the application saw no owned watch
+    event cannot support an "under churn" input percentile: the run fails by
+    name instead of publishing idle cursor moves."""
+
+    class _SilentMutationClient(_FakeMutationClient):
+        """Applies the guarded patch but never wakes the watch."""
+
+        async def _apply(self, namespace: str, name: str, *, uid: str, tick: str) -> None:
+            return None
+
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    app_clients: list[_FakeKubeClient] = []
+    deps = _happy_deps(
+        namespaces,
+        pods,
+        RUN_ID,
+        app_clients=app_clients,
+        mutation_client_factory=lambda run_id_arg: _SilentMutationClient(
+            lambda: app_clients[-1], run_id_arg
+        ),
+    )
+    monotonic_fn, async_sleep = _virtual_clock()
+
+    with pytest.raises(WaitTimeout, match="input sampling incomplete"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(
+                time_scale=1.0,
+                monotonic_fn=monotonic_fn,
+                async_sleep=async_sleep,
+                input_sample_pairs=2,
+            ),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+            limits=LiveLimits(initial_render_timeout_seconds=30.0),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1869,12 +2267,19 @@ async def test_run_live_replay_counts_mutation_throttles_outside_read_telemetry(
             self, kube: Callable[[], _FakeKubeClient] | _FakeKubeClient, run_id: str
         ) -> None:
             super().__init__(kube, run_id)
+            self.attempts = 0
             self.throttled = False
 
         async def patch_pod_labels_guarded(
             self, namespace: str, name: str, *, uid: str, tick: str
         ) -> None:
-            if not self.throttled:
+            self.attempts += 1
+            # Throttle the *second* guarded patch, not the first: cursor
+            # sampling now waits for the first patch's watch event, and this
+            # test's pacing seam gates every injected sleep - including the
+            # retry backoff - on a completed cursor sample. Throttling the
+            # first patch would therefore deadlock the seam, not the harness.
+            if self.attempts > 1 and not self.throttled:
                 self.throttled = True
                 raise ApiStatusError(429, "Too Many Requests")
             await super().patch_pod_labels_guarded(namespace, name, uid=uid, tick=tick)

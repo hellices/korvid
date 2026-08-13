@@ -47,6 +47,7 @@ from tests.performance.metrics import (
     ProcessSummary,
     RunManifest,
     ScenarioResult,
+    UpdateLatencyKind,
 )
 from tests.performance.profile import (
     FailureInjection,
@@ -191,10 +192,16 @@ class ReplayReport:
     rendered_updates: int
     render_passes: int
     coalesced_updates: int
-    event_to_render: LatencySummary
+    #: Watch-event receipt to resource-update-handler completion, qualified by
+    #: `update_latency_kind`: a rendered-cell interval for the deterministic
+    #: replay, a no-op-diff interval for the metadata-only live workload.
+    update_latency: LatencySummary
     input_latency: LatencySummary
-    #: Whether at least one churn event had actually been emitted (replay) or
-    #: dispatched (live) when input latency was first measured.
+    #: Whether the application had really observed live churn when input
+    #: latency was first measured: at least one churn event emitted (replay) or
+    #: one owned `MODIFIED` event received at watch receipt (live). Dispatching
+    #: a mutation is deliberately *not* enough - it is counted before the patch
+    #: is awaited, and its watch event arrives over an independent connection.
     churn_started_before_input: bool
     process: ProcessSummary
     api: ApiSummary
@@ -202,6 +209,10 @@ class ReplayReport:
     #: depth, post-burst drain) the numeric budgets are stated against.
     phases: PhaseSummary
     manifest: RunManifest
+    #: What `update_latency` measured. Defaults to the rendered-cell meaning:
+    #: the deterministic replay really does rewrite rendered cells, so every
+    #: construction that does not say otherwise keeps its published semantics.
+    update_latency_kind: UpdateLatencyKind = UpdateLatencyKind.EVENT_TO_RENDER
     #: Requested-versus-achieved churn accounting; `None` for deterministic
     #: replay, which drives its own source rather than a real API server.
     churn: ChurnSummary | None = None
@@ -227,9 +238,11 @@ class MeasuredKorvidApp(KorvidApp):
     includes the in-place cell writes and the repaint request; when it did not
     - a metadata-only mutation such as the live driver's
     `korvid.dev/performance-tick` label, which no Pod column renders - the
-    diff finds nothing to write and the sample times a no-op. Reports must
-    state which workload produced the samples instead of comparing a
-    metadata-only figure with the rendered-frame budget.
+    diff finds nothing to write and the sample times a no-op. Which of the two
+    a run produced is declared by `ReplayReport.update_latency_kind`, so the
+    artifacts publish the samples under the metric name that was actually
+    measured instead of comparing a metadata-only figure with the
+    rendered-frame budget.
     """
 
     def __init__(self, *args: Any, recorder: BenchmarkRecorder, **kwargs: Any) -> None:
@@ -858,7 +871,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
         rendered_updates=benchmark.rendered_updates,
         render_passes=benchmark.render_passes,
         coalesced_updates=benchmark.coalesced_updates,
-        event_to_render=benchmark.event_to_render,
+        update_latency=benchmark.update_latency,
         input_latency=benchmark.input_latency,
         churn_started_before_input=churn_started_before_input,
         process=benchmark.process,

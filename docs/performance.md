@@ -175,11 +175,32 @@ that workload does not exist yet.
 The deterministic replay above *does* rewrite rendered cells, so its
 event-to-render numbers remain event-to-rendered-cell measurements.
 
+The artifacts encode this distinction rather than leaving it to prose. Every
+report carries `latency.update_latency_kind`. A deterministic replay reports
+`event_to_render`, populates `latency.event_to_render`, leaves
+`latency.watch_to_diff_completion` null, and prints "Event to render p95" in
+the Markdown. A metadata-only live run reports `watch_to_diff_completion`,
+publishes its samples under `latency.watch_to_diff_completion`, leaves
+`latency.event_to_render` **null**, and prints "Watch receipt to diff
+completion p95" — the string "Event to render" never appears in such a report.
+`latency.event_to_render` becoming nullable is why the JSON `schema_version`
+is `2`.
+
+"50 cursor samples while churn was active" means active at the *application*,
+not merely dispatched: the live harness opens its own watch on the churned
+namespaces and does not take the first cursor sample until it has recorded an
+owned `MODIFIED` event arriving on that stream. Gating on mutation dispatch
+would not do — the driver counts a mutation as started before the `PATCH` is
+awaited, so a sample taken then could land on a still-idle table and report an
+idle-input percentile as an under-churn one. If no owned watch event arrives
+within the initial-render timeout, the run fails loudly instead of publishing
+that number.
+
 The driver completed all 720 requested mutations in 29.92 seconds
 (24.06 events/s), with no mutation throttles. A separate run with `cProfile`
 enabled measured 116 ms cursor-input p95 and 99.4% peak CPU; those figures are
-diagnostic overhead, not acceptance results (its 134 ms "event to render" p95
-carries the same metadata-only caveat as above).
+diagnostic overhead, not acceptance results (its 134 ms watch-receipt-to-diff-
+completion p95 carries the same metadata-only caveat as above).
 
 ## Known limits
 

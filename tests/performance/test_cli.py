@@ -20,6 +20,7 @@ from tests.performance.metrics import (
     ProcessSummary,
     RunManifest,
     ScenarioResult,
+    UpdateLatencyKind,
 )
 from tests.performance.profile import FailureInjection, WorkloadProfile
 from tests.performance.replay import ReplayOptions, ReplayReport
@@ -166,7 +167,7 @@ async def fake_run_replay(
         rendered_updates=0,
         render_passes=0,
         coalesced_updates=0,
-        event_to_render=_make_latency(),
+        update_latency=_make_latency(),
         input_latency=_make_latency(),
         churn_started_before_input=True,
         process=_make_process(),
@@ -189,7 +190,7 @@ async def fake_failed_report(
         rendered_updates=0,
         render_passes=0,
         coalesced_updates=0,
-        event_to_render=_make_latency(),
+        update_latency=_make_latency(),
         input_latency=_make_latency(),
         churn_started_before_input=True,
         process=_make_process(),
@@ -316,9 +317,45 @@ def test_cli_writes_json_and_markdown(tmp_path: Path, monkeypatch: pytest.Monkey
         ]
     )
     assert result == 0
-    assert json.loads(json_path.read_text())["schema_version"] == 1
+    assert json.loads(json_path.read_text())["schema_version"] == 2
     assert json_path.read_text().index('"api"') < json_path.read_text().index('"schema_version"')
     assert "# Large-cluster benchmark" in markdown_path.read_text()
+
+
+def test_cli_replay_publishes_a_rendered_cell_run_as_event_to_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deterministic replay churns rendered cells, so its artifacts keep the
+    `event_to_render` key and label the published render budget is stated
+    against - and leave the metadata-only key unavailable."""
+    json_path = tmp_path / "result.json"
+    markdown_path = tmp_path / "result.md"
+    monkeypatch.setattr(cli, "run_replay", fake_run_replay)
+
+    result = cli.main(
+        [
+            "replay",
+            "--profile",
+            str(profile_path(tmp_path)),
+            "--json",
+            str(json_path),
+            "--out",
+            str(markdown_path),
+        ]
+    )
+
+    assert result == 0
+    latency = json.loads(json_path.read_text())["latency"]
+    assert latency["update_latency_kind"] == "event_to_render"
+    assert latency["event_to_render"] == {
+        "count": 0,
+        "p50_seconds": None,
+        "p95_seconds": None,
+        "p99_seconds": None,
+        "maximum_seconds": None,
+    }
+    assert latency["watch_to_diff_completion"] is None
+    assert "- Event to render p95: `n/a`" in markdown_path.read_text()
 
 
 @pytest.mark.parametrize("failed_replay", [fake_failed_report, fake_dropped_report])
@@ -698,7 +735,7 @@ def test_cli_replay_live_writes_json_and_markdown(
         ]
     )
     assert result == 0
-    assert json.loads(json_path.read_text())["schema_version"] == 1
+    assert json.loads(json_path.read_text())["schema_version"] == 2
     assert "# Large-cluster benchmark" in markdown_path.read_text()
     assert len(calls) == 1
     assert calls[0]["context"] == "aks-context"
@@ -706,6 +743,62 @@ def test_cli_replay_live_writes_json_and_markdown(
     assert calls[0]["expected_cluster_id"] == _LIVE_IDENTITY_ARGS[3]
     # No --time-scale option: production real-time replay always uses 1.0.
     assert calls[0]["options"].time_scale == 1.0  # type: ignore[attr-defined]
+
+
+async def fake_live_metadata_only_report(
+    profile: WorkloadProfile,
+    options: ReplayOptions,
+    *,
+    context: str,
+    expected_cluster_id: str,
+    run_id: str,
+) -> ReplayReport:
+    """A live run exactly as `run_live_replay` reports one: its churn patches
+    only the tick label, so its update samples end at a no-op table diff."""
+    report = await fake_run_replay(profile, options)
+    return replace(
+        report,
+        update_latency=LatencySummary(
+            count=3,
+            p50_seconds=0.03,
+            p95_seconds=0.032,
+            p99_seconds=0.032,
+            maximum_seconds=0.032,
+        ),
+        update_latency_kind=UpdateLatencyKind.WATCH_TO_DIFF_COMPLETION,
+    )
+
+
+def test_cli_replay_live_never_publishes_a_no_op_diff_as_event_to_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The artifacts are the evidence. A metadata-only live run must serialize
+    its samples under `latency.watch_to_diff_completion`, leave
+    `latency.event_to_render` unavailable, and never print an event-to-render
+    figure in the Markdown a human reads the render budget from."""
+    json_path = tmp_path / "aks186-live.json"
+    markdown_path = tmp_path / "aks186-live.md"
+    monkeypatch.setattr(cli, "run_live_replay", fake_live_metadata_only_report)
+
+    result = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            *_live_artifacts(tmp_path),
+        ]
+    )
+
+    assert result == 0
+    latency = json.loads(json_path.read_text())["latency"]
+    assert latency["update_latency_kind"] == "watch_to_diff_completion"
+    assert latency["event_to_render"] is None
+    assert latency["watch_to_diff_completion"]["p95_seconds"] == 0.032
+
+    markdown = markdown_path.read_text()
+    assert "- Watch receipt to diff completion p95: `0.032s`" in markdown
+    assert "Event to render" not in markdown
 
 
 @pytest.mark.parametrize(

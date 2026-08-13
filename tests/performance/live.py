@@ -43,7 +43,10 @@ event - `make_live_watch_source` records at watch receipt, exactly like the
 deterministic `_ReplaySource` - never at patch acknowledgement. The watch
 event and the patch response race over independent connections, so recording
 at ack both misreports the interval (it would include the write round-trip)
-and can append an event *after* its own render.
+and can append an event *after* its own render. That same watch receipt is the
+signal cursor sampling waits on (`wait_for_first_watch_receipt`): a dispatched
+mutation is counted before it is awaited and proves nothing about the
+application having seen live churn.
 
 The sample's *end* is where `MeasuredKorvidApp.on_resources_updated` returns.
 Because live churn is metadata-only by design and no Pod column renders
@@ -99,6 +102,7 @@ from tests.performance.metrics import (
     ChurnSummary,
     NodePoolInfo,
     ProcessSampler,
+    UpdateLatencyKind,
 )
 from tests.performance.profile import WorkloadProfile, burst_end_offsets, validate_profile
 from tests.performance.replay import (
@@ -149,6 +153,13 @@ _RETRYABLE_MUTATION_STATUS = 429
 #: await is interrupted by a cancellation aimed at the caller.
 _CANCEL_DRAIN_ATTEMPTS = 3
 
+#: The live churn workload patches only `manifests.TICK_LABEL`, which no Pod
+#: column renders, so the in-place table diff finds no cell to write: this
+#: run's update samples end at a *no-op* diff, never at a rendered frame. The
+#: report carries that fact so the artifacts never publish the figure under
+#: `event_to_render`, the key the 250 ms render budget is stated against.
+_LIVE_UPDATE_LATENCY_KIND = UpdateLatencyKind.WATCH_TO_DIFF_COMPLETION
+
 
 async def _sleep_default(delay: float) -> None:
     await asyncio.sleep(delay)
@@ -182,7 +193,8 @@ class LiveLimits:
             identity/context-host lookup, the harness read client connect, and
             the application read client connect.
         initial_render_timeout_seconds: Ceiling for the initial 1,000-row
-            render.
+            render, and for the first owned watch receipt that gates cursor
+            sampling.
         churn_grace_seconds: Allowance added to the profile's own scheduled
             duration when bounding the churn wait.
         convergence_timeout_seconds: Ceiling for the store digest to converge
@@ -852,6 +864,7 @@ def make_live_watch_source(
     run_id: str,
     recorder: BenchmarkRecorder,
     now: Callable[[], float] = monotonic,
+    watch_receipt: asyncio.Event | None = None,
 ) -> WatchSource:
     """Filter the real cluster-wide Pod watch to exactly the expected, seeded
     namespaces - unrelated cluster Pods (or namespaces sharing the cluster with
@@ -865,6 +878,16 @@ def make_live_watch_source(
 
     The event counter is shared across reconnects, so a re-LIST after a dropped
     watch continues the same sequence.
+
+    Args:
+        watch_receipt: Optional signal set the first time an owned `MODIFIED`
+            event is recorded here. This is the only evidence the application
+            has really observed live churn: a dispatched mutation proves
+            nothing, because the patch is counted before it is even awaited and
+            its watch event arrives over a different connection. The live
+            harness gates cursor sampling on it (see
+            `wait_for_first_watch_receipt`), so an input percentile is never
+            measured against a table nothing has updated yet.
     """
     sequence = 0
 
@@ -878,9 +901,51 @@ def make_live_watch_source(
             if event_type == "MODIFIED" and _owns(pod.labels, run_id):
                 sequence += 1
                 recorder.record_event(sequence, now())
+                if watch_receipt is not None:
+                    watch_receipt.set()
             yield (event_type, pod)
 
     return _source
+
+
+async def wait_for_first_watch_receipt(
+    pilot: Any,
+    *,
+    watch_receipt: asyncio.Event,
+    churn_task: asyncio.Task[None],
+    timeout: float,
+    recorder: BenchmarkRecorder,
+) -> bool:
+    """Block until the application has really received one owned watch event.
+
+    `ChurnProgress.started` is incremented *before* `patch_pod_labels_guarded`
+    is awaited, so it only proves a mutation was dispatched. The watch event
+    that mutation produces travels over an independent connection and can still
+    be in flight when every configured cursor sample has already been taken -
+    which would publish an idle-table figure labelled "under churn".
+    `make_live_watch_source` sets *watch_receipt* at the one instant that does
+    prove otherwise, and this waits for it.
+
+    The wait also ends when *churn_task* finishes, so a churn run that died (or
+    completed) without ever producing an owned watch event aborts by its own
+    cause instead of sitting out this timeout.
+
+    Returns:
+        `True` when an owned watch receipt was observed, `False` when the wait
+        ended because churn finished first.
+
+    Raises:
+        WaitTimeout: Neither a receipt nor a finished churn task within
+            *timeout* seconds.
+    """
+    await wait_for(
+        pilot,
+        lambda: watch_receipt.is_set() or churn_task.done(),
+        timeout=timeout,
+        label="first owned watch event received by the application",
+        recorder=recorder,
+    )
+    return watch_receipt.is_set()
 
 
 def _first_error(group: BaseExceptionGroup[BaseException]) -> BaseException:
@@ -1354,6 +1419,7 @@ async def _run_measured_window(
     run_id: str,
     live_state: dict[tuple[str, str], PodSummary],
     state: _LiveRunState,
+    watch_receipt: asyncio.Event,
 ) -> None:
     """Drive the app: initial render, churn, ground-truth read, convergence.
 
@@ -1395,17 +1461,19 @@ async def _run_measured_window(
         )
         try:
             if events:
-                # Real ordering signal: input latency is only meaningful if
-                # churn was actually under way, so wait for the first mutation
-                # to be dispatched (or for churn to fail) before measuring.
-                await wait_for(
+                # Real ordering signal: input latency is only meaningful once
+                # the *application* has received live churn, so wait for the
+                # first owned watch event (or for churn to end) before
+                # measuring. Mutation dispatch is not that signal - it is
+                # counted before the patch is awaited, and the watch event it
+                # produces arrives over an independent connection.
+                state.churn_started_before_input = await wait_for_first_watch_receipt(
                     pilot,
-                    lambda: state.progress.started > 0 or churn_task.done(),
+                    watch_receipt=watch_receipt,
+                    churn_task=churn_task,
                     timeout=limits.initial_render_timeout_seconds,
-                    label="first churn mutation started",
                     recorder=recorder,
                 )
-            state.churn_started_before_input = state.progress.started > 0
 
             await sample_cursor_input(
                 pilot,
@@ -1527,6 +1595,9 @@ async def run_live_replay(
     recorder = BenchmarkRecorder()
     sampler = ProcessSampler(options.sample_interval)
     state = _LiveRunState()
+    #: Set by `make_live_watch_source` the first time the application receives
+    #: an owned `MODIFIED` event; gates cursor sampling.
+    watch_receipt = asyncio.Event()
 
     harness_kube = active_deps.harness_kube_client_factory()
     try:
@@ -1562,6 +1633,7 @@ async def run_live_replay(
                     expected_namespaces,
                     run_id=run_id,
                     recorder=recorder,
+                    watch_receipt=watch_receipt,
                 )
                 watch_manager = WatchManager(store, source, retry_delay=0.0)
                 manifest = build_manifest(
@@ -1610,6 +1682,7 @@ async def run_live_replay(
                         run_id=run_id,
                         live_state=live_state,
                         state=state,
+                        watch_receipt=watch_receipt,
                     )
                 finally:
                     process_samples = await sampler.stop()
@@ -1628,6 +1701,7 @@ async def run_live_replay(
         final_digest=state.final_digest,
         expected_digest=state.expected_digest,
         churn=churn,
+        update_latency_kind=_LIVE_UPDATE_LATENCY_KIND,
     )
 
     return ReplayReport(
@@ -1638,7 +1712,8 @@ async def run_live_replay(
         rendered_updates=benchmark.rendered_updates,
         render_passes=benchmark.render_passes,
         coalesced_updates=benchmark.coalesced_updates,
-        event_to_render=benchmark.event_to_render,
+        update_latency=benchmark.update_latency,
+        update_latency_kind=_LIVE_UPDATE_LATENCY_KIND,
         input_latency=benchmark.input_latency,
         churn_started_before_input=state.churn_started_before_input,
         process=benchmark.process,

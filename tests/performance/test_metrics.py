@@ -17,6 +17,7 @@ from tests.performance.metrics import (
     ProcessSample,
     ProcessSampler,
     RunManifest,
+    UpdateLatencyKind,
     render_markdown,
     report_payload,
 )
@@ -144,9 +145,9 @@ def test_render_flushes_all_pending_events_as_coalesced() -> None:
     assert report.render_passes == 1
     assert report.coalesced_updates == 1
     assert report.dropped_updates == 0
-    assert report.event_to_render.count == 2
-    assert report.event_to_render.p50_seconds == pytest.approx(0.1)
-    assert report.event_to_render.maximum_seconds == pytest.approx(0.2)
+    assert report.update_latency.count == 2
+    assert report.update_latency.p50_seconds == pytest.approx(0.1)
+    assert report.update_latency.maximum_seconds == pytest.approx(0.2)
 
 
 def test_report_marks_pending_events_as_dropped() -> None:
@@ -160,7 +161,7 @@ def test_report_marks_pending_events_as_dropped() -> None:
     assert report.render_passes == 0
     assert report.coalesced_updates == 0
     assert report.dropped_updates == 2
-    assert report.event_to_render.count == 0
+    assert report.update_latency.count == 0
 
 
 def test_report_counts_api_operations_without_path_loss() -> None:
@@ -270,6 +271,8 @@ def test_report_payload_is_json_serializable_and_stable() -> None:
             "node_pools": [],
         },
         "latency": {
+            "update_latency_kind": "event_to_render",
+            "watch_to_diff_completion": None,
             "event_to_render": {
                 "count": 1,
                 "p50_seconds": 0.19999999999999996,
@@ -337,12 +340,90 @@ def test_render_markdown_uses_stable_labels() -> None:
 
     assert "# Large-cluster benchmark report" in text
     assert "- Profile ID: `smoke-1k`" in text
+    assert "- Update latency metric: `event_to_render`" in text
     assert "- Event to render p95: `0.100s`" in text
     assert "- Input latency p95 (key injection to cursor-row acknowledgement): `0.020s`" in text
     assert "- RSS slope: `1.00 MiB/min`" in text
     assert "- Rendered updates: `1`" in text
     assert "- watch_open: `1`" in text
     assert "- Final digest: `abc`" in text
+
+
+def _metadata_only_report() -> Any:
+    """A report whose update samples came from a metadata-only workload.
+
+    The live churn driver patches only `korvid.dev/performance-tick`, which no
+    Pod column renders, so its samples end at a *no-op* table diff rather than
+    at a rendered cell.
+    """
+    recorder = BenchmarkRecorder()
+    recorder.record_event(1, 1.0)
+    recorder.record_render(1.1)
+    recorder.record_input(0.02)
+    return recorder.report(
+        run_manifest(),
+        process_samples(),
+        final_digest="abc",
+        update_latency_kind=UpdateLatencyKind.WATCH_TO_DIFF_COMPLETION,
+    )
+
+
+def test_report_payload_publishes_a_rendered_cell_run_as_event_to_render() -> None:
+    """The deterministic replay really does rewrite rendered cells, so its
+    samples keep the `event_to_render` key the published budget is stated
+    against - and the watch-to-diff key stays explicitly unavailable."""
+    recorder = BenchmarkRecorder()
+    recorder.record_event(1, 1.0)
+    recorder.record_render(1.1)
+
+    latency = cast(
+        dict[str, object],
+        report_payload(recorder.report(run_manifest(), (), final_digest="abc"))["latency"],
+    )
+
+    assert latency["update_latency_kind"] == "event_to_render"
+    assert latency["event_to_render"] == {
+        "count": 1,
+        "p50_seconds": pytest.approx(0.1),
+        "p95_seconds": pytest.approx(0.1),
+        "p99_seconds": pytest.approx(0.1),
+        "maximum_seconds": pytest.approx(0.1),
+    }
+    assert latency["watch_to_diff_completion"] is None
+
+
+def test_report_payload_publishes_a_metadata_only_run_as_watch_to_diff_completion() -> None:
+    """A metadata-only workload never changes a rendered cell, so publishing
+    its samples under `event_to_render` would advertise a rendered-frame
+    measurement that was never taken. The samples must appear under their own
+    key and `event_to_render` must be explicitly unavailable."""
+    latency = cast(dict[str, object], report_payload(_metadata_only_report())["latency"])
+
+    assert latency["update_latency_kind"] == "watch_to_diff_completion"
+    assert latency["event_to_render"] is None
+    assert latency["watch_to_diff_completion"] == {
+        "count": 1,
+        "p50_seconds": pytest.approx(0.1),
+        "p95_seconds": pytest.approx(0.1),
+        "p99_seconds": pytest.approx(0.1),
+        "maximum_seconds": pytest.approx(0.1),
+    }
+    assert json.dumps(report_payload(_metadata_only_report()), sort_keys=True)
+
+
+def test_render_markdown_never_labels_a_metadata_only_run_event_to_render() -> None:
+    """The Markdown artifact is read by humans deciding whether the 250 ms
+    render budget passed; it must name what was actually measured and must not
+    print an event-to-render figure for a run that produced none."""
+    text = render_markdown(_metadata_only_report())
+
+    assert "- Update latency metric: `watch_to_diff_completion`" in text
+    assert "- Watch receipt to diff completion p95: `0.100s`" in text
+    assert "- Watch receipt to diff completion p99: `0.100s`" in text
+    assert "- Watch receipt to diff completion max: `0.100s`" in text
+    assert "Event to render" not in text
+    # The unrelated cursor metric is untouched by the qualifier.
+    assert "- Input latency p95 (key injection to cursor-row acknowledgement): `0.020s`" in text
 
 
 @pytest.mark.asyncio
