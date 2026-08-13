@@ -7,49 +7,58 @@ keyboard-first Kubernetes cockpit that needs nothing but a kubeconfig. Add an
 extra and it gains an embedded AI agent. Add another and it becomes a tool
 *other* AI clients can drive.
 
-Three shapes, one binary, one safety model.
+One core, independent adapters, one safety model.
 
 ---
 
 ## The shape
 
 ```mermaid
-flowchart TB
-    M["<b>your editor's assistant</b><br/>VS Code Copilot Chat<br/>Claude Code · Cursor · Zed"]
-    P["<b>a model, wherever you want it</b><br/>Copilot · Azure · Anthropic · OpenAI<br/>Ollama or any OpenAI-compatible endpoint"]
+flowchart LR
+    HUMAN["👤 Human operator"]
+    MODEL["🤖 Model / provider<br/>Copilot · Azure · Anthropic<br/>OpenAI · Ollama · compatible"]
+    CLIENT["🖥 Editor / external assistant<br/>VS Code · Claude Code<br/>Cursor · Zed"]
+    CLUSTER[("☸ Kubeconfig +<br/>cluster")]
 
-    subgraph X1[" &nbsp; optional: + korvid[mcp] &nbsp; "]
-        MS["<b>MCP server</b><br/>same reads · same UI driving<br/><i>writes: propose only, opt-in</i>"]
+    subgraph KORVID["KORVID — product boundary"]
+        direction LR
+        TUI["TUI adapter<br/><b>INCLUDED</b><br/>browse · filter · describe<br/>logs · port-forward · exec"]
+        AGENT["Agent adapter<br/><b>OPTIONAL</b> korvid[agent]<br/>Ctrl-A chat panel<br/>context-aware reads"]
+        CORE["Observe · diagnose · navigate<br/>approval-gated operations<br/>audit log · secret masking"]
+        MCP["MCP adapter<br/><b>OPTIONAL</b> korvid[mcp]<br/>read + UI-drive over MCP<br/>write proposals opt-in"]
+        K8S["Kubernetes adapter<br/><b>INCLUDED</b><br/>watch · read · apply"]
+
+        TUI --> CORE
+        AGENT --> CORE
+        MCP --> CORE
+        CORE --> K8S
     end
 
-    subgraph X2[" &nbsp; optional: + korvid[agent] &nbsp; "]
-        A["<b>Ctrl-A chat panel</b><br/>knows what you are looking at<br/><i>writes: request only</i>"]
-    end
+    HUMAN <--> TUI
+    MODEL <--> AGENT
+    CLIENT <--> MCP
+    K8S <--> CLUSTER
 
-    subgraph BASE[" &nbsp; korvid &nbsp; — the cockpit, complete on its own &nbsp; "]
-        T["<b>browse · filter · describe · live logs</b><br/>port-forward · file transfer · exec<br/><i>writes: your keystroke</i>"]
-    end
-
-    K[("your kubeconfig")]
-
-    M <--> MS
-    P <--> A
-    MS -->|"reads · drives the UI"| T
-    A -->|"reads · drives the UI"| T
-    T --> K
-
-    style BASE fill:#22543d,color:#fff,stroke:#1a202c,stroke-width:2px
-    style X1 fill:#2c5282,color:#fff,stroke:#1a202c,stroke-dasharray: 6 4
-    style X2 fill:#553c9a,color:#fff,stroke:#1a202c,stroke-dasharray: 6 4
-    style T fill:#f7fafc,color:#1a202c
-    style A fill:#f7fafc,color:#1a202c
-    style MS fill:#f7fafc,color:#1a202c
-    style M fill:#edf2f7,color:#1a202c,stroke-dasharray: 4 4
-    style P fill:#edf2f7,color:#1a202c,stroke-dasharray: 4 4
-    style K fill:#edf2f7,color:#1a202c,stroke-dasharray: 4 4
+    style KORVID fill:#1a202c,color:#e2e8f0,stroke:#4a5568,stroke-width:2px
+    style CORE fill:#2d3748,color:#e2e8f0,stroke:#4a5568
+    style TUI fill:#22543d,color:#fff,stroke:#276749
+    style K8S fill:#22543d,color:#fff,stroke:#276749
+    style AGENT fill:#553c9a,color:#fff,stroke:#6b46c1
+    style MCP fill:#2c5282,color:#fff,stroke:#3182ce
+    style HUMAN fill:#edf2f7,color:#1a202c,stroke:#a0aec0,stroke-dasharray: 4 4
+    style MODEL fill:#edf2f7,color:#1a202c,stroke:#a0aec0,stroke-dasharray: 4 4
+    style CLIENT fill:#edf2f7,color:#1a202c,stroke:#a0aec0,stroke-dasharray: 4 4
+    style CLUSTER fill:#edf2f7,color:#1a202c,stroke:#a0aec0,stroke-dasharray: 4 4
 ```
 
-Neither box above is required, and neither implies the other.
+The center is a product contract, not the `src/korvid/core/` package. Every
+adapter shares cluster reads and UI control. Any write request that reaches
+korvid — from the TUI, the embedded agent, or an MCP write proposal — passes
+through the approval gate and is logged. MCP itself exposes read and UI-drive
+tools; write proposals are opt-in and handled inside korvid, not by the MCP
+client.
+
+Neither optional adapter is required, and neither implies the other.
 
 The two extras are **independent**, not a ladder. Each adds to the cockpit on
 its own: `korvid[mcp]` gives an editor's assistant cluster sight without
@@ -77,7 +86,7 @@ explicitly requested a feature is the one behaviour worth failing over.
 
 ---
 
-## Layer 1 — the cockpit
+## Base — the cockpit
 
 **What it is:** a terminal UI for operating a cluster, built for people who
 would rather not remember `kubectl` flag order.
@@ -100,7 +109,7 @@ account anywhere.
 
 ---
 
-## Layer 2 — an agent inside the cockpit
+## Agent module — an agent inside the cockpit
 
 **What it is:** `Ctrl-A` opens a chat panel that already knows what you are
 looking at — view, namespace, selection, filter. You do not describe your
@@ -124,7 +133,7 @@ people who would rather their production incidents not leave the building.
 
 ---
 
-## Layer 3 — korvid as a tool for other agents
+## MCP module — korvid as a tool for other agents
 
 **What it is:** the same read and UI-driving tools, exposed over MCP so an
 external agent can use them. VS Code Copilot Chat, Claude Code, Cursor, Zed.
@@ -142,21 +151,96 @@ deliberately — and it stays off until you turn it on.
 
 ---
 
-## The one rule all three share
+## Four valid compositions
 
+Four installs, four shapes — the two optional adapters occupy independent ports.
+
+<!-- LAYOUT NOTE (Mermaid 11 nested-subgraph rendering):
+     The subgraph declaration order below is C4 → C2 (ROW1) then C3 → C1 (ROW2).
+     Mermaid 11 renders nested subgraphs in reverse declaration order within each
+     row, so this intentional "reversed" source order produces the desired
+     rendered grid: cockpit (C1) top-left, Agent (C2) top-right, MCP (C3)
+     bottom-left, all (C4) bottom-right.
+     Do NOT "tidy" the source order to alphabetical/logical sequence — doing so
+     silently reverses the grid without any visible warning. -->
 ```mermaid
-flowchart LR
-    U["you"] -->|keystroke| G
-    A["embedded agent"] -->|requests| G
-    M["MCP client"] -->|"proposes<br/>(opt-in)"| G["approval dialog<br/><i>preview where the operation has one</i>"]
-    G -->|approved| AU["audit log"]
-    AU -->|written durably| W["the cluster changes"]
-    AU -.->|cannot be written| X["blocked"]
+flowchart TB
+    subgraph ROW1["  "]
+        direction LR
+        subgraph C4["korvid[all]  —  agent + MCP"]
+            direction TB
+            C4A["Agent<br/>OPTIONAL"]
+            C4M["MCP<br/>OPTIONAL"]
+            C4T["TUI<br/>INCLUDED"]
+            C4R["Core"]
+            C4K["K8s<br/>INCLUDED"]
+            C4A --> C4R
+            C4M --> C4R
+            C4T --> C4R --> C4K
+        end
 
-    style G fill:#744210,color:#fff
-    style X fill:#742a2a,color:#fff
-    style W fill:#22543d,color:#fff
+        subgraph C2["korvid[agent]  —  + embedded AI"]
+            direction TB
+            C2A["Agent<br/>OPTIONAL"]
+            C2T["TUI<br/>INCLUDED"]
+            C2R["Core"]
+            C2K["K8s<br/>INCLUDED"]
+            C2A --> C2R
+            C2T --> C2R --> C2K
+        end
+    end
+
+    subgraph ROW2["  "]
+        direction LR
+        subgraph C3["korvid[mcp]  —  + MCP server"]
+            direction TB
+            C3M["MCP<br/>OPTIONAL"]
+            C3T["TUI<br/>INCLUDED"]
+            C3R["Core"]
+            C3K["K8s<br/>INCLUDED"]
+            C3M --> C3R
+            C3T --> C3R --> C3K
+        end
+
+        subgraph C1["korvid  —  cockpit only"]
+            direction TB
+            C1T["TUI<br/>INCLUDED"]
+            C1R["Core"]
+            C1K["K8s<br/>INCLUDED"]
+            C1T --> C1R --> C1K
+        end
+    end
+
+    NOTE["korvid[agent,entra] is a separate<br/>auth extra — not included in [all]"]
+
+    style ROW1 fill:none,stroke:none
+    style ROW2 fill:none,stroke:none
+    style NOTE fill:#fffbeb,color:#92400e,stroke:#d97706,stroke-dasharray: 4 4
+
+    style C1T fill:#22543d,color:#fff,stroke:#276749
+    style C1R fill:#2d3748,color:#e2e8f0,stroke:#4a5568
+    style C1K fill:#22543d,color:#fff,stroke:#276749
+
+    style C2T fill:#22543d,color:#fff,stroke:#276749
+    style C2A fill:#553c9a,color:#fff,stroke:#6b46c1
+    style C2R fill:#2d3748,color:#e2e8f0,stroke:#4a5568
+    style C2K fill:#22543d,color:#fff,stroke:#276749
+
+    style C3T fill:#22543d,color:#fff,stroke:#276749
+    style C3M fill:#2c5282,color:#fff,stroke:#3182ce
+    style C3R fill:#2d3748,color:#e2e8f0,stroke:#4a5568
+    style C3K fill:#22543d,color:#fff,stroke:#276749
+
+    style C4T fill:#22543d,color:#fff,stroke:#276749
+    style C4A fill:#553c9a,color:#fff,stroke:#6b46c1
+    style C4M fill:#2c5282,color:#fff,stroke:#3182ce
+    style C4R fill:#2d3748,color:#e2e8f0,stroke:#4a5568
+    style C4K fill:#22543d,color:#fff,stroke:#276749
 ```
+
+---
+
+## The one rule all four share
 
 **Nothing changes your cluster without a human keystroke, and nothing changes
 it unlogged.**
@@ -191,7 +275,7 @@ both.
 
 Three convictions, each visible in the structure above:
 
-**An operator's tool should work without AI.** Layer 1 is complete on its own.
+**An operator's tool should work without AI.** The base cockpit is complete on its own.
 The agent is an addition to a working cockpit, not the reason it exists — so
 your cluster tooling does not stop working when a provider is down, a token
 expires, or a policy forbids sending cluster data anywhere.
