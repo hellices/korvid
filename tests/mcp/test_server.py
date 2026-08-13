@@ -31,6 +31,7 @@ from korvid.tools.executor import (
     ToolExecutor,
     ToolOutcome,
 )
+from korvid.tools.registry import mcp_tool_schemas
 from korvid.tools.structured import load_structured_document
 from tests.platforms import POSIX
 from tests.tools.test_executor import (
@@ -1366,3 +1367,47 @@ async def test_a_failed_proposal_is_flagged_even_though_its_producer_says_nothin
         server.request_shutdown()
         await asyncio.wait_for(task, timeout=10)
     assert executor.calls != []
+
+
+# ---------------------------------------------------------------------------
+# External reads (issue #193)
+# ---------------------------------------------------------------------------
+
+
+async def test_an_external_read_is_noted_rather_than_mirrored() -> None:
+    """There is no resource view for a Prometheus query.
+
+    Mirroring would have to pick some screen; the activity note is what
+    makes the query visible in the TUI, which is what the issue asks for.
+    """
+    executor = RecordingExecutor()
+    ui = FakeBridge()
+    notes: list[str] = []
+    server = KorvidMCPServer(
+        executor,
+        READ_TOOLS + UI_TOOLS + mcp_tool_schemas(observability_backends=frozenset({"metrics"})),
+        port=0,
+        ui=ui,
+        follow_enabled=lambda: True,
+        note_activity=notes.append,
+    )
+    await server.call_tool("query_metrics", {"signal": "cpu", "namespace": "prod"})
+    await _drain_follow(server)
+    assert ui.calls == []
+    assert len(notes) == 1
+    assert "query_metrics" in notes[0]
+
+
+async def test_an_external_read_result_beginning_with_error_is_not_a_failed_call() -> None:
+    """A log line is not korvid's text, so the prefix decides nothing."""
+    from korvid.mcp.server import _failed
+
+    outcome = ToolOutcome(text="ERROR: connection refused", error=False)
+    assert _failed("search_logs", outcome) is False
+
+
+async def test_a_failed_external_read_is_reported_as_a_failed_call() -> None:
+    from korvid.mcp.server import _failed
+
+    outcome = ToolOutcome(text="ERROR: [network] prom is unreachable", error=True)
+    assert _failed("query_metrics", outcome) is True

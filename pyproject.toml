@@ -71,8 +71,14 @@ mcp = [
 entra = [
     "azure-identity>=1.19",
 ]
+# Read-only observability connectors (issue #193): bounded Prometheus and
+# Loki investigation. Only an HTTP client is needed - the connector
+# boundary itself is stdlib.
+observability = [
+    "httpx>=0.27",
+]
 all = [
-    "korvid[agent,mcp]",
+    "korvid[agent,mcp,observability]",
 ]
 
 [build-system]

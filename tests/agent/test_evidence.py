@@ -742,3 +742,50 @@ def test_the_container_a_read_resolved_is_what_the_citation_carries() -> None:
     item = ledger.resolve(ref)
     assert item is not None
     assert item.container == "app"
+
+
+def test_an_external_read_is_citable_evidence() -> None:
+    """A metric or log line is exactly the kind of thing a claim rests on.
+
+    The issue requires these results to carry source, scope, window and
+    truncation "so they can participate in evidence citations"; that only
+    happens if the runtime records them.
+    """
+    from korvid.agent.runtime import _is_recorded_read
+
+    assert _is_recorded_read("query_metrics")
+    assert _is_recorded_read("search_logs")
+
+
+def test_a_screen_action_is_still_not_evidence() -> None:
+    """Widening reads must not widen to UI or write tools."""
+    from korvid.agent.runtime import _is_recorded_read
+
+    assert not _is_recorded_read("navigate")
+    assert not _is_recorded_read("scale_workload")
+    assert not _is_recorded_read("not_a_tool")
+
+
+def test_the_locator_covers_every_registered_external_read() -> None:
+    """The same guard as for cluster reads, for the newest kind of read."""
+    from korvid.agent.evidence import TARGET_ARGUMENTS
+    from korvid.tools.registry import TOOLS_BY_NAME
+
+    handled = set(TARGET_ARGUMENTS) | {"kind", "name"}
+    unhandled = []
+    for tool, definition in TOOLS_BY_NAME.items():
+        if definition.effect != "external_read":
+            continue
+        params = set(definition.schema["function"]["parameters"].get("properties", {}))
+        # `workload` is deliberately not a locator target: a workload name
+        # alone does not name a kind (Deployment? StatefulSet?), and a
+        # guessed kind would navigate to the wrong object.
+        unknown = (
+            params
+            - {"namespace", "window_minutes", "limit", "contains", "signal", "workload"}
+            - handled
+        )
+        if unknown:
+            unhandled.append((tool, sorted(unknown)))
+
+    assert unhandled == []

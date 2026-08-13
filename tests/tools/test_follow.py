@@ -176,3 +176,34 @@ async def test_diagnose_pvc_follow_opens_claim_describe() -> None:
     assert ui.calls == [
         ("open_describe", {"kind": "persistentvolumeclaims", "name": "data", "namespace": "shop"})
     ]
+
+
+def test_external_reads_are_explicitly_unmirrored() -> None:
+    """No screen shows a Prometheus query, so the decision must be recorded.
+
+    An external read has no resource view to navigate to; leaving it out
+    of both sets would make the pairing guard silently stop covering the
+    newest kind of read.
+    """
+    from korvid.tools.follow import UNMIRRORED_TOOLS
+    from korvid.tools.registry import TOOL_DEFS
+
+    external = {t.name for t in TOOL_DEFS if t.effect == "external_read" and "mcp" in t.surfaces}
+    assert external
+    assert external <= UNMIRRORED_TOOLS
+    assert not (external & FOLLOWABLE_TOOLS)
+
+
+def test_the_summary_names_the_signal_and_workload_of_an_external_read() -> None:
+    """`query_metrics (ns prod)` alone would not say what was asked."""
+    summary = read_summary(
+        "query_metrics", {"signal": "cpu", "workload": "api", "namespace": "prod"}
+    )
+    assert "cpu" in summary
+    assert "api" in summary
+    assert "ns prod" in summary
+
+
+def test_the_summary_sanitises_an_external_read_workload() -> None:
+    summary = read_summary("search_logs", {"workload": "api\nfake toast line", "namespace": "p"})
+    assert "\n" not in summary

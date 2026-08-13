@@ -1041,6 +1041,9 @@ mcp = [
     { name = "starlette" },
     { name = "uvicorn" },
 ]
+observability = [
+    { name = "httpx" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1065,8 +1068,9 @@ requires-dist = [
     { name = "anyio", marker = "extra == 'mcp'", specifier = ">=4.5" },
     { name = "azure-identity", marker = "extra == 'entra'", specifier = ">=1.19" },
     { name = "httpx", marker = "extra == 'agent'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'observability'", specifier = ">=0.27" },
     { name = "keyring", marker = "extra == 'agent'", specifier = ">=25.7.0" },
-    { name = "korvid", extras = ["agent", "mcp"], marker = "extra == 'all'" },
+    { name = "korvid", extras = ["agent", "mcp", "observability"], marker = "extra == 'all'" },
     { name = "kubernetes-asyncio", specifier = ">=32.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0.0,<3" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -1076,7 +1080,7 @@ requires-dist = [
     { name = "textual", specifier = ">=8.0" },
     { name = "uvicorn", marker = "extra == 'mcp'", specifier = ">=0.52.1" },
 ]
-provides-extras = ["agent", "mcp", "entra", "all"]
+provides-extras = ["agent", "mcp", "entra", "observability", "all"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -149,7 +149,7 @@ def _failed(name: str, outcome: ToolOutcome) -> bool:
     if outcome.error:
         return True
     tool = TOOLS_BY_NAME.get(name)
-    if tool is None or tool.effect == "cluster_read":
+    if tool is None or tool.effect in ("cluster_read", "external_read"):
         return False
     return outcome.text.startswith(ERROR_PREFIX)
 
@@ -337,7 +337,12 @@ class KorvidMCPServer:
         mirror.
         """
         tool = TOOLS_BY_NAME.get(name)
-        if tool is None or tool.effect != "cluster_read":
+        if tool is None or tool.effect not in ("cluster_read", "external_read"):
+            return
+        if tool.effect == "external_read":
+            # No screen shows a Prometheus query; the activity note is the
+            # whole of "visible in the TUI" for an external read (#193).
+            self._note_read(name, args, ctx)
             return
         ui = self._ui
         if (

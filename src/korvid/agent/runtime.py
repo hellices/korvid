@@ -209,15 +209,22 @@ def _describe(item: Evidence) -> str:
     return item.tool
 
 
-def _is_cluster_read(name: str) -> bool:
-    """Whether `name` reads cluster state, per the tool registry.
+#: Effects whose results a claim may cite. External reads (issue #193)
+#: are here for the same reason cluster reads are: a metric series or a
+#: log line is an observation someone can go and check. A screen action
+#: or a write is not, however successful it reports itself.
+_EVIDENCE_EFFECTS: frozenset[str] = frozenset({"cluster_read", "external_read"})
+
+
+def _is_recorded_read(name: str) -> bool:
+    """Whether `name` produces evidence, per the tool registry.
 
     Unknown names are not reads: a custom or plugin tool has to declare
     itself before its output can be cited, rather than being trusted as
     evidence by default (issue #192).
     """
     definition = TOOLS_BY_NAME.get(name)
-    return definition is not None and definition.effect == "cluster_read"
+    return definition is not None and definition.effect in _EVIDENCE_EFFECTS
 
 
 class AgentRuntime:
@@ -551,7 +558,7 @@ class AgentRuntime:
         # the model was actually shown - evidence the user cannot find in
         # the transcript would be worse than no citation.
         ref = None
-        if _is_cluster_read(name):
+        if _is_recorded_read(name):
             ref = self._evidence.record(
                 name,
                 parsed or {},

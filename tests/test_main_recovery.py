@@ -316,7 +316,11 @@ async def test_provider_created_before_a_later_wiring_failure_is_released(
     provider_seen: list[object] = []
 
     async def fake_teardown(
-        controller: object, discovery: object, provider: object, kube: object
+        controller: object,
+        discovery: object,
+        provider: object,
+        kube: object,
+        observability: object = None,
     ) -> None:
         provider_seen.append(provider)
         await kube.close()  # type: ignore[attr-defined]  # fake in test

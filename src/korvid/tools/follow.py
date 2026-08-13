@@ -40,10 +40,15 @@ FOLLOWABLE_TOOLS: frozenset[str] = frozenset(
 )
 
 #: Reads deliberately left unmirrored. The pairing test in
-#: tests/tools/test_follow.py forces every cluster_read on the MCP surface
-#: into exactly one of these sets, so a new read tool cannot silently
-#: become invisible again.
-UNMIRRORED_TOOLS: frozenset[str] = frozenset()
+#: tests/tools/test_follow.py forces every cluster_read and external_read
+#: on the MCP surface into exactly one of these sets, so a new read tool
+#: cannot silently become invisible again.
+#:
+#: The external reads (issue #193) are here because there is no screen to
+#: mirror them to: korvid has no Prometheus or Loki view, and picking some
+#: resource screen would claim the query was about that object. They
+#: surface as activity notes instead.
+UNMIRRORED_TOOLS: frozenset[str] = frozenset({"query_metrics", "search_logs"})
 
 
 def _str_or_none(value: Any) -> str | None:
@@ -70,15 +75,22 @@ def _display(value: str, *, limit: int = _SUMMARY_FIELD_LIMIT) -> str:
 
 
 def read_summary(tool: str, args: Mapping[str, Any]) -> str:
-    """One activity-feed line for a cluster read.
+    """One activity-feed line for a cluster or external read.
 
     E.g. `get_logs api-1 (ns prod)`, `list_resources pods (ns all)` - short
     enough for a transient toast, specific enough to know what an external
     host just looked at. Caller-controlled fields are sanitized and bounded
     (`_display`).
     """
-    kind = _str_or_none(args.get("kind"))
-    target = _str_or_none(args.get("pod")) or _str_or_none(args.get("name"))
+    # `signal`/`workload` come from the external reads (issue #193), which
+    # name their subject differently; without them the note would read
+    # `query_metrics (ns prod)` and say nothing about what was asked.
+    kind = _str_or_none(args.get("kind")) or _str_or_none(args.get("signal"))
+    target = (
+        _str_or_none(args.get("pod"))
+        or _str_or_none(args.get("name"))
+        or _str_or_none(args.get("workload"))
+    )
     namespace = _str_or_none(args.get("namespace"))
     parts = [tool]
     if kind and target:

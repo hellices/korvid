@@ -130,6 +130,11 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
   third-party LLM adapters, selected-only loading, exact event and option
   limits, and guidance on when a plugin is warranted instead of an
   OpenAI-compatible endpoint.
+- **[Observability connectors](https://github.com/hellices/korvid/blob/main/docs/observability.md)** — bounded read-only
+  Prometheus and Loki investigation: a fixed signal catalogue rather than
+  free-form queries, enforced window/size/timeout/concurrency limits,
+  credentials named but never stored, and TLS verification that cannot be
+  turned off.
 - **[MCP server](https://github.com/hellices/korvid/blob/main/docs/mcp.md)** — expose korvid's read and UI-drive tools
   to VS Code, Claude Code, Cursor, or Zed; write tools are never exposed.
   An opt-in proposal flow lets external agents queue writes that execute

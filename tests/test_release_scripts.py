@@ -827,6 +827,7 @@ def _metadata_text(
         "Provides-Extra: agent\n"
         "Provides-Extra: mcp\n"
         f"{entra}"
+        "Provides-Extra: observability\n"
         "Provides-Extra: all\n"
         'Requires-Dist: httpx>=0.27; extra == "agent"\n'
         f"{keyring}"
@@ -834,6 +835,7 @@ def _metadata_text(
         'Requires-Dist: anyio>=4.5; extra == "mcp"\n'
         'Requires-Dist: starlette>=0.36; extra == "mcp"\n'
         'Requires-Dist: uvicorn>=0.30; extra == "mcp"\n'
+        'Requires-Dist: httpx>=0.27; extra == "observability"\n'
         'Requires-Dist: httpx>=0.27; extra == "all"\n'
         'Requires-Dist: keyring>=25.7.0; extra == "all"\n'
         'Requires-Dist: mcp<2,>=1.10; extra == "all"\n'
