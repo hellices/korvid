@@ -274,3 +274,28 @@ class TestResultProjection:
         assert "endpoint: loki.example.com" in lines
         assert "truncated: no" in lines
         assert "hunter2" not in result
+
+    async def test_a_backend_error_message_is_projected_too(self) -> None:
+        """The failure text is backend-controlled, so it needs the same pass.
+
+        `require_success` quotes the backend's own `error` field, which a
+        compromised or merely careless backend can fill with anything —
+        including a credential it echoed back from a query.
+        """
+        connector = FakeLogs(
+            ConnectorError("backend", "loki refused: api_key=AKIAIOSFODNN7EXAMPLE")
+        )
+        outcome = await _executor(logs=connector).execute_recorded(
+            "search_logs", {"namespace": "prod"}
+        )
+        assert outcome.error is True
+        assert "AKIAIOSFODNN7EXAMPLE" not in outcome.text
+        assert outcome.redactions
+
+    async def test_a_projected_failure_keeps_its_kind_and_stays_an_error(self) -> None:
+        connector = FakeMetrics(ConnectorError("permission", "the endpoint refused the query"))
+        outcome = await _executor(metrics=connector).execute_recorded(
+            "query_metrics", {"signal": "cpu", "namespace": "prod"}
+        )
+        assert outcome.error is True
+        assert outcome.text.startswith("ERROR: [permission]")

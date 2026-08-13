@@ -440,7 +440,7 @@ def _query_scope(args: Mapping[str, Any]) -> QueryScope:
     )
 
 
-def _projected(text: str, path: str) -> ToolOutcome:
+def _projected(text: str, path: str, *, error: bool = False) -> ToolOutcome:
     """An external read's rendered result, masked before it leaves here.
 
     The projection has to happen at this boundary rather than on the way
@@ -454,18 +454,24 @@ def _projected(text: str, path: str) -> ToolOutcome:
     that sees the text at full length (issue #193, PR #280 review).
     """
     records: list[RedactionRecord] = []
-    return ToolOutcome(text=redact_text(text, path, records), redactions=tuple(records))
+    return ToolOutcome(
+        text=redact_text(text, path, records), redactions=tuple(records), error=error
+    )
 
 
-def _connector_failure(exc: ConnectorError) -> ToolOutcome:
-    """A connector failure as a marked error result.
+def _connector_failure(exc: ConnectorError, path: str) -> ToolOutcome:
+    """A connector failure as a marked, projected error result.
 
     The kind travels with the message because it is the actionable part:
     a `network` failure means try again or check the endpoint, a
     `permission` failure means the credential is the problem, and the two
     read identically once flattened into prose.
+
+    Projected like a successful result: a `backend` failure quotes the
+    backend's own `error` field, so the failure path carries exactly the
+    same untrusted text the success path does (PR #280 review).
     """
-    return ToolOutcome(text=f"{ERROR_PREFIX} [{exc.kind}] {exc}", error=True)
+    return _projected(f"{ERROR_PREFIX} [{exc.kind}] {exc}", path, error=True)
 
 
 def redacted_and_compacted(text: str, limit: int, path: str, records: list[RedactionRecord]) -> str:
@@ -1157,7 +1163,7 @@ class ToolExecutor(RecordedExecution):
         try:
             result = await self._metrics.query(signal=signal, scope=scope, window_minutes=window)
         except ConnectorError as exc:
-            return _connector_failure(exc)
+            return _connector_failure(exc, "metrics")
         return _projected(render_metrics(result), "metrics")
 
     async def _search_logs(self, args: dict[str, Any]) -> ToolOutcome:
@@ -1174,7 +1180,7 @@ class ToolExecutor(RecordedExecution):
                 limit=args.get("limit"),
             )
         except ConnectorError as exc:
-            return _connector_failure(exc)
+            return _connector_failure(exc, "logs")
         return _projected(render_logs(result), "logs")
 
     async def _get_events(self, args: dict[str, Any]) -> ToolOutcome:
