@@ -506,11 +506,14 @@ Expected: every command exits `0`.
 **Interfaces:**
 - Produces: `ReplayOptions.input_sample_pairs` (positive int, default 25) and
   `validate_input_sample_pairs(options)`, plus
+  `validate_input_ack_timeout(options)` (finite and > 0 — `asyncio.timeout(inf)`
+  never fires) and
   `sample_cursor_input(pilot, table, recorder, *, pairs, now, timeout, aborted)`
-  shared by both harnesses.
+  shared by both harnesses. Both validators run at the top of `run_replay` and
+  `run_live_replay`, before app startup or any live cluster work.
 - Produces: `--input-ack-timeout FLOAT` and `--input-sample-pairs INT` on both
-  `replay` and `replay-live`, validated as positive and forwarded into both
-  `ReplayOptions` constructions.
+  `replay` and `replay-live`, validated as finite/positive and positive
+  respectively, and forwarded into both `ReplayOptions` constructions.
 - Preserves: cursor identity (each pair is a self-cancelling `down`/`up` round
   trip), the abort predicate before every sample, live identity/ownership
   gates, and artifact validation.

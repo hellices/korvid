@@ -8,6 +8,7 @@ update accounting, and API telemetry.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import re
 from collections.abc import AsyncIterator
 from time import monotonic
@@ -18,9 +19,11 @@ import pytest
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
+from korvid.k8s.models import PodSummary
 from korvid.ui.messages import ResourcesUpdated
-from korvid.ui.widgets.resource_table import ResourceTable
+from korvid.ui.widgets.resource_table import ResourceTable, _cells_equal
 from tests.performance import replay as replay_module
+from tests.performance.manifests import TICK_LABEL
 from tests.performance.metrics import BenchmarkRecorder, RunManifest
 from tests.performance.pacing import sample_paced_schedule
 from tests.performance.profile import Burst, FailureInjection, WorkloadProfile
@@ -35,6 +38,7 @@ from tests.performance.replay import (
 )
 from tests.performance.workload import apply_events, initial_pods, scheduled_events, summary_digest
 from tests.ui.test_app import _pod, make_app
+from tests.ui.test_table_diff_update import _plain_refreshes, _spy_refresh
 from tests.ui.waits import WaitTimeout, until
 
 
@@ -63,6 +67,16 @@ def _manifest_profile() -> WorkloadProfile:
 
 def _manifest_for_test() -> RunManifest:
     return build_manifest(_manifest_profile())
+
+
+def _tick_labelled_pod(name: str, tick: str) -> PodSummary:
+    """A Pod differing from `_pod(name)` only in an unrendered metadata label.
+
+    Mirrors the live churn driver exactly: it patches
+    `korvid.dev/performance-tick` and nothing else, and no Pod column renders
+    labels (they feed the client-side `-l` filter only).
+    """
+    return dataclasses.replace(_pod(name), labels=((TICK_LABEL, tick),))
 
 
 async def test_measure_cursor_input_returns_when_cursor_row_changes() -> None:
@@ -369,6 +383,39 @@ async def test_replay_rejects_a_non_positive_input_sample_pair_count() -> None:
 
     with pytest.raises(ValueError, match="input_sample_pairs must be positive"):
         await run_replay(profile, ReplayOptions(time_scale=0, input_sample_pairs=0))
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [0.0, -1.0, float("nan"), float("inf"), float("-inf")],
+    ids=["zero", "negative", "nan", "positive-infinity", "negative-infinity"],
+)
+async def test_replay_rejects_a_non_finite_or_non_positive_input_ack_timeout(
+    monkeypatch: pytest.MonkeyPatch, timeout: float
+) -> None:
+    """`asyncio.timeout(inf)`/`nan` never fires, so an unacknowledged key would
+    hang the run forever, contradicting the documented bounded probe; a
+    non-positive bound aborts before the key can possibly be acknowledged.
+    Both are harness misconfiguration and must fail before the app starts."""
+
+    def fail_app(*args: object, **kwargs: object) -> MeasuredKorvidApp:
+        pytest.fail("run_replay should reject an invalid input_ack_timeout before app startup")
+
+    monkeypatch.setattr(replay_module, "MeasuredKorvidApp", fail_app)
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-input-ack-invalid",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=10,
+        duration_seconds=1,
+        bursts=(),
+        failures=(),
+    )
+
+    with pytest.raises(ValueError, match="input_ack_timeout must be finite and positive"):
+        await run_replay(profile, ReplayOptions(time_scale=0, input_ack_timeout=timeout))
 
 
 async def test_replay_rejects_one_object_input_sampling_before_app_start(
@@ -695,6 +742,54 @@ async def test_measured_app_counts_only_resource_update_renders() -> None:
     report = recorder.report(_manifest_for_test(), (), final_digest="d")
     assert report.render_passes == 1
     assert report.rendered_updates == 1
+
+
+async def test_metadata_only_event_records_a_render_sample_without_changing_cells() -> None:
+    """`event_to_render` times recorder completion, not a visible repaint.
+
+    The live 24 ev/s workload patches only `korvid.dev/performance-tick`, a
+    label no Pod column renders. The in-place diff therefore finds no changed
+    cell and requests no repaint, yet `MeasuredKorvidApp.on_resources_updated`
+    still calls `record_render`, so the recorded sample spans event receipt to
+    *no-op* table-diff completion. That number is real, but it is not a
+    rendered-frame measurement and must never be published against the
+    event-to-render budget for a metadata-only workload. Replay is different:
+    its churn rewrites phase/ready/restarts, which are rendered cells.
+    """
+    recorder = BenchmarkRecorder()
+    store = ResourceStore()
+    pods = [_pod(f"pod-{i:02d}") for i in range(3)]
+
+    async def source(kind: str, _scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        for pod in pods if kind == "pods" else []:
+            yield ("ADDED", pod)
+        await asyncio.Event().wait()
+
+    app = MeasuredKorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, source, retry_delay=0.0),
+        recorder=recorder,
+    )
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 3, label="pods loaded")
+        before = list(table.get_row("default/pod-01"))
+        refreshes = _spy_refresh(table)
+
+        recorder.record_event(1, monotonic())
+        store.apply_event("pods", "default", "MODIFIED", _tick_labelled_pod("pod-01", "7"))
+        await until(pilot, lambda: recorder.pending_count() == 0, label="event reached recorder")
+
+        after = list(table.get_row("default/pod-01"))
+        assert [_cells_equal(old, new) for old, new in zip(before, after, strict=True)] == [
+            True
+        ] * len(before)
+        assert _plain_refreshes(refreshes) == []
+
+    report = recorder.report(_manifest_for_test(), (), final_digest="d")
+    assert report.render_passes == 1
+    assert report.event_to_render.count == 1
 
 
 async def test_replay_measures_list_phase_separately_from_watch_events(

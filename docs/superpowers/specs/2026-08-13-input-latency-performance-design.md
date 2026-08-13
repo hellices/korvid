@@ -142,13 +142,18 @@ interaction under steady churn.
 - Key injection fails explicitly if no active driver exists.
 - Cursor acknowledgement uses a monotonic deadline and names the key and
   expected row in its timeout.
-- A non-positive sample-pair count is rejected at both harness entry points,
-  before any cluster identity, ownership, or mutation work, and by both CLI
-  parsers.
+- A non-positive sample-pair count, and an acknowledgement timeout that is not
+  finite and positive (`asyncio.timeout(inf)` never fires, so an
+  unacknowledged key would hang the run), are rejected at both harness entry
+  points, before any cluster identity, ownership, or mutation work, and by
+  both CLI parsers.
 - The live workload keeps all existing identity, ownership, UID, and guarded
   mutation checks.
 - An unmeasured live result is reported as unmeasured, never as a passing or
-  estimated one.
+  estimated one. This includes event-to-render: the live churn driver is
+  metadata-only, no Pod column renders labels, so its recorded samples end at
+  a no-op table diff and are published as not-measured rather than against the
+  render budget.
 
 ## Testing and verification
 

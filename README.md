@@ -130,7 +130,8 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
   (1,000 pods at 24 watch events/second for 31 minutes against a real
   cluster), which budgets pass and which miss, which cursor-input figures were
   withdrawn as invalid measurements, and the corrected 30-second live
-  qualification where both latency budgets pass.
+  qualification where the corrected cursor-input budget passes (event-to-render
+  stays unmeasured live: that churn workload changes no rendered cell).
 - **[Threat model](https://github.com/hellices/korvid/blob/main/docs/threat-model.md)** — exactly what crosses the
   embedded-provider boundary, what is redacted, the MCP and plugin trust
   boundaries, and the residual risks that are not mitigated. See

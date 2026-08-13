@@ -63,10 +63,19 @@ Supporting numbers: event-to-render p50 266 → 156 ms, p99 659 → 356 ms, max
 1,628 → 714 ms; max backlog depth 42 → 39; achieved churn 23.18 → 23.996 ev/s
 against a 24.0 target.
 
+**The event-to-render row measures the same thing here as in the 30-second
+table below**, and for the same reason: live churn is metadata-only, so the
+recorded interval ends when the table diff completes without writing a cell.
+The 527 → 299 ms improvement is a real reduction in per-event diff cost, but
+the figure is not a to-screen measurement. The **miss** verdict still holds:
+a no-op diff is strictly less work than one that writes cells and repaints, so
+299 ms is a lower bound on a rendered-cell workload at the same rate, and a
+lower bound already over the 250 ms budget refutes it.
+
 Render passes went *up* 51% (3,640 → 5,493) while latency went *down* 43%.
 Before the change each pass was expensive enough that the update coalescer was
 swallowing work to keep up; afterwards each pass is cheap enough to run more
-often, so events reach the screen sooner and the backlog stays shallower. That
+often, so events are applied sooner and the backlog stays shallower. That
 is also why achieved churn only reaches its 24.0 ev/s target after the change —
 the event driver was previously being back-pressured by the renderer.
 
@@ -142,21 +151,49 @@ smoke run, not a replacement for the 31-minute endurance result above.
 | LIST to 1,000-row table | ≤ 2 s | 144 ms | pass |
 | Process start to interactive | ≤ 10 s | 1.55 s | pass |
 | Peak RSS | ≤ 512 MiB | 236 MiB | pass |
-| Event-to-render p95 | ≤ 250 ms @ 20 ev/s | 32 ms @ 24 ev/s | pass |
+| Achieved churn | 24 ev/s | 24.06 ev/s (720/720) | pass |
 | Cursor-input p95 | ≤ 100 ms | 7 ms (n=50) | pass |
+| Event-to-render p95 | ≤ 250 ms @ 20 ev/s | **n/a for this workload** | not measured |
+
+**Event-to-render was not measured by this run, and its 250 ms budget is
+neither passed nor missed by it.** The live churn driver is metadata-only by
+design: it patches one label, `korvid.dev/performance-tick`, and nothing
+else. No Pod column renders labels — they feed the client-side `-l` filter —
+so the in-place table diff finds no changed cell for such an event, writes
+nothing, and requests no repaint. The harness nevertheless calls
+`record_render()` when the resource-update handler returns, so the 32 ms
+figure this run recorded is the interval from **watch-event receipt to
+no-op table-diff completion**. That is a real number about the message path,
+but it is not a rendered-frame measurement and is not compared to the render
+budget here. A no-op diff is strictly less work than one that writes cells and
+requests a repaint, so 32 ms is a *lower bound* on what a rendered-cell
+workload would record at the same rate — a lower bound can refute a budget,
+never establish it. Measuring event-to-render live needs a churn workload that
+changes a rendered cell (phase, ready, restarts) and observes it on the table;
+that workload does not exist yet.
+
+The deterministic replay above *does* rewrite rendered cells, so its
+event-to-render numbers remain event-to-rendered-cell measurements.
 
 The driver completed all 720 requested mutations in 29.92 seconds
 (24.06 events/s), with no mutation throttles. A separate run with `cProfile`
-enabled measured 134 ms event-to-render p95, 116 ms cursor-input p95, and 99.4%
-peak CPU; those figures are diagnostic overhead, not acceptance results.
+enabled measured 116 ms cursor-input p95 and 99.4% peak CPU; those figures are
+diagnostic overhead, not acceptance results (its 134 ms "event to render" p95
+carries the same metadata-only caveat as above).
 
 ## Known limits
 
 **The corrected live result is a 30-second smoke qualification.** It establishes
-that both latency budgets pass against the real API server at a steady
-24 events/s, but it does not establish long-session memory slope, credential
-refresh, or burst-drain behavior. The 31-minute endurance run has not yet been
-repeated with the corrected input probe and current render path.
+that the corrected cursor-input budget passes against the real API server at a
+steady 24 events/s, but it does not establish long-session memory slope,
+credential refresh, or burst-drain behavior. The 31-minute endurance run has not
+yet been repeated with the corrected input probe and current render path.
+
+**Event-to-render is unqualified live.** The live churn workload is
+metadata-only and changes no rendered cell, so the 250 ms budget has no live
+result behind it — only the deterministic replay exercises rendered-cell
+updates. A live churn driver that mutates a rendered field is required before
+that budget can be called passed or missed against a real API server.
 
 **UI-at-scale interaction timings are not yet trustworthy.** Filter, split-pane
 and multi-log key sequences still use `Pilot.press()`-style keystroke timing,

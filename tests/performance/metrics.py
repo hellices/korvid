@@ -611,8 +611,12 @@ def report_payload(report: BenchmarkReport) -> dict[str, object]:
 
     `latency.input` carries the cursor-input samples: seconds from key
     injection to cursor-row acknowledgement, not to a terminal repaint.
-    `latency.event_to_render` is unrelated — it times a watch event reaching
-    a rendered table update.
+    `latency.event_to_render` is unrelated - it times a watch event from
+    application receipt to the table-update handler completing. That is a
+    rendered-cell update only when the event actually changes a rendered
+    cell; a metadata-only workload (the live driver's
+    `korvid.dev/performance-tick` label) produces a no-op diff, so its
+    samples must not be published against the event-to-render budget.
     """
     api_operations = dict(report.api.operations)
     api_paths = {path: dict(counts) for path, counts in report.api.paths.items()}

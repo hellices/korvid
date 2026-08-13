@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -220,6 +221,15 @@ class MeasuredKorvidApp(KorvidApp):
     `ui/app.py`). Counting those would inflate `render_passes` and - worse -
     let an unrelated repaint flush the pending-event backlog, attributing a
     watch event's latency to a keypress that happened to repaint first.
+
+    What the recorded instant means: the table-update handler for that batch
+    has *completed*. When the event changed a cell the table renders, that
+    includes the in-place cell writes and the repaint request; when it did not
+    - a metadata-only mutation such as the live driver's
+    `korvid.dev/performance-tick` label, which no Pod column renders - the
+    diff finds nothing to write and the sample times a no-op. Reports must
+    state which workload produced the samples instead of comparing a
+    metadata-only figure with the rendered-frame budget.
     """
 
     def __init__(self, *args: Any, recorder: BenchmarkRecorder, **kwargs: Any) -> None:
@@ -559,6 +569,28 @@ def validate_input_sample_pairs(options: ReplayOptions) -> None:
         raise ValueError(f"input_sample_pairs must be positive; got {options.input_sample_pairs}")
 
 
+def validate_input_ack_timeout(options: ReplayOptions) -> None:
+    """Reject a cursor-probe bound that cannot bound anything.
+
+    `sample_cursor_input` wraps each key press in `asyncio.timeout(...)`, and
+    that timeout never fires for `inf` or `nan` - an unacknowledged key would
+    hang the run forever, contradicting the documented bounded probe. A
+    non-positive bound is the mirror image: it aborts before the key can
+    possibly be acknowledged. The CLI rejects both on its own arguments; this
+    is the programmatic guard, called at the top of both harness entry points
+    - before app startup or any live cluster identity, ownership, or mutation
+    work - so a misconfigured run fails immediately instead of hanging a
+    seeded cluster mid-churn.
+
+    Raises:
+        ValueError: `input_ack_timeout` is not finite and positive.
+    """
+    if not math.isfinite(options.input_ack_timeout) or options.input_ack_timeout <= 0:
+        raise ValueError(
+            f"input_ack_timeout must be finite and positive; got {options.input_ack_timeout}"
+        )
+
+
 def validate_input_sampling_profile(profile: WorkloadProfile) -> None:
     """Reject benchmark profiles that cannot satisfy the cursor probe.
 
@@ -678,10 +710,12 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
     9. Compares the table/store digest to the source's expected state.
 
     Raises:
-        ValueError: `options.input_sample_pairs` is not positive, or the
+        ValueError: `options.input_sample_pairs` is not positive,
+            `options.input_ack_timeout` is not finite and positive, or the
             profile cannot support cursor input sampling.
     """
     validate_input_sample_pairs(options)
+    validate_input_ack_timeout(options)
     validate_input_sampling_profile(profile)
     events = scheduled_events(profile)
     failures: dict[int, FailureInjection] = {f.at_event: f for f in profile.failures}

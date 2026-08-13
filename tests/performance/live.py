@@ -45,6 +45,13 @@ event and the patch response race over independent connections, so recording
 at ack both misreports the interval (it would include the write round-trip)
 and can append an event *after* its own render.
 
+The sample's *end* is where `MeasuredKorvidApp.on_resources_updated` returns.
+Because live churn is metadata-only by design and no Pod column renders
+labels, the in-place table diff finds no changed cell for a `TICK_LABEL`
+patch: the live figure measures event receipt to no-op table-diff completion,
+not a visible event-to-render interval. Reports must label it that way rather
+than compare it with the rendered-frame budget - see `docs/performance.md`.
+
 Two separate `KubeReadClient` connections are used deliberately: a
 non-instrumented *harness* client (`LiveDependencies.harness_kube_client_factory`)
 performs the ownership gate, the ground-truth re-read, and nothing else, while
@@ -102,6 +109,7 @@ from tests.performance.replay import (
     check_rendered_rows,
     resolve_korvid_sha,
     sample_cursor_input,
+    validate_input_ack_timeout,
     validate_input_sample_pairs,
     validate_input_sampling_profile,
     wait_for,
@@ -1472,9 +1480,9 @@ async def run_live_replay(
 ) -> ReplayReport:
     """Replay churn against an already-seeded real AKS cluster and return metrics.
 
-    Fail-closed order: `time_scale`/`run_id`/topology/profile validation, the
-    cluster identity gate, the ownership gate - all *before* any mutation
-    client is constructed - then the real application-path wiring
+    Fail-closed order: `time_scale`/cursor-probe knobs/`run_id`/topology/profile
+    validation, the cluster identity gate, the ownership gate - all *before*
+    any mutation client is constructed - then the real application-path wiring
     (`KubeClient` -> `WatchManager` -> `ResourceStore` -> `MeasuredKorvidApp`),
     guarded metadata-only churn, and digest parity against an independent,
     revalidated re-read of the cluster taken while the watch is still live.
@@ -1488,6 +1496,7 @@ async def run_live_replay(
     """
     _validate_time_scale(options)
     validate_input_sample_pairs(options)
+    validate_input_ack_timeout(options)
     manifests.validate_run_id(run_id)
     _validate_topology(profile)
     # Re-check duration-dependent invariants: a caller may hand us a profile

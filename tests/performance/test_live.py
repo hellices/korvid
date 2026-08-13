@@ -2330,6 +2330,40 @@ async def test_run_live_replay_rejects_a_non_positive_input_sample_pair_count() 
         )
 
 
+@pytest.mark.parametrize(
+    "timeout",
+    [0.0, -1.0, float("nan"), float("inf"), float("-inf")],
+    ids=["zero", "negative", "nan", "positive-infinity", "negative-infinity"],
+)
+async def test_run_live_replay_rejects_a_non_finite_or_non_positive_input_ack_timeout(
+    timeout: float,
+) -> None:
+    """A live run reaches the cursor probe only after cluster identity,
+    ownership and churn have already started, so an unbounded
+    `asyncio.timeout(inf)`/`nan` would hang a seeded cluster indefinitely.
+    Every external seam below fails the test if it is called, proving the
+    rejection happens before any cluster or subprocess work."""
+    deps = LiveDependencies(
+        command_runner=_never_called("command_runner"),
+        active_context=_never_called("active_context"),
+        context_host=_never_called("context_host"),
+        kube_client_factory=_never_called("kube_client_factory"),
+        harness_kube_client_factory=_never_called("harness_kube_client_factory"),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+        resolve_sha=_never_called("resolve_sha"),
+    )
+
+    with pytest.raises(ValueError, match="input_ack_timeout must be finite and positive"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0, input_ack_timeout=timeout),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
 async def test_run_live_replay_rejects_zero_event_profiles_before_external_work() -> None:
     """Zero-event live profiles must fail before identity, ownership, or SHA work."""
     deps = LiveDependencies(
