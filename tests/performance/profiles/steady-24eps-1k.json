@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "steady-24eps-1k",
+  "seed": 186,
+  "object_count": 1000,
+  "namespace_count": 20,
+  "steady_events_per_second": 24,
+  "duration_seconds": 30,
+  "bursts": [],
+  "failures": []
+}
