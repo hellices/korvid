@@ -48,6 +48,14 @@ from korvid.k8s.models import (
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
 from korvid.k8s.reads import ReadOps
 from korvid.k8s.relations import owned_by
+from korvid.obs.connector import (
+    ConnectorError,
+    LogsConnector,
+    MetricsConnector,
+    QueryScope,
+    render_logs,
+    render_metrics,
+)
 from korvid.tools.diagnose import (
     _event_count,
     _event_last_seen,
@@ -398,6 +406,110 @@ def compact_result(result: str, limit: int) -> str:
     return result[:head] + _MIDDLE_TRUNCATION_MARKER + result[len(result) - tail :]
 
 
+def _required_arg(args: Mapping[str, Any], key: str) -> str:
+    """One required string argument, rejected rather than coerced.
+
+    `str(123)` would name a target the model never asked about, so a
+    wrong-typed argument is refused before it can reach a backend.
+    """
+    value = args.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"'{key}' must be a non-empty string, got {value!r}")
+    return value.strip()
+
+
+def _optional_arg(args: Mapping[str, Any], key: str) -> str | None:
+    value = args.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"'{key}' must be a string, got {value!r}")
+    return value
+
+
+def _query_scope(args: Mapping[str, Any]) -> QueryScope:
+    """The observability scope named by a tool call.
+
+    Raises:
+        ValueError: for a missing namespace or a wrong-typed scope field.
+    """
+    return QueryScope(
+        namespace=_required_arg(args, "namespace"),
+        workload=_optional_arg(args, "workload"),
+        pod=_optional_arg(args, "pod"),
+    )
+
+
+#: Opening rendering budget for an external read. Applied while the
+#: result is *built*, so a result cut to fit reports `truncated: yes` —
+#: `cap_result` downstream would leave the header claiming the answer was
+#: complete (PR #280 review).
+_OBSERVABILITY_RENDER_CHARS = MAX_RESULT_CHARS - 1000
+
+#: How many times to re-render after projection overshoots the cap. Each
+#: attempt shrinks the budget by the exact overshoot, so two are ample;
+#: the floor below guarantees termination regardless.
+_OBSERVABILITY_RENDER_ATTEMPTS = 4
+
+
+def _projected_within_budget(render: Callable[[int], str], path: str) -> ToolOutcome:
+    """Render, project, and re-render until the projected text fits.
+
+    A fixed reserve is not a guarantee: redaction *expands* text — every
+    `token=x` becomes `token=` plus a placeholder — so a result that fit
+    before the pass can exceed the cap after it. Re-rendering rather than
+    slicing is what keeps the header honest: a shorter render reports
+    `truncated: yes`, while a slice would leave it claiming the answer was
+    complete (PR #280 review).
+    """
+    budget = _OBSERVABILITY_RENDER_CHARS
+    outcome = _projected(render(budget), path)
+    for _ in range(_OBSERVABILITY_RENDER_ATTEMPTS):
+        overshoot = len(outcome.text) - MAX_RESULT_CHARS
+        if overshoot <= 0:
+            return outcome
+        # Shrink by the overshoot plus a margin, with a floor so a header
+        # that alone exceeds the cap still terminates (cap_result then
+        # trims it, and a header-only result has nothing to mislead with).
+        budget = max(200, budget - overshoot - 100)
+        outcome = _projected(render(budget), path)
+    return outcome
+
+
+def _projected(text: str, path: str, *, error: bool = False) -> ToolOutcome:
+    """An external read's rendered result, masked before it leaves here.
+
+    The projection has to happen at this boundary rather than on the way
+    to a provider: an MCP host receives this `ToolOutcome` directly, and a
+    centralized log store aggregates whatever every workload ever printed
+    — including the credentials some of them print. Only credential-shaped
+    text is masked, so the labels, timestamps and provenance header a
+    citation rests on survive intact.
+
+    The records travel with the outcome because this pass is the only one
+    that sees the text at full length (issue #193, PR #280 review).
+    """
+    records: list[RedactionRecord] = []
+    return ToolOutcome(
+        text=redact_text(text, path, records), redactions=tuple(records), error=error
+    )
+
+
+def _connector_failure(exc: ConnectorError, path: str) -> ToolOutcome:
+    """A connector failure as a marked, projected error result.
+
+    The kind travels with the message because it is the actionable part:
+    a `network` failure means try again or check the endpoint, a
+    `permission` failure means the credential is the problem, and the two
+    read identically once flattened into prose.
+
+    Projected like a successful result: a `backend` failure quotes the
+    backend's own `error` field, so the failure path carries exactly the
+    same untrusted text the success path does (PR #280 review).
+    """
+    return _projected(f"{ERROR_PREFIX} [{exc.kind}] {exc}", path, error=True)
+
+
 def redacted_and_compacted(text: str, limit: int, path: str, records: list[RedactionRecord]) -> str:
     """Redact shaped text, then compact it — in that order, always.
 
@@ -719,11 +831,18 @@ class ToolExecutor(RecordedExecution):
         *,
         proposal_tools: bool = False,
         custom_columns: Mapping[str, tuple[str, ...]] | None = None,
+        metrics: MetricsConnector | None = None,
+        logs: LogsConnector | None = None,
     ) -> None:
         self._kube = kube
         self._aliases = aliases
         self._ui = ui
         self._proposal_tools = proposal_tools
+        #: Observability connectors (issue #193). None is the ordinary
+        #: state: an unconfigured backend means the tool is not offered,
+        #: and a direct call gets an error naming the missing config.
+        self._metrics = metrics
+        self._logs = logs
         #: Configured custom column *names* per plural (issue #45): values
         #: arrive on GenericSummary.custom from the client; the names let
         #: list_resources render them as name=value for the model.
@@ -1060,6 +1179,47 @@ class ToolExecutor(RecordedExecution):
         # identity is worse than none. The resolved container is reported,
         # because that much this read does know (#250 review).
         return ToolOutcome(text="\n".join(lines), container=container or None)
+
+    async def _query_metrics(self, args: dict[str, Any]) -> ToolOutcome:
+        """One catalogue metric signal from the configured metrics backend.
+
+        A connector failure is returned as a marked error rather than
+        raised: the kind (`network`, `permission`, `timeout`, …) is the
+        actionable part, and burying it in a generic exception string
+        would leave the reader unable to tell "ask again" from "ask an
+        administrator".
+        """
+        if self._metrics is None:
+            raise ValueError(
+                "no metrics backend is configured — set `observability.prometheus.url`"
+            )
+        signal = _required_arg(args, "signal")
+        scope = _query_scope(args)
+        window = args.get("window_minutes")
+        try:
+            result = await self._metrics.query(signal=signal, scope=scope, window_minutes=window)
+        except ConnectorError as exc:
+            return _connector_failure(exc, "metrics")
+        return _projected_within_budget(
+            lambda budget: render_metrics(result, limit=budget), "metrics"
+        )
+
+    async def _search_logs(self, args: dict[str, Any]) -> ToolOutcome:
+        """Centralized log lines from the configured logs backend."""
+        if self._logs is None:
+            raise ValueError("no logs backend is configured — set `observability.loki.url`")
+        scope = _query_scope(args)
+        contains = _optional_arg(args, "contains")
+        try:
+            result = await self._logs.search(
+                scope=scope,
+                window_minutes=args.get("window_minutes"),
+                contains=contains,
+                limit=args.get("limit"),
+            )
+        except ConnectorError as exc:
+            return _connector_failure(exc, "logs")
+        return _projected_within_budget(lambda budget: render_logs(result, limit=budget), "logs")
 
     async def _get_events(self, args: dict[str, Any]) -> ToolOutcome:
         kind = str(args["kind"]).strip().lower()

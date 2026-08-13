@@ -164,3 +164,37 @@ def test_agent_outbound_does_not_load_optional_extras() -> None:
         "    raise SystemExit(f'agent outbound leaked optional extras into base import: {leaked}')\n"
     )
     _run_subprocess_probe(probe)
+
+
+def test_the_connector_boundary_imports_without_the_observability_extra() -> None:
+    """`korvid.obs.connector` is the policy half and must stay stdlib-only.
+
+    The tool registry imports it for the signal catalogue, so a base
+    installation would break at startup if it reached for httpx.
+    """
+    _assert_import_is_extra_free("korvid.obs.connector")
+
+
+def test_the_tool_registry_imports_without_any_extra() -> None:
+    _assert_import_is_extra_free("korvid.tools.registry")
+
+
+def test_the_http_connectors_are_not_reachable_from_the_boundary() -> None:
+    """Importing the boundary must not drag the HTTP implementations in.
+
+    They are what needs the extra; if the package `__init__` or the
+    boundary imported them eagerly, the extra would stop being optional.
+    """
+    probe = """
+import sys
+
+import korvid.obs.connector  # noqa: F401
+
+leaked = [m for m in ("korvid.obs.prometheus", "korvid.obs.loki") if m in sys.modules]
+if leaked:
+    raise SystemExit(f"HTTP connectors leaked into the boundary import: {leaked}")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr

@@ -18,6 +18,7 @@ from pathlib import Path
 from stat import S_IMODE
 from tempfile import mkstemp
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -49,6 +50,16 @@ _SECRET_SEGMENT_TOKEN_SEQS: tuple[tuple[str, ...], ...] = tuple(
 
 _PROVIDER_SEPARATOR_RE = re.compile(r"[-_.]+")
 
+#: The Prometheus/LogQL label-name grammar. A mapped name is interpolated
+#: into a selector as an identifier, so it cannot be escaped the way a
+#: value is — it has to match the grammar or be refused.
+_LABEL_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+#: Sentinel recorded for a rejected label name, so the backend is disabled
+#: rather than quietly falling back to a default that would query the
+#: wrong label.
+_INVALID_LABEL = "\x00invalid"
+
 
 def _canonicalize_provider_name(name: str) -> str:
     """Canonicalize a provider name: lowercase, collapse [-_.] to hyphens, strip.
@@ -68,6 +79,76 @@ class ViewConfig:
     #: True replaces the kind's default columns (NAME/NAMESPACE always stay);
     #: False appends after them.
     replace: bool = False
+
+
+#: Scope field to backend label name, for a log shipper using the
+#: conventional Kubernetes labels.
+_DEFAULT_LABEL_MAPPINGS: dict[str, str] = {
+    "namespace": "namespace",
+    "pod": "pod",
+    "workload": "app",
+}
+
+#: Scope fields a Loki label mapping may name. Closed: a mapping for an
+#: unknown field would look configured and silently do nothing.
+_SCOPE_FIELDS: tuple[str, ...] = ("namespace", "pod", "workload")
+
+#: Keys that read as "turn TLS verification off". korvid has no such
+#: setting, and ignoring one would leave the user believing they had
+#: disabled verification when they had not.
+_TLS_SWITCH_KEYS: tuple[str, ...] = (
+    "insecure",
+    "insecure_skip_verify",
+    "skip_tls_verify",
+    "tls_skip_verify",
+    "verify",
+    "tls_verify",
+)
+
+#: Keys that would hold a credential *value*. config.yaml is not a secret
+#: store: a token belongs in an environment variable or a file, named here.
+_INLINE_CREDENTIAL_KEYS: tuple[str, ...] = (
+    "token",
+    "password",
+    "bearer_token",
+    "api_key",
+    "apikey",
+    "credentials",
+)
+
+
+@dataclass(frozen=True)
+class ObservabilityBackend:
+    """One configured read-only observability endpoint (issue #193).
+
+    Carries *where* the backend is and *how much* it may be asked. It
+    deliberately has no field that could hold a credential value and no
+    field that could weaken TLS: the credential is named indirectly
+    (`token_env`/`token_file`) and trust follows `network.ca_bundle`.
+    """
+
+    url: str
+    #: Environment variable holding the bearer token, read at call time.
+    token_env: str | None = None
+    #: File holding the bearer token, read at call time.
+    token_file: str | None = None
+    #: Multi-tenant header value (Loki `X-Scope-OrgID`).
+    tenant: str | None = None
+    timeout_seconds: float = 10.0
+    default_window_minutes: int = 60
+    max_window_minutes: int = 360
+    max_series: int = 50
+    max_lines: int = 200
+    max_response_bytes: int = 1024 * 1024
+    max_concurrency: int = 2
+    #: Scope field to backend label name (Loki). Defaults cover the
+    #: conventional Kubernetes labels a log shipper attaches.
+    label_mappings: dict[str, str] = field(default_factory=lambda: dict(_DEFAULT_LABEL_MAPPINGS))
+    #: Backend labels whose *values* are masked in every result, lowercased
+    #: (issue #193). For fields that are sensitive by policy rather than by
+    #: shape - a tenant id, a customer name - which the credential-shaped
+    #: text pass cannot recognise on its own.
+    mask_labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -160,6 +241,11 @@ class KorvidConfig:
     #: (SSL_CERT_FILE, proxy variables) applies when unset. There is no
     #: insecure mode: an unloadable bundle fails startup actionably.
     network_ca_bundle: str | None = None
+    #: `observability.prometheus` / `observability.loki` (issue #193):
+    #: bounded read-only investigation backends. None means not
+    #: configured — the matching tools are absent, not failing.
+    observability_prometheus: ObservabilityBackend | None = None
+    observability_loki: ObservabilityBackend | None = None
     #: Human-readable config problems (e.g. an invalid custom column) that
     #: the UI surfaces once at startup instead of crashing or hiding them.
     warnings: tuple[str, ...] = ()
@@ -247,6 +333,18 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         )
     favorites, favorite_warnings = _parse_favorite_namespaces(raw.get("favorite_namespaces"))
     warnings.extend(favorite_warnings)
+    observability_value = raw.get("observability")
+    observability_raw: dict[str, Any] = (
+        observability_value if isinstance(observability_value, dict) else {}
+    )
+    prometheus, prometheus_warnings = _parse_observability_backend(
+        observability_raw.get("prometheus"), "observability.prometheus"
+    )
+    warnings.extend(prometheus_warnings)
+    loki, loki_warnings = _parse_observability_backend(
+        observability_raw.get("loki"), "observability.loki"
+    )
+    warnings.extend(loki_warnings)
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
@@ -286,6 +384,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         mcp_write_proposals=mcp_raw.get("write_proposals") is True,
         telepresence_enabled=integrations_raw.get("telepresence") is not False,
         network_ca_bundle=_opt_str(network_raw.get("ca_bundle")),
+        observability_prometheus=prometheus,
+        observability_loki=loki,
         mcp_follow=mcp_raw.get("follow") is True,
         debug_default_image=_opt_str(debug_raw.get("default_image")),
         debug_images=debug_images,
@@ -294,6 +394,274 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         views=views,
         ui_topbar_expanded=ui_raw.get("topbar") == "expanded",
         warnings=tuple(warnings),
+    )
+
+
+def _observability_url(value: Any, label: str, warnings: list[str]) -> str | None:
+    """A usable endpoint URL, or None with the reason.
+
+    Parsed rather than prefix-matched: `https://user:pw@` starts with
+    `https://` and names no host at all, so a prefix check would accept it
+    and leave the connector with nothing but the raw string — credential
+    included — to name in a message.
+    """
+    url = _opt_str(value)
+    if url is None:
+        warnings.append(f"{label}: `url` is required — the backend is disabled")
+        return None
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+    except ValueError:
+        warnings.append(f"{label}.url: is not a usable URL — the backend is disabled")
+        return None
+    if parsed.scheme not in ("http", "https"):
+        warnings.append(
+            f"{label}.url: must be an http:// or https:// URL — the backend is disabled"
+        )
+        return None
+    if not host:
+        # Deliberately does not echo the URL: a hostname-less authority is
+        # most often `scheme://user:password@`, and this warning is shown
+        # on screen.
+        warnings.append(f"{label}.url: names no host — the backend is disabled")
+        return None
+    if parsed.query or parsed.fragment or "?" in url or "#" in url:
+        # The API path is appended to this, so a query string would
+        # swallow it and every request would target the wrong endpoint.
+        warnings.append(
+            f"{label}.url: must be an origin with an optional base path, not a"
+            f" query string or fragment — the backend is disabled"
+        )
+        return None
+    if "@" in parsed.netloc:
+        # `https://user:pw@host` is an inline credential wearing a URL's
+        # clothes: the HTTP client sends it as Basic auth. Rejected for
+        # the same reason a `token:` key is (issue #193, PR #280 review).
+        warnings.append(
+            f"{label}.url: must not carry a username or password — use `token_env`"
+            f" (environment variable name) or `token_file` (path)."
+            f" The backend is disabled."
+        )
+        return None
+    return url
+
+
+def _observability_rejections(raw: Mapping[str, Any], label: str, warnings: list[str]) -> bool:
+    """Whether a key was present that must disable the backend outright.
+
+    Both classes fail closed rather than being ignored: a user who thinks
+    they turned off TLS verification, or who thinks their token is being
+    read from `config.yaml`, is worse off believing it than being told no.
+    """
+    rejected = False
+    for key in _TLS_SWITCH_KEYS:
+        if key in raw:
+            warnings.append(
+                f"{label}.{key}: TLS verification cannot be disabled — remove the key and"
+                f" configure a trust bundle with `network.ca_bundle` instead."
+                f" The backend is disabled."
+            )
+            rejected = True
+    for key in _INLINE_CREDENTIAL_KEYS:
+        if key in raw:
+            warnings.append(
+                f"{label}.{key}: a credential value must not live in config.yaml — use"
+                f" `token_env` (environment variable name) or `token_file` (path)."
+                f" The backend is disabled."
+            )
+            rejected = True
+    token_env = _opt_str(raw.get("token_env"))
+    token_file = _opt_str(raw.get("token_file"))
+    if token_env and token_file:
+        warnings.append(
+            f"{label}: set either `token_env` or `token_file`, not both —"
+            f" the backend is disabled rather than guessing which credential to send."
+        )
+        rejected = True
+    return rejected
+
+
+def _observability_int(
+    raw: Mapping[str, Any], key: str, default: int, label: str, warnings: list[str]
+) -> int:
+    if key not in raw:
+        return default
+    value = raw[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        warnings.append(f"{label}.{key}: must be a positive integer — using the default {default}")
+        return default
+    return value
+
+
+def _observability_timeout(raw: Mapping[str, Any], label: str, warnings: list[str]) -> float:
+    default = ObservabilityBackend.timeout_seconds
+    if "timeout_seconds" not in raw:
+        return default
+    value = raw["timeout_seconds"]
+    # `isfinite` matters: YAML `.inf` parses to a float that is greater
+    # than zero, and would mean the bounded-query contract has no bound.
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not isfinite(value)
+        or value <= 0
+    ):
+        warnings.append(
+            f"{label}.timeout_seconds: must be a positive finite number"
+            f" — using the default {default}"
+        )
+        return default
+    return float(value)
+
+
+def _observability_label_mappings(value: Any, label: str, warnings: list[str]) -> dict[str, str]:
+    mappings = dict(_DEFAULT_LABEL_MAPPINGS)
+    if value is None:
+        return mappings
+    if not isinstance(value, Mapping):
+        warnings.append(f"{label}.label_mappings: must be a mapping — using the defaults")
+        return mappings
+    for scope_field, backend_label in value.items():
+        if scope_field not in _SCOPE_FIELDS:
+            warnings.append(
+                f"{label}.label_mappings.{scope_field}: unknown scope field — ignored"
+                f" (known fields: {', '.join(_SCOPE_FIELDS)})"
+            )
+            continue
+        name = _opt_str(backend_label)
+        if name is None:
+            warnings.append(
+                f"{label}.label_mappings.{scope_field}: must be a non-empty label name — ignored"
+            )
+            continue
+        if not _LABEL_NAME_RE.fullmatch(name):
+            warnings.append(
+                f"{label}.label_mappings.{scope_field}: {name!r} is not a usable label name"
+                f" (a label name must match [a-zA-Z_][a-zA-Z0-9_]*) — the backend is disabled"
+            )
+            mappings[scope_field] = _INVALID_LABEL
+            continue
+        mappings[scope_field] = name
+    return mappings
+
+
+def _observability_mask_labels(value: Any, label: str, warnings: list[str]) -> tuple[str, ...]:
+    """The label names whose values are always masked, lowercased and sorted."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        warnings.append(f"{label}.mask_labels: must be a list of label names — ignored")
+        return ()
+    names: set[str] = set()
+    for entry in value:
+        name = _opt_str(entry)
+        if name is None:
+            warnings.append(
+                f"{label}.mask_labels: entries must be non-empty label names — one dropped"
+            )
+            continue
+        names.add(name.lower())
+    return tuple(sorted(names))
+
+
+def _colliding_label_mapping(mappings: Mapping[str, str]) -> tuple[str, list[str]] | None:
+    """The backend label two scope fields share, with the fields, or None.
+
+    A collision is not a preference, it is a lost constraint: the
+    selector is a mapping from label to value, so mapping `namespace` and
+    `workload` both to `app` leaves one matcher and the search silently
+    covers every namespace.
+    """
+    by_label: dict[str, list[str]] = {}
+    for scope_field, name in mappings.items():
+        by_label.setdefault(name, []).append(scope_field)
+    for name, fields in sorted(by_label.items()):
+        if len(fields) > 1:
+            return name, sorted(fields)
+    return None
+
+
+def _parse_observability_backend(
+    value: Any, label: str
+) -> tuple[ObservabilityBackend | None, list[str]]:
+    """One `observability.<backend>` section, or None with the reasons why.
+
+    Returns:
+        The backend and the warnings its section produced. A None backend
+        means the tools that would use it are simply absent.
+    """
+    warnings: list[str] = []
+    if value is None:
+        return None, warnings
+    if not isinstance(value, Mapping):
+        warnings.append(f"{label}: must be a mapping — the backend is disabled")
+        return None, warnings
+    url = _observability_url(value.get("url"), label, warnings)
+    rejected = _observability_rejections(value, label, warnings)
+    mappings = _observability_label_mappings(value.get("label_mappings"), label, warnings)
+    if _INVALID_LABEL in mappings.values():
+        return None, warnings
+    collision = _colliding_label_mapping(mappings)
+    if collision is not None:
+        name, fields = collision
+        warnings.append(
+            f"{label}.label_mappings: {' and '.join(fields)} both map to the label"
+            f" {name!r}, which would drop one of the two constraints from every"
+            f" query — the backend is disabled"
+        )
+        rejected = True
+    if url is None or rejected:
+        return None, warnings
+    token_env = _opt_str(value.get("token_env"))
+    token_file = _opt_str(value.get("token_file"))
+    # The parsed scheme, not the spelling: URL schemes are
+    # case-insensitive, so `HTTP://` is cleartext too.
+    if urlsplit(url).scheme == "http" and (token_env or token_file):
+        # Allowed, because a cluster-local Prometheus over http is an
+        # ordinary deployment — but a bearer token on that connection
+        # crosses the network in the clear, and the user should decide
+        # that knowingly rather than by omission.
+        warnings.append(
+            f"{label}: a credential is configured for a plaintext http:// endpoint —"
+            f" the token will cross the network unencrypted"
+        )
+    defaults = ObservabilityBackend(url=url)
+    max_window = _observability_int(
+        value, "max_window_minutes", defaults.max_window_minutes, label, warnings
+    )
+    default_window = _observability_int(
+        value, "default_window_minutes", defaults.default_window_minutes, label, warnings
+    )
+    if default_window > max_window:
+        warnings.append(
+            f"{label}.default_window_minutes: {default_window} exceeds"
+            f" max_window_minutes {max_window} — using {max_window}"
+        )
+        default_window = max_window
+    return (
+        ObservabilityBackend(
+            url=url,
+            token_env=token_env,
+            token_file=token_file,
+            tenant=_opt_str(value.get("tenant")),
+            timeout_seconds=_observability_timeout(value, label, warnings),
+            default_window_minutes=default_window,
+            max_window_minutes=max_window,
+            max_series=_observability_int(
+                value, "max_series", defaults.max_series, label, warnings
+            ),
+            max_lines=_observability_int(value, "max_lines", defaults.max_lines, label, warnings),
+            max_response_bytes=_observability_int(
+                value, "max_response_bytes", defaults.max_response_bytes, label, warnings
+            ),
+            max_concurrency=_observability_int(
+                value, "max_concurrency", defaults.max_concurrency, label, warnings
+            ),
+            label_mappings=mappings,
+            mask_labels=_observability_mask_labels(value.get("mask_labels"), label, warnings),
+        ),
+        warnings,
     )
 
 

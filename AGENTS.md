@@ -48,6 +48,7 @@ src/korvid/
 ├── tools/          # pure Python: tool schemas, ToolExecutor, UIBridge, diagnose
 ├── agent/          # pure Python: agentic loop, ToolRegistry, LLMProvider ABC
 ├── mcp/            # MCP adapter (optional extra: korvid[mcp])
+├── obs/            # bounded read-only Prometheus/Loki connectors (optional extra: korvid[observability])
 ├── k8s/            # pure Python: kubernetes.aio wrapper
 └── providers/      # concrete LLMProvider implementations (optional extra: korvid[agent])
 ```
@@ -56,9 +57,10 @@ src/korvid/
 |---|---|---|
 | `ui/` | core, agent, k8s, tools | **Yes — only here** |
 | `core/` | k8s | No |
-| `tools/` | core, k8s | No |
+| `tools/` | core, k8s, obs | No |
 | `agent/` | core, k8s, tools | No |
 | `mcp/` | core, tools | No |
+| `obs/` | core | No |
 | `k8s/` | (stdlib + kubernetes client) | No |
 | `providers/` | agent | No |
 
@@ -66,7 +68,7 @@ src/korvid/
 - No DI containers, no service locators. Dependencies are injected via constructors, wired once in `__main__.py`.
 - The UI Bus is Textual `Message` subclasses defined in `ui/messages.py`. `core/`/`agent/` expose plain async functions; `ui/` workers translate results into Messages.
 - Plugins/providers register via `importlib.metadata.entry_points` groups: `korvid.provider`, `korvid.panel`, `korvid.tool`.
-- **Optional extras**: `mcp/`'s stack (mcp/anyio/starlette/uvicorn) ships in the `[mcp]` extra; `providers/`'s stack (httpx/keyring) in `[agent]`. `__main__.py` imports both lazily — a missing extra degrades to a None wiring unless the feature was explicitly requested, in which case startup fails with an install hint. Import-graph tests in `tests/test_optional_extras.py` pin this boundary.
+- **Optional extras**: `mcp/`'s stack (mcp/anyio/starlette/uvicorn) ships in the `[mcp]` extra; `providers/`'s stack (httpx/keyring) in `[agent]`; `obs/`'s HTTP client in `[observability]` (the connector boundary itself is stdlib, so `tools/` can import it unconditionally). `__main__.py` imports both lazily — a missing extra degrades to a None wiring unless the feature was explicitly requested, in which case startup fails with an install hint. Import-graph tests in `tests/test_optional_extras.py` pin this boundary.
 
 ## Style Rules
 

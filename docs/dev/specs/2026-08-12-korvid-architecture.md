@@ -52,6 +52,7 @@ flowchart TD
     K8S["<b>k8s/</b> — imports no other korvid layer<br/>async client · reads · writes · discovery"]
     PROV["<b>providers/</b><br/>Copilot · Azure · Anthropic<br/>OpenAI · Ollama"]
     MCP["<b>mcp/</b><br/>server adapter"]
+    OBS["<b>obs/</b><br/>bounded read-only<br/>Prometheus · Loki"]
     EVALS["<b>evals/</b><br/>scenarios · grader · runner"]
 
     UI ==> AGENT
@@ -60,6 +61,8 @@ flowchart TD
     CORE ==> K8S
 
     MCP --> TOOLS
+    TOOLS --> OBS
+    OBS --> CORE
     PROV -.->|"implements LLMProvider ABC"| AGENT
     EVALS -.->|"drives the real loop"| AGENT
 
@@ -99,10 +102,19 @@ implementation.
 
 **`providers/` points *up*.** Concrete providers implement the `LLMProvider`
 ABC declared in `agent/provider.py`, so the agent core knows nothing about
-Azure or Ollama. Both `providers/` and `mcp/` are optional extras; `__main__.py`
-imports them lazily and degrades to a `None` wiring when the extra is missing —
-unless the feature was explicitly requested, in which case startup fails with an
-install hint rather than silently disabling it.
+Azure or Ollama. `providers/`, `mcp/` and `obs/` all ship behind optional
+extras; `__main__.py` imports them lazily and degrades to a `None` wiring when
+the extra is missing — unless the feature was explicitly requested, in which
+case startup fails with an install hint rather than silently disabling it.
+
+**`obs/` is split by what it needs** (issue #193). The connector boundary —
+the ABC, the result types, the limits, the renderers — is stdlib-only, so
+`tools/` imports it unconditionally and the tool registry can name the signal
+catalogue at import time. Only the two HTTP implementations need the
+`[observability]` extra, and only `__main__.py` imports those. The HTTP client
+is *injected*, never constructed inside `obs/`, which is what makes "one
+`network.ca_bundle` governs every korvid-owned HTTPS client" a structural fact
+rather than a convention.
 
 **Cross-layer** wiring happens in `__main__.py`: which provider, which
 executor, which bridge, assembled once at one place you can read top to bottom.

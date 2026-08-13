@@ -13,6 +13,7 @@ korvid configures TLS trust **only for connections it owns**:
 | --- | --- | --- |
 | Agent LLM endpoint (OpenAI-compatible, native Ollama) | **korvid** | `network.ca_bundle` |
 | `:ai` wizard connection test | **korvid** | `network.ca_bundle` (same builder — the test and the live agent cannot disagree) |
+| Prometheus / Loki observability connectors | **korvid** | `network.ca_bundle` (same builder again — see [`docs/observability.md`](observability.md)) |
 | Internal Helm chart repository | **helm** (korvid passes it through) | CA-file field in the repo dialog → `helm repo add --ca-file` |
 | Kubernetes API server | kubeconfig | `certificate-authority[-data]` in kubeconfig |
 | OLM catalogs, bundle/operand images | cluster nodes / container runtime | registry mirror + node trust configuration |

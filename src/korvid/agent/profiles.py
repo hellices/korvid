@@ -132,6 +132,7 @@ def build_profile(
     *,
     readonly: bool,
     resize_supported: bool,
+    observability_backends: frozenset[str] = frozenset(),
     overrides: PromptOverrides | None = None,
 ) -> AgentProfile:
     """Build the tool surface, budgets, and prompts for one profile.
@@ -142,6 +143,10 @@ def build_profile(
             is never even told they exist.
         resize_supported: whether discovery found pods/resize; the resize
             tool is offered only when the cluster can honor it.
+        observability_backends: which external backends are configured
+            (`metrics`, `logs`, issue #193). Gated separately from
+            `resize_supported` because it is a local configuration
+            question, not something discovery can answer.
         overrides: configured prompt overrides (`agent.prompts`). Only the
             role statement and tool descriptions are configurable; the
             write/no-write and UI clauses stay conditional on what is
@@ -154,7 +159,10 @@ def build_profile(
     slots = overrides or PromptOverrides()
     if name == "full":
         tools = agent_tool_schemas(
-            "full_agent", readonly=readonly, resize_supported=resize_supported
+            "full_agent",
+            readonly=readonly,
+            resize_supported=resize_supported,
+            observability_backends=observability_backends,
         )
         return AgentProfile(
             name="full",
@@ -169,7 +177,10 @@ def build_profile(
         )
     if name == "small":
         tools = agent_tool_schemas(
-            "small_agent", readonly=readonly, resize_supported=resize_supported
+            "small_agent",
+            readonly=readonly,
+            resize_supported=resize_supported,
+            observability_backends=observability_backends,
         )
         return AgentProfile(
             name="small",

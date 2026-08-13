@@ -73,7 +73,20 @@ def test_resize_is_capability_gated() -> None:
     resize = next(d for d in TOOL_DEFS if d.name == "resize_pod")
     assert resize.capability == "pod_resize"
     others = [d for d in TOOL_DEFS if d.name != "resize_pod"]
-    assert all(d.capability == "none" for d in others)
+    assert all(d.capability != "pod_resize" for d in others)
+
+
+def test_only_external_reads_declare_a_backend_capability() -> None:
+    """A backend capability gates on local configuration, not on the cluster.
+
+    Putting one on a cluster read would make that read disappear when a
+    Prometheus URL is unset, which is not what the gate means.
+    """
+    for d in TOOL_DEFS:
+        if d.capability in ("metrics_backend", "logs_backend"):
+            assert d.effect == "external_read"
+        elif d.effect == "external_read":
+            raise AssertionError(f"external read {d.name!r} declares no backend capability")
 
 
 def test_every_tool_declares_an_outbound_result_format() -> None:

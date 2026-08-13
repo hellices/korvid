@@ -28,6 +28,7 @@ from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
     KorvidConfig,
+    ObservabilityBackend,
     context_is_protected,
     load_config,
     save_agent_config,
@@ -99,11 +100,174 @@ _AGENT_INSTALL_HINT = (
 #: keyring is absent), which would misreport the capability as installed.
 _MCP_EXTRA_ROOTS = frozenset({"mcp", "anyio", "starlette", "uvicorn"})
 _AGENT_EXTRA_ROOTS = frozenset({"httpx", "keyring"})
+#: The observability connectors need only an HTTP client.
+_OBSERVABILITY_EXTRA_ROOTS = frozenset({"httpx"})
+_OBSERVABILITY_INSTALL_HINT = (
+    "an observability backend is configured (observability.prometheus/loki in "
+    "config.yaml) but its dependencies are not installed — install them with: "
+    "pip install 'korvid[observability]'"
+)
 
 
 def _missing_extra_packages(extra_roots: frozenset[str]) -> list[str]:
     """The extra's packages that are not installed (empty = extra present)."""
     return sorted(pkg for pkg in extra_roots if importlib.util.find_spec(pkg) is None)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ObservabilityWiring:
+    """The observability connectors this session has, if any (issue #193).
+
+    Both are None in the ordinary case: an unconfigured backend is not a
+    tool that fails, it is a tool that is never offered. `backends` is
+    what the tool registry gates on.
+    """
+
+    metrics: Any = None
+    logs: Any = None
+
+    @property
+    def backends(self) -> frozenset[str]:
+        """The backend names the tool registry should offer tools for."""
+        names: set[str] = set()
+        if self.metrics is not None:
+            names.add("metrics")
+        if self.logs is not None:
+            names.add("logs")
+        return frozenset(names)
+
+    async def aclose(self) -> None:
+        """Close every owned client; each is attempted even if one raises."""
+        try:
+            if self.metrics is not None:
+                await self.metrics.aclose()
+        finally:
+            if self.logs is not None:
+                await self.logs.aclose()
+
+
+def _build_observability(config: KorvidConfig) -> ObservabilityWiring:
+    """Build the configured read-only observability connectors (issue #193).
+
+    Nothing configured means nothing imported: a base installation never
+    pulls in the HTTP stack for a feature it is not using. A configured
+    backend without the extra fails with an install hint rather than
+    degrading, because the user asked for it explicitly.
+
+    Every client comes from the providers' trust builder, so one
+    `network.ca_bundle` governs every korvid-owned HTTPS client and an
+    unloadable bundle fails startup instead of falling back to default
+    trust.
+
+    Raises:
+        SystemExit: when a backend is configured but the extra or the
+            configured CA bundle is unusable.
+    """
+    prometheus = config.observability_prometheus
+    loki = config.observability_loki
+    if prometheus is None and loki is None:
+        return ObservabilityWiring()
+    if _missing_extra_packages(_OBSERVABILITY_EXTRA_ROOTS):
+        raise SystemExit(f"korvid: {_OBSERVABILITY_INSTALL_HINT}")
+
+    from korvid.obs.connector import ConnectorError, QueryLimits
+    from korvid.providers import net
+
+    def limits(backend: ObservabilityBackend) -> QueryLimits:
+        return QueryLimits(
+            timeout_seconds=backend.timeout_seconds,
+            default_window_minutes=backend.default_window_minutes,
+            max_window_minutes=backend.max_window_minutes,
+            max_series=backend.max_series,
+            max_lines=backend.max_lines,
+            max_response_bytes=backend.max_response_bytes,
+            max_concurrency=backend.max_concurrency,
+        )
+
+    def client(backend: ObservabilityBackend) -> Any:
+        # Looked up through the module so a test (and a future refactor)
+        # sees one trust builder rather than a captured function.
+        try:
+            return net.make_client(config.network_ca_bundle, timeout=backend.timeout_seconds)
+        except ValueError as exc:
+            raise SystemExit(f"korvid: {exc}") from exc
+
+    try:
+        _validate_observability(prometheus, loki)
+        # Built before any client: `QueryLimits` validates as well, and it
+        # was evaluated *after* the client in the constructor's argument
+        # list — so a bad limit stranded a client nobody could close.
+        prometheus_limits = limits(prometheus) if prometheus is not None else None
+        loki_limits = limits(loki) if loki is not None else None
+        return _connectors(prometheus, loki, prometheus_limits, loki_limits, client)
+    except (ConnectorError, ValueError) as exc:
+        # Two refusal types, one outcome: a connector-level invariant
+        # (`ConnectorError`) and an unusable limit (`ValueError` from
+        # `QueryLimits`). Neither should reach the user as a traceback,
+        # and both mean the same thing to them.
+        raise SystemExit(f"korvid: observability configuration is unusable: {exc}") from exc
+
+
+def _validate_observability(
+    prometheus: ObservabilityBackend | None, loki: ObservabilityBackend | None
+) -> None:
+    """Refuse an unusable configuration before any client is allocated.
+
+    The connectors validate in their constructors, but their arguments —
+    the HTTP client among them — are evaluated first, so a refusal there
+    would strand a client nobody can close.
+
+    Raises:
+        ConnectorError: `config` for anything a connector would refuse.
+    """
+    from korvid.obs import loki as loki_module
+    from korvid.obs.http import validate_endpoint
+
+    if prometheus is not None:
+        validate_endpoint(prometheus.url, "prometheus")
+    if loki is not None:
+        validate_endpoint(loki.url, "loki")
+        loki_module.validate_options(tenant=loki.tenant, label_mappings=loki.label_mappings)
+
+
+def _connectors(
+    prometheus: ObservabilityBackend | None,
+    loki: ObservabilityBackend | None,
+    prometheus_limits: Any,
+    loki_limits: Any,
+    client: Callable[[ObservabilityBackend], Any],
+) -> ObservabilityWiring:
+    """Construct whichever connectors are configured (see `_build_observability`)."""
+    from korvid.obs.loki import LokiConnector
+    from korvid.obs.prometheus import PrometheusConnector
+
+    metrics = (
+        PrometheusConnector(
+            prometheus.url,
+            client=client(prometheus),
+            limits=prometheus_limits,
+            token_env=prometheus.token_env,
+            token_file=prometheus.token_file,
+            mask_labels=frozenset(prometheus.mask_labels),
+        )
+        if prometheus is not None
+        else None
+    )
+    logs = (
+        LokiConnector(
+            loki.url,
+            client=client(loki),
+            limits=loki_limits,
+            token_env=loki.token_env,
+            token_file=loki.token_file,
+            tenant=loki.tenant,
+            label_mappings=loki.label_mappings,
+            mask_labels=frozenset(loki.mask_labels),
+        )
+        if loki is not None
+        else None
+    )
+    return ObservabilityWiring(metrics=metrics, logs=logs)
 
 
 def _custom_column_names(config: KorvidConfig) -> dict[str, tuple[str, ...]]:
@@ -139,6 +303,7 @@ def _build_mcp_controller(
     aliases: dict[str, ResourceMeta],
     ui: UIBridge | None,
     mcp_hooks: _MCPAppHooks | None = None,
+    observability: ObservabilityWiring | None = None,
 ) -> MCPControllerBase | None:
     """Import and wire the MCP adapter only when its extra is installed.
 
@@ -158,6 +323,8 @@ def _build_mcp_controller(
 
     from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
 
+    obs = observability or ObservabilityWiring()
+
     def factory() -> KorvidMCPServer:
         # A fresh capability token per server run (issue #110): the token is
         # published only in the owner-readable endpoint file, so echoing it
@@ -173,8 +340,13 @@ def _build_mcp_controller(
                 # this server enforces the capability token before dispatch.
                 proposal_tools=config.mcp_write_proposals,
                 custom_columns=_custom_column_names(config),
+                metrics=obs.metrics,
+                logs=obs.logs,
             ),
-            mcp_tool_schemas(write_proposals=config.mcp_write_proposals),
+            mcp_tool_schemas(
+                write_proposals=config.mcp_write_proposals,
+                observability_backends=obs.backends,
+            ),
             port=config.mcp_port,
             endpoint_path=default_endpoint_path(),
             capability_token=token,
@@ -493,6 +665,7 @@ def _initial_profile(
     overrides: PromptOverrides,
     pod_resize_supported: bool,
     startup_warnings: list[str] | None,
+    observability_backends: frozenset[str] = frozenset(),
 ) -> AgentProfile:
     """The starting capability profile, reporting advisory prompt warnings.
 
@@ -509,6 +682,7 @@ def _initial_profile(
         config.agent_profile or "full",
         readonly=config.readonly,
         resize_supported=pod_resize_supported,
+        observability_backends=observability_backends,
         overrides=overrides,
     )
     if startup_warnings is not None:
@@ -525,6 +699,7 @@ def _build_agent_wiring(
     cluster_context: str | None = None,
     provider_box: list[LLMProvider | None] | None = None,
     startup_warnings: list[str] | None = None,
+    observability: ObservabilityWiring | None = None,
 ) -> tuple[
     AgentRuntime | None,
     AgentConfigurator | None,
@@ -542,6 +717,7 @@ def _build_agent_wiring(
     agent fails with an actionable install hint.
     """
     ui_proxy = _UIBridgeProxy()
+    obs = observability or ObservabilityWiring()
     # The caller may hand in the box that its teardown guard reads (issue
     # #166): the provider is owned by that box from the moment it exists,
     # so a failure in the *rest* of the agent wiring still cleans it up.
@@ -572,7 +748,9 @@ def _build_agent_wiring(
     # tool wording only — the write/no-write and UI clauses stay conditional
     # on what is actually armed.
     prompt_overrides = _prompt_overrides(config)
-    profile = _initial_profile(config, prompt_overrides, pod_resize_supported, startup_warnings)
+    profile = _initial_profile(
+        config, prompt_overrides, pod_resize_supported, startup_warnings, obs.backends
+    )
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     ollama_options = OllamaOptions(
         num_ctx=config.agent_ollama_num_ctx,
@@ -591,7 +769,14 @@ def _build_agent_wiring(
     agent_runtime = (
         AgentRuntime(
             provider,
-            ToolExecutor(kube, aliases, ui=ui_proxy, custom_columns=_custom_column_names(config)),
+            ToolExecutor(
+                kube,
+                aliases,
+                ui=ui_proxy,
+                custom_columns=_custom_column_names(config),
+                metrics=obs.metrics,
+                logs=obs.logs,
+            ),
             tools=profile.tools,
             max_iterations=profile.max_iterations,
             max_history_chars=profile.max_history_chars,
@@ -665,12 +850,18 @@ def _build_agent_wiring(
                 settings.profile,
                 readonly=config.readonly,
                 resize_supported=resize_box[0],
+                observability_backends=obs.backends,
                 overrides=prompt_overrides,
             )
             new_runtime = AgentRuntime(
                 new_provider,
                 ToolExecutor(
-                    kube, aliases, ui=ui_proxy, custom_columns=_custom_column_names(config)
+                    kube,
+                    aliases,
+                    ui=ui_proxy,
+                    custom_columns=_custom_column_names(config),
+                    metrics=obs.metrics,
+                    logs=obs.logs,
                 ),
                 tools=new_profile.tools,
                 max_iterations=new_profile.max_iterations,
@@ -713,6 +904,7 @@ def _build_agent_wiring(
                 profile_box[0],
                 readonly=config.readonly,
                 resize_supported=pod_resize_supported,
+                observability_backends=obs.backends,
                 overrides=prompt_overrides,
             )
             runtime.retarget(tools=retarget_profile.tools, cluster_context=cluster_context)
@@ -806,13 +998,18 @@ async def _teardown(
     discovery_task: asyncio.Task[None] | None,
     provider: LLMProvider | None,
     kube: KubeClient,
+    observability: ObservabilityWiring | None = None,
 ) -> None:
     """Bounded graceful MCP stop first; anything still pending is awaited
     only *after* the critical provider/kube cleanup, matching what
     asyncio.run()'s final task-gathering would do anyway - but explicitly,
     with the exception consumed instead of swallowed."""
     leftover = await controller.shutdown() if controller is not None else None
-    await _shutdown(discovery_task, provider, kube)
+    try:
+        await _shutdown(discovery_task, provider, kube)
+    finally:
+        if observability is not None:
+            await observability.aclose()
     if leftover is not None:
         with contextlib.suppress(BaseException):
             await leftover
@@ -987,6 +1184,9 @@ class _RunState:
     mcp: MCPControllerBase | None = None
     provider_box: list[LLMProvider | None] = dataclasses.field(default_factory=lambda: [None])
     discovery_box: list[asyncio.Task[None]] = dataclasses.field(default_factory=list)
+    #: Observability connectors (issue #193): each owns an HTTP client
+    #: that teardown must close, however far wiring got.
+    observability: ObservabilityWiring | None = None
 
 
 async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None = None) -> None:
@@ -1009,6 +1209,7 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
             state.discovery_box[0] if state.discovery_box else None,
             state.provider_box[0],
             kube,
+            state.observability,
         )
 
 
@@ -1048,6 +1249,12 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
     # the agent system prompt and the Service/Ingress describe footer.
     provider_info = await _probe_cloud_provider(kube)
 
+    # Observability connectors (issue #193): built once and shared by the
+    # embedded agent and the MCP surface, so both see the same endpoint,
+    # the same limits, and one connection pool per backend.
+    observability = _build_observability(config)
+    state.observability = observability
+
     agent_warnings: list[str] = []
     agent_runtime, configurator, rebuild_agent, retarget_agent, disconnect_agent, _, ui_proxy = (
         _build_agent_wiring(
@@ -1060,13 +1267,16 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
             # provider exists, so partial agent wiring is also cleaned up.
             provider_box=state.provider_box,
             startup_warnings=agent_warnings,
+            observability=observability,
         )
     )
     if agent_warnings:
         config = dataclasses.replace(config, warnings=(*config.warnings, *agent_warnings))
 
     mcp_hooks = _MCPAppHooks()
-    mcp_controller = _build_mcp_controller(config, kube, aliases, ui_proxy, mcp_hooks=mcp_hooks)
+    mcp_controller = _build_mcp_controller(
+        config, kube, aliases, ui_proxy, mcp_hooks=mcp_hooks, observability=observability
+    )
     state.mcp = mcp_controller
     proposal_store = _build_proposal_store(config)
 

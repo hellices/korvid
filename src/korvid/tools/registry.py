@@ -22,15 +22,26 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-Effect = Literal["cluster_read", "ui_only", "cluster_write", "write_proposal"]
+from korvid.obs.connector import SIGNALS
+
+Effect = Literal["cluster_read", "external_read", "ui_only", "cluster_write", "write_proposal"]
 Approval = Literal["none", "user_confirmation"]
-Capability = Literal["none", "pod_resize"]
+Capability = Literal["none", "pod_resize", "metrics_backend", "logs_backend"]
 ResultFormat = Literal["structured_yaml", "untrusted_text"]
 Surface = Literal["full_agent", "small_agent", "mcp", "mcp_proposal"]
 
-_EFFECTS = ("cluster_read", "ui_only", "cluster_write", "write_proposal")
+_EFFECTS = ("cluster_read", "external_read", "ui_only", "cluster_write", "write_proposal")
 _APPROVALS = ("none", "user_confirmation")
-_CAPABILITIES = ("none", "pod_resize")
+_CAPABILITIES = ("none", "pod_resize", "metrics_backend", "logs_backend")
+
+#: Capability to the configured observability backend it needs. Gated
+#: separately from `pod_resize` because the two answer different
+#: questions: whether the *cluster* can honor a call, versus whether the
+#: *user* configured a backend for korvid to call at all.
+_BACKEND_CAPABILITIES: dict[str, str] = {
+    "metrics_backend": "metrics",
+    "logs_backend": "logs",
+}
 _RESULT_FORMATS = ("structured_yaml", "untrusted_text")
 _SURFACES = ("full_agent", "small_agent", "mcp", "mcp_proposal")
 
@@ -281,7 +292,7 @@ def validate_dispatch_targets(defs: list[ToolDef], *, executor_cls: type, bridge
                 f"write_proposal tools may route there, otherwise the "
                 f"proposal capability check is skipped"
             )
-        if d.effect == "cluster_read":
+        if d.effect in ("cluster_read", "external_read"):
             cls, role = executor_cls, "executor"
         else:
             cls, role = bridge_cls, "UI bridge"
@@ -292,8 +303,24 @@ def validate_dispatch_targets(defs: list[ToolDef], *, executor_cls: type, bridge
             )
 
 
+def _capability_available(
+    capability: str, *, resize_supported: bool, observability_backends: frozenset[str]
+) -> bool:
+    """Whether this session can honor a tool's declared capability."""
+    if capability == "pod_resize":
+        return resize_supported
+    required = _BACKEND_CAPABILITIES.get(capability)
+    if required is not None:
+        return required in observability_backends
+    return True
+
+
 def agent_tool_schemas(
-    surface: str, *, readonly: bool, resize_supported: bool
+    surface: str,
+    *,
+    readonly: bool,
+    resize_supported: bool,
+    observability_backends: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Derive one agent surface's schema list, in registry order.
 
@@ -303,6 +330,10 @@ def agent_tool_schemas(
             is never even told they exist.
         resize_supported: whether discovery found pods/resize; the resize
             tool is offered only when the cluster can honor it.
+        observability_backends: which external backends this session has
+            configured (`metrics`, `logs`). A tool whose backend is
+            absent is never offered — an unconfigured connector is not a
+            tool that fails, it is a tool that does not exist.
 
     Raises:
         ValueError: for a surface other than the two agent surfaces.
@@ -315,7 +346,11 @@ def agent_tool_schemas(
             continue
         if d.effect == "cluster_write" and readonly:
             continue
-        if d.capability == "pod_resize" and not resize_supported:
+        if not _capability_available(
+            d.capability,
+            resize_supported=resize_supported,
+            observability_backends=observability_backends,
+        ):
             continue
         # Deep copies (issue #97): providers are plugins, and the schema
         # dicts they receive ride along on every request — a caller
@@ -324,7 +359,11 @@ def agent_tool_schemas(
     return schemas
 
 
-def mcp_tool_schemas(*, write_proposals: bool = False) -> list[dict[str, Any]]:
+def mcp_tool_schemas(
+    *,
+    write_proposals: bool = False,
+    observability_backends: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
     """The MCP exposure surface: read + UI-drive tools only.
 
     Direct write tools stay with the built-in agent; `validate_tool_defs`
@@ -332,13 +371,23 @@ def mcp_tool_schemas(*, write_proposals: bool = False) -> list[dict[str, Any]]:
     When `write_proposals` is enabled (issue #110), the surface adds the
     proposal submission/status/cancel tools — those never execute a write
     themselves, they queue an immutable proposal for TUI review.
-    Returns deep copies so a caller mutating a schema cannot corrupt the
-    registry (issue #97).
+    External reads (issue #193) appear only for the backends this session
+    configured. Returns deep copies so a caller mutating a schema cannot
+    corrupt the registry (issue #97).
     """
     surfaces: set[Surface] = {"mcp"}
     if write_proposals:
         surfaces.add("mcp_proposal")
-    return [copy.deepcopy(d.schema) for d in TOOL_DEFS if d.surfaces & surfaces]
+    return [
+        copy.deepcopy(d.schema)
+        for d in TOOL_DEFS
+        if d.surfaces & surfaces
+        and _capability_available(
+            d.capability,
+            resize_supported=False,
+            observability_backends=observability_backends,
+        )
+    ]
 
 
 _ALL_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent", "mcp"})
@@ -689,6 +738,130 @@ TOOL_DEFS: list[ToolDef] = [
                         },
                     },
                     "required": ["pvc", "namespace"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="query_metrics",
+        effect="external_read",
+        dispatch="_query_metrics",
+        surfaces=_FULL_AND_MCP,
+        result_format="untrusted_text",
+        capability="metrics_backend",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "query_metrics",
+                "description": (
+                    "Read one bounded metric signal for a workload or pod from the configured "
+                    "Prometheus backend, aggregated over a time window. "
+                    "Answers questions Kubernetes state cannot: whether error rate or latency "
+                    "moved before a pod failed, and whether saturation is workload-wide. "
+                    "Read-only, bounded, and limited to the signals listed below - there is no "
+                    "free-form query."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "signal": {
+                            "type": "string",
+                            "enum": list(SIGNALS),
+                            "description": (
+                                "Which signal to read: cpu (cores), memory (bytes), "
+                                "restarts (count), request_rate, error_rate (5xx), "
+                                "latency_p95 (seconds)."
+                            ),
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Kubernetes namespace to scope the query to.",
+                        },
+                        "workload": {
+                            "type": "string",
+                            "description": (
+                                "Workload name (Deployment/StatefulSet); matches its pods "
+                                "by name prefix. Omit when querying a single pod."
+                            ),
+                        },
+                        "pod": {
+                            "type": "string",
+                            "description": "Exact pod name. Takes precedence over workload.",
+                        },
+                        "window_minutes": {
+                            "type": "integer",
+                            "description": (
+                                "Length of the time window ending now. Defaults to the "
+                                "configured window; an over-long window is refused, not "
+                                "shortened."
+                            ),
+                        },
+                    },
+                    "required": ["signal", "namespace"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="search_logs",
+        effect="external_read",
+        dispatch="_search_logs",
+        surfaces=_FULL_AND_MCP,
+        result_format="untrusted_text",
+        capability="logs_backend",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "search_logs",
+                "description": (
+                    "Search centralized logs in the configured Loki backend for a workload or "
+                    "pod over a bounded window. Unlike get_logs, these outlive the pod that "
+                    "wrote them, so they still answer questions about a restarted or deleted "
+                    "pod. Read-only and bounded; the filter is a plain substring, not a query "
+                    "language."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {
+                            "type": "string",
+                            "description": "Kubernetes namespace to scope the search to.",
+                        },
+                        "workload": {
+                            "type": "string",
+                            "description": (
+                                "Workload name, matched against the configured workload label."
+                            ),
+                        },
+                        "pod": {
+                            "type": "string",
+                            "description": "Exact pod name. Takes precedence over workload.",
+                        },
+                        "contains": {
+                            "type": "string",
+                            "description": (
+                                "Plain substring every returned line must contain. Not a "
+                                "regular expression and not a query language."
+                            ),
+                        },
+                        "window_minutes": {
+                            "type": "integer",
+                            "description": (
+                                "Length of the time window ending now. Defaults to the "
+                                "configured window; an over-long window is refused."
+                            ),
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": (
+                                "Maximum number of lines. The most recent matching "
+                                "lines are selected, then returned oldest first so the "
+                                "excerpt reads forwards. Capped by configuration; a "
+                                "larger value is refused."
+                            ),
+                        },
+                    },
+                    "required": ["namespace"],
                 },
             },
         },
