@@ -308,6 +308,12 @@ class PhaseSummary:
 class BenchmarkReport:
     manifest: RunManifest
     event_to_render: LatencySummary
+    #: Cursor-input latency: the interval from injecting one key event into
+    #: the running app to the `ResourceTable` cursor row being observed on
+    #: its new index. It is an *acknowledgement* measurement, not a terminal
+    #: paint time and not a test-driver quiescence heuristic (Textual's
+    #: `Pilot.press` CPU-idle waits are deliberately excluded). Serialised as
+    #: `latency.input` in the JSON report.
     input_latency: LatencySummary
     process: ProcessSummary
     api: ApiSummary
@@ -514,6 +520,13 @@ class BenchmarkRecorder:
             self._burst_end_pending = [end for end in self._burst_end_pending if end > rendered_at]
 
     def record_input(self, latency_seconds: float) -> None:
+        """Record one cursor-input sample.
+
+        *latency_seconds* must be measured from key injection to the
+        `ResourceTable` cursor row acknowledging the move (see
+        `replay.measure_cursor_input`) — never from a driver idle-wait
+        helper, which measures the harness, not the application.
+        """
         self._input_latency.append(latency_seconds)
 
     def record_api(self, event: ReadTelemetryEvent) -> None:
@@ -594,6 +607,13 @@ class BenchmarkRecorder:
 
 
 def report_payload(report: BenchmarkReport) -> dict[str, object]:
+    """Machine-readable form of *report*.
+
+    `latency.input` carries the cursor-input samples: seconds from key
+    injection to cursor-row acknowledgement, not to a terminal repaint.
+    `latency.event_to_render` is unrelated — it times a watch event reaching
+    a rendered table update.
+    """
     api_operations = dict(report.api.operations)
     api_paths = {path: dict(counts) for path, counts in report.api.paths.items()}
     return {
@@ -738,7 +758,8 @@ def render_markdown(report: BenchmarkReport) -> str:
         f"- Event to render p95: `{_format_seconds(report.event_to_render.p95_seconds)}`",
         f"- Event to render p99: `{_format_seconds(report.event_to_render.p99_seconds)}`",
         f"- Event to render max: `{_format_seconds(report.event_to_render.maximum_seconds)}`",
-        f"- Input latency p95: `{_format_seconds(report.input_latency.p95_seconds)}`",
+        f"- Input latency p95 (key injection to cursor-row acknowledgement): "
+        f"`{_format_seconds(report.input_latency.p95_seconds)}`",
         "",
         "## Process",
         f"- CPU max: `{_format_float(report.process.cpu_percent_max)}`",

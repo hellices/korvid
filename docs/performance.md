@@ -37,7 +37,24 @@ Measured before and after the render-path work described below.
 | Peak RSS | ≤ 512 MiB | 276 MiB | 271 MiB | pass |
 | Post-warm-up RSS slope | ≤ 1 MiB/min | 1.06 MiB/min | 0.53 MiB/min | fixed |
 | Event-to-render p95 | ≤ 250 ms @ 20 ev/s | 527 ms @ 24 ev/s | 299 ms @ 24 ev/s | **miss** |
-| Cursor-input p95 | ≤ 100 ms | 2,311 ms | 2,447 ms | **miss** |
+| Cursor-input p95 | ≤ 100 ms | 2,311 ms | 2,447 ms | **invalid** |
+
+**The 2,311 ms and 2,447 ms cursor figures are not measurements of korvid.**
+Both were taken with Textual's `Pilot.press()`, which performs two CPU-idle
+waits, each bounded at one second. Under this workload the client is
+CPU-saturated, so both waits run to their one-second ceiling regardless of how
+fast the cursor actually moved: the numbers are the test driver's quiescence
+heuristic plus a ~2 s constant, not user-visible input latency. They are
+retained here only to invalidate them; do not compare them to any budget, to
+K9s, or to the corrected figures below.
+
+**The corrected metric** — everything reported as cursor-input latency from
+this point on — is the interval from injecting one key event into the running
+app to the `ResourceTable` cursor row being observed on its new index. It is a
+state acknowledgement, not a terminal paint: it excludes the emulator's own
+draw, and it excludes every driver idle heuristic. It is emitted as
+`latency.input` in the metrics JSON and as "Input latency p95 (key injection to
+cursor-row acknowledgement)" in the markdown report.
 
 Supporting numbers: event-to-render p50 266 → 156 ms, p99 659 → 356 ms, max
 1,628 → 714 ms; max backlog depth 42 → 39; achieved churn 23.18 → 23.996 ev/s
@@ -66,19 +83,64 @@ All three are now memoised. The one thing deliberately *not* cached is the
 `Text` object returned for a phase cell: `DataTable` takes ownership of it and
 mutates it, so a shared instance would corrupt unrelated rows.
 
+## Corrected deterministic 1,000-pod replay
+
+Local, deterministic replay of the same 1,000-pod / 24-events-per-second
+workload on macOS arm64 / Python 3.12 / 10 cores, using the corrected cursor
+probe. This is a replay, not a cluster run: it exercises the real app, watch
+manager, store and table, but not the API server, the watch decoder, or a real
+terminal, so it does not replace the live table above.
+
+| Metric | Baseline replay | Corrected replay |
+|---|---:|---:|
+| Cursor-input p95 | 2,206 ms (invalid, `Pilot.press`) | **7.7 ms** |
+| Event-to-render p95 | 156 ms | 5.3 ms |
+| Sampled CPU max | 99.2% | 61.5% |
+| Peak RSS | 187 MiB | 133 MiB |
+| LIST to populated table | 593 ms | 213 ms |
+| Process start to interactive | 922 ms | 330 ms |
+| Final digest match | true | true |
+| Dropped updates | 0 | 0 |
+
+The same run under `cProfile` reports 76.7 ms cursor-input p95 and 98.2% CPU
+max: profiling instruments every Python call and materially changes compositor
+cost, so profiles are diagnostic artifacts only, never the acceptance
+environment for the 100 ms input budget. Before/after profiles must use
+identical instrumentation to be comparable.
+
+Two production changes produced the difference, both in the in-place table
+diff: an unchanged cursor is no longer re-seated after every watch tick (a
+`move_cursor()` to the same coordinate is repaint work), and a batch of cell
+updates requests at most one repaint, and none at all when no changed row
+intersects the painted viewport. Off-screen rows still update their data
+immediately — `get_row`, sorting, filtering and the final digest see the new
+value — and the row repaints as soon as it scrolls into view.
+
 ## Known limits
 
-**Cursor input is the binding constraint, not rendering.** Input
-acknowledgement p95 sits above 2 s at 1,000 objects under full churn, more than
-20× its budget, and the render-path work above did not move it. The client is
-CPU-saturated (peak ~99.7%) at this size, so the render win buys headroom
-rather than removing the ceiling. Treat 1,000 objects under sustained churn as
-the point where interaction becomes visibly sluggish.
+**The live cursor-input result is unmeasured, not slow.** The only live
+figures ever taken (2,311 ms / 2,447 ms) came from the invalid `Pilot.press`
+probe described above and have been withdrawn. The corrected probe currently
+has a deterministic replay result only. Rerunning it live — and the exact K9s
+comparison — is blocked: the dedicated `aks-korvid-contract-test` cluster is
+absent from the active Azure subscription (`ResourceGroupNotFound`) and its
+kubeconfig endpoint no longer resolves. No live cursor number is estimated
+from the replay, and none is inferred from K9s.
 
-**Event-to-render p95 misses its budget, but the budget and the measurement do
-not line up.** The budget is written at 20 events/s; the live profile runs at
-24. The optimized 299 ms is a miss at the higher rate and has not been
-re-measured at 20.
+**A valid K9s comparison covers common observables only.** The installed
+comparator is K9s 0.50.18. Stock K9s cannot expose informer-receipt-to-draw
+timestamps, rendered-update digests, or backlog depth, so a direct comparison
+is limited to startup, cursor acknowledgement, process CPU, RSS, achieved
+churn, and final cluster state — run alternating trials on the same host,
+terminal size and workload schedule, with the mutation driver external to both
+clients. Event-to-render comparison would require an instrumented K9s build
+and must not be inferred from PTY output.
+
+**Event-to-render p95 misses its budget live, but the budget and the
+measurement do not line up.** The budget is written at 20 events/s; the live
+profile runs at 24. The optimized 299 ms is a miss at the higher rate and has
+not been re-measured at 20, nor re-measured live since the render-path work
+above.
 
 **UI-at-scale interaction timings are not yet trustworthy.** Filter, split-pane
 and multi-log key sequences took seconds, not milliseconds, in both runs — but

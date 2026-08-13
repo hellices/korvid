@@ -338,7 +338,7 @@ def test_render_markdown_uses_stable_labels() -> None:
     assert "# Large-cluster benchmark report" in text
     assert "- Profile ID: `smoke-1k`" in text
     assert "- Event to render p95: `0.100s`" in text
-    assert "- Input latency p95: `0.020s`" in text
+    assert "- Input latency p95 (key injection to cursor-row acknowledgement): `0.020s`" in text
     assert "- RSS slope: `1.00 MiB/min`" in text
     assert "- Rendered updates: `1`" in text
     assert "- watch_open: `1`" in text
