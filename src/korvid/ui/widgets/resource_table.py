@@ -561,8 +561,8 @@ class ResourceTable(DataTable[str | Text]):
                 repaint = repaint or self._row_is_visible(key)
         self._emitted = dict(pending)
         if touched:
-            grew = self._absorb_widths(touched)
-            if repaint and not grew:
+            self._absorb_widths(touched)
+            if repaint:
                 self.refresh()
         return True
 

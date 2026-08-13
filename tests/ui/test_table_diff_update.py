@@ -40,13 +40,18 @@ def _spy_refresh(table: ResourceTable) -> list[tuple[tuple[Any, ...], dict[str, 
     return calls
 
 
+async def _await_refresh_spy_ready(pilot: Any, table: ResourceTable) -> None:
+    """Wait until initial scrollbar/layout refresh work is done before spying."""
+    await until(pilot, lambda: not table.is_scrolling, label="table settled")
+
+
 async def test_offscreen_cell_update_changes_data_without_repaint() -> None:
     app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 40, label="pods loaded")
         await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
-        await pilot.pause()
+        await _await_refresh_spy_ready(pilot, table)
         calls = _spy_refresh(table)
 
         app.store.apply_event("pods", "default", "MODIFIED", _pod("pod-39", phase="Pending"))
@@ -65,7 +70,7 @@ async def test_visible_cell_update_repaints_once() -> None:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 40, label="pods loaded")
         await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
-        await pilot.pause()
+        await _await_refresh_spy_ready(pilot, table)
         calls = _spy_refresh(table)
 
         app.store.apply_event("pods", "default", "MODIFIED", _pod("pod-00", phase="Pending"))
@@ -78,13 +83,43 @@ async def test_visible_cell_update_repaints_once() -> None:
         assert len(calls) == 1
 
 
+async def test_visible_width_growth_requests_immediate_repaint() -> None:
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
+        await _await_refresh_spy_ready(pilot, table)
+        status = table.ordered_columns[2]
+        original_width = status.content_width
+        assert original_width < len("CrashLoopBackOff")
+        calls = _spy_refresh(table)
+
+        app.store.apply_event(
+            "pods", "default", "MODIFIED", _pod("pod-00", phase="CrashLoopBackOff")
+        )
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/pod-00")[2]) == "CrashLoopBackOff",
+            label="visible width-growing cell updated",
+        )
+
+        assert calls
+        assert calls[0] == ((), {})
+        await until(
+            pilot,
+            lambda: status.content_width > original_width,
+            label="visible width absorbed",
+        )
+
+
 async def test_offscreen_width_growth_still_repaints() -> None:
     app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 40, label="pods loaded")
         await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
-        await pilot.pause()
+        await _await_refresh_spy_ready(pilot, table)
         status = table.ordered_columns[2]
         original_width = status.content_width
         calls = _spy_refresh(table)
