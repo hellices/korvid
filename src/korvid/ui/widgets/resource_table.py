@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
-from typing import Final, Self, cast
+from typing import Final, NamedTuple, Self, cast
 
 from rich.cells import cell_len
 from rich.text import Text
+from textual import __version__ as _textual_version
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
 from textual.widgets.data_table import Column, RowDoesNotExist, RowKey
@@ -93,6 +94,48 @@ def _phase_cell(phase: str) -> Text:
 # row-location map); cap them so a bulk drop (e.g. a narrowing filter) takes
 # the linear rebuild path instead of a quadratic remove loop.
 _MAX_IN_PLACE_REMOVALS = 8
+
+#: Textual major version whose `DataTable` internals this widget writes to
+#: directly (`_data` plus the `_update_count` cache generation).
+_TEXTUAL_CELL_BATCH_MAJOR: Final = 8
+
+
+def _supports_cell_batching(version: str) -> bool:
+    """Whether *version* is the Textual major this widget may batch cells for.
+
+    Batching writes `DataTable._data` and bumps `_update_count` itself, so a
+    run of changed cells costs one cache generation and at most one repaint
+    instead of one full-widget refresh per cell. Both attributes are
+    private, so the fast path is allowed only on the major version it was
+    verified against; any other major falls back to the public
+    `update_cell`, which is slower but cannot silently write the wrong
+    store or leave a stale cache behind.
+    """
+    major, _, _ = version.partition(".")
+    try:
+        return int(major) == _TEXTUAL_CELL_BATCH_MAJOR
+    except ValueError:
+        return False
+
+
+#: Resolved once at import — the installed Textual cannot change mid-session.
+_BATCH_CELL_WRITES = _supports_cell_batching(_textual_version)
+
+
+class _VisibleRows(NamedTuple):
+    """The row indices Textual is currently painting.
+
+    `first`/`last` are inclusive bounds on the scrollable window; rows below
+    `fixed_count` are pinned to the top and always painted.
+    """
+
+    fixed_count: int
+    first: int
+    last: int
+
+    def contains(self, row_index: int) -> bool:
+        """Whether the row at *row_index* is on screen (O(1))."""
+        return row_index < self.fixed_count or self.first <= row_index <= self.last
 
 
 def _cell_width(cell: str | Text) -> int:
@@ -550,6 +593,10 @@ class ResourceTable(DataTable[str | Text]):
         for key in doomed:
             self.remove_row(key)
         columns = self.ordered_columns
+        # One geometry read for the whole batch: removals are done, and the
+        # appends below only extend the bottom, so no surviving row's index
+        # moves while the loop runs.
+        visible = self._visible_rows()
         touched: list[tuple[str, list[str | Text]]] = []
         repaint = False
         for key, cells in pending:
@@ -558,7 +605,7 @@ class ResourceTable(DataTable[str | Text]):
                 touched.append((key, cells))
             elif self._patch_row(key, cells, columns):
                 touched.append((key, cells))
-                repaint = repaint or self._row_is_visible(key)
+                repaint = repaint or visible.contains(self.get_row_index(key))
         self._emitted = dict(pending)
         if touched:
             self._absorb_widths(touched)
@@ -566,20 +613,29 @@ class ResourceTable(DataTable[str | Text]):
                 self.refresh()
         return True
 
-    def _row_is_visible(self, key: str) -> bool:
-        """Whether the row keyed by *key* intersects the current viewport."""
-        row_index = self.get_row_index(key)
+    def _visible_rows(self) -> _VisibleRows:
+        """Row-index bounds of the painted viewport, computed once per batch.
+
+        Every row this widget puts in the table is exactly one line high:
+        `add_row` is always called without `height`, so it takes
+        `DataTable`'s `height=1` default, and no row carries a label or auto
+        height. A row's y-offset is therefore its index, and the window is
+        integer arithmetic — no `_get_row_region`, which sums the height of
+        every preceding row and would make one watch tick O(rows) per
+        changed row.
+
+        The offset mirrors `DataTable.render_line`, which shifts everything
+        below the header and the fixed rows by `scroll_offset.y` — that is
+        `scroll_y` *rounded*. Truncating instead would slide the window one
+        row up at any fractional offset (mid-animation, momentum or
+        wheel-step scrolling) and misread the last painted row as
+        off-screen, so its change would never reach the screen.
+        """
         fixed_count = min(self.fixed_rows, self.row_count)
-        if row_index < fixed_count:
-            return True
-        fixed_height = sum(row.height for row in self.ordered_rows[:fixed_count])
         header_height = self.header_height if self.show_header else 0
-        viewport_height = max(self.size.height - header_height - fixed_height, 0)
-        row_region = self._get_row_region(row_index)
-        row_top = row_region.y - header_height - fixed_height
-        visible_top = int(self.scroll_y)
-        visible_bottom = visible_top + viewport_height
-        return row_region.height + row_top > visible_top and row_top < visible_bottom
+        viewport_height = max(self.size.height - header_height - fixed_count, 0)
+        first = fixed_count + self.scroll_offset.y
+        return _VisibleRows(fixed_count, first, first + viewport_height - 1)
 
     def _patch_row(self, key: str, cells: list[str | Text], columns: list[Column]) -> bool:
         """Update an existing row's changed cells; True when any cell moved."""
@@ -589,16 +645,27 @@ class ResourceTable(DataTable[str | Text]):
         if old_cells is None:
             old_cells = self.get_row(key)
         changed = False
+        batched = _BATCH_CELL_WRITES
         row_key = RowKey(key)
         for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
-            if not _cells_equal(old_cell, new_cell):
+            if _cells_equal(old_cell, new_cell):
+                continue
+            if batched:
                 self._data[row_key][column.key] = new_cell
-                changed = True
-        if changed:
+            else:
+                # Unverified Textual major: pay one refresh per cell rather
+                # than write a private store whose shape may have moved.
+                self.update_cell(row_key, column.key, new_cell, update_width=False)
+            changed = True
+        if changed and batched:
+            # One cache generation for the whole row: `_update_count` is what
+            # invalidates DataTable's line and offset caches, so a row that
+            # was updated off-screen paints its new cells as soon as it is
+            # scrolled into view.
             self._update_count += 1
         return changed
 
-    def _absorb_widths(self, rows: Iterable[tuple[str, list[str | Text]]]) -> bool:
+    def _absorb_widths(self, rows: Iterable[tuple[str, list[str | Text]]]) -> None:
         """Grow the column widths from cells this widget is holding anyway.
 
         `DataTable` derives column widths from `on_idle`, and to do so it
@@ -614,12 +681,20 @@ class ResourceTable(DataTable[str | Text]):
         display width is exactly its length, and both markup parsing and the
         newline truncation `_cell_width` performs can only shorten it — so a
         cell that short cannot widen its column no matter how it renders.
+
+        A grown column repaints on its own, so this returns nothing and the
+        caller must not gate its repaint on it: setting
+        `_require_update_dimensions` makes `DataTable._on_idle` run
+        `_update_dimensions`, which republishes `virtual_size` from the new
+        column widths, and that reactive assignment schedules a layout
+        repaint. Reintroducing a "did it grow" flag here would invite the
+        unsafe inverse — treating "no growth" as "no repaint needed", which
+        is exactly the off-screen case this widget deliberately skips.
         """
         columns = self.ordered_columns
         widths = [column.content_width for column in columns]
         limit = len(widths)
         absorbed = self._absorbed
-        grew = False
         for key, cells in rows:
             absorbed.add(key)
             for index, cell in enumerate(cells):
@@ -638,8 +713,6 @@ class ResourceTable(DataTable[str | Text]):
                 # recomputes the virtual size from the dimension pass, which
                 # `update_cell(update_width=False)` does not schedule.
                 self._require_update_dimensions = True
-                grew = True
-        return grew
 
     def remove_row(self, row_key: RowKey | str) -> None:
         """Forget the absorption record for a row that is going away.

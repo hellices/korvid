@@ -5,10 +5,13 @@ reorder (e.g. a pod inserted mid-table) falls back to the rebuild path."""
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
+import pytest
 from rich.text import Text
 
+from korvid.ui.widgets import resource_table
 from korvid.ui.widgets.resource_table import ResourceTable, _cell_width, _cells_equal
 
 from .test_app import _pod, make_app
@@ -29,6 +32,7 @@ def _spy_clear(table: ResourceTable) -> list[bool]:
 
 
 def _spy_refresh(table: ResourceTable) -> list[tuple[tuple[Any, ...], dict[str, Any]]]:
+    """Record every refresh() call on *table* as its (args, kwargs) pair."""
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     original = table.refresh
 
@@ -40,9 +44,65 @@ def _spy_refresh(table: ResourceTable) -> list[tuple[tuple[Any, ...], dict[str, 
     return calls
 
 
-async def _await_refresh_spy_ready(pilot: Any, table: ResourceTable) -> None:
-    """Wait until initial scrollbar/layout refresh work is done before spying."""
-    await until(pilot, lambda: not table.is_scrolling, label="table settled")
+def _plain_refreshes(
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]],
+) -> list[tuple[tuple[Any, ...], dict[str, Any]]]:
+    """The no-argument `refresh()` calls — the repaint the diff decides on.
+
+    Layout and region refreshes (`refresh(layout=True)`, `refresh(region)`)
+    are *not* counted: Textual schedules those for its own reasons — a
+    pending scrollbar pass, a virtual-size change from the idle dimension
+    pass — and their arrival is timing dependent, so counting them makes the
+    assertion flake. Only `refresh()` with no arguments is a decision this
+    widget makes in `_apply_in_place`.
+    """
+    return [call for call in calls if call == ((), {})]
+
+
+def _bottom_painted_pod(table: ResourceTable) -> str:
+    """The pod name Textual actually paints on the table's last line.
+
+    Read back out of `render_line` rather than recomputed from the scroll
+    offset, so the test asserts against Textual's own painting contract
+    instead of restating the production formula.
+    """
+    text = table.render_line(table.size.height - 1).text
+    match = re.search(r"pod-\d\d", text)
+    assert match is not None, f"no pod rendered on the last line: {text!r}"
+    return match.group(0)
+
+
+def _painted_pods(table: ResourceTable) -> list[str]:
+    """Every pod name Textual paints, top line to bottom line."""
+    names = []
+    for line in range(table.size.height):
+        match = re.search(r"pod-\d\d", table.render_line(line).text)
+        if match is not None:
+            names.append(match.group(0))
+    assert names, "no pods rendered at all"
+    return names
+
+
+def _painted_line(table: ResourceTable, name: str) -> str:
+    """The rendered line *name* currently occupies, straight from Textual."""
+    for line in range(table.size.height):
+        text = table.render_line(line).text
+        if name in text:
+            return text
+    raise AssertionError(f"{name} is not painted")
+
+
+def _spy_row_region(table: ResourceTable) -> list[int]:
+    """Record every `_get_row_region` call — the per-row O(N) geometry walk."""
+    calls: list[int] = []
+    original = table._get_row_region
+
+    def spy(row_index: int) -> Any:
+        calls.append(row_index)
+        return original(row_index)
+
+    table._get_row_region = spy  # type: ignore[method-assign]  # test spy
+    return calls
 
 
 async def test_offscreen_cell_update_changes_data_without_repaint() -> None:
@@ -51,7 +111,6 @@ async def test_offscreen_cell_update_changes_data_without_repaint() -> None:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 40, label="pods loaded")
         await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
-        await _await_refresh_spy_ready(pilot, table)
         calls = _spy_refresh(table)
 
         app.store.apply_event("pods", "default", "MODIFIED", _pod("pod-39", phase="Pending"))
@@ -61,7 +120,101 @@ async def test_offscreen_cell_update_changes_data_without_repaint() -> None:
             label="offscreen cell updated",
         )
 
-        assert calls == []
+        assert _plain_refreshes(calls) == []
+
+
+async def test_bottom_painted_row_repaints_at_a_fractional_scroll_offset() -> None:
+    # Textual paints from `scroll_offset.y`, which *rounds* `scroll_y`.
+    # Truncating instead (int()) shifts the window down by one row at any
+    # offset that rounds up, so the last painted row is misread as
+    # off-screen and its change never reaches the screen.
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
+        table.scroll_to(y=3.6, animate=False, immediate=True, force=True)
+        await until(pilot, lambda: table.scroll_offset.y == 4, label="fractional scroll settled")
+        assert table.scroll_y == 3.6  # genuinely fractional, rounds up to 4
+        name = _bottom_painted_pod(table)
+        calls = _spy_refresh(table)
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod(name, phase="Pending"))
+        await until(
+            pilot,
+            lambda: str(table.get_row(f"default/{name}")[2]) == "Pending",
+            label="bottom painted cell updated",
+        )
+
+        assert len(_plain_refreshes(calls)) == 1
+
+
+async def test_row_scrolled_above_the_window_does_not_repaint() -> None:
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
+        table.scroll_to(y=6, animate=False, immediate=True, force=True)
+        await until(pilot, lambda: table.scroll_offset.y == 6, label="scrolled down")
+        above = _painted_pods(table)[0]
+        assert above == "pod-06"
+        calls = _spy_refresh(table)
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("pod-00", phase="Pending"))
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/pod-00")[2]) == "Pending",
+            label="scrolled-past cell updated",
+        )
+
+        assert _plain_refreshes(calls) == []
+
+
+async def test_fixed_row_repaints_even_when_scrolled_past() -> None:
+    # A fixed row is painted at the top of the viewport whatever the scroll
+    # offset, so it is always inside the repaint window.
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
+        table.fixed_rows = 1
+        table.scroll_to(y=6, animate=False, immediate=True, force=True)
+        await until(pilot, lambda: table.scroll_offset.y == 6, label="scrolled down")
+        assert _painted_pods(table)[0] == "pod-00"
+        calls = _spy_refresh(table)
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("pod-00", phase="Pending"))
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/pod-00")[2]) == "Pending",
+            label="fixed row cell updated",
+        )
+
+        assert len(_plain_refreshes(calls)) == 1
+
+
+async def test_visibility_decision_does_not_walk_row_geometry() -> None:
+    # `_get_row_region` sums every preceding row's height, so consulting it
+    # per changed row makes one watch tick O(rows x changes). The batch
+    # computes index bounds once instead.
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
+        regions = _spy_row_region(table)
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("pod-00", phase="Pending"))
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("pod-39", phase="Pending"))
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/pod-39")[2]) == "Pending",
+            label="both cells updated",
+        )
+
+        assert regions == []
 
 
 async def test_visible_cell_update_repaints_once() -> None:
@@ -70,7 +223,6 @@ async def test_visible_cell_update_repaints_once() -> None:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 40, label="pods loaded")
         await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
-        await _await_refresh_spy_ready(pilot, table)
         calls = _spy_refresh(table)
 
         app.store.apply_event("pods", "default", "MODIFIED", _pod("pod-00", phase="Pending"))
@@ -80,7 +232,7 @@ async def test_visible_cell_update_repaints_once() -> None:
             label="visible cell updated",
         )
 
-        assert len(calls) == 1
+        assert len(_plain_refreshes(calls)) == 1
 
 
 async def test_visible_width_growth_requests_immediate_repaint() -> None:
@@ -89,7 +241,6 @@ async def test_visible_width_growth_requests_immediate_repaint() -> None:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 40, label="pods loaded")
         await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
-        await _await_refresh_spy_ready(pilot, table)
         status = table.ordered_columns[2]
         original_width = status.content_width
         assert original_width < len("CrashLoopBackOff")
@@ -104,8 +255,7 @@ async def test_visible_width_growth_requests_immediate_repaint() -> None:
             label="visible width-growing cell updated",
         )
 
-        assert calls
-        assert calls[0] == ((), {})
+        assert len(_plain_refreshes(calls)) == 1
         await until(
             pilot,
             lambda: status.content_width > original_width,
@@ -114,12 +264,14 @@ async def test_visible_width_growth_requests_immediate_repaint() -> None:
 
 
 async def test_offscreen_width_growth_still_repaints() -> None:
+    # Off-screen growth does not take the plain-refresh path: absorbing the
+    # wider column sets `_require_update_dimensions`, and Textual's idle
+    # dimension pass republishes `virtual_size`, which repaints via layout.
     app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 40, label="pods loaded")
         await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
-        await _await_refresh_spy_ready(pilot, table)
         status = table.ordered_columns[2]
         original_width = status.content_width
         calls = _spy_refresh(table)
@@ -133,7 +285,98 @@ async def test_offscreen_width_growth_still_repaints() -> None:
             label="offscreen width absorbed",
         )
 
-        assert len(calls) == 1
+        assert _plain_refreshes(calls) == []
+
+
+async def test_offscreen_update_is_painted_once_scrolled_into_view() -> None:
+    # The repaint skipped above must not survive as a stale cell: the row is
+    # painted first (populating DataTable's line cache), updated while it is
+    # off-screen, then scrolled back in. Batching bumps `_update_count`,
+    # which is part of that cache's key, so the new value wins.
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
+        table.scroll_end(animate=False, immediate=True, force=True)
+        await until(pilot, lambda: "pod-39" in _painted_pods(table), label="pod-39 painted once")
+        assert "Running" in _painted_line(table, "pod-39")
+        table.scroll_home(animate=False, immediate=True, force=True)
+        await until(
+            pilot, lambda: "pod-39" not in _painted_pods(table), label="pod-39 scrolled off"
+        )
+        calls = _spy_refresh(table)
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("pod-39", phase="Pending"))
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/pod-39")[2]) == "Pending",
+            label="offscreen cell updated",
+        )
+        assert _plain_refreshes(calls) == []
+
+        table.scroll_end(animate=False, immediate=True, force=True)
+        await until(pilot, lambda: "pod-39" in _painted_pods(table), label="pod-39 scrolled in")
+
+        assert "Pending" in _painted_line(table, "pod-39")
+
+
+async def test_patching_a_row_advances_the_cache_generation() -> None:
+    # Synchronous companion to the scroll-back test above: no event loop turn
+    # runs between the two reads, so nothing else (a Resize, a sort) can
+    # advance the generation and mask a missing bump.
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        cells: list[str | Text] = list(table.get_row("default/pod-39"))
+        cells[2] = Text("Pending")
+        before = table._update_count
+
+        assert table._patch_row("default/pod-39", cells, table.ordered_columns) is True
+
+        assert table._update_count == before + 1
+
+
+async def test_cell_writes_fall_back_to_update_cell_on_an_unverified_textual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Another Textual major may have moved `_data`/`_update_count`, so the
+    # private batching is disabled and the public API keeps the cell correct.
+    monkeypatch.setattr(resource_table, "_BATCH_CELL_WRITES", False)
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
+        updates: list[tuple[Any, ...]] = []
+        original = table.update_cell
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            updates.append(args)
+            return original(*args, **kwargs)
+
+        table.update_cell = spy  # type: ignore[method-assign]  # test spy
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("pod-39", phase="Pending"))
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/pod-39")[2]) == "Pending",
+            label="offscreen cell updated through update_cell",
+        )
+
+        assert updates
+        table.scroll_end(animate=False, immediate=True, force=True)
+        await until(pilot, lambda: "pod-39" in _painted_pods(table), label="pod-39 scrolled in")
+        assert "Pending" in _painted_line(table, "pod-39")
+
+
+def test_cell_batching_is_limited_to_the_verified_textual_major() -> None:
+    assert resource_table._supports_cell_batching("8.0.0") is True
+    assert resource_table._supports_cell_batching("8.2.8") is True
+    assert resource_table._supports_cell_batching("9.0.0") is False
+    assert resource_table._supports_cell_batching("7.9.9") is False
+    assert resource_table._supports_cell_batching("unreleased") is False
 
 
 async def test_modified_pod_updates_cells_without_clear() -> None:
