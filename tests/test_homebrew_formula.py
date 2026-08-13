@@ -311,3 +311,29 @@ def test_the_tap_bump_can_be_rerun_after_a_partial_failure() -> None:
     )
     assert "--force-with-lease" in commands, "a rerun cannot update the branch it already pushed"
     assert "gh pr list" in commands, "a rerun opens a second pull request or fails on the first"
+
+
+def test_an_unchanged_branch_still_reaches_the_pull_request() -> None:
+    """The early exit must mean "done", not "nothing to commit".
+
+    On the rerun that the resume path exists for, the branch already
+    carries the formula, so the staged diff is empty — and exiting there
+    skips the pull request that failed to open the first time, which is
+    the whole reason for the rerun. Only an unchanged `main` means the
+    work is actually finished.
+    """
+    workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
+    bump = workflow.split("      - name: Open the formula bump on the tap")[1]
+    commands = "\n".join(
+        line for line in bump.splitlines() if line.strip() and not line.strip().startswith("#")
+    )
+    # The exit that follows the staged-diff check is the dangerous one:
+    # it must be reached only through a comparison against main.
+    after_staged_check = commands.split("git diff --cached --quiet")[1]
+    before_first_exit = after_staged_check.split("exit 0")[0]
+    assert "origin/main" in before_first_exit, (
+        "the early exit does not distinguish a resumed branch from a finished one"
+    )
+    assert commands.index("git diff --cached --quiet") < commands.index("gh pr list"), (
+        "the diff check should precede the pull-request lookup"
+    )

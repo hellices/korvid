@@ -585,6 +585,9 @@ jobs:
           git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/hellices/homebrew-korvid.git" tap
           cd tap
+          # A shallow clone of one branch has no origin/main to compare
+          # the resumed branch against.
+          git fetch --depth 1 origin main:refs/remotes/origin/main
           # Resume rather than restart. A rerun happens because something
           # after the push failed, and branching from main again would be
           # rejected as non-fast-forward before reaching the retry.
@@ -602,12 +605,20 @@ jobs:
           # commit nothing.
           git add Formula/korvid.rb
           if git diff --cached --quiet; then
-            echo "the tap already carries this formula"
-            exit 0
+            # Nothing to commit means one of two very different things.
+            # Compared against main - not against the branch - because on
+            # the rerun this path exists for, the branch already carries
+            # the formula and only main can say whether it landed.
+            if git diff --quiet "origin/main" -- Formula/korvid.rb; then
+              echo "the tap already carries this formula"
+              exit 0
+            fi
+            echo "the branch is already up to date; checking the pull request"
+          else
+            git -c user.name=github-actions[bot] \
+                -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+                commit -m "korvid ${version}"
           fi
-          git -c user.name=github-actions[bot] \
-              -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
-              commit -m "korvid ${version}"
           # The lease is what keeps "resume" from meaning "overwrite":
           # a branch someone edited by hand rejects the push instead of
           # losing the edit.
