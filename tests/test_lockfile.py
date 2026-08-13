@@ -354,25 +354,28 @@ def test_the_relock_workflow_survives_a_repository_that_forbids_bot_pull_request
     assert "Allow GitHub Actions to create and" in printed, (
         "the operator is not told which setting refused the pull request"
     )
-    assert "gh pr create --base" in printed, (
-        "the manual remedy must be printed with the real branch name"
-    )
-    assert "$branch" in failure_branch
     assert "Nothing is lost" in printed
+    # Isolate the copyable command. Asserting `$branch` anywhere in the
+    # failure branch is satisfied by the status message above it, so a
+    # remedy naming the wrong head would still pass.
+    remedy = next((line for line in printed.splitlines() if "gh pr create --base" in line), None)
+    assert remedy is not None, "the manual remedy is not printed"
+    assert "$BASE" in remedy, "the remedy must name the base the run actually used"
+    assert "$branch" in remedy, "the remedy must name the branch the run actually pushed"
     # The claim is only true if the branch is already on the remote when
     # creation is attempted. Reordering these would leave the message
     # intact and the work lost.
     assert workflow.index('git push origin "$branch"') < workflow.index("if ! gh pr create"), (
         "the branch must be pushed before the pull request can fail"
     )
-    # The printed line gets pasted into a shell, so it must be escaped
-    # rather than interpolated: git allows ';' in a ref name, and $BASE is
-    # a dispatch input.
-    assert "gh pr create --base $BASE --head $branch" not in printed, (
+    # The line gets pasted into a shell, so it must be escaped rather than
+    # interpolated: git allows ';' in a ref name, and $BASE is a dispatch
+    # input.
+    assert "--base $BASE" not in remedy, (
         "an unescaped base ref lets a branch name run extra shell commands"
     )
-    assert "printf" in printed, "render the copyable command with shell escaping"
-    assert "%q" in printed, "render the copyable command with shell escaping"
+    assert remedy.strip().startswith("printf "), "render the remedy with shell escaping"
+    assert remedy.count("%q") == 2, "both the base and the branch must be escaped"
 
 
 def test_pyproject_pins_no_alternate_package_index() -> None:
