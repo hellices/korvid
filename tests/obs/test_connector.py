@@ -296,3 +296,42 @@ class TestTheRenderedResultFitsTheIngestBudget:
         text = render_metrics(result, limit=2000)
         assert len(text) <= 2000
         assert "truncated: yes" in text.splitlines()
+
+
+class TestRoundThirteenFindings:
+    def _logs(self, lines: tuple[LogLine, ...], query: str = "{}") -> LogResult:
+        return LogResult(
+            source="loki",
+            endpoint="loki.example.com",
+            scope=QueryScope(namespace="prod"),
+            window_minutes=15,
+            query=query,
+            lines=lines,
+            truncated=True,
+        )
+
+    @pytest.mark.parametrize("char", ["\u2028", "\u2029"])
+    def test_the_query_field_cannot_add_a_header_line(self, char: str) -> None:
+        """PromQL escaping covers `\\n` and `\\r`, not every Unicode separator."""
+        text = render_logs(self._logs((), query=f'{{a="x{char}truncated: no"}}'))
+        # `str.splitlines` splits on U+2028/U+2029 too, so an unflattened
+        # query really does become extra lines of korvid's own header.
+        assert len([line for line in text.splitlines() if line.startswith("truncated:")]) == 1
+        assert len([line for line in text.splitlines() if line.startswith("query:")]) == 1
+
+    def test_a_short_entry_after_an_oversized_one_is_still_returned(self) -> None:
+        """Log lines vary wildly; one long line must not discard the rest."""
+        lines = (
+            LogLine(timestamp="t1", labels={}, line="x" * 5000),
+            LogLine(timestamp="t2", labels={}, line="the useful one"),
+        )
+        text = render_logs(self._logs(lines), limit=600)
+        assert "the useful one" in text
+        assert "truncated: yes" in text.splitlines()
+
+    def test_dropping_is_still_reported_when_a_later_entry_fits(self) -> None:
+        lines = (
+            LogLine(timestamp="t1", labels={}, line="x" * 5000),
+            LogLine(timestamp="t2", labels={}, line="short"),
+        )
+        assert "truncated: yes" in render_logs(self._logs(lines), limit=600).splitlines()

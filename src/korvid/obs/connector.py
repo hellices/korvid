@@ -275,12 +275,15 @@ def _header(
     extra: tuple[str, ...] = (),
 ) -> list[str]:
     return [
-        f"source: {source}",
-        f"endpoint: {endpoint}",
+        f"source: {flatten(source)}",
+        f"endpoint: {flatten(endpoint)}",
         f"scope: {scope.describe()}",
         f"window: {window_minutes}m",
         *extra,
-        f"query: {query}",
+        # Flattened like every other header field: PromQL escaping covers
+        # `\n` and `\r`, but not the Unicode separators `str.splitlines`
+        # also breaks on (PR #280 review).
+        f"query: {flatten(query)}",
         f"truncated: {'yes' if truncated else 'no'}",
     ]
 
@@ -310,9 +313,12 @@ def _rendered(
         # can never push the header over the budget afterwards.
         budget = limit - len("\n".join(_header(**header_fields, truncated=True))) - 2
         for entry in entries:
+            # Skipped, not stopped at: log lines vary by orders of
+            # magnitude, and one early giant would otherwise discard every
+            # short line after it (PR #280 review).
             if len(entry) + 1 > budget:
                 dropped = True
-                break
+                continue
             kept.append(entry)
             budget -= len(entry) + 1
     lines = _header(**header_fields, truncated=truncated or dropped)

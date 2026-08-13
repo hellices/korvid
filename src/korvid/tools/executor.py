@@ -440,12 +440,40 @@ def _query_scope(args: Mapping[str, Any]) -> QueryScope:
     )
 
 
-#: Rendering budget for an external read, under `MAX_RESULT_CHARS` with
-#: room for the redaction placeholders the projection may add. Applied
-#: while the result is *built*, so a result cut to fit reports
-#: `truncated: yes` — `cap_result` downstream would leave the header
-#: claiming the answer was complete (PR #280 review).
+#: Opening rendering budget for an external read. Applied while the
+#: result is *built*, so a result cut to fit reports `truncated: yes` —
+#: `cap_result` downstream would leave the header claiming the answer was
+#: complete (PR #280 review).
 _OBSERVABILITY_RENDER_CHARS = MAX_RESULT_CHARS - 1000
+
+#: How many times to re-render after projection overshoots the cap. Each
+#: attempt shrinks the budget by the exact overshoot, so two are ample;
+#: the floor below guarantees termination regardless.
+_OBSERVABILITY_RENDER_ATTEMPTS = 4
+
+
+def _projected_within_budget(render: Callable[[int], str], path: str) -> ToolOutcome:
+    """Render, project, and re-render until the projected text fits.
+
+    A fixed reserve is not a guarantee: redaction *expands* text — every
+    `token=x` becomes `token=` plus a placeholder — so a result that fit
+    before the pass can exceed the cap after it. Re-rendering rather than
+    slicing is what keeps the header honest: a shorter render reports
+    `truncated: yes`, while a slice would leave it claiming the answer was
+    complete (PR #280 review).
+    """
+    budget = _OBSERVABILITY_RENDER_CHARS
+    outcome = _projected(render(budget), path)
+    for _ in range(_OBSERVABILITY_RENDER_ATTEMPTS):
+        overshoot = len(outcome.text) - MAX_RESULT_CHARS
+        if overshoot <= 0:
+            return outcome
+        # Shrink by the overshoot plus a margin, with a floor so a header
+        # that alone exceeds the cap still terminates (cap_result then
+        # trims it, and a header-only result has nothing to mislead with).
+        budget = max(200, budget - overshoot - 100)
+        outcome = _projected(render(budget), path)
+    return outcome
 
 
 def _projected(text: str, path: str, *, error: bool = False) -> ToolOutcome:
@@ -1172,7 +1200,9 @@ class ToolExecutor(RecordedExecution):
             result = await self._metrics.query(signal=signal, scope=scope, window_minutes=window)
         except ConnectorError as exc:
             return _connector_failure(exc, "metrics")
-        return _projected(render_metrics(result, limit=_OBSERVABILITY_RENDER_CHARS), "metrics")
+        return _projected_within_budget(
+            lambda budget: render_metrics(result, limit=budget), "metrics"
+        )
 
     async def _search_logs(self, args: dict[str, Any]) -> ToolOutcome:
         """Centralized log lines from the configured logs backend."""
@@ -1189,7 +1219,7 @@ class ToolExecutor(RecordedExecution):
             )
         except ConnectorError as exc:
             return _connector_failure(exc, "logs")
-        return _projected(render_logs(result, limit=_OBSERVABILITY_RENDER_CHARS), "logs")
+        return _projected_within_budget(lambda budget: render_logs(result, limit=budget), "logs")
 
     async def _get_events(self, args: dict[str, Any]) -> ToolOutcome:
         kind = str(args["kind"]).strip().lower()

@@ -62,6 +62,7 @@ class FakeLogs(LogsConnector):
         self._error = error
         self.closed = False
         self.line = "boom"
+        self.lines_count = 1
 
     async def search(
         self,
@@ -87,7 +88,10 @@ class FakeLogs(LogsConnector):
             scope=scope,
             window_minutes=15,
             query='{namespace="prod"}',
-            lines=(LogLine(timestamp="2026-08-14T00:00:00Z", labels={}, line=self.line),),
+            lines=tuple(
+                LogLine(timestamp="2026-08-14T00:00:00Z", labels={}, line=self.line)
+                for _ in range(self.lines_count)
+            ),
         )
 
     async def aclose(self) -> None:
@@ -315,3 +319,29 @@ class TestResultProjection:
         connector.line = "boom"
         result = await _executor(logs=connector).execute("search_logs", {"namespace": "prod"})
         assert "truncated: no" in result.splitlines()
+
+    async def test_projection_expansion_cannot_push_a_result_past_the_ingest_cap(self) -> None:
+        """`token=x` becomes `token=<mask>`; enough of those grow the text."""
+        from korvid.tools.executor import MAX_RESULT_CHARS
+
+        connector = FakeLogs()
+        connector.line = " ".join("token=x" for _ in range(900))
+        outcome = await _executor(logs=connector).execute_recorded(
+            "search_logs", {"namespace": "prod"}
+        )
+        assert len(outcome.text) <= MAX_RESULT_CHARS
+        assert "truncated:" in outcome.text
+        statuses = [line for line in outcome.text.splitlines() if line.startswith("truncated:")]
+        assert len(statuses) == 1
+
+    async def test_a_result_cut_by_the_expansion_says_it_was_cut(self) -> None:
+        from korvid.tools.executor import MAX_RESULT_CHARS
+
+        connector = FakeLogs()
+        connector.lines_count = 400
+        connector.line = " ".join("token=x" for _ in range(40))
+        outcome = await _executor(logs=connector).execute_recorded(
+            "search_logs", {"namespace": "prod"}
+        )
+        assert len(outcome.text) <= MAX_RESULT_CHARS
+        assert "truncated: yes" in outcome.text.splitlines()

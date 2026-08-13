@@ -260,3 +260,31 @@ class TestNoClientLeaksOnARefusal:
                 )
             )
         assert made == []
+
+    async def test_an_invalid_limit_does_not_leave_a_client_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`QueryLimits` validates too, and it was evaluated after the client."""
+        import httpx
+
+        import korvid.providers.net as net
+
+        made: list[httpx.AsyncClient] = []
+        original = net.make_client
+
+        def spy(ca_bundle: str | None, timeout: Any) -> httpx.AsyncClient:
+            client = original(ca_bundle, timeout)
+            made.append(client)
+            return client
+
+        monkeypatch.setattr(net, "make_client", spy)
+        with pytest.raises(SystemExit, match="max_series"):
+            _build_observability(
+                _config(
+                    observability_prometheus=ObservabilityBackend(url="https://p.example.com"),
+                    observability_loki=ObservabilityBackend(
+                        url="https://l.example.com", max_series=0
+                    ),
+                )
+            )
+        assert made == []

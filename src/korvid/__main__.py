@@ -194,8 +194,18 @@ def _build_observability(config: KorvidConfig) -> ObservabilityWiring:
 
     try:
         _validate_observability(prometheus, loki)
-        return _connectors(prometheus, loki, limits, client)
-    except ConnectorError as exc:
+        # Built before any client: `QueryLimits` validates as well, and it
+        # was evaluated *after* the client in the constructor's argument
+        # list — so a bad limit stranded a client nobody could close.
+        prometheus_limits = limits(prometheus) if prometheus is not None else None
+        loki_limits = limits(loki) if loki is not None else None
+        return _connectors(prometheus, loki, prometheus_limits, loki_limits, client)
+    except (ConnectorError, ValueError) as exc:
+        # Two refusal types, one outcome: a connector-level invariant
+        # (`ConnectorError`) and an unusable limit (`ValueError` from
+        # `QueryLimits`). Neither should reach the user as a traceback,
+        # and both mean the same thing to them.
+        raise SystemExit(f"korvid: observability configuration is unusable: {exc}") from exc
         # A refusal the config parser did not reach (a connector-level
         # invariant, or a directly-constructed backend): actionable text
         # rather than a traceback at startup.
@@ -227,7 +237,8 @@ def _validate_observability(
 def _connectors(
     prometheus: ObservabilityBackend | None,
     loki: ObservabilityBackend | None,
-    limits: Callable[[ObservabilityBackend], Any],
+    prometheus_limits: Any,
+    loki_limits: Any,
     client: Callable[[ObservabilityBackend], Any],
 ) -> ObservabilityWiring:
     """Construct whichever connectors are configured (see `_build_observability`)."""
@@ -238,7 +249,7 @@ def _connectors(
         PrometheusConnector(
             prometheus.url,
             client=client(prometheus),
-            limits=limits(prometheus),
+            limits=prometheus_limits,
             token_env=prometheus.token_env,
             token_file=prometheus.token_file,
             mask_labels=frozenset(prometheus.mask_labels),
@@ -250,7 +261,7 @@ def _connectors(
         LokiConnector(
             loki.url,
             client=client(loki),
-            limits=limits(loki),
+            limits=loki_limits,
             token_env=loki.token_env,
             token_file=loki.token_file,
             tenant=loki.tenant,
