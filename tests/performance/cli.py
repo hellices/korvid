@@ -53,7 +53,7 @@ from tests.performance.replay import ReplayAborted, ReplayOptions, ReplayReport,
 from tests.ui.waits import WaitTimeout
 
 _REPLAY_TIME_SCALE_ERROR = (
-    "--time-scale must be >= 1.0: cursor sampling requires real-time-or-slower churn"
+    "--time-scale must be finite and >= 1.0: cursor sampling requires real-time-or-slower churn"
 )
 
 
@@ -92,9 +92,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         metavar="FLOAT",
-        help="Sleep multiplier for replay churn (must be >= 1.0): 1.0 replays at "
-        "real time, larger values slow the schedule; cursor sampling requires "
-        "real-time-or-slower churn.",
+        help="Sleep multiplier for replay churn (must be finite and >= 1.0): "
+        "1.0 replays at real time, larger values slow the schedule; cursor "
+        "sampling requires churn at real time or slower.",
     )
     rp.add_argument(
         "--sample-interval",
@@ -287,7 +287,7 @@ def _replay_time_scale_error(time_scale: float) -> str | None:
     finishes, so the run should fail as a harness misconfiguration instead of
     surfacing a late `WaitTimeout` after the replay work has already happened.
     """
-    if time_scale < 1.0:
+    if not math.isfinite(time_scale) or time_scale < 1.0:
         return _REPLAY_TIME_SCALE_ERROR
     return None
 

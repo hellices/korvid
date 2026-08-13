@@ -25,7 +25,7 @@ from tests.performance.profile import FailureInjection, WorkloadProfile
 from tests.performance.replay import ReplayOptions, ReplayReport
 
 _REPLAY_TIME_SCALE_ERROR = (
-    "--time-scale must be >= 1.0: cursor sampling requires real-time-or-slower churn"
+    "--time-scale must be finite and >= 1.0: cursor sampling requires real-time-or-slower churn"
 )
 
 # ---------------------------------------------------------------------------
@@ -326,7 +326,7 @@ def test_cli_rejects_invalid_timing_options(
     assert message in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("value", ["0", "0.1", "0.999"])
+@pytest.mark.parametrize("value", ["0", "0.1", "0.999", "nan", "inf", "-inf"])
 def test_cli_replay_rejects_compressed_time_scales_before_loading_the_profile(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -341,7 +341,11 @@ def test_cli_replay_rejects_compressed_time_scales_before_loading_the_profile(
 
     monkeypatch.setattr(cli, "load_profile", fail_load)
 
-    exit_code = cli.main(["replay", "--profile", "profile.json", "--time-scale", value])
+    time_scale_arg = f"--time-scale={value}" if value.startswith("-") else "--time-scale"
+    argv = ["replay", "--profile", "profile.json", time_scale_arg]
+    if time_scale_arg == "--time-scale":
+        argv.append(value)
+    exit_code = cli.main(argv)
 
     assert exit_code == 1
     assert capsys.readouterr().err == f"error: {_REPLAY_TIME_SCALE_ERROR}\n"
@@ -366,8 +370,8 @@ def test_cli_replay_help_explains_the_real_time_scale_floor(
         cli.main(["replay", "--help"])
 
     help_text = " ".join(capsys.readouterr().out.split())
-    assert "must be >= 1.0" in help_text
-    assert "cursor sampling requires real-time-or-slower churn" in help_text
+    assert "must be finite and >= 1.0" in help_text
+    assert "cursor sampling requires churn at real time or slower" in help_text
 
 
 def test_cli_reports_expected_replay_errors(
