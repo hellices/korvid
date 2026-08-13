@@ -34,6 +34,14 @@ wait to their ceiling while the compositor is saturated. Injecting the same key
 and waiting only for the cursor row to change reduced the profiled measurement
 to about 205 ms without changing production code.
 
+The first corrected 30-second replay reduced cursor-input p95 to 159 ms but did
+not meet the 100 ms target. A focused five-second trace found 349 off-screen
+cell changes and only 6 visible cell changes, while `ResourceTable.refresh()`
+ran 379 times. Textual's `DataTable.update_cell()` refreshes the entire widget
+for every changed cell, including rows outside the viewport. This unnecessary
+off-screen repaint pressure is the remaining demonstrated production
+bottleneck.
+
 ## Considered approaches
 
 ### Measurement correction only
@@ -69,6 +77,23 @@ the pre-update cursor snapshot.
 
 This keeps the optimization local to the in-place path and avoids a general
 render throttle, which could trade input latency for event-to-render latency.
+
+### Viewport-aware cell updates
+
+The in-place diff will update `DataTable`'s cell model and cache generation
+without immediately refreshing the widget for every cell. One repaint is
+requested after the batch only when at least one changed row intersects the
+current viewport.
+
+An off-screen value that grows a column remains a repaint condition because the
+new width changes the visible table layout even when the value itself is not
+visible. Row additions, removals, reorder fallbacks, and dimension updates keep
+their existing paths.
+
+This is not virtualization and does not defer data correctness: `get_row()`,
+sorting, filtering, a later scroll, and final digest checks see the new value
+immediately. It only suppresses a screen refresh that cannot display the
+changed row.
 
 ### Direct input acknowledgement
 
@@ -130,15 +155,18 @@ ephemeral instrumented K9s build and must not be inferred from PTY output.
 
 1. Add a `ResourceTable` regression proving a no-op in-place update does not
    move the cursor or request cursor-driven refresh work.
-2. Preserve tests for deletion above the cursor, deletion of the selected row,
+2. Add regressions proving an off-screen cell update changes table data without
+   repaint, a visible update repaints once, and off-screen width growth still
+   repaints.
+3. Preserve tests for deletion above the cursor, deletion of the selected row,
    sorting, and viewport restoration.
-3. Add input-probe tests for down/up acknowledgement and timeout behavior.
-4. Run the targeted resource-table and performance replay/live tests.
-5. Run Ruff and mypy on changed files; run Tach only if imports cross package
+4. Add input-probe tests for down/up acknowledgement and timeout behavior.
+5. Run the targeted resource-table and performance replay/live tests.
+6. Run Ruff and mypy on changed files; run Tach only if imports cross package
    boundaries.
-6. Rerun the 1,000-Pod, 24-events/second replay without `cProfile` for the input
+7. Rerun the 1,000-Pod, 24-events/second replay without `cProfile` for the input
    acceptance result and with `cProfile` for an apples-to-apples CPU profile.
-7. Confirm zero dropped updates, a matching final digest, and no event-latency
+8. Confirm zero dropped updates, a matching final digest, and no event-latency
    regression.
 
 ## Non-goals

@@ -391,3 +391,281 @@ git --no-pager log -5 --oneline --decorate
 ```
 
 Expected: no uncommitted source changes and separate commits for the design, production optimization, and measurement correction.
+
+### Task 4: Suppress off-screen cell repaints
+
+**Files:**
+- Modify: `src/korvid/ui/widgets/resource_table.py:527-621`
+- Test: `tests/ui/test_table_diff_update.py`
+- Verify: `tests/ui/test_cursor_stability.py`
+
+**Interfaces:**
+- Produces: `ResourceTable._row_is_visible(key: str) -> bool`
+- Changes: `ResourceTable._absorb_widths(...) -> bool`, returning whether a column grew.
+- Preserves: immediate table-model updates, cache-generation invalidation, width growth, row add/remove/reorder, cursor, and viewport behavior.
+
+- [ ] **Step 1: Add failing viewport-aware refresh tests**
+
+Add a refresh spy:
+
+```python
+def _spy_refresh(table: ResourceTable) -> list[tuple[tuple[Any, ...], dict[str, Any]]]:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    original = table.refresh
+
+    def spy(*regions: Any, **kwargs: Any) -> Any:
+        calls.append((regions, kwargs))
+        return original(*regions, **kwargs)
+
+    table.refresh = spy  # type: ignore[method-assign]  # test spy
+    return calls
+```
+
+Add three tests:
+
+```python
+async def test_offscreen_cell_update_changes_data_without_repaint() -> None:
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        await until(pilot, lambda: table.max_scroll_y > 0, label="table scrollable")
+        calls = _spy_refresh(table)
+
+        app.store.apply_event(
+            "pods", "default", "MODIFIED", _pod("pod-39", phase="Pending")
+        )
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/pod-39")[2]) == "Pending",
+            label="offscreen cell updated",
+        )
+
+        assert calls == []
+
+
+async def test_visible_cell_update_repaints_once() -> None:
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        calls = _spy_refresh(table)
+
+        app.store.apply_event(
+            "pods", "default", "MODIFIED", _pod("pod-00", phase="Pending")
+        )
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/pod-00")[2]) == "Pending",
+            label="visible cell updated",
+        )
+
+        assert len(calls) == 1
+
+
+async def test_offscreen_width_growth_still_repaints() -> None:
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        status = table.ordered_columns[2]
+        original_width = status.content_width
+        calls = _spy_refresh(table)
+
+        app.store.apply_event(
+            "pods", "default", "MODIFIED", _pod("pod-39", phase="CrashLoopBackOff")
+        )
+        await until(
+            pilot,
+            lambda: status.content_width > original_width,
+            label="offscreen width absorbed",
+        )
+
+        assert len(calls) == 1
+```
+
+- [ ] **Step 2: Run the tests to verify RED**
+
+Run:
+
+```bash
+.venv/bin/python -m pytest -p no:tach \
+  tests/ui/test_table_diff_update.py::test_offscreen_cell_update_changes_data_without_repaint \
+  tests/ui/test_table_diff_update.py::test_visible_cell_update_repaints_once \
+  tests/ui/test_table_diff_update.py::test_offscreen_width_growth_still_repaints -q
+```
+
+Expected: FAIL because inherited `DataTable.update_cell()` refreshes once per changed cell.
+
+- [ ] **Step 3: Batch model updates and repaint only visible changes**
+
+Add `_row_is_visible()`:
+
+```python
+    def _row_is_visible(self, key: str) -> bool:
+        row_index = self.get_row_index(key)
+        fixed_count = min(self.fixed_rows, self.row_count)
+        if row_index < fixed_count:
+            return True
+        fixed_height = sum(row.height for row in self.ordered_rows[:fixed_count])
+        header_height = self.header_height if self.show_header else 0
+        viewport_height = max(self.size.height - header_height - fixed_height, 0)
+        row_region = self._get_row_region(row_index)
+        row_top = row_region.y - header_height - fixed_height
+        visible_top = int(self.scroll_y)
+        visible_bottom = visible_top + viewport_height
+        return row_region.height + row_top > visible_top and row_top < visible_bottom
+```
+
+Replace `_patch_row()`'s `update_cell()` loop with direct model updates:
+
+```python
+        row_key = RowKey(key)
+        changed = False
+        for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
+            if not _cells_equal(old_cell, new_cell):
+                self._data[row_key][column.key] = new_cell
+                changed = True
+        if changed:
+            self._update_count += 1
+        return changed
+```
+
+Change `_absorb_widths()` to return `bool`, initialize `grew = False`, set it
+when a column grows, and `return grew`.
+
+In `_apply_in_place()`, collect whether any changed row is visible. After
+absorbing touched widths, call `self.refresh()` exactly once if a changed row
+is visible or any column grew:
+
+```python
+        repaint = False
+        for key, cells in pending:
+            if key not in current_set:
+                self.add_row(*cells, key=key)
+                touched.append((key, cells))
+            elif self._patch_row(key, cells, columns):
+                touched.append((key, cells))
+                repaint = repaint or self._row_is_visible(key)
+        self._emitted = dict(pending)
+        if touched:
+            grew = self._absorb_widths(touched)
+            if repaint or grew:
+                self.refresh()
+        return True
+```
+
+- [ ] **Step 4: Run focused table and cursor tests**
+
+Run:
+
+```bash
+.venv/bin/python -m pytest -p no:tach \
+  tests/ui/test_table_diff_update.py \
+  tests/ui/test_cursor_stability.py \
+  tests/ui/test_table_column_widths.py -q
+```
+
+Expected: all tests PASS.
+
+- [ ] **Step 5: Run lint, format, and type checks**
+
+Run:
+
+```bash
+.venv/bin/ruff check --fix \
+  src/korvid/ui/widgets/resource_table.py \
+  tests/ui/test_table_diff_update.py
+.venv/bin/ruff format \
+  src/korvid/ui/widgets/resource_table.py \
+  tests/ui/test_table_diff_update.py
+.venv/bin/mypy src/korvid/ui/widgets/resource_table.py
+```
+
+Expected: all commands exit 0.
+
+- [ ] **Step 6: Commit Task 4**
+
+```bash
+git add src/korvid/ui/widgets/resource_table.py tests/ui/test_table_diff_update.py
+git commit -m "perf: skip repaints for offscreen row updates" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+```
+
+### Task 5: Repeat final requalification
+
+**Files:**
+- Verify only: no repository file changes required.
+- Artifacts: `/Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/`
+
+- [ ] **Step 1: Run the final unprofiled acceptance replay**
+
+```bash
+.venv/bin/python -m tests.performance.cli replay \
+  --profile /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/steady-24eps-1k.json \
+  --json /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-24eps.json \
+  --out /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-24eps.md
+```
+
+Expected: cursor-input p95 is below `0.100s`, digest match is `true`, and
+dropped updates are `0`.
+
+- [ ] **Step 2: Run the final apples-to-apples diagnostic profile**
+
+```bash
+.venv/bin/python -m tests.performance.cli replay \
+  --profile /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/steady-24eps-1k.json \
+  --json /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-profiled-24eps.json \
+  --out /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-profiled-24eps.md \
+  --cpu-profile /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-24eps.pstats \
+  --allocation-snapshot /Users/hwang-inhwan/.copilot/session-state/1d927e2d-c5c1-49c4-a894-61ccd45ddaa4/files/final-24eps-alloc.txt
+```
+
+Expected: digest match is `true`, dropped updates are `0`, and the corrected
+cursor metric contains no Pilot idle waits.
+
+- [ ] **Step 3: Run all changed-surface gates**
+
+```bash
+.venv/bin/python -m pytest -p no:tach \
+  tests/ui/test_table_diff_update.py \
+  tests/ui/test_cursor_stability.py \
+  tests/ui/test_table_column_widths.py \
+  tests/performance/test_replay.py \
+  tests/performance/test_live.py::test_run_live_replay_measures_input_latency_with_the_injected_clock \
+  tests/performance/test_live.py::test_run_live_replay_aborts_and_still_closes_clients_on_guard_failure \
+  tests/performance/test_live.py::test_run_live_replay_propagates_cancelled_error_and_still_closes_clients -q
+.venv/bin/ruff check \
+  src/korvid/ui/widgets/resource_table.py \
+  tests/ui/test_table_diff_update.py \
+  tests/performance/replay.py \
+  tests/performance/live.py \
+  tests/performance/test_replay.py
+.venv/bin/ruff format --check \
+  src/korvid/ui/widgets/resource_table.py \
+  tests/ui/test_table_diff_update.py \
+  tests/performance/replay.py \
+  tests/performance/live.py \
+  tests/performance/test_replay.py
+.venv/bin/mypy src/korvid/ui/widgets/resource_table.py \
+  tests/performance/replay.py \
+  tests/performance/live.py
+```
+
+Expected: every command exits `0`.
+
+- [ ] **Step 4: Reconfirm the K9s blocker without mutating infrastructure**
+
+```bash
+/opt/homebrew/bin/k9s version --short
+kubectl config get-contexts aks-korvid-contract-test
+az aks show \
+  --resource-group rg-korvid-contract-test \
+  --name aks-korvid-contract-test \
+  --query '{id:id,state:powerState.code}' -o json
+kubectl --context aks-korvid-contract-test get namespaces --request-timeout=5s
+```
+
+Expected in the current environment: K9s is `0.50.18`, while the AKS resource
+group is absent and the kubeconfig endpoint does not resolve. Record the direct
+comparison as blocked, not passed or estimated.
