@@ -24,6 +24,9 @@ deterministic schedule used to compare a live run against the synthetic
 failure points are re-validated against the shortened duration).
 `steady-24eps-1k` is the deterministic input-latency acceptance profile: 1,000
 Pods across 20 namespaces, 30 seconds of burst-free churn at 24 events/s.
+Because the replay command publishes cursor metrics sampled *during* churn,
+`replay --time-scale` must be at least 1.0: compressed schedules drain before
+the probe can finish and are rejected during CLI validation.
 """
 
 from __future__ import annotations
@@ -48,6 +51,10 @@ from tests.performance.metrics import BenchmarkReport, render_markdown, report_p
 from tests.performance.profile import WorkloadProfile, load_profile, validate_profile
 from tests.performance.replay import ReplayAborted, ReplayOptions, ReplayReport, run_replay
 from tests.ui.waits import WaitTimeout
+
+_REPLAY_TIME_SCALE_ERROR = (
+    "--time-scale must be >= 1.0: cursor sampling requires real-time-or-slower churn"
+)
 
 
 def _to_benchmark_report(replay: ReplayReport) -> BenchmarkReport:
@@ -85,7 +92,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         metavar="FLOAT",
-        help="Sleep multiplier: 0 skips all sleeps, 1.0 replays at real time.",
+        help="Sleep multiplier for replay churn (must be >= 1.0): 1.0 replays at "
+        "real time, larger values slow the schedule; cursor sampling requires "
+        "real-time-or-slower churn.",
     )
     rp.add_argument(
         "--sample-interval",
@@ -270,6 +279,19 @@ def _input_probe_error(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _replay_time_scale_error(time_scale: float) -> str | None:
+    """Reject compressed replay schedules before a long run starts.
+
+    The replay CLI always publishes cursor metrics sampled during churn. Once
+    the schedule is compressed below real time it can drain before that probe
+    finishes, so the run should fail as a harness misconfiguration instead of
+    surfacing a late `WaitTimeout` after the replay work has already happened.
+    """
+    if time_scale < 1.0:
+        return _REPLAY_TIME_SCALE_ERROR
+    return None
+
+
 def _run_with_cpu_profile(
     profile: WorkloadProfile,
     options: ReplayOptions,
@@ -381,8 +403,9 @@ def _cmd_seed_manifests(args: argparse.Namespace) -> int:
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
-    if args.time_scale < 0:
-        print("error: --time-scale must be non-negative", file=sys.stderr)
+    time_scale_error = _replay_time_scale_error(args.time_scale)
+    if time_scale_error:
+        print(f"error: {time_scale_error}", file=sys.stderr)
         return 1
     if args.sample_interval <= 0:
         print("error: --sample-interval must be positive", file=sys.stderr)

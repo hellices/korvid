@@ -24,6 +24,10 @@ from tests.performance.metrics import (
 from tests.performance.profile import FailureInjection, WorkloadProfile
 from tests.performance.replay import ReplayOptions, ReplayReport
 
+_REPLAY_TIME_SCALE_ERROR = (
+    "--time-scale must be >= 1.0: cursor sampling requires real-time-or-slower churn"
+)
+
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -283,7 +287,7 @@ def test_cli_writes_json_and_markdown(tmp_path: Path, monkeypatch: pytest.Monkey
             "--profile",
             str(profile_path(tmp_path)),
             "--time-scale",
-            "0",
+            "1.0",
             "--json",
             str(json_path),
             "--out",
@@ -309,7 +313,6 @@ def test_cli_returns_nonzero_for_digest_or_drop_failure(
 @pytest.mark.parametrize(
     ("option", "value", "message"),
     [
-        ("--time-scale", "-1", "--time-scale must be non-negative"),
         ("--sample-interval", "0", "--sample-interval must be positive"),
     ],
 )
@@ -321,6 +324,50 @@ def test_cli_rejects_invalid_timing_options(
 ) -> None:
     assert cli.main(["replay", "--profile", "profile.json", option, value]) == 1
     assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "0.1", "0.999"])
+def test_cli_replay_rejects_compressed_time_scales_before_loading_the_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    """Compressed replay churn drains before the cursor probe can finish, so the
+    CLI must reject it during validation instead of failing later with a replay
+    `WaitTimeout`."""
+
+    def fail_load(_path: Path) -> WorkloadProfile:
+        raise AssertionError("load_profile must not run for an invalid time scale")
+
+    monkeypatch.setattr(cli, "load_profile", fail_load)
+
+    exit_code = cli.main(["replay", "--profile", "profile.json", "--time-scale", value])
+
+    assert exit_code == 1
+    assert capsys.readouterr().err == f"error: {_REPLAY_TIME_SCALE_ERROR}\n"
+
+
+def test_cli_replay_accepts_and_forwards_time_scale_1_point_0(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = _replay_options_for(
+        ["replay", "--profile", str(profile_path(tmp_path)), "--time-scale", "1.0"],
+        monkeypatch,
+    )
+
+    assert options.time_scale == 1.0
+
+
+def test_cli_replay_help_explains_the_real_time_scale_floor(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["replay", "--help"])
+
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "must be >= 1.0" in help_text
+    assert "cursor sampling requires real-time-or-slower churn" in help_text
 
 
 def test_cli_reports_expected_replay_errors(
@@ -344,7 +391,7 @@ def test_cli_reports_terminal_replay_abort_without_traceback(
     )
     monkeypatch.setattr(cli, "load_profile", lambda _path: profile)
 
-    assert cli.main(["replay", "--profile", "profile.json", "--time-scale", "0"]) == 1
+    assert cli.main(["replay", "--profile", "profile.json", "--time-scale", "1.0"]) == 1
     stderr = capsys.readouterr().err
     assert "error during replay: replay aborted:" in stderr
     assert "Traceback" not in stderr
@@ -789,7 +836,9 @@ def test_replay_and_seed_manifests_commands_still_work(
 ) -> None:
     """Adding `replay-live` must not disturb the pre-existing subcommands."""
     monkeypatch.setattr(cli, "run_replay", fake_run_replay)
-    assert cli.main(["replay", "--profile", str(profile_path(tmp_path)), "--time-scale", "0"]) == 0
+    assert (
+        cli.main(["replay", "--profile", str(profile_path(tmp_path)), "--time-scale", "1.0"]) == 0
+    )
 
     output_path = tmp_path / "seed.yaml"
     assert (
@@ -890,7 +939,7 @@ def test_cli_reports_output_write_errors_instead_of_raising(
             "--profile",
             str(written_profile),
             "--time-scale",
-            "0",
+            "1.0",
             output_option,
             str(tmp_path / "report.out"),
         ]
@@ -1048,7 +1097,7 @@ def test_cli_replay_passes_the_input_probe_knobs_into_replay_options(
             "--profile",
             str(profile_path(tmp_path)),
             "--time-scale",
-            "0",
+            "1.0",
             "--input-ack-timeout",
             "12.5",
             "--input-sample-pairs",
@@ -1065,7 +1114,7 @@ def test_cli_replay_defaults_the_input_probe_knobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     options = _replay_options_for(
-        ["replay", "--profile", str(profile_path(tmp_path)), "--time-scale", "0"],
+        ["replay", "--profile", str(profile_path(tmp_path)), "--time-scale", "1.0"],
         monkeypatch,
     )
 
