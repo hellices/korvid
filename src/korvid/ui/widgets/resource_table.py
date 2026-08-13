@@ -429,15 +429,11 @@ class ResourceTable(DataTable[str | Text]):
         pending, self._pending_rows = self._pending_rows, []
         self._prune_memo(pending)
         if same_view and sort == self._last_sort and self._apply_in_place(pending):
-            # Nothing was cleared, so the scroll offset never moved; only
-            # the cursor may have slid when rows above it were removed —
-            # and even with scroll=False, Textual's cursor watcher schedules
-            # a deferred _scroll_cursor_into_view on an index change, so the
-            # viewport must be re-asserted after it (same as the rebuild
-            # path below). When the index is unchanged no deferred scroll
-            # was scheduled — re-asserting anyway would yank back a user
-            # scroll that lands before the callback runs.
-            if restore is not None:
+            # In-place updates and appends leave the selected key alone.
+            # Avoid reassigning the same cursor coordinate: DataTable treats
+            # move_cursor() as repaint work even when nothing selected moved.
+            current = self._cursor_snapshot()
+            if restore is not None and (current is None or current[0] != restore[0]):
                 offset = (self.scroll_x, self.scroll_y)
                 self._restore_cursor(*restore, scroll=False)
                 if self.cursor_row != restore[1]:

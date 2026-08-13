@@ -160,6 +160,35 @@ def test_cell_width_measures_multiline_cells_by_widest_line() -> None:
     assert _cell_width("") == 0
 
 
+async def test_in_place_update_does_not_move_unchanged_cursor() -> None:
+    # The cursor already stays on beta when the row key survives in place;
+    # moving it again would only trigger a no-op repaint.
+    app = make_app([_pod("alpha"), _pod("beta"), _pod("gamma")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 3, label="pods loaded")
+        table.focus()
+        await pilot.press("down")
+        await until(pilot, lambda: table.cursor_row == 1, label="cursor on beta")
+        calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        original = table.move_cursor
+
+        def spy(*args: Any, **kwargs: Any) -> None:
+            calls.append((args, kwargs))
+            original(*args, **kwargs)
+
+        table.move_cursor = spy  # type: ignore[method-assign]  # test spy
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("beta", phase="Pending"))
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/beta")[2]) == "Pending",
+            label="phase cell updated",
+        )
+
+        assert calls == []
+        assert table.cursor_row == 1
+
+
 async def test_no_deferred_scroll_scheduled_when_cursor_unchanged() -> None:
     # The deferred viewport re-assert exists only to counter Textual's
     # deferred _scroll_cursor_into_view, which is scheduled solely on a
