@@ -100,6 +100,7 @@ from tests.performance.replay import (
     ReplayReport,
     build_manifest,
     check_rendered_rows,
+    measure_cursor_input,
     resolve_korvid_sha,
     wait_for,
 )
@@ -1379,12 +1380,14 @@ async def _run_measured_window(
                 )
             state.churn_started_before_input = state.progress.started > 0
 
-            t0 = now()
-            await pilot.press("down")
-            recorder.record_input(now() - t0)
-            t0 = now()
-            await pilot.press("up")
-            recorder.record_input(now() - t0)
+            if not (
+                churn_task.done() and (churn_task.cancelled() or churn_task.exception() is not None)
+            ):
+                recorder.record_input(await measure_cursor_input(pilot, table, "down", now=now))
+            if not (
+                churn_task.done() and (churn_task.cancelled() or churn_task.exception() is not None)
+            ):
+                recorder.record_input(await measure_cursor_input(pilot, table, "up", now=now))
 
             # UI-at-scale evidence: drive the scoped scenarios (filter, sort,
             # namespace switch, split pane, describe, multi-log) through the

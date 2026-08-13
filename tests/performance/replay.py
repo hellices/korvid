@@ -24,6 +24,7 @@ from typing import Any, cast
 
 import psutil  # type: ignore[import-untyped]  # no inline stubs shipped
 from textual import __version__ as _textual_version
+from textual import events
 
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -480,6 +481,35 @@ def check_rendered_rows(table: Any, pods: Iterable[PodSummary]) -> None:
             )
 
 
+async def measure_cursor_input(
+    pilot: Any,
+    table: ResourceTable,
+    key: str,
+    *,
+    now: Callable[[], float] = monotonic,
+    timeout: float = 5.0,
+) -> float:
+    """Measure key injection until the table acknowledges a cursor-row change."""
+    start_row = table.cursor_row
+    app = pilot.app
+    driver = app._driver
+    if driver is None:
+        raise RuntimeError("cursor input measurement requires an active Textual test driver")
+    event = events.Key(key, None)
+    event.set_sender(app)
+    started = now()
+    driver.send_message(event)
+    try:
+        async with asyncio.timeout(timeout):
+            while table.cursor_row == start_row:
+                await asyncio.sleep(0)
+    except TimeoutError as exc:
+        raise WaitTimeout(
+            f"{key} cursor input from row {start_row} was not acknowledged within {timeout}s"
+        ) from exc
+    return now() - started
+
+
 async def wait_for(
     pilot: Any,
     condition: Callable[[], object],
@@ -594,12 +624,10 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                     recorder=recorder,
                 )
             churn_started_before_input = source.emitted_events > 0
-            t0 = monotonic()
-            await pilot.press("down")
-            recorder.record_input(monotonic() - t0)
-            t0 = monotonic()
-            await pilot.press("up")
-            recorder.record_input(monotonic() - t0)
+            if source.terminal_failure is None:
+                recorder.record_input(await measure_cursor_input(pilot, table, "down"))
+            if source.terminal_failure is None:
+                recorder.record_input(await measure_cursor_input(pilot, table, "up"))
 
             # Wait for all events to be emitted and all renders to complete.
             await wait_for(

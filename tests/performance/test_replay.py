@@ -17,6 +17,7 @@ from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.ui.messages import ResourcesUpdated
+from korvid.ui.widgets.resource_table import ResourceTable
 from tests.performance.metrics import BenchmarkRecorder, RunManifest
 from tests.performance.profile import Burst, FailureInjection, WorkloadProfile
 from tests.performance.replay import (
@@ -24,10 +25,13 @@ from tests.performance.replay import (
     ReplayAborted,
     ReplayOptions,
     build_manifest,
+    measure_cursor_input,
     resolve_korvid_sha,
     run_replay,
 )
 from tests.performance.workload import apply_events, initial_pods, scheduled_events, summary_digest
+from tests.ui.test_app import _pod, make_app
+from tests.ui.waits import WaitTimeout, until
 
 
 async def _never_watch(_kind: str, _scope: str) -> AsyncIterator[tuple[str, Summary]]:
@@ -55,6 +59,30 @@ def _manifest_profile() -> WorkloadProfile:
 
 def _manifest_for_test() -> RunManifest:
     return build_manifest(_manifest_profile())
+
+
+async def test_measure_cursor_input_returns_when_cursor_row_changes() -> None:
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        table.focus()
+
+        elapsed = await measure_cursor_input(pilot, table, "down")
+
+        assert elapsed >= 0.0
+        assert table.cursor_row == 1
+
+
+async def test_measure_cursor_input_times_out_when_cursor_cannot_move() -> None:
+    app = make_app([_pod("only")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        table.focus()
+
+        with pytest.raises(WaitTimeout, match=r"down.*row 0.*0\.01s"):
+            await measure_cursor_input(pilot, table, "down", timeout=0.01)
 
 
 async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:
