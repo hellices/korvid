@@ -61,6 +61,10 @@ from tests.ui.waits import WaitTimeout, until
 #: Anything else (e.g. the historical literal ``dev``) is not traceable to a
 #: commit and is rejected by `resolve_korvid_sha`.
 _SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+#: Final churn wait allowance beyond the profile's own scheduled wall duration.
+#: Keeps the replay's workload timing unchanged while still allowing the last
+#: render pass to drain after the final scheduled event.
+_REPLAY_CHURN_COMPLETION_GRACE_SECONDS = 5.0
 
 
 def _git_head() -> str | None:
@@ -550,6 +554,21 @@ def validate_input_sample_pairs(options: ReplayOptions) -> None:
         raise ValueError(f"input_sample_pairs must be positive; got {options.input_sample_pairs}")
 
 
+def validate_input_sampling_profile(profile: WorkloadProfile) -> None:
+    """Reject benchmark profiles that cannot satisfy the cursor probe.
+
+    The replay harness measures input latency as `down`/`up` cursor round trips
+    during churn. With fewer than two rows the first `down` move is impossible,
+    so the benchmark must fail as a profile contract error before the Textual
+    app starts. `load_profile` intentionally stays generic: other consumers can
+    still use a schema-valid one-object `WorkloadProfile`.
+    """
+    if profile.object_count < 2:
+        raise ValueError(
+            f"performance input sampling requires object_count >= 2; got {profile.object_count}"
+        )
+
+
 def input_sampling_incomplete_message(pairs: int) -> str:
     """Name the metric-contract failure when churn ends before sampling does."""
     return f"input sampling incomplete: churn finished before all {pairs} cursor sample pairs completed"
@@ -645,9 +664,11 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
     9. Compares the table/store digest to the source's expected state.
 
     Raises:
-        ValueError: `options.input_sample_pairs` is not positive.
+        ValueError: `options.input_sample_pairs` is not positive, or the
+            profile cannot support cursor input sampling.
     """
     validate_input_sample_pairs(options)
+    validate_input_sampling_profile(profile)
     events = scheduled_events(profile)
     failures: dict[int, FailureInjection] = {f.at_event: f for f in profile.failures}
 
@@ -740,7 +761,10 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                     source.terminal_failure is not None
                     or (churn_done.is_set() and recorder.pending_count() == 0)
                 ),
-                timeout=30.0,
+                timeout=(
+                    profile.duration_seconds * options.time_scale
+                    + _REPLAY_CHURN_COMPLETION_GRACE_SECONDS
+                ),
                 label="churn complete and all events rendered",
                 recorder=recorder,
             )

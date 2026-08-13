@@ -437,7 +437,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             replay = _run_with_cpu_profile(profile, options, args.cpu_profile)
         else:
             replay = asyncio.run(run_replay(profile, options))
-    except (ReplayAborted, ApiStatusError, WaitTimeout, OSError) as exc:
+    except (ReplayAborted, ApiStatusError, WaitTimeout, OSError, ValueError) as exc:
         print(f"error during replay: {exc}", file=sys.stderr)
         return 1
     finally:

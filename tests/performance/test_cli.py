@@ -127,6 +127,27 @@ def profile_path(tmp_path: Path) -> Path:
     return path
 
 
+def one_object_profile_path(tmp_path: Path) -> Path:
+    """Write a schema-valid single-object profile to *tmp_path* and return its path."""
+    path = tmp_path / "single-object.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "id": "single-object",
+                "seed": 0,
+                "object_count": 1,
+                "namespace_count": 1,
+                "steady_events_per_second": 0,
+                "duration_seconds": 1,
+                "bursts": [],
+                "failures": [],
+            }
+        )
+    )
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Fake coroutines for monkeypatching
 # ---------------------------------------------------------------------------
@@ -415,6 +436,31 @@ def test_cli_does_not_hide_unexpected_replay_errors(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(cli, "run_replay", fake_programmer_error)
     with pytest.raises(TypeError, match="unexpected replay defect"):
         cli.main(["replay", "--profile", "profile.json"])
+
+
+def test_cli_reports_one_object_input_sampling_error_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Schema-valid one-object profiles stay loadable, but the benchmark CLI
+    must report the run-time input-sampling contract failure cleanly."""
+
+    async def fail_for_one_object(profile: WorkloadProfile, options: ReplayOptions) -> ReplayReport:
+        del options
+        assert profile.object_count == 1
+        raise ValueError("performance input sampling requires object_count >= 2; got 1")
+
+    monkeypatch.setattr(cli, "run_replay", fail_for_one_object)
+
+    exit_code = cli.main(["replay", "--profile", str(one_object_profile_path(tmp_path))])
+
+    assert exit_code == 1
+    stderr = capsys.readouterr().err
+    assert stderr == (
+        "error during replay: performance input sampling requires object_count >= 2; got 1\n"
+    )
+    assert "Traceback" not in stderr
 
 
 def test_cli_writes_seed_manifests_yaml(tmp_path: Path) -> None:

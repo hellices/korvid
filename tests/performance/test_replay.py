@@ -65,6 +65,120 @@ def _manifest_for_test() -> RunManifest:
     return build_manifest(_manifest_profile())
 
 
+class _CapturedTimeout(Exception):
+    pass
+
+
+class _FakeReplaySource:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.emitted_events = 0
+        self.terminal_failure = None
+
+
+class _FakeReplayWatchManager:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    async def stop_all(self) -> None:
+        return None
+
+
+class _FakeReplaySampler:
+    def __init__(self, _interval: float) -> None:
+        pass
+
+    def start(self) -> None:
+        return None
+
+    async def stop(self) -> tuple[()]:
+        return ()
+
+
+class _FakeReplayTable:
+    row_count = 2
+
+
+class _FakeReplayPilot:
+    app: object
+
+
+class _FakeReplayRunTest:
+    def __init__(self, app: object) -> None:
+        self._pilot = _FakeReplayPilot()
+        self._pilot.app = app
+
+    async def __aenter__(self) -> _FakeReplayPilot:
+        return self._pilot
+
+    async def __aexit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _tb: object,
+    ) -> None:
+        return None
+
+
+class _FakeReplayApp:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self._table = _FakeReplayTable()
+
+    def query_one(self, _widget: object) -> _FakeReplayTable:
+        return self._table
+
+    def run_test(self) -> _FakeReplayRunTest:
+        return _FakeReplayRunTest(self)
+
+
+async def _capture_churn_completion_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    profile: WorkloadProfile,
+    *,
+    time_scale: float,
+) -> float:
+    seen_source: list[_FakeReplaySource] = []
+
+    def fake_source(*args: object, **kwargs: object) -> _FakeReplaySource:
+        source = _FakeReplaySource(*args, **kwargs)
+        seen_source.append(source)
+        return source
+
+    async def fake_wait_for(
+        pilot: object,
+        condition: object,
+        *,
+        timeout: float,
+        label: str,
+        recorder: BenchmarkRecorder,
+    ) -> None:
+        del pilot, condition, recorder
+        if label == "initial pods rendered":
+            assert timeout == 30.0
+            return
+        if label == "first churn event emitted":
+            assert timeout == 30.0
+            seen_source[0].emitted_events = 1
+            return
+        if label == "churn complete and all events rendered":
+            raise _CapturedTimeout(timeout)
+        raise AssertionError(f"unexpected wait label: {label}")
+
+    async def fake_sample_cursor_input(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(replay_module, "_ReplaySource", fake_source)
+    monkeypatch.setattr(replay_module, "WatchManager", _FakeReplayWatchManager)
+    monkeypatch.setattr(replay_module, "ProcessSampler", _FakeReplaySampler)
+    monkeypatch.setattr(replay_module, "MeasuredKorvidApp", _FakeReplayApp)
+    monkeypatch.setattr(replay_module, "wait_for", fake_wait_for)
+    monkeypatch.setattr(replay_module, "sample_cursor_input", fake_sample_cursor_input)
+
+    with pytest.raises(_CapturedTimeout) as exc_info:
+        await run_replay(profile, ReplayOptions(time_scale=time_scale, input_sample_pairs=1))
+
+    return cast(float, exc_info.value.args[0])
+
+
 async def test_measure_cursor_input_returns_when_cursor_row_changes() -> None:
     app = make_app([_pod("alpha"), _pod("beta")])
     async with app.run_test() as pilot:
@@ -369,6 +483,55 @@ async def test_replay_rejects_a_non_positive_input_sample_pair_count() -> None:
 
     with pytest.raises(ValueError, match="input_sample_pairs must be positive"):
         await run_replay(profile, ReplayOptions(time_scale=0, input_sample_pairs=0))
+
+
+async def test_replay_rejects_one_object_input_sampling_before_app_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-row table cannot acknowledge the first `down` cursor sample, so the
+    benchmark contract rejects that topology before the Textual app starts."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-one-object",
+        seed=186,
+        object_count=1,
+        namespace_count=1,
+        steady_events_per_second=0,
+        duration_seconds=1,
+        bursts=(),
+        failures=(),
+    )
+
+    def fail_app(*args: object, **kwargs: object) -> MeasuredKorvidApp:
+        pytest.fail("run_replay should reject one-object input sampling before app startup")
+
+    monkeypatch.setattr(replay_module, "MeasuredKorvidApp", fail_app)
+
+    with pytest.raises(
+        ValueError, match=r"performance input sampling requires object_count >= 2; got 1"
+    ):
+        await run_replay(profile, ReplayOptions(time_scale=0, input_sample_pairs=1))
+
+
+async def test_replay_scales_churn_completion_wait_with_profile_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The churn-completion wait must cover the schedule's wall duration at the
+    configured `time_scale`, plus a small explicit render-drain grace."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-churn-wait",
+        seed=186,
+        object_count=2,
+        namespace_count=1,
+        steady_events_per_second=1,
+        duration_seconds=30,
+        bursts=(),
+        failures=(),
+    )
+    timeout = await _capture_churn_completion_timeout(monkeypatch, profile, time_scale=2.0)
+
+    assert timeout == 65.0
 
 
 async def test_replay_uses_real_app_and_reaches_expected_digest(
