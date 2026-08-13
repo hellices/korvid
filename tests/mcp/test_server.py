@@ -1324,3 +1324,45 @@ async def test_a_refusal_before_dispatch_is_flagged_as_an_error() -> None:
         )
         assert result.is_error is True, f"{name} refusal was reported as a successful call"
     assert executor.calls == []
+
+
+async def test_a_failed_proposal_is_flagged_even_though_its_producer_says_nothing(
+    tmp_path: Path,
+) -> None:
+    """The UI bridges answer with strings, not outcomes.
+
+    `agent_get_write_proposal` returns `ERROR: unknown proposal id` and
+    `ToolExecutor` wraps that plain string with the default `error=False`,
+    so a capability-valid but failed proposal would reach the host marked
+    successful. korvid authored that text, so its `ERROR:` prefix is a
+    contract rather than content — unlike a log line, which is why the
+    judgement is made per effect and not globally.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    executor = RecordingExecutor()
+    executor.result = "ERROR: unknown proposal id"
+    executor.error = False  # exactly what the string-returning bridges produce
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_proposal_server(executor, port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        capability = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())][
+            "capability"
+        ]
+        async with (
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool(
+                "get_write_proposal", {"proposal_id": "nope", "capability": capability}
+            )
+            assert getattr(result.content[0], "text", "") == "ERROR: unknown proposal id"
+            assert result.is_error is True, "a failed proposal was reported as successful"
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    assert executor.calls != []

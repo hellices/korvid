@@ -131,6 +131,29 @@ def _sanitize_client_meta(value: object, *, limit: int = 120) -> str:
     return text[:limit]
 
 
+def _failed(name: str, outcome: ToolOutcome) -> bool:
+    """Whether one dispatch failed, for the MCP ``isError`` flag.
+
+    Two producers, two rules. A cluster read returns content korvid did
+    not author, so only its `error` bit can say - a pod logging
+    ``ERROR: connection refused`` succeeded. Everything else returns text
+    korvid wrote, where the ``ERROR:`` prefix *is* the failure contract:
+    the UI and proposal bridges answer with plain strings that
+    `ToolExecutor` wraps with the default ``error=False``, so a failed
+    proposal would otherwise reach the host marked successful.
+
+    Judged here rather than in the executor because that bit also drives
+    the agent's evidence ledger and provenance, where a screen action
+    reporting failure would mean something different.
+    """
+    if outcome.error:
+        return True
+    tool = TOOLS_BY_NAME.get(name)
+    if tool is None or tool.effect == "cluster_read":
+        return False
+    return outcome.text.startswith(ERROR_PREFIX)
+
+
 class KorvidMCPServer:
     """Streamable HTTP MCP server wrapping the agent tool surface.
 
@@ -287,7 +310,10 @@ class KorvidMCPServer:
             # that failed, never the document behind it.
             outcome = ToolOutcome(text=cap_result(f"{ERROR_PREFIX} {exc}"), error=True)
         self._surface_read(name, args, outcome, ctx)
-        return [types.TextContent(type="text", text=outcome.text)], outcome.error
+        return (
+            [types.TextContent(type="text", text=outcome.text)],
+            _failed(name, outcome),
+        )
 
     def _surface_read(
         self,
