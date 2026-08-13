@@ -61,6 +61,10 @@ warning** rather than half-configured when its `url` is missing, is not
 `http(s)://`, or names no host — `https://user:pw@` passes a prefix check
 and has no host at all, so the URL is parsed, not prefix-matched.
 
+The `url` must be an origin with an optional base path — the API path is
+appended to it, so a query string would swallow it and every request would
+quietly reach the wrong endpoint.
+
 A `url` carrying a username or password disables the backend too: the HTTP
 client would send it as Basic auth, which is an inline credential in
 `config.yaml` wearing a URL's clothes. Use `token_env` or `token_file`.

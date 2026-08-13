@@ -65,6 +65,27 @@ class Answer:
         return {self.scrub(key): self.scrub(value) for key, value in labels.items()}
 
 
+def _require_origin(url: str, source: str) -> None:
+    """Refuse a base URL that is a whole request rather than an origin.
+
+    The API path is appended to it, so `https://host/base?x=1` puts
+    `/api/v1/query` inside the query string and every request quietly
+    targets the wrong endpoint — the worst kind of failure, because it
+    can still answer (round-8 review).
+
+    Raises:
+        ConnectorError: `config` when the URL carries a query string,
+            fragment or path parameters.
+    """
+    parsed = urlsplit(url)
+    if parsed.query or parsed.fragment or "?" in url or "#" in url:
+        raise ConnectorError(
+            "config",
+            f"{source}: the configured url must be an origin with an optional base path,"
+            f" not a query string or fragment",
+        )
+
+
 def _userinfo(url: str) -> str:
     """The `user:pass` part of `url`, or "" when there is none."""
     authority = urlsplit(url).netloc
@@ -94,6 +115,7 @@ class HttpBackend:
         self._token_file = token_file
         self._extra_headers = dict(headers or {})
         self._gate = asyncio.Semaphore(limits.max_concurrency)
+        _require_origin(url, source)
         if _userinfo(url):
             # httpx turns `https://user:pw@host` into a Basic
             # `Authorization` header, so this is an inline credential

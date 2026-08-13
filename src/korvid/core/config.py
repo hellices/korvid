@@ -426,6 +426,14 @@ def _observability_url(value: Any, label: str, warnings: list[str]) -> str | Non
         # on screen.
         warnings.append(f"{label}.url: names no host — the backend is disabled")
         return None
+    if parsed.query or parsed.fragment or "?" in url or "#" in url:
+        # The API path is appended to this, so a query string would
+        # swallow it and every request would target the wrong endpoint.
+        warnings.append(
+            f"{label}.url: must be an origin with an optional base path, not a"
+            f" query string or fragment — the backend is disabled"
+        )
+        return None
     if "@" in parsed.netloc:
         # `https://user:pw@host` is an inline credential wearing a URL's
         # clothes: the HTTP client sends it as Basic auth. Rejected for

@@ -393,3 +393,26 @@ class TestLabelNamesAreValidatedInConfig:
             },
         )
         assert isinstance(loki, ObservabilityBackend)
+
+
+class TestUrlIsAnOriginNotARequest:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://p.example.com/base?x=1",
+            "https://p.example.com#frag",
+        ],
+    )
+    def test_a_url_with_a_query_or_fragment_disables_the_backend(
+        self, tmp_path: Path, url: str
+    ) -> None:
+        """The API path is appended, so a query string would swallow it."""
+        prometheus, _, warnings = _load(tmp_path, {"prometheus": {"url": url}})
+        assert prometheus is None
+        assert any("query string or fragment" in w for w in warnings)
+
+    def test_a_base_path_is_still_accepted(self, tmp_path: Path) -> None:
+        prometheus, _, _ = _load(
+            tmp_path, {"prometheus": {"url": "https://p.example.com/prometheus"}}
+        )
+        assert isinstance(prometheus, ObservabilityBackend)

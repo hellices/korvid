@@ -883,3 +883,40 @@ class TestScrubbingNeverRewritesTheEnvelope:
             del os.environ["TOK"]
         assert len(result.series) == 1
         assert result.series[0].value == pytest.approx(1.0)
+
+
+class TestTheBaseUrlIsOnlyAnOrigin:
+    """Round-8 review: the API path is appended by concatenation.
+
+    `https://host/base?x=1` + `/api/v1/query` puts the API path inside the
+    query string, so every request quietly targets the wrong endpoint.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://x.example.com/base?x=1",
+            "https://x.example.com#frag",
+            "https://x.example.com/base?",
+            "https://x.example.com/base#",
+        ],
+    )
+    def test_a_url_with_a_query_or_fragment_is_refused(self, url: str) -> None:
+        with pytest.raises(ConnectorError, match="query string or fragment") as caught:
+            HttpBackend(url, source="prometheus", client=httpx.AsyncClient(), limits=QueryLimits())
+        assert caught.value.kind == "config"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://x.example.com",
+            "https://x.example.com/",
+            "https://x.example.com/prometheus",
+            "http://x.example.com:9090/base/path",
+        ],
+    )
+    def test_an_origin_with_an_optional_base_path_is_accepted(self, url: str) -> None:
+        backend = HttpBackend(
+            url, source="prometheus", client=httpx.AsyncClient(), limits=QueryLimits()
+        )
+        assert backend.endpoint == "x.example.com"
