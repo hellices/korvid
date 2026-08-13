@@ -8,8 +8,9 @@ and testable without a socket.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from math import isfinite
 from typing import Literal
 
 from korvid.core.secrets import MASK_PLACEHOLDER
@@ -72,8 +73,17 @@ class QueryLimits:
     max_concurrency: int = 2
 
     def __post_init__(self) -> None:
-        if not self.timeout_seconds > 0:
-            raise ValueError("timeout_seconds must be positive")
+        # `> 0` alone admits `True` and `float("inf")`, either of which
+        # would mean the bounded-call contract has no bound. Checked here
+        # and not only in the config parser, because a connector can be
+        # built directly (PR #280 review).
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, int | float)
+            or not isfinite(self.timeout_seconds)
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be a positive finite number")
         for name in (
             "default_window_minutes",
             "max_window_minutes",
@@ -127,6 +137,9 @@ class MetricResult:
     unit: str
     series: tuple[Series, ...] = ()
     truncated: bool = False
+    #: When the backend says the samples were taken, in UTC. A window is
+    #: relative; without this a citation cannot be rechecked later.
+    observed_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +223,20 @@ def masked_labels(labels: Mapping[str, str], mask: frozenset[str]) -> dict[str, 
     }
 
 
+def mask_in(text: str, secrets: Iterable[str]) -> str:
+    """`text` with each configured-sensitive value replaced.
+
+    Masking response labels is not enough: the value the operator declared
+    sensitive is also the value that was *asked about*, so it appears in
+    the echoed scope and in the rendered query (PR #280 review). Both are
+    korvid's own text, so replacing it here is exact rather than a guess.
+    """
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, MASK_PLACEHOLDER)
+    return text
+
+
 def _labels(labels: Mapping[str, str]) -> str:
     return " ".join(f"{key}={value}" for key, value in sorted(labels.items()))
 
@@ -249,7 +276,11 @@ def render_metrics(result: MetricResult) -> str:
         window_minutes=result.window_minutes,
         query=result.query,
         truncated=result.truncated,
-        extra=(f"signal: {result.signal}", f"unit: {result.unit}"),
+        extra=(
+            f"signal: {result.signal}",
+            f"unit: {result.unit}",
+            *((f"observed at: {result.observed_at}",) if result.observed_at else ()),
+        ),
     )
     if not result.series:
         lines.append("no series matched this scope and window")

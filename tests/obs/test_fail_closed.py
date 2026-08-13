@@ -132,7 +132,8 @@ class TestLokiParsingEdges:
     async def test_a_non_list_result_is_refused(self) -> None:
         connector = _loki(
             lambda request: httpx.Response(
-                200, json={"status": "success", "data": {"result": "streams"}}
+                200,
+                json={"status": "success", "data": {"resultType": "streams", "result": "nope"}},
             )
         )
         with pytest.raises(ConnectorError, match="unexpected result shape") as caught:
@@ -181,7 +182,11 @@ class TestPrometheusParsingEdges:
             client=httpx.AsyncClient(
                 transport=httpx.MockTransport(
                     lambda request: httpx.Response(
-                        200, json={"status": "success", "data": {"result": "vector"}}
+                        200,
+                        json={
+                            "status": "success",
+                            "data": {"resultType": "vector", "result": "nope"},
+                        },
                     )
                 )
             ),
@@ -407,3 +412,132 @@ class TestConfiguredLabelMasking:
         )
         result = await connector.search(scope=QueryScope(namespace="prod"))
         assert result.lines[0].labels["tenant"] == "acme"
+
+
+class TestRoundThreeFindings:
+    """Advisory round-3 findings that were credible on the merits."""
+
+    @pytest.mark.parametrize("value", [True, float("inf"), float("nan"), "10"])
+    def test_a_non_finite_or_non_numeric_timeout_is_rejected_at_the_boundary(
+        self, value: object
+    ) -> None:
+        """Config rejects these; a directly-built connector must not slip through."""
+        with pytest.raises(ValueError, match="timeout_seconds"):
+            QueryLimits(timeout_seconds=value)  # type: ignore[arg-type]  # the point of the test
+
+    async def test_a_prometheus_response_of_the_wrong_result_type_is_refused(self) -> None:
+        """A matrix has a list-shaped `result` and would render as "no series"."""
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "status": "success",
+                            "data": {"resultType": "matrix", "result": []},
+                        },
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+        )
+        with pytest.raises(ConnectorError, match="matrix") as caught:
+            await connector.query(signal="cpu", scope=QueryScope(namespace="prod"))
+        assert caught.value.kind == "backend"
+
+    async def test_a_loki_response_of_the_wrong_result_type_is_refused(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200, json={"status": "success", "data": {"resultType": "vector", "result": []}}
+            )
+        )
+        with pytest.raises(ConnectorError, match="vector") as caught:
+            await connector.search(scope=QueryScope(namespace="prod"))
+        assert caught.value.kind == "backend"
+
+    @pytest.mark.parametrize("tenant", ["team\ra", "team\na", "tenant\u00e9"])
+    def test_a_tenant_that_is_not_header_safe_is_refused(self, tenant: str) -> None:
+        """Same leak as an unsafe token: httpx quotes an illegal header value."""
+        with pytest.raises(ConnectorError, match="not a valid HTTP header value") as caught:
+            _loki(lambda request: httpx.Response(200, json={}), tenant=tenant)
+        assert caught.value.kind == "config"
+
+    async def test_a_metric_result_carries_the_moment_it_describes(self) -> None:
+        """Evidence with a relative window but no absolute time cannot be rechecked."""
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "status": "success",
+                            "data": {
+                                "resultType": "vector",
+                                "result": [{"metric": {"pod": "a"}, "value": [1786000000, "1.0"]}],
+                            },
+                        },
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+        )
+        result = await connector.query(signal="cpu", scope=QueryScope(namespace="prod"))
+        assert result.observed_at is not None
+        assert result.observed_at.endswith("Z")
+
+
+class TestMaskingCoversTheProvenance:
+    """A masked label's value must not reappear in the scope or the query."""
+
+    async def test_a_masked_scope_value_is_not_echoed_in_the_scope_or_query(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200, json={"status": "success", "data": {"resultType": "streams", "result": []}}
+            ),
+            label_mappings={"namespace": "namespace", "pod": "pod", "workload": "customer"},
+            mask_labels=frozenset({"customer"}),
+        )
+        result = await connector.search(scope=QueryScope(namespace="prod", workload="acme"))
+        assert "acme" not in result.query
+        assert "acme" not in result.scope.describe()
+        assert result.scope.namespace == "prod"
+
+    async def test_an_unmasked_scope_value_is_still_reported(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200, json={"status": "success", "data": {"resultType": "streams", "result": []}}
+            ),
+            mask_labels=frozenset({"customer"}),
+        )
+        result = await connector.search(scope=QueryScope(namespace="prod", workload="api"))
+        assert "api" in result.query
+        assert result.scope.workload == "api"
+
+    async def test_a_masked_prometheus_scope_value_is_not_echoed(self) -> None:
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "status": "success",
+                            "data": {"resultType": "vector", "result": []},
+                        },
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+            mask_labels=frozenset({"namespace"}),
+        )
+        result = await connector.query(signal="cpu", scope=QueryScope(namespace="secret-ns"))
+        assert "secret-ns" not in result.query
+        assert "secret-ns" not in result.scope.describe()

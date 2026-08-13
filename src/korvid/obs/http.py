@@ -219,3 +219,22 @@ class HttpBackend:
         if not isinstance(data, Mapping):
             raise ConnectorError("backend", f"{self.endpoint} returned no result data")
         return data
+
+    def require_result_type(self, data: Mapping[str, Any], expected: str) -> None:
+        """Refuse a successful answer of the wrong shape.
+
+        A `matrix` or `scalar` also has a list-shaped `result`, so without
+        this a wrong endpoint (or an API change) renders as "nothing
+        matched" — a wrong answer presented as a valid one, which is worse
+        than an error (PR #280 review).
+
+        Raises:
+            ConnectorError: `backend` when the type is not `expected`.
+        """
+        actual = data.get("resultType")
+        if actual != expected:
+            raise ConnectorError(
+                "backend",
+                f"{self.endpoint} answered with resultType {actual!r},"
+                f" expected {expected!r} — check the configured url",
+            )

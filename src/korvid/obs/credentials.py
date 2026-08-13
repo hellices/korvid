@@ -24,6 +24,22 @@ def _header_safe(token: str) -> bool:
     return all(char in _HEADER_SAFE for char in token)
 
 
+def require_header_safe(value: str, what: str, source: str) -> str:
+    """`value`, or a refusal naming `what` but never the value itself.
+
+    Used for every caller-supplied header value, not only the bearer
+    token: an illegal header makes the HTTP client raise an error quoting
+    the value, and that error becomes a tool result (PR #280 review).
+    """
+    if not _header_safe(value):
+        raise ConnectorError(
+            "config",
+            f"{source}: {what} is not a valid HTTP header value"
+            f" (it contains a control or non-ASCII character)",
+        )
+    return value
+
+
 def resolve_token(
     *, token_env: str | None, token_file: str | None, source: str, getenv: object = None
 ) -> str | None:
@@ -88,10 +104,4 @@ def resolve_token(
 
 def _validated(token: str, where: str, source: str) -> str:
     """`token`, or a refusal that names where it came from but not what it is."""
-    if not _header_safe(token):
-        raise ConnectorError(
-            "config",
-            f"{source}: the token in {where} is not a valid HTTP header value"
-            f" (it contains a control or non-ASCII character)",
-        )
-    return token
+    return require_header_safe(token, f"the token in {where}", source)

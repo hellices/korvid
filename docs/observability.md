@@ -141,6 +141,11 @@ error field, which is untrusted text like any other.
   built, so the value never reaches the result object at all. Matching is
   case-insensitive: a label's capitalisation is the log shipper's choice.
 
+  Masking covers the *provenance* too. If `workload` maps to a masked
+  label, the value does not appear in the echoed scope or in the rendered
+  query either — it is also the value that was asked about, and hiding it
+  only in the response labels would hide nothing.
+
 ## Credentials
 
 A token is **named** in config, never stored there:

@@ -9,6 +9,7 @@ window affordable for both the backend and the model's context.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from math import isfinite
 from typing import Any
 
@@ -21,6 +22,7 @@ from korvid.obs.connector import (
     QueryLimits,
     QueryScope,
     Series,
+    mask_in,
     masked_labels,
     resolve_window,
 )
@@ -94,20 +96,31 @@ class PrometheusConnector(MetricsConnector):
         query = build_metric_query(signal, exact, regex, window_minutes=window)
         payload = await self._http.get_json("/api/v1/query", {"query": query})
         data = self._http.require_success(payload)
-        series, truncated = self._parse(data)
+        self._http.require_result_type(data, "vector")
+        series, truncated, observed_at = self._parse(data)
+        # The scope and the query name the values that were *asked about*,
+        # which for a masked label is exactly the value the operator
+        # declared sensitive.
+        secrets = self._masked_scope_values(scope)
         return MetricResult(
             source=SOURCE,
             endpoint=self._http.endpoint,
             signal=signal,
-            scope=scope,
+            scope=_masked_scope(scope, secrets),
             window_minutes=window,
-            query=query,
+            query=mask_in(query, secrets),
             unit=unit,
             series=series,
             truncated=truncated,
+            observed_at=observed_at,
         )
 
-    def _parse(self, data: Mapping[str, Any]) -> tuple[tuple[Series, ...], bool]:
+    def _masked_scope_values(self, scope: QueryScope) -> tuple[str, ...]:
+        """Scope values whose Prometheus label the operator marked sensitive."""
+        pairs = (("namespace", scope.namespace), ("pod", scope.pod), ("pod", scope.workload))
+        return tuple(value for label, value in pairs if value and label in self._mask)
+
+    def _parse(self, data: Mapping[str, Any]) -> tuple[tuple[Series, ...], bool, str | None]:
         rows = data.get("result")
         if not isinstance(rows, list):
             raise ConnectorError(
@@ -115,14 +128,47 @@ class PrometheusConnector(MetricsConnector):
             )
         cap = self._http.limits.max_series
         parsed: list[Series] = []
+        observed_at: str | None = None
+        truncated = False
         for row in rows:
+            observed_at = observed_at or _observed_at(row)
             entry = _series(row, self._mask)
             if entry is None:
                 continue
             if len(parsed) == cap:
-                return tuple(parsed), True
+                truncated = True
+                break
             parsed.append(entry)
-        return tuple(parsed), False
+        return tuple(parsed), truncated, observed_at
+
+
+def _observed_at(row: Any) -> str | None:
+    """The sample's own timestamp as UTC, or None when it is unusable.
+
+    An instant query answers "as of when"; a window alone is relative, and
+    a citation someone rechecks tomorrow needs the absolute moment.
+    """
+    if not isinstance(row, Mapping):
+        return None
+    sample = row.get("value")
+    if not isinstance(sample, list) or len(sample) != 2:
+        return None
+    try:
+        moment = datetime.fromtimestamp(float(sample[0]), tz=UTC)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _masked_scope(scope: QueryScope, secrets: tuple[str, ...]) -> QueryScope:
+    """`scope` with every configured-sensitive value replaced."""
+    if not secrets:
+        return scope
+    return QueryScope(
+        namespace=mask_in(scope.namespace, secrets),
+        workload=mask_in(scope.workload, secrets) if scope.workload else scope.workload,
+        pod=mask_in(scope.pod, secrets) if scope.pod else scope.pod,
+    )
 
 
 def _series(row: Any, mask: frozenset[str]) -> Series | None:

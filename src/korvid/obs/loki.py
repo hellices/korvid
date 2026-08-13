@@ -22,10 +22,12 @@ from korvid.obs.connector import (
     LogsConnector,
     QueryLimits,
     QueryScope,
+    mask_in,
     masked_labels,
     resolve_limit,
     resolve_window,
 )
+from korvid.obs.credentials import require_header_safe
 from korvid.obs.http import HttpBackend
 from korvid.obs.query import build_line_filter, build_selector
 
@@ -58,6 +60,8 @@ class LokiConnector(LogsConnector):
         mask_labels: frozenset[str] = frozenset(),
     ) -> None:
         self._mask = frozenset(name.lower() for name in mask_labels)
+        if tenant:
+            require_header_safe(tenant, "the configured tenant", SOURCE)
         self._http = HttpBackend(
             url,
             source=SOURCE,
@@ -114,16 +118,27 @@ class LokiConnector(LogsConnector):
             },
         )
         data = self._http.require_success(payload)
+        self._http.require_result_type(data, "streams")
         lines, truncated = self._parse(data, line_limit)
+        secrets = self._masked_scope_values(scope)
         return LogResult(
             source=SOURCE,
             endpoint=self._http.endpoint,
-            scope=scope,
+            scope=_masked_scope(scope, secrets),
             window_minutes=window,
-            query=query,
+            query=mask_in(query, secrets),
             lines=lines,
             truncated=truncated,
         )
+
+    def _masked_scope_values(self, scope: QueryScope) -> tuple[str, ...]:
+        """Scope values whose mapped Loki label the operator marked sensitive."""
+        pairs = (
+            (self._labels.get("namespace", "namespace"), scope.namespace),
+            (self._labels.get("pod", "pod"), scope.pod),
+            (self._labels.get("workload", "app"), scope.workload),
+        )
+        return tuple(value for label, value in pairs if value and label.lower() in self._mask)
 
     def _parse(self, data: Mapping[str, Any], line_limit: int) -> tuple[tuple[LogLine, ...], bool]:
         streams = data.get("result")
@@ -147,6 +162,17 @@ class LokiConnector(LogsConnector):
         collected.sort(key=lambda item: item[0])
         kept = collected[-line_limit:] if len(collected) > line_limit else collected
         return tuple(line for _, line in kept), truncated
+
+
+def _masked_scope(scope: QueryScope, secrets: tuple[str, ...]) -> QueryScope:
+    """`scope` with every configured-sensitive value replaced."""
+    if not secrets:
+        return scope
+    return QueryScope(
+        namespace=mask_in(scope.namespace, secrets),
+        workload=mask_in(scope.workload, secrets) if scope.workload else scope.workload,
+        pod=mask_in(scope.pod, secrets) if scope.pod else scope.pod,
+    )
 
 
 def _validated_mappings(label_mappings: Mapping[str, str] | None) -> dict[str, str]:
