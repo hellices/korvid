@@ -144,6 +144,12 @@ Two passes:
 Both passes cover failures too: a `backend` error quotes the backend's own
 error field, which is untrusted text like any other.
 
+Neither pass depends on the backend being polite. The bearer token and any
+masked scope value — in the form the query carried, escaping included — are
+scrubbed out of the response and out of every error the call can raise,
+because a backend that echoes an opaque token has produced something no
+pattern can recognise.
+
 - **`mask_labels`** — label values that are sensitive by *policy* rather
   than by shape (a tenant id, a customer name) cannot be recognised by the
   first pass. Name them and their values are replaced while the result is

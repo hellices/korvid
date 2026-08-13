@@ -29,7 +29,7 @@ from korvid.obs.connector import (
 )
 from korvid.obs.credentials import require_header_safe
 from korvid.obs.http import HttpBackend
-from korvid.obs.query import build_line_filter, build_selector
+from korvid.obs.query import build_line_filter, build_selector, escape_label_value
 
 SOURCE = "loki"
 
@@ -107,6 +107,7 @@ class LokiConnector(LogsConnector):
         query = f"{self._selector(scope)}{build_line_filter(contains)}"
         end = time.time_ns()
         start = end - window * _NS_PER_MINUTE
+        secrets = self._masked_scope_values(scope)
         payload = await self._http.get_json(
             "/loki/api/v1/query_range",
             {
@@ -116,11 +117,11 @@ class LokiConnector(LogsConnector):
                 "limit": str(line_limit),
                 "direction": "backward",
             },
+            secrets=_with_escaped(secrets),
         )
         data = self._http.require_success(payload)
         self._http.require_result_type(data, "streams")
         lines, truncated = self._parse(data, line_limit)
-        secrets = self._masked_scope_values(scope)
         return LogResult(
             source=SOURCE,
             endpoint=self._http.endpoint,
@@ -162,6 +163,17 @@ class LokiConnector(LogsConnector):
         collected.sort(key=lambda item: item[0])
         kept = collected[-line_limit:] if len(collected) > line_limit else collected
         return tuple(line for _, line in kept), truncated
+
+
+def _with_escaped(values: tuple[str, ...]) -> tuple[str, ...]:
+    """Each value and the escaped form the query actually carried."""
+    forms: list[str] = []
+    for value in values:
+        forms.append(value)
+        escaped = escape_label_value(value)
+        if escaped != value:
+            forms.append(escaped)
+    return tuple(forms)
 
 
 def _masked_scope(scope: QueryScope, secrets: tuple[str, ...]) -> QueryScope:

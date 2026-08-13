@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
-from korvid.obs.connector import ConnectorError, QueryLimits
+from korvid.obs.connector import ConnectorError, QueryLimits, mask_in
 from korvid.obs.credentials import resolve_token
 
 
@@ -34,6 +34,25 @@ def endpoint_host(url: str) -> str:
     """
     host = urlsplit(url).hostname
     return host or url.rsplit("@", 1)[-1]
+
+
+def scrub_json(value: Any, secrets: Sequence[str]) -> Any:
+    """`value` with every secret replaced, everywhere a string can appear.
+
+    Applied to the decoded structure rather than only to the raw body:
+    JSON escaping means a secret containing a quote is unrecognisable in
+    the text and obvious here. Keys as well as values, because a backend
+    is free to echo a query fragment as either.
+    """
+    if not secrets:
+        return value
+    if isinstance(value, str):
+        return mask_in(value, secrets)
+    if isinstance(value, dict):
+        return {scrub_json(key, secrets): scrub_json(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [scrub_json(item, secrets) for item in value]
+    return value
 
 
 def _userinfo(url: str) -> str:
@@ -83,17 +102,30 @@ class HttpBackend:
         """Close the injected client."""
         await self._client.aclose()
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self) -> tuple[dict[str, str], str | None]:
         headers = {"accept": "application/json", **self._extra_headers}
         token = resolve_token(
             token_env=self._token_env, token_file=self._token_file, source=self.source
         )
         if token:
             headers["authorization"] = f"Bearer {token}"
-        return headers
+        return headers, token
 
-    async def get_json(self, path: str, params: Mapping[str, str]) -> Any:
+    async def get_json(
+        self, path: str, params: Mapping[str, str], *, secrets: Sequence[str] = ()
+    ) -> Any:
         """GET `path`, bounded by the configured timeout and byte cap.
+
+        Args:
+            path: API path appended to the configured base URL.
+            params: Query parameters.
+            secrets: Values the caller has declared sensitive (a masked
+                scope value and its escaped form). They are scrubbed out
+                of the response body and out of every message this call
+                can raise, together with the bearer token.
+
+        Returns:
+            The parsed JSON body, with every secret already replaced.
 
         Raises:
             ConnectorError: `config` for an unusable credential, `auth`,
@@ -105,11 +137,17 @@ class HttpBackend:
         # request does, so it bounds neither the wait for a concurrency
         # slot nor the total elapsed time of a response that trickles in
         # just fast enough never to look idle (round-1 review).
+        scrub: tuple[str, ...] = tuple(secrets)
         try:
             async with asyncio.timeout(self.limits.timeout_seconds):
-                headers = self._headers()
+                headers, token = self._headers()
+                # The token is held only for this call: a backend that
+                # echoes an opaque token in an error, a label or a log line
+                # defeats pattern redaction, and only an exact match can
+                # find it (round-5 review).
+                scrub = (*scrub, token) if token else scrub
                 async with self._gate:
-                    body = await self._read(path, params, headers)
+                    body = await self._read(path, params, headers, scrub)
         except TimeoutError as exc:
             raise ConnectorError(
                 "timeout",
@@ -117,14 +155,25 @@ class HttpBackend:
                 f" {self.limits.timeout_seconds:g}s (including time spent waiting for a"
                 f" free request slot) — raise the timeout or narrow the window",
             ) from exc
+        # Twice, because the two passes see different text. The raw pass
+        # covers the not-JSON error below, which quotes the body; the
+        # parsed pass sees values with their JSON escaping undone, which
+        # is the only place a secret containing a quote is recognisable.
         try:
-            return json.loads(body)
+            parsed = json.loads(mask_in(body, scrub))
         except ValueError as exc:
             raise ConnectorError(
                 "backend", f"{self.endpoint} returned a body that is not JSON: {exc}"
             ) from exc
+        return scrub_json(parsed, scrub)
 
-    async def _read(self, path: str, params: Mapping[str, str], headers: Mapping[str, str]) -> str:
+    async def _read(
+        self,
+        path: str,
+        params: Mapping[str, str],
+        headers: Mapping[str, str],
+        secrets: Sequence[str] = (),
+    ) -> str:
         cap = self.limits.max_response_bytes
         try:
             async with self._client.stream(
@@ -145,7 +194,8 @@ class HttpBackend:
             ) from exc
         except httpx.HTTPError as exc:
             raise ConnectorError(
-                "network", f"{self.endpoint} is unreachable: {self._scrubbed(str(exc))}"
+                "network",
+                f"{self.endpoint} is unreachable: {mask_in(self._scrubbed(str(exc)), secrets)}",
             ) from exc
 
     def _raise_for_status(self, response: httpx.Response) -> None:

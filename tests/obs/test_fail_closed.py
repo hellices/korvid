@@ -541,3 +541,123 @@ class TestMaskingCoversTheProvenance:
         result = await connector.query(signal="cpu", scope=QueryScope(namespace="secret-ns"))
         assert "secret-ns" not in result.query
         assert "secret-ns" not in result.scope.describe()
+
+
+class TestSecretsAreScrubbedFromEverythingThatComesBack:
+    """Round-5 review: masking must not depend on which path the call took.
+
+    A backend can echo the bearer token or the selector in an error, a
+    label or a log line, and a failure never reached the projection at
+    all. Both are scrubbed at the transport boundary now, so the success
+    and failure paths cannot diverge.
+    """
+
+    async def test_an_echoed_bearer_token_never_reaches_the_result(self) -> None:
+        """Opaque token, no `token=` syntax: the pattern pass cannot see it."""
+        connector = _loki(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {
+                        "resultType": "streams",
+                        "result": [
+                            {
+                                "stream": {"pod": "a"},
+                                "values": [["1", "upstream said Zm9vYmFyc2VjcmV0dmFsdWU"]],
+                            }
+                        ],
+                    },
+                },
+            ),
+            token_env="TOK",
+        )
+        import os
+
+        os.environ["TOK"] = "Zm9vYmFyc2VjcmV0dmFsdWU"
+        try:
+            result = await connector.search(scope=QueryScope(namespace="prod"))
+        finally:
+            del os.environ["TOK"]
+        assert "Zm9vYmFyc2VjcmV0dmFsdWU" not in result.lines[0].line
+
+    async def test_an_echoed_token_never_reaches_a_backend_error(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200,
+                json={"status": "error", "error": "bad request: Zm9vYmFyc2VjcmV0dmFsdWU"},
+            ),
+            token_env="TOK",
+        )
+        import os
+
+        os.environ["TOK"] = "Zm9vYmFyc2VjcmV0dmFsdWU"
+        try:
+            with pytest.raises(ConnectorError) as caught:
+                await connector.search(scope=QueryScope(namespace="prod"))
+        finally:
+            del os.environ["TOK"]
+        assert "Zm9vYmFyc2VjcmV0dmFsdWU" not in str(caught.value)
+
+    async def test_a_backend_error_echoing_the_selector_masks_the_policy_value(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "error",
+                    "error": 'parse error in {customer="acme", namespace="prod"}',
+                },
+            ),
+            label_mappings={"namespace": "namespace", "pod": "pod", "workload": "customer"},
+            mask_labels=frozenset({"customer"}),
+        )
+        with pytest.raises(ConnectorError) as caught:
+            await connector.search(scope=QueryScope(namespace="prod", workload="acme"))
+        assert "acme" not in str(caught.value)
+
+    async def test_a_prometheus_error_echoing_the_selector_masks_the_policy_value(self) -> None:
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "status": "error",
+                            "error": 'parse error in {namespace="secret-ns"}',
+                        },
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+            mask_labels=frozenset({"namespace"}),
+        )
+        with pytest.raises(ConnectorError) as caught:
+            await connector.query(signal="cpu", scope=QueryScope(namespace="secret-ns"))
+        assert "secret-ns" not in str(caught.value)
+
+    async def test_an_escaped_form_in_the_echo_is_masked_too(self) -> None:
+        """The query embeds the *escaped* value, so that is what comes back."""
+        connector = _loki(
+            lambda request: httpx.Response(
+                200,
+                json={"status": "error", "error": 'parse error near "ac\\"me"'},
+            ),
+            label_mappings={"namespace": "namespace", "pod": "pod", "workload": "customer"},
+            mask_labels=frozenset({"customer"}),
+        )
+        with pytest.raises(ConnectorError) as caught:
+            await connector.search(scope=QueryScope(namespace="prod", workload='ac"me'))
+        assert 'ac\\"me' not in str(caught.value)
+
+    async def test_an_unmasked_value_still_appears_in_a_backend_error(self) -> None:
+        """Scrubbing that ate the diagnostic would make the error useless."""
+        connector = _loki(
+            lambda request: httpx.Response(
+                200, json={"status": "error", "error": 'parse error in {namespace="prod"}'}
+            )
+        )
+        with pytest.raises(ConnectorError, match="prod"):
+            await connector.search(scope=QueryScope(namespace="prod"))
