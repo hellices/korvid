@@ -93,7 +93,7 @@ terminal, so it does not replace the live table above.
 
 | Metric | Baseline replay | Corrected replay |
 |---|---:|---:|
-| Cursor-input p95 | 2,206 ms (invalid, `Pilot.press`) | **7.7 ms** |
+| Cursor-input p95 | 2,206 ms (invalid, `Pilot.press`) | **7.7 ms** (n=2) |
 | Event-to-render p95 | 156 ms | 5.3 ms |
 | Sampled CPU max | 99.2% | 61.5% |
 | Peak RSS | 187 MiB | 133 MiB |
@@ -107,6 +107,11 @@ max: profiling instruments every Python call and materially changes compositor
 cost, so profiles are diagnostic artifacts only, never the acceptance
 environment for the 100 ms input budget. Before/after profiles must use
 identical instrumentation to be comparable.
+
+That corrected replay p95 is computed from exactly two samples — one `down`
+and one `up`. It is preliminary acceptance-smoke evidence that the harness now
+measures state acknowledgement instead of `Pilot.press()` idle waits, not a
+statistically robust long-run percentile.
 
 Two production changes produced the difference, both in the in-place table
 diff: an unchanged cursor is no longer re-seated after every watch tick (a
@@ -143,11 +148,11 @@ not been re-measured at 20, nor re-measured live since the render-path work
 above.
 
 **UI-at-scale interaction timings are not yet trustworthy.** Filter, split-pane
-and multi-log key sequences took seconds, not milliseconds, in both runs — but
-both runs predate the harness fix that makes those scenarios wait for the
-target UI state instead of for the keystroke to return. The recorded values are
-upper bounds taken while the app was CPU-saturated, not clean measurements, and
-they need re-running on the fixed harness before they mean anything.
+and multi-log key sequences still use `Pilot.press()`-style keystroke timing,
+not the direct driver injection plus state-acknowledgement probe used for the
+cursor metric above. The cursor-harness fix did not validate those scenario
+timings. Their recorded values remain invalid upper bounds until those
+scenarios are migrated to the same direct driver/state acknowledgement method.
 
 **Burst drain is unmeasured live.** The 3-second post-burst drain budget is
 exercised in replay only; the live profile contains no burst.

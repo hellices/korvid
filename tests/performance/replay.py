@@ -494,8 +494,12 @@ async def measure_cursor_input(
     now: Callable[[], float] = monotonic,
     timeout: float = 5.0,
 ) -> float:
-    """Measure key injection until the table acknowledges a cursor-row change."""
+    """Measure `down`/`up` key injection until the expected cursor row is reached."""
     start_row = table.cursor_row
+    try:
+        expected_row = start_row + {"down": 1, "up": -1}[key]
+    except KeyError as exc:
+        raise ValueError("cursor input measurement supports only 'down' and 'up'") from exc
     app = pilot.app
     driver = app._driver
     if driver is None:
@@ -506,11 +510,12 @@ async def measure_cursor_input(
     driver.send_message(event)
     try:
         async with asyncio.timeout(timeout):
-            while table.cursor_row == start_row:
+            while table.cursor_row != expected_row:
                 await asyncio.sleep(0)
     except TimeoutError as exc:
         raise WaitTimeout(
-            f"{key} cursor input from row {start_row} was not acknowledged within {timeout}s"
+            f"{key} cursor input from row {start_row} to expected row {expected_row} "
+            f"was not acknowledged within {timeout}s"
         ) from exc
     return now() - started
 

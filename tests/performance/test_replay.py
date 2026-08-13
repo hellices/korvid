@@ -76,6 +76,35 @@ async def test_measure_cursor_input_returns_when_cursor_row_changes() -> None:
         assert table.cursor_row == 1
 
 
+async def test_measure_cursor_input_ignores_unrelated_cursor_row_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = make_app([_pod("alpha"), _pod("beta"), _pod("gamma")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 3, label="pods loaded")
+        table.focus()
+        driver = pilot.app._driver
+        assert driver is not None
+
+        def swallow_send(_event: object) -> None:
+            return None
+
+        monkeypatch.setattr(driver, "send_message", swallow_send)
+
+        async def unrelated_cursor_move() -> None:
+            await asyncio.sleep(0)
+            table.move_cursor(row=2)
+
+        move_task = asyncio.create_task(unrelated_cursor_move())
+
+        with pytest.raises(WaitTimeout, match=r"down.*row 0.*0\.01s"):
+            await measure_cursor_input(pilot, table, "down", timeout=0.01)
+
+        await move_task
+        assert table.cursor_row == 2
+
+
 async def test_measure_cursor_input_times_out_when_cursor_cannot_move() -> None:
     app = make_app([_pod("only")])
     async with app.run_test() as pilot:
