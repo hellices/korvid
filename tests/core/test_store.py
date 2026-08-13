@@ -1,3 +1,8 @@
+from typing import Any
+
+import pytest
+
+from korvid.core import store as store_module
 from korvid.core.store import ALL_NAMESPACES, ResourceStore
 from korvid.k8s.models import PodSummary
 
@@ -144,3 +149,100 @@ def test_clear_all_drops_every_bucket_and_notifies() -> None:
     assert store.get("pods", "default") == []
     assert store.get("deployments", "other") == []
     assert set(notified) == {"pods", "deployments"}
+
+
+def test_repeated_reads_do_not_resort_an_unchanged_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A watch tick re-reads the whole bucket for every repaint, so ordering a
+    1,000-object bucket again on every read is work the key set already
+    settled. Sorting must happen once per key-set change, not once per read."""
+    store = ResourceStore()
+    for name in ("b", "a", "c"):
+        store.apply_event("pods", "default", "ADDED", _pod(name))
+
+    sorts = 0
+    real_sorted = sorted
+
+    def counting_sorted(*args: Any, **kwargs: Any) -> list[Any]:
+        nonlocal sorts
+        sorts += 1
+        return real_sorted(*args, **kwargs)
+
+    monkeypatch.setattr(store_module, "sorted", counting_sorted, raising=False)
+
+    first = [p.name for p in store.get("pods", "default")]
+    second = [p.name for p in store.get("pods", "default")]
+
+    assert first == ["a", "b", "c"]
+    assert second == first
+    assert sorts == 1
+
+
+def test_a_modified_object_is_returned_after_an_earlier_read() -> None:
+    """Reusing a settled order must never reuse a settled object: MODIFIED
+    replaces the value under an unchanged key."""
+
+    def phase_of(store: ResourceStore) -> str:
+        summary = store.get("pods", "default")[0]
+        assert isinstance(summary, PodSummary)
+        return summary.phase
+
+    store = ResourceStore()
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
+    assert phase_of(store) == "Running"
+
+    store.apply_event(
+        "pods",
+        "default",
+        "MODIFIED",
+        PodSummary(
+            name="a", namespace="default", phase="Failed", ready="0/1", restarts=3, node=None
+        ),
+    )
+
+    assert phase_of(store) == "Failed"
+
+
+def test_an_object_added_after_a_read_sorts_into_place() -> None:
+    """A cached order must be discarded when the key set changes, or a new
+    object would append instead of sorting into position."""
+    store = ResourceStore()
+    store.apply_event("pods", "default", "ADDED", _pod("b"))
+    assert [p.name for p in store.get("pods", "default")] == ["b"]
+
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
+
+    assert [p.name for p in store.get("pods", "default")] == ["a", "b"]
+
+
+def test_a_deleted_object_leaves_the_remaining_order_intact() -> None:
+    store = ResourceStore()
+    for name in ("a", "b", "c"):
+        store.apply_event("pods", "default", "ADDED", _pod(name))
+    assert len(store.get("pods", "default")) == 3
+
+    store.apply_event("pods", "default", "DELETED", _pod("b"))
+
+    assert [p.name for p in store.get("pods", "default")] == ["a", "c"]
+
+
+def test_namespace_ordering_survives_a_reused_order() -> None:
+    """Keys are `namespace/name`, but the published order is by
+    `(namespace, name)`; `-` sorts before `/`, so a key-string order would
+    disagree with the tuple order for namespaces that prefix one another."""
+    store = ResourceStore()
+    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("x", ns="team"))
+    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("y", ns="team-b"))
+
+    ordered = [(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)]
+
+    assert ordered == [("team", "x"), ("team-b", "y")]
+
+
+def test_clearing_a_kind_discards_its_reused_order() -> None:
+    store = ResourceStore()
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
+    assert store.get("pods", "default")
+
+    store.clear("pods", "default")
+
+    assert store.get("pods", "default") == []

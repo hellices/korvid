@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 from korvid.k8s.olm import channel_names, package_description
 from korvid.k8s.relationship_facts import RelationshipFacts, extract_relationship_facts
@@ -74,6 +74,28 @@ def format_memory(size: int) -> str:
     return f"{round(size / 2**20)}Mi"
 
 
+#: Age strings remembered with the window they are correct for:
+#: `{created: (valid_from_epoch, valid_until_epoch, text)}`. A repaint asks
+#: every row for its age, but "5m" is the answer for a whole minute, so the
+#: parse and the arithmetic are done once per displayed bucket rather than
+#: once per row per repaint. Bounded because a long session can walk through
+#: many distinct creation timestamps.
+_AGE_WINDOWS: dict[str, tuple[float, float, str]] = {}
+_MAX_AGE_WINDOWS: Final = 20_000
+
+
+def _age_window(total_seconds: int, created_ts: float) -> tuple[float, float, str]:
+    """The age text for *total_seconds* and the instants it stays correct for."""
+    days = total_seconds // 86400
+    if days >= 1:
+        return created_ts + days * 86400, created_ts + (days + 1) * 86400, f"{days}d"
+    hours = total_seconds // 3600
+    if hours >= 1:
+        return created_ts + hours * 3600, created_ts + (hours + 1) * 3600, f"{hours}h"
+    minutes = total_seconds // 60
+    return created_ts + minutes * 60, created_ts + (minutes + 1) * 60, f"{minutes}m"
+
+
 def format_age(created: str, now: datetime | None = None) -> str:
     """Compact age string ("5m", "3h", "2d") from an RFC 3339 timestamp.
 
@@ -83,6 +105,10 @@ def format_age(created: str, now: datetime | None = None) -> str:
         return "-"
     if now is None:
         now = datetime.now(UTC)
+    now_ts = now.timestamp()
+    remembered = _AGE_WINDOWS.get(created)
+    if remembered is not None and remembered[0] <= now_ts < remembered[1]:
+        return remembered[2]
     try:
         ts = created
         if ts.endswith("Z"):
@@ -92,16 +118,15 @@ def format_age(created: str, now: datetime | None = None) -> str:
             created_dt = created_dt.replace(tzinfo=UTC)
     except ValueError:
         return "-"
-    total_seconds = int((now - created_dt).total_seconds())
+    created_ts = created_dt.timestamp()
+    total_seconds = int(now_ts - created_ts)
     if total_seconds < 0:
         return "-"
-    days = total_seconds // 86400
-    if days >= 1:
-        return f"{days}d"
-    hours = total_seconds // 3600
-    if hours >= 1:
-        return f"{hours}h"
-    return f"{total_seconds // 60}m"
+    window = _age_window(total_seconds, created_ts)
+    if len(_AGE_WINDOWS) >= _MAX_AGE_WINDOWS:
+        _AGE_WINDOWS.clear()
+    _AGE_WINDOWS[created] = window
+    return window[2]
 
 
 def _quantities(containers: list[dict[str, Any]], bucket: str, key: str) -> list[str]:

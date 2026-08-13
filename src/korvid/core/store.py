@@ -35,23 +35,48 @@ class ResourceStore:
         # in ALL_NAMESPACES scope when two namespaces have same-named objects.
         self._data: dict[tuple[str, str], dict[str, Summary]] = {}
         self._subscribers: list[Callable[[str], None]] = []
+        #: Settled `get()` order per bucket, as keys into `_data`. Dropped
+        #: whenever a key enters or leaves that bucket; a MODIFIED event
+        #: replaces a value under an unchanged key, which cannot move it.
+        self._order: dict[tuple[str, str], list[str]] = {}
 
     def apply_event(self, kind: str, scope: str, event_type: str, obj: Summary) -> None:
         bucket = self._data.setdefault((kind, scope), {})
         key = f"{obj.namespace}/{obj.name}"
         if event_type == "DELETED":
-            bucket.pop(key, None)
+            if bucket.pop(key, None) is not None:
+                self._order.pop((kind, scope), None)
         else:  # ADDED / MODIFIED
+            if key not in bucket:
+                self._order.pop((kind, scope), None)
             bucket[key] = obj
         self._notify(kind)
 
     def get(self, kind: str, scope: str) -> list[Summary]:
-        bucket = self._data.get((kind, scope), {})
-        return sorted(bucket.values(), key=lambda o: (o.namespace, o.name))
+        """Objects for (kind, scope), ordered by `(namespace, name)`.
+
+        A repaint re-reads the whole bucket, so the order is settled once per
+        key-set change instead of once per read: at 1,000 objects the ordering
+        pass dominated the read, and watch churn is overwhelmingly MODIFIED
+        events, which cannot reorder anything. The objects themselves are
+        always re-read from the bucket, so a replaced value is never stale.
+        """
+        bucket = self._data.get((kind, scope))
+        if bucket is None:
+            return []
+        order = self._order.get((kind, scope))
+        if order is None:
+            order = [
+                key
+                for key, _ in sorted(bucket.items(), key=lambda kv: (kv[1].namespace, kv[1].name))
+            ]
+            self._order[(kind, scope)] = order
+        return [bucket[key] for key in order]
 
     def clear(self, kind: str, scope: str) -> None:
         """Remove all objects for (kind, scope) and notify subscribers."""
         self._data.pop((kind, scope), None)
+        self._order.pop((kind, scope), None)
         self._notify(kind)
 
     def clear_all(self) -> None:
@@ -62,6 +87,7 @@ class ResourceStore:
         """
         kinds = {kind for kind, _ in self._data}
         self._data.clear()
+        self._order.clear()
         for kind in kinds:
             self._notify(kind)
 

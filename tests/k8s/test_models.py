@@ -1,8 +1,9 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
+from korvid.k8s import models
 from korvid.k8s.models import (
     CSVSummary,
     EndpointSliceSummary,
@@ -12,6 +13,7 @@ from korvid.k8s.models import (
     PodSummary,
     ReplicaSetSummary,
     StorageClassSummary,
+    format_age,
     summary_for,
 )
 from korvid.k8s.relationship_facts import RelationKind, RelationshipFacts
@@ -1698,3 +1700,76 @@ def test_endpoint_slice_summary_carries_relationship_facts_via_authoritative_gro
     # ROUTES_TO is gated on the resolved group == "discovery.k8s.io"; this only
     # succeeds when `group` is threaded through instead of the (missing) apiVersion.
     assert (RelationKind.ROUTES_TO, "Pod", "api-0") in pairs
+
+
+class _CountingDatetime(datetime):
+    """`datetime` that records how often a timestamp string is parsed."""
+
+    parses = 0
+
+    @classmethod
+    def fromisoformat(cls, date_string: str) -> datetime:  # type: ignore[override]  # counting shim over the stdlib classmethod
+        _CountingDatetime.parses += 1
+        return datetime.fromisoformat(date_string)
+
+
+def test_age_is_not_reparsed_within_the_same_displayed_minute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every repaint asks all rows for their age, but "5m" is the answer for a
+    whole minute. Re-parsing the same creation timestamp inside one displayed
+    minute is work the answer's own validity window already settled."""
+    created = "2031-03-04T00:00:00Z"
+    base = datetime(2031, 3, 4, 0, 5, 0, tzinfo=UTC)
+    assert format_age(created, base) == "5m"
+
+    monkeypatch.setattr(models, "datetime", _CountingDatetime)
+    _CountingDatetime.parses = 0
+
+    assert format_age(created, base + timedelta(seconds=30)) == "5m"
+
+    assert _CountingDatetime.parses == 0
+
+
+def test_age_advances_when_the_displayed_minute_rolls_over() -> None:
+    created = "2031-03-05T00:00:00Z"
+    base = datetime(2031, 3, 5, 0, 5, 0, tzinfo=UTC)
+    assert format_age(created, base) == "5m"
+
+    assert format_age(created, base + timedelta(seconds=60)) == "6m"
+
+
+def test_age_is_correct_when_asked_about_an_earlier_instant() -> None:
+    """Panes repaint independently, so a later call can carry an earlier clock
+    reading; a remembered answer must not outrun its own window backwards."""
+    created = "2031-03-06T00:00:00Z"
+    base = datetime(2031, 3, 6, 0, 5, 0, tzinfo=UTC)
+    assert format_age(created, base) == "5m"
+
+    assert format_age(created, base - timedelta(minutes=3)) == "2m"
+
+
+def test_age_advances_across_the_hour_and_day_boundaries() -> None:
+    created = "2031-03-07T00:00:00Z"
+    assert format_age(created, datetime(2031, 3, 7, 0, 59, 59, tzinfo=UTC)) == "59m"
+    assert format_age(created, datetime(2031, 3, 7, 1, 0, 0, tzinfo=UTC)) == "1h"
+    assert format_age(created, datetime(2031, 3, 7, 23, 59, 59, tzinfo=UTC)) == "23h"
+    assert format_age(created, datetime(2031, 3, 8, 0, 0, 0, tzinfo=UTC)) == "1d"
+    assert format_age(created, datetime(2031, 3, 9, 0, 0, 0, tzinfo=UTC)) == "2d"
+
+
+def test_distinct_creation_timestamps_keep_distinct_ages() -> None:
+    older = "2031-03-10T00:00:00Z"
+    newer = "2031-03-10T00:04:00Z"
+    now = datetime(2031, 3, 10, 0, 5, 0, tzinfo=UTC)
+
+    assert format_age(older, now) == "5m"
+    assert format_age(newer, now) == "1m"
+
+
+def test_age_rejects_empty_unparsable_and_future_timestamps() -> None:
+    now = datetime(2031, 3, 11, 0, 5, 0, tzinfo=UTC)
+
+    assert format_age("", now) == "-"
+    assert format_age("not-a-timestamp", now) == "-"
+    assert format_age("2031-03-11T00:06:00Z", now) == "-"
