@@ -136,6 +136,49 @@ intersects the painted viewport. Off-screen rows still update their data
 immediately — `get_row`, sorting, filtering and the final digest see the new
 value — and the row repaints as soon as it scrolls into view.
 
+## Update-path CPU and memory, before and after
+
+Latency percentiles cannot resolve a change of this size on an unpinned
+machine — identical saturated runs varied between 5 ms and 40 ms p95 here. The
+same fixed workload always performs the same amount of work, so CPU time and
+allocation snapshots are what these numbers are taken from. Workload: 1,000
+Pods across 20 namespaces at 120 events/s for 20 s, median of three runs.
+
+| Workload | Metric | Before | After | |
+|---|---|---:|---:|---|
+| Committed replay profile | CPU time | 13.63 s | 12.74 s | **−6.6%** |
+| Committed replay profile | Peak RSS | 127.9 MiB | 129.0 MiB | +1.1 MiB |
+| Plus Pod creation timestamps | CPU time | 18.48 s | 15.20 s | **−17.7%** |
+| Plus Pod creation timestamps | Peak RSS | 127.8 MiB | 127.1 MiB | −0.7 MiB |
+| Plus Pod creation timestamps | `tracemalloc` peak | 28.47 MiB | 28.58 MiB | +0.11 MiB |
+
+Every run kept `dropped updates: 0` and a matching final digest.
+
+Two redundancies were removed, both of which repeated per-object work that
+nothing had invalidated:
+
+- `ResourceStore.get()` re-ordered the whole bucket on every read, although a
+  repaint re-reads it constantly and a `MODIFIED` event replaces a value under
+  an unchanged key — which cannot reorder anything. The order is now settled
+  once per key-set change; objects are still re-read from the bucket, so a
+  replaced value is never stale.
+- `format_age` re-parsed every creation timestamp on every repaint, although
+  "5m" is the correct answer for a whole minute. Each answer is now remembered
+  with the window it is valid for, checked against both ends so a pane
+  repainting with an earlier clock reading still gets the right string.
+
+The age memo is the only new retained allocation: 1,000 rows cost ~197 KiB,
+and it is capped at 20,000 entries. Peak RSS moved less than the ±1 MiB
+run-to-run spread at 128 MiB, so it is not a measurable trade.
+
+**The committed replay profile understates the render path.** Its synthetic
+Pods carry no `created`, so `format_age` short-circuits and the AGE cell costs
+nothing — which is why the same change is worth 6.6% against that profile and
+17.7% once the timestamps a real cluster always sends are present. The
+timestamps also account for the workload's own cost: adding them raised
+baseline CPU from 13.63 s to 18.48 s. Benchmark numbers taken against the
+committed profile are therefore a floor for anything AGE-dependent.
+
 ## Corrected live 1,000-pod smoke result
 
 Run `i279-20260813-1620` exercised the same checked-in
@@ -218,6 +261,14 @@ metadata-only and changes no rendered cell, so the 250 ms budget has no live
 result behind it — only the deterministic replay exercises rendered-cell
 updates. A live churn driver that mutates a rendered field is required before
 that budget can be called passed or missed against a real API server.
+
+**The replay workload has no creation timestamps.** `initial_pods` builds
+`PodSummary` without `created`, so every AGE cell renders "-" and the whole
+age path is skipped. Measured above, that alone accounts for a third of the
+update-path CPU on this workload, so any AGE-dependent figure taken from the
+committed profile is a floor rather than a result. Populating `created` would
+change every published baseline, so it is deliberately left as follow-up work
+rather than folded into an unrelated change.
 
 **UI-at-scale interaction timings are not yet trustworthy.** Filter, split-pane
 and multi-log key sequences still use `Pilot.press()`-style keystroke timing,
