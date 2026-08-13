@@ -30,6 +30,7 @@ from typing import Any
 import anyio
 import uvicorn
 from mcp import types
+from mcp.server import ServerRequestContext
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import (
@@ -177,9 +178,37 @@ class KorvidMCPServer:
         self._bound_port: int | None = None
         self._uvicorn: uvicorn.Server | None = None
         self._shutdown_requested = False
-        self._server: Server[Any, Any] = Server("korvid")
-        self._server.list_tools()(self.list_tools)  # type: ignore[no-untyped-call]  # SDK decorator factory is untyped
-        self._server.call_tool()(self.call_tool)
+        # mcp 2.x registers handlers as constructor callbacks rather than
+        # decorators, and hands each one the request context instead of
+        # exposing it as ambient state.
+        self._server: Server[Any] = Server(
+            "korvid",
+            on_list_tools=self._on_list_tools,
+            on_call_tool=self._on_call_tool,
+        )
+
+    async def _on_list_tools(
+        self,
+        ctx: ServerRequestContext[Any],
+        params: types.PaginatedRequestParams | None,
+    ) -> types.ListToolsResult:
+        """SDK adapter for ``tools/list``; the surface itself is unpaginated."""
+        return types.ListToolsResult(tools=await self.list_tools())
+
+    async def _on_call_tool(
+        self,
+        ctx: ServerRequestContext[Any],
+        params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
+        """SDK adapter for ``tools/call``.
+
+        `is_error` stays False deliberately: a refused or failed tool call
+        comes back as ``"ERROR: ..."`` text, the same contract the built-in
+        agent loop sees, so the model can read and act on the reason rather
+        than being handed a protocol-level failure.
+        """
+        content = await self.call_tool(params.name, params.arguments, ctx=ctx)
+        return types.CallToolResult(content=list(content))
 
     async def list_tools(self) -> list[types.Tool]:
         """MCP ``tools/list``: mirror the agent tool definitions 1:1."""
@@ -187,13 +216,17 @@ class KorvidMCPServer:
             types.Tool(
                 name=t["function"]["name"],
                 description=t["function"]["description"],
-                inputSchema=t["function"]["parameters"],
+                input_schema=t["function"]["parameters"],
             )
             for t in self._tools
         ]
 
     async def call_tool(
-        self, name: str, arguments: dict[str, Any] | None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None,
+        *,
+        ctx: ServerRequestContext[Any] | None = None,
     ) -> list[types.TextContent]:
         """MCP ``tools/call``: dispatch through the shared executor.
 
@@ -218,15 +251,21 @@ class KorvidMCPServer:
             error = self._authorize_proposal_call(args)
             if error is not None:
                 return [types.TextContent(type="text", text=error)]
-            client_name, client_version = self._client_info()
+            client_name, client_version = self._client_info(ctx)
             args["_session_id"] = self._session_id
             args["_client_name"] = client_name
             args["_client_version"] = client_version
         result = await self._executor.execute(name, args)
-        self._surface_read(name, args, result)
+        self._surface_read(name, args, result, ctx)
         return [types.TextContent(type="text", text=result)]
 
-    def _surface_read(self, name: str, args: dict[str, Any], result: str) -> None:
+    def _surface_read(
+        self,
+        name: str,
+        args: dict[str, Any],
+        result: str,
+        ctx: ServerRequestContext[Any] | None = None,
+    ) -> None:
         """Follow mode (issue #153): make external cluster reads visible.
 
         With follow on and a successful read, mirror it in the TUI as a
@@ -247,13 +286,19 @@ class KorvidMCPServer:
             and self._follow_enabled()
             and not result.startswith("ERROR:")
         ):
-            task = asyncio.create_task(self._mirror_or_note(ui, name, args))
+            task = asyncio.create_task(self._mirror_or_note(ui, name, args, ctx))
             self._follow_tasks.add(task)
             task.add_done_callback(self._follow_tasks.discard)
             return
-        self._note_read(name, args)
+        self._note_read(name, args, ctx)
 
-    async def _mirror_or_note(self, ui: UIBridge, name: str, args: dict[str, Any]) -> None:
+    async def _mirror_or_note(
+        self,
+        ui: UIBridge,
+        name: str,
+        args: dict[str, Any],
+        ctx: ServerRequestContext[Any] | None = None,
+    ) -> None:
         """One detached mirror: on a UI refusal (e.g. `subscriptions` is not
         an alias in this cluster) or an unmapped read, degrade to the
         activity note - a successful external read must never become
@@ -261,12 +306,17 @@ class KorvidMCPServer:
         outcome = await mirror_read(ui, name, args)
         if outcome is not None and not outcome.startswith("ERROR"):
             return
-        self._note_read(name, args)
+        self._note_read(name, args, ctx)
 
-    def _note_read(self, name: str, args: dict[str, Any]) -> None:
+    def _note_read(
+        self,
+        name: str,
+        args: dict[str, Any],
+        ctx: ServerRequestContext[Any] | None = None,
+    ) -> None:
         if self._note_activity is None:
             return
-        client = self._client_info()[0] or "mcp"
+        client = self._client_info(ctx)[0] or "mcp"
         try:
             self._note_activity(f"{client}: {read_summary(name, args)}")
         except Exception:  # display-only: never fail the tool call over it
@@ -305,17 +355,19 @@ class KorvidMCPServer:
             return "ERROR: invalid or missing capability token"
         return None
 
-    def _client_info(self) -> tuple[str, str]:
+    def _client_info(self, ctx: ServerRequestContext[Any] | None = None) -> tuple[str, str]:
         """Best-effort caller identity from the MCP initialize handshake.
 
         Display metadata only — never an authorization input (any caller can
         claim any name). Stateless transport may not carry it; degrade to
         empty strings. Values are sanitized here because they cross into
         approval dialogs, the status bar and audit records."""
+        if ctx is None:
+            return "", ""
         try:
-            params = self._server.request_context.session.client_params
-            info = params.clientInfo if params is not None else None
-        except (LookupError, AttributeError):
+            params = ctx.session.client_params
+            info = params.client_info if params is not None else None
+        except AttributeError:
             return "", ""
         if info is None:
             return "", ""
@@ -353,7 +405,7 @@ class KorvidMCPServer:
     async def run(self) -> None:
         """Serve until cancelled (run as a background task in the app loop)."""
         # json_response=True: our tools are single request/response - no
-        # server->client streaming - and the SDK's SSE path (1.28.x) leaks
+        # server->client streaming - and the SDK's SSE path (1.28.x) leaked
         # its sse_stream_reader on normal completion (ResourceWarning),
         # while the JSON path cleans up its streams in a finally block.
         manager = StreamableHTTPSessionManager(

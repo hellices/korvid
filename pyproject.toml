@@ -56,9 +56,11 @@ agent = [
 ]
 # MCP adapter: expose read + UI-drive tools to external agents.
 mcp = [
-    # mcp 1.10.0 is the first release with mcp.server.transport_security
-    # (DNS-rebinding protection), which korvid requires at import time.
-    "mcp>=1.29.0,<2",
+    # 2.x is required, not merely allowed: the adapter registers its
+    # handlers as constructor callbacks and reads the request context from
+    # the handler argument, neither of which exists in 1.x. The upper bound
+    # holds because that same surface broke across the last major.
+    "mcp>=2.0.0,<3",
     # Imported directly by mcp/server.py, so declared directly even
     # though mcp already pulls them in (deptry flags transitive imports).
     "anyio>=4.5",

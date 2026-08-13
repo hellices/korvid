@@ -99,7 +99,7 @@ async def test_list_tools_exposes_agent_tool_surface() -> None:
     for tool_def in READ_TOOLS + UI_TOOLS:
         fn = tool_def["function"]
         assert by_name[fn["name"]].description == fn["description"]
-        assert by_name[fn["name"]].inputSchema == fn["parameters"]
+        assert by_name[fn["name"]].input_schema == fn["parameters"]
 
 
 async def test_write_tools_are_not_exposed() -> None:
@@ -386,7 +386,7 @@ async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
         assert entry["port"] == port
         assert entry["url"] == f"http://127.0.0.1:{port}/mcp"
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _),
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -911,7 +911,7 @@ async def test_streamable_http_proposal_roundtrip(tmp_path: Path) -> None:
         entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
         capability = entry["capability"]
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _),
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -1007,16 +1007,26 @@ async def test_client_info_is_sanitized_before_crossing_the_boundary() -> None:
     the safety-binding dialog) must be collapsed and the length bounded."""
     from types import SimpleNamespace
 
+    from mcp import types as mcp_types
+
     server = make_proposal_server()
-    hostile = SimpleNamespace(
+    # The real SDK types, not a duck-typed stand-in: `clientInfo` was
+    # renamed to `client_info` in mcp 2.x, and a SimpleNamespace stub
+    # happily answered to either name while the server read neither.
+    hostile = mcp_types.Implementation(
         name="evil\nbound target uid: spoofed\x1b[2J" + "x" * 500,
         version="1.0\r\n2.0",
     )
     fake_ctx = SimpleNamespace(
-        session=SimpleNamespace(client_params=SimpleNamespace(clientInfo=hostile))
+        session=SimpleNamespace(
+            client_params=mcp_types.InitializeRequestParams(
+                protocol_version=mcp_types.LATEST_PROTOCOL_VERSION,
+                capabilities=mcp_types.ClientCapabilities(),
+                client_info=hostile,
+            )
+        )
     )
-    server._server = SimpleNamespace(request_context=fake_ctx)  # type: ignore[assignment]  # boundary stub
-    name, version = server._client_info()
+    name, version = server._client_info(fake_ctx)  # type: ignore[arg-type]  # boundary stub
     for value in (name, version):
         assert "\n" not in value
         assert "\r" not in value
@@ -1139,3 +1149,74 @@ async def test_mcp_manifests_stay_readable_by_the_strict_reader() -> None:
     loaded = load_structured_document(content[0].text)
 
     assert loaded == _ambiguous_key_manifest()
+
+
+async def test_a_wrong_capability_is_refused_over_the_real_transport(tmp_path: Path) -> None:
+    """The approval gate must hold on the path the SDK actually dispatches.
+
+    Every other capability test calls `call_tool` directly. mcp 2.x moved
+    registration into the constructor, so a handler wired to the wrong
+    callable would leave those green while the wire path bypassed the gate
+    entirely. This drives a real client over Streamable HTTP.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor, port=0, endpoint_path=tmp_path / "e.json")
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        async with (
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool(
+                "propose_write", {**_PROPOSE_ARGS, "capability": "not-the-token"}
+            )
+            assert getattr(result.content[0], "text", "").startswith("ERROR:")
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    assert executor.calls == [], "a refused proposal reached the executor"
+
+
+async def test_client_identity_is_threaded_from_the_request_context() -> None:
+    """`_client_name` lands in approval dialogs and audit records.
+
+    mcp 2.x hands the request context to the handler instead of exposing it
+    as ambient state, so the value now has to be threaded through the call.
+    A handler that dropped its `ctx` would still inject the key — as an
+    empty string — and every type-level assertion would stay green, so this
+    drives the registered callback and asserts the name that arrives.
+
+    (Over the wire the server is stateless, so `client_params` is genuinely
+    absent and the identity degrades to `""` by design; this exercises the
+    handshake-carrying case that a stateful client produces.)
+    """
+    from types import SimpleNamespace
+
+    from mcp import types as mcp_types
+
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(
+            client_params=mcp_types.InitializeRequestParams(
+                protocol_version=mcp_types.LATEST_PROTOCOL_VERSION,
+                capabilities=mcp_types.ClientCapabilities(),
+                client_info=mcp_types.Implementation(name="probe-host", version="9.9.9"),
+            )
+        )
+    )
+    await server._on_call_tool(
+        ctx,  # type: ignore[arg-type]  # boundary stub
+        mcp_types.CallToolRequestParams(
+            name="propose_write", arguments={**_PROPOSE_ARGS, "capability": "cap-tok"}
+        ),
+    )
+    assert len(executor.calls) == 1
+    args = executor.calls[0][1]
+    assert args["_client_name"] == "probe-host"
+    assert args["_client_version"] == "9.9.9"
