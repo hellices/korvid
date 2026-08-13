@@ -1097,7 +1097,10 @@ async def test_churn_failed_reports_only_a_finished_task_that_did_not_succeed() 
     running = asyncio.create_task(never())
     assert live._churn_failed(running) is False
     running.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    # `CancelledError` from a plain `task.cancel()` carries no message, so the
+    # required match pattern is the empty-message anchor (a literal `""` would
+    # match anything and pytest warns about it).
+    with pytest.raises(asyncio.CancelledError, match=r"^$"):
         await running
     assert live._churn_failed(running) is True
 
@@ -2165,7 +2168,12 @@ async def test_run_live_replay_measures_input_latency_with_the_injected_clock() 
     namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
     deps = _happy_deps(namespaces, pods, RUN_ID)
     monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+    options = ReplayOptions(
+        time_scale=1.0,
+        monotonic_fn=monotonic_fn,
+        async_sleep=async_sleep,
+        input_sample_pairs=3,
+    )
 
     report = await run_live_replay(
         _tiny_live_profile(),
@@ -2176,8 +2184,57 @@ async def test_run_live_replay_measures_input_latency_with_the_injected_clock() 
         deps=deps,
     )
 
-    assert report.input_latency.count == 2
+    assert report.input_latency.count == 6
     assert report.input_latency.maximum_seconds == 0.0
+
+
+async def test_run_live_replay_takes_the_configured_number_of_cursor_sample_pairs() -> None:
+    """The live input figure must rest on the same configurable sample size as
+    replay, and each `down`/`up` pair must return the cursor to its original
+    row so the post-churn row and digest checks see an unmoved selection."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(namespaces, pods, RUN_ID)
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(
+        time_scale=1.0,
+        monotonic_fn=monotonic_fn,
+        async_sleep=async_sleep,
+        input_sample_pairs=5,
+    )
+
+    report = await run_live_replay(
+        _tiny_live_profile(),
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert report.input_latency.count == 10
+
+
+async def test_run_live_replay_rejects_a_non_positive_input_sample_pair_count() -> None:
+    """Zero pairs would publish an input percentile computed from no samples.
+    Rejected before any cluster identity, ownership, or mutation work."""
+    deps = LiveDependencies(
+        command_runner=_never_called("command_runner"),
+        active_context=_never_called("active_context"),
+        context_host=_never_called("context_host"),
+        kube_client_factory=_never_called("kube_client_factory"),
+        harness_kube_client_factory=_never_called("harness_kube_client_factory"),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+    )
+
+    with pytest.raises(ValueError, match="input_sample_pairs must be positive"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0, input_sample_pairs=0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
 
 
 async def test_run_live_replay_rejects_a_profile_whose_bursts_escape_its_duration() -> None:

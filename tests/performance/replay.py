@@ -138,6 +138,14 @@ class ReplayOptions:
             acknowledge an injected key before failing the run. Bounded so a
             saturated client aborts with a named timeout instead of hanging;
             raise it for a slow remote cluster, lower it to fail fast.
+        input_sample_pairs: Number of `down`/`up` cursor round trips the input
+            probe performs, so the reported percentile rests on
+            `2 * input_sample_pairs` samples. Two samples make a point
+            observation, not a percentile; the default of 25 pairs (50
+            samples) is enough for a usable p95 while staying short next to
+            the churn schedule it runs inside. Must be positive - each pair
+            restores the original cursor row, so the surrounding row and
+            digest checks are unaffected by the count.
         monotonic_fn: Monotonic clock callable injected for testing.
             Production runs leave this `None` (uses `time.monotonic`).
         async_sleep: Async sleep callable injected for testing.
@@ -150,6 +158,7 @@ class ReplayOptions:
     time_scale: float = 1.0
     sample_interval: float = 1.0
     input_ack_timeout: float = 5.0
+    input_sample_pairs: int = 25
     monotonic_fn: Callable[[], float] | None = field(default=None, hash=False, compare=False)
     async_sleep: Callable[[float], Awaitable[None]] | None = field(
         default=None, hash=False, compare=False
@@ -520,6 +529,58 @@ async def measure_cursor_input(
     return now() - started
 
 
+def validate_input_sample_pairs(options: ReplayOptions) -> None:
+    """Reject a sample-pair count that cannot produce a usable percentile.
+
+    Called at the top of both harness entry points - before any cluster
+    identity, ownership, or mutation work - so a misconfigured run fails
+    immediately rather than after paying for a full setup and then publishing
+    an input percentile computed from zero samples.
+
+    Raises:
+        ValueError: `input_sample_pairs` is not a positive integer.
+    """
+    if options.input_sample_pairs < 1:
+        raise ValueError(f"input_sample_pairs must be positive; got {options.input_sample_pairs}")
+
+
+async def sample_cursor_input(
+    pilot: Any,
+    table: ResourceTable,
+    recorder: BenchmarkRecorder,
+    *,
+    pairs: int,
+    now: Callable[[], float] = monotonic,
+    timeout: float = 5.0,
+    aborted: Callable[[], bool] = lambda: False,
+) -> None:
+    """Record *pairs* `down`/`up` cursor round trips into *recorder*.
+
+    A pair, not a single key press, is the unit: `up` undoes `down`, so the
+    cursor is on its original row both between pairs and when the loop ends.
+    Every check that follows the probe - rendered-row freshness, row count,
+    digest convergence - therefore sees the selection the run started with,
+    whatever the configured count is.
+
+    *aborted* is re-asked before every single sample rather than once per
+    pair: a churn task that dies mid-pair would leave nothing updating the
+    table, and the remaining samples would each record their own timeout as
+    input latency. Stopping mid-pair can leave the cursor one row down, which
+    is why the caller's failure path must not depend on the cursor position -
+    by the time this returns early the run is already failing.
+
+    Shared by the deterministic replay and the live harness so both publish
+    the same measurement over the same sample size.
+    """
+    for _ in range(pairs):
+        for key in ("down", "up"):
+            if aborted():
+                return
+            recorder.record_input(
+                await measure_cursor_input(pilot, table, key, now=now, timeout=timeout)
+            )
+
+
 async def wait_for(
     pilot: Any,
     condition: Callable[[], object],
@@ -559,12 +620,16 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
     2. Emits initial Pods as ``ADDED`` (one logical LIST + WATCH OPEN).
     3. Waits on `churn_ready` after initial population.
     4. Waits until the `ResourceTable` shows all objects.
-    5. Records key-press input latency.
+    5. Records `options.input_sample_pairs` down/up cursor input samples.
     6. Signals the source to start scheduled-event churn.
     7. Awaits churn completion and the final render pass.
     8. Stops the watch manager and process sampler in `finally`.
     9. Compares the table/store digest to the source's expected state.
+
+    Raises:
+        ValueError: `options.input_sample_pairs` is not positive.
     """
+    validate_input_sample_pairs(options)
     events = scheduled_events(profile)
     failures: dict[int, FailureInjection] = {f.at_event: f for f in profile.failures}
 
@@ -634,18 +699,14 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                     recorder=recorder,
                 )
             churn_started_before_input = source.emitted_events > 0
-            if source.terminal_failure is None:
-                recorder.record_input(
-                    await measure_cursor_input(
-                        pilot, table, "down", timeout=options.input_ack_timeout
-                    )
-                )
-            if source.terminal_failure is None:
-                recorder.record_input(
-                    await measure_cursor_input(
-                        pilot, table, "up", timeout=options.input_ack_timeout
-                    )
-                )
+            await sample_cursor_input(
+                pilot,
+                table,
+                recorder,
+                pairs=options.input_sample_pairs,
+                timeout=options.input_ack_timeout,
+                aborted=lambda: source.terminal_failure is not None,
+            )
 
             # Wait for all events to be emitted and all renders to complete.
             await wait_for(

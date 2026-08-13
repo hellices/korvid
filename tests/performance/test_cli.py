@@ -996,3 +996,195 @@ def test_cli_replay_live_reports_an_unwritable_allocation_snapshot(
 
     assert exit_code == 1
     assert "allocation snapshot" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Cursor-input probe knobs (`--input-ack-timeout`, `--input-sample-pairs`)
+# ---------------------------------------------------------------------------
+
+
+def _make_recording_replay(
+    calls: list[dict[str, object]],
+) -> Callable[..., Awaitable[ReplayReport]]:
+    """Build a fake `run_replay` that records every call's arguments into
+    *calls* (a fresh list per test, to stay independent of execution order)."""
+
+    async def fake(profile: WorkloadProfile, options: ReplayOptions) -> ReplayReport:
+        calls.append({"profile": profile, "options": options})
+        return await fake_run_replay(profile, options)
+
+    return fake
+
+
+def _replay_options_for(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> ReplayOptions:
+    """Run `replay` with *argv* and return the `ReplayOptions` it constructed."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_replay", _make_recording_replay(calls))
+    assert cli.main(argv) == 0
+    options = calls[0]["options"]
+    assert isinstance(options, ReplayOptions)
+    return options
+
+
+def _live_options_for(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> ReplayOptions:
+    """Run `replay-live` with *argv* and return the `ReplayOptions` it built."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay(calls))
+    assert cli.main(argv) == 0
+    options = calls[0]["options"]
+    assert isinstance(options, ReplayOptions)
+    return options
+
+
+def test_cli_replay_passes_the_input_probe_knobs_into_replay_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ReplayOptions` documents the cursor-probe timeout and the sample-pair
+    count as run knobs; if the CLI never forwards them, every real run is
+    pinned to the defaults and the documentation is a false claim."""
+    options = _replay_options_for(
+        [
+            "replay",
+            "--profile",
+            str(profile_path(tmp_path)),
+            "--time-scale",
+            "0",
+            "--input-ack-timeout",
+            "12.5",
+            "--input-sample-pairs",
+            "7",
+        ],
+        monkeypatch,
+    )
+
+    assert options.input_ack_timeout == 12.5
+    assert options.input_sample_pairs == 7
+
+
+def test_cli_replay_defaults_the_input_probe_knobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = _replay_options_for(
+        ["replay", "--profile", str(profile_path(tmp_path)), "--time-scale", "0"],
+        monkeypatch,
+    )
+
+    assert options.input_ack_timeout == 5.0
+    assert options.input_sample_pairs == 25
+
+
+def test_cli_replay_live_passes_the_input_probe_knobs_into_replay_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = _live_options_for(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            "--input-ack-timeout",
+            "30",
+            "--input-sample-pairs",
+            "40",
+            *_live_artifacts(tmp_path),
+        ],
+        monkeypatch,
+    )
+
+    assert options.input_ack_timeout == 30.0
+    assert options.input_sample_pairs == 40
+
+
+def test_cli_replay_live_defaults_the_input_probe_knobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = _live_options_for(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            *_live_artifacts(tmp_path),
+        ],
+        monkeypatch,
+    )
+
+    assert options.input_ack_timeout == 5.0
+    assert options.input_sample_pairs == 25
+
+
+@pytest.mark.parametrize("value", ["0", "-1.5"])
+def test_cli_replay_rejects_a_non_positive_input_ack_timeout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    """A zero or negative acknowledgement bound would abort the probe before
+    the key can possibly be acknowledged, reporting a harness misconfiguration
+    as an application timeout."""
+    exit_code = cli.main(
+        ["replay", "--profile", str(profile_path(tmp_path)), "--input-ack-timeout", value]
+    )
+
+    assert exit_code == 1
+    assert "--input-ack-timeout must be positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+def test_cli_replay_rejects_a_non_positive_input_sample_pair_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    """Zero pairs would publish an input percentile computed from no samples."""
+    exit_code = cli.main(
+        ["replay", "--profile", str(profile_path(tmp_path)), "--input-sample-pairs", value]
+    )
+
+    assert exit_code == 1
+    assert "--input-sample-pairs must be positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-1.5"])
+def test_cli_replay_live_rejects_a_non_positive_input_ack_timeout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    exit_code = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            "--input-ack-timeout",
+            value,
+            *_live_artifacts(tmp_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "--input-ack-timeout must be positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+def test_cli_replay_live_rejects_a_non_positive_input_sample_pair_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    exit_code = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            "--input-sample-pairs",
+            value,
+            *_live_artifacts(tmp_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "--input-sample-pairs must be positive" in capsys.readouterr().err
+
+
+def test_cli_rejects_a_fractional_input_sample_pair_count(tmp_path: Path) -> None:
+    """The pair count is a count, not a rate: argparse must reject `2.5`
+    outright rather than silently truncating it to a different workload."""
+    with pytest.raises(SystemExit, match="2"):
+        cli.main(
+            ["replay", "--profile", str(profile_path(tmp_path)), "--input-sample-pairs", "2.5"]
+        )

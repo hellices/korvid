@@ -116,9 +116,11 @@ async def test_measure_cursor_input_times_out_when_cursor_cannot_move() -> None:
             await measure_cursor_input(pilot, table, "down", timeout=0.01)
 
 
-def test_replay_options_default_the_input_ack_timeout() -> None:
+def test_replay_options_default_the_input_probe_knobs() -> None:
     assert ReplayOptions().input_ack_timeout == 5.0
     assert ReplayOptions(input_ack_timeout=0.25).input_ack_timeout == 0.25
+    assert ReplayOptions().input_sample_pairs == 25
+    assert ReplayOptions(input_sample_pairs=3).input_sample_pairs == 3
 
 
 async def test_replay_passes_the_configured_input_ack_timeout(
@@ -147,10 +149,54 @@ async def test_replay_passes_the_configured_input_ack_timeout(
         failures=(),
     )
 
-    report = await run_replay(profile, ReplayOptions(time_scale=0, input_ack_timeout=2.5))
+    report = await run_replay(
+        profile, ReplayOptions(time_scale=0, input_ack_timeout=2.5, input_sample_pairs=3)
+    )
 
-    assert timeouts == [2.5, 2.5]
-    assert report.input_latency.count == 2
+    assert timeouts == [2.5] * 6
+    assert report.input_latency.count == 6
+
+
+async def test_replay_takes_the_configured_number_of_cursor_sample_pairs() -> None:
+    """A percentile over two samples is a point observation, not a percentile.
+    The pair count is configurable so the published input figure rests on a
+    usable sample size, and each pair is a `down`/`up` round trip so the
+    cursor ends where it started - the digest and row checks that follow must
+    see an unmoved selection."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-input-pairs",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=10,
+        duration_seconds=1,
+        bursts=(),
+        failures=(),
+    )
+
+    report = await run_replay(profile, ReplayOptions(time_scale=0, input_sample_pairs=4))
+
+    assert report.input_latency.count == 8
+
+
+async def test_replay_rejects_a_non_positive_input_sample_pair_count() -> None:
+    """Zero pairs would report an input percentile computed from no samples;
+    a negative count is a programmer error, not a "skip the probe" switch."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-input-pairs-invalid",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=10,
+        duration_seconds=1,
+        bursts=(),
+        failures=(),
+    )
+
+    with pytest.raises(ValueError, match="input_sample_pairs must be positive"):
+        await run_replay(profile, ReplayOptions(time_scale=0, input_sample_pairs=0))
 
 
 async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:

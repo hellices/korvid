@@ -144,6 +144,27 @@ def test_aks_live_1k_profile_matches_the_published_live_plan() -> None:
     assert planned_event_count(profile) == 43200
 
 
+def test_steady_24eps_1k_profile_pins_the_published_acceptance_workload() -> None:
+    """The input-latency acceptance result is published against a 1,000-Pod,
+    24-events/second, 30-second steady schedule. That profile has to live in the
+    repository, or the published number cannot be reproduced by anyone else. It
+    is deliberately burst-free and failure-free: the cursor probe measures
+    interaction under *steady* churn, and a burst or an injected failure would
+    change the very workload the number is quoted against."""
+    profile = load_profile(Path(__file__).with_name("profiles") / "steady-24eps-1k.json")
+
+    assert profile.schema_version == 1
+    assert profile.id == "steady-24eps-1k"
+    assert profile.seed == 186
+    assert profile.object_count == 1000
+    assert profile.namespace_count == 20
+    assert profile.steady_events_per_second == 24
+    assert profile.duration_seconds == 30
+    assert profile.bursts == ()
+    assert profile.failures == ()
+    assert planned_event_count(profile) == 720
+
+
 @pytest.mark.parametrize(
     "kind", ["gone", "throttled", "forbidden", "slow", "metrics_unavailable", "slow_logs"]
 )

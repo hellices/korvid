@@ -100,8 +100,9 @@ from tests.performance.replay import (
     ReplayReport,
     build_manifest,
     check_rendered_rows,
-    measure_cursor_input,
     resolve_korvid_sha,
+    sample_cursor_input,
+    validate_input_sample_pairs,
     wait_for,
 )
 from tests.performance.workload import ScheduledEvent, scheduled_events, summary_digest
@@ -1392,18 +1393,15 @@ async def _run_measured_window(
                 )
             state.churn_started_before_input = state.progress.started > 0
 
-            if not _churn_failed(churn_task):
-                recorder.record_input(
-                    await measure_cursor_input(
-                        pilot, table, "down", now=now, timeout=options.input_ack_timeout
-                    )
-                )
-            if not _churn_failed(churn_task):
-                recorder.record_input(
-                    await measure_cursor_input(
-                        pilot, table, "up", now=now, timeout=options.input_ack_timeout
-                    )
-                )
+            await sample_cursor_input(
+                pilot,
+                table,
+                recorder,
+                pairs=options.input_sample_pairs,
+                now=now,
+                timeout=options.input_ack_timeout,
+                aborted=lambda: _churn_failed(churn_task),
+            )
 
             # UI-at-scale evidence: drive the scoped scenarios (filter, sort,
             # namespace switch, split pane, describe, multi-log) through the
@@ -1478,6 +1476,7 @@ async def run_live_replay(
     snapshot is reused as the pre-churn uid snapshot - it is never re-listed.
     """
     _validate_time_scale(options)
+    validate_input_sample_pairs(options)
     manifests.validate_run_id(run_id)
     _validate_topology(profile)
     # Re-check duration-dependent invariants: a caller may hand us a profile
