@@ -588,13 +588,18 @@ jobs:
           git switch -c "$branch"
           mkdir -p Formula
           cp ../korvid.rb Formula/korvid.rb
-          if git diff --quiet; then
+          # Staged before comparing: `git diff` and `commit -a` both ignore
+          # untracked files, so a tap that has no formula yet - a fresh tap,
+          # or one recovering from a deletion - would look up to date and
+          # commit nothing.
+          git add Formula/korvid.rb
+          if git diff --cached --quiet; then
             echo "the tap already carries this formula"
             exit 0
           fi
           git -c user.name=github-actions[bot] \
               -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
-              commit -am "korvid ${version}"
+              commit -m "korvid ${version}"
           git push origin "$branch"
           gh pr create --repo hellices/homebrew-korvid \
             --base main --head "$branch" \

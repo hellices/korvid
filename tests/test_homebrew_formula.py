@@ -95,10 +95,28 @@ def test_packages_for_platforms_homebrew_does_not_build_are_excluded() -> None:
     """Homebrew builds on macOS and Linux.
 
     `pywin32` has no sdist at all, so a formula naming it cannot even be
-    fetched — the marker filter is what keeps it out.
+    fetched. `pywin32-ctypes` is the harder case: its own record carries
+    no marker, and it is Windows-only solely because of the edge
+    `keyring` declares — so the edge has to be read, not just the node.
     """
     names = {r.name for r in resolve_resources(_LOCK, extras=("agent",))}
     assert "pywin32" not in names
+    assert "pywin32-ctypes" not in names, "a Windows-only edge was followed onto a brew target"
+
+
+def test_the_formula_advertises_the_project_license() -> None:
+    """`brew audit` does not check this, and a wrong licence is a licence
+    claim about someone else's software."""
+    import tomllib
+
+    declared = tomllib.loads((_ROOT / "pyproject.toml").read_text())["project"]["license"]
+    ruby = render_formula(
+        version="1.2.3",
+        url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",
+        sha256="a" * 64,
+        resources=[],
+    )
+    assert f'license "{declared}"' in ruby
 
 
 def test_every_resource_carries_a_pypi_url_and_a_sha256() -> None:
@@ -253,3 +271,25 @@ def test_the_formula_job_runs_only_after_the_release_is_published() -> None:
     job = workflow["jobs"]["homebrew-formula"]
     assert "publish-pypi" in job["needs"]
     assert "finalize-github-release" in job["needs"]
+
+
+def test_the_tap_bump_stages_before_it_compares() -> None:
+    """`git diff` and `commit -a` both ignore untracked files.
+
+    A tap with no formula yet — a fresh tap, or one recovering from a
+    deletion — would report itself up to date and commit nothing, which is
+    the one case the automation exists for.
+    """
+    workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
+    bump = workflow.split("      - name: Open the formula bump on the tap")[1]
+    # Commands only: the rationale is written in a comment that mentions
+    # both, and matching prose would pass on any ordering.
+    commands = "\n".join(
+        line for line in bump.splitlines() if line.strip() and not line.strip().startswith("#")
+    )
+    assert "git add Formula/korvid.rb" in commands, "an untracked formula is never staged"
+    assert commands.index("git add Formula/korvid.rb") < commands.index("git diff"), (
+        "the comparison runs before the file is staged"
+    )
+    assert "git diff --cached --quiet" in commands, "the comparison ignores the index"
+    assert "commit -am" not in commands, "`commit -a` skips the untracked formula"

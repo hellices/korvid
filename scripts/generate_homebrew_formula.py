@@ -27,6 +27,7 @@ import tomllib
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 PROJECT = "korvid"
 #: Shipped by the formula. `[mcp]` is deliberately absent: it puts an HTTP
@@ -80,10 +81,10 @@ def resolve_resources(lock_path: Path, extras: tuple[str, ...] = DEFAULT_EXTRAS)
     packages = {package["name"]: package for package in lock["package"]}
     root = packages[PROJECT]
 
-    pending = [dep["name"] for dep in root.get("dependencies", [])]
+    pending = _reachable(root.get("dependencies", []))
     optional = root.get("optional-dependencies", {})
     for extra in extras:
-        pending.extend(dep["name"] for dep in optional.get(extra, []))
+        pending.extend(_reachable(optional.get(extra, [])))
 
     seen: set[str] = set()
     while pending:
@@ -94,7 +95,7 @@ def resolve_resources(lock_path: Path, extras: tuple[str, ...] = DEFAULT_EXTRAS)
         if package is None or _is_excluded(package):
             continue
         seen.add(name)
-        pending.extend(dep["name"] for dep in package.get("dependencies", []))
+        pending.extend(_reachable(package.get("dependencies", [])))
 
     resources = []
     for name in sorted(seen):
@@ -107,6 +108,30 @@ def resolve_resources(lock_path: Path, extras: tuple[str, ...] = DEFAULT_EXTRAS)
     return resources
 
 
+def _reachable(edges: list[dict[str, Any]]) -> list[str]:
+    """The dependencies of one package that apply on a Homebrew target.
+
+    A package can be Windows-only purely because of the *edge* that
+    reaches it: `keyring` requires `pywin32-ctypes` under
+    `sys_platform == 'win32'`, while that package's own record carries no
+    marker at all. Reading only the node lets it into a macOS formula.
+    """
+    return [edge["name"] for edge in edges if not _marker_excludes(edge.get("marker"))]
+
+
+def _marker_excludes(marker: object) -> bool:
+    """Whether an environment marker rules out every Homebrew target.
+
+    Deliberately narrow: only an equality against an excluded platform
+    counts, so an unrecognised marker keeps the dependency. A resource
+    that is merely unnecessary costs build time; a missing one is an
+    ImportError on a user's machine.
+    """
+    if not isinstance(marker, str):
+        return False
+    return any(f"sys_platform == '{platform}'" in marker for platform in EXCLUDED_MARKER_PLATFORMS)
+
+
 def _is_excluded(package: dict[str, object]) -> bool:
     """Whether a package applies only to a platform Homebrew does not build.
 
@@ -116,10 +141,7 @@ def _is_excluded(package: dict[str, object]) -> bool:
     marker = package.get("resolution-markers")
     if not isinstance(marker, list) or not marker:
         return False
-    return all(
-        any(f"sys_platform == '{platform}'" in str(entry) for platform in EXCLUDED_MARKER_PLATFORMS)
-        for entry in marker
-    )
+    return all(_marker_excludes(str(entry)) for entry in marker)
 
 
 def _hash(value: str, name: str) -> str:
@@ -143,7 +165,26 @@ def fetch_project_sdist(version: str) -> tuple[str, str]:
     raise ValueError(f"{PROJECT} {version} publishes no source archive")
 
 
-def render_formula(*, version: str, url: str, sha256: str, resources: list[Resource]) -> str:
+def project_license(pyproject: Path) -> str:
+    """The project's SPDX identifier, read rather than repeated.
+
+    A formula that names the wrong licence is a claim about someone
+    else's software, and `brew audit` does not check it.
+    """
+    license_id = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["license"]
+    if not isinstance(license_id, str):
+        raise TypeError(f"expected an SPDX string in {pyproject}, got {license_id!r}")
+    return license_id
+
+
+def render_formula(
+    *,
+    version: str,
+    url: str,
+    sha256: str,
+    resources: list[Resource],
+    license: str = "Apache-2.0",
+) -> str:
     """Render `korvid.rb`.
 
     `virtualenv_install_with_resources` builds against brew's own Python,
@@ -185,7 +226,7 @@ class Korvid < Formula
   homepage "https://github.com/hellices/korvid"
   url "{url}"
   sha256 "{sha256}"
-  license "MIT"
+  license "{license}"
 
 {depends_on}
 {stanzas}
@@ -204,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True, help="published korvid version")
     parser.add_argument("--lock", type=Path, default=Path("uv.lock"))
+    parser.add_argument("--pyproject", type=Path, default=Path("pyproject.toml"))
     parser.add_argument("-o", "--output", type=Path, default=Path("korvid.rb"))
     args = parser.parse_args(argv)
 
@@ -213,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         url=url,
         sha256=sha256,
         resources=resolve_resources(args.lock),
+        license=project_license(args.pyproject),
     )
     args.output.write_text(formula, encoding="utf-8")
     print(f"wrote {args.output}")
