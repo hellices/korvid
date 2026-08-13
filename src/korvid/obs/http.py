@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -36,23 +37,32 @@ def endpoint_host(url: str) -> str:
     return host or url.rsplit("@", 1)[-1]
 
 
-def scrub_json(value: Any, secrets: Sequence[str]) -> Any:
-    """`value` with every secret replaced, everywhere a string can appear.
+@dataclass(frozen=True, slots=True)
+class Answer:
+    """One parsed backend answer, plus what must not survive it.
 
-    Applied to the decoded structure rather than only to the raw body:
-    JSON escaping means a secret containing a quote is unrecognisable in
-    the text and obvious here. Keys as well as values, because a backend
-    is free to echo a query fragment as either.
+    The payload is deliberately **unscrubbed**: a secret is content, and
+    the envelope is structure. A one-character bearer token is legal, and
+    replacing it across the whole body rewrote `"status": "success"` into
+    nonsense, turning every successful request into a backend failure
+    (round-7 review). Structural fields are therefore read exactly as the
+    backend sent them, and scrubbing is applied where content becomes
+    text: label names and values, log lines, and the backend's own error
+    message.
     """
-    if not secrets:
-        return value
-    if isinstance(value, str):
-        return mask_in(value, secrets)
-    if isinstance(value, dict):
-        return {scrub_json(key, secrets): scrub_json(item, secrets) for key, item in value.items()}
-    if isinstance(value, list):
-        return [scrub_json(item, secrets) for item in value]
-    return value
+
+    payload: Any
+    secrets: tuple[str, ...] = ()
+
+    def scrub(self, text: str) -> str:
+        """`text` with every secret replaced."""
+        return mask_in(text, self.secrets)
+
+    def scrub_labels(self, labels: Mapping[str, str]) -> dict[str, str]:
+        """`labels` with every secret replaced, in names and values alike."""
+        if not self.secrets:
+            return dict(labels)
+        return {self.scrub(key): self.scrub(value) for key, value in labels.items()}
 
 
 def _userinfo(url: str) -> str:
@@ -116,7 +126,7 @@ class HttpBackend:
 
     async def get_json(
         self, path: str, params: Mapping[str, str], *, secrets: Sequence[str] = ()
-    ) -> Any:
+    ) -> Answer:
         """GET `path`, bounded by the configured timeout and byte cap.
 
         Args:
@@ -128,7 +138,9 @@ class HttpBackend:
                 can raise, together with the bearer token.
 
         Returns:
-            The parsed JSON body, with every secret already replaced.
+            The parsed body and the secrets to keep out of anything
+            derived from it. The payload itself is not rewritten — see
+            `Answer`.
 
         Raises:
             ConnectorError: `config` for an unusable credential, `auth`,
@@ -158,17 +170,17 @@ class HttpBackend:
                 f" {self.limits.timeout_seconds:g}s (including time spent waiting for a"
                 f" free request slot) — raise the timeout or narrow the window",
             ) from exc
-        # Twice, because the two passes see different text. The raw pass
-        # covers the not-JSON error below, which quotes the body; the
-        # parsed pass sees values with their JSON escaping undone, which
-        # is the only place a secret containing a quote is recognisable.
         try:
-            parsed = json.loads(mask_in(body, scrub))
+            parsed = json.loads(body)
         except ValueError as exc:
+            # The exception quotes the body, so *this* text is scrubbed:
+            # it is a message, not a structure, and nothing downstream
+            # parses it.
             raise ConnectorError(
-                "backend", f"{self.endpoint} returned a body that is not JSON: {exc}"
+                "backend",
+                f"{self.endpoint} returned a body that is not JSON: {mask_in(str(exc), scrub)}",
             ) from exc
-        return scrub_json(parsed, scrub)
+        return Answer(payload=parsed, secrets=scrub)
 
     async def _read(
         self,
@@ -253,7 +265,7 @@ class HttpBackend:
             chunks.append(chunk)
         return b"".join(chunks).decode("utf-8", "replace")
 
-    def require_success(self, payload: Any) -> Mapping[str, Any]:
+    def require_success(self, answer: Answer) -> Mapping[str, Any]:
         """The `data` block of a Prometheus-style envelope.
 
         Both backends speak the same envelope, so both get the same
@@ -263,11 +275,16 @@ class HttpBackend:
             ConnectorError: `backend` for a non-mapping payload or a
                 reported error.
         """
+        payload = answer.payload
         if not isinstance(payload, Mapping):
             raise ConnectorError("backend", f"{self.endpoint} returned an unexpected payload")
         if payload.get("status") != "success":
             reason = payload.get("error") or payload.get("status") or "unknown error"
-            raise ConnectorError("backend", f"{self.endpoint} refused the query: {reason}")
+            # The backend's own words, so they are scrubbed before they
+            # travel — the *decision* above read the field untouched.
+            raise ConnectorError(
+                "backend", f"{self.endpoint} refused the query: {answer.scrub(str(reason))}"
+            )
         data = payload.get("data")
         if not isinstance(data, Mapping):
             raise ConnectorError("backend", f"{self.endpoint} returned no result data")

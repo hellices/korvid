@@ -26,7 +26,7 @@ from korvid.obs.connector import (
     masked_labels,
     resolve_window,
 )
-from korvid.obs.http import HttpBackend
+from korvid.obs.http import Answer, HttpBackend
 from korvid.obs.query import build_metric_query, encoded_forms, metric_unit
 
 SOURCE = "prometheus"
@@ -98,10 +98,10 @@ class PrometheusConnector(MetricsConnector):
         # usually quotes it back, and a failure never reaches the
         # success-path projection (round-5 review).
         secrets = encoded_forms(self._masked_scope_values(scope))
-        payload = await self._http.get_json("/api/v1/query", {"query": query}, secrets=secrets)
-        data = self._http.require_success(payload)
+        answer = await self._http.get_json("/api/v1/query", {"query": query}, secrets=secrets)
+        data = self._http.require_success(answer)
         self._http.require_result_type(data, "vector")
-        series, truncated, observed_at = self._parse(data)
+        series, truncated, observed_at = self._parse(data, answer)
         # The scope and the query name the values that were *asked about*,
         # which for a masked label is exactly the value the operator
         # declared sensitive.
@@ -123,7 +123,9 @@ class PrometheusConnector(MetricsConnector):
         pairs = (("namespace", scope.namespace), ("pod", scope.pod), ("pod", scope.workload))
         return tuple(value for label, value in pairs if value and label in self._mask)
 
-    def _parse(self, data: Mapping[str, Any]) -> tuple[tuple[Series, ...], bool, str | None]:
+    def _parse(
+        self, data: Mapping[str, Any], answer: Answer
+    ) -> tuple[tuple[Series, ...], bool, str | None]:
         rows = data.get("result")
         if not isinstance(rows, list):
             raise ConnectorError(
@@ -135,7 +137,7 @@ class PrometheusConnector(MetricsConnector):
         truncated = False
         for row in rows:
             observed_at = observed_at or _observed_at(row)
-            entry = _series(row, self._mask)
+            entry = _series(row, self._mask, answer)
             if entry is None:
                 continue
             if len(parsed) == cap:
@@ -174,7 +176,7 @@ def _masked_scope(scope: QueryScope, secrets: tuple[str, ...]) -> QueryScope:
     )
 
 
-def _series(row: Any, mask: frozenset[str]) -> Series | None:
+def _series(row: Any, mask: frozenset[str], answer: Answer) -> Series | None:
     """One vector sample, or None when it is not one korvid can report.
 
     A single unparsable sample drops out rather than failing the query:
@@ -194,4 +196,4 @@ def _series(row: Any, mask: frozenset[str]) -> Series | None:
         return None
     metric = row.get("metric")
     labels = {str(k): str(v) for k, v in metric.items()} if isinstance(metric, Mapping) else {}
-    return Series(labels=masked_labels(labels, mask), value=value)
+    return Series(labels=answer.scrub_labels(masked_labels(labels, mask)), value=value)

@@ -28,7 +28,7 @@ from korvid.obs.connector import (
     resolve_window,
 )
 from korvid.obs.credentials import require_header_safe
-from korvid.obs.http import HttpBackend
+from korvid.obs.http import Answer, HttpBackend
 from korvid.obs.query import build_line_filter, build_selector, encoded_forms
 
 SOURCE = "loki"
@@ -108,7 +108,7 @@ class LokiConnector(LogsConnector):
         end = time.time_ns()
         start = end - window * _NS_PER_MINUTE
         secrets = encoded_forms(self._masked_scope_values(scope))
-        payload = await self._http.get_json(
+        answer = await self._http.get_json(
             "/loki/api/v1/query_range",
             {
                 "query": query,
@@ -119,9 +119,9 @@ class LokiConnector(LogsConnector):
             },
             secrets=secrets,
         )
-        data = self._http.require_success(payload)
+        data = self._http.require_success(answer)
         self._http.require_result_type(data, "streams")
-        lines, truncated = self._parse(data, line_limit)
+        lines, truncated = self._parse(data, line_limit, answer)
         return LogResult(
             source=SOURCE,
             endpoint=self._http.endpoint,
@@ -141,7 +141,9 @@ class LokiConnector(LogsConnector):
         )
         return tuple(value for label, value in pairs if value and label.lower() in self._mask)
 
-    def _parse(self, data: Mapping[str, Any], line_limit: int) -> tuple[tuple[LogLine, ...], bool]:
+    def _parse(
+        self, data: Mapping[str, Any], line_limit: int, answer: Answer
+    ) -> tuple[tuple[LogLine, ...], bool]:
         streams = data.get("result")
         if not isinstance(streams, list):
             raise ConnectorError(
@@ -150,7 +152,7 @@ class LokiConnector(LogsConnector):
         collected: list[tuple[int, LogLine]] = []
         raw_entries = 0
         for stream in streams:
-            entries, parsed = _stream_lines(stream, self._mask)
+            entries, parsed = _stream_lines(stream, self._mask, answer)
             raw_entries += entries
             collected.extend(parsed)
         # Truncation is judged on the *raw* page, not on what parsed:
@@ -198,7 +200,9 @@ def _validated_mappings(label_mappings: Mapping[str, str] | None) -> dict[str, s
     return mappings
 
 
-def _stream_lines(stream: Any, mask: frozenset[str]) -> tuple[int, list[tuple[int, LogLine]]]:
+def _stream_lines(
+    stream: Any, mask: frozenset[str], answer: Answer
+) -> tuple[int, list[tuple[int, LogLine]]]:
     """(`raw entry count`, parsed lines) for one stream.
 
     The raw count is returned separately because it, not the parsed
@@ -207,9 +211,13 @@ def _stream_lines(stream: Any, mask: frozenset[str]) -> tuple[int, list[tuple[in
     if not isinstance(stream, Mapping):
         return 0, []
     raw_labels = stream.get("stream")
-    labels = masked_labels(
-        {str(k): str(v) for k, v in raw_labels.items()} if isinstance(raw_labels, Mapping) else {},
-        mask,
+    labels = answer.scrub_labels(
+        masked_labels(
+            {str(k): str(v) for k, v in raw_labels.items()}
+            if isinstance(raw_labels, Mapping)
+            else {},
+            mask,
+        )
     )
     values = stream.get("values")
     if not isinstance(values, list):
@@ -229,7 +237,7 @@ def _stream_lines(stream: Any, mask: frozenset[str]) -> tuple[int, list[tuple[in
             # `datetime` can represent; one hostile timestamp must drop out
             # like any other unusable entry, not end the whole search.
             continue
-        lines.append((nanos, LogLine(timestamp=timestamp, labels=labels, line=text)))
+        lines.append((nanos, LogLine(timestamp=timestamp, labels=labels, line=answer.scrub(text))))
     return len(values), lines
 
 

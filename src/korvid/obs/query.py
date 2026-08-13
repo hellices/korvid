@@ -187,16 +187,26 @@ def encoded_forms(values: Sequence[str]) -> tuple[str, ...]:
 
     A value reaches a selector in more than one encoding: literally, as a
     quoted string literal, and — for a workload, which becomes a regex
-    matcher — regex-escaped as well. Masking the raw form alone leaves the
-    form that was actually sent, which is also the form a backend quotes
-    back in a parse error (PR #280 review).
+    matcher — regex-escaped both as the engine reads it and as the string
+    literal carries it. Masking the raw form alone leaves the form that
+    was actually sent, which is also the form a backend quotes back in a
+    parse error (PR #280 review).
+
+    All four are included because which one a backend echoes is the
+    backend's choice: Prometheus may quote the literal it received or the
+    regex it parsed, and korvid does not get to assume.
     """
     forms: list[str] = []
     for value in values:
         if not value:
             continue
-        for form in (value, escape_label_value(value), escape_regex_value(value)):
-            if form not in forms:
+        for form in (
+            value,
+            escape_label_value(value),
+            re.escape(value),
+            escape_regex_value(value),
+        ):
+            if form and form not in forms:
                 forms.append(form)
     return tuple(forms)
 

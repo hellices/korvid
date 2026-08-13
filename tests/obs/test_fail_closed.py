@@ -762,3 +762,124 @@ class TestUserinfoIsRefusedAtTheTransportBoundary:
             limits=QueryLimits(),
         )
         assert backend.endpoint == "x.example.com"
+
+
+class TestScrubbingNeverRewritesTheEnvelope:
+    """Round-7 review: a secret is content, so it must not touch structure.
+
+    A one-character bearer token is legal. Blind substring replacement
+    over the body turned `"status": "success"` into nonsense, so every
+    successful request became a backend failure — and the same class of
+    corruption could hide a real one.
+    """
+
+    async def test_a_one_character_token_does_not_break_a_successful_answer(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {
+                        "resultType": "streams",
+                        "result": [
+                            {"stream": {"pod": "api-s1"}, "values": [["1", "s is everywhere"]]}
+                        ],
+                    },
+                },
+            ),
+            token_env="TOK",
+        )
+        import os
+
+        os.environ["TOK"] = "s"
+        try:
+            result = await connector.search(scope=QueryScope(namespace="prod"))
+        finally:
+            del os.environ["TOK"]
+        assert len(result.lines) == 1
+
+    async def test_the_token_is_still_scrubbed_from_the_content(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {
+                        "resultType": "streams",
+                        "result": [
+                            {
+                                "stream": {"pod": "a"},
+                                "values": [["1", "leaked Zm9vYmFyc2VjcmV0"]],
+                            }
+                        ],
+                    },
+                },
+            ),
+            token_env="TOK",
+        )
+        import os
+
+        os.environ["TOK"] = "Zm9vYmFyc2VjcmV0"
+        try:
+            result = await connector.search(scope=QueryScope(namespace="prod"))
+        finally:
+            del os.environ["TOK"]
+        assert "Zm9vYmFyc2VjcmV0" not in result.lines[0].line
+
+    async def test_a_secret_matching_a_structural_field_leaves_the_result_type_alone(
+        self,
+    ) -> None:
+        """`resultType` is korvid's contract with the backend, not content."""
+        connector = _loki(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {"resultType": "streams", "result": []},
+                },
+            ),
+            token_env="TOK",
+        )
+        import os
+
+        os.environ["TOK"] = "streams"
+        try:
+            result = await connector.search(scope=QueryScope(namespace="prod"))
+        finally:
+            del os.environ["TOK"]
+        assert result.lines == ()
+        assert result.truncated is False
+
+    async def test_a_one_character_token_does_not_break_a_prometheus_answer(self) -> None:
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "status": "success",
+                            "data": {
+                                "resultType": "vector",
+                                "result": [
+                                    {"metric": {"pod": "api-s"}, "value": [1786000000, "1.0"]}
+                                ],
+                            },
+                        },
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+            token_env="TOK",
+        )
+        import os
+
+        os.environ["TOK"] = "s"
+        try:
+            result = await connector.query(signal="cpu", scope=QueryScope(namespace="prod"))
+        finally:
+            del os.environ["TOK"]
+        assert len(result.series) == 1
+        assert result.series[0].value == pytest.approx(1.0)
