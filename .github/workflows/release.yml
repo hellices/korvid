@@ -592,7 +592,7 @@ jobs:
           # after the push failed, and branching from main again would be
           # rejected as non-fast-forward before reaching the retry.
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-            git fetch --depth 1 origin "$branch"
+            git fetch --depth 1 origin "$branch:refs/remotes/origin/$branch"
             git switch -c "$branch" "origin/$branch"
           else
             git switch -c "$branch"

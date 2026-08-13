@@ -87,15 +87,24 @@ def resolve_resources(lock_path: Path, extras: tuple[str, ...] = DEFAULT_EXTRAS)
         pending.extend(_reachable(optional.get(extra, [])))
 
     seen: set[str] = set()
+    visited: set[tuple[str, str]] = set()
     while pending:
-        name = pending.pop()
-        if name in seen or name == PROJECT:
+        name, extra = pending.pop()
+        if (name, extra) in visited or name == PROJECT:
             continue
         package = packages.get(name)
         if package is None or _is_excluded(package):
             continue
+        visited.add((name, extra))
         seen.add(name)
-        pending.extend(_reachable(package.get("dependencies", [])))
+        if extra:
+            # An extra requested on an edge adds dependencies without
+            # adding a package: `textual` needs `markdown-it-py[linkify]`,
+            # and `linkify-it-py` is reachable no other way.
+            edges = package.get("optional-dependencies", {}).get(extra, [])
+        else:
+            edges = package.get("dependencies", [])
+        pending.extend(_reachable(edges))
 
     resources = []
     for name in sorted(seen):
@@ -108,15 +117,29 @@ def resolve_resources(lock_path: Path, extras: tuple[str, ...] = DEFAULT_EXTRAS)
     return resources
 
 
-def _reachable(edges: list[dict[str, Any]]) -> list[str]:
+def _reachable(edges: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """The dependencies of one package that apply on a Homebrew target.
 
-    A package can be Windows-only purely because of the *edge* that
-    reaches it: `keyring` requires `pywin32-ctypes` under
-    `sys_platform == 'win32'`, while that package's own record carries no
-    marker at all. Reading only the node lets it into a macOS formula.
+    Each is a `(name, extra)` pair, because an edge carries two things the
+    node cannot supply.
+
+    A package can be Windows-only purely because of the edge that reaches
+    it: `keyring` requires `pywin32-ctypes` under
+    `sys_platform == 'win32'`, while that package's own record has no
+    marker at all.
+
+    An edge can also request an extra: `textual` requires
+    `markdown-it-py[linkify]`, and `linkify-it-py` is reachable only
+    through that group. `--no-deps` cannot recover it at install time, so
+    losing it here means an ImportError on a user's machine.
     """
-    return [edge["name"] for edge in edges if not _marker_excludes(edge.get("marker"))]
+    reachable = []
+    for edge in edges:
+        if _marker_excludes(edge.get("marker")):
+            continue
+        extras = edge.get("extra") or [""]
+        reachable.extend((edge["name"], extra) for extra in extras)
+    return reachable
 
 
 def _marker_excludes(marker: object) -> bool:

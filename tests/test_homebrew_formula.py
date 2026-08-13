@@ -62,6 +62,28 @@ def test_the_closure_is_transitive_not_just_the_direct_dependencies() -> None:
     assert "textual" in names, "a direct dependency is missing"
     assert "markdown-it-py" in names, "textual's own dependency is missing"
     assert "mdurl" in names, "the closure stopped one level too early"
+    # Textual requires `markdown-it-py[linkify]`; `linkify-it-py` is
+    # reachable only through that extra. Reducing an edge to its package
+    # name drops it, and `--no-deps` cannot recover it at install time.
+    assert "linkify-it-py" in names, "an extra requested on a dependency edge was dropped"
+    assert "uc-micro-py" in names, "the extra's own dependency is missing"
+
+
+def test_a_resumed_branch_is_fetched_into_its_remote_tracking_ref() -> None:
+    """`git fetch origin <branch>` writes FETCH_HEAD, not `origin/<branch>`.
+
+    A `--depth 1` clone configures `remote.origin.fetch` for the default
+    branch alone, so the refspec has to be explicit or the `git switch`
+    that follows fails — on the rerun path this exists to support.
+    """
+    workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
+    bump = workflow.split("      - name: Open the formula bump on the tap")[1]
+    commands = "\n".join(
+        line for line in bump.splitlines() if line.strip() and not line.strip().startswith("#")
+    )
+    assert 'git fetch --depth 1 origin "$branch:refs/remotes/origin/$branch"' in commands, (
+        "the resumed branch never becomes origin/$branch"
+    )
 
 
 def test_the_selected_extras_and_nothing_else_are_installed() -> None:
