@@ -18,6 +18,7 @@ from pathlib import Path
 from stat import S_IMODE
 from tempfile import mkstemp
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -133,6 +134,11 @@ class ObservabilityBackend:
     #: Scope field to backend label name (Loki). Defaults cover the
     #: conventional Kubernetes labels a log shipper attaches.
     label_mappings: dict[str, str] = field(default_factory=lambda: dict(_DEFAULT_LABEL_MAPPINGS))
+    #: Backend labels whose *values* are masked in every result, lowercased
+    #: (issue #193). For fields that are sensitive by policy rather than by
+    #: shape - a tenant id, a customer name - which the credential-shaped
+    #: text pass cannot recognise on its own.
+    mask_labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -382,14 +388,33 @@ def load_config(path: Path | None = None) -> KorvidConfig:
 
 
 def _observability_url(value: Any, label: str, warnings: list[str]) -> str | None:
+    """A usable endpoint URL, or None with the reason.
+
+    Parsed rather than prefix-matched: `https://user:pw@` starts with
+    `https://` and names no host at all, so a prefix check would accept it
+    and leave the connector with nothing but the raw string — credential
+    included — to name in a message.
+    """
     url = _opt_str(value)
     if url is None:
         warnings.append(f"{label}: `url` is required — the backend is disabled")
         return None
-    if not (url.startswith("http://") or url.startswith("https://")):
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+    except ValueError:
+        warnings.append(f"{label}.url: is not a usable URL — the backend is disabled")
+        return None
+    if parsed.scheme not in ("http", "https"):
         warnings.append(
             f"{label}.url: must be an http:// or https:// URL — the backend is disabled"
         )
+        return None
+    if not host:
+        # Deliberately does not echo the URL: a hostname-less authority is
+        # most often `scheme://user:password@`, and this warning is shown
+        # on screen.
+        warnings.append(f"{label}.url: names no host — the backend is disabled")
         return None
     return url
 
@@ -446,9 +471,17 @@ def _observability_timeout(raw: Mapping[str, Any], label: str, warnings: list[st
     if "timeout_seconds" not in raw:
         return default
     value = raw["timeout_seconds"]
-    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+    # `isfinite` matters: YAML `.inf` parses to a float that is greater
+    # than zero, and would mean the bounded-query contract has no bound.
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not isfinite(value)
+        or value <= 0
+    ):
         warnings.append(
-            f"{label}.timeout_seconds: must be a positive number — using the default {default}"
+            f"{label}.timeout_seconds: must be a positive finite number"
+            f" — using the default {default}"
         )
         return default
     return float(value)
@@ -478,6 +511,42 @@ def _observability_label_mappings(value: Any, label: str, warnings: list[str]) -
     return mappings
 
 
+def _observability_mask_labels(value: Any, label: str, warnings: list[str]) -> tuple[str, ...]:
+    """The label names whose values are always masked, lowercased and sorted."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        warnings.append(f"{label}.mask_labels: must be a list of label names — ignored")
+        return ()
+    names: set[str] = set()
+    for entry in value:
+        name = _opt_str(entry)
+        if name is None:
+            warnings.append(
+                f"{label}.mask_labels: entries must be non-empty label names — one dropped"
+            )
+            continue
+        names.add(name.lower())
+    return tuple(sorted(names))
+
+
+def _colliding_label_mapping(mappings: Mapping[str, str]) -> tuple[str, list[str]] | None:
+    """The backend label two scope fields share, with the fields, or None.
+
+    A collision is not a preference, it is a lost constraint: the
+    selector is a mapping from label to value, so mapping `namespace` and
+    `workload` both to `app` leaves one matcher and the search silently
+    covers every namespace.
+    """
+    by_label: dict[str, list[str]] = {}
+    for scope_field, name in mappings.items():
+        by_label.setdefault(name, []).append(scope_field)
+    for name, fields in sorted(by_label.items()):
+        if len(fields) > 1:
+            return name, sorted(fields)
+    return None
+
+
 def _parse_observability_backend(
     value: Any, label: str
 ) -> tuple[ObservabilityBackend | None, list[str]]:
@@ -495,6 +564,16 @@ def _parse_observability_backend(
         return None, warnings
     url = _observability_url(value.get("url"), label, warnings)
     rejected = _observability_rejections(value, label, warnings)
+    mappings = _observability_label_mappings(value.get("label_mappings"), label, warnings)
+    collision = _colliding_label_mapping(mappings)
+    if collision is not None:
+        name, fields = collision
+        warnings.append(
+            f"{label}.label_mappings: {' and '.join(fields)} both map to the label"
+            f" {name!r}, which would drop one of the two constraints from every"
+            f" query — the backend is disabled"
+        )
+        rejected = True
     if url is None or rejected:
         return None, warnings
     defaults = ObservabilityBackend(url=url)
@@ -529,9 +608,8 @@ def _parse_observability_backend(
             max_concurrency=_observability_int(
                 value, "max_concurrency", defaults.max_concurrency, label, warnings
             ),
-            label_mappings=_observability_label_mappings(
-                value.get("label_mappings"), label, warnings
-            ),
+            label_mappings=mappings,
+            mask_labels=_observability_mask_labels(value.get("mask_labels"), label, warnings),
         ),
         warnings,
     )

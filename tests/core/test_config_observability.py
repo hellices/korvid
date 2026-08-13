@@ -212,3 +212,131 @@ class TestLoki:
         assert isinstance(loki, ObservabilityBackend)
         assert "cluster" not in loki.label_mappings
         assert any("cluster" in w for w in warnings)
+
+
+class TestUrlIsParsedNotPrefixMatched:
+    """Round-1 review: a prefix check accepts an authority with no host."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://",
+            "https://user:hunter2@",
+            "https:///path",
+            "http://:8080",
+        ],
+    )
+    def test_a_url_without_a_hostname_disables_the_backend(self, tmp_path: Path, url: str) -> None:
+        prometheus, _, warnings = _load(tmp_path, {"prometheus": {"url": url}})
+        assert prometheus is None
+        assert any("host" in w for w in warnings)
+
+    def test_the_warning_for_a_credential_bearing_url_does_not_echo_it(
+        self, tmp_path: Path
+    ) -> None:
+        _, _, warnings = _load(tmp_path, {"prometheus": {"url": "https://user:hunter2@"}})
+        assert not any("hunter2" in w for w in warnings)
+
+    def test_a_url_with_a_hostname_and_userinfo_is_accepted(self, tmp_path: Path) -> None:
+        """Discouraged, but the connector reports only the host."""
+        prometheus, _, _ = _load(tmp_path, {"prometheus": {"url": "https://user:pw@p.example.com"}})
+        assert isinstance(prometheus, ObservabilityBackend)
+
+
+class TestTimeoutIsFinite:
+    @pytest.mark.parametrize("value", [".inf", ".nan"])
+    def test_a_non_finite_timeout_falls_back_to_the_default(
+        self, tmp_path: Path, value: str
+    ) -> None:
+        """YAML `.inf` parses to a float and would mean "no timeout at all"."""
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "observability:\n  prometheus:\n"
+            "    url: https://p.example.com\n"
+            f"    timeout_seconds: {value}\n"
+        )
+        config = load_config(path)
+        assert config.observability_prometheus is not None
+        assert config.observability_prometheus.timeout_seconds == (
+            ObservabilityBackend.timeout_seconds
+        )
+        assert any("timeout_seconds" in w for w in config.warnings)
+
+
+class TestLabelMappingsCannotCollide:
+    def test_two_scope_fields_mapped_to_one_label_disable_the_backend(self, tmp_path: Path) -> None:
+        """The second assignment would overwrite the namespace constraint.
+
+        `{app="prod"}` then `{app="api"}` leaves one matcher, and the
+        search silently covers every namespace.
+        """
+        _, loki, warnings = _load(
+            tmp_path,
+            {
+                "loki": {
+                    "url": "https://l.example.com",
+                    "label_mappings": {"namespace": "app", "workload": "app"},
+                }
+            },
+        )
+        assert loki is None
+        assert any("app" in w for w in warnings)
+
+    def test_a_mapping_colliding_with_an_unmapped_default_is_also_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """`workload -> namespace` collides with the default namespace label."""
+        _, loki, warnings = _load(
+            tmp_path,
+            {
+                "loki": {
+                    "url": "https://l.example.com",
+                    "label_mappings": {"workload": "namespace"},
+                }
+            },
+        )
+        assert loki is None
+        assert any("namespace" in w for w in warnings)
+
+    def test_distinct_mappings_are_accepted(self, tmp_path: Path) -> None:
+        _, loki, _ = _load(
+            tmp_path,
+            {
+                "loki": {
+                    "url": "https://l.example.com",
+                    "label_mappings": {"workload": "service", "pod": "instance"},
+                }
+            },
+        )
+        assert isinstance(loki, ObservabilityBackend)
+
+
+class TestMaskLabels:
+    def test_configured_labels_are_kept_normalized(self, tmp_path: Path) -> None:
+        _, loki, _ = _load(
+            tmp_path,
+            {"loki": {"url": "https://l.example.com", "mask_labels": ["Tenant", "customer"]}},
+        )
+        assert isinstance(loki, ObservabilityBackend)
+        assert loki.mask_labels == ("customer", "tenant")
+
+    def test_nothing_configured_masks_nothing(self, tmp_path: Path) -> None:
+        _, loki, _ = _load(tmp_path, {"loki": {"url": "https://l.example.com"}})
+        assert isinstance(loki, ObservabilityBackend)
+        assert loki.mask_labels == ()
+
+    def test_a_non_list_value_is_reported_and_ignored(self, tmp_path: Path) -> None:
+        _, loki, warnings = _load(
+            tmp_path, {"loki": {"url": "https://l.example.com", "mask_labels": "tenant"}}
+        )
+        assert isinstance(loki, ObservabilityBackend)
+        assert loki.mask_labels == ()
+        assert any("mask_labels" in w for w in warnings)
+
+    def test_a_non_string_entry_is_dropped_with_a_warning(self, tmp_path: Path) -> None:
+        _, loki, warnings = _load(
+            tmp_path, {"loki": {"url": "https://l.example.com", "mask_labels": ["tenant", 7]}}
+        )
+        assert isinstance(loki, ObservabilityBackend)
+        assert loki.mask_labels == ("tenant",)
+        assert any("mask_labels" in w for w in warnings)

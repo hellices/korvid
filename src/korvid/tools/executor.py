@@ -440,6 +440,23 @@ def _query_scope(args: Mapping[str, Any]) -> QueryScope:
     )
 
 
+def _projected(text: str, path: str) -> ToolOutcome:
+    """An external read's rendered result, masked before it leaves here.
+
+    The projection has to happen at this boundary rather than on the way
+    to a provider: an MCP host receives this `ToolOutcome` directly, and a
+    centralized log store aggregates whatever every workload ever printed
+    — including the credentials some of them print. Only credential-shaped
+    text is masked, so the labels, timestamps and provenance header a
+    citation rests on survive intact.
+
+    The records travel with the outcome because this pass is the only one
+    that sees the text at full length (issue #193, PR #280 review).
+    """
+    records: list[RedactionRecord] = []
+    return ToolOutcome(text=redact_text(text, path, records), redactions=tuple(records))
+
+
 def _connector_failure(exc: ConnectorError) -> ToolOutcome:
     """A connector failure as a marked error result.
 
@@ -1141,7 +1158,7 @@ class ToolExecutor(RecordedExecution):
             result = await self._metrics.query(signal=signal, scope=scope, window_minutes=window)
         except ConnectorError as exc:
             return _connector_failure(exc)
-        return ToolOutcome(text=render_metrics(result))
+        return _projected(render_metrics(result), "metrics")
 
     async def _search_logs(self, args: dict[str, Any]) -> ToolOutcome:
         """Centralized log lines from the configured logs backend."""
@@ -1158,7 +1175,7 @@ class ToolExecutor(RecordedExecution):
             )
         except ConnectorError as exc:
             return _connector_failure(exc)
-        return ToolOutcome(text=render_logs(result))
+        return _projected(render_logs(result), "logs")
 
     async def _get_events(self, args: dict[str, Any]) -> ToolOutcome:
         kind = str(args["kind"]).strip().lower()

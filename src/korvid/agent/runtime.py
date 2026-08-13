@@ -549,10 +549,12 @@ class AgentRuntime:
             error=errored,
             result_format=self._result_formats.get(name),
         )
-        # Only cluster reads are evidence. A successful mutation or a
-        # screen action also reports error=False, so recording every
-        # non-error result would let "I deleted the pod" be cited as
-        # support for a claim about what the cluster is (#192 review).
+        # Only reads are evidence — cluster reads and the external reads
+        # of #193, both listed in `_EVIDENCE_EFFECTS`. A successful
+        # mutation or a screen action also reports error=False, so
+        # recording every non-error result would let "I deleted the pod"
+        # be cited as support for a claim about what the cluster is
+        # (#192 review).
         #
         # Recorded after sanitisation so a citation's excerpt matches what
         # the model was actually shown - evidence the user cannot find in

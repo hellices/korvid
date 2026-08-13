@@ -170,9 +170,7 @@ def _build_observability(config: KorvidConfig) -> ObservabilityWiring:
     if _missing_extra_packages(_OBSERVABILITY_EXTRA_ROOTS):
         raise SystemExit(f"korvid: {_OBSERVABILITY_INSTALL_HINT}")
 
-    from korvid.obs.connector import QueryLimits
-    from korvid.obs.loki import LokiConnector
-    from korvid.obs.prometheus import PrometheusConnector
+    from korvid.obs.connector import ConnectorError, QueryLimits
     from korvid.providers import net
 
     def limits(backend: ObservabilityBackend) -> QueryLimits:
@@ -194,6 +192,25 @@ def _build_observability(config: KorvidConfig) -> ObservabilityWiring:
         except ValueError as exc:
             raise SystemExit(f"korvid: {exc}") from exc
 
+    try:
+        return _connectors(prometheus, loki, limits, client)
+    except ConnectorError as exc:
+        # A refusal the config parser did not reach (a connector-level
+        # invariant, or a directly-constructed backend): actionable text
+        # rather than a traceback at startup.
+        raise SystemExit(f"korvid: observability configuration is unusable: {exc}") from exc
+
+
+def _connectors(
+    prometheus: ObservabilityBackend | None,
+    loki: ObservabilityBackend | None,
+    limits: Callable[[ObservabilityBackend], Any],
+    client: Callable[[ObservabilityBackend], Any],
+) -> ObservabilityWiring:
+    """Construct whichever connectors are configured (see `_build_observability`)."""
+    from korvid.obs.loki import LokiConnector
+    from korvid.obs.prometheus import PrometheusConnector
+
     metrics = (
         PrometheusConnector(
             prometheus.url,
@@ -201,6 +218,7 @@ def _build_observability(config: KorvidConfig) -> ObservabilityWiring:
             limits=limits(prometheus),
             token_env=prometheus.token_env,
             token_file=prometheus.token_file,
+            mask_labels=frozenset(prometheus.mask_labels),
         )
         if prometheus is not None
         else None
@@ -214,6 +232,7 @@ def _build_observability(config: KorvidConfig) -> ObservabilityWiring:
             token_file=loki.token_file,
             tenant=loki.tenant,
             label_mappings=loki.label_mappings,
+            mask_labels=frozenset(loki.mask_labels),
         )
         if loki is not None
         else None

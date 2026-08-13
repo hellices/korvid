@@ -21,6 +21,7 @@ from korvid.obs.connector import (
     QueryLimits,
     QueryScope,
     Series,
+    masked_labels,
     resolve_window,
 )
 from korvid.obs.http import HttpBackend
@@ -59,7 +60,9 @@ class PrometheusConnector(MetricsConnector):
         limits: QueryLimits,
         token_env: str | None = None,
         token_file: str | None = None,
+        mask_labels: frozenset[str] = frozenset(),
     ) -> None:
+        self._mask = frozenset(name.lower() for name in mask_labels)
         self._http = HttpBackend(
             url,
             source=SOURCE,
@@ -113,7 +116,7 @@ class PrometheusConnector(MetricsConnector):
         cap = self._http.limits.max_series
         parsed: list[Series] = []
         for row in rows:
-            entry = _series(row)
+            entry = _series(row, self._mask)
             if entry is None:
                 continue
             if len(parsed) == cap:
@@ -122,7 +125,7 @@ class PrometheusConnector(MetricsConnector):
         return tuple(parsed), False
 
 
-def _series(row: Any) -> Series | None:
+def _series(row: Any, mask: frozenset[str]) -> Series | None:
     """One vector sample, or None when it is not one korvid can report.
 
     A single unparsable sample drops out rather than failing the query:
@@ -142,4 +145,4 @@ def _series(row: Any) -> Series | None:
         return None
     metric = row.get("metric")
     labels = {str(k): str(v) for k, v in metric.items()} if isinstance(metric, Mapping) else {}
-    return Series(labels=labels, value=value)
+    return Series(labels=masked_labels(labels, mask), value=value)

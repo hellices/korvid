@@ -102,9 +102,9 @@ class TestResolveLimit:
 
 class TestConnectorError:
     def test_the_kind_is_carried_separately_from_the_message(self) -> None:
-        error = ConnectorError("auth", "credentials rejected by prom.example.com")
+        error = ConnectorError("auth", "credentials rejected by the endpoint")
         assert error.kind == "auth"
-        assert "prom.example.com" in str(error)
+        assert str(error) == "credentials rejected by the endpoint"
 
     def test_an_unknown_kind_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="unknown connector error kind"):
@@ -128,7 +128,7 @@ class TestRenderMetrics:
     def test_the_header_states_source_scope_window_and_query(self) -> None:
         text = render_metrics(self._result())
         assert "source: prometheus" in text
-        assert "endpoint: prom.example.com" in text
+        assert "endpoint: prom.example.com" in text.splitlines()
         assert "namespace=prod" in text
         assert "workload=api" in text
         assert "window: 30m" in text
@@ -176,7 +176,7 @@ class TestRenderLogs:
     def test_the_header_states_source_scope_window_and_query(self) -> None:
         text = render_logs(self._result())
         assert "source: loki" in text
-        assert "endpoint: loki.example.com" in text
+        assert "endpoint: loki.example.com" in text.splitlines()
         assert "namespace=prod" in text
         assert "window: 15m" in text
         assert '{namespace="prod"} |= "boom"' in text

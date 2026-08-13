@@ -28,10 +28,18 @@ def endpoint_host(url: str) -> str:
 
     A userinfo component (`https://user:pass@host`) is dropped with the
     rest of the authority, so a URL someone pasted with a password in it
-    cannot travel into a tool result.
+    cannot travel into a tool result. The fallback for an unparsable URL
+    drops anything before an `@` for the same reason - config rejects
+    hostname-less URLs, so this is belt to that braces.
     """
     host = urlsplit(url).hostname
-    return host or url
+    return host or url.rsplit("@", 1)[-1]
+
+
+def _userinfo(url: str) -> str:
+    """The `user:pass` part of `url`, or "" when there is none."""
+    authority = urlsplit(url).netloc
+    return authority.rsplit("@", 1)[0] if "@" in authority else ""
 
 
 class HttpBackend:
@@ -57,6 +65,14 @@ class HttpBackend:
         self._token_file = token_file
         self._extra_headers = dict(headers or {})
         self._gate = asyncio.Semaphore(limits.max_concurrency)
+        #: Credential material in the configured URL. Transport errors
+        #: quote the request URL, so it has to be scrubbed out of anything
+        #: that becomes a tool result.
+        self._userinfo = _userinfo(url)
+
+    def _scrubbed(self, text: str) -> str:
+        """`text` with any URL credential replaced, for a message that ships."""
+        return text.replace(self._userinfo, "***") if self._userinfo else text
 
     @property
     def max_concurrency(self) -> int:
@@ -85,9 +101,22 @@ class HttpBackend:
                 oversized body, or `backend` for anything the backend
                 itself refused or malformed.
         """
-        headers = self._headers()
-        async with self._gate:
-            body = await self._read(path, params, headers)
+        # One budget for the whole call. httpx's timeout starts when the
+        # request does, so it bounds neither the wait for a concurrency
+        # slot nor the total elapsed time of a response that trickles in
+        # just fast enough never to look idle (round-1 review).
+        try:
+            async with asyncio.timeout(self.limits.timeout_seconds):
+                headers = self._headers()
+                async with self._gate:
+                    body = await self._read(path, params, headers)
+        except TimeoutError as exc:
+            raise ConnectorError(
+                "timeout",
+                f"{self.endpoint} did not answer within"
+                f" {self.limits.timeout_seconds:g}s (including time spent waiting for a"
+                f" free request slot) — raise the timeout or narrow the window",
+            ) from exc
         try:
             return json.loads(body)
         except ValueError as exc:
@@ -115,7 +144,9 @@ class HttpBackend:
                 f" {self.limits.timeout_seconds:g}s — raise the timeout or narrow the window",
             ) from exc
         except httpx.HTTPError as exc:
-            raise ConnectorError("network", f"{self.endpoint} is unreachable: {exc}") from exc
+            raise ConnectorError(
+                "network", f"{self.endpoint} is unreachable: {self._scrubbed(str(exc))}"
+            ) from exc
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         status = response.status_code

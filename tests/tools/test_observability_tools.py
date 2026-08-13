@@ -31,6 +31,7 @@ class FakeMetrics(MetricsConnector):
         self.calls: list[dict[str, Any]] = []
         self._error = error
         self.closed = False
+        self.labels: dict[str, str] = {"pod": "api-1"}
 
     async def query(
         self, *, signal: str, scope: QueryScope, window_minutes: object = None
@@ -46,7 +47,7 @@ class FakeMetrics(MetricsConnector):
             window_minutes=30,
             query="sum(rate(x[30m]))",
             unit="cores",
-            series=(Series(labels={"pod": "api-1"}, value=0.5),),
+            series=(Series(labels=self.labels, value=0.5),),
         )
 
     async def aclose(self) -> None:
@@ -60,6 +61,7 @@ class FakeLogs(LogsConnector):
         self.calls: list[dict[str, Any]] = []
         self._error = error
         self.closed = False
+        self.line = "boom"
 
     async def search(
         self,
@@ -85,7 +87,7 @@ class FakeLogs(LogsConnector):
             scope=scope,
             window_minutes=15,
             query='{namespace="prod"}',
-            lines=(LogLine(timestamp="2026-08-14T00:00:00Z", labels={}, line="boom"),),
+            lines=(LogLine(timestamp="2026-08-14T00:00:00Z", labels={}, line=self.line),),
         )
 
     async def aclose(self) -> None:
@@ -109,7 +111,10 @@ class TestMetrics:
         assert call["signal"] == "cpu"
         assert call["scope"] == QueryScope(namespace="prod", workload="api")
         assert call["window_minutes"] == 30
-        assert "prom.example.com" in result
+        # Whole-line equality, not a substring: the endpoint field is
+        # rendered on its own line and the exact form is what a reader
+        # (and a citation) relies on.
+        assert "endpoint: prom.example.com" in result.splitlines()
 
     async def test_the_rendered_result_reports_its_bounds(self) -> None:
         result = await _executor(metrics=FakeMetrics()).execute(
@@ -222,3 +227,50 @@ class TestIndependence:
             "query_metrics", {"signal": "cpu", "namespace": "prod"}
         )
         assert result.startswith("ERROR:")
+
+
+class TestResultProjection:
+    """Issue #193: results are projected before they leave the boundary.
+
+    The embedded agent redacts on the way to a provider, but MCP receives
+    this `ToolOutcome` directly, so the pass has to happen here.
+    """
+
+    async def test_a_credential_shaped_log_line_is_masked(self) -> None:
+        connector = FakeLogs()
+        connector.line = "starting with api_key=AKIAIOSFODNN7EXAMPLE and going on"
+        result = await _executor(logs=connector).execute("search_logs", {"namespace": "prod"})
+        assert "AKIAIOSFODNN7EXAMPLE" not in result
+
+    async def test_the_masking_is_recorded_so_the_user_can_see_it_happened(self) -> None:
+        connector = FakeLogs()
+        connector.line = "token=ghp_0123456789abcdefghijklmnopqrstuvwxyz"
+        outcome = await _executor(logs=connector).execute_recorded(
+            "search_logs", {"namespace": "prod"}
+        )
+        assert outcome.redactions
+
+    async def test_a_credential_shaped_metric_label_is_masked(self) -> None:
+        connector = FakeMetrics()
+        connector.labels = {"pod": "api-1", "api_key": "AKIAIOSFODNN7EXAMPLE"}
+        result = await _executor(metrics=connector).execute(
+            "query_metrics", {"signal": "cpu", "namespace": "prod"}
+        )
+        assert "AKIAIOSFODNN7EXAMPLE" not in result
+
+    async def test_an_ordinary_log_line_survives_intact(self) -> None:
+        """Masking that ate the evidence would be worse than none."""
+        connector = FakeLogs()
+        connector.line = "OOMKilled: container api exceeded its memory limit"
+        result = await _executor(logs=connector).execute("search_logs", {"namespace": "prod"})
+        assert "OOMKilled: container api exceeded its memory limit" in result
+
+    async def test_the_provenance_header_survives_masking(self) -> None:
+        """A citation needs the endpoint, window and truncation status."""
+        connector = FakeLogs()
+        connector.line = "password=hunter2"
+        result = await _executor(logs=connector).execute("search_logs", {"namespace": "prod"})
+        lines = result.splitlines()
+        assert "endpoint: loki.example.com" in lines
+        assert "truncated: no" in lines
+        assert "hunter2" not in result

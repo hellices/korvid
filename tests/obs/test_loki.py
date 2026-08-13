@@ -227,3 +227,69 @@ class TestErrors:
         connector = LokiConnector("https://loki.example.com", client=client, limits=QueryLimits())
         await connector.aclose()
         assert client.is_closed
+
+
+class TestRoundOneReviewFindings:
+    async def test_colliding_label_mappings_are_refused_at_construction(self) -> None:
+        """Config rejects this; a directly-built connector must not slip through.
+
+        Two scope fields on one label leaves a single matcher, so the
+        namespace constraint disappears and the search covers the cluster.
+        """
+        with pytest.raises(ConnectorError, match="app") as caught:
+            _connector(
+                _ok(_streams()),
+                label_mappings={"namespace": "app", "pod": "pod", "workload": "app"},
+            )
+        assert caught.value.kind == "config"
+
+    async def test_an_out_of_range_timestamp_is_skipped_not_fatal(self) -> None:
+        """A syntactically valid integer can still be outside datetime's range."""
+        payload = {
+            "status": "success",
+            "data": {
+                "resultType": "streams",
+                "result": [
+                    {
+                        "stream": {"pod": "api-1"},
+                        "values": [[str(10**30), "hostile"], [str(NS), "ok"]],
+                    }
+                ],
+            },
+        }
+        connector, _ = _connector(_ok(payload))
+        result = await connector.search(scope=SCOPE)
+        assert [line.line for line in result.lines] == ["ok"]
+
+    async def test_a_full_raw_page_is_truncated_even_when_an_entry_is_unusable(self) -> None:
+        """Loki applies `limit` to raw entries, so a dropped one still means more exist."""
+        payload = {
+            "status": "success",
+            "data": {
+                "resultType": "streams",
+                "result": [
+                    {
+                        "stream": {"pod": "api-1"},
+                        "values": [["nonsense", "dropped"], [str(NS), "a"], [str(NS + 1), "b"]],
+                    }
+                ],
+            },
+        }
+        connector, _ = _connector(_ok(payload), limits=QueryLimits(max_lines=3))
+        result = await connector.search(scope=SCOPE)
+        assert len(result.lines) == 2
+        assert result.truncated is True
+
+    async def test_a_partial_raw_page_is_still_not_truncated(self) -> None:
+        payload = {
+            "status": "success",
+            "data": {
+                "resultType": "streams",
+                "result": [
+                    {"stream": {"pod": "api-1"}, "values": [["nonsense", "dropped"]]},
+                ],
+            },
+        }
+        connector, _ = _connector(_ok(payload), limits=QueryLimits(max_lines=3))
+        result = await connector.search(scope=SCOPE)
+        assert result.truncated is False

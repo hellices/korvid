@@ -7,12 +7,14 @@ to refuse, not the shape of an answer.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
+from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.obs.connector import ConnectorError, QueryLimits, QueryScope
 from korvid.obs.credentials import resolve_token
 from korvid.obs.http import HttpBackend, endpoint_host
@@ -220,3 +222,188 @@ class TestPrometheusParsingEdges:
         result = await connector.query(signal="cpu", scope=QueryScope(namespace="prod"))
         assert result.series[0].labels == labels
         assert result.series[0].value == pytest.approx(1.0)
+
+
+class TestTokenHygiene:
+    """Round-1 review: a token must not be able to leak through a transport error."""
+
+    def test_a_whitespace_only_environment_value_is_refused(self) -> None:
+        """It is truthy before stripping, so it would send `Bearer ` unauthenticated."""
+        with pytest.raises(ConnectorError, match="unset or empty"):
+            resolve_token(
+                token_env="TOK", token_file=None, source="loki", getenv={"TOK": "  \n"}.get
+            )
+
+    def test_a_non_utf8_token_file_is_an_actionable_config_error(self, tmp_path: Path) -> None:
+        """`UnicodeDecodeError` is a ValueError, not an OSError."""
+        path = tmp_path / "token"
+        path.write_bytes(b"\xff\xfe\x00binary")
+        with pytest.raises(ConnectorError, match="could not be read") as caught:
+            resolve_token(token_env=None, token_file=str(path), source="loki")
+        assert caught.value.kind == "config"
+
+    @pytest.mark.parametrize("value", ["a\rb", "a\nb", "a\x00b", "a\x7fb", "tok\u00e9n"])
+    def test_a_token_that_is_not_header_safe_is_refused(self, value: str) -> None:
+        """An illegal header value makes httpx raise *with the value in the message*."""
+        with pytest.raises(ConnectorError, match="not a valid HTTP header value") as caught:
+            resolve_token(
+                token_env="TOK", token_file=None, source="loki", getenv={"TOK": value}.get
+            )
+        assert caught.value.kind == "config"
+
+    def test_the_refusal_does_not_echo_the_token(self) -> None:
+        with pytest.raises(ConnectorError) as caught:
+            resolve_token(
+                token_env="TOK",
+                token_file=None,
+                source="loki",
+                getenv={"TOK": "secret\rvalue"}.get,
+            )
+        assert "secret" not in str(caught.value)
+
+
+class TestErrorsNeverEchoUserinfo:
+    async def test_a_transport_failure_message_scrubs_the_url_credential(self) -> None:
+        """httpx error text can carry the request URL, userinfo included."""
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError(
+                "failed connecting to https://user:hunter2@x.example.com", request=request
+            )
+
+        backend = HttpBackend(
+            "https://user:hunter2@x.example.com",
+            source="prometheus",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(responder)),
+            limits=QueryLimits(),
+        )
+        with pytest.raises(ConnectorError) as caught:
+            await backend.get_json("/x", {})
+        assert "hunter2" not in str(caught.value)
+        assert caught.value.kind == "network"
+
+
+class TestTheTimeoutBoundsTheWholeCall:
+    async def test_waiting_for_a_slot_counts_against_the_budget(self) -> None:
+        """Queueing behind other calls is elapsed time the caller is waiting."""
+
+        async def responder(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(5)
+            return httpx.Response(200, json={"status": "success", "data": {}})
+
+        backend = _backend(responder, timeout_seconds=0.05, max_concurrency=1)
+        with pytest.raises(ConnectorError) as caught:
+            await asyncio.gather(
+                backend.get_json("/x", {}),
+                backend.get_json("/x", {}),
+            )
+        assert caught.value.kind == "timeout"
+
+    async def test_a_trickling_response_cannot_outlast_the_budget(self) -> None:
+        """httpx read timeouts bound inactivity, not total elapsed time."""
+
+        async def trickle() -> Any:
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                yield b"x"
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=trickle())
+
+        backend = _backend(responder, timeout_seconds=0.05)
+        with pytest.raises(ConnectorError) as caught:
+            await backend.get_json("/x", {})
+        assert caught.value.kind == "timeout"
+
+
+class TestConfiguredLabelMasking:
+    """Issue #193: configured sensitive fields are masked in the projection.
+
+    Some label values are sensitive by policy rather than by shape — a
+    tenant id, a customer name, an internal hostname. The generic
+    credential-shaped pass cannot know that, so the operator names them.
+    """
+
+    async def test_a_configured_label_value_is_masked_in_a_log_result(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {
+                        "resultType": "streams",
+                        "result": [
+                            {"stream": {"pod": "api-1", "tenant": "acme"}, "values": [["1", "x"]]}
+                        ],
+                    },
+                },
+            ),
+            mask_labels=frozenset({"tenant"}),
+        )
+        result = await connector.search(scope=QueryScope(namespace="prod"))
+        assert result.lines[0].labels["tenant"] == MASK_PLACEHOLDER
+        assert result.lines[0].labels["pod"] == "api-1"
+
+    async def test_a_configured_label_value_is_masked_in_a_metric_result(self) -> None:
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "status": "success",
+                            "data": {
+                                "resultType": "vector",
+                                "result": [
+                                    {
+                                        "metric": {"pod": "api-1", "tenant": "acme"},
+                                        "value": [1, "1.0"],
+                                    }
+                                ],
+                            },
+                        },
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+            mask_labels=frozenset({"tenant"}),
+        )
+        result = await connector.query(signal="cpu", scope=QueryScope(namespace="prod"))
+        assert result.series[0].labels["tenant"] == MASK_PLACEHOLDER
+        assert result.series[0].labels["pod"] == "api-1"
+
+    async def test_masking_is_case_insensitive_on_the_label_name(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {
+                        "resultType": "streams",
+                        "result": [{"stream": {"Tenant": "acme"}, "values": [["1", "x"]]}],
+                    },
+                },
+            ),
+            mask_labels=frozenset({"tenant"}),
+        )
+        result = await connector.search(scope=QueryScope(namespace="prod"))
+        assert result.lines[0].labels["Tenant"] == MASK_PLACEHOLDER
+
+    async def test_nothing_configured_masks_nothing(self) -> None:
+        connector = _loki(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {
+                        "resultType": "streams",
+                        "result": [{"stream": {"tenant": "acme"}, "values": [["1", "x"]]}],
+                    },
+                },
+            )
+        )
+        result = await connector.search(scope=QueryScope(namespace="prod"))
+        assert result.lines[0].labels["tenant"] == "acme"

@@ -188,3 +188,14 @@ class TestMissingExtra:
         monkeypatch.setattr(main, "_missing_extra_packages", lambda roots: ["httpx"])
         wiring = _build_observability(_config())
         assert wiring.backends == frozenset()
+
+
+class TestConnectorRefusalAtStartup:
+    async def test_a_connector_config_refusal_fails_startup_actionably(self) -> None:
+        """A refusal the config parser did not catch must not be a traceback."""
+        backend = ObservabilityBackend(
+            url="https://l.example.com",
+            label_mappings={"namespace": "app", "pod": "pod", "workload": "app"},
+        )
+        with pytest.raises(SystemExit, match="app"):
+            _build_observability(_config(observability_loki=backend))

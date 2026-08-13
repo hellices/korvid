@@ -12,6 +12,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
+from korvid.core.secrets import MASK_PLACEHOLDER
+
 #: Failure classes a caller can act on differently. Kept distinct because
 #: "the endpoint is unreachable" and "your token cannot read that
 #: namespace" need different responses from the person reading them.
@@ -191,6 +193,21 @@ def resolve_limit(value: object, *, maximum: int, label: str) -> int:
             "limit", f"{label} of {value} exceeds the configured maximum of {maximum}"
         )
     return value
+
+
+def masked_labels(labels: Mapping[str, str], mask: frozenset[str]) -> dict[str, str]:
+    """`labels` with every configured name's value replaced.
+
+    Applied while the result is built, so the value never reaches the
+    result object at all - a projection rather than a display filter. The
+    name is matched case-insensitively because a label's capitalisation is
+    the log shipper's choice, not the operator's.
+    """
+    if not mask:
+        return dict(labels)
+    return {
+        key: (MASK_PLACEHOLDER if key.lower() in mask else value) for key, value in labels.items()
+    }
 
 
 def _labels(labels: Mapping[str, str]) -> str:

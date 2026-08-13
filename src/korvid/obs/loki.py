@@ -22,6 +22,7 @@ from korvid.obs.connector import (
     LogsConnector,
     QueryLimits,
     QueryScope,
+    masked_labels,
     resolve_limit,
     resolve_window,
 )
@@ -54,7 +55,9 @@ class LokiConnector(LogsConnector):
         token_file: str | None = None,
         tenant: str | None = None,
         label_mappings: Mapping[str, str] | None = None,
+        mask_labels: frozenset[str] = frozenset(),
     ) -> None:
+        self._mask = frozenset(name.lower() for name in mask_labels)
         self._http = HttpBackend(
             url,
             source=SOURCE,
@@ -64,7 +67,7 @@ class LokiConnector(LogsConnector):
             token_file=token_file,
             headers={"x-scope-orgid": tenant} if tenant else None,
         )
-        self._labels = dict(label_mappings or DEFAULT_LABEL_MAPPINGS)
+        self._labels = _validated_mappings(label_mappings)
 
     @property
     def max_concurrency(self) -> int:
@@ -129,43 +132,86 @@ class LokiConnector(LogsConnector):
                 "backend", f"{self._http.endpoint} returned an unexpected result shape"
             )
         collected: list[tuple[int, LogLine]] = []
+        raw_entries = 0
         for stream in streams:
-            collected.extend(_stream_lines(stream))
+            entries, parsed = _stream_lines(stream, self._mask)
+            raw_entries += entries
+            collected.extend(parsed)
+        # Truncation is judged on the *raw* page, not on what parsed:
+        # Loki applies `limit` before korvid drops anything, so a full page
+        # means later lines were omitted even if one entry was unusable.
+        truncated = raw_entries >= line_limit
         # Sorted then cut from the *newest* end: `direction=backward` asked
         # for the most recent page, so dropping the oldest overflow keeps
         # the lines the caller asked about.
         collected.sort(key=lambda item: item[0])
-        truncated = len(collected) >= line_limit
-        kept = collected[-line_limit:] if truncated else collected
+        kept = collected[-line_limit:] if len(collected) > line_limit else collected
         return tuple(line for _, line in kept), truncated
 
 
-def _stream_lines(stream: Any) -> list[tuple[int, LogLine]]:
+def _validated_mappings(label_mappings: Mapping[str, str] | None) -> dict[str, str]:
+    """The scope-to-label mapping, or a refusal for a collision.
+
+    Two scope fields on one backend label is not a preference, it is a
+    lost constraint: the selector is a mapping from label to value, so
+    the second assignment overwrites the first and the query silently
+    covers everything the dropped matcher was excluding.
+    """
+    mappings = dict(label_mappings or DEFAULT_LABEL_MAPPINGS)
+    by_label: dict[str, list[str]] = {}
+    for scope_field, name in mappings.items():
+        by_label.setdefault(name, []).append(scope_field)
+    for name, fields in sorted(by_label.items()):
+        if len(fields) > 1:
+            raise ConnectorError(
+                "config",
+                f"loki: {' and '.join(sorted(fields))} both map to the label {name!r},"
+                f" which would drop one of the two constraints from every query",
+            )
+    return mappings
+
+
+def _stream_lines(stream: Any, mask: frozenset[str]) -> tuple[int, list[tuple[int, LogLine]]]:
+    """(`raw entry count`, parsed lines) for one stream.
+
+    The raw count is returned separately because it, not the parsed
+    count, is what the backend applied `limit` to.
+    """
     if not isinstance(stream, Mapping):
-        return []
+        return 0, []
     raw_labels = stream.get("stream")
-    labels = (
-        {str(k): str(v) for k, v in raw_labels.items()} if isinstance(raw_labels, Mapping) else {}
+    labels = masked_labels(
+        {str(k): str(v) for k, v in raw_labels.items()} if isinstance(raw_labels, Mapping) else {},
+        mask,
     )
     values = stream.get("values")
     if not isinstance(values, list):
-        return []
+        return 0, []
     lines: list[tuple[int, LogLine]] = []
     for entry in values:
         if not isinstance(entry, list) or len(entry) != 2:
             continue
-        try:
-            nanos = int(entry[0])
-        except (TypeError, ValueError):
-            continue
         text = entry[1]
         if not isinstance(text, str):
             continue
-        lines.append((nanos, LogLine(timestamp=_iso(nanos), labels=labels, line=text)))
-    return lines
+        try:
+            nanos = int(entry[0])
+            timestamp = _iso(nanos)
+        except (TypeError, ValueError, OverflowError, OSError):
+            # A syntactically valid integer can still be outside the range
+            # `datetime` can represent; one hostile timestamp must drop out
+            # like any other unusable entry, not end the whole search.
+            continue
+        lines.append((nanos, LogLine(timestamp=timestamp, labels=labels, line=text)))
+    return len(values), lines
 
 
 def _iso(nanos: int) -> str:
-    """Nanosecond epoch as readable UTC, to the millisecond."""
+    """Nanosecond epoch as readable UTC, to the millisecond.
+
+    Raises:
+        OverflowError, OSError, ValueError: for a value outside the range
+            `datetime` can represent. The caller skips the entry.
+    """
     moment = datetime.fromtimestamp(nanos / 1_000_000_000, tz=UTC)
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
