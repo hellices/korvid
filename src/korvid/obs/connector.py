@@ -231,9 +231,13 @@ def mask_in(text: str, secrets: Iterable[str]) -> str:
     the echoed scope and in the rendered query (PR #280 review). Both are
     korvid's own text, so replacing it here is exact rather than a guess.
     """
-    for secret in secrets:
-        if secret:
-            text = text.replace(secret, MASK_PLACEHOLDER)
+    # Longest first, deduplicated: replacing in the order given lets a
+    # short secret consume the front of a longer one and leave the rest
+    # readable — `("a", "abc")` turns `abc` into `<mask>bc` (PR #280
+    # review). Length order makes the result independent of the order the
+    # caller happened to assemble them in.
+    for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
+        text = text.replace(secret, MASK_PLACEHOLDER)
     return text
 
 

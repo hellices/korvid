@@ -17,7 +17,8 @@ from tests.obs import skeleton
 
 SCOPE = QueryScope(namespace="prod", workload="api")
 
-#: Nanosecond epoch for 2026-08-14T00:00:00Z.
+#: Nanosecond epoch for 2026-08-06T07:06:40Z. Any fixed instant does; the
+#: tests assert on ordering and formatting, not on the date itself.
 NS = 1786_000_000_000_000_000
 
 

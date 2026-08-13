@@ -854,8 +854,10 @@ TOOL_DEFS: list[ToolDef] = [
                         "limit": {
                             "type": "integer",
                             "description": (
-                                "Maximum number of lines, newest first. Capped by "
-                                "configuration; a larger value is refused."
+                                "Maximum number of lines. The most recent matching "
+                                "lines are selected, then returned oldest first so the "
+                                "excerpt reads forwards. Capped by configuration; a "
+                                "larger value is refused."
                             ),
                         },
                     },

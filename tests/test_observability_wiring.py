@@ -199,3 +199,64 @@ class TestConnectorRefusalAtStartup:
         )
         with pytest.raises(SystemExit, match="app"):
             _build_observability(_config(observability_loki=backend))
+
+
+class TestNoClientLeaksOnARefusal:
+    async def test_a_loki_refusal_does_not_leave_a_metrics_client_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Teardown never sees a wiring that was not returned, so nothing may be allocated.
+
+        The connector validates in its constructor, but the client is
+        built while evaluating the argument list — so a refusal used to
+        strand every client created before it.
+        """
+        import httpx
+
+        import korvid.providers.net as net
+
+        made: list[httpx.AsyncClient] = []
+        original = net.make_client
+
+        def spy(ca_bundle: str | None, timeout: Any) -> httpx.AsyncClient:
+            client = original(ca_bundle, timeout)
+            made.append(client)
+            return client
+
+        monkeypatch.setattr(net, "make_client", spy)
+        with pytest.raises(SystemExit, match="app"):
+            _build_observability(
+                _config(
+                    observability_prometheus=ObservabilityBackend(url="https://p.example.com"),
+                    observability_loki=ObservabilityBackend(
+                        url="https://l.example.com",
+                        label_mappings={"namespace": "app", "pod": "pod", "workload": "app"},
+                    ),
+                )
+            )
+        assert made == [], "a client was allocated before the configuration was accepted"
+
+    async def test_a_bad_url_does_not_leave_a_client_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import httpx
+
+        import korvid.providers.net as net
+
+        made: list[httpx.AsyncClient] = []
+        original = net.make_client
+
+        def spy(ca_bundle: str | None, timeout: Any) -> httpx.AsyncClient:
+            client = original(ca_bundle, timeout)
+            made.append(client)
+            return client
+
+        monkeypatch.setattr(net, "make_client", spy)
+        with pytest.raises(SystemExit):
+            _build_observability(
+                _config(
+                    observability_prometheus=ObservabilityBackend(url="https://p.example.com"),
+                    observability_loki=ObservabilityBackend(url="ftp://l.example.com"),
+                )
+            )
+        assert made == []

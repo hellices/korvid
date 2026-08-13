@@ -60,8 +60,7 @@ class LokiConnector(LogsConnector):
         mask_labels: frozenset[str] = frozenset(),
     ) -> None:
         self._mask = frozenset(name.lower() for name in mask_labels)
-        if tenant:
-            require_header_safe(tenant, "the configured tenant", SOURCE)
+        validate_options(tenant=tenant, label_mappings=label_mappings)
         self._http = HttpBackend(
             url,
             source=SOURCE,
@@ -176,6 +175,25 @@ def _masked_scope(scope: QueryScope, secrets: tuple[str, ...]) -> QueryScope:
         workload=mask_in(scope.workload, secrets) if scope.workload else scope.workload,
         pod=mask_in(scope.pod, secrets) if scope.pod else scope.pod,
     )
+
+
+def validate_options(
+    *, tenant: str | None = None, label_mappings: Mapping[str, str] | None = None
+) -> None:
+    """Check everything a Loki connector refuses, without building one.
+
+    The composition root calls this *before* allocating an HTTP client:
+    the constructor validates too, but its arguments — the client among
+    them — are evaluated first, so a refusal there would strand a client
+    nobody holds a reference to (PR #280 review).
+
+    Raises:
+        ConnectorError: `config` for an unsafe tenant header or a
+            colliding label mapping.
+    """
+    if tenant:
+        require_header_safe(tenant, "the configured tenant", SOURCE)
+    _validated_mappings(label_mappings)
 
 
 def _validated_mappings(label_mappings: Mapping[str, str] | None) -> dict[str, str]:

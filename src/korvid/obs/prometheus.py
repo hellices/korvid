@@ -136,7 +136,6 @@ class PrometheusConnector(MetricsConnector):
         observed_at: str | None = None
         truncated = False
         for row in rows:
-            observed_at = observed_at or _observed_at(row)
             entry = _series(row, self._mask, answer)
             if entry is None:
                 continue
@@ -144,6 +143,10 @@ class PrometheusConnector(MetricsConnector):
                 truncated = True
                 break
             parsed.append(entry)
+            # Only from a row that survived: dating the result by a row
+            # that was discarded would claim the kept series was observed
+            # at a time nothing reported (PR #280 review).
+            observed_at = observed_at or _observed_at(row)
         return tuple(parsed), truncated, observed_at
 
 

@@ -193,12 +193,35 @@ def _build_observability(config: KorvidConfig) -> ObservabilityWiring:
             raise SystemExit(f"korvid: {exc}") from exc
 
     try:
+        _validate_observability(prometheus, loki)
         return _connectors(prometheus, loki, limits, client)
     except ConnectorError as exc:
         # A refusal the config parser did not reach (a connector-level
         # invariant, or a directly-constructed backend): actionable text
         # rather than a traceback at startup.
         raise SystemExit(f"korvid: observability configuration is unusable: {exc}") from exc
+
+
+def _validate_observability(
+    prometheus: ObservabilityBackend | None, loki: ObservabilityBackend | None
+) -> None:
+    """Refuse an unusable configuration before any client is allocated.
+
+    The connectors validate in their constructors, but their arguments —
+    the HTTP client among them — are evaluated first, so a refusal there
+    would strand a client nobody can close.
+
+    Raises:
+        ConnectorError: `config` for anything a connector would refuse.
+    """
+    from korvid.obs import loki as loki_module
+    from korvid.obs.http import validate_endpoint
+
+    if prometheus is not None:
+        validate_endpoint(prometheus.url, "prometheus")
+    if loki is not None:
+        validate_endpoint(loki.url, "loki")
+        loki_module.validate_options(tenant=loki.tenant, label_mappings=loki.label_mappings)
 
 
 def _connectors(

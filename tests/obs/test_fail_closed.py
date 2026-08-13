@@ -990,3 +990,60 @@ class TestRoundNineFindings:
         with pytest.raises(ConnectorError) as caught:
             HttpBackend(url, source="prometheus", client=httpx.AsyncClient(), limits=QueryLimits())
         assert caught.value.kind == "config"
+
+
+class TestRoundTenFindings:
+    def test_a_short_secret_cannot_leave_a_longer_one_partly_visible(self) -> None:
+        """Replacing in input order lets `a` chew the front off `abc`."""
+        from korvid.obs.connector import mask_in
+
+        masked = mask_in("abc", ("a", "abc"))
+        assert "bc" not in masked
+
+    def test_the_longest_secret_wins_regardless_of_order(self) -> None:
+        from korvid.obs.connector import mask_in
+
+        assert mask_in("abc", ("abc", "a")) == mask_in("abc", ("a", "abc"))
+
+    def test_a_repeated_secret_is_handled_once(self) -> None:
+        from korvid.obs.connector import mask_in
+
+        assert "secret" not in mask_in("secret", ("secret", "secret"))
+
+    async def test_a_deeply_nested_body_is_a_backend_error(self) -> None:
+        """`RecursionError` is not a `ValueError`, so it escaped the contract."""
+        body = b"[" * 200_000 + b"]" * 200_000
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        with pytest.raises(ConnectorError) as caught:
+            await backend.get_json("/x", {})
+        assert caught.value.kind in ("backend", "limit")
+
+    async def test_the_observation_time_comes_from_a_row_that_was_kept(self) -> None:
+        """Otherwise the result dates its series by a row it discarded."""
+        from korvid.obs.prometheus import PrometheusConnector
+
+        connector = PrometheusConnector(
+            "https://p.example.com",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "status": "success",
+                            "data": {
+                                "resultType": "vector",
+                                "result": [
+                                    {"metric": {"pod": "bad"}, "value": [1000000000, "NaN"]},
+                                    {"metric": {"pod": "good"}, "value": [1786000000, "1.0"]},
+                                ],
+                            },
+                        },
+                    )
+                )
+            ),
+            limits=QueryLimits(),
+        )
+        result = await connector.query(signal="cpu", scope=QueryScope(namespace="prod"))
+        assert [s.labels["pod"] for s in result.series] == ["good"]
+        assert result.observed_at is not None
+        assert not result.observed_at.startswith("2001")

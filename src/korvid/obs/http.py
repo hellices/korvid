@@ -65,6 +65,25 @@ class Answer:
         return {self.scrub(key): self.scrub(value) for key, value in labels.items()}
 
 
+def validate_endpoint(url: str, source: str) -> None:
+    """Check everything `HttpBackend` refuses about a URL, without building one.
+
+    Called by the composition root before an HTTP client is allocated —
+    see `korvid.obs.loki.validate_options` for why.
+
+    Raises:
+        ConnectorError: `config` for an unusable origin or an inline
+            credential in the URL.
+    """
+    _require_origin(url, source)
+    if _userinfo(url):
+        raise ConnectorError(
+            "config",
+            f"{source}: the configured url must not carry a username or password"
+            f" — use `token_env` (environment variable name) or `token_file` (path)",
+        )
+
+
 def _require_origin(url: str, source: str) -> None:
     """Refuse a base URL that is not a usable origin.
 
@@ -120,18 +139,10 @@ class HttpBackend:
         headers: Mapping[str, str] | None = None,
     ) -> None:
         self.source = source
-        _require_origin(url, source)
-        if _userinfo(url):
-            # httpx turns `https://user:pw@host` into a Basic
-            # `Authorization` header, so this is an inline credential
-            # wearing a URL's clothes. Config rejects it; refused here too
-            # because a connector can be built directly, and the message
-            # names the supported settings rather than the value.
-            raise ConnectorError(
-                "config",
-                f"{source}: the configured url must not carry a username or password"
-                f" — use `token_env` (environment variable name) or `token_file` (path)",
-            )
+        # httpx turns `https://user:pw@host` into a Basic `Authorization`
+        # header, so an inline credential in the URL is refused here as
+        # well as in config: a connector can be built directly.
+        validate_endpoint(url, source)
         self.url = url.rstrip("/")
         self.endpoint = endpoint_host(url)
         self.limits = limits
@@ -207,6 +218,12 @@ class HttpBackend:
             ) from exc
         try:
             parsed = json.loads(body)
+        except RecursionError as exc:
+            # Not a ValueError: a deeply nested body would otherwise escape
+            # the connector's error contract as a generic tool failure.
+            raise ConnectorError(
+                "backend", f"{self.endpoint} returned a body nested too deeply to parse"
+            ) from exc
         except ValueError as exc:
             # The exception quotes the body, so *this* text is scrubbed:
             # it is a message, not a structure, and nothing downstream
