@@ -202,13 +202,16 @@ class KorvidMCPServer:
     ) -> types.CallToolResult:
         """SDK adapter for ``tools/call``.
 
-        `is_error` stays False deliberately: a refused or failed tool call
-        comes back as ``"ERROR: ..."`` text, the same contract the built-in
-        agent loop sees, so the model can read and act on the reason rather
-        than being handed a protocol-level failure.
+        Failures stay in-band: the text is the same ``"ERROR: ..."`` the
+        built-in agent loop reads, so a model can act on the reason. But
+        ``is_error`` is the spec's own signal for that case, not a
+        transport-level failure, and a host that trusts it would otherwise
+        record a refused proposal as a successful call. Flag it whenever
+        the domain result uses the ``ERROR:`` contract.
         """
         content = await self.call_tool(params.name, params.arguments, ctx=ctx)
-        return types.CallToolResult(content=list(content))
+        failed = any(item.text.startswith("ERROR:") for item in content)
+        return types.CallToolResult(content=list(content), is_error=failed)
 
     async def list_tools(self) -> list[types.Tool]:
         """MCP ``tools/list``: mirror the agent tool definitions 1:1."""

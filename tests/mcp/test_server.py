@@ -397,6 +397,7 @@ async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
             result = await session.call_tool("list_resources", {"kind": "pods"})
             assert result.content[0].type == "text"
             assert getattr(result.content[0], "text", None) == "ok"
+            assert result.is_error is False, "a successful call must not be flagged as an error"
         assert executor.calls == [("list_resources", {"kind": "pods"})]
     finally:
         server.request_shutdown()
@@ -922,6 +923,7 @@ async def test_streamable_http_proposal_roundtrip(tmp_path: Path) -> None:
             )
             assert result.content[0].type == "text"
             assert getattr(result.content[0], "text", None) == "ok"
+            assert result.is_error is False, "an accepted proposal must not be flagged as an error"
     finally:
         server.request_shutdown()
         await asyncio.wait_for(task, timeout=10)
@@ -1176,6 +1178,10 @@ async def test_a_wrong_capability_is_refused_over_the_real_transport(tmp_path: P
                 "propose_write", {**_PROPOSE_ARGS, "capability": "not-the-token"}
             )
             assert getattr(result.content[0], "text", "").startswith("ERROR:")
+            # `isError` is the spec's in-band failure signal, not a
+            # transport error: a host that trusts it would otherwise file a
+            # refused proposal as a successful call.
+            assert result.is_error is True
     finally:
         server.request_shutdown()
         await asyncio.wait_for(task, timeout=10)
