@@ -293,3 +293,21 @@ def test_the_tap_bump_stages_before_it_compares() -> None:
     )
     assert "git diff --cached --quiet" in commands, "the comparison ignores the index"
     assert "commit -am" not in commands, "`commit -a` skips the untracked formula"
+
+
+def test_the_tap_bump_can_be_rerun_after_a_partial_failure() -> None:
+    """Push and pull-request creation are two steps that can split.
+
+    If the push lands and `gh pr create` does not — a PAT without
+    `pull_requests: write` is the obvious way — a rerun branches from
+    `main` again and the push is rejected as non-fast-forward, before it
+    ever reaches the retry that was the point. The release is already
+    published by then, so there is no third chance.
+    """
+    workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
+    bump = workflow.split("      - name: Open the formula bump on the tap")[1]
+    commands = "\n".join(
+        line for line in bump.splitlines() if line.strip() and not line.strip().startswith("#")
+    )
+    assert "--force-with-lease" in commands, "a rerun cannot update the branch it already pushed"
+    assert "gh pr list" in commands, "a rerun opens a second pull request or fails on the first"

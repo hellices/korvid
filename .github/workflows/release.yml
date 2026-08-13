@@ -585,7 +585,15 @@ jobs:
           git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/hellices/homebrew-korvid.git" tap
           cd tap
-          git switch -c "$branch"
+          # Resume rather than restart. A rerun happens because something
+          # after the push failed, and branching from main again would be
+          # rejected as non-fast-forward before reaching the retry.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch --depth 1 origin "$branch"
+            git switch -c "$branch" "origin/$branch"
+          else
+            git switch -c "$branch"
+          fi
           mkdir -p Formula
           cp ../korvid.rb Formula/korvid.rb
           # Staged before comparing: `git diff` and `commit -a` both ignore
@@ -600,7 +608,15 @@ jobs:
           git -c user.name=github-actions[bot] \
               -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
               commit -m "korvid ${version}"
-          git push origin "$branch"
+          # The lease is what keeps "resume" from meaning "overwrite":
+          # a branch someone edited by hand rejects the push instead of
+          # losing the edit.
+          git push --force-with-lease origin "$branch"
+          if [ -n "$(gh pr list --repo hellices/homebrew-korvid \
+                       --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            echo "the bump is already open; the push above updated it"
+            exit 0
+          fi
           gh pr create --repo hellices/homebrew-korvid \
             --base main --head "$branch" \
             --title "korvid ${version}" \
