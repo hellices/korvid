@@ -30,6 +30,7 @@ from typing import Any
 import anyio
 import uvicorn
 from mcp import types
+from mcp.server import ServerRequestContext
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import (
@@ -44,9 +45,17 @@ from starlette.types import Receive, Scope, Send
 
 from korvid.core.audit import interprocess_lock
 from korvid.core.mcp import MCPControllerBase
-from korvid.tools.executor import PROPOSAL_TOOL_NAMES, ToolExecutor, UIBridge
+from korvid.tools.executor import (
+    PROPOSAL_TOOL_NAMES,
+    ToolExecutor,
+    ToolOutcome,
+    ToolResultBlocked,
+    UIBridge,
+    cap_result,
+)
 from korvid.tools.follow import mirror_read, read_summary
 from korvid.tools.registry import TOOLS_BY_NAME
+from korvid.tools.structured import ERROR_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +131,29 @@ def _sanitize_client_meta(value: object, *, limit: int = 120) -> str:
     return text[:limit]
 
 
+def _failed(name: str, outcome: ToolOutcome) -> bool:
+    """Whether one dispatch failed, for the MCP ``isError`` flag.
+
+    Two producers, two rules. A cluster read returns content korvid did
+    not author, so only its `error` bit can say - a pod logging
+    ``ERROR: connection refused`` succeeded. Everything else returns text
+    korvid wrote, where the ``ERROR:`` prefix *is* the failure contract:
+    the UI and proposal bridges answer with plain strings that
+    `ToolExecutor` wraps with the default ``error=False``, so a failed
+    proposal would otherwise reach the host marked successful.
+
+    Judged here rather than in the executor because that bit also drives
+    the agent's evidence ledger and provenance, where a screen action
+    reporting failure would mean something different.
+    """
+    if outcome.error:
+        return True
+    tool = TOOLS_BY_NAME.get(name)
+    if tool is None or tool.effect == "cluster_read":
+        return False
+    return outcome.text.startswith(ERROR_PREFIX)
+
+
 class KorvidMCPServer:
     """Streamable HTTP MCP server wrapping the agent tool surface.
 
@@ -177,9 +209,43 @@ class KorvidMCPServer:
         self._bound_port: int | None = None
         self._uvicorn: uvicorn.Server | None = None
         self._shutdown_requested = False
-        self._server: Server[Any, Any] = Server("korvid")
-        self._server.list_tools()(self.list_tools)  # type: ignore[no-untyped-call]  # SDK decorator factory is untyped
-        self._server.call_tool()(self.call_tool)
+        # mcp 2.x registers handlers as constructor callbacks rather than
+        # decorators, and hands each one the request context instead of
+        # exposing it as ambient state.
+        self._server: Server[Any] = Server(
+            "korvid",
+            on_list_tools=self._on_list_tools,
+            on_call_tool=self._on_call_tool,
+        )
+
+    async def _on_list_tools(
+        self,
+        ctx: ServerRequestContext[Any],
+        params: types.PaginatedRequestParams | None,
+    ) -> types.ListToolsResult:
+        """SDK adapter for ``tools/list``; the surface itself is unpaginated."""
+        return types.ListToolsResult(tools=await self.list_tools())
+
+    async def _on_call_tool(
+        self,
+        ctx: ServerRequestContext[Any],
+        params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
+        """SDK adapter for ``tools/call``.
+
+        Failures stay in-band: the text is the same ``"ERROR: ..."`` the
+        built-in agent loop reads, so a model can act on the reason. But
+        ``is_error`` is the spec's own signal for that case, not a
+        transport-level failure, and a host that trusts it would otherwise
+        record a refused proposal as a successful call.
+
+        The verdict comes from whoever produced the text, never from the
+        text: ``get_logs`` returns raw log lines, so a pod logging
+        ``ERROR: connection refused`` must not be reported as a failed
+        call. Pre-dispatch refusals have no producer and say so themselves.
+        """
+        content, failed = await self._dispatch(params.name, params.arguments, ctx)
+        return types.CallToolResult(content=list(content), is_error=failed)
 
     async def list_tools(self) -> list[types.Tool]:
         """MCP ``tools/list``: mirror the agent tool definitions 1:1."""
@@ -187,15 +253,29 @@ class KorvidMCPServer:
             types.Tool(
                 name=t["function"]["name"],
                 description=t["function"]["description"],
-                inputSchema=t["function"]["parameters"],
+                input_schema=t["function"]["parameters"],
             )
             for t in self._tools
         ]
 
     async def call_tool(
-        self, name: str, arguments: dict[str, Any] | None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None,
+        *,
+        ctx: ServerRequestContext[Any] | None = None,
     ) -> list[types.TextContent]:
-        """MCP ``tools/call``: dispatch through the shared executor.
+        """MCP ``tools/call``: the model-visible content of one dispatch."""
+        content, _ = await self._dispatch(name, arguments, ctx)
+        return content
+
+    async def _dispatch(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None,
+        ctx: ServerRequestContext[Any] | None = None,
+    ) -> tuple[list[types.TextContent], bool]:
+        """Dispatch one tool call: its content, and whether it failed.
 
         Discovery is not an authorization boundary - callers choose ``name``
         freely and the shared :class:`ToolExecutor` also knows the write
@@ -207,9 +287,8 @@ class KorvidMCPServer:
         see (same contract as the built-in agent loop).
         """
         if name not in self._tool_names:
-            return [
-                types.TextContent(type="text", text=f"ERROR: tool not available over MCP: {name}")
-            ]
+            text = f"ERROR: tool not available over MCP: {name}"
+            return [types.TextContent(type="text", text=text)], True
         # Underscore-prefixed keys are reserved for server-side injection
         # (transport identity); strip whatever the caller sent so nothing in
         # the executor ever trusts caller-controlled identity metadata.
@@ -217,16 +296,32 @@ class KorvidMCPServer:
         if name in PROPOSAL_TOOL_NAMES:
             error = self._authorize_proposal_call(args)
             if error is not None:
-                return [types.TextContent(type="text", text=error)]
-            client_name, client_version = self._client_info()
+                return [types.TextContent(type="text", text=error)], True
+            client_name, client_version = self._client_info(ctx)
             args["_session_id"] = self._session_id
             args["_client_name"] = client_name
             args["_client_version"] = client_version
-        result = await self._executor.execute(name, args)
-        self._surface_read(name, args, result)
-        return [types.TextContent(type="text", text=result)]
+        try:
+            outcome = await self._executor.execute_recorded(name, args)
+        except ToolResultBlocked as exc:
+            # `execute_recorded` raises this so the agent can stop its turn;
+            # an MCP host has no turn to stop, and this boundary must not
+            # start raising (PR #197 review). The string names the shape
+            # that failed, never the document behind it.
+            outcome = ToolOutcome(text=cap_result(f"{ERROR_PREFIX} {exc}"), error=True)
+        self._surface_read(name, args, outcome, ctx)
+        return (
+            [types.TextContent(type="text", text=outcome.text)],
+            _failed(name, outcome),
+        )
 
-    def _surface_read(self, name: str, args: dict[str, Any], result: str) -> None:
+    def _surface_read(
+        self,
+        name: str,
+        args: dict[str, Any],
+        outcome: ToolOutcome,
+        ctx: ServerRequestContext[Any] | None = None,
+    ) -> None:
         """Follow mode (issue #153): make external cluster reads visible.
 
         With follow on and a successful read, mirror it in the TUI as a
@@ -236,6 +331,10 @@ class KorvidMCPServer:
         degrade to a transient activity note so the read is still seen.
         ``ui_only`` tools already move the screen visibly; surfacing them
         again would be noise.
+
+        Success is the producer's verdict, not the prefix of the text - a
+        pod that logs ``ERROR:`` on its first line still deserves its
+        mirror.
         """
         tool = TOOLS_BY_NAME.get(name)
         if tool is None or tool.effect != "cluster_read":
@@ -245,15 +344,21 @@ class KorvidMCPServer:
             ui is not None
             and self._follow_enabled is not None
             and self._follow_enabled()
-            and not result.startswith("ERROR:")
+            and not outcome.error
         ):
-            task = asyncio.create_task(self._mirror_or_note(ui, name, args))
+            task = asyncio.create_task(self._mirror_or_note(ui, name, args, ctx))
             self._follow_tasks.add(task)
             task.add_done_callback(self._follow_tasks.discard)
             return
-        self._note_read(name, args)
+        self._note_read(name, args, ctx)
 
-    async def _mirror_or_note(self, ui: UIBridge, name: str, args: dict[str, Any]) -> None:
+    async def _mirror_or_note(
+        self,
+        ui: UIBridge,
+        name: str,
+        args: dict[str, Any],
+        ctx: ServerRequestContext[Any] | None = None,
+    ) -> None:
         """One detached mirror: on a UI refusal (e.g. `subscriptions` is not
         an alias in this cluster) or an unmapped read, degrade to the
         activity note - a successful external read must never become
@@ -261,12 +366,17 @@ class KorvidMCPServer:
         outcome = await mirror_read(ui, name, args)
         if outcome is not None and not outcome.startswith("ERROR"):
             return
-        self._note_read(name, args)
+        self._note_read(name, args, ctx)
 
-    def _note_read(self, name: str, args: dict[str, Any]) -> None:
+    def _note_read(
+        self,
+        name: str,
+        args: dict[str, Any],
+        ctx: ServerRequestContext[Any] | None = None,
+    ) -> None:
         if self._note_activity is None:
             return
-        client = self._client_info()[0] or "mcp"
+        client = self._client_info(ctx)[0] or "mcp"
         try:
             self._note_activity(f"{client}: {read_summary(name, args)}")
         except Exception:  # display-only: never fail the tool call over it
@@ -305,17 +415,19 @@ class KorvidMCPServer:
             return "ERROR: invalid or missing capability token"
         return None
 
-    def _client_info(self) -> tuple[str, str]:
+    def _client_info(self, ctx: ServerRequestContext[Any] | None = None) -> tuple[str, str]:
         """Best-effort caller identity from the MCP initialize handshake.
 
         Display metadata only — never an authorization input (any caller can
         claim any name). Stateless transport may not carry it; degrade to
         empty strings. Values are sanitized here because they cross into
         approval dialogs, the status bar and audit records."""
+        if ctx is None:
+            return "", ""
         try:
-            params = self._server.request_context.session.client_params
-            info = params.clientInfo if params is not None else None
-        except (LookupError, AttributeError):
+            params = ctx.session.client_params
+            info = params.client_info if params is not None else None
+        except AttributeError:
             return "", ""
         if info is None:
             return "", ""
@@ -353,7 +465,7 @@ class KorvidMCPServer:
     async def run(self) -> None:
         """Serve until cancelled (run as a background task in the app loop)."""
         # json_response=True: our tools are single request/response - no
-        # server->client streaming - and the SDK's SSE path (1.28.x) leaks
+        # server->client streaming - and the SDK's SSE path (1.28.x) leaked
         # its sse_stream_reader on normal completion (ResourceWarning),
         # while the JSON path cleans up its streams in a finally block.
         manager = StreamableHTTPSessionManager(

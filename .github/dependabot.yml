@@ -13,15 +13,6 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    ignore:
-      # mcp 2.0 is a breaking release: the Server type parameters, the
-      # registration surface, `request_context`, the Tool schema field name
-      # and the streamable_http_client return arity all changed. That
-      # migration touches the path the approval gate sits on, so it is
-      # tracked as #260 rather than done as a bump. Remove this entry in
-      # the same change that closes it.
-      - dependency-name: mcp
-        update-types: [version-update:semver-major]
     groups:
       # One pull request per group keeps the review loop bounded: a routine
       # dev-tool bump does not deserve the same attention as a runtime one.

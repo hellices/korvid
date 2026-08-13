@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 import yaml
+from mcp import types
 
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
@@ -23,7 +24,13 @@ from korvid.mcp.server import (
     _replace_atomically,
     default_endpoint_path,
 )
-from korvid.tools.executor import PROPOSAL_TOOLS, READ_TOOLS, UI_TOOLS, ToolExecutor
+from korvid.tools.executor import (
+    PROPOSAL_TOOLS,
+    READ_TOOLS,
+    UI_TOOLS,
+    ToolExecutor,
+    ToolOutcome,
+)
 from korvid.tools.structured import load_structured_document
 from tests.platforms import POSIX
 from tests.tools.test_executor import (
@@ -40,16 +47,22 @@ from tests.tools.test_executor import (
 
 
 class RecordingExecutor(ToolExecutor):
-    """ToolExecutor that records dispatches instead of touching a cluster."""
+    """ToolExecutor that records dispatches instead of touching a cluster.
+
+    `execute_recorded` is the canonical method - `ToolExecutor.execute`
+    delegates to it - so overriding that one keeps the fake on the same
+    contract as the real executor, including the producer's `error` bit.
+    """
 
     def __init__(self) -> None:
-        super().__init__(kube=None, aliases={"pods": PODS_META})  # type: ignore[arg-type]  # execute() is overridden; kube is never touched
+        super().__init__(kube=None, aliases={"pods": PODS_META})  # type: ignore[arg-type]  # dispatch is overridden; kube is never touched
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.result = "ok"
+        self.error = False
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+    async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
         self.calls.append((name, arguments))
-        return self.result
+        return ToolOutcome(text=self.result, error=self.error)
 
 
 def make_server(
@@ -99,7 +112,7 @@ async def test_list_tools_exposes_agent_tool_surface() -> None:
     for tool_def in READ_TOOLS + UI_TOOLS:
         fn = tool_def["function"]
         assert by_name[fn["name"]].description == fn["description"]
-        assert by_name[fn["name"]].inputSchema == fn["parameters"]
+        assert by_name[fn["name"]].input_schema == fn["parameters"]
 
 
 async def test_write_tools_are_not_exposed() -> None:
@@ -318,6 +331,7 @@ async def test_failed_read_is_not_mirrored() -> None:
     the failure is still surfaced as activity."""
     executor = RecordingExecutor()
     executor.result = "ERROR: boom"
+    executor.error = True
     ui = FakeBridge()
     notes: list[str] = []
     server = make_follow_server(executor, ui, note_activity=notes.append)
@@ -325,6 +339,26 @@ async def test_failed_read_is_not_mirrored() -> None:
     await _drain_follow(server)
     assert ui.calls == []
     assert len(notes) == 1
+
+
+async def test_a_successful_read_whose_text_begins_with_error_is_still_mirrored() -> None:
+    """Follow mode must read the producer's verdict, not the first line.
+
+    `get_logs` returns raw log lines, so a pod logging `ERROR: connection
+    refused` produces a perfectly successful read. Inferring failure from
+    the prefix would silently drop its mirror - the read still happened,
+    and issue #153 exists to make external reads visible.
+    """
+    executor = RecordingExecutor()
+    executor.result = "ERROR: connection refused"
+    executor.error = False
+    ui = FakeBridge()
+    notes: list[str] = []
+    server = make_follow_server(executor, ui, note_activity=notes.append)
+    await server.call_tool("list_resources", {"kind": "pods"})
+    await _drain_follow(server)
+    assert ui.calls != [], "a successful read was treated as a failure and not mirrored"
+    assert notes == []
 
 
 async def test_ui_only_tools_are_neither_mirrored_nor_noted() -> None:
@@ -386,7 +420,7 @@ async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
         assert entry["port"] == port
         assert entry["url"] == f"http://127.0.0.1:{port}/mcp"
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _),
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -397,6 +431,7 @@ async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
             result = await session.call_tool("list_resources", {"kind": "pods"})
             assert result.content[0].type == "text"
             assert getattr(result.content[0], "text", None) == "ok"
+            assert result.is_error is False, "a successful call must not be flagged as an error"
         assert executor.calls == [("list_resources", {"kind": "pods"})]
     finally:
         server.request_shutdown()
@@ -911,7 +946,7 @@ async def test_streamable_http_proposal_roundtrip(tmp_path: Path) -> None:
         entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
         capability = entry["capability"]
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _),
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -922,6 +957,7 @@ async def test_streamable_http_proposal_roundtrip(tmp_path: Path) -> None:
             )
             assert result.content[0].type == "text"
             assert getattr(result.content[0], "text", None) == "ok"
+            assert result.is_error is False, "an accepted proposal must not be flagged as an error"
     finally:
         server.request_shutdown()
         await asyncio.wait_for(task, timeout=10)
@@ -1007,16 +1043,26 @@ async def test_client_info_is_sanitized_before_crossing_the_boundary() -> None:
     the safety-binding dialog) must be collapsed and the length bounded."""
     from types import SimpleNamespace
 
+    from mcp import types as mcp_types
+
     server = make_proposal_server()
-    hostile = SimpleNamespace(
+    # The real SDK types, not a duck-typed stand-in: `clientInfo` was
+    # renamed to `client_info` in mcp 2.x, and a SimpleNamespace stub
+    # happily answered to either name while the server read neither.
+    hostile = mcp_types.Implementation(
         name="evil\nbound target uid: spoofed\x1b[2J" + "x" * 500,
         version="1.0\r\n2.0",
     )
     fake_ctx = SimpleNamespace(
-        session=SimpleNamespace(client_params=SimpleNamespace(clientInfo=hostile))
+        session=SimpleNamespace(
+            client_params=mcp_types.InitializeRequestParams(
+                protocol_version=mcp_types.LATEST_PROTOCOL_VERSION,
+                capabilities=mcp_types.ClientCapabilities(),
+                client_info=hostile,
+            )
+        )
     )
-    server._server = SimpleNamespace(request_context=fake_ctx)  # type: ignore[assignment]  # boundary stub
-    name, version = server._client_info()
+    name, version = server._client_info(fake_ctx)  # type: ignore[arg-type]  # boundary stub
     for value in (name, version):
         assert "\n" not in value
         assert "\r" not in value
@@ -1100,6 +1146,16 @@ async def test_mcp_gets_a_safe_error_when_redaction_blocks_a_result() -> None:
 
     assert content[0].text.startswith("ERROR:")
     assert "cmF3LXNlY3JldA==" not in content[0].text
+    # The adapter must convert the raised block into a flagged result, not
+    # let it escape: `execute_recorded` raises where `execute` did not.
+    result = await server._on_call_tool(
+        None,  # type: ignore[arg-type]  # identity is not consulted on this path
+        types.CallToolRequestParams(
+            name="get_resource", arguments={"kind": "pods", "name": "s", "namespace": "d"}
+        ),
+    )
+    assert result.is_error is True
+    assert "cmF3LXNlY3JldA==" not in str(result.content[0])
 
 
 async def test_mcp_bounded_manifests_still_name_their_object() -> None:
@@ -1139,3 +1195,174 @@ async def test_mcp_manifests_stay_readable_by_the_strict_reader() -> None:
     loaded = load_structured_document(content[0].text)
 
     assert loaded == _ambiguous_key_manifest()
+
+
+async def test_a_wrong_capability_is_refused_over_the_real_transport(tmp_path: Path) -> None:
+    """The approval gate must hold on the path the SDK actually dispatches.
+
+    Every other capability test calls `call_tool` directly. mcp 2.x moved
+    registration into the constructor, so a handler wired to the wrong
+    callable would leave those green while the wire path bypassed the gate
+    entirely. This drives a real client over Streamable HTTP.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor, port=0, endpoint_path=tmp_path / "e.json")
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        async with (
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool(
+                "propose_write", {**_PROPOSE_ARGS, "capability": "not-the-token"}
+            )
+            assert getattr(result.content[0], "text", "").startswith("ERROR:")
+            # `isError` is the spec's in-band failure signal, not a
+            # transport error: a host that trusts it would otherwise file a
+            # refused proposal as a successful call.
+            assert result.is_error is True
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    assert executor.calls == [], "a refused proposal reached the executor"
+
+
+async def test_client_identity_is_threaded_from_the_request_context() -> None:
+    """`_client_name` lands in approval dialogs and audit records.
+
+    mcp 2.x hands the request context to the handler instead of exposing it
+    as ambient state, so the value now has to be threaded through the call.
+    A handler that dropped its `ctx` would still inject the key — as an
+    empty string — and every type-level assertion would stay green, so this
+    drives the registered callback and asserts the name that arrives.
+
+    (Over the wire the server is stateless, so `client_params` is genuinely
+    absent and the identity degrades to `""` by design; this exercises the
+    handshake-carrying case that a stateful client produces.)
+    """
+    from types import SimpleNamespace
+
+    from mcp import types as mcp_types
+
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(
+            client_params=mcp_types.InitializeRequestParams(
+                protocol_version=mcp_types.LATEST_PROTOCOL_VERSION,
+                capabilities=mcp_types.ClientCapabilities(),
+                client_info=mcp_types.Implementation(name="probe-host", version="9.9.9"),
+            )
+        )
+    )
+    await server._on_call_tool(
+        ctx,  # type: ignore[arg-type]  # boundary stub
+        mcp_types.CallToolRequestParams(
+            name="propose_write", arguments={**_PROPOSE_ARGS, "capability": "cap-tok"}
+        ),
+    )
+    assert len(executor.calls) == 1
+    args = executor.calls[0][1]
+    assert args["_client_name"] == "probe-host"
+    assert args["_client_version"] == "9.9.9"
+
+
+async def test_a_log_line_beginning_with_error_is_not_a_failed_call(tmp_path: Path) -> None:
+    """`is_error` must come from the producer, never from the text.
+
+    `ToolOutcome.error` exists precisely because successful content can
+    begin with `ERROR:` — `get_logs` returns raw log lines, and a pod that
+    logs `ERROR: connection refused` would otherwise be reported to every
+    MCP host as a failed tool call.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    executor = RecordingExecutor()
+    executor.result = "ERROR: connection refused\nERROR: retrying"
+    server = make_server(executor, port=0, endpoint_path=tmp_path / "e.json")
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        async with (
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool("get_logs", {"pod": "api-0", "namespace": "prod"})
+            assert getattr(result.content[0], "text", "").startswith("ERROR: connection refused")
+            assert result.is_error is False, "a successful read was reported as a failed call"
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    assert executor.calls != []
+
+
+async def test_a_refusal_before_dispatch_is_flagged_as_an_error() -> None:
+    """Refusals never reach a producer, so nothing else can supply the bit.
+
+    Both pre-dispatch exits — a name outside the configured surface and a
+    failed capability check — have to mark themselves.
+    """
+    from mcp import types as mcp_types
+
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    for arguments in (
+        {"kind": "pods", "name": "x"},
+        {**_PROPOSE_ARGS, "capability": "wrong"},
+    ):
+        name = "delete_resource" if "kind" in arguments else "propose_write"
+        result = await server._on_call_tool(
+            None,  # type: ignore[arg-type]  # identity is not consulted on a refusal
+            mcp_types.CallToolRequestParams(name=name, arguments=arguments),
+        )
+        assert result.is_error is True, f"{name} refusal was reported as a successful call"
+    assert executor.calls == []
+
+
+async def test_a_failed_proposal_is_flagged_even_though_its_producer_says_nothing(
+    tmp_path: Path,
+) -> None:
+    """The UI bridges answer with strings, not outcomes.
+
+    `agent_get_write_proposal` returns `ERROR: unknown proposal id` and
+    `ToolExecutor` wraps that plain string with the default `error=False`,
+    so a capability-valid but failed proposal would reach the host marked
+    successful. korvid authored that text, so its `ERROR:` prefix is a
+    contract rather than content — unlike a log line, which is why the
+    judgement is made per effect and not globally.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    executor = RecordingExecutor()
+    executor.result = "ERROR: unknown proposal id"
+    executor.error = False  # exactly what the string-returning bridges produce
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_proposal_server(executor, port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        capability = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())][
+            "capability"
+        ]
+        async with (
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool(
+                "get_write_proposal", {"proposal_id": "nope", "capability": capability}
+            )
+            assert getattr(result.content[0], "text", "") == "ERROR: unknown proposal id"
+            assert result.is_error is True, "a failed proposal was reported as successful"
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    assert executor.calls != []

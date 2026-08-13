@@ -162,7 +162,7 @@ async def test_real_mcp_http_open_describe_and_follow_mirror() -> None:
         try:
             port = await asyncio.wait_for(server.wait_started(), timeout=10)
             async with (
-                streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _),
+                streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
                 ClientSession(read, write) as session,
             ):
                 await session.initialize()
