@@ -146,7 +146,7 @@ Success: no issues found in 1 source file
 
 ## Commit
 
-Commit SHA: `PENDING`
+Commit SHA: `c3d8532553e119b3abd9a1bc3e7a9c804b3990c4`
 
 Commit message:
 
@@ -164,3 +164,4 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 
 - This optimization intentionally depends on current Textual internals: `_data`, `_update_count`, `_get_row_region()`, and the idle/layout refresh triggered by `_require_update_dimensions`. The regression tests now pin that contract, but a future Textual internal change could require revisiting this batching path.
 - The provided sketch needed one surgical correction: width-growth repaint should not also call an extra manual `refresh()` because Textual already repaints during the dimension/layout pass, and forcing both creates duplicate repaint work.
+- The commit itself required `UV_FROZEN=1 UV_NO_SYNC=1` so the pre-commit `uv run mypy` hook would use the existing environment instead of attempting a fresh universal resolution that is currently unsatisfiable for the repo's open-ended `requires-python` range at Python 3.15+.
