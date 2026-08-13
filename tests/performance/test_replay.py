@@ -180,6 +180,29 @@ async def test_replay_takes_the_configured_number_of_cursor_sample_pairs() -> No
     assert report.input_latency.count == 8
 
 
+async def test_replay_rejects_input_sampling_when_churn_finishes_early() -> None:
+    """The input metric contract requires every sample to happen during active
+    churn, so a cleanly finished schedule must fail rather than pad the tail
+    with idle cursor moves."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-input-incomplete",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=1,
+        duration_seconds=1,
+        bursts=(),
+        failures=(),
+    )
+
+    with pytest.raises(
+        WaitTimeout,
+        match="input sampling incomplete: churn finished before all 3 cursor sample pairs completed",
+    ):
+        await run_replay(profile, ReplayOptions(time_scale=0, input_sample_pairs=3))
+
+
 async def test_replay_rejects_a_non_positive_input_sample_pair_count() -> None:
     """Zero pairs would report an input percentile computed from no samples;
     a negative count is a programmer error, not a "skip the probe" switch."""

@@ -253,6 +253,7 @@ class _ReplaySource:
         churn_ready: asyncio.Event,
         churn_start: asyncio.Event,
         churn_done: asyncio.Event,
+        input_sampling_done: asyncio.Event,
         failures: dict[int, FailureInjection],
     ) -> None:
         self._profile = profile
@@ -262,6 +263,7 @@ class _ReplaySource:
         self._churn_ready = churn_ready
         self._churn_start = churn_start
         self._churn_done = churn_done
+        self._input_sampling_done = input_sampling_done
         self._failures = failures
         self._generation = 0
         self._next_event_index = 0
@@ -407,6 +409,8 @@ class _ReplaySource:
             yield (event.event_type, event.summary)
             self.emitted_events += 1
             self._next_event_index = i + 1
+            if i == 0 and len(self._events) > 1:
+                await self._input_sampling_done.wait()
 
         self._churn_done.set()
         # Stay open like a real watch stream so WatchManager does not reconnect.
@@ -544,6 +548,11 @@ def validate_input_sample_pairs(options: ReplayOptions) -> None:
         raise ValueError(f"input_sample_pairs must be positive; got {options.input_sample_pairs}")
 
 
+def input_sampling_incomplete_message(pairs: int) -> str:
+    """Name the metric-contract failure when churn ends before sampling does."""
+    return f"input sampling incomplete: churn finished before all {pairs} cursor sample pairs completed"
+
+
 async def sample_cursor_input(
     pilot: Any,
     table: ResourceTable,
@@ -553,6 +562,7 @@ async def sample_cursor_input(
     now: Callable[[], float] = monotonic,
     timeout: float = 5.0,
     aborted: Callable[[], bool] = lambda: False,
+    incomplete: Callable[[], bool] = lambda: False,
 ) -> None:
     """Record *pairs* `down`/`up` cursor round trips into *recorder*.
 
@@ -562,18 +572,24 @@ async def sample_cursor_input(
     digest convergence - therefore sees the selection the run started with,
     whatever the configured count is.
 
-    *aborted* is re-asked before every single sample rather than once per
-    pair: a churn task that dies mid-pair would leave nothing updating the
-    table, and the remaining samples would each record their own timeout as
-    input latency. Stopping mid-pair can leave the cursor one row down, which
-    is why the caller's failure path must not depend on the cursor position -
-    by the time this returns early the run is already failing.
+    *aborted* and *incomplete* are re-asked before every single sample rather
+    than once per pair. A churn task that dies mid-pair would otherwise leave
+    nothing updating the table, and the remaining samples would each record
+    their own timeout as input latency. A churn run that finishes cleanly
+    before the configured sample count is satisfied would likewise dilute the
+    reported percentile with idle cursor moves, so that case fails the run by
+    name instead of publishing a partial metric. Stopping mid-pair can leave
+    the cursor one row down, which is why the caller's failure path must not
+    depend on the cursor position - by the time this returns early the run is
+    already failing.
 
     Shared by the deterministic replay and the live harness so both publish
     the same measurement over the same sample size.
     """
     for _ in range(pairs):
         for key in ("down", "up"):
+            if incomplete():
+                raise WaitTimeout(input_sampling_incomplete_message(pairs))
             if aborted():
                 return
             recorder.record_input(
@@ -618,10 +634,10 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
     The function:
     1. Creates `ResourceStore`, `BenchmarkRecorder`, and one `_ReplaySource`.
     2. Emits initial Pods as ``ADDED`` (one logical LIST + WATCH OPEN).
-    3. Waits on `churn_ready` after initial population.
-    4. Waits until the `ResourceTable` shows all objects.
-    5. Records `options.input_sample_pairs` down/up cursor input samples.
-    6. Signals the source to start scheduled-event churn.
+    3. Waits until the `ResourceTable` shows all objects.
+    4. Signals the source to start scheduled-event churn.
+    5. Waits for the first churn event to be emitted.
+    6. Records `options.input_sample_pairs` down/up cursor input samples.
     7. Awaits churn completion and the final render pass.
     8. Stops the watch manager and process sampler in `finally`.
     9. Compares the table/store digest to the source's expected state.
@@ -640,6 +656,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
     churn_ready = asyncio.Event()
     churn_start = asyncio.Event()
     churn_done = asyncio.Event()
+    input_sampling_done = asyncio.Event()
 
     source = _ReplaySource(
         profile,
@@ -649,6 +666,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
         churn_ready,
         churn_start,
         churn_done,
+        input_sampling_done,
         failures,
     )
     watch_manager = WatchManager(store, source, retry_delay=0.0)
@@ -706,7 +724,14 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                 pairs=options.input_sample_pairs,
                 timeout=options.input_ack_timeout,
                 aborted=lambda: source.terminal_failure is not None,
+                incomplete=lambda: (
+                    bool(events)
+                    and churn_done.is_set()
+                    and recorder.pending_count() == 0
+                    and source.terminal_failure is None
+                ),
             )
+            input_sampling_done.set()
 
             # Wait for all events to be emitted and all renders to complete.
             await wait_for(
@@ -727,6 +752,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                     table, cast(Iterable[PodSummary], store.get("pods", ALL_NAMESPACES))
                 )
     finally:
+        input_sampling_done.set()
         process_samples = await sampler.stop()
         await watch_manager.stop_all()
 

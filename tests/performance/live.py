@@ -207,6 +207,7 @@ class ChurnProgress:
     mutation_throttles: int = 0
     first_started_at: float | None = None
     last_completed_at: float | None = None
+    paused_seconds: float = 0.0
 
     def record_started(self, at: float) -> None:
         if self.first_started_at is None:
@@ -217,10 +218,13 @@ class ChurnProgress:
         self.completed += 1
         self.last_completed_at = at
 
+    def record_pause(self, duration: float) -> None:
+        self.paused_seconds += duration
+
     def wall_seconds(self) -> float | None:
         if self.first_started_at is None or self.last_completed_at is None:
             return None
-        return self.last_completed_at - self.first_started_at
+        return self.last_completed_at - self.first_started_at - self.paused_seconds
 
     def summary(self, *, requested_duration_seconds: int) -> ChurnSummary:
         return ChurnSummary.from_observations(
@@ -1014,6 +1018,7 @@ async def drive_live_churn(
     limits: LiveLimits,
     profile: WorkloadProfile,
     recorder: BenchmarkRecorder,
+    input_sampling_done: asyncio.Event | None = None,
 ) -> None:
     """Drive guarded churn at wall-clock time with explicit bounded concurrency.
 
@@ -1036,6 +1041,10 @@ async def drive_live_churn(
     sleep = options.async_sleep if options.async_sleep is not None else _sleep_default
     semaphore = asyncio.Semaphore(limits.churn_concurrency)
     start = now()
+    planned_events = tuple(events)
+    if input_sampling_done is None:
+        input_sampling_done = asyncio.Event()
+        input_sampling_done.set()
 
     async def _run(namespace: str, name: str, uid: str, tick: str) -> None:
         try:
@@ -1063,7 +1072,7 @@ async def drive_live_churn(
             # burst-drain budget cannot be evaluated.
             burst_ends = burst_end_offsets(profile)
             next_burst = 0
-            for event in events:
+            for index, event in enumerate(planned_events):
                 elapsed = now() - start
                 delay = event.offset_seconds * options.time_scale - elapsed
                 if delay > 0:
@@ -1086,6 +1095,10 @@ async def drive_live_churn(
                 # unbounded backlog of pending patches.
                 await semaphore.acquire()
                 group.create_task(_run(namespace, name, current.uid, str(event.sequence)))
+                if index == 0 and len(planned_events) > 1:
+                    pause_start = now()
+                    await input_sampling_done.wait()
+                    progress.record_pause(now() - pause_start)
     except BaseExceptionGroup as group_error:
         raise _first_error(group_error) from None
 
@@ -1100,6 +1113,11 @@ def _churn_failed(task: asyncio.Task[None]) -> bool:
     same question.
     """
     return task.done() and (task.cancelled() or task.exception() is not None)
+
+
+def _churn_completed_cleanly(task: asyncio.Task[None]) -> bool:
+    """Whether the churn task finished successfully before sampling could finish."""
+    return task.done() and not _churn_failed(task)
 
 
 async def _cancel_and_drain(task: asyncio.Task[None]) -> None:
@@ -1349,6 +1367,7 @@ async def _run_measured_window(
     a frozen store against a cluster that was still changing.
     """
     now = options.monotonic_fn if options.monotonic_fn is not None else monotonic
+    input_sampling_done = asyncio.Event()
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
 
@@ -1377,6 +1396,7 @@ async def _run_measured_window(
                 limits=limits,
                 profile=profile,
                 recorder=recorder,
+                input_sampling_done=input_sampling_done,
             )
         )
         try:
@@ -1401,7 +1421,13 @@ async def _run_measured_window(
                 now=now,
                 timeout=options.input_ack_timeout,
                 aborted=lambda: _churn_failed(churn_task),
+                incomplete=lambda: (
+                    bool(events)
+                    and _churn_completed_cleanly(churn_task)
+                    and recorder.pending_count() == 0
+                ),
             )
+            input_sampling_done.set()
 
             # UI-at-scale evidence: drive the scoped scenarios (filter, sort,
             # namespace switch, split pane, describe, multi-log) through the
@@ -1446,6 +1472,7 @@ async def _run_measured_window(
             check_rendered_rows(table, final_pods)
             state.final_digest = _store_digest(store)
         finally:
+            input_sampling_done.set()
             await _cancel_and_drain(churn_task)
 
 

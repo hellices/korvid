@@ -33,6 +33,7 @@ import asyncio
 import cProfile
 import dataclasses
 import json
+import math
 import sys
 import tracemalloc
 from pathlib import Path
@@ -241,7 +242,7 @@ def _add_input_probe_arguments(parser: argparse.ArgumentParser) -> None:
         default=5.0,
         metavar="FLOAT",
         help="Seconds a cursor key press may go unacknowledged before the run "
-        "fails (positive); raise it for a slow remote cluster.",
+        "fails (finite and positive); raise it for a slow remote cluster.",
     )
     parser.add_argument(
         "--input-sample-pairs",
@@ -262,8 +263,8 @@ def _input_probe_error(args: argparse.Namespace) -> str | None:
     no samples. Both are harness misconfiguration, reported as such rather
     than as an application failure after the run.
     """
-    if args.input_ack_timeout <= 0:
-        return "--input-ack-timeout must be positive"
+    if not math.isfinite(args.input_ack_timeout) or args.input_ack_timeout <= 0:
+        return "--input-ack-timeout must be finite and positive"
     if args.input_sample_pairs <= 0:
         return "--input-sample-pairs must be positive"
     return None

@@ -1125,7 +1125,24 @@ def test_cli_replay_rejects_a_non_positive_input_ack_timeout(
     )
 
     assert exit_code == 1
-    assert "--input-ack-timeout must be positive" in capsys.readouterr().err
+    assert "--input-ack-timeout must be finite and positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_cli_replay_rejects_a_non_finite_input_ack_timeout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setattr(cli, "run_replay", fake_run_replay)
+
+    exit_code = cli.main(
+        ["replay", "--profile", str(profile_path(tmp_path)), f"--input-ack-timeout={value}"]
+    )
+
+    assert exit_code == 1
+    assert "--input-ack-timeout must be finite and positive" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("value", ["0", "-3"])
@@ -1151,14 +1168,37 @@ def test_cli_replay_live_rejects_a_non_positive_input_ack_timeout(
             "--profile",
             str(profile_path(tmp_path)),
             *_LIVE_IDENTITY_ARGS,
-            "--input-ack-timeout",
-            value,
+            f"--input-ack-timeout={value}",
             *_live_artifacts(tmp_path),
         ]
     )
 
     assert exit_code == 1
-    assert "--input-ack-timeout must be positive" in capsys.readouterr().err
+    assert "--input-ack-timeout must be finite and positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_cli_replay_live_rejects_a_non_finite_input_ack_timeout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay([]))
+
+    exit_code = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            f"--input-ack-timeout={value}",
+            *_live_artifacts(tmp_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "--input-ack-timeout must be finite and positive" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("value", ["0", "-3"])

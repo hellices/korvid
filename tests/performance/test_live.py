@@ -1824,13 +1824,15 @@ async def test_run_live_replay_reports_requested_and_achieved_churn_rate() -> No
     )
 
     assert report.churn is not None
-    # 4 events requested over 2 seconds (2 events/s requested); the driver
-    # observed all 4 within a 1.0 s window, i.e. a different achieved rate.
+    # 4 events requested over 2 seconds (2 events/s requested); the measured
+    # window now holds the driver after the first mutation until the cursor
+    # probe finishes, so the observed churn rate remains a separately reported
+    # fact rather than being conflated with the requested one.
     assert report.churn.requested_events == 4
     assert report.churn.requested_events_per_second == 2.0
     assert report.churn.observed_events == 4
-    assert report.churn.wall_seconds == 1.0
-    assert report.churn.achieved_events_per_second == 4.0
+    assert report.churn.wall_seconds == 1.5
+    assert report.churn.achieved_events_per_second == pytest.approx(4 / 1.5)
     assert report.churn.requested_events_per_second != report.churn.achieved_events_per_second
     assert report.churn.mutation_throttles == 0
 
@@ -2212,6 +2214,33 @@ async def test_run_live_replay_takes_the_configured_number_of_cursor_sample_pair
     )
 
     assert report.input_latency.count == 10
+
+
+async def test_run_live_replay_rejects_input_sampling_when_churn_finishes_early() -> None:
+    """A cleanly completed churn task must fail the run if input sampling did
+    not finish first; otherwise the reported percentile includes idle samples."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(namespaces, pods, RUN_ID)
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(
+        time_scale=1.0,
+        monotonic_fn=monotonic_fn,
+        async_sleep=async_sleep,
+        input_sample_pairs=3,
+    )
+
+    with pytest.raises(
+        WaitTimeout,
+        match="input sampling incomplete: churn finished before all 3 cursor sample pairs completed",
+    ):
+        await run_live_replay(
+            dataclasses.replace(_tiny_live_profile(), steady_events_per_second=1),
+            options,
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
 
 
 async def test_run_live_replay_rejects_a_non_positive_input_sample_pair_count() -> None:
