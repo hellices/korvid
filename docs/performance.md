@@ -111,9 +111,7 @@ figure in the single-digit-millisecond range instead of the ~2.2 s
 `Pilot.press` artifact it replaced. **No point estimate from it is published
 here.** Successive local runs on an unpinned developer machine differ, and
 quoting one run's percentile as *the* number is how the withdrawn figures above
-came to be trusted in the first place. The authoritative numbers are the live
-ones, and the live cursor-input result has not been re-measured with the
-corrected probe yet (see "Known limits").
+came to be trusted in the first place.
 
 Profiled runs are not comparable to unprofiled ones: `cProfile` instruments
 every Python call and materially changes compositor cost, which alone moves the
@@ -129,20 +127,36 @@ intersects the painted viewport. Off-screen rows still update their data
 immediately — `get_row`, sorting, filtering and the final digest see the new
 value — and the row repaints as soon as it scrolls into view.
 
+## Corrected live 1,000-pod smoke result
+
+Run `i279-20260813-1620` exercised the same checked-in
+`steady-24eps-1k` profile against the dedicated AKS cluster: 1,000 Running,
+Ready Pods across 20 namespaces, 720 guarded metadata mutations in 30 seconds,
+and 50 cursor samples while churn was active. This is a live qualification
+smoke run, not a replacement for the 31-minute endurance result above.
+
+| Metric | Budget | Result | |
+|---|---:|---:|---|
+| Dropped updates | 0 | 0 | pass |
+| Final digest mismatch | 0 | 0 | pass |
+| LIST to 1,000-row table | ≤ 2 s | 144 ms | pass |
+| Process start to interactive | ≤ 10 s | 1.55 s | pass |
+| Peak RSS | ≤ 512 MiB | 236 MiB | pass |
+| Event-to-render p95 | ≤ 250 ms @ 20 ev/s | 32 ms @ 24 ev/s | pass |
+| Cursor-input p95 | ≤ 100 ms | 7 ms (n=50) | pass |
+
+The driver completed all 720 requested mutations in 29.92 seconds
+(24.06 events/s), with no mutation throttles. A separate run with `cProfile`
+enabled measured 134 ms event-to-render p95, 116 ms cursor-input p95, and 99.4%
+peak CPU; those figures are diagnostic overhead, not acceptance results.
+
 ## Known limits
 
-**The live cursor-input result is unmeasured, not slow.** The only live figures
-ever taken (2,311 ms / 2,447 ms) came from the invalid `Pilot.press` probe
-described above and have been withdrawn. The corrected probe has a
-deterministic replay result only; no live cursor number is estimated from it.
-Until the live run is repeated, korvid makes **no claim** that the 100 ms
-cursor-input budget is met against a real cluster.
-
-**Event-to-render p95 misses its budget live, but the budget and the
-measurement do not line up.** The budget is written at 20 events/s; the live
-profile runs at 24. The optimized 299 ms is a miss at the higher rate and has
-not been re-measured at 20, nor re-measured live since the render-path work
-above.
+**The corrected live result is a 30-second smoke qualification.** It establishes
+that both latency budgets pass against the real API server at a steady
+24 events/s, but it does not establish long-session memory slope, credential
+refresh, or burst-drain behavior. The 31-minute endurance run has not yet been
+repeated with the corrected input probe and current render path.
 
 **UI-at-scale interaction timings are not yet trustworthy.** Filter, split-pane
 and multi-log key sequences still use `Pilot.press()`-style keystroke timing,
