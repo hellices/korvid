@@ -330,6 +330,54 @@ def test_the_relock_pull_request_does_not_promise_codeql_it_cannot_deliver() -> 
     assert "CodeQL only runs for pull requests targeting" in workflow
 
 
+def test_the_relock_workflow_survives_a_repository_that_forbids_bot_pull_requests() -> None:
+    """`gh pr create` fails when Actions may not open pull requests.
+
+    Observed on the first real dispatch: the branch pushed and the lock was
+    verified, then `createPullRequest` was refused by a repository setting
+    the API cannot even read. Exiting there would discard verified work for
+    a reason nobody can fix from inside the job, so it reports the setting
+    and the one command that finishes the job by hand.
+    """
+    workflow = (_ROOT / ".github" / "workflows" / "relock.yml").read_text()
+    assert "if ! gh pr create" in workflow, "a refused pull request aborts without explanation"
+    # Assert against the branch that actually runs, not the whole file: a
+    # comment mentioning the setting would otherwise satisfy this while the
+    # job died silently.
+    _, _, after = workflow.partition("if ! gh pr create")
+    failure_branch, _, _ = after.partition("exit 1")
+    printed = "\n".join(
+        line
+        for line in failure_branch.splitlines()
+        if line.strip().startswith(("echo ", "printf "))
+    )
+    assert "Allow GitHub Actions to create and" in printed, (
+        "the operator is not told which setting refused the pull request"
+    )
+    assert "Nothing is lost" in printed
+    # Isolate the copyable command. Asserting `$branch` anywhere in the
+    # failure branch is satisfied by the status message above it, so a
+    # remedy naming the wrong head would still pass.
+    remedy = next((line for line in printed.splitlines() if "gh pr create --base" in line), None)
+    assert remedy is not None, "the manual remedy is not printed"
+    assert "$BASE" in remedy, "the remedy must name the base the run actually used"
+    assert "$branch" in remedy, "the remedy must name the branch the run actually pushed"
+    # The claim is only true if the branch is already on the remote when
+    # creation is attempted. Reordering these would leave the message
+    # intact and the work lost.
+    assert workflow.index('git push origin "$branch"') < workflow.index("if ! gh pr create"), (
+        "the branch must be pushed before the pull request can fail"
+    )
+    # The line gets pasted into a shell, so it must be escaped rather than
+    # interpolated: git allows ';' in a ref name, and $BASE is a dispatch
+    # input.
+    assert "--base $BASE" not in remedy, (
+        "an unescaped base ref lets a branch name run extra shell commands"
+    )
+    assert remedy.strip().startswith("printf "), "render the remedy with shell escaping"
+    assert remedy.count("%q") == 2, "both the base and the branch must be escaped"
+
+
 def test_pyproject_pins_no_alternate_package_index() -> None:
     """An index pinned here redirects every resolution in the repository.
 

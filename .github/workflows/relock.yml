@@ -208,7 +208,13 @@ jobs:
           and the repository rejects that.
           "
           git push origin "$branch"
-          gh pr create \
+          # A repository (or organisation) can forbid Actions from opening
+          # pull requests - "Allow GitHub Actions to create and approve pull
+          # requests" in Settings > Actions. The branch is already pushed and
+          # verified at that point, so losing the run would throw away the
+          # work for a setting nobody can change from here. Report the exact
+          # remedy and the command to finish by hand instead.
+          if ! gh pr create \
             --base "$BASE" \
             --head "$branch" \
             --title "build: relock ${target}" \
@@ -231,4 +237,21 @@ jobs:
           merging. CodeQL only runs for pull requests targeting \`main\`, so
           a relock onto any other base will not get it at all.
 
-          Opened by the \`Relock\` workflow."
+          Opened by the \`Relock\` workflow."; then
+            echo
+            echo "The lock is verified and pushed as $branch, but this job"
+            echo "could not open the pull request. The usual cause is"
+            echo "Settings > Actions > 'Allow GitHub Actions to create and"
+            echo "approve pull requests' being off - an API-invisible switch."
+            echo
+            echo "Nothing is lost. Open it by hand:"
+            # %q, not interpolation: git allows ';' and other shell
+            # metacharacters in a ref name, and $BASE is a dispatch input.
+            # The real call above quotes them; a line meant to be pasted
+            # has to escape them.
+            printf '  gh pr create --base %q --head %q\n' "$BASE" "$branch"
+            echo
+            echo "That also has the side effect of starting CI, which a"
+            echo "GITHUB_TOKEN-opened pull request would not have done."
+            exit 1
+          fi
