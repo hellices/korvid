@@ -165,10 +165,12 @@ interpreted. Route `parentRefs` (the Gateway a Route attaches to) are not
 modelled. A second, bounded phase then LISTs the namespaces those results'
 `routes_to` references explicitly named (see [Cross-namespace
 routing](#cross-namespace-routing-referencegrant)); each of those LISTs
-records its own coverage, scoped to the namespace it ran in. Each LIST
-records one of five **coverage states**:
+records its own coverage, scoped to the namespace it ran in. Coverage uses
+six states:
 
 - **`complete`** — the LIST succeeded.
+- **`partial`** — a target namespace was intentionally sampled only for the
+  referenced kind(s) and `ReferenceGrant`, not for the full catalog.
 - **`forbidden`** — the LIST returned 403; RBAC denies this account that
   resource kind.
 - **`unavailable`** — the resource kind (or the whole Gateway API group) was
@@ -176,11 +178,10 @@ records one of five **coverage states**:
   an absent optional CRD, not a permission problem.
 - **`failed`** — the LIST raised any other API error or a network/transport
   error.
-- **`capped`** — the number of input resources (across all sources), the
+- **`capped`** — the number of input resources in a named source, the
   number of joined edges, or the number of cross-namespace follow-up LISTs
   exceeded a hard limit and the excess was dropped deterministically (see
-  [Limits](#limits)); this can also appear once per cap even when every
-  individual source's own LIST was `complete`.
+  [Limits](#limits)).
 
 Press `c` to toggle coverage detail: the namespace each non-`complete`
 record was scoped to (shown as `core/services @prod: forbidden`, so the
@@ -205,12 +206,14 @@ treat a `missing` edge under incomplete coverage as "unknown," not "absent."
 ### When the selected resource is not in the snapshot
 
 The root itself can be absent from a snapshot even when coverage is
-`complete`: the object was deleted, or recreated with a new UID after the
-table's row was read, or dropped when a source hit the resource cap. Its
-Dependencies and Dependents sections are then empty because the snapshot has
-nothing about it — not because the cluster has nothing. The banner says so
-literally ("This resource is not present in this snapshot …") instead of
-letting two empty sections read as "no relationships."
+`complete`: the object was deleted or recreated with a new UID after the
+table's row was read. With a positive resource limit, the loader prioritizes
+the root's source and the exact selected object before sharing the remaining
+budget across sources. Dependencies and Dependents are empty when the root is
+still absent because the snapshot has nothing about it — not because the
+cluster has nothing. The banner says so literally ("This resource is not
+present in this snapshot …") instead of letting two empty sections read as
+"no relationships."
 
 ## Stale owner references
 
@@ -268,8 +271,11 @@ one namespace still cost one LIST per resource), ordered by `(namespace,
 group, plural)`, capped at `max_target_lists`, and each records its own
 coverage with `scope` set to the namespace it ran in — so an RBAC denial in
 the target namespace shows up as `forbidden` coverage rather than a silent
-default-deny. An all-namespaces snapshot (`0`) issues no follow-ups at all;
-it has already listed every namespace.
+default-deny. The target namespace also gets one `partial` record because
+other catalog kinds in that namespace were intentionally not read; a resolved
+backend therefore does not make that namespace look fully covered. An
+all-namespaces snapshot (`0`) issues no follow-ups at all; it has already
+listed every namespace and does not get this partial marker.
 
 ## Limits
 
@@ -282,14 +288,16 @@ it has already listed every namespace.
 | `max_concurrency` | 4 | Concurrent LISTs the snapshot loader runs at once |
 | `max_target_lists` | 32 | Follow-up LISTs into the namespaces `routes_to` references name |
 
-All caps are deterministic, never API-response-order dependent. The resource
-cap is enforced twice, each in its own fixed order: the snapshot loader caps
-first, keeping resources in `(group, plural)` source order (each source's own
-resources ordered by `(namespace, name, uid)`, with target-namespace results
-after the current namespace's); the graph builder then applies its own
+All caps are deterministic, never API-response-order dependent. The snapshot
+loader applies the resource cap first: it moves the selected root's source
+first, moves the exact selected object first within that source, then allocates
+the remaining budget round-robin across sources. Each source is internally
+ordered by `(namespace, name, uid)`, and each source that loses objects gets
+its own `capped` record and dropped count. This prevents an early, large source
+from starving every later kind. The graph builder then applies its own
 resource cap — a safety net that is effectively a no-op once the loader has
-already capped, but independently enforced regardless — sorted by
-`(group, kind, namespace, name, uid)`.
+already capped, but independently enforced regardless — sorted by `(group,
+kind, namespace, name, uid)`.
 
 The edge cap is applied *while* edges are generated, not after: a selector
 join can describe far more candidate edges than the cap allows (an empty
@@ -313,19 +321,17 @@ only reference *names* (`envFrom`, `env[].valueFrom`, a volume's `secret`/
 Secret's `data`/`stringData`, never a literal `env[].value`, and never a
 container's `command`/`args` or object annotations.
 
-Be precise about where that boundary sits. Secrets are one of the fixed
-sources this view LISTs, and a Kubernetes Secret LIST is an ordinary LIST:
-the API server returns whole Secret objects, values included, exactly as it
-does for `kubectl get secrets -o yaml`. Nothing korvid can do client-side
-changes that. What korvid guarantees is what happens next: each listed
-object is immediately reduced to name, namespace, UID, labels, and
-metadata-only relationship facts, and **no Secret value is ever retained or
-copied into a summary's relationship facts, the graph snapshot, an
-audit/coverage record's detail text, or anything the screen renders**. A
-row's Evidence column is always a manifest *field path* (e.g.
-`spec.volumes[0].secret`), never a field *value*, and the same holds for
-ephemeral containers, whose `envFrom`/`env[].valueFrom` references are read
-through that same name-only extractor.
+Secrets are one of the fixed sources this view LISTs, but this path requests
+Kubernetes' `PartialObjectMetadataList` representation. The API response
+therefore contains only object metadata; korvid does not request or receive
+Secret `data`/`stringData` for a relationship snapshot. If an API server
+cannot serve that representation, the Secret source fails visibly in
+coverage instead of falling back to a full-payload LIST. The resulting
+summary and graph retain only name, namespace, UID, labels, and metadata-only
+relationship facts. A row's Evidence column is always a manifest *field
+path* (e.g. `spec.volumes[0].secret`), never a field *value*, and the same
+holds for ephemeral containers, whose `envFrom`/`env[].valueFrom` references
+are read through that same name-only extractor.
 
 To actually see a Secret's contents you use the Secrets view, which routes
 them through korvid's masking pipeline — this view has no path to them at

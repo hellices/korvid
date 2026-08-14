@@ -2020,10 +2020,11 @@ class _FakeKubeForWiring:
     constructing `KorvidApp`. Most are referenced but never called during
     wiring (they become bound-method kwargs), so a cheap stub is enough -
     only `detect_cloud_provider` (the bounded cloud-provider probe) and
-    `list_objects` (asserted below) are actually invoked."""
+    `list_relationship_objects` (asserted below) are actually invoked."""
 
     def __init__(self) -> None:
         self.list_calls: list[tuple[Any, str | None]] = []
+        self.relationship_list_calls: list[tuple[Any, str | None]] = []
 
     async def detect_cloud_provider(self) -> Any:
         from korvid.k8s.csp import detect_provider
@@ -2035,6 +2036,10 @@ class _FakeKubeForWiring:
 
     async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
         self.list_calls.append((meta, namespace))
+        return []
+
+    async def list_relationship_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+        self.relationship_list_calls.append((meta, namespace))
         return []
 
     def list_namespaces(self) -> Any: ...
@@ -2053,9 +2058,9 @@ async def test_wire_and_run_wires_relationship_lister_from_kube(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The composition root must hand KorvidApp a relationship lister backed
-    by the connected client's own `list_objects` (issue #281 task 7): the `g`
-    binding's exclusive worker calls exactly this callable to resolve a
-    root's dependents/dependencies for the operational relationship graph."""
+    by the connected client's own `list_relationship_objects` (issue #281
+    task 7): the `g` binding's exclusive worker calls exactly this callable
+    to resolve a root's dependents/dependencies for the relationship graph."""
     import korvid.__main__ as main_mod
     from korvid.core.config import KorvidConfig
 
@@ -2076,4 +2081,5 @@ async def test_wire_and_run_wires_relationship_lister_from_kube(
     wired = _FakeAppCapturesKwargs.instances[0].captured["list_relationship_objects"]
     result = await wired("meta", "ns")
     assert result == []
-    assert kube.list_calls == [("meta", "ns")]
+    assert kube.relationship_list_calls == [("meta", "ns")]
+    assert kube.list_calls == []

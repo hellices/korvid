@@ -2005,6 +2005,23 @@ async def test_secrets_never_evaluate_custom_columns() -> None:
     assert summaries[0].custom == ()
 
 
+async def test_list_relationship_objects_requests_only_secret_metadata() -> None:
+    client = KubeClient()
+    body = b'{"items":[{"metadata":{"name":"s1","namespace":"default","uid":"uid-1"}}]}'
+    mock_api = MagicMock()
+    mock_api.call_api = AsyncMock(return_value=_raw_response(200, "OK", body))
+    meta = ResourceMeta(kind="Secret", plural="secrets", group="", version="v1", namespaced=True)
+
+    with patch.object(client, "_api", mock_api):
+        summaries = await client.list_relationship_objects(meta, "default")
+
+    assert [(summary.name, summary.uid) for summary in summaries] == [("s1", "uid-1")]
+    assert mock_api.call_api.await_args is not None
+    assert mock_api.call_api.await_args.kwargs["header_params"] == {
+        "Accept": "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1"
+    }
+
+
 # ---------------------------------------------------------------------------
 # list_context_names — :ctx picker source (issue #36)
 # ---------------------------------------------------------------------------

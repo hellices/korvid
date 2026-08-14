@@ -57,9 +57,10 @@ class EdgeResolution(StrEnum):
 
 
 class CoverageState(StrEnum):
-    """Completeness of one attempted resource LIST feeding the graph."""
+    """Completeness state for one snapshot source, scope, or hard cap."""
 
     COMPLETE = "complete"
+    PARTIAL = "partial"
     FORBIDDEN = "forbidden"
     UNAVAILABLE = "unavailable"
     FAILED = "failed"
@@ -105,7 +106,7 @@ class RelationshipEdge:
 
 @dataclass(frozen=True, slots=True)
 class CoverageRecord:
-    """Completeness of one attempted resource LIST.
+    """Completeness of one snapshot source, scope, or hard cap.
 
     `detail` is defensively sanitized: control characters (including
     newlines) are flattened to spaces and the text is capped at

@@ -239,8 +239,76 @@ async def test_resource_cap_is_visible_and_deterministic() -> None:
     graph = await RelationshipSnapshotLoader(lister, limits=GraphLoadLimits(max_resources=2)).load(
         _root("Pod", "prod"), "prod", _aliases(CONFIG_MAPS_META, PODS_META)
     )
-    assert [node.name for node in graph.nodes] == ["cfg-00", "cfg-01"]
-    assert any(record.state is CoverageState.CAPPED for record in graph.coverage)
+    assert [node.name for node in graph.nodes] == ["cfg-00", "api-0"]
+    capped = [record for record in graph.coverage if record.state is CoverageState.CAPPED]
+    assert [(record.resource, record.detail) for record in capped] == [
+        ("configmaps", "2 input resource(s) dropped at the 2-resource cap")
+    ]
+
+
+async def test_resource_cap_prioritizes_the_selected_root_source() -> None:
+    lister = _Lister(
+        results={
+            ("", "configmaps"): [_generic_summary("cfg-a")],
+            ("", "services"): [_generic_summary("root", kind="Service")],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister, limits=GraphLoadLimits(max_resources=1)).load(
+        _root("Service", "prod"), "prod", _aliases(CONFIG_MAPS_META, SERVICE_META)
+    )
+    assert [(node.kind, node.name) for node in graph.nodes] == [("Service", "root")]
+    assert any(
+        record.resource == "configmaps" and record.state is CoverageState.CAPPED
+        for record in graph.coverage
+    )
+
+
+async def test_resource_cap_round_robins_across_non_root_sources() -> None:
+    lister = _Lister(
+        results={
+            ("", "configmaps"): [_generic_summary("cfg-a"), _generic_summary("cfg-b")],
+            ("", "pods"): [_pod_summary("root")],
+            ("", "services"): [
+                _generic_summary("svc-a", kind="Service"),
+                _generic_summary("svc-b", kind="Service"),
+            ],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister, limits=GraphLoadLimits(max_resources=3)).load(
+        _root("Pod", "prod"),
+        "prod",
+        _aliases(CONFIG_MAPS_META, PODS_META, SERVICE_META),
+    )
+    assert {(node.kind, node.name) for node in graph.nodes} == {
+        ("ConfigMap", "cfg-a"),
+        ("Pod", "root"),
+        ("Service", "svc-a"),
+    }
+    capped_resources = {
+        record.resource for record in graph.coverage if record.state is CoverageState.CAPPED
+    }
+    assert capped_resources == {"configmaps", "services"}
+
+
+async def test_all_namespaces_cap_record_keeps_cluster_wide_scope() -> None:
+    lister = _Lister(
+        results={
+            ("", "configmaps"): [
+                _generic_summary("cfg-a", namespace="prod"),
+                _generic_summary("cfg-b", namespace="prod"),
+            ],
+            ("", "pods"): [_pod_summary("root", namespace="prod")],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister, limits=GraphLoadLimits(max_resources=1)).load(
+        _root("Pod", ""), None, _aliases(CONFIG_MAPS_META, PODS_META)
+    )
+    capped = [
+        record
+        for record in graph.coverage
+        if record.resource == "configmaps" and record.state is CoverageState.CAPPED
+    ]
+    assert [record.scope for record in capped] == [""]
 
 
 async def test_unexpected_api_failure_is_flattened_as_failed() -> None:
@@ -505,6 +573,9 @@ async def test_cross_namespace_backend_resolves_with_a_grant_in_the_target_names
     assert _routes_to_resolution(graph) is EdgeResolution.RESOLVED
     assert ("", "services", "prod") in lister.calls
     assert (GATEWAY, "referencegrants", "prod") in lister.calls
+    partial = [record for record in graph.coverage if record.state is CoverageState.PARTIAL]
+    assert [(record.resource, record.scope) for record in partial] == [("*", "prod")]
+    assert graph.incomplete
 
 
 async def test_grant_in_the_wrong_namespace_leaves_the_backend_invalid() -> None:

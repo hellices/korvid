@@ -239,44 +239,80 @@ def _summary_sort_key(summary: SummaryLike) -> tuple[str, str, str]:
     return (summary.namespace, summary.name, summary.uid)
 
 
-def _cap_inputs(
-    fetched: Sequence[tuple[ResourceMeta, list[SummaryLike]]],
-    max_resources: int,
-) -> tuple[list[GraphInput], CoverageRecord | None]:
-    """Truncate `fetched` to at most `max_resources`, in the caller's
-    `(group, plural)` source order, deterministically ordering each
-    source's own summaries by `(namespace, name, uid)` first.
+_FetchedSource = tuple[ResourceMeta, list[SummaryLike], str]
 
-    This truncation happens before `build_relationship_graph` ever sees the
-    inputs: that function's own cap sorts by `(group, kind, namespace,
-    name, uid)`, which is not always equivalent to `(group, plural)` source
-    order (e.g. `PersistentVolume` sorts before `PersistentVolumeClaim` by
-    kind, but after it by plural) and is not the ordering the loader's
-    caller requested a snapshot in.
-    """
-    inputs: list[GraphInput] = []
-    remaining = max_resources
-    dropped = 0
-    for meta, summaries in fetched:
-        ordered = sorted(summaries, key=_summary_sort_key)
-        if remaining <= 0:
-            dropped += len(ordered)
-            continue
-        keep, drop = ordered[:remaining], ordered[remaining:]
-        inputs.extend(GraphInput(meta=meta, summary=summary) for summary in keep)
-        remaining -= len(keep)
-        dropped += len(drop)
 
-    if dropped == 0:
-        return inputs, None
-    record = CoverageRecord(
-        group="",
-        resource="*",
-        scope="",
-        state=CoverageState.CAPPED,
-        detail=f"{dropped} input resource(s) dropped at the {max_resources}-resource cap",
+def _is_root_summary(meta: ResourceMeta, summary: SummaryLike, root: GraphResource) -> bool:
+    return (
+        meta.group == root.group
+        and meta.kind == root.kind
+        and summary.namespace == root.namespace
+        and summary.name == root.name
+        and (root.uid is None or summary.uid == root.uid)
     )
-    return inputs, record
+
+
+def _ordered_input_buckets(
+    fetched: Sequence[_FetchedSource],
+    root: GraphResource,
+) -> list[_FetchedSource]:
+    """Sort each source and put the selected root's source first."""
+    buckets: list[_FetchedSource] = []
+    for meta, summaries, scope in fetched:
+        ordered = sorted(summaries, key=_summary_sort_key)
+        root_index = next(
+            (
+                index
+                for index, summary in enumerate(ordered)
+                if _is_root_summary(meta, summary, root)
+            ),
+            None,
+        )
+        if root_index is not None:
+            ordered.insert(0, ordered.pop(root_index))
+        buckets.append((meta, ordered, scope))
+    buckets.sort(key=lambda bucket: bucket[0].group != root.group or bucket[0].kind != root.kind)
+    return buckets
+
+
+def _cap_inputs(
+    fetched: Sequence[_FetchedSource],
+    max_resources: int,
+    root: GraphResource,
+) -> tuple[list[GraphInput], list[CoverageRecord]]:
+    """Bound inputs while preserving the root and sharing space across sources."""
+    buckets = _ordered_input_buckets(fetched, root)
+    positions = [0] * len(buckets)
+    inputs: list[GraphInput] = []
+    limit = max(max_resources, 0)
+    while len(inputs) < limit:
+        added = False
+        for index, (meta, summaries, _scope) in enumerate(buckets):
+            if positions[index] >= len(summaries):
+                continue
+            inputs.append(GraphInput(meta=meta, summary=summaries[positions[index]]))
+            positions[index] += 1
+            added = True
+            if len(inputs) >= limit:
+                break
+        if not added:
+            break
+
+    coverage: list[CoverageRecord] = []
+    for position, (meta, summaries, scope) in zip(positions, buckets, strict=True):
+        dropped = len(summaries) - position
+        if dropped == 0:
+            continue
+        coverage.append(
+            CoverageRecord(
+                group=meta.group,
+                resource=meta.plural,
+                scope=scope,
+                state=CoverageState.CAPPED,
+                detail=f"{dropped} input resource(s) dropped at the {limit}-resource cap",
+            )
+        )
+    return inputs, coverage
 
 
 class Lister(Protocol):
@@ -302,7 +338,7 @@ def _metas_by_group_kind(
 
 
 def _cross_namespace_route_targets(
-    fetched: Sequence[tuple[ResourceMeta, list[SummaryLike]]],
+    fetched: Sequence[_FetchedSource],
 ) -> dict[str, set[tuple[str, str]]]:
     """The `(group, kind)`s each namespace is referenced for from outside it.
 
@@ -313,7 +349,7 @@ def _cross_namespace_route_targets(
     goes on to issue follow-up LISTs.
     """
     targets: dict[str, set[tuple[str, str]]] = {}
-    for _meta, summaries in fetched:
+    for _meta, summaries, _scope in fetched:
         for summary in summaries:
             for fact in summary.relationships.references:
                 target = fact.target
@@ -326,7 +362,7 @@ def _cross_namespace_route_targets(
 
 
 def _target_namespace_requests(
-    fetched: Sequence[tuple[ResourceMeta, list[SummaryLike]]],
+    fetched: Sequence[_FetchedSource],
     namespace: str | None,
     aliases: Mapping[str, ResourceMeta],
 ) -> list[tuple[ResourceMeta, str]]:
@@ -384,6 +420,25 @@ def _cap_target_requests(
     return list(requests[:limit]), record
 
 
+def _target_partial_coverage(
+    requests: Sequence[tuple[ResourceMeta, str]],
+) -> list[CoverageRecord]:
+    """Record that follow-ups cover selected kinds, not whole namespaces."""
+    return [
+        CoverageRecord(
+            group="",
+            resource="*",
+            scope=scope,
+            state=CoverageState.PARTIAL,
+            detail=(
+                "cross-namespace follow-up listed only referenced kinds "
+                "and ReferenceGrant in this namespace"
+            ),
+        )
+        for scope in sorted({scope for _meta, scope in requests})
+    ]
+
+
 def _grant_gap_record(scope: str) -> CoverageRecord:
     return CoverageRecord(
         group=_GATEWAY_GROUP,
@@ -398,7 +453,7 @@ def _grant_gap_record(scope: str) -> CoverageRecord:
 
 
 def _missing_grant_coverage(
-    fetched: Sequence[tuple[ResourceMeta, list[SummaryLike]]],
+    fetched: Sequence[_FetchedSource],
     namespace: str | None,
     requests: Sequence[tuple[ResourceMeta, str]],
     aliases: Mapping[str, ResourceMeta],
@@ -459,13 +514,13 @@ async def _cancel_pending(tasks: Sequence[asyncio.Task[_FetchResult]]) -> None:
 
 def _join_results(
     results: Sequence[_FetchResult], coverage: list[CoverageRecord]
-) -> list[tuple[ResourceMeta, list[SummaryLike]]]:
+) -> list[_FetchedSource]:
     """Record every LIST's coverage; keep the ones that returned summaries."""
-    fetched: list[tuple[ResourceMeta, list[SummaryLike]]] = []
+    fetched: list[_FetchedSource] = []
     for meta, summaries, record in results:
         coverage.append(record)
         if summaries is not None:
-            fetched.append((meta, summaries))
+            fetched.append((meta, summaries, record.scope))
     return fetched
 
 
@@ -515,14 +570,14 @@ class RelationshipSnapshotLoader:
             coverage.append(target_cap_record)
         coverage.extend(_missing_grant_coverage(fetched, namespace, requests, aliases))
         if requests:
+            coverage.extend(_target_partial_coverage(requests))
             target_results = await self._gather(list(requests), semaphore)
             fetched.extend(_join_results(target_results, coverage))
 
-        inputs, cap_record = _cap_inputs(fetched, self._limits.max_resources)
-        if cap_record is not None:
-            coverage.append(cap_record)
+        inputs, cap_records = _cap_inputs(fetched, self._limits.max_resources, root)
+        coverage.extend(cap_records)
 
-        # The cap already ran above (in source order); `GraphLimits` here
+        # The fair, root-prioritized cap already ran above; `GraphLimits` here
         # only carries the configured `max_resources` through into the
         # resulting graph's metadata — `len(inputs) <= max_resources`
         # always holds by construction, so this never triggers a second,
