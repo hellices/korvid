@@ -262,7 +262,7 @@ async def test_loader_pre_caps_by_source_order_before_build_graph(
 
     def _spy(inputs: object, coverage: object, limits: object) -> object:
         captured_inputs.extend(inputs)  # type: ignore[arg-type]  # test spy, any iterable
-        return _original_build_relationship_graph(inputs, coverage, limits)  # type: ignore[arg-type]
+        return _original_build_relationship_graph(inputs, coverage, limits)  # type: ignore[arg-type]  # inputs/coverage/limits typed as object to match the patched signature
 
     monkeypatch.setattr(relationship_controller, "build_relationship_graph", _spy)
 
@@ -282,7 +282,7 @@ async def test_loader_pre_caps_by_source_order_before_build_graph(
 
     assert len(captured_inputs) == 1
     kept = captured_inputs[0]
-    assert kept.meta.kind == "PersistentVolumeClaim"  # type: ignore[attr-defined]
+    assert kept.meta.kind == "PersistentVolumeClaim"  # type: ignore[attr-defined]  # captured_inputs is list[object]; real elements are GraphInput
     assert [node.name for node in graph.nodes] == ["pvc-a"]
     assert any(record.state is CoverageState.CAPPED for record in graph.coverage)
 
