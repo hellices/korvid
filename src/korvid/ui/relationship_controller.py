@@ -31,7 +31,7 @@ from korvid.core.relationships import (
 )
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
-from korvid.k8s.relationship_facts import GATEWAY_GROUP, is_gateway_route_kind
+from korvid.k8s.relationship_facts import GATEWAY_GROUP, RelationKind, is_gateway_route_kind
 
 #: Gateway API resources are an optional cluster feature discovered at
 #: runtime (their plural/version are not fixed), unlike the always-probed
@@ -57,10 +57,17 @@ class GraphSourceSpec:
 
 @dataclass(frozen=True, slots=True)
 class GraphLoadLimits:
-    """Bounds on the snapshot LIST fan-out (mirrors `GraphLimits`' caps)."""
+    """Bounds on the snapshot LIST fan-out (mirrors `GraphLimits`' caps).
+
+    `max_target_lists` bounds the second, cross-namespace phase: a snapshot
+    may follow `routes_to` references into the namespaces those references
+    explicitly name, but never into more LISTs than this, no matter how
+    many distinct namespaces a pathological set of routes points at.
+    """
 
     max_concurrency: int = 4
     max_resources: int = 10_000
+    max_target_lists: int = 32
 
 
 #: The fixed, always-probed source catalog (issue #281 design doc §Task 5).
@@ -235,6 +242,98 @@ class Lister(Protocol):
     ) -> Sequence[SummaryLike]: ...
 
 
+#: The kind every cross-namespace `routes_to` follow-up also LISTs: only a
+#: Gateway API `ReferenceGrant` *in the target namespace* can authorize such
+#: a reference, so loading the backend without it would default-deny an
+#: authorized route.
+_REFERENCE_GRANT_KIND = "ReferenceGrant"
+
+
+def _metas_by_group_kind(
+    aliases: Mapping[str, ResourceMeta],
+) -> dict[tuple[str, str], ResourceMeta]:
+    """Index discovered resources by `(group, kind)` (aliases collapse)."""
+    return {(meta.group, meta.kind): meta for meta in aliases.values()}
+
+
+def _routes_to_target_namespaces(
+    fetched: Sequence[tuple[ResourceMeta, list[SummaryLike]]], namespace: str
+) -> dict[str, set[tuple[str, str]]]:
+    """The `(group, kind)`s each *other* namespace is referenced for.
+
+    Only `routes_to` facts that explicitly name a different namespace than
+    the one already listed are considered — the graph authorizes exactly
+    those against a `ReferenceGrant`, and nothing else may widen the LIST
+    fan-out beyond the namespaces a route named itself.
+    """
+    targets: dict[str, set[tuple[str, str]]] = {}
+    for _meta, summaries in fetched:
+        for summary in summaries:
+            for fact in summary.relationships.references:
+                target = fact.target
+                if fact.relation is not RelationKind.ROUTES_TO:
+                    continue
+                if not target.namespace or target.namespace == namespace:
+                    continue
+                targets.setdefault(target.namespace, set()).add((target.group, target.kind))
+    return targets
+
+
+def _target_namespace_requests(
+    fetched: Sequence[tuple[ResourceMeta, list[SummaryLike]]],
+    namespace: str | None,
+    aliases: Mapping[str, ResourceMeta],
+) -> list[tuple[ResourceMeta, str]]:
+    """The deterministic second-phase `(meta, namespace)` LISTs to run.
+
+    For every namespace a `routes_to` fact explicitly named, this LISTs the
+    referenced kind(s) plus `ReferenceGrant` — nothing else, and never a
+    per-object GET. Requests are sorted by `(namespace, group, plural)` and
+    deduplicated, so the same namespace referenced by a thousand routes
+    still costs one LIST per resource.
+
+    An all-namespaces snapshot (`namespace is None`) returns nothing: every
+    target namespace is already in the first phase's results, so a
+    follow-up could only duplicate a LIST that already ran. A kind that
+    discovery never reported is skipped rather than guessed at: an API
+    resource absent from discovery has no objects to list.
+    """
+    if namespace is None:
+        return []
+    targets = _routes_to_target_namespaces(fetched, namespace)
+    if not targets:
+        return []
+    by_group_kind = _metas_by_group_kind(aliases)
+    requests: list[tuple[ResourceMeta, str]] = []
+    for target_namespace in sorted(targets):
+        wanted = targets[target_namespace] | {(_GATEWAY_GROUP, _REFERENCE_GRANT_KIND)}
+        metas: dict[tuple[str, str], ResourceMeta] = {}
+        for group_kind in wanted:
+            meta = by_group_kind.get(group_kind)
+            if meta is not None and meta.namespaced:
+                metas[(meta.group, meta.plural)] = meta
+        requests.extend((meta, target_namespace) for _key, meta in sorted(metas.items()))
+    return requests
+
+
+def _cap_target_requests(
+    requests: Sequence[tuple[ResourceMeta, str]], max_target_lists: int
+) -> tuple[list[tuple[ResourceMeta, str]], CoverageRecord | None]:
+    """Truncate follow-up LISTs to `max_target_lists`, visibly."""
+    limit = max(max_target_lists, 0)
+    if len(requests) <= limit:
+        return list(requests), None
+    dropped = len(requests) - limit
+    record = CoverageRecord(
+        group="",
+        resource="*",
+        scope="",
+        state=CoverageState.CAPPED,
+        detail=f"{dropped} target-namespace LIST(s) dropped at the {limit}-target-list cap",
+    )
+    return list(requests[:limit]), record
+
+
 #: One source LIST's outcome: its meta, its summaries (None when the LIST
 #: failed in a way `_fetch` classifies), and the coverage record it earned.
 _FetchResult = tuple[ResourceMeta, list[SummaryLike] | None, CoverageRecord]
@@ -258,6 +357,18 @@ async def _cancel_pending(tasks: Sequence[asyncio.Task[_FetchResult]]) -> None:
     await asyncio.gather(*pending, return_exceptions=True)
 
 
+def _join_results(
+    results: Sequence[_FetchResult], coverage: list[CoverageRecord]
+) -> list[tuple[ResourceMeta, list[SummaryLike]]]:
+    """Record every LIST's coverage; keep the ones that returned summaries."""
+    fetched: list[tuple[ResourceMeta, list[SummaryLike]]] = []
+    for meta, summaries, record in results:
+        coverage.append(record)
+        if summaries is not None:
+            fetched.append((meta, summaries))
+    return fetched
+
+
 class RelationshipSnapshotLoader:
     """Loads one bounded `RelationshipGraph` snapshot; owns no worker state.
 
@@ -278,27 +389,33 @@ class RelationshipSnapshotLoader:
         namespace: str | None,
         aliases: Mapping[str, ResourceMeta],
     ) -> RelationshipGraph:
-        """Return one immutable, bounded `RelationshipGraph` snapshot."""
+        """Return one immutable, bounded `RelationshipGraph` snapshot.
+
+        Sources are listed in two phases. The first LISTs the fixed catalog
+        in the requested namespace (cluster-scoped kinds cluster-wide). The
+        second follows the `routes_to` references those results declared
+        into the namespaces they explicitly named, LISTing only the
+        referenced kind(s) plus `ReferenceGrant` there — the backend object
+        and the grant that authorizes it both live in the target namespace,
+        so a namespace-only snapshot could never resolve, or fairly deny,
+        a cross-namespace route.
+        """
         metas, missing_specs = graph_source_metas(root, namespace, aliases)
         coverage: list[CoverageRecord] = [_missing_coverage(spec) for spec in missing_specs]
         semaphore = asyncio.Semaphore(self._limits.max_concurrency)
 
-        # Explicit tasks (rather than bare coroutines) so a source failure
-        # `_fetch` deliberately does not classify — or a cancellation of
-        # this load — leaves no sibling LIST running against a client the
-        # caller may be about to close. `gather` still returns results in
-        # source order, so the join below stays deterministic.
-        tasks = [asyncio.create_task(self._fetch(meta, namespace, semaphore)) for meta in metas]
-        try:
-            results = await asyncio.gather(*tasks)
-        finally:
-            await _cancel_pending(tasks)
+        results = await self._gather([(meta, namespace) for meta in metas], semaphore)
+        fetched = _join_results(results, coverage)
 
-        fetched: list[tuple[ResourceMeta, list[SummaryLike]]] = []
-        for meta, summaries, record in results:
-            coverage.append(record)
-            if summaries is not None:
-                fetched.append((meta, summaries))
+        requests, target_cap_record = _cap_target_requests(
+            _target_namespace_requests(fetched, namespace, aliases),
+            self._limits.max_target_lists,
+        )
+        if target_cap_record is not None:
+            coverage.append(target_cap_record)
+        if requests:
+            target_results = await self._gather(list(requests), semaphore)
+            fetched.extend(_join_results(target_results, coverage))
 
         inputs, cap_record = _cap_inputs(fetched, self._limits.max_resources)
         if cap_record is not None:
@@ -311,6 +428,28 @@ class RelationshipSnapshotLoader:
         # differently-ordered cap inside `build_relationship_graph`.
         limits = GraphLimits(max_resources=self._limits.max_resources)
         return build_relationship_graph(inputs, coverage, limits)
+
+    async def _gather(
+        self,
+        requests: Sequence[tuple[ResourceMeta, str | None]],
+        semaphore: asyncio.Semaphore,
+    ) -> list[_FetchResult]:
+        """Run one phase's LISTs concurrently, in request order.
+
+        Explicit tasks (rather than bare coroutines) so a source failure
+        `_fetch` deliberately does not classify — or a cancellation of
+        this load — leaves no sibling LIST running against a client the
+        caller may be about to close. `gather` still returns results in
+        request order, so the join stays deterministic.
+        """
+        tasks = [
+            asyncio.create_task(self._fetch(meta, request_namespace, semaphore))
+            for meta, request_namespace in requests
+        ]
+        try:
+            return list(await asyncio.gather(*tasks))
+        finally:
+            await _cancel_pending(tasks)
 
     async def _fetch(
         self,

@@ -18,13 +18,26 @@ import pytest
 
 from korvid.core.relationships import (
     CoverageState,
+    EdgeResolution,
     GraphResource,
+    RelationshipGraph,
     SummaryLike,
 )
 from korvid.core.relationships import build_relationship_graph as _original_build_relationship_graph
 from korvid.k8s.discovery import ResourceMeta, build_alias_map
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.k8s.relationship_facts import (
+    GATEWAY_GROUP as GATEWAY,
+)
+from korvid.k8s.relationship_facts import (
+    FactConfidence,
+    ReferenceFact,
+    ReferenceGrantFact,
+    RelationKind,
+    RelationshipFacts,
+    TargetReference,
+)
 from korvid.ui import relationship_controller
 from korvid.ui.relationship_controller import (
     GraphLoadLimits,
@@ -388,3 +401,227 @@ async def test_source_results_stay_in_source_order_regardless_of_completion_orde
         _ReversedCompletionLister(), limits=GraphLoadLimits(max_resources=1)
     ).load(_root("Pod", "prod"), "prod", _aliases(PODS_META, SERVICE_META))
     assert [node.name for node in graph.nodes] == ["api-0"]
+
+
+def _route_summary(
+    name: str = "route-a",
+    *,
+    namespace: str = "edge",
+    targets: tuple[tuple[str, str], ...] = (("prod", "api"),),
+) -> GenericSummary:
+    """An HTTPRoute whose backendRefs name `(namespace, service)` targets."""
+    references = tuple(
+        ReferenceFact(
+            relation=RelationKind.ROUTES_TO,
+            target=TargetReference("", "Service", target_namespace, target_name),
+            confidence=FactConfidence.DECLARED,
+            field=f"spec.rules[0].backendRefs[{index}]",
+        )
+        for index, (target_namespace, target_name) in enumerate(targets)
+    )
+    return GenericSummary(
+        name=name,
+        namespace=namespace,
+        kind="HTTPRoute",
+        created="",
+        uid=name,
+        relationships=RelationshipFacts(api_group=GATEWAY, references=references),
+    )
+
+
+def _grant_summary(
+    name: str = "grant-a",
+    *,
+    namespace: str = "prod",
+    from_namespace: str = "edge",
+    to_name: str | None = "api",
+) -> GenericSummary:
+    grant = ReferenceGrantFact(
+        from_group=GATEWAY,
+        from_kind="HTTPRoute",
+        from_namespace=from_namespace,
+        to_group="",
+        to_kind="Service",
+        namespace=namespace,
+        field="spec",
+        to_name=to_name,
+    )
+    return GenericSummary(
+        name=name,
+        namespace=namespace,
+        kind="ReferenceGrant",
+        created="",
+        uid=name,
+        relationships=RelationshipFacts(api_group=GATEWAY, grants=(grant,)),
+    )
+
+
+class _NamespacedLister:
+    """Replays results/errors keyed by `(group, plural, namespace)`."""
+
+    def __init__(
+        self,
+        *,
+        results: dict[tuple[str, str, str | None], list[SummaryLike]] | None = None,
+        errors: dict[tuple[str, str, str | None], Exception] | None = None,
+    ) -> None:
+        self._results = results or {}
+        self._errors = errors or {}
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[SummaryLike]:
+        key = (meta.group, meta.plural, namespace)
+        self.calls.append(key)
+        if key in self._errors:
+            raise self._errors[key]
+        return list(self._results.get(key, []))
+
+
+def _route_aliases() -> dict[str, ResourceMeta]:
+    return _aliases(HTTP_ROUTE_META, REFERENCE_GRANT_META, SERVICE_META, PODS_META)
+
+
+def _routes_to_resolution(graph: RelationshipGraph) -> EdgeResolution:
+    """The single `routes_to` edge's resolution (asserts there is exactly one)."""
+    edges = [edge for edge in graph.edges if edge.relation is RelationKind.ROUTES_TO]
+    assert len(edges) == 1, edges
+    return edges[0].resolution
+
+
+async def test_cross_namespace_backend_resolves_with_a_grant_in_the_target_namespace() -> None:
+    """Opening a route in `edge` must load its target namespace: both the
+    backend Service and the authorizing ReferenceGrant live in `prod`, and
+    a namespace-only LIST set can never see either of them."""
+    lister = _NamespacedLister(
+        results={
+            (GATEWAY, "httproutes", "edge"): [_route_summary()],
+            ("", "services", "prod"): [_generic_summary("api", namespace="prod", kind="Service")],
+            (GATEWAY, "referencegrants", "prod"): [_grant_summary()],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", "edge"), "edge", _route_aliases()
+    )
+    assert _routes_to_resolution(graph) is EdgeResolution.RESOLVED
+    assert ("", "services", "prod") in lister.calls
+    assert (GATEWAY, "referencegrants", "prod") in lister.calls
+
+
+async def test_grant_in_the_wrong_namespace_leaves_the_backend_invalid() -> None:
+    """A grant that lives in the route's own namespace authorizes nothing:
+    the Gateway API requires it in the *target* namespace."""
+    lister = _NamespacedLister(
+        results={
+            (GATEWAY, "httproutes", "edge"): [_route_summary()],
+            (GATEWAY, "referencegrants", "edge"): [_grant_summary(namespace="edge")],
+            ("", "services", "prod"): [_generic_summary("api", namespace="prod", kind="Service")],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", "edge"), "edge", _route_aliases()
+    )
+    assert _routes_to_resolution(graph) is EdgeResolution.INVALID
+
+
+async def test_grant_naming_another_object_leaves_the_backend_invalid() -> None:
+    lister = _NamespacedLister(
+        results={
+            (GATEWAY, "httproutes", "edge"): [_route_summary()],
+            (GATEWAY, "referencegrants", "prod"): [_grant_summary(to_name="admin")],
+            ("", "services", "prod"): [_generic_summary("api", namespace="prod", kind="Service")],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", "edge"), "edge", _route_aliases()
+    )
+    assert _routes_to_resolution(graph) is EdgeResolution.INVALID
+
+
+async def test_forbidden_target_namespace_list_is_recorded_with_its_scope() -> None:
+    """An RBAC denial in the target namespace is per-scope coverage, not a
+    silent default-deny: the record names the namespace it was denied in."""
+    lister = _NamespacedLister(
+        results={
+            (GATEWAY, "httproutes", "edge"): [_route_summary()],
+            ("", "services", "prod"): [_generic_summary("api", namespace="prod", kind="Service")],
+        },
+        errors={(GATEWAY, "referencegrants", "prod"): ApiStatusError(403, "Forbidden")},
+    )
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", "edge"), "edge", _route_aliases()
+    )
+    records = [
+        item
+        for item in graph.coverage
+        if item.resource == "referencegrants" and item.scope == "prod"
+    ]
+    assert [record.state for record in records] == [CoverageState.FORBIDDEN]
+    assert graph.incomplete
+    assert _routes_to_resolution(graph) is EdgeResolution.INVALID
+
+
+async def test_target_namespace_lists_are_deduped_and_deterministic() -> None:
+    """Many routes to the same namespace cost one LIST per (namespace,
+    resource), never one per route, and always in the same order."""
+    routes: list[SummaryLike] = [
+        _route_summary("route-a", targets=(("prod", "api"), ("prod", "admin"))),
+        _route_summary("route-b", targets=(("prod", "api"), ("staging", "api"))),
+    ]
+    lister = _NamespacedLister(results={(GATEWAY, "httproutes", "edge"): routes})
+    await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", "edge"), "edge", _route_aliases()
+    )
+    follow_ups = [call for call in lister.calls if call[2] in {"prod", "staging"}]
+    assert follow_ups == [
+        ("", "services", "prod"),
+        (GATEWAY, "referencegrants", "prod"),
+        ("", "services", "staging"),
+        (GATEWAY, "referencegrants", "staging"),
+    ]
+
+
+async def test_all_namespaces_load_issues_no_follow_up_lists() -> None:
+    """An all-namespaces snapshot already covers every target namespace —
+    a follow-up LIST would only duplicate work it has already done."""
+    lister = _NamespacedLister(
+        results={(GATEWAY, "httproutes", None): [_route_summary()]},
+    )
+    await RelationshipSnapshotLoader(lister).load(_root("HTTPRoute", ""), None, _route_aliases())
+    assert all(call[2] is None for call in lister.calls)
+    assert len(lister.calls) == len(set(lister.calls))
+
+
+async def test_target_namespace_lists_are_bounded_and_capped_visibly() -> None:
+    """The follow-up fan-out is bounded: a pathological set of routes can
+    never turn one snapshot into an unbounded number of LISTs."""
+    routes: list[SummaryLike] = [
+        _route_summary("route-a", targets=(("prod", "api"), ("staging", "api"))),
+    ]
+    lister = _NamespacedLister(results={(GATEWAY, "httproutes", "edge"): routes})
+    graph = await RelationshipSnapshotLoader(
+        lister, limits=GraphLoadLimits(max_target_lists=1)
+    ).load(_root("HTTPRoute", "edge"), "edge", _route_aliases())
+    follow_ups = [call for call in lister.calls if call[2] in {"prod", "staging"}]
+    assert follow_ups == [("", "services", "prod")]
+    assert any(record.state is CoverageState.CAPPED for record in graph.coverage)
+
+
+async def test_target_namespace_results_participate_in_the_resource_cap() -> None:
+    """Target-namespace results are ordinary inputs: they take what the
+    current-namespace sources leave of the resource cap, deterministically."""
+    lister = _NamespacedLister(
+        results={
+            (GATEWAY, "httproutes", "edge"): [_route_summary()],
+            ("", "services", "prod"): [_generic_summary("api", namespace="prod", kind="Service")],
+            (GATEWAY, "referencegrants", "prod"): [_grant_summary()],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister, limits=GraphLoadLimits(max_resources=2)).load(
+        _root("HTTPRoute", "edge"), "edge", _route_aliases()
+    )
+    # Current-namespace sources take the cap first, then the target
+    # namespace's own `(namespace, group, plural)` order: the Service is
+    # kept and the ReferenceGrant is what the cap drops.
+    assert sorted(node.name for node in graph.nodes) == ["api", "route-a"]
+    assert all(node.kind != "ReferenceGrant" for node in graph.nodes)
+    assert any(record.state is CoverageState.CAPPED for record in graph.coverage)
