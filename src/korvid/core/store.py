@@ -35,8 +35,11 @@ class ResourceStore:
         on_purge: Called by `clear_all` after every bucket is dropped, for
             caches keyed by data this store just retired. Injected rather
             than imported so `core` keeps knowing only the `Summary`
-            protocol, and so one store's context switch cannot reach into
-            state another store is still rendering from.
+            protocol, and so the owner — not this class — decides what a
+            purge retires. Note that what a hook reaches is the hook's own
+            business: the one wired today (`reset_age_memo`) clears a
+            process-wide memo, so a second `ResourceStore` would need a hook
+            scoped to its own state to avoid clearing the first one's.
         """
         self._on_purge = on_purge
         # {(kind, scope): {"namespace/name": obj}}  — composite key avoids collisions
@@ -103,10 +106,10 @@ class ResourceStore:
         """Drop every bucket and notify each affected kind once.
 
         Context switching (issue #36) purges the whole store: rows from the
-        previous cluster must never render against the new one. The age memo
-        Anything keyed by those objects — the injected `on_purge` hook, e.g.
-        the age memo, whose keys are their creation timestamps — is retired
-        with them rather than left to age out one entry at a time.
+        previous cluster must never render against the new one. Anything keyed
+        by those objects — the injected `on_purge` hook, e.g. the age memo,
+        whose keys are their creation timestamps — is retired with them rather
+        than left to age out one entry at a time.
         """
         kinds = {kind for kind, _ in self._data}
         self._data.clear()

@@ -1906,3 +1906,55 @@ def test_the_age_memo_evicts_the_least_recently_written_entry(
 
     assert "2031-10-01T00:00:00Z" in models._AGE_WINDOWS
     assert "2031-10-01T00:01:00Z" not in models._AGE_WINDOWS
+
+
+def test_an_unreadable_timestamp_is_parsed_once_not_every_repaint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value the parser rejects returns "-" whatever the clock says, so it is
+    the cheapest thing in the table to remember — and the most expensive to
+    forget, because every repaint pays the failed parse again for every row
+    carrying it."""
+    parses = 0
+    real = models._created_epoch
+
+    def counting(created: str) -> float | None:
+        nonlocal parses
+        parses += 1
+        return real(created)
+
+    monkeypatch.setattr(models, "_created_epoch", counting)
+    base = datetime(2031, 10, 1, tzinfo=UTC)
+
+    for offset in range(5):
+        assert format_age("not-a-timestamp", base + timedelta(minutes=offset)) == "-"
+
+    assert parses == 1
+
+
+def test_a_future_timestamp_is_parsed_once_and_expires_when_it_arrives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clock skew between a node and the API server routinely makes a
+    just-created object look a little way into the future, and a bulk creation
+    puts that on many rows at once — precisely the case this memo exists for.
+    The answer is only good until the timestamp stops being future, so it is
+    remembered with a window that ends exactly there."""
+    parses = 0
+    real = models._created_epoch
+
+    def counting(created: str) -> float | None:
+        nonlocal parses
+        parses += 1
+        return real(created)
+
+    monkeypatch.setattr(models, "_created_epoch", counting)
+    created = "2031-10-01T00:10:00Z"
+    base = datetime(2031, 10, 1, 0, 0, 0, tzinfo=UTC)
+
+    for offset in range(5):
+        assert format_age(created, base + timedelta(minutes=offset)) == "-"
+    assert parses == 1
+
+    # Once the clock passes it, the remembered "-" must not survive.
+    assert format_age(created, datetime(2031, 10, 1, 0, 15, 0, tzinfo=UTC)) == "5m"

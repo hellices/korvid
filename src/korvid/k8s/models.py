@@ -185,9 +185,18 @@ def format_age(created: str, now: datetime | None = None) -> str:
         return remembered[2]
     created_ts = _created_epoch(created)
     if created_ts is None:
+        # Remembered for good: no clock reading makes an unreadable timestamp
+        # readable, and without this every repaint pays the failed parse again
+        # for every row carrying it.
+        _remember_age(created, (float("-inf"), float("inf"), "-"))
         return "-"
     total_seconds = int(now_ts - created_ts)
     if total_seconds < 0:
+        # Skew between a node and the API server routinely puts a fresh object
+        # a little way into the future. The answer holds only until the
+        # timestamp arrives, so the window ends exactly there and the real age
+        # is computed from then on.
+        _remember_age(created, (now_ts, created_ts, "-"))
         return "-"
     window = _age_window(total_seconds, created_ts)
     _remember_age(created, window)
