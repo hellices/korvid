@@ -2922,7 +2922,12 @@ class KorvidApp(App[None]):
         target = self._selected_relationship_root()
         if target is None:
             return
-        self._run_relationship_worker(self._load_relationships(target, self._ctx_epoch))
+        pane = self._pane
+        origin = (pane, pane.kind, pane.scope)
+        namespace = None if pane.scope == ALL_NAMESPACES else pane.scope
+        self._run_relationship_worker(
+            self._load_relationships(target, namespace, self._ctx_epoch, origin)
+        )
 
     def _run_relationship_worker(self, work: Coroutine[Any, Any, None]) -> None:
         """Start one exclusive `relationships` worker with an error boundary.
@@ -2964,18 +2969,27 @@ class KorvidApp(App[None]):
             markup=False,
         )
 
-    async def _load_relationships(self, target: GraphResource, epoch: int) -> None:
+    async def _load_relationships(
+        self,
+        target: GraphResource,
+        namespace: str | None,
+        epoch: int,
+        origin: tuple[PaneState, str, str],
+    ) -> None:
         """Load one bounded snapshot and open `RelationshipScreen` over it.
 
         A :ctx switch crossing *epoch* while the snapshot LISTs are in
-        flight discards the result: it describes the old cluster and must
-        never reach the screen."""
+        flight discards the result. A pane, view, or scope change from
+        *origin* also discards it so an old selection cannot open over the
+        view the user moved to."""
         loader = self._relationship_loader
         if loader is None:
             return  # composition changed under us since action_relationships checked
-        namespace = None if self.current_namespace == ALL_NAMESPACES else self.current_namespace
         graph = await loader.load(target, namespace, self.aliases)
         if self._ctx_switch_crossed(epoch):
+            return
+        pane, kind, scope = origin
+        if self._pane is not pane or pane.kind != kind or pane.scope != scope:
             return
         if len(self.screen_stack) > 1:  # another dialog opened during the LISTs
             return

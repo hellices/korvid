@@ -227,6 +227,39 @@ async def test_context_switch_discards_inflight_graph() -> None:
         assert env.switch_calls == ["ctx-b"]
 
 
+async def test_view_navigation_discards_inflight_graph() -> None:
+    env = _RelEnv(
+        pods=(_pod("api-0", uid="pod-1"),),
+        configmaps=(_configmap("cm-a"),),
+    )
+    env.lister.pause()
+    app = env.app
+    async with app.run_test() as pilot:
+        await _show_pods(env, pilot)
+        await pilot.press("g")
+        await until(pilot, lambda: env.lister.calls != [], label="loader started")
+        app.post_message(NavigateCommand("configmaps"))
+        await until(pilot, lambda: app.current_kind == "configmaps", label="view changed")
+        env.lister.resume()
+        await until(pilot, lambda: _relationship_workers_finished(app), label="graph worker reaped")
+        assert not isinstance(app.screen, RelationshipScreen)
+
+
+async def test_relationship_worker_uses_scope_captured_by_action() -> None:
+    env = _RelEnv(pods=(_pod("api-0", uid="pod-1"),))
+    env.lister.pause()
+    app = env.app
+    async with app.run_test() as pilot:
+        await _show_pods(env, pilot)
+        app.action_relationships()
+        app.current_scope = "staging"
+        await until(pilot, lambda: env.lister.calls != [], label="loader started")
+        assert {namespace for _plural, namespace in env.lister.calls} == {"prod"}
+        env.lister.resume()
+        await until(pilot, lambda: _relationship_workers_finished(app), label="graph worker reaped")
+        assert not isinstance(app.screen, RelationshipScreen)
+
+
 async def test_g_without_selected_row_does_not_start_loader() -> None:
     env = _RelEnv(pods=())
     app = env.app
