@@ -1679,7 +1679,9 @@ Document:
 - why a stale owner UID remains missing after same-name replacement;
 - Gateway `ReferenceGrant` behavior;
 - exact default bounds;
-- explicit statement that Secret values are never read.
+- explicit statement that Secret values are never retained in relationship
+  facts, the graph, or rendered output (and that a Secret LIST itself is an
+  ordinary LIST).
 
 Link the new document from the README documentation section.
 

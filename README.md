@@ -124,7 +124,7 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
   bounded transitive expansion with cycle-safe traversal, per-source RBAC/
   availability coverage with an incomplete-graph warning, exact Gateway
   `ReferenceGrant` cross-namespace authorization, and a metadata-only
-  extraction that never reads a Secret's value.
+  extraction that never retains a Secret's value.
 - **[Helm and operators](https://github.com/hellices/korvid/blob/main/docs/helm-operators.md)** — a release browser that
   needs no helm binary, search-first chart install / upgrade / rollback /
   uninstall wizards with dry-run previews, chart repo management, and the

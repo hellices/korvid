@@ -433,8 +433,11 @@ k8s manifest -> RelationshipFacts -> core RelationshipGraph
 `korvid.k8s.relationship_facts.extract_relationship_facts` is the safety
 boundary: it walks one raw manifest and extracts only the metadata a
 relationship needs (owner references, label selectors, volume/config
-references, routing backends, node scheduling, storage bindings), never a
-Secret's `data`, a literal env value, or a command/arg. Every listed object's
+references, routing backends, live Pod node scheduling, storage bindings),
+never a Secret's `data`, a literal env value, or a command/arg. The
+guarantee is retention, not transport — a Secret LIST returns whole objects
+like any other LIST, and this boundary is what keeps their values out of
+every summary, graph, and rendered row. Every listed object's
 summary (`GenericSummary`/`PodSummary`) carries its `RelationshipFacts`
 alongside the fields the rest of the UI already reads — the extraction runs
 once, at list time, not again when the graph is built.
@@ -446,12 +449,15 @@ declared/observed reference facts against the resources it was handed by
 UID-or-name, joins selector facts against same-namespace candidates by label
 match, authorizes cross-namespace `routes_to` edges only against an exact
 Gateway `ReferenceGrant` match, and returns one immutable, deterministically
-capped `RelationshipGraph`.
+capped `RelationshipGraph`. Its edge cap is enforced during generation by a
+bounded top-K accumulator, so a quadratic selector join never allocates more
+than `max_edges` edges at a time.
 
 All the bounded LISTs — the fixed resource catalog, the discovered Gateway
-API kinds, per-source concurrency and per-snapshot resource caps, and the
-per-source `CoverageRecord` a 403/404/network failure becomes — are
-`korvid.ui.relationship_controller.RelationshipSnapshotLoader`'s
+API kinds, the bounded second phase that follows `routes_to` references into
+the namespaces they name, per-source concurrency and per-snapshot resource
+caps, and the per-source `CoverageRecord` a 403/404/network failure becomes
+— are `korvid.ui.relationship_controller.RelationshipSnapshotLoader`'s
 responsibility, not the core builder's. That split is about purity, not
 about which layer is allowed to touch the API: `WatchManager` in §8 lives in
 `core/` and drives its own watch loop through an injected source callable,

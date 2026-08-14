@@ -6,10 +6,11 @@ backends, node scheduling, and storage bindings, joined from the resources
 korvid has already listed. It answers "what breaks if I delete this?" and
 "why is this Pod using that ConfigMap?" without a second tool.
 
-This is a **read-only, metadata-only** view: it never issues a write, and it
-never reads a Secret's `data`/`stringData`, a container's `command`/`args`, or
-a literal environment variable value. See [Secret safety](#secret-safety)
-below.
+This is a **read-only, metadata-only** view: it never issues a write, and no
+Secret `data`/`stringData`, container `command`/`args`, or literal
+environment variable value is ever retained in a relationship fact, the
+graph, or anything the screen renders. See [Secret safety](#secret-safety)
+below for what that guarantee does and does not cover.
 
 ## Opening the view
 
@@ -64,9 +65,9 @@ Each row shows six columns:
 | `routes_to` | Ingress / Gateway API Route (HTTPRoute, GRPCRoute, TLSRoute, TCPRoute, UDPRoute) | The backend Service it routes to |
 | `routes_to` | EndpointSlice | The Pod named by one `endpoints[].targetRef` (live routing target, not authored config) |
 | `uses_volume` | Pod / workload template | A PersistentVolumeClaim mounted as a volume |
-| `uses_config` | Pod / workload template | A ConfigMap or Secret referenced by name only (`envFrom`, `env[].valueFrom`, a volume, a projected volume source, or `imagePullSecrets`) |
-| `scheduled_on` | Pod | The Node named in its (live) `spec.nodeName` |
-| `bound_to` | PersistentVolumeClaim / PersistentVolume | The bound PersistentVolume / PersistentVolumeClaim on the other side |
+| `uses_config` | Pod / workload template | A ConfigMap or Secret referenced by name only (`envFrom`, `env[].valueFrom` — across regular, init, and ephemeral containers — a volume, a projected volume source, or `imagePullSecrets`) |
+| `scheduled_on` | Pod | The Node named in its (live) `spec.nodeName`. Only a live Pod is ever scheduled: a workload's `spec.template.spec.nodeName` is template configuration, not an observed placement of the Deployment/Job itself, so it produces no edge |
+| `bound_to` | PersistentVolumeClaim / PersistentVolume | The bound PersistentVolume / PersistentVolumeClaim on the other side (a PV's `spec.claimRef` UID is kept, so a stale binding is not reattached to a recreated claim of the same name) |
 
 Direction reflects **operational** dependency, not which object's manifest
 holds the selector: a Service's `spec.selector` names Pods, and the Service
@@ -144,7 +145,11 @@ API defines for all of them, so HTTPRoute, GRPCRoute, and the stream routes
 being listed and silently ignored. A CRD outside that group whose kind merely
 ends in `Route` (for example an OpenShift `Route`) is neither listed nor
 interpreted. Route `parentRefs` (the Gateway a Route attaches to) are not
-modelled. Each LIST records one of five **coverage states**:
+modelled. A second, bounded phase then LISTs the namespaces those results'
+`routes_to` references explicitly named (see [Cross-namespace
+routing](#cross-namespace-routing-referencegrant)); each of those LISTs
+records its own coverage, scoped to the namespace it ran in. Each LIST
+records one of five **coverage states**:
 
 - **`complete`** — the LIST succeeded.
 - **`forbidden`** — the LIST returned 403; RBAC denies this account that
@@ -154,10 +159,11 @@ modelled. Each LIST records one of five **coverage states**:
   an absent optional CRD, not a permission problem.
 - **`failed`** — the LIST raised any other API error or a network/transport
   error.
-- **`capped`** — the number of input resources (across all sources) or the
-  number of joined edges exceeded a hard limit and the excess was dropped
-  deterministically (see [Limits](#limits)); this can also appear once per
-  cap even when every individual source's own LIST was `complete`.
+- **`capped`** — the number of input resources (across all sources), the
+  number of joined edges, or the number of cross-namespace follow-up LISTs
+  exceeded a hard limit and the excess was dropped deterministically (see
+  [Limits](#limits)); this can also appear once per cap even when every
+  individual source's own LIST was `complete`.
 
 Press `c` to toggle coverage detail: the underlying error/skip text for each
 non-`complete` record (sanitized: control characters flattened, capped at
@@ -198,9 +204,12 @@ This means **recreating a Deployment with the same name produces a new
 UID**, and any ReplicaSet still carrying the *old* Deployment's UID in its
 `ownerReferences` resolves as `missing`, explained as "no observed resource
 has uid `<old-uid>`" — it is never silently reattached to the new Deployment
-just because the name matches. A resource is only resolved by name when its
-reference carries no UID at all (some reference shapes, like a ConfigMap
-`envFrom`, never carry one).
+just because the name matches. The same protection covers a
+PersistentVolume's `spec.claimRef`, which carries the bound claim's UID: a
+PV still pointing at a deleted PVC stays `missing` instead of appearing
+bound to a replacement claim that merely reuses the name. A resource is only
+resolved by name when its reference carries no UID at all (some reference
+shapes, like a ConfigMap `envFrom`, never carry one).
 
 ## Cross-namespace routing (`ReferenceGrant`)
 
@@ -228,6 +237,20 @@ A cluster-scoped subject (for example a PersistentVolume referencing a
 namespaced PersistentVolumeClaim) is exempt from this check, since it has no
 namespace of its own to disagree with.
 
+Both halves of that decision — the backend object and the grant — live in
+the *target* namespace, so the snapshot loads it. After the current
+namespace's LISTs return, korvid reads the `routes_to` facts they produced
+and, for each namespace one of them explicitly named, LISTs only the
+referenced kind(s) plus `ReferenceGrant` there. Nothing else widens the
+fan-out: no per-object GET, no cluster-wide sweep, and no namespace that no
+route named. Those follow-up LISTs are deduplicated (a thousand routes into
+one namespace still cost one LIST per resource), ordered by `(namespace,
+group, plural)`, capped at `max_target_lists`, and each records its own
+coverage with `scope` set to the namespace it ran in — so an RBAC denial in
+the target namespace shows up as `forbidden` coverage rather than a silent
+default-deny. An all-namespaces snapshot (`0`) issues no follow-ups at all;
+it has already listed every namespace.
+
 ## Limits
 
 | Limit | Default | Applies to |
@@ -237,16 +260,30 @@ namespace of its own to disagree with.
 | `max_depth` | 5 | Hops the `d` expansion walks outward from the root |
 | `max_nodes` | 500 | Resources visited by the `d` expansion, and the total render-row budget the screen shares across every category |
 | `max_concurrency` | 4 | Concurrent LISTs the snapshot loader runs at once |
+| `max_target_lists` | 32 | Follow-up LISTs into the namespaces `routes_to` references name |
 
 All caps are deterministic, never API-response-order dependent. The resource
 cap is enforced twice, each in its own fixed order: the snapshot loader caps
 first, keeping resources in `(group, plural)` source order (each source's own
-resources ordered by `(namespace, name, uid)`); the graph builder then
-applies its own resource cap — a safety net that is effectively a no-op once
-the loader has already capped, but independently enforced regardless — sorted
-by `(group, kind, namespace, name, uid)`, and its edge cap sorted by
-`(subject, relation, target, evidence field)`. Exceeding any cap adds a
-`capped` coverage record rather than silently dropping data with no trace.
+resources ordered by `(namespace, name, uid)`, with target-namespace results
+after the current namespace's); the graph builder then applies its own
+resource cap — a safety net that is effectively a no-op once the loader has
+already capped, but independently enforced regardless — sorted by
+`(group, kind, namespace, name, uid)`.
+
+The edge cap is applied *while* edges are generated, not after: a selector
+join can describe far more candidate edges than the cap allows (an empty
+`policy/v1` PDB selector matches every Pod in its namespace), so korvid
+retains at most `max_edges` of them at a time, always the lowest-ordered
+ones by `(subject, relation, target, evidence field)`. The result is exactly
+what sorting every candidate and truncating would have produced, without
+ever allocating every candidate. Its `capped` coverage record therefore
+names the cap rather than a dropped count: the dropped candidates are never
+retained, and counting the distinct edges among them would need the
+unbounded memory the cap exists to avoid.
+
+Exceeding any cap adds a `capped` coverage record rather than silently
+dropping data with no trace.
 
 ## Secret safety
 
@@ -254,12 +291,25 @@ Korvid's relationship extraction is metadata-only by construction: it reads
 only reference *names* (`envFrom`, `env[].valueFrom`, a volume's `secret`/
 `configMap`, a projected volume source, `imagePullSecrets`) — never a
 Secret's `data`/`stringData`, never a literal `env[].value`, and never a
-container's `command`/`args` or object annotations. This holds even though
-Secrets are one of the fixed sources the loader LISTs: the LIST result is
-reduced to name/namespace/UID/labels/relationship-facts before it is ever
-joined into the graph, so no Secret value reaches the graph, the screen, or
-any evidence field. A row's Evidence column is always a manifest *field
-path* (e.g. `spec.volumes[0].secret`), never a field *value*.
+container's `command`/`args` or object annotations.
+
+Be precise about where that boundary sits. Secrets are one of the fixed
+sources this view LISTs, and a Kubernetes Secret LIST is an ordinary LIST:
+the API server returns whole Secret objects, values included, exactly as it
+does for `kubectl get secrets -o yaml`. Nothing korvid can do client-side
+changes that. What korvid guarantees is what happens next: each listed
+object is immediately reduced to name, namespace, UID, labels, and
+metadata-only relationship facts, and **no Secret value is ever retained or
+copied into a summary's relationship facts, the graph snapshot, an
+audit/coverage record's detail text, or anything the screen renders**. A
+row's Evidence column is always a manifest *field path* (e.g.
+`spec.volumes[0].secret`), never a field *value*, and the same holds for
+ephemeral containers, whose `envFrom`/`env[].valueFrom` references are read
+through that same name-only extractor.
+
+To actually see a Secret's contents you use the Secrets view, which routes
+them through korvid's masking pipeline — this view has no path to them at
+all.
 
 ## Navigating from the view
 
@@ -275,8 +325,9 @@ path* (e.g. `spec.volumes[0].secret`), never a field *value*.
 
 ## What this view does not do
 
-- It does not read Secret values, container commands/args, env literal
-  values, or annotations (see [Secret safety](#secret-safety)).
+- It does not retain Secret values, container commands/args, env literal
+  values, or annotations anywhere in the facts it extracts, the graph, or
+  what it renders (see [Secret safety](#secret-safety)).
 - It does not perform any write — it is read-only, like every other korvid
   view that is not behind the write-approval gate.
 - It does not attempt to enumerate every possible Kubernetes relationship —
@@ -286,8 +337,10 @@ path* (e.g. `spec.volumes[0].secret`), never a field *value*.
 - It does not prove the *absence* of a dependency once coverage is
   incomplete (see [above](#why-an-incomplete-graph-cannot-prove-no-dependency)).
 - It scopes its namespaced-resource LISTs to the currently selected
-  namespace, the same way every other korvid table does (cluster-scoped
-  kinds such as Node and PersistentVolume are always listed cluster-wide) —
-  press `0` to switch to the all-namespaces view before opening the graph if
-  you need dependencies/dependents outside the current namespace
-  considered.
+  namespace, plus the namespaces a `routes_to` reference in those results
+  explicitly names (see [Cross-namespace
+  routing](#cross-namespace-routing-referencegrant)); cluster-scoped kinds
+  such as Node and PersistentVolume are always listed cluster-wide. It does
+  not sweep every namespace looking for other relationships — press `0` to
+  switch to the all-namespaces view before opening the graph if you need
+  dependencies/dependents outside the current namespace considered.

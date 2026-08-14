@@ -68,11 +68,15 @@ Facts contain metadata and references only:
 - EndpointSlice Service ownership and endpoint target references;
 - Ingress and Gateway backend references;
 - PDB selectors;
-- Pod node placement.
+- Pod node placement (live Pods only; a workload's template `nodeName` is
+  configuration, not an observed placement).
 
-Secret `data` and `stringData` are never read into the facts model. Environment
-literal values, command arguments, annotations, and unrelated manifest fields
-are also excluded.
+Secret `data` and `stringData` are never read into the facts model, and no
+Secret value is ever retained in a summary, the graph, or rendered output.
+The boundary is retention, not transport: a Secret LIST is an ordinary LIST
+and the API server returns whole objects, which the adapter immediately
+reduces to metadata-only facts. Environment literal values, command
+arguments, annotations, and unrelated manifest fields are also excluded.
 
 `GenericSummary`, `PodSummary`, and any specialized summary that flows through
 the resource store carry `RelationshipFacts`. The extraction belongs in
@@ -278,6 +282,6 @@ graph is incomplete, but the preview must say so.
 - A persistent or multi-user historical database.
 - A complete causal dependency graph.
 - Force-directed graph layout or a new visualization dependency.
-- Reading Secret values.
+- Retaining or rendering Secret values anywhere in this feature.
 - Blocking a write solely because of an inferred edge.
 - Cluster-write plugins or third-party graph extractors.
