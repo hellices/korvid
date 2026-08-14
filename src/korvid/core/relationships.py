@@ -22,6 +22,7 @@ Pod) and cross-namespace Gateway backend authorization via an exact
 
 from __future__ import annotations
 
+import heapq
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -483,27 +484,37 @@ def _build_selector_edge(
     )
 
 
-def _selector_edges(
+def _collect_selector_edges(
     sorted_inputs: Sequence[GraphInput],
     nodes: Sequence[GraphResource],
-) -> list[RelationshipEdge]:
+    edges: _BoundedEdges,
+) -> None:
     """Join every `SelectorFact` against same-namespace candidate targets.
 
     A selector never crosses namespaces: candidates are restricted to the
-    selector-declaring resource's own namespace. One edge is created per
+    selector-declaring resource's own namespace. One edge is offered per
     matching target; an empty or absent selector (per `matches_selector`'s
     `empty_matches` policy) simply yields no candidates matched, not a
     missing/invalid edge.
+
+    Candidates within one fact are generated in ascending edge order (the
+    candidate index preserves the inputs' `(namespace, name, uid)` sort, and
+    everything else in the sort key is fixed for a single fact), and the
+    accumulator's retained set only ever improves. So once one candidate is
+    dropped for being ordered past the cap, every later candidate of the
+    same fact would be dropped too and the scan can stop -- an exact
+    short-circuit, not an approximation.
     """
     index = _selector_targets_by_group_kind_namespace(sorted_inputs, nodes)
-    edges: list[RelationshipEdge] = []
     for item, declaring in zip(sorted_inputs, nodes, strict=True):
         for fact in item.summary.relationships.selectors:
             candidates = index.get((fact.target_group, fact.target_kind, declaring.namespace), ())
             for matched, labels in candidates:
-                if matches_selector(fact.selector, labels, empty_matches=fact.empty_matches):
-                    edges.append(_build_selector_edge(declaring, fact, matched))
-    return edges
+                if not matches_selector(fact.selector, labels, empty_matches=fact.empty_matches):
+                    continue
+                offer = edges.offer(_build_selector_edge(declaring, fact, matched))
+                if offer is _EdgeOffer.DROPPED:
+                    break
 
 
 def _edge_sort_key(
@@ -524,6 +535,94 @@ def _edge_sort_key(
         edge.target.uid or "",
         edge.evidence.field,
     )
+
+
+class _EdgeOffer(StrEnum):
+    """What `_BoundedEdges` did with one offered candidate edge."""
+
+    #: Kept (possibly by evicting a higher-ordered candidate).
+    RETAINED = "retained"
+    #: Identical to an already-retained edge; deduplicated away.
+    DUPLICATE = "duplicate"
+    #: Ordered after every retained candidate while the cap was full.
+    DROPPED = "dropped"
+
+
+@dataclass(frozen=True, slots=True)
+class _RankedEdge:
+    """A candidate edge plus its position in the graph's total edge order.
+
+    `rank` is `(_edge_sort_key(edge), arrival index)`. The arrival index
+    breaks ties exactly the way a stable sort of the candidate stream
+    would, so a bounded accumulation keeps precisely the edges a full
+    sort-then-truncate would have kept.
+    """
+
+    rank: tuple[tuple[str, ...], int]
+    edge: RelationshipEdge
+
+    def __lt__(self, other: _RankedEdge) -> bool:
+        # Deliberately inverted: `heapq` is a min-heap, and `_BoundedEdges`
+        # needs O(1) access to the *worst* retained candidate to evict it.
+        return self.rank > other.rank
+
+
+class _BoundedEdges:
+    """Retains at most `max_edges` candidate edges while they are generated.
+
+    The joins that feed this accumulator are quadratic by nature -- an
+    empty-selector `policy/v1` PodDisruptionBudget matches every Pod in its
+    namespace, so a few thousand PDBs and a few thousand Pods describe
+    millions of candidate edges. Materializing them all and truncating
+    afterwards allocates all of them first; instead every candidate is
+    offered here and only the `max_edges` lowest-ordered ones (by
+    `_edge_sort_key`, ties broken by arrival) are ever retained, so peak
+    edge memory is O(max_edges) no matter how large the join is.
+
+    The retained set is exactly `sorted(deduplicated_candidates,
+    key=_edge_sort_key)[:max_edges]`: a duplicate of a retained edge is
+    dropped, and a duplicate of an already-evicted edge is ordered at or
+    after the eviction that removed it (the retained set only ever
+    improves), so it is dropped again rather than reappearing.
+    """
+
+    def __init__(self, max_edges: int) -> None:
+        self._max_edges = max(max_edges, 0)
+        self._heap: list[_RankedEdge] = []
+        self._retained: set[RelationshipEdge] = set()
+        self._arrivals = 0
+        #: True once any candidate was dropped because the cap was full.
+        self.dropped = False
+
+    def __len__(self) -> int:
+        """How many candidate edges are currently retained."""
+        return len(self._heap)
+
+    def offer(self, edge: RelationshipEdge) -> _EdgeOffer:
+        """Offer one candidate edge and report what happened to it."""
+        if edge in self._retained:
+            return _EdgeOffer.DUPLICATE
+        if self._max_edges == 0:
+            self.dropped = True
+            return _EdgeOffer.DROPPED
+        candidate = _RankedEdge((_edge_sort_key(edge), self._arrivals), edge)
+        self._arrivals += 1
+        if len(self._heap) < self._max_edges:
+            heapq.heappush(self._heap, candidate)
+            self._retained.add(edge)
+            return _EdgeOffer.RETAINED
+        if candidate.rank > self._heap[0].rank:
+            self.dropped = True
+            return _EdgeOffer.DROPPED
+        evicted = heapq.heapreplace(self._heap, candidate)
+        self._retained.discard(evicted.edge)
+        self._retained.add(edge)
+        self.dropped = True
+        return _EdgeOffer.RETAINED
+
+    def ordered(self) -> list[RelationshipEdge]:
+        """The retained edges in the graph's deterministic edge order."""
+        return [ranked.edge for ranked in sorted(self._heap, key=lambda ranked: ranked.rank)]
 
 
 def _node_indexes(
@@ -556,29 +655,18 @@ def _grants_by_namespace(
     return {namespace: tuple(namespace_grants) for namespace, namespace_grants in grants.items()}
 
 
-def _reference_edges(
+def _collect_reference_edges(
     sorted_inputs: Sequence[GraphInput],
     nodes: Sequence[GraphResource],
     by_uid: dict[tuple[str, str], GraphResource],
     by_name: dict[tuple[str, str, str, str], GraphResource],
     grants_by_namespace: Mapping[str, tuple[ReferenceGrantFact, ...]],
-) -> list[RelationshipEdge]:
-    edges: list[RelationshipEdge] = []
+    edges: _BoundedEdges,
+) -> None:
+    """Offer one edge per declared `ReferenceFact` to the bounded accumulator."""
     for item, subject in zip(sorted_inputs, nodes, strict=True):
         for fact in item.summary.relationships.references:
-            edges.append(_build_edge(subject, fact, by_uid, by_name, grants_by_namespace))
-    return edges
-
-
-def _deduplicate_edges(edges: Sequence[RelationshipEdge]) -> list[RelationshipEdge]:
-    seen: set[RelationshipEdge] = set()
-    deduplicated: list[RelationshipEdge] = []
-    for edge in edges:
-        if edge in seen:
-            continue
-        seen.add(edge)
-        deduplicated.append(edge)
-    return deduplicated
+            edges.offer(_build_edge(subject, fact, by_uid, by_name, grants_by_namespace))
 
 
 #: Frozen singleton so the default argument below is a name lookup, not a
@@ -597,6 +685,11 @@ def build_relationship_graph(
     are applied so which resources/edges survive a cap is deterministic
     regardless of discovery order. Only `name`, `namespace`, `uid`,
     `labels`, and `relationships` are ever read from each input's summary.
+
+    Edges are accumulated through `_BoundedEdges`, which retains at most
+    `limits.max_edges` candidates at a time: a selector join can describe
+    far more candidate edges than the cap allows, and materializing them
+    all before truncating would allocate every one of them first.
     """
     sorted_inputs = sorted(inputs, key=_input_sort_key)
     truncated = False
@@ -619,14 +712,12 @@ def build_relationship_graph(
     nodes, by_uid, by_name = _node_indexes(sorted_inputs)
     grants_by_namespace = _grants_by_namespace(sorted_inputs)
 
-    candidate_edges = _reference_edges(sorted_inputs, nodes, by_uid, by_name, grants_by_namespace)
-    candidate_edges += _selector_edges(sorted_inputs, nodes)
-    edges = _deduplicate_edges(candidate_edges)
-    edges.sort(key=_edge_sort_key)
+    candidates = _BoundedEdges(limits.max_edges)
+    _collect_reference_edges(sorted_inputs, nodes, by_uid, by_name, grants_by_namespace, candidates)
+    _collect_selector_edges(sorted_inputs, nodes, candidates)
+    edges = candidates.ordered()
 
-    if len(edges) > limits.max_edges:
-        dropped_edges = len(edges) - limits.max_edges
-        edges = edges[: limits.max_edges]
+    if candidates.dropped:
         truncated = True
         extra_coverage.append(
             CoverageRecord(
@@ -634,7 +725,11 @@ def build_relationship_graph(
                 resource="*",
                 scope="",
                 state=CoverageState.CAPPED,
-                detail=f"{dropped_edges} edge(s) dropped at the {limits.max_edges}-edge cap",
+                # No count: the dropped candidates are never retained, so
+                # counting the *distinct* edges among them would need the
+                # unbounded memory this cap exists to avoid.
+                detail=f"edge(s) dropped at the {limits.max_edges}-edge cap; "
+                "the lowest-ordered edges were kept and the exact dropped count is not tracked",
             )
         )
 

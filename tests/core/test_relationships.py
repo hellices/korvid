@@ -13,6 +13,7 @@ from collections.abc import Iterable, Iterator, Mapping
 
 import pytest
 
+from korvid.core import relationships
 from korvid.core.relationships import (
     CoverageRecord,
     CoverageState,
@@ -34,6 +35,7 @@ from korvid.k8s.relationship_facts import (
     RelationshipFacts,
     SelectorFact,
     TargetReference,
+    extract_relationship_facts,
 )
 from korvid.k8s.selectors import LabelSelector, SelectorExpression
 
@@ -1269,3 +1271,176 @@ def test_workload_and_pdb_selectors_do_not_cross_namespaces() -> None:
         [_complete("deployments"), _complete("poddisruptionbudgets"), _complete("pods")],
     )
     assert graph.edges == ()
+
+
+def _pv_input(
+    name: str, *, claim: str, claim_uid: str | None, namespace: str = "prod"
+) -> GraphInput:
+    """A PersistentVolume whose `spec.claimRef` BOUND_TO fact carries `claim_uid`."""
+    return _input(
+        "PersistentVolume",
+        "",
+        "",
+        name,
+        f"pv-{name}",
+        relationships=_facts(
+            references=(
+                _ref(
+                    "bound_to",
+                    "",
+                    "PersistentVolumeClaim",
+                    namespace,
+                    claim,
+                    uid=claim_uid,
+                    field="spec.claimRef",
+                ),
+            )
+        ),
+    )
+
+
+def test_pv_claim_ref_uid_does_not_reconnect_to_a_recreated_claim() -> None:
+    """A PV bound to a deleted PVC must not reattach to its same-named
+    replacement: the claimRef UID makes the stale binding visibly missing."""
+    volume = _pv_input("pv-1", claim="api-data", claim_uid="pvc-old")
+    claim = _input("PersistentVolumeClaim", "", "prod", "api-data", "pvc-new")
+    graph = build_relationship_graph(
+        [volume, claim], [_complete("persistentvolumes"), _complete("persistentvolumeclaims")]
+    )
+    edge = next(edge for edge in graph.edges if edge.subject.kind == "PersistentVolume")
+    assert edge.resolution is EdgeResolution.MISSING
+    assert edge.target.uid == "pvc-old"
+    assert "pvc-new" not in repr(edge)
+
+
+def test_pv_claim_ref_uid_resolves_the_exact_bound_claim() -> None:
+    """The same claimRef UID resolves to the live claim it actually names."""
+    volume = _pv_input("pv-1", claim="api-data", claim_uid="pvc-1")
+    claim = _input("PersistentVolumeClaim", "", "prod", "api-data", "pvc-1")
+    graph = build_relationship_graph(
+        [volume, claim], [_complete("persistentvolumes"), _complete("persistentvolumeclaims")]
+    )
+    edge = next(edge for edge in graph.edges if edge.subject.kind == "PersistentVolume")
+    assert edge.resolution is EdgeResolution.RESOLVED
+    assert edge.target.uid == "pvc-1"
+
+
+def _adversarial_selector_inputs(pdbs: int, pods: int) -> list[GraphInput]:
+    """`pdbs` x `pods` candidate selector edges: every empty-selector
+    `policy/v1` PDB matches every Pod in the namespace."""
+    inputs: list[GraphInput] = [
+        _pdb_input(f"pdb-{index:03d}", selector={}, empty_matches=True) for index in range(pdbs)
+    ]
+    inputs.extend(_pod_input(f"pod-{index:03d}") for index in range(pods))
+    return inputs
+
+
+def _selector_coverage() -> list[CoverageRecord]:
+    return [_complete("poddisruptionbudgets"), _complete("pods")]
+
+
+def _peak_tracking_accumulator(peaks: list[int]) -> type[relationships._BoundedEdges]:
+    """A `_BoundedEdges` subclass recording its retained size after every offer."""
+
+    class _PeakTrackingEdges(relationships._BoundedEdges):
+        def offer(self, edge: RelationshipEdge) -> relationships._EdgeOffer:
+            outcome = super().offer(edge)
+            peaks.append(len(self))
+            return outcome
+
+    return _PeakTrackingEdges
+
+
+def test_edge_cap_never_retains_more_candidates_than_max_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PDB x Pod join must never materialize every candidate edge first.
+
+    Thousands of empty-selector PDBs joined against thousands of Pods
+    produce millions of candidates; only `max_edges` of them may ever be
+    retained at once, so the cap has to bound accumulation during
+    generation rather than truncating a fully built list afterwards.
+    """
+    peaks: list[int] = []
+    monkeypatch.setattr(relationships, "_BoundedEdges", _peak_tracking_accumulator(peaks))
+    inputs = _adversarial_selector_inputs(pdbs=20, pods=20)
+    graph = build_relationship_graph(inputs, _selector_coverage(), limits=GraphLimits(max_edges=7))
+    assert len(graph.edges) == 7
+    assert peaks
+    assert max(peaks) <= 7
+
+
+def test_edge_cap_keeps_the_lowest_ordered_edges_regardless_of_input_order() -> None:
+    """The capped edge set is exactly the top of the fully ordered join,
+    and does not depend on the order inputs were discovered in."""
+    inputs = _adversarial_selector_inputs(pdbs=8, pods=8)
+    uncapped = build_relationship_graph(inputs, _selector_coverage())
+    capped = build_relationship_graph(inputs, _selector_coverage(), limits=GraphLimits(max_edges=5))
+    reversed_capped = build_relationship_graph(
+        list(reversed(inputs)), _selector_coverage(), limits=GraphLimits(max_edges=5)
+    )
+    assert capped.edges == uncapped.edges[:5]
+    assert reversed_capped.edges == capped.edges
+
+
+def test_edge_cap_records_capped_coverage_without_inventing_a_count() -> None:
+    """The cap stays visible in coverage. The exact number of distinct
+    dropped edges is unknowable under bounded memory, so the record names
+    the cap that was hit rather than a fabricated count."""
+    graph = build_relationship_graph(
+        _adversarial_selector_inputs(pdbs=4, pods=4),
+        _selector_coverage(),
+        limits=GraphLimits(max_edges=3),
+    )
+    record = next(item for item in graph.coverage if item.state is CoverageState.CAPPED)
+    assert graph.truncated
+    assert "3-edge cap" in record.detail
+
+
+def test_deduplicated_edges_survive_a_cap_larger_than_the_distinct_edge_count() -> None:
+    """Duplicate candidate edges must not consume cap budget: the same
+    fact declared twice is one edge, leaving room for the rest."""
+    duplicate = _ref("uses_config", "", "ConfigMap", "prod", "api-config", field="spec.volumes[0]")
+    pod = _input(
+        "Pod",
+        "",
+        "prod",
+        "api-0",
+        "pod-1",
+        relationships=_facts(references=(duplicate, duplicate)),
+    )
+    other = _input(
+        "Pod",
+        "",
+        "prod",
+        "api-1",
+        "pod-2",
+        relationships=_facts(references=(duplicate,)),
+    )
+    graph = build_relationship_graph(
+        [pod, other], [_complete("pods")], limits=GraphLimits(max_edges=2)
+    )
+    assert len(graph.edges) == 2
+    assert not graph.truncated
+
+
+def test_pv_claim_ref_uid_flows_from_the_manifest_into_graph_resolution() -> None:
+    """End-to-end: a PV manifest's `spec.claimRef.uid` must survive
+    extraction and make a recreated same-named claim resolve as missing."""
+    facts = extract_relationship_facts(
+        "PersistentVolume",
+        "",
+        "v1",
+        {
+            "metadata": {"name": "pv-1"},
+            "spec": {"claimRef": {"namespace": "prod", "name": "api-data", "uid": "pvc-old"}},
+        },
+    )
+    volume = _input("PersistentVolume", "", "", "pv-1", "pv-uid", relationships=facts)
+    claim = _input("PersistentVolumeClaim", "", "prod", "api-data", "pvc-new")
+    graph = build_relationship_graph(
+        [volume, claim], [_complete("persistentvolumes"), _complete("persistentvolumeclaims")]
+    )
+    edge = next(edge for edge in graph.edges if edge.subject.kind == "PersistentVolume")
+    assert edge.resolution is EdgeResolution.MISSING
+    assert edge.target.uid == "pvc-old"
