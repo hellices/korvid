@@ -283,19 +283,13 @@ class RelationshipGraph:
             frontier = next_frontier
 
         if frontier and not truncated:
-            # The depth cap stopped traversal before the frontier was
-            # expanded. That is only a real truncation if some frontier
-            # resource has a genuine unvisited dependent beyond the cap;
-            # an edge that only loops back into an already-visited
-            # resource (a cycle or a revisit) is not unexplored work
-            # being dropped.
-            has_unexplored_dependent = any(
-                edge.subject not in parent_of
-                for current in frontier
-                for edge in dependents.get(current, ())
+            depth_cycles, depth_revisits, truncated = _classify_depth_frontier(
+                frontier,
+                dependents,
+                parent_of,
             )
-            if has_unexplored_dependent:
-                truncated = True
+            cycles.extend(depth_cycles)
+            revisits.extend(depth_revisits)
 
         return TraversalResult(
             edges=tuple(edges),
@@ -303,6 +297,25 @@ class RelationshipGraph:
             truncated=truncated,
             revisits=tuple(revisits),
         )
+
+
+def _classify_depth_frontier(
+    frontier: Sequence[GraphResource],
+    dependents: Mapping[GraphResource, Sequence[RelationshipEdge]],
+    parent_of: Mapping[GraphResource, GraphResource | None],
+) -> tuple[tuple[RelationshipEdge, ...], tuple[RelationshipEdge, ...], bool]:
+    """Classify edges hidden behind the depth cap without traversing them."""
+    cycles: list[RelationshipEdge] = []
+    revisits: list[RelationshipEdge] = []
+    truncated = False
+    for current in frontier:
+        for edge in dependents.get(current, ()):
+            if edge.subject not in parent_of:
+                truncated = True
+                continue
+            target = cycles if _is_ancestor(edge.subject, current, parent_of) else revisits
+            target.append(edge)
+    return tuple(cycles), tuple(revisits), truncated
 
 
 def _is_ancestor(

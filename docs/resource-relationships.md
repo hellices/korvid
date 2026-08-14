@@ -276,8 +276,10 @@ the target namespace shows up as `forbidden` coverage rather than a silent
 default-deny. The target namespace also gets one `partial` record because
 other catalog kinds in that namespace were intentionally not read; a resolved
 backend therefore does not make that namespace look fully covered. An
-all-namespaces snapshot (`0`) issues no follow-ups at all; it has already
-listed every namespace and does not get this partial marker.
+all-namespaces snapshot (`0`) does not repeat follow-ups for kinds already
+listed in the first-phase catalog. A referenced discovered kind outside that
+bounded catalog, such as a custom backend kind, still gets a namespace-scoped
+follow-up and therefore a `partial` marker for that target namespace.
 
 ## Limits
 

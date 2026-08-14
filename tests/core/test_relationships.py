@@ -1640,6 +1640,22 @@ def test_walk_dependents_still_reports_a_genuine_back_edge_as_a_cycle() -> None:
     assert result.revisits == ()
 
 
+def test_walk_dependents_classifies_a_back_edge_at_the_depth_limit() -> None:
+    graph = _owner_graph(
+        ("Deployment", "deploy-1"),
+        ("ReplicaSet", "rs-1"),
+        ("Pod", "pod-1"),
+        cycle_to="pod-1",
+    )
+    result = graph.walk_dependents(
+        _resource(graph, "Deployment", "deploy-1"),
+        max_depth=2,
+    )
+    assert [edge.evidence.field for edge in result.cycles] == ["spec.cycleProbe"]
+    assert result.revisits == ()
+    assert result.truncated is False
+
+
 def test_walk_dependents_reports_a_self_dependency_as_a_cycle() -> None:
     """A resource that references itself loops back into the path trivially."""
     config = _input(
