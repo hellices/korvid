@@ -452,9 +452,14 @@ All the bounded LISTs — the fixed resource catalog, the discovered Gateway
 API kinds, per-source concurrency and per-snapshot resource caps, and the
 per-source `CoverageRecord` a 403/404/network failure becomes — are
 `korvid.ui.relationship_controller.RelationshipSnapshotLoader`'s
-responsibility, not the core builder's. This is the same core/ui split
-`WatchManager`/`ResourceStore` draw in §8 above: `core/` computes, the
-`k8s/`-facing I/O happens one layer up, in `ui/`.
+responsibility, not the core builder's. That split is about purity, not
+about which layer is allowed to touch the API: `WatchManager` in §8 lives in
+`core/` and drives its own watch loop through an injected source callable,
+and the snapshot loader is the same shape — an orchestrator that reads
+through an injected `Lister` protocol and performs no Textual work of its
+own. It sits in `ui/` because the app is what owns its worker lifecycle
+(starting, cancelling on a `:ctx` switch, and reporting a failure), not
+because `core/` may not perform reads.
 `korvid.ui.widgets.relationship_screen.RelationshipScreen` then renders one
 already-built graph — it performs no I/O either, only bounded BFS traversal
 and row budgeting over data it was handed.

@@ -22,12 +22,39 @@ KorvidApp  (ui/app.py)
 ├── ShellController     (ui/shell_controller.py)     pod exec, debug fallback, node shell
 ├── TransferController  (ui/transfer.py)             post-approval file transfer
 ├── DebugController     (ui/debug.py)                gated kubectl debug runs
+├── RelationshipSnapshotLoader
+│                       (ui/relationship_controller.py)  bounded read-only graph LISTs
 └── ...                                              further extractions pending
 ```
 
 Controllers do **not** import `app.py`. Dependencies arrive in the
 constructor, and the load-bearing ones arrive as *named interfaces* rather
 than anonymous callables.
+
+### The relationship snapshot loader is a read-only outlier
+
+`RelationshipSnapshotLoader` (issue #281) is listed above but does not follow
+the controller shape, deliberately:
+
+- it takes no `WriteGate`/`ViewState`/`UiSurface` — it never writes, never
+  pushes a screen, and never starts a worker. Its only dependency is a
+  `Lister` protocol (one `list_objects` method) plus its own bounds;
+- every `load()` call is independent and holds no state across calls, so
+  there is nothing for a `:ctx` switch to invalidate inside it;
+- the app owns the flow around it: `action_relationships` starts the
+  exclusive `relationships` worker (`exit_on_error=False`),
+  `_load_relationships` re-checks the context epoch and the screen stack
+  before pushing `RelationshipScreen`, `on_worker_state_changed` reports a
+  failed load instead of exiting, and `_teardown_for_context_switch`
+  cancels and awaits the whole group before the client is swapped;
+- `RelationshipScreen` (`ui/widgets/relationship_screen.py`) renders one
+  already-built graph and dismisses with a navigation target, which the app
+  translates back into its ordinary `_jump_to_object` path — the screen
+  never navigates on its own.
+
+Because it holds no worker and no app reference, it needs none of the seams
+below; it is included here so the inventory of what lives in `ui/` stays
+complete.
 
 ### Why interfaces and not callables
 
@@ -79,10 +106,10 @@ So the boundaries that matter are named:
   Implemented by `AppUiSurface`.
 
 `UiSurface.run_worker` gives supervision, not context safety: a `:ctx`
-switch cancels only the `hint-events` group, so a worker started before the
-switch keeps running against the cluster it captured. Controllers that
-outlive an await revalidate through `WriteGate.context_intact` or the epoch
-they captured.
+switch cancels only the `hint-events` and `relationships` groups, so a
+worker in any other group that was started before the switch keeps running
+against the cluster it captured. Controllers that outlive an await
+revalidate through `WriteGate.context_intact` or the epoch they captured.
 
 `AppWriteGate` is an adapter rather than the app inheriting `WriteGate`
 because Textual's `App` metaclass conflicts with `ABCMeta` — the same reason

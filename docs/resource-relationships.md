@@ -61,7 +61,7 @@ Each row shows six columns:
 | `selects` | Service | The Pods its `spec.selector` matches |
 | `managed_by` | Pod | The Deployment/ReplicaSet/StatefulSet/DaemonSet/Job whose `spec.selector` matches it |
 | `protected_by` | Pod | The PodDisruptionBudget whose `spec.selector` matches it |
-| `routes_to` | Ingress / HTTPRoute | The backend Service it routes to |
+| `routes_to` | Ingress / Gateway API Route (HTTPRoute, GRPCRoute, TLSRoute, TCPRoute, UDPRoute) | The backend Service it routes to |
 | `routes_to` | EndpointSlice | The Pod named by one `endpoints[].targetRef` (live routing target, not authored config) |
 | `uses_volume` | Pod / workload template | A PersistentVolumeClaim mounted as a volume |
 | `uses_config` | Pod / workload template | A ConfigMap or Secret referenced by name only (`envFrom`, `env[].valueFrom`, a volume, a projected volume source, or `imagePullSecrets`) |
@@ -137,8 +137,14 @@ Before it can join any facts, korvid LISTs a fixed catalog of resource kinds
 ReplicaSets, StatefulSets, DaemonSets, Jobs, CronJobs, EndpointSlices,
 Ingresses, PodDisruptionBudgets) plus any Gateway API resources
 (`gateway.networking.k8s.io` Gateways, `*Route` kinds, ReferenceGrants) the
-cluster's own API discovery reports. Each LIST records one of five
-**coverage states**:
+cluster's own API discovery reports. Every discovered `*Route` kind in that
+group is read through the one `spec.rules[].backendRefs[]` shape the Gateway
+API defines for all of them, so HTTPRoute, GRPCRoute, and the stream routes
+(TLSRoute/TCPRoute/UDPRoute) all contribute `routes_to` edges rather than
+being listed and silently ignored. A CRD outside that group whose kind merely
+ends in `Route` (for example an OpenShift `Route`) is neither listed nor
+interpreted. Route `parentRefs` (the Gateway a Route attaches to) are not
+modelled. Each LIST records one of five **coverage states**:
 
 - **`complete`** — the LIST succeeded.
 - **`forbidden`** — the LIST returned 403; RBAC denies this account that
@@ -170,6 +176,16 @@ record is not `complete`. The screen's top line always states whether
 coverage as a whole is `complete` or `incomplete` for exactly this reason —
 treat a `missing` edge under incomplete coverage as "unknown," not "absent."
 
+### When the selected resource is not in the snapshot
+
+The root itself can be absent from a snapshot even when coverage is
+`complete`: the object was deleted, or recreated with a new UID after the
+table's row was read, or dropped when a source hit the resource cap. Its
+Dependencies and Dependents sections are then empty because the snapshot has
+nothing about it — not because the cluster has nothing. The banner says so
+literally ("This resource is not present in this snapshot …") instead of
+letting two empty sections read as "no relationships."
+
 ## Stale owner references
 
 Kubernetes owner references (and the EndpointSlice `targetRef`, and any other
@@ -188,16 +204,20 @@ reference carries no UID at all (some reference shapes, like a ConfigMap
 
 ## Cross-namespace routing (`ReferenceGrant`)
 
-A `routes_to` reference (Ingress/HTTPRoute backend) that names a different
-namespace than its subject is **invalid by default** — cross-namespace
-routing is denied unless an exact Gateway API `ReferenceGrant` in the
-*target* namespace authorizes it. "Exact" means every one of these must
+A `routes_to` reference (an Ingress or Gateway API Route backend) that names a
+different namespace than its subject is **invalid by default** —
+cross-namespace routing is denied unless an exact Gateway API `ReferenceGrant`
+in the *target* namespace authorizes it. "Exact" means every one of these must
 match, with no wildcard or partial match honored:
 
 - the `ReferenceGrant`'s `from.group`/`from.kind`/`from.namespace` match the
   subject's group, kind, and namespace, **and**
 - the `ReferenceGrant`'s `to.group`/`to.kind` match the target's group and
-  kind.
+  kind, **and**
+- the `ReferenceGrant`'s `to.name`, *when it names one*, matches the target's
+  name exactly. An omitted `to.name` means "every object of that group/kind in
+  this namespace", which is what the Gateway API defines it to mean — but a
+  grant for Service `payments` never authorizes a route to Service `admin`.
 
 The mere presence of a `ReferenceGrant` object in the target namespace is
 never treated as authorization on its own — every field above must match.
@@ -215,7 +235,7 @@ namespace of its own to disagree with.
 | `max_resources` | 10,000 | Total resources fed into the graph across every listed source |
 | `max_edges` | 50,000 | Total joined edges kept in the graph |
 | `max_depth` | 5 | Hops the `d` expansion walks outward from the root |
-| `max_nodes` | 500 | Resources visited by the `d` expansion, and the shared row budget the screen renders per category |
+| `max_nodes` | 500 | Resources visited by the `d` expansion, and the total render-row budget the screen shares across every category |
 | `max_concurrency` | 4 | Concurrent LISTs the snapshot loader runs at once |
 
 All caps are deterministic, never API-response-order dependent. The resource
