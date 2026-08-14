@@ -232,6 +232,13 @@ def test_namespace_ordering_survives_a_reused_order() -> None:
     store = ResourceStore()
     store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("x", ns="team"))
     store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("y", ns="team-b"))
+    assert [(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)] == [
+        ("team", "x"),
+        ("team-b", "y"),
+    ]
+
+    # Settle the order first, then read it again through the reuse path.
+    store.apply_event("pods", ALL_NAMESPACES, "MODIFIED", _pod("x", ns="team"))
 
     ordered = [(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)]
 
@@ -239,10 +246,59 @@ def test_namespace_ordering_survives_a_reused_order() -> None:
 
 
 def test_clearing_a_kind_discards_its_reused_order() -> None:
+    """`clear` empties the bucket, so a leftover order cannot produce a wrong
+    read — any repopulation re-invalidates it. What it would do is retain a
+    key list for a kind nobody is showing, which is what this pins."""
     store = ResourceStore()
-    store.apply_event("pods", "default", "ADDED", _pod("a"))
-    assert store.get("pods", "default")
+    store.apply_event("pods", "default", "ADDED", _pod("b"))
+    assert [p.name for p in store.get("pods", "default")] == ["b"]
 
     store.clear("pods", "default")
 
     assert store.get("pods", "default") == []
+    assert ("pods", "default") not in store._order
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
+    assert [p.name for p in store.get("pods", "default")] == ["a"]
+
+
+def test_clearing_every_kind_discards_each_reused_order() -> None:
+    """A context switch purges every kind at once; the orders it settled for
+    the previous cluster must not be retained until something repopulates
+    them, which for a large view is a list per object."""
+    store = ResourceStore()
+    store.apply_event("pods", "default", "ADDED", _pod("b"))
+    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("c", ns="other"))
+    assert store.get("pods", "default")
+    assert store.get("pods", ALL_NAMESPACES)
+
+    store.clear_all()
+
+    assert store._order == {}
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
+    assert [p.name for p in store.get("pods", "default")] == ["a"]
+
+
+def test_a_bucket_grown_behind_the_cache_is_still_ordered_correctly() -> None:
+    """Defence in depth: the settled order is only sound while every mutation
+    goes through `apply_event`. A future contributor adding a path that
+    forgets to invalidate should get a stale-but-repaired order, not a
+    silently truncated table."""
+    store = ResourceStore()
+    store.apply_event("pods", "default", "ADDED", _pod("b"))
+    assert [p.name for p in store.get("pods", "default")] == ["b"]
+
+    store._data[("pods", "default")]["default/a"] = _pod("a")
+
+    assert [p.name for p in store.get("pods", "default")] == ["a", "b"]
+
+
+def test_a_bucket_shrunk_behind_the_cache_does_not_raise() -> None:
+    """The same slip in the other direction must not crash a repaint."""
+    store = ResourceStore()
+    for name in ("a", "b"):
+        store.apply_event("pods", "default", "ADDED", _pod(name))
+    assert len(store.get("pods", "default")) == 2
+
+    del store._data[("pods", "default")]["default/a"]
+
+    assert [p.name for p in store.get("pods", "default")] == ["b"]

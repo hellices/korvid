@@ -1793,3 +1793,30 @@ def test_a_naive_clock_reading_stays_consistent_across_buckets() -> None:
     assert format_age(created, datetime(2031, 4, 2, 0, 5, 0)) == "5m"
     assert format_age(created, datetime(2031, 4, 3, 0, 0, 0)) == "1d"
     assert format_age(created, datetime(2031, 4, 1, 23, 0, 0)) == "-"
+
+
+def test_an_oversized_creation_timestamp_is_not_remembered() -> None:
+    """`created` is unvalidated API-server input and becomes a memo key.
+    `datetime.fromisoformat` accepts an arbitrarily long fractional-second
+    field, so capping entry *count* alone bounds nothing: 20,000 such keys
+    would retain gigabytes. The answer is still correct, just not kept."""
+    oversized = "2031-08-01T00:00:00." + "0" * 5000 + "+00:00"
+    now = datetime(2031, 8, 1, 0, 5, 0, tzinfo=UTC)
+
+    assert format_age(oversized, now) == "5m"
+
+    assert oversized not in models._AGE_WINDOWS
+
+
+def test_the_age_memo_stays_correct_when_it_reaches_its_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discarding remembered answers must cost accuracy nothing."""
+    monkeypatch.setattr(models, "_MAX_AGE_WINDOWS", 2)
+    now = datetime(2031, 8, 2, 0, 10, 0, tzinfo=UTC)
+    stamps = [f"2031-08-02T00:0{minute}:00Z" for minute in range(5)]
+
+    ages = [format_age(stamp, now) for stamp in stamps]
+
+    assert ages == ["10m", "9m", "8m", "7m", "6m"]
+    assert len(models._AGE_WINDOWS) <= 2

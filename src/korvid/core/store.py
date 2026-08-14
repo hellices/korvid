@@ -65,7 +65,11 @@ class ResourceStore:
         if bucket is None:
             return []
         order = self._order.get((kind, scope))
-        if order is None:
+        # The length check is a tripwire, not the invalidation rule: it costs
+        # O(1) and turns a mutation path that ever forgets to invalidate into
+        # a re-ordered read rather than a truncated table or a KeyError in
+        # the middle of a repaint.
+        if order is None or len(order) != len(bucket):
             order = [
                 key
                 for key, _ in sorted(bucket.items(), key=lambda kv: (kv[1].namespace, kv[1].name))

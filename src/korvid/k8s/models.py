@@ -78,14 +78,22 @@ def format_memory(size: int) -> str:
 #: `{created: (valid_from_epoch, valid_until_epoch, text)}`. A repaint asks
 #: every row for its age, but "5m" is the answer for a whole minute, so the
 #: parse and the arithmetic are done once per displayed bucket rather than
-#: once per row per repaint. Bounded because a long session can walk through
-#: many distinct creation timestamps.
+#: once per row per repaint. Only read and written from the single render
+#: path, and every entry is self-validating against the caller's own clock
+#: reading, so the worst outcome of a race is a redundant recompute.
 _AGE_WINDOWS: dict[str, tuple[float, float, str]] = {}
+#: Entry ceiling: a long session walks through many creation timestamps.
 _MAX_AGE_WINDOWS: Final = 20_000
+#: Key ceiling. `created` is unvalidated API-server input and
+#: `datetime.fromisoformat` accepts an arbitrarily long fractional-second
+#: field, so capping the entry count alone bounds nothing. An RFC 3339
+#: timestamp with nanoseconds and an offset is under 40 characters; anything
+#: longer is still formatted, just never remembered.
+_MAX_TIMESTAMP_LENGTH: Final = 64
 
 
 def _age_window(total_seconds: int, created_ts: float) -> tuple[float, float, str]:
-    """The age text for *total_seconds* and the instants it stays correct for."""
+    """The age text for `total_seconds`, and the instants it stays correct for."""
     days = total_seconds // 86400
     if days >= 1:
         return created_ts + days * 86400, created_ts + (days + 1) * 86400, f"{days}d"
@@ -94,6 +102,31 @@ def _age_window(total_seconds: int, created_ts: float) -> tuple[float, float, st
         return created_ts + hours * 3600, created_ts + (hours + 1) * 3600, f"{hours}h"
     minutes = total_seconds // 60
     return created_ts + minutes * 60, created_ts + (minutes + 1) * 60, f"{minutes}m"
+
+
+def _created_epoch(created: str) -> float | None:
+    """Epoch seconds for an RFC 3339 timestamp; None when it cannot be read.
+
+    A timezone-less timestamp is read as UTC, which is what the API server
+    sends for `metadata.creationTimestamp`.
+    """
+    try:
+        ts = created[:-1] + "+00:00" if created.endswith("Z") else created
+        created_dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    if created_dt.tzinfo is None:
+        created_dt = created_dt.replace(tzinfo=UTC)
+    return created_dt.timestamp()
+
+
+def _remember_age(created: str, window: tuple[float, float, str]) -> None:
+    """Keep `window` for `created`, within both of the memo's ceilings."""
+    if len(created) > _MAX_TIMESTAMP_LENGTH:
+        return
+    if len(_AGE_WINDOWS) >= _MAX_AGE_WINDOWS:
+        _AGE_WINDOWS.clear()
+    _AGE_WINDOWS[created] = window
 
 
 def format_age(created: str, now: datetime | None = None) -> str:
@@ -106,32 +139,23 @@ def format_age(created: str, now: datetime | None = None) -> str:
     if now is None:
         now = datetime.now(UTC)
     elif now.tzinfo is None:
-        # A timezone-less `created` is read as UTC below, so a timezone-less
-        # clock reading is too. `datetime.timestamp()` would instead resolve
-        # it against the host's local zone and return a different age — or
-        # "-" — for the same instant depending on where the process runs.
+        # A timezone-less `created` is read as UTC, so a timezone-less clock
+        # reading is too. `datetime.timestamp()` would instead resolve it
+        # against the host's local zone and return a different age — or "-" —
+        # for the same instant depending on where the process runs.
         now = now.replace(tzinfo=UTC)
     now_ts = now.timestamp()
     remembered = _AGE_WINDOWS.get(created)
     if remembered is not None and remembered[0] <= now_ts < remembered[1]:
         return remembered[2]
-    try:
-        ts = created
-        if ts.endswith("Z"):
-            ts = ts[:-1] + "+00:00"
-        created_dt = datetime.fromisoformat(ts)
-        if created_dt.tzinfo is None:
-            created_dt = created_dt.replace(tzinfo=UTC)
-    except ValueError:
+    created_ts = _created_epoch(created)
+    if created_ts is None:
         return "-"
-    created_ts = created_dt.timestamp()
     total_seconds = int(now_ts - created_ts)
     if total_seconds < 0:
         return "-"
     window = _age_window(total_seconds, created_ts)
-    if len(_AGE_WINDOWS) >= _MAX_AGE_WINDOWS:
-        _AGE_WINDOWS.clear()
-    _AGE_WINDOWS[created] = window
+    _remember_age(created, window)
     return window[2]
 
 
