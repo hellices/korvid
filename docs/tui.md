@@ -154,3 +154,46 @@ probes like pod-resize support, cloud-provider hints, audit log context)
 at the new cluster. An open AI conversation survives the switch: the agent
 is told the context changed, and its tools operate on the new cluster from
 the next turn.
+
+## Session timeline
+
+`T` opens a bounded, read-only log of what has happened in this session:
+watch deltas (ADDED/MODIFIED/DELETED), Warning events, context switches, and
+audit-logged writes, newest first. It performs no cluster I/O of its own —
+it only renders what the running session already recorded — so it opens
+instantly, with or without a row selected, and works the same with the AI
+agent disabled.
+
+By default the timeline shows only the current kube context's epoch, every
+source, every resource. Inside the modal:
+
+- `e` toggles between the current epoch and every epoch the session has
+  seen (a stale entry from before a `:ctx` switch is otherwise never shown
+  by default).
+- `s` cycles the source filter: all → watch → event → context → write →
+  all.
+- `r` toggles between every resource and the one selected in the table
+  behind the modal at the moment `T` was pressed (captured once; it is
+  never re-read while the modal stays open).
+- `Enter` on a row that carries a resource navigates there, reusing the
+  same jump path as every other in-app navigation; rows with no resource
+  (a context-switch entry, say) are inert.
+- `Esc` / `q` closes.
+
+Every cluster-controlled field the timeline renders — timestamps, Warning
+`reason`/`note`, context names, resource identifiers — is shown as literal
+text, never interpreted as Rich markup, even if the cluster or a workload
+supplies text that looks like a markup sequence.
+
+The timeline is bounded in memory and never grows without limit: it holds
+at most `max_entries` entries and `max_bytes` of encoded content, evicting
+the oldest entries first once either cap is hit; the banner above the table
+reports how many entries are currently stored, their encoded size, and how
+many were evicted or refused. Configure the caps in
+`~/.config/korvid/config.yaml`:
+
+```yaml
+timeline:
+  max_entries: 500      # default
+  max_bytes: 262144     # default (256 KiB of encoded content)
+```

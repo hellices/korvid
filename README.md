@@ -110,8 +110,9 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
 - **[Browsing the cluster](https://github.com/hellices/korvid/blob/main/docs/tui.md)** — custom columns from labels /
   annotations / jsonpath, live pod metrics, ops hints for troubled pods,
   split workspace, the log viewer (multi-pod merge, JSON highlighting,
-  search, save), explicit namespace scope with RBAC-aware denials, and
-  probe-first context switching.
+  search, save), explicit namespace scope with RBAC-aware denials,
+  probe-first context switching, and the bounded, read-only session
+  timeline of watch/event/context/write history.
 - **[Operations and safety](https://github.com/hellices/korvid/blob/main/docs/ops.md)** — the safety model (keystroke
   approval + fail-closed audit on every write, with best-effort SSAR
   pre-checks and dry-run previews), read-only

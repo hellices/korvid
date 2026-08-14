@@ -74,7 +74,7 @@ from korvid.core.portforward import (
 )
 from korvid.core.relationships import GraphResource, SummaryLike
 from korvid.core.secrets import mask_secret_manifest
-from korvid.core.session_timeline import AppendResult, SessionTimeline
+from korvid.core.session_timeline import AppendResult, SessionTimeline, TimelineResourceRef
 from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.transfer import RemoteEntry, TransferError, TransferSpec, list_remote_dir
@@ -168,6 +168,7 @@ from korvid.ui.widgets.relationship_screen import GotoResult, RelationshipScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.secret_screen import SecretScreen
+from korvid.ui.widgets.session_timeline_screen import SessionTimelineScreen, TimelineGotoResult
 from korvid.ui.widgets.status_bar import StatusBar
 from korvid.ui.widgets.telepresence_screen import TelepresenceScreen
 from korvid.ui.widgets.top_bar import KeyEntry, TopBar
@@ -295,6 +296,13 @@ _RELATIONSHIP_GROUP = "relationships"
 #: deliberately *not* shared with the resource watches — the timeline is a
 #: side channel, so its failures can never take the live view down with it.
 _TIMELINE_EVENT_GROUP = "timeline-warning-events"
+
+#: The worker group a Timeline goto (`Enter` on a navigable row, issue
+#: #282 Task 4) runs its `_jump_to_object` follow-up in — the same
+#: exclusive/`exit_on_error=False` shape as `_RELATIONSHIP_GROUP`, since it
+#: reuses the exact navigation path and must not crash the TUI over a
+#: read-only view.
+_TIMELINE_GROUP = "timeline"
 
 #: Statuses that answer the Warning-event stream permanently: no token this
 #: session holds and no retry interval changes an RBAC denial (401/403) or a
@@ -544,6 +552,7 @@ class KorvidApp(App[None]):
         ],
         Binding("d", "describe", "Describe", id="describe"),
         Binding("g", "relationships", "Relationships", id="relationships"),
+        Binding("T", "timeline", "Timeline", id="timeline"),
         Binding("s", "shell", "Shell", id="shell"),
         Binding("l", "logs", "Logs", id="logs"),
         Binding("shift+l", "logs_multi", "Multi-log", id="logs_multi"),
@@ -3288,11 +3297,11 @@ class KorvidApp(App[None]):
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Report a failed timeline or relationship worker instead of exiting.
 
-        Scoped to this app's own `relationships` and `timeline-warning-events`
-        workers, which are the only ones started with `exit_on_error=False`:
-        every other group keeps Textual's default crash-on-error behaviour,
-        and a cancelled worker never reaches `WorkerState.ERROR`, so it is
-        never reported.
+        Scoped to this app's own `relationships`, `timeline-warning-events`,
+        and `timeline` (goto) workers, which are the only ones started with
+        `exit_on_error=False`: every other group keeps Textual's default
+        crash-on-error behaviour, and a cancelled worker never reaches
+        `WorkerState.ERROR`, so it is never reported.
         """
         if event.worker.node is not self or event.state is not WorkerState.ERROR:
             return
@@ -3300,6 +3309,8 @@ class KorvidApp(App[None]):
             self._notify_worker_error("Warning-event timeline feed failed", event.worker)
         elif event.worker.group == _RELATIONSHIP_GROUP:
             self._notify_worker_error("Relationships failed", event.worker)
+        elif event.worker.group == _TIMELINE_GROUP:
+            self._notify_worker_error("Timeline navigation failed", event.worker)
 
     def _notify_worker_error(self, label: str, worker: Worker[Any]) -> None:
         """One visible report for a worker that failed instead of crashing."""
@@ -3367,6 +3378,92 @@ class KorvidApp(App[None]):
             return
         alias, _namespaced = resolved
         self._run_relationship_worker(self._jump_to_object(alias, namespace, name, epoch=epoch))
+
+    def _selected_timeline_resource(self) -> TimelineResourceRef | None:
+        """The exact resource under the cursor when `T` is pressed, captured
+        once so the timeline's `r` toggle keeps pinning it even as the
+        table underneath changes (issue #282). Unlike
+        `_selected_relationship_root`, this never `notify`s: the timeline
+        opens with or without a selection, so an empty, unselected, or
+        synthetic view just means `r` has nothing to toggle - the modal's
+        own status line says so, not a warning toast the user didn't ask for."""
+        meta = self.aliases.get(self.current_kind)
+        if meta is None or meta.synthetic:
+            return None
+        table = self._focused_table()
+        if table.row_count == 0:
+            return None
+        row_index = table.cursor_row
+        ordered = table.ordered_rows
+        if row_index >= len(ordered):
+            return None
+        parts = str(ordered[row_index].key.value).split("/", 1)
+        if len(parts) != 2:
+            return None
+        namespace, name = parts
+        return TimelineResourceRef(
+            kind_alias=self._canonical_kind(self.current_kind),
+            display_kind=meta.kind,
+            namespace=namespace,
+            name=name,
+            uid=self._selected_uid(namespace or None, name),
+        )
+
+    def action_timeline(self) -> None:
+        """Open the read-only session timeline (issue #282 Task 4).
+
+        Unlike `action_relationships`, opening this performs no I/O -
+        `SessionTimeline.snapshot()` is a bounded in-memory read - so `T`
+        opens the modal even with nothing selected on the active pane;
+        only the post-Enter goto below is async and epoch-guarded, reusing
+        the exact same `_jump_to_object` path as every other navigation."""
+        timeline = self._session_timeline
+        if timeline is None:
+            self.notify("Timeline unavailable in this session", severity="warning")
+            return
+        epoch = self._ctx_epoch
+        self.push_screen(
+            SessionTimelineScreen(
+                timeline,
+                current_epoch=epoch,
+                resource_toggle=self._selected_timeline_resource(),
+            ),
+            functools.partial(self._on_timeline_result, epoch),
+        )
+
+    def _on_timeline_result(self, epoch: int, result: TimelineGotoResult | None) -> None:
+        """Enter on a navigable row: reuse `_jump_to_object` directly - the
+        timeline's own resource refs already carry the discovered-view
+        alias `_jump_to_object` expects, unlike the relationship graph's
+        (group, kind) pair, so no translation step is needed here. A
+        `:ctx` switch that crossed *epoch* while the modal was open (only
+        reachable today by a test directly bumping `_ctx_epoch`, since
+        `_ctx_switch_blocker` itself refuses a real switch while any modal
+        is on the screen stack) discards the navigation instead of jumping
+        into a view built for the wrong cluster."""
+        if result is None:
+            return
+        if self._ctx_switch_crossed(epoch):
+            self.notify(
+                "timeline navigation cancelled - the kube context changed"
+                " while the timeline was open",
+                severity="warning",
+            )
+            return
+        _, kind_alias, namespace, name = result
+        self._run_timeline_worker(self._jump_to_object(kind_alias, namespace, name, epoch=epoch))
+
+    def _run_timeline_worker(self, work: Coroutine[Any, Any, None]) -> None:
+        """Start one exclusive `timeline` worker with an error boundary,
+        mirroring `_run_relationship_worker`: `exit_on_error=False` keeps an
+        unexpected navigation failure from tearing down the TUI over a
+        read-only view, and `on_worker_state_changed` reports it instead."""
+        self.run_worker(
+            work,
+            exclusive=True,
+            group=_TIMELINE_GROUP,
+            exit_on_error=False,
+        )
 
     async def action_describe(self) -> None:
         """Fetch and display the manifest + events for the currently highlighted row."""
