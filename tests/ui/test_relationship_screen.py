@@ -147,6 +147,70 @@ def _secret_graph(secret_name: str) -> RelationshipGraph:
     return RelationshipGraph(nodes=(root, target), edges=(edge,), coverage=())
 
 
+def _dependent_with_missing_edge_resolution_graph() -> RelationshipGraph:
+    """A dependent whose *edge* was recorded `MISSING` at build time, yet
+    whose *subject* (the dependent itself) is a perfectly real, discovered
+    node (issue #281 review round 2, finding 2). `EdgeResolution` always
+    describes `edge.target`; a `dependents_of(root)` row's navigable
+    resource is `edge.subject`, so this edge's resolution state must not
+    block navigating to it."""
+    root = _resource("Service", "api")
+    pod = _resource("Pod", "api-0")
+    edge = _edge(pod, root, relation=RelationKind.SELECTS, resolution=EdgeResolution.MISSING)
+    return RelationshipGraph(nodes=(root, pod), edges=(edge,), coverage=())
+
+
+def _deep_dependents_graph() -> RelationshipGraph:
+    """A genuine two-hop dependent chain (root <- rs1 <- pod1), well within
+    the default node/depth caps — nothing here is capped or cyclic, so the
+    depth-2 row must be rendered from real BFS depth, not omitted."""
+    root = _resource("Deployment", "api")
+    rs1 = _resource("ReplicaSet", "api-rs1")
+    pod1 = _resource("Pod", "api-rs1-0")
+    edges = (
+        _edge(rs1, root, relation=RelationKind.OWNED_BY),
+        _edge(pod1, rs1, relation=RelationKind.OWNED_BY),
+    )
+    return RelationshipGraph(nodes=(root, rs1, pod1), edges=edges, coverage=())
+
+
+def _many_direct_dependents_graph(count: int = 30, max_nodes: int = 3) -> RelationshipGraph:
+    """`count` direct dependents against a deliberately tiny `max_nodes` —
+    the *base* (unexpanded) view must already be bounded; nothing about
+    this scenario touches expansion or cycles at all."""
+    root = _resource("Deployment", "api")
+    dependents = tuple(_resource("Pod", f"api-{i}") for i in range(count))
+    edges = tuple(_edge(dep, root, relation=RelationKind.OWNED_BY) for dep in dependents)
+    return RelationshipGraph(
+        nodes=(root, *dependents), edges=edges, coverage=(), limits=GraphLimits(max_nodes=max_nodes)
+    )
+
+
+def _many_cycles_graph(count: int = 50, max_nodes: int = 2) -> RelationshipGraph:
+    """`count` back-edges from rs2 to rs1, all discovered as cycles one
+    level into expansion. `RelationshipGraph.walk_dependents` itself does
+    not cap `cycles` (only `edges`/`added_nodes`), so rendering must cap
+    independently or a resource with many cyclic references renders one
+    row per cycle."""
+    root = _resource("Deployment", "api")
+    rs1 = _resource("ReplicaSet", "api-rs1")
+    rs2 = _resource("ReplicaSet", "api-rs2")
+    edges = [
+        _edge(rs1, root, relation=RelationKind.OWNED_BY),
+        _edge(rs2, root, relation=RelationKind.OWNED_BY),
+    ]
+    edges.extend(
+        _edge(rs2, rs1, relation=RelationKind.MANAGED_BY, field=f"spec.selector[{i}]")
+        for i in range(count)
+    )
+    return RelationshipGraph(
+        nodes=(root, rs1, rs2),
+        edges=tuple(edges),
+        coverage=(),
+        limits=GraphLimits(max_nodes=max_nodes),
+    )
+
+
 class HostApp(App[None]):
     def __init__(self) -> None:
         super().__init__()
@@ -241,3 +305,85 @@ async def test_markup_names_and_secret_metadata_render_literally() -> None:
         rendered = app.screen.query_one(DataTable).get_row_at(1)
         assert "[red]tls[/]" in {str(cell) for cell in rendered}
         assert "secret-value" not in repr(screen)
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (issue #281 Task 6 findings)
+# ---------------------------------------------------------------------------
+
+
+async def test_escape_dismisses_with_none() -> None:
+    app = HostApp()
+    screen = RelationshipScreen(_graph(), _resource("Deployment", "api"))
+    async with app.run_test() as pilot:
+        await app.push_screen(screen, lambda value: setattr(app, "result", value))
+        await pilot.press("escape")
+        assert app.result is None
+
+
+async def test_dependent_subject_navigable_despite_missing_edge_resolution() -> None:
+    """Finding 2: `edge.resolution` describes `edge.target`, not the
+    dependent (`edge.subject`) a Dependents row navigates to. A dependent
+    whose recorded edge is `MISSING` (target-side) must still dismiss with
+    its own, real, indexed subject."""
+    app = HostApp()
+    screen = RelationshipScreen(
+        _dependent_with_missing_edge_resolution_graph(), _resource("Service", "api")
+    )
+    async with app.run_test() as pilot:
+        await app.push_screen(screen, lambda value: setattr(app, "result", value))
+        # row 0: "Dependencies" header (empty); row 1: "Dependents" header;
+        # row 2: the sole dependent edge (subject=Pod/prod/api-0).
+        await pilot.press("down", "down", "enter")
+        assert app.result == ("goto", "", "Pod", "prod", "api-0")
+
+
+async def test_expansion_renders_genuine_depth_two_row() -> None:
+    """Finding 3: depth labels must come from an order-independent BFS over
+    the returned edge set, not from `TraversalResult.edges`' incidental
+    iteration order. root <- rs1 <- pod1 is a genuine, uncapped, uncyclic
+    two-hop chain."""
+    app = HostApp()
+    screen = RelationshipScreen(_deep_dependents_graph(), _resource("Deployment", "api"))
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.press("d")
+        table = app.screen.query_one(DataTable)
+        await until(pilot, lambda: table.row_count > 3, label="expanded rows rendered")
+        text = "\n".join(_all_cells(table))
+        assert "depth 2" in text.lower()
+
+
+async def test_many_direct_dependents_row_count_stays_bounded() -> None:
+    """Finding 1: direct dependency/dependent rows are not currently
+    bounded at all — a resource with many direct dependents must still
+    render a `row_count` within the shared `max_nodes`-based budget, with
+    the omitted rows visibly summarized rather than silently dropped."""
+    app = HostApp()
+    graph = _many_direct_dependents_graph(count=30, max_nodes=3)
+    screen = RelationshipScreen(graph, _resource("Deployment", "api"))
+    async with app.run_test():
+        await app.push_screen(screen)
+        table = app.screen.query_one(DataTable)
+        text = "\n".join(_all_cells(table))
+        assert table.row_count <= graph.limits.max_nodes + 4
+        assert "capped" in text.lower()
+
+
+async def test_many_cycle_edges_row_count_stays_bounded() -> None:
+    """Finding 1: `RelationshipGraph.walk_dependents` does not cap
+    `cycles`, so many cyclic back-edges must not translate into one
+    rendered row each — the shared render budget must bound cycle rows
+    too, with the omission visibly summarized."""
+    app = HostApp()
+    graph = _many_cycles_graph(count=50, max_nodes=2)
+    screen = RelationshipScreen(graph, _resource("Deployment", "api"))
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.press("d")
+        table = app.screen.query_one(DataTable)
+        await until(pilot, lambda: table.row_count > 3, label="expanded rows rendered")
+        text = "\n".join(_all_cells(table))
+        assert table.row_count <= graph.limits.max_nodes + 4
+        assert "cycle" in text.lower()
+        assert "capped" in text.lower()
