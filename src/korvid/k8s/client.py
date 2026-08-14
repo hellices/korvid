@@ -1621,6 +1621,43 @@ class KubeClient(ReadOps, WriteOps):
         result: list[dict[str, Any]] = list(data.get("items", []))
         return result
 
+    async def watch_warning_events(self, namespace: str | None) -> AsyncIterator[dict[str, Any]]:
+        """Yield only live Warning Event objects from the core/v1 Event stream."""
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        path = (
+            "/api/v1/events"
+            if namespace is None
+            else f"/api/v1/namespaces/{_path_segment(namespace)}/events"
+        )
+        query = [("fieldSelector", "type=Warning")]
+        try:
+            data = await self._request_json(path, query_params=query)
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
+        items = data.get("items", [])
+        self._observe_read("list", path, payload=data, object_count=len(items))
+        resource_version = str((data.get("metadata") or {}).get("resourceVersion") or "") or None
+        watch_func = self._make_raw_watch_callable(path, extra_query=query)
+        watch_kwargs: dict[str, Any] = {}
+        if resource_version is not None:
+            watch_kwargs["resource_version"] = resource_version
+        w = k8s_watch.Watch()
+        self._observe_read("watch_open", path)
+        try:
+            async with w.stream(watch_func, **watch_kwargs) as stream:
+                async for event in stream:
+                    raw_object = cast(dict[str, Any], event["raw_object"])
+                    self._observe_read("watch_event", path, payload=raw_object, object_count=1)
+                    yield raw_object
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
+        except k8s_client.exceptions.ApiException as exc:
+            self._observe_read_error(path, exc)
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+
     def _make_raw_watch_callable(
         self, path: str, extra_query: Sequence[tuple[str, str]] = ()
     ) -> Any:

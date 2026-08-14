@@ -496,6 +496,64 @@ async def test_watch_pods_all_namespaces_uses_cluster_path() -> None:
     assert called_path == "/api/v1/pods"
 
 
+async def test_watch_warning_events_uses_warning_selector_without_backfill() -> None:
+    client = KubeClient()
+    fake_watch = _FakeWatch(
+        [
+            {
+                "type": "ADDED",
+                "raw_object": {
+                    "type": "Warning",
+                    "message": "new warning",
+                    "reason": "BackOff",
+                },
+            }
+        ]
+    )
+    mock_api = MagicMock()
+    request_json = AsyncMock(
+        return_value={
+            "metadata": {"resourceVersion": "77"},
+            "items": [{"type": "Warning", "message": "old warning", "reason": "BackOff"}],
+        }
+    )
+
+    async def _capture_watch_call(*args: Any, **kwargs: Any) -> Any:
+        return _raw_response(200, "OK", b"")
+
+    mock_api.call_api = _capture_watch_call
+
+    with (
+        patch.object(client, "_api", mock_api),
+        patch.object(client, "_request_json", request_json),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        seen = [event async for event in client.watch_warning_events(None)]
+
+    assert [event["message"] for event in seen] == ["new warning"]
+    request_json.assert_awaited_once_with(
+        "/api/v1/events", query_params=[("fieldSelector", "type=Warning")]
+    )
+    assert fake_watch.captured_kwargs["resource_version"] == "77"
+
+
+async def test_watch_warning_events_namespaced_path_and_selector() -> None:
+    client = KubeClient()
+    fake_watch = _FakeWatch([])
+    request_json = AsyncMock(return_value={"metadata": {"resourceVersion": "1"}, "items": []})
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        async for _ in client.watch_warning_events("team-a"):
+            pass
+    request_json.assert_awaited_once_with(
+        "/api/v1/namespaces/team-a/events", query_params=[("fieldSelector", "type=Warning")]
+    )
+    assert fake_watch.captured_kwargs["resource_version"] == "1"
+
+
 async def test_list_namespaces_api_error_raises_api_status_error() -> None:
     """ApiException must not cross the k8s boundary from list_namespaces."""
     client = KubeClient()

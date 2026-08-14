@@ -37,6 +37,38 @@ async def test_start_feeds_store() -> None:
     await mgr.stop_all()
 
 
+async def test_on_event_runs_after_store_accepts_delta() -> None:
+    store = ResourceStore()
+    seen: list[tuple[str, list[str]]] = []
+    mgr = WatchManager(store, make_source([("ADDED", _pod("api-1"))]))
+    mgr.on_event = lambda kind, scope, event_type, obj: seen.append(
+        (event_type, [pod.name for pod in store.get(kind, scope)])
+    )
+    await mgr.start("pods", "default")
+    await asyncio.sleep(0.05)
+    assert seen == [("ADDED", ["api-1"])]
+    await mgr.stop_all()
+
+
+async def test_on_event_failure_does_not_kill_watch() -> None:
+    store = ResourceStore()
+    mgr = WatchManager(store, make_source([("ADDED", _pod("api-1"))]))
+    calls = 0
+
+    def boom(kind: str, scope: str, event_type: str, obj: Summary) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("timeline sink exploded")
+
+    mgr.on_event = boom
+    await mgr.start("pods", "default")
+    await asyncio.sleep(0.05)
+    assert calls == 1
+    assert mgr.active == {("pods", "default")}
+    assert [pod.name for pod in store.get("pods", "default")] == ["api-1"]
+    await mgr.stop_all()
+
+
 async def test_start_is_idempotent() -> None:
     store = ResourceStore()
     mgr = WatchManager(store, make_source([]))

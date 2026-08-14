@@ -51,6 +51,7 @@ class WatchManager:
         self._store = store
         self._source = watch_source
         self.on_error = on_error  # public: the UI wires this after construction
+        self.on_event: Callable[[str, str, str, Summary], None] | None = None
         self._retry_delay = retry_delay
         self._max_retries = max_retries
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
@@ -110,6 +111,7 @@ class WatchManager:
                     # failure streak so hours-long streams don't inherit old failures.
                     failures = 0
                     self._store.apply_event(kind, scope, event_type, obj)
+                    self._emit_event(kind, scope, event_type, obj)
                 # Stream ended normally (server-side watch timeout) -> reconnect.
                 failures = 0
             except asyncio.CancelledError:
@@ -128,6 +130,14 @@ class WatchManager:
                 if failures >= self._max_retries:
                     return exc
             await asyncio.sleep(self._retry_delay)
+
+    def _emit_event(self, kind: str, scope: str, event_type: str, obj: Summary) -> None:
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(kind, scope, event_type, obj)
+        except Exception:
+            logger.exception("watch event sink failed")
 
     def _report(self, kind: str, scope: str, exc: Exception) -> None:
         if self.on_error is None:
