@@ -7,13 +7,22 @@ from textual.binding import Binding
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
+from korvid.core.session_timeline import (
+    SessionTimeline,
+    TimelineSource,
+    WarningEventPayload,
+    WatchDeltaPayload,
+)
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager, WatchSource
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
+
+from .waits import until
 
 # ---------------------------------------------------------------------------
 # Shared resource meta
@@ -76,6 +85,8 @@ def make_app(
     open_pod_exec: Any | None = None,
     get_manifest: Any | None = None,
     metrics: Any | None = None,
+    session_timeline: SessionTimeline | None = None,
+    watch_warning_events: Any | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -102,6 +113,8 @@ def make_app(
         open_pod_exec=open_pod_exec,
         get_manifest=get_manifest,
         metrics=metrics,
+        session_timeline=session_timeline,
+        watch_warning_events=watch_warning_events,
     )
 
 
@@ -885,8 +898,6 @@ async def test_shell_nonzero_exit_offers_debug_fallback(tmp_path: Path) -> None:
 
     from korvid.ui.widgets.pick_screen import PickScreen
 
-    from .waits import until
-
     # The debug fallback mutates the pod spec, so it needs an audit sink.
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
     async with app.run_test() as pilot:
@@ -961,8 +972,6 @@ async def test_namespace_picker_403_shows_permission_notice_and_ns_hint() -> Non
     from korvid.ui.messages import ShowNamespacePicker
     from korvid.ui.widgets.namespace_picker import NamespacePicker
 
-    from .waits import until
-
     store = ResourceStore()
 
     async def failing_list() -> list[str]:
@@ -987,7 +996,6 @@ async def test_namespace_picker_403_shows_permission_notice_and_ns_hint() -> Non
 async def test_favorite_namespace_keys_navigate_like_ns_command() -> None:
     """Keys 1-9 jump to `favorite_namespaces` entries in order via the same
     navigation path as `:ns <name>` (issue #108); unbound digits are no-ops."""
-    from .waits import until
 
     store = ResourceStore()
     app = KorvidApp(
@@ -1012,8 +1020,6 @@ async def test_favorite_namespace_403_keeps_a_usable_ui() -> None:
     still navigates, the watch reports one concise notice, and the UI stays
     usable (issue #108)."""
     from korvid.k8s.errors import ApiStatusError
-
-    from .waits import until
 
     store = ResourceStore()
 
@@ -1066,8 +1072,6 @@ async def test_toggle_all_namespaces_denied_stays_in_namespace() -> None:
         check_permission=deny_list,
     )
     async with app.run_test() as pilot:
-        from .waits import until
-
         await until(pilot, lambda: app.query_one(ResourceTable).row_count, label="table seeded")
         await pilot.press("0")
         await until(
@@ -1097,8 +1101,6 @@ async def test_toggle_all_namespaces_rechecks_after_grant() -> None:
         check_permission=toggling_ssar,
     )
     async with app.run_test() as pilot:
-        from .waits import until
-
         await until(pilot, lambda: app.query_one(ResourceTable).row_count, label="table seeded")
         await pilot.press("0")
         await until(
@@ -1133,8 +1135,6 @@ async def test_toggle_all_namespaces_allowed_proceeds() -> None:
         check_permission=allow_all,
     )
     async with app.run_test() as pilot:
-        from .waits import until
-
         await until(pilot, lambda: app.query_one(ResourceTable).row_count, label="table seeded")
         await pilot.press("0")
         await until(
@@ -1149,8 +1149,6 @@ async def test_toggle_all_namespaces_denied_for_helm_view_probes_secrets() -> No
     Secret LIST: the all-namespaces guard must probe `secrets`, not skip the
     check just because the view has no API endpoint of its own."""
     from korvid.k8s.helm import HELM_RELEASES_META
-
-    from .waits import until
 
     store = ResourceStore()
     checked: list[tuple[str, str]] = []
@@ -1185,3 +1183,182 @@ async def test_toggle_all_namespaces_denied_for_helm_view_probes_secrets() -> No
         )
         assert app.current_scope == "default"
         assert ("secrets", "") in checked
+
+
+# ---------------------------------------------------------------------------
+# Bounded session timeline producers (issue #282)
+# ---------------------------------------------------------------------------
+
+
+def _warning_event(message: str, *, name: str = "web-1") -> dict[str, Any]:
+    return {
+        "type": "Warning",
+        "reason": "BackOff",
+        "message": message,
+        "count": 3,
+        "lastTimestamp": "2026-08-15T00:00:00Z",
+        "involvedObject": {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "namespace": "default",
+            "name": name,
+            "uid": "pod-uid-1",
+        },
+    }
+
+
+async def test_resource_watch_records_post_store_delta() -> None:
+    """A watch delta reaches the timeline only after the store applied it:
+    the timeline is a record of what the session actually saw, so it must
+    never disagree with the table it sits next to."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=8192)
+    app = make_app([_pod("web-1")], session_timeline=timeline)
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: bool(
+                timeline.snapshot(epoch=0, source=TimelineSource.WATCH, resource=None).entries
+            ),
+            label="watch delta recorded",
+        )
+        entry = timeline.snapshot(epoch=0, source=TimelineSource.WATCH, resource=None).entries[0]
+        assert entry.resource is not None
+        assert isinstance(entry.payload, WatchDeltaPayload)
+        assert (entry.resource.kind_alias, entry.resource.name, entry.payload.verb) == (
+            "pods",
+            "web-1",
+            "ADDED",
+        )
+        assert [pod.name for pod in app.store.get("pods", app.current_scope)] == ["web-1"]
+
+
+async def test_watch_deltas_are_inert_without_a_timeline() -> None:
+    """No timeline injected: the watch sink stays unwired, so a build
+    without the feature pays nothing per watch event."""
+    app = make_app([_pod("web-1")])
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: bool(app.store.get("pods", app.current_scope)),
+            label="store seeded",
+        )
+        assert app.watch_manager.on_event is None
+
+
+async def test_warning_watch_redacts_before_timeline_storage() -> None:
+    """Warning-event text is cluster-controlled: credentials must be masked
+    and newlines flattened before anything is retained."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=8192)
+    hold = asyncio.Event()
+
+    async def warnings(_namespace: str | None) -> AsyncIterator[dict[str, Any]]:
+        yield _warning_event("Authorization: secret-token\nBack-off")
+        await hold.wait()
+
+    app = make_app([_pod("web-1")], session_timeline=timeline, watch_warning_events=warnings)
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: bool(
+                timeline.snapshot(epoch=0, source=TimelineSource.EVENT, resource=None).entries
+            ),
+            label="Warning event recorded",
+        )
+        entry = timeline.snapshot(epoch=0, source=TimelineSource.EVENT, resource=None).entries[0]
+        assert isinstance(entry.payload, WarningEventPayload)
+        assert "secret-token" not in entry.payload.note
+        assert "\u2022\u2022\u2022\u2022\u2022\u2022" in entry.payload.note
+        assert "\n" not in entry.payload.note
+        hold.set()
+
+
+async def test_warning_watch_reconnects_after_a_normal_stream_end() -> None:
+    """A server-side watch timeout ends the stream normally; the feed must
+    reconnect instead of going quiet for the rest of the session."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=8192)
+    calls: list[int] = []
+    hold = asyncio.Event()
+
+    async def warnings(_namespace: str | None) -> AsyncIterator[dict[str, Any]]:
+        calls.append(1)
+        yield _warning_event(f"attempt-{len(calls)}")
+        if len(calls) > 1:
+            await hold.wait()
+
+    app = make_app([_pod("web-1")], session_timeline=timeline, watch_warning_events=warnings)
+    app.TIMELINE_EVENT_RETRY_SECONDS = 0.0
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: len(calls) >= 2, label="stream reconnected")
+        notes = [
+            entry.payload.note
+            for entry in timeline.snapshot(
+                epoch=0, source=TimelineSource.EVENT, resource=None
+            ).entries
+            if isinstance(entry.payload, WarningEventPayload)
+        ]
+        assert "attempt-1" in notes
+        hold.set()
+
+
+async def test_warning_watch_stops_visibly_on_a_deterministic_denial() -> None:
+    """403 on the Event stream is a permanent RBAC answer: retrying it
+    forever would hammer the API server and hide the cause."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=8192)
+    calls: list[int] = []
+
+    async def warnings(_namespace: str | None) -> AsyncIterator[dict[str, Any]]:
+        calls.append(1)
+        raise ApiStatusError(403, "Forbidden")
+        yield {}  # pragma: no cover - makes the callable an async generator
+
+    app = make_app([_pod("web-1")], session_timeline=timeline, watch_warning_events=warnings)
+    app.TIMELINE_EVENT_RETRY_SECONDS = 0.0
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: any("events" in n.message for n in app._notifications),
+            label="denial reported",
+        )
+        await pilot.pause(0.1)
+        assert calls == [1]
+        assert timeline.snapshot(epoch=0, source=TimelineSource.EVENT, resource=None).entries == ()
+
+
+async def test_warning_watch_failure_never_stops_resource_watches() -> None:
+    """The Warning feed is a side channel: a broken one must bound its own
+    retries and leave the resource watches (the actual view) untouched."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=8192)
+    calls: list[int] = []
+
+    async def warnings(_namespace: str | None) -> AsyncIterator[dict[str, Any]]:
+        calls.append(1)
+        raise RuntimeError("stream broke")
+        yield {}  # pragma: no cover - makes the callable an async generator
+
+    app = make_app([_pod("web-1")], session_timeline=timeline, watch_warning_events=warnings)
+    app.TIMELINE_EVENT_RETRY_SECONDS = 0.0
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: any(
+                "Warning-event timeline feed stopped" in n.message for n in app._notifications
+            ),
+            label="feed gave up",
+        )
+        assert len(calls) == app.TIMELINE_EVENT_MAX_FAILURES
+        assert app.query_one(ResourceTable).row_count == 1
+        assert [pod.name for pod in app.store.get("pods", app.current_scope)] == ["web-1"]
+
+
+async def test_refused_timeline_append_is_diagnosed_on_screen() -> None:
+    """A refused append is silent data loss unless it is surfaced: the
+    timeline must never quietly drop what the session saw."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=1)
+    app = make_app([_pod("web-1")], session_timeline=timeline)
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: any("Timeline skipped" in n.message for n in app._notifications),
+            label="refusal diagnosed",
+        )
+        assert timeline.snapshot(epoch=None, source=None, resource=None).stats.refused >= 1

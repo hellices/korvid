@@ -22,6 +22,7 @@ import yaml
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.portforward import OWNER_CHAIN_PLURALS, WORKLOAD_PLURALS
+from korvid.core.session_timeline import SessionTimeline, TimelineSource, WriteAuditPayload
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
@@ -102,6 +103,7 @@ def make_app(
     edit_text: object = None,
     check_calls: list[tuple[str, str, str, str | None, str, str]] | None = None,
     extra_pods: list[Summary] | None = None,
+    session_timeline: SessionTimeline | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -154,6 +156,7 @@ def make_app(
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,
+        session_timeline=session_timeline,
     )
 
 
@@ -1529,3 +1532,79 @@ def test_owner_chain_is_a_superset_of_the_workload_map() -> None:
     """
     assert set(WORKLOAD_PLURALS) < set(OWNER_CHAIN_PLURALS)
     assert all(OWNER_CHAIN_PLURALS[k] == v for k, v in WORKLOAD_PLURALS.items())
+
+
+# -- bounded session timeline: write records (issue #282) ---------------------
+
+
+def _write_records(timeline: SessionTimeline) -> list[tuple[str, str]]:
+    records: list[tuple[str, str]] = []
+    for entry in timeline.snapshot(epoch=None, source=TimelineSource.WRITE, resource=None).entries:
+        assert isinstance(entry.payload, WriteAuditPayload)
+        records.append((entry.payload.action, entry.payload.outcome))
+    return records
+
+
+async def test_run_write_records_timeline_after_intent_and_success_audit(tmp_path: Path) -> None:
+    """The timeline mirrors the durable audit trail: both records appear,
+    in the same order the audit log persisted them."""
+    timeline = SessionTimeline(max_entries=8, max_bytes=4096)
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(Recorder(), audit_path, session_timeline=timeline)
+
+    async def op() -> None:
+        return None
+
+    async with app.run_test():
+        result = await app._run_write("delete", _PODS_META, "default", "web-1", lambda: op())
+    assert result == "done"
+    assert _write_records(timeline) == [("delete", "intent"), ("delete", "success")]
+    entry = timeline.snapshot(epoch=0, source=TimelineSource.WRITE, resource=None).entries[0]
+    assert entry.resource is not None
+    assert (entry.resource.kind_alias, entry.resource.namespace, entry.resource.name) == (
+        "pods",
+        "default",
+        "web-1",
+    )
+    assert [json.loads(line)["outcome"] for line in audit_path.read_text().splitlines()] == [
+        "intent",
+        "success",
+    ]
+
+
+async def test_blocked_intent_does_not_record_write_timeline(tmp_path: Path) -> None:
+    """Auditing is fail-closed: an intent that could not be persisted blocks
+    the write, so the timeline must not show one that looks like it ran."""
+    timeline = SessionTimeline(max_entries=8, max_bytes=4096)
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.mkdir()  # directory makes appends fail → intent blocked
+
+    async def op() -> None:
+        raise AssertionError("must not run")
+
+    app = make_app(Recorder(), audit_path, session_timeline=timeline)
+    async with app.run_test():
+        result = await app._run_write("delete", _PODS_META, "default", "web-1", lambda: op())
+    assert "blocked" in result
+    assert timeline.snapshot(epoch=None, source=TimelineSource.WRITE, resource=None).entries == ()
+
+
+async def test_failed_write_records_the_error_outcome_it_audited(tmp_path: Path) -> None:
+    """A write that reached the API and failed is part of the session
+    history; the timeline outcome must match the audited one."""
+    timeline = SessionTimeline(max_entries=8, max_bytes=4096)
+    app = make_app(Recorder(fail_status=403), tmp_path / "audit.jsonl", session_timeline=timeline)
+
+    async with app.run_test():
+        result = await app._run_write(
+            "delete",
+            _PODS_META,
+            "default",
+            "web-1",
+            lambda: app._write_ops.delete_object(_PODS_META, "default", "web-1"),  # type: ignore[union-attr]  # wired above
+        )
+    assert "failed" in result
+    actions = _write_records(timeline)
+    assert actions[0] == ("delete", "intent")
+    assert actions[1][0] == "delete"
+    assert actions[1][1].startswith("error:")

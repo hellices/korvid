@@ -74,6 +74,7 @@ from korvid.core.portforward import (
 )
 from korvid.core.relationships import GraphResource, SummaryLike
 from korvid.core.secrets import mask_secret_manifest
+from korvid.core.session_timeline import AppendResult, SessionTimeline
 from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.transfer import RemoteEntry, TransferError, TransferSpec, list_remote_dir
@@ -198,6 +199,23 @@ _APPROVAL_TIMEOUT = 120.0
 _PERMISSION_CHECK_TIMEOUT = 10.0
 
 
+async def _aclose_quietly(stream: AsyncIterator[Any] | None) -> None:
+    """Close a watch stream deterministically when its consumer stops.
+
+    Left to the garbage collector, an abandoned async generator keeps the
+    cluster connection it opened until an unspecified later finalization —
+    long enough for a `:ctx` switch to close the client underneath it. The
+    close itself is best-effort: the stream is already being discarded, so a
+    transport error while shutting it down is not actionable. Cancellation
+    still propagates, which is what makes the consumer cancel-safe.
+    """
+    aclose = getattr(stream, "aclose", None)
+    if aclose is None:
+        return
+    with contextlib.suppress(Exception):
+        await aclose()
+
+
 def _yaml_equal(a: object, b: object) -> bool:
     """Type-sensitive structural equality for parsed YAML documents.
     Python's ``==`` conflates YAML booleans and integers (``True == 1``),
@@ -269,6 +287,33 @@ _HEADER_SORT_COLUMNS = {"NAME": "name", "AGE": "age", "CPU": "cpu", "MEM": "mem"
 #: follow-up run in (issue #281): cancelled as a unit on a `:ctx` switch,
 #: and the only group whose failures are notified rather than fatal.
 _RELATIONSHIP_GROUP = "relationships"
+
+#: The worker group the session timeline's Warning-event feed runs in
+#: (issue #282). Its own group for two reasons: a `:ctx` switch cancels it
+#: as a unit (the stream holds the old cluster's connection, and an event
+#: read from it must never be recorded under the new epoch), and it is
+#: deliberately *not* shared with the resource watches — the timeline is a
+#: side channel, so its failures can never take the live view down with it.
+_TIMELINE_EVENT_GROUP = "timeline-warning-events"
+
+#: Statuses that answer the Warning-event stream permanently: no token this
+#: session holds and no retry interval changes an RBAC denial (401/403) or a
+#: server that does not implement watching Events (405). Retrying those would
+#: hammer the API server and bury the reason under a reconnect loop.
+_TIMELINE_EVENT_DENIED = frozenset({401, 403, 405})
+
+#: Ceiling on the Warning-feed reconnect backoff, so a cluster that is down
+#: for hours is polled at a fixed low rate instead of exponentially rarely.
+_TIMELINE_EVENT_MAX_BACKOFF = 30.0
+
+#: Watch verbs the timeline records, as the literals its payload declares.
+#: Doubles as the filter for frames that carry no object state (BOOKMARK,
+#: ERROR): they are watch-protocol bookkeeping, not something the session saw.
+_TIMELINE_WATCH_VERBS: dict[str, Literal["ADDED", "MODIFIED", "DELETED"]] = {
+    "ADDED": "ADDED",
+    "MODIFIED": "MODIFIED",
+    "DELETED": "DELETED",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -656,6 +701,8 @@ class KorvidApp(App[None]):
         list_relationship_objects: (
             Callable[[ResourceMeta, str | None], Awaitable[list[GenericSummary]]] | None
         ) = None,
+        session_timeline: SessionTimeline | None = None,
+        watch_warning_events: (Callable[[str | None], AsyncIterator[dict[str, Any]]] | None) = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -722,6 +769,17 @@ class KorvidApp(App[None]):
             if list_relationship_objects is not None
             else None
         )
+        #: Bounded session timeline (issue #282): a per-session record of the
+        #: watch deltas, Warning Events, context switches and audited writes
+        #: this session actually observed. None disables every producer —
+        #: nothing is recorded and the watch sink stays unwired, so a build
+        #: without the feature pays nothing per event.
+        self._session_timeline = session_timeline
+        #: The only timeline producer that is not already flowing through the
+        #: store: a live Warning-Event stream. None (no cluster connection,
+        #: or a composition root that chose not to wire it) simply means the
+        #: timeline records no Events.
+        self._watch_warning_events = watch_warning_events
         #: App-owned execution context (issue #165), captured in on_mount;
         #: None until then. AppUIBridge._dispatch refuses pre-mount calls
         #: as 'UI not ready' (production-reachable: the MCP endpoint goes
@@ -1236,6 +1294,7 @@ class KorvidApp(App[None]):
 
         self.store.subscribe(_on_store_update)
         self.watch_manager.on_error = _on_watch_error
+        self._wire_timeline_producers()
         if self._metrics is not None:
             # Metrics updates reuse the pods render path; the pending guard in
             # _on_store_update coalesces them with watch events.
@@ -1272,6 +1331,206 @@ class KorvidApp(App[None]):
         splash.display = False
         workspace.display = True
         table.display = True
+
+    # ------------------------------------------------------------------
+    # Bounded session timeline producers (issue #282)
+    # ------------------------------------------------------------------
+
+    #: Base reconnect delay for the Warning-event feed; doubled per
+    #: consecutive failure up to `_TIMELINE_EVENT_MAX_BACKOFF`.
+    TIMELINE_EVENT_RETRY_SECONDS = 1.0
+    #: Consecutive stream failures after which the feed gives up visibly
+    #: rather than reconnecting forever against a cluster that never answers.
+    TIMELINE_EVENT_MAX_FAILURES = 5
+
+    def _wire_timeline_producers(self) -> None:
+        """Attach the live timeline producers, or leave the feature inert.
+
+        Without a timeline nothing is wired at all: the watch sink stays
+        None so the manager skips it per event, and no Warning-feed worker
+        is started.
+        """
+        if self._session_timeline is None:
+            return
+        # The manager's sink fires *after* `store.apply_event`, so the
+        # timeline records what this session actually displayed and can
+        # never disagree with the table beside it.
+        self.watch_manager.on_event = self._record_timeline_watch_event
+        self._start_timeline_warning_watch()
+
+    def _record_timeline_result(self, label: str, result: AppendResult | None) -> None:
+        """Surface a refused append instead of losing it silently.
+
+        A bounded buffer *evicting* an old entry is the design; *refusing* a
+        new one is data the session saw and did not keep, so it is reported
+        the same way any other dropped observation would be.
+        """
+        if result is None or result.accepted or result.diagnostic is None:
+            return
+        # markup=False: the diagnostic can quote cluster-controlled text,
+        # which must never be interpreted as Rich markup.
+        self.notify(
+            f"Timeline skipped {label}: {result.diagnostic}", severity="warning", markup=False
+        )
+
+    def _record_timeline_watch_event(
+        self, kind: str, scope: str, event_type: str, obj: Summary
+    ) -> None:
+        """Record one watch delta the store has already applied.
+
+        Runs inside the watch task (the manager guards the call), so it does
+        no I/O and never raises: a timeline problem must not break a watch.
+        """
+        timeline = self._session_timeline
+        if timeline is None:
+            return
+        verb = _TIMELINE_WATCH_VERBS.get(event_type)
+        if verb is None:
+            return
+        meta = self.aliases.get(kind)
+        display_kind = meta.kind if meta is not None else str(getattr(obj, "kind", "") or kind)
+        self._record_timeline_result(
+            "watch delta",
+            timeline.append_watch(
+                epoch=self._ctx_epoch,
+                kind_alias=kind,
+                display_kind=display_kind,
+                namespace=str(getattr(obj, "namespace", "") or ""),
+                name=str(getattr(obj, "name", "") or ""),
+                uid=str(getattr(obj, "uid", "") or "") or None,
+                verb=verb,
+            ),
+        )
+
+    def _start_timeline_warning_watch(self) -> None:
+        """Start the epoch-bound Warning-event feed, if the feature is wired.
+
+        `exit_on_error=False`: the timeline is a side channel, so an
+        unexpected failure becomes a notification (`on_worker_state_changed`)
+        instead of tearing the TUI down over a record-keeping stream.
+        """
+        if self._session_timeline is None or self._watch_warning_events is None:
+            return
+        self.run_worker(
+            self._run_timeline_warning_watch(),
+            exclusive=False,
+            group=_TIMELINE_EVENT_GROUP,
+            exit_on_error=False,
+        )
+
+    async def _run_timeline_warning_watch(self) -> None:
+        """Feed live Warning Events into the timeline for one context epoch."""
+        watch = self._watch_warning_events
+        timeline = self._session_timeline
+        if watch is None or timeline is None:
+            return
+        await self._timeline_warning_loop(watch, timeline, self._ctx_epoch)
+
+    async def _timeline_warning_loop(
+        self,
+        watch: Callable[[str | None], AsyncIterator[dict[str, Any]]],
+        timeline: SessionTimeline,
+        epoch: int,
+    ) -> None:
+        """Reconnect loop for the Warning feed, bound to *epoch*.
+
+        The stream ends normally on every server-side watch timeout, so a
+        clean end costs no failure budget. Cancellation (a `:ctx` switch, app
+        exit) propagates untouched, and a switch that lands mid-stream stops
+        the loop rather than filing an old cluster's event under the new
+        epoch. Deterministic denials stop it visibly; everything else backs
+        off and retries a bounded number of times.
+        """
+        failures = 0
+        while epoch == self._ctx_epoch:
+            stream: AsyncIterator[dict[str, Any]] | None = None
+            try:
+                stream = watch(None)
+                async for event in stream:
+                    if epoch != self._ctx_epoch:
+                        return
+                    failures = 0
+                    self._record_timeline_result(
+                        "Warning event",
+                        timeline.append_warning_event(
+                            epoch=epoch, event=event, kind_alias=self._event_kind_alias(event)
+                        ),
+                    )
+                failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if self._timeline_watch_denied(exc):
+                    return
+                failures += 1
+            finally:
+                await _aclose_quietly(stream)
+            if failures >= self.TIMELINE_EVENT_MAX_FAILURES:
+                self.notify(
+                    f"Warning-event timeline feed stopped after"
+                    f" {self.TIMELINE_EVENT_MAX_FAILURES} failures",
+                    severity="error",
+                    markup=False,
+                )
+                return
+            await asyncio.sleep(
+                min(self.TIMELINE_EVENT_RETRY_SECONDS * 2**failures, _TIMELINE_EVENT_MAX_BACKOFF)
+            )
+
+    def _timeline_watch_denied(self, exc: Exception) -> bool:
+        """True when *exc* is a permanent answer the feed must stop on."""
+        if isinstance(exc, ApiStatusError) and exc.status in _TIMELINE_EVENT_DENIED:
+            self.notify(
+                explain_api_error(exc.status, exc.reason, "events", None),
+                severity="warning",
+                markup=False,
+            )
+            return True
+        logger.warning("Warning-event timeline feed failed", exc_info=exc)
+        return False
+
+    def _event_kind_alias(self, event: dict[str, Any]) -> str | None:
+        """Resolve an Event's involvedObject to a discovered view alias.
+
+        None when nothing discovered matches: the entry still records the
+        Event's own kind/name, it just cannot be filtered by view.
+        """
+        involved = event.get("involvedObject")
+        if not isinstance(involved, dict):
+            return None
+        api_version = str(involved.get("apiVersion") or "")
+        kind = str(involved.get("kind") or "")
+        group = api_version.rpartition("/")[0]
+        for alias, meta in self.aliases.items():
+            if self._canonical_kind(alias) != alias or meta.synthetic:
+                continue
+            if meta.kind == kind and meta.group == group:
+                return alias
+        return None
+
+    def _record_context_switch(
+        self,
+        *,
+        epoch: int,
+        phase: Literal["started", "completed", "failed"],
+        from_context: str | None,
+        to_context: str | None,
+        note: str = "",
+    ) -> None:
+        """Record one context-switch phase against the epoch that owns it."""
+        timeline = self._session_timeline
+        if timeline is None:
+            return
+        self._record_timeline_result(
+            "context switch",
+            timeline.append_context_switch(
+                epoch=epoch,
+                phase=phase,
+                from_context=from_context,
+                to_context=to_context,
+                note=note,
+            ),
+        )
 
     def on_aliases_updated(self) -> None:
         """Refresh command autocompletion after background resource discovery."""
@@ -1764,9 +2023,24 @@ class KorvidApp(App[None]):
             return
         if not await self._ctx_switch_guards_pass(name):
             return
+        # The switch is now committed to attempting: recorded before the
+        # probe, on the epoch that is still serving this session. Anything
+        # refused above never started, and inventing a `started` for it
+        # would put a transition in the record that never happened.
+        epoch = self._ctx_epoch
+        self._record_context_switch(epoch=epoch, phase="started", from_context=old, to_context=name)
         try:
             await self._probe_context(name)  # type: ignore[misc]  # guarded by caller
         except Exception as exc:
+            # Nothing was torn down and no cluster was applied, so the
+            # failure belongs to the epoch that is still live.
+            self._record_context_switch(
+                epoch=epoch,
+                phase="failed",
+                from_context=old,
+                to_context=name,
+                note=self._describe_ctx_error(exc),
+            )
             self.notify(
                 f"Cannot switch to context {name!r}: {self._describe_ctx_error(exc)}"
                 f" — staying on {old or 'the current context'}",
@@ -1779,6 +2053,15 @@ class KorvidApp(App[None]):
             # have started meanwhile; re-check before anything is torn down.
             blocker = self._ctx_switch_blocker()
             if blocker is not None:
+                # A `started` with no terminal phase would read as a switch
+                # still in flight; the abort is the outcome, on the old epoch.
+                self._record_context_switch(
+                    epoch=epoch,
+                    phase="failed",
+                    from_context=old,
+                    to_context=name,
+                    note=blocker,
+                )
                 self.notify(blocker, severity="warning")
                 return
             # Quiesce the embedded MCP server BEFORE any teardown: external
@@ -1787,6 +2070,13 @@ class KorvidApp(App[None]):
             # fully usable (watches, forwards, store all intact).
             mcp_restart = await self._quiesce_mcp_for_switch()
             if mcp_restart is None:
+                self._record_context_switch(
+                    epoch=epoch,
+                    phase="failed",
+                    from_context=old,
+                    to_context=name,
+                    note="embedded MCP server did not stop in time",
+                )
                 return
             # Old-context proposals are stale the moment this committed
             # transition begins: the old MCP run (and its capability) is
@@ -1805,6 +2095,7 @@ class KorvidApp(App[None]):
                         timeout=15,
                     )
                 return
+            self._resume_timeline_after_retarget(name, old, applied)
             if mcp_restart and self._mcp is not None:
                 # Resume on the same endpoint, now serving whichever context
                 # was actually applied (target, or the restored old one).
@@ -1818,6 +2109,29 @@ class KorvidApp(App[None]):
         self.on_aliases_updated()
         if applied == name:
             self.notify(f"Switched to context {name} (ns: {self.current_scope})")
+
+    def _resume_timeline_after_retarget(
+        self, name: str, old: str | None, applied: str | None
+    ) -> None:
+        """Close out the switch on the timeline and rebind its Warning feed.
+
+        `completed` belongs to the epoch the switch created, so the new
+        cluster's record opens with the switch that started it — but only
+        when the requested target is what got applied: `_apply_context_switch`
+        also runs while *restoring* the old context after a failed swap, and
+        recording completion there would report the target that failed as if
+        it had succeeded. The feed restarts either way: teardown cancelled the
+        old epoch's, and whichever context is now applied deserves one.
+        """
+        if applied == name:
+            self._record_context_switch(
+                epoch=self._ctx_epoch,
+                phase="completed",
+                from_context=old,
+                to_context=name,
+                note="all cluster state was reset",
+            )
+        self._start_timeline_warning_watch()
 
     async def _quiesce_mcp_for_switch(self) -> bool | None:
         """Drain and stop the embedded MCP server ahead of a context switch.
@@ -1943,6 +2257,7 @@ class KorvidApp(App[None]):
         self.workers.cancel_group(self, "hint-events")
         self._hints.teardown()
         await self._cancel_relationship_workers()
+        await self._cancel_timeline_warning_workers()
         self.filter_pattern = ""
         self._resource_filter = parse_filter("")
 
@@ -1961,6 +2276,20 @@ class KorvidApp(App[None]):
             with contextlib.suppress(WorkerError):
                 await worker.wait()
 
+    async def _cancel_timeline_warning_workers(self) -> None:
+        """Stop the Warning-event feed before the connection swaps.
+
+        The feed holds an open watch against the old cluster: left running it
+        would either keep reading a connection the swap is about to close, or
+        record an old cluster's Event under the new epoch. Each cancelled
+        worker is awaited so teardown cannot return while one is still inside
+        its stream; `WorkerError` covers cancelled/failed/never-started, none
+        of which is actionable here.
+        """
+        for worker in self.workers.cancel_group(self, _TIMELINE_EVENT_GROUP):
+            with contextlib.suppress(WorkerError):
+                await worker.wait()
+
     async def _retarget_context(self, name: str, old: str | None) -> tuple[bool, str | None]:
         """Swap the connection to *name*; on failure fall back to *old*.
 
@@ -1973,11 +2302,22 @@ class KorvidApp(App[None]):
         Old-context proposals were already expired by the caller (right
         after MCP quiescing), before teardown or either switch attempt.
         """
+        # Captured before the first attempt: `_apply_context_switch` bumps
+        # the epoch as its first action, so reading it in the handler below
+        # could file a failed swap under the epoch it failed to create.
+        epoch = self._ctx_epoch
         try:
             result = await self._switch_context(name)  # type: ignore[misc]  # guarded by caller
             self._apply_context_switch(name, old, result)
             return True, name
         except Exception as exc:
+            self._record_context_switch(
+                epoch=epoch,
+                phase="failed",
+                from_context=old,
+                to_context=name,
+                note=self._describe_ctx_error(exc),
+            )
             self.notify(
                 f"Context switch to {name!r} failed mid-swap: {self._describe_ctx_error(exc)}",
                 severity="error",
@@ -2946,24 +3286,30 @@ class KorvidApp(App[None]):
         )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        """Report a failed relationship worker instead of exiting.
+        """Report a failed timeline or relationship worker instead of exiting.
 
-        Scoped to this app's own `relationships` workers, which are the
-        only ones started with `exit_on_error=False`: every other group
-        keeps Textual's default crash-on-error behaviour, and a cancelled
-        worker never reaches `WorkerState.ERROR`, so it is never reported.
+        Scoped to this app's own `relationships` and `timeline-warning-events`
+        workers, which are the only ones started with `exit_on_error=False`:
+        every other group keeps Textual's default crash-on-error behaviour,
+        and a cancelled worker never reaches `WorkerState.ERROR`, so it is
+        never reported.
         """
-        if event.worker.node is not self or event.worker.group != _RELATIONSHIP_GROUP:
+        if event.worker.node is not self or event.state is not WorkerState.ERROR:
             return
-        if event.state is not WorkerState.ERROR:
-            return
-        error = event.worker.error
+        if event.worker.group == _TIMELINE_EVENT_GROUP:
+            self._notify_worker_error("Warning-event timeline feed failed", event.worker)
+        elif event.worker.group == _RELATIONSHIP_GROUP:
+            self._notify_worker_error("Relationships failed", event.worker)
+
+    def _notify_worker_error(self, label: str, worker: Worker[Any]) -> None:
+        """One visible report for a worker that failed instead of crashing."""
+        error = worker.error
         detail = f"{type(error).__name__}: {error}" if error is not None else "unknown error"
         # markup=False: the detail can quote cluster-controlled text (a
         # resource name inside a parser error), which must never be read
         # as Rich markup.
         self.notify(
-            f"Relationships failed - {detail[:200]}",
+            f"{label} - {detail[:200]}",
             severity="error",
             timeout=10,
             markup=False,
@@ -4471,7 +4817,13 @@ class KorvidApp(App[None]):
         outcome: str,
     ) -> None:
         """Append one audit record; raises if it cannot be persisted (the
-        caller decides whether that blocks the write - see _run_write)."""
+        caller decides whether that blocks the write - see _run_write).
+
+        The single chokepoint where a write reaches the session timeline
+        too: the entry is appended only after the durable append returned,
+        so a failed audit can never leave a success-shaped record behind
+        (auditing is fail-closed — AGENTS.md).
+        """
         if self._audit is None:
             raise RuntimeError("audit log not configured")
         audit = self._audit
@@ -4486,6 +4838,22 @@ class KorvidApp(App[None]):
                 detail=detail,
                 outcome=outcome,
             )
+        )
+        timeline = self._session_timeline
+        if timeline is None:
+            return
+        self._record_timeline_result(
+            "write entry",
+            timeline.append_write(
+                epoch=self._ctx_epoch,
+                action=action,
+                kind_alias=meta.plural,
+                display_kind=meta.kind,
+                namespace=namespace,
+                name=name,
+                uid=None,
+                outcome=outcome,
+            ),
         )
 
     @_tracks_cluster_write

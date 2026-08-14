@@ -2049,6 +2049,7 @@ class _FakeKubeForWiring:
     def open_pod_exec(self, *a: Any, **k: Any) -> Any: ...
     def probe_context(self, *a: Any, **k: Any) -> Any: ...
     def list_pod_metrics(self, *a: Any, **k: Any) -> Any: ...
+    def watch_warning_events(self, *a: Any, **k: Any) -> Any: ...
 
     async def switch_context(self, name: str | None) -> None:
         return None
@@ -2083,3 +2084,35 @@ async def test_wire_and_run_wires_relationship_lister_from_kube(
     assert result == []
     assert kube.relationship_list_calls == [("meta", "ns")]
     assert kube.list_calls == []
+
+
+async def test_wire_and_run_passes_session_timeline_and_warning_watch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The composition root owns the timeline's bounds and its only live
+    producer that is not already wired through the store: a session with no
+    Warning feed would silently lose half the record (issue #282 task 3)."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+    from korvid.core.session_timeline import SessionTimeline
+
+    monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    _FakeAppCapturesKwargs.instances.clear()
+
+    kube = _FakeKubeForWiring()
+    config = KorvidConfig(readonly=True, timeline_max_entries=7, timeline_max_bytes=4096)
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(config, cast("Any", kube), state)
+    if state.discovery_box:
+        await state.discovery_box[0]
+
+    captured = _FakeAppCapturesKwargs.instances[0].captured
+    timeline = captured["session_timeline"]
+    assert isinstance(timeline, SessionTimeline)
+    assert captured["watch_warning_events"] == kube.watch_warning_events
+    # The configured bounds reach the timeline, not just its constructor.
+    for index in range(9):
+        timeline.append_context_switch(
+            epoch=0, phase="started", from_context=None, to_context=f"ctx-{index}"
+        )
+    assert timeline.snapshot(epoch=None, source=None, resource=None).stats.entry_count == 7

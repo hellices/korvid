@@ -36,6 +36,7 @@ from korvid.core.config import (
 )
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRegistry
+from korvid.core.session_timeline import SessionTimeline
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.client import (
@@ -1333,6 +1334,12 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         proposal_store=proposal_store,
         save_topbar=lambda expanded: save_topbar_state(DEFAULT_CONFIG_PATH, expanded=expanded),
         list_relationship_objects=kube.list_relationship_objects,
+        # Bounded session record (issue #282): the composition root owns the
+        # buffer's limits, so a long session cannot grow it without bound.
+        session_timeline=SessionTimeline(config.timeline_max_entries, config.timeline_max_bytes),
+        # The only timeline producer the store does not already feed: a live
+        # Warning-Event stream, read-only and filtered server-side.
+        watch_warning_events=kube.watch_warning_events,
     )
     app_box.append(app)
     # Late-bind the UI bridge: from here on the agent's UI-control tools

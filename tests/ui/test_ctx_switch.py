@@ -15,6 +15,12 @@ import pytest
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
+from korvid.core.session_timeline import (
+    ContextSwitchPayload,
+    SessionTimeline,
+    TimelineSource,
+    WarningEventPayload,
+)
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
@@ -49,6 +55,8 @@ class _CtxEnv:
         stream_logs: Any = None,
         probe_gate: asyncio.Event | None = None,
         metrics: Any = None,
+        timeline: SessionTimeline | None = None,
+        watch_warning_events: Any = None,
     ) -> None:
         self.probe_calls: list[str] = []
         self.switch_calls: list[str | None] = []
@@ -98,6 +106,8 @@ class _CtxEnv:
             switch_context=switch,
             stream_logs=stream_logs,
             metrics=metrics,
+            session_timeline=timeline,
+            watch_warning_events=watch_warning_events,
         )
 
 
@@ -1259,3 +1269,132 @@ async def test_switch_restarts_metrics_for_same_namespace() -> None:
         calls.clear()
         await until(pilot, lambda: len(calls) > 0, label="poller restarted after switch")
         assert calls
+
+
+# ---------------------------------------------------------------------------
+# Bounded session timeline: context-switch records (issue #282)
+# ---------------------------------------------------------------------------
+
+
+def _ctx_phases(timeline: SessionTimeline) -> list[tuple[int, str]]:
+    phases: list[tuple[int, str]] = []
+    for entry in timeline.snapshot(
+        epoch=None, source=TimelineSource.CONTEXT, resource=None
+    ).entries:
+        assert isinstance(entry.payload, ContextSwitchPayload)
+        phases.append((entry.epoch, entry.payload.phase))
+    return phases
+
+
+async def test_successful_switch_records_started_then_completed_in_distinct_epochs() -> None:
+    """The switch spans two clusters: `started` belongs to the epoch that
+    was still live when it began, `completed` to the one it created."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=8192)
+    env = _CtxEnv(timeline=timeline)
+    async with env.app.run_test() as pilot:
+        env.app.post_message(SwitchContextCommand("ctx-b"))
+        await until(pilot, lambda: env.app.config.kube_context == "ctx-b", label="switched")
+        await until(
+            pilot,
+            lambda: len(_ctx_phases(timeline)) == 2,
+            label="both context entries recorded",
+        )
+    assert _ctx_phases(timeline) == [(0, "started"), (1, "completed")]
+
+
+async def test_refused_switch_records_nothing_before_the_guards_pass() -> None:
+    """A switch refused by the guards never started: recording it would
+    invent a transition the session never attempted."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=8192)
+    env = _CtxEnv(timeline=timeline)
+    async with env.app.run_test() as pilot:
+        env.app.post_message(SwitchContextCommand("ctx-zzz"))
+        await until(
+            pilot,
+            lambda: any("Unknown context" in n.message for n in env.app._notifications),
+            label="unknown context refused",
+        )
+        assert env.probe_calls == []
+    assert _ctx_phases(timeline) == []
+
+
+async def test_probe_failure_records_context_failure_without_bumping_epoch() -> None:
+    """The probe failed, so no cluster was applied: both entries stay on the
+    epoch that is still serving the session."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=8192)
+    env = _CtxEnv(probe_error=RuntimeError("Unauthorized"), timeline=timeline)
+    async with env.app.run_test() as pilot:
+        env.app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: any("Unauthorized" in n.message for n in env.app._notifications),
+            label="probe failure",
+        )
+        await until(pilot, lambda: len(_ctx_phases(timeline)) == 2, label="failure recorded")
+    assert _ctx_phases(timeline) == [(0, "started"), (0, "failed")]
+
+
+async def test_mid_swap_failure_records_context_failure_before_restore() -> None:
+    """The target swap failed and the old context was restored: the failure
+    belongs to the old epoch, and the restore is not a completed switch."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=8192)
+    env = _CtxEnv(switch_error=RuntimeError("socket closed"), timeline=timeline)
+    async with env.app.run_test() as pilot:
+        env.app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: any("Restored context" in n.message for n in env.app._notifications),
+            label="restore notification",
+        )
+        await until(pilot, lambda: len(_ctx_phases(timeline)) == 2, label="failure recorded")
+        await pilot.pause(0.1)
+    assert _ctx_phases(timeline) == [(0, "started"), (0, "failed")]
+
+
+async def test_switch_rebinds_the_warning_feed_to_the_new_epoch() -> None:
+    """The Warning feed holds the old cluster's connection: the switch must
+    cancel it and start one bound to the new epoch, never leaving an
+    old-cluster event to land under the new epoch's entries."""
+    timeline = SessionTimeline(max_entries=32, max_bytes=32768)
+    streams: list[str] = []
+    hold = asyncio.Event()
+
+    async def warnings(_namespace: str | None) -> AsyncIterator[dict[str, Any]]:
+        streams.append("open")
+        yield {
+            "type": "Warning",
+            "reason": "BackOff",
+            "message": f"stream-{len(streams)}",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "namespace": "default",
+                "name": "pod-a",
+            },
+        }
+        await hold.wait()
+
+    env = _CtxEnv(timeline=timeline, watch_warning_events=warnings)
+    async with env.app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: bool(
+                timeline.snapshot(epoch=0, source=TimelineSource.EVENT, resource=None).entries
+            ),
+            label="first stream recorded",
+        )
+        env.app.post_message(SwitchContextCommand("ctx-b"))
+        await until(pilot, lambda: env.app.config.kube_context == "ctx-b", label="switched")
+        await until(
+            pilot,
+            lambda: bool(
+                timeline.snapshot(epoch=1, source=TimelineSource.EVENT, resource=None).entries
+            ),
+            label="second stream recorded",
+        )
+        assert len(streams) == 2
+        first = timeline.snapshot(epoch=0, source=TimelineSource.EVENT, resource=None).entries
+        assert [
+            entry.payload.note for entry in first if isinstance(entry.payload, WarningEventPayload)
+        ] == ["stream-1"]
+        hold.set()
