@@ -83,12 +83,14 @@ class SamplePacedSchedule:
         self._advanced.set()
         await asyncio.sleep(0)
 
-    async def release(self) -> None:
+    async def release(self) -> bool:
         """Let one more scheduled event through; free-run once the probe ends.
 
-        Returns once the schedule has actually advanced (or after a bounded
-        number of event-loop turns, so a schedule that already ran out of
-        events fails the run by name instead of hanging).
+        Returns whether the schedule actually advanced. A bounded wait keeps a
+        schedule that has run out of events from hanging, but exhausting that
+        bound is not success: the caller turns it into a named failure so a run
+        that quietly stopped being paced can never be mistaken for a passing
+        one.
         """
         self._remaining_samples -= 1
         if self._remaining_samples <= 0:
@@ -97,8 +99,14 @@ class SamplePacedSchedule:
         self._gate.set()
         for _ in range(_SETTLE_TURNS):
             if self._advanced.is_set():
-                return
+                return True
             await asyncio.sleep(0)
+        return self._advanced.is_set()
+
+    @property
+    def free_running(self) -> bool:
+        """Whether every sample is taken and the schedule is no longer gated."""
+        return self._free_running
 
     def options(self, **overrides: Any) -> ReplayOptions:
         """`ReplayOptions` wired to this schedule, with *overrides* applied."""
@@ -135,7 +143,14 @@ def sample_paced_schedule(
 
     async def paced_measure(*args: Any, **kwargs: Any) -> float:
         elapsed = await original(*args, **kwargs)
-        await schedule.release()
+        advanced = await schedule.release()
+        if not advanced and not schedule.free_running:
+            pytest.fail(
+                "sample pacing stalled: the schedule did not advance within "
+                f"{_SETTLE_TURNS} event-loop turns while samples remained. "
+                "Pacing has disengaged, so any assertion that depends on churn "
+                "continuing through the probe is no longer proving anything."
+            )
         return float(elapsed)
 
     monkeypatch.setattr(replay_module, "measure_cursor_input", paced_measure)

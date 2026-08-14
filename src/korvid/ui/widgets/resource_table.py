@@ -420,6 +420,12 @@ class ResourceTable(DataTable[str | Text]):
         self._emitted: dict[str, list[str | Text]] = {}
         #: Single clock reading per repaint; see `show()`.
         self._render_now: datetime = datetime.now(UTC)
+        #: Whether the private-store fast path has been proven against the
+        #: installed Textual, and whether it held. The major-version gate says
+        #: only that this Textual *may* be batched; the first batched write
+        #: reads itself back to confirm the renderer sees it.
+        self._cell_batching_verified = False
+        self._cell_batching_usable = True
 
     def show(
         self,
@@ -637,6 +643,22 @@ class ResourceTable(DataTable[str | Text]):
         first = fixed_count + self.scroll_offset.y
         return _VisibleRows(fixed_count, first, first + viewport_height - 1)
 
+    def _batched_write_holds(self, row_key: RowKey, column: Column, expected: str | Text) -> bool:
+        """Whether a private-store write is actually visible through the public API.
+
+        The batching gate is a Textual *major version* check, and a version
+        string is not evidence about internals: a minor release can move the
+        structure the renderer reads while leaving `_data` writable, which
+        would paint stale cells with no error. This reads one written cell
+        back through `get_cell`, so the fast path is proven on the installed
+        Textual rather than assumed. Verified once per widget — the internals
+        cannot change while the process runs.
+        """
+        try:
+            return _cells_equal(self.get_cell(row_key, column.key), expected)
+        except Exception:  # any failure here means "don't trust the fast path"
+            return False
+
     def _patch_row(self, key: str, cells: list[str | Text], columns: list[Column]) -> bool:
         """Update an existing row's changed cells; True when any cell moved."""
         old_cells = self._emitted.get(key)
@@ -645,13 +667,22 @@ class ResourceTable(DataTable[str | Text]):
         if old_cells is None:
             old_cells = self.get_row(key)
         changed = False
-        batched = _BATCH_CELL_WRITES
+        batched = _BATCH_CELL_WRITES and self._cell_batching_usable
         row_key = RowKey(key)
         for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
             if _cells_equal(old_cell, new_cell):
                 continue
             if batched:
                 self._data[row_key][column.key] = new_cell
+                if not self._cell_batching_verified:
+                    self._cell_batching_verified = True
+                    if not self._batched_write_holds(row_key, column, new_cell):
+                        # The installed Textual does not read what this wrote.
+                        # Disable the fast path for good and redo this cell
+                        # (and every later one) through the public API.
+                        self._cell_batching_usable = False
+                        batched = False
+                        self.update_cell(row_key, column.key, new_cell, update_width=False)
             else:
                 # Unverified Textual major: pay one refresh per cell rather
                 # than write a private store whose shape may have moved.

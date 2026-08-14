@@ -6,10 +6,11 @@ reorder (e.g. a pod inserted mid-table) falls back to the rebuild path."""
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from rich.text import Text
+from textual.widgets.data_table import RowKey
 
 from korvid.ui.widgets import resource_table
 from korvid.ui.widgets.resource_table import ResourceTable, _cell_width, _cells_equal
@@ -654,3 +655,112 @@ async def test_bulk_removal_falls_back_to_rebuild() -> None:
         keep = [row.key.value for row in table.ordered_rows][:2]
         pending = [(key, list(table.get_row(key))) for key in keep if key is not None]
         assert table._apply_in_place(pending) is False
+
+
+class _DiscardingRow(dict):  # type: ignore[type-arg]  # test double mirroring one row of DataTable._data
+    """A row mapping that accepts direct writes and drops them.
+
+    Reads still work, so it stands for a Textual release that moved the
+    structure the renderer consults while leaving `_data` writable — the
+    failure a major-version gate cannot see.
+    """
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        return None
+
+    def force(self, key: Any, value: Any) -> None:
+        """Write the way the public API would, around the dropped path."""
+        dict.__setitem__(self, key, value)
+
+
+def _discard_private_writes(table: ResourceTable) -> None:
+    """Drop `_data` writes while keeping `update_cell` effective."""
+    table._data = {  # type: ignore[assignment]  # test double for DataTable's private store
+        key: _DiscardingRow(value) for key, value in table._data.items()
+    }
+
+    def public_update_cell(row_key: Any, column_key: Any, value: Any, **_kwargs: Any) -> None:
+        row = cast(_DiscardingRow, table._data[RowKey(getattr(row_key, "value", row_key))])
+        row.force(column_key, value)
+        table._update_count += 1
+        table.refresh()
+
+    table.update_cell = public_update_cell  # type: ignore[method-assign]  # test double
+
+
+async def test_batching_falls_back_when_the_private_store_does_not_take_writes() -> None:
+    """The fast path writes `DataTable._data` directly, gated only on a Textual
+    major version. A version string is not evidence about internals: Textual has
+    changed `DataTable`'s structures inside a major before, and a write landing
+    somewhere the renderer no longer reads would silently paint stale cells. The
+    widget must verify the write once against the public API and fall back.
+    """
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        _discard_private_writes(table)
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("alpha", phase="Failed"))
+
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/alpha")[2]) == "Failed",
+            label="cell reached the table through the fallback",
+        )
+        assert table._cell_batching_usable is False
+
+
+async def test_fixed_rows_do_not_shift_the_painted_window() -> None:
+    """`first = fixed_count + scroll_offset.y` mirrors `DataTable.render_line`,
+    which adds `scroll_y` only to lines at or below the fixed block: screen
+    line `fixed_rows_height` is therefore row `fixed_count + scroll_y`. The
+    pinned rows are reported separately by `contains`, so the window must not
+    be widened to cover them — doing so would claim rows between `scroll_y`
+    and `fixed_count + scroll_y` are painted when they are scrolled away.
+    """
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(60)])
+    async with app.run_test(size=(120, 14)) as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 60, label="pods loaded")
+        table.fixed_rows = 2
+        table.scroll_to(y=7, animate=False, immediate=True, force=True)
+        await until(pilot, lambda: table.scroll_offset.y == 7, label="scrolled")
+
+        visible = table._visible_rows()
+
+        header = table.header_height if table.show_header else 0
+        fixed_block = visible.fixed_count + header
+        painted = sorted(
+            index
+            for index in {
+                (line if line < fixed_block else line + table.scroll_offset.y) - header
+                for line in range(table.size.height)
+            }
+            if index >= 0
+        )
+        assert [index for index in range(60) if visible.contains(index)] == painted
+
+
+async def test_a_changed_row_under_fixed_rows_still_repaints() -> None:
+    """The window bounds are only useful if a visible change still repaints
+    once rows are pinned."""
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(60)])
+    async with app.run_test(size=(120, 14)) as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 60, label="pods loaded")
+        table.fixed_rows = 2
+        table.scroll_to(y=7, animate=False, immediate=True, force=True)
+        await until(pilot, lambda: table.scroll_offset.y == 7, label="scrolled")
+        visible = table._visible_rows()
+        painted_name = f"pod-{visible.first:02d}"
+        calls = _spy_refresh(table)
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod(painted_name, phase="Pending"))
+        await until(
+            pilot,
+            lambda: str(table.get_row(f"default/{painted_name}")[2]) == "Pending",
+            label="painted row updated",
+        )
+
+        assert _plain_refreshes(calls) != []
