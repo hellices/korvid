@@ -520,20 +520,49 @@ def _endpoint_targets(manifest: Mapping[str, Any], namespace: str) -> list[Refer
     return references
 
 
-def _ingress_backends(spec: Mapping[str, Any], namespace: str) -> list[ReferenceFact]:
-    """Ingress `spec.defaultBackend` / `spec.rules[].http.paths[].backend` -> Service."""
-    references: list[ReferenceFact] = []
-    default_service = _mapping(_mapping(spec.get("defaultBackend")).get("service"))
-    default_name = default_service.get("name")
-    if isinstance(default_name, str) and default_name:
-        references.append(
-            ReferenceFact(
-                relation=RelationKind.ROUTES_TO,
-                target=TargetReference("", "Service", namespace, default_name),
-                confidence=FactConfidence.DECLARED,
-                field="spec.defaultBackend.service",
-            )
+def _ingress_backend(
+    backend: Mapping[str, Any], namespace: str, field: str
+) -> ReferenceFact | None:
+    service = _mapping(backend.get("service"))
+    service_name = service.get("name")
+    if isinstance(service_name, str) and service_name:
+        return ReferenceFact(
+            relation=RelationKind.ROUTES_TO,
+            target=TargetReference("", "Service", namespace, service_name),
+            confidence=FactConfidence.DECLARED,
+            field=f"{field}.service",
         )
+    resource = _mapping(backend.get("resource"))
+    resource_kind = resource.get("kind")
+    resource_name = resource.get("name")
+    if (
+        not isinstance(resource_kind, str)
+        or not resource_kind
+        or not isinstance(resource_name, str)
+        or not resource_name
+    ):
+        return None
+    return ReferenceFact(
+        relation=RelationKind.ROUTES_TO,
+        target=TargetReference(
+            str(resource.get("apiGroup") or ""),
+            resource_kind,
+            namespace,
+            resource_name,
+        ),
+        confidence=FactConfidence.DECLARED,
+        field=f"{field}.resource",
+    )
+
+
+def _ingress_backends(spec: Mapping[str, Any], namespace: str) -> list[ReferenceFact]:
+    """Ingress service/resource backends -> declared `ROUTES_TO` facts."""
+    references: list[ReferenceFact] = []
+    default = _ingress_backend(
+        _mapping(spec.get("defaultBackend")), namespace, "spec.defaultBackend"
+    )
+    if default is not None:
+        references.append(default)
     rules = spec.get("rules")
     if not isinstance(rules, list):
         return references
@@ -546,23 +575,57 @@ def _ingress_backends(spec: Mapping[str, Any], namespace: str) -> list[Reference
         for pi, path in enumerate(paths):
             if not isinstance(path, Mapping):
                 continue
-            service = _mapping(_mapping(path.get("backend")).get("service"))
-            name = service.get("name")
-            if not isinstance(name, str) or not name:
-                continue
-            references.append(
-                ReferenceFact(
-                    relation=RelationKind.ROUTES_TO,
-                    target=TargetReference("", "Service", namespace, name),
-                    confidence=FactConfidence.DECLARED,
-                    field=f"spec.rules[{ri}].http.paths[{pi}].backend.service",
-                )
+            fact = _ingress_backend(
+                _mapping(path.get("backend")),
+                namespace,
+                f"spec.rules[{ri}].http.paths[{pi}].backend",
             )
+            if fact is not None:
+                references.append(fact)
+    return references
+
+
+def _gateway_backend(ref: object, namespace: str, field: str) -> ReferenceFact | None:
+    if not isinstance(ref, Mapping):
+        return None
+    name = ref.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    return ReferenceFact(
+        relation=RelationKind.ROUTES_TO,
+        target=TargetReference(
+            str(ref.get("group") or ""),
+            str(ref.get("kind") or "Service"),
+            str(ref.get("namespace") or namespace),
+            name,
+        ),
+        confidence=FactConfidence.DECLARED,
+        field=field,
+    )
+
+
+def _request_mirror_backends(filters: object, namespace: str, field: str) -> list[ReferenceFact]:
+    if not isinstance(filters, list):
+        return []
+    references: list[ReferenceFact] = []
+    for index, route_filter in enumerate(filters):
+        if not isinstance(route_filter, Mapping):
+            continue
+        if route_filter.get("type") != "RequestMirror":
+            continue
+        request_mirror = _mapping(route_filter.get("requestMirror"))
+        fact = _gateway_backend(
+            request_mirror.get("backendRef"),
+            namespace,
+            f"{field}[{index}].requestMirror.backendRef",
+        )
+        if fact is not None:
+            references.append(fact)
     return references
 
 
 def _gateway_backends(spec: Mapping[str, Any], namespace: str) -> list[ReferenceFact]:
-    """Gateway Route `spec.rules[].backendRefs[]` -> declared `ROUTES_TO` facts.
+    """Gateway Route forwarding/mirror backends -> declared `ROUTES_TO` facts.
 
     Shared by every `gateway.networking.k8s.io` `*Route` kind (HTTPRoute,
     GRPCRoute, TLSRoute, TCPRoute, UDPRoute): the Gateway API defines
@@ -579,25 +642,22 @@ def _gateway_backends(spec: Mapping[str, Any], namespace: str) -> list[Reference
         if not isinstance(rule, Mapping):
             continue
         backend_refs = rule.get("backendRefs")
-        if not isinstance(backend_refs, list):
-            continue
-        for bi, ref in enumerate(backend_refs):
-            if not isinstance(ref, Mapping):
-                continue
-            name = ref.get("name")
-            if not isinstance(name, str) or not name:
-                continue
-            group = str(ref.get("group") or "")
-            kind = str(ref.get("kind") or "Service")
-            ref_namespace = str(ref.get("namespace") or namespace)
-            references.append(
-                ReferenceFact(
-                    relation=RelationKind.ROUTES_TO,
-                    target=TargetReference(group, kind, ref_namespace, name),
-                    confidence=FactConfidence.DECLARED,
-                    field=f"spec.rules[{ri}].backendRefs[{bi}]",
-                )
-            )
+        if isinstance(backend_refs, list):
+            for bi, ref in enumerate(backend_refs):
+                fact = _gateway_backend(ref, namespace, f"spec.rules[{ri}].backendRefs[{bi}]")
+                if fact is not None:
+                    references.append(fact)
+                if isinstance(ref, Mapping):
+                    references.extend(
+                        _request_mirror_backends(
+                            ref.get("filters"),
+                            namespace,
+                            f"spec.rules[{ri}].backendRefs[{bi}].filters",
+                        )
+                    )
+        references.extend(
+            _request_mirror_backends(rule.get("filters"), namespace, f"spec.rules[{ri}].filters")
+        )
     return references
 
 

@@ -433,12 +433,13 @@ k8s manifest -> RelationshipFacts -> core RelationshipGraph
 `korvid.k8s.relationship_facts.extract_relationship_facts` is the safety
 boundary: it walks one raw manifest and extracts only the metadata a
 relationship needs (owner references, label selectors, volume/config
-references, routing backends, live Pod node scheduling, storage bindings),
-never a Secret's `data`, a literal env value, or a command/arg. Relationship
-snapshot Secret LISTs request Kubernetes `PartialObjectMetadataList`; an API
-server that cannot provide that representation produces visible incomplete
-coverage rather than a retry that retrieves full Secret objects. Every listed
-object's summary (`GenericSummary`/`PodSummary`) carries its
+references, Ingress service/resource backends, Gateway forwarding/request-
+mirror backends, live Pod node scheduling, storage bindings), never a Secret's
+`data`, a literal env value, or a command/arg. Relationship snapshot Secret
+LISTs request Kubernetes `PartialObjectMetadataList`; an API server that cannot
+provide that representation produces visible incomplete coverage rather than a
+retry that retrieves full Secret objects. Every listed object's summary
+(`GenericSummary`/`PodSummary`) carries its
 `RelationshipFacts` alongside the fields the rest of the UI already reads —
 the extraction runs once, at list time, not again when the graph is built.
 
@@ -453,19 +454,21 @@ deterministically capped `RelationshipGraph`. Its edge cap is enforced during
 generation by a bounded top-K accumulator, so a quadratic selector join never
 allocates more than `max_edges` edges at a time.
 
-All the bounded LISTs — the fixed resource catalog, the discovered Gateway
-API kinds, the bounded second phase that follows `routes_to` references into
-the namespaces they name, per-source concurrency and per-snapshot resource
-caps, and the per-source `CoverageRecord` a 403/404/network failure becomes
-— are `korvid.ui.relationship_controller.RelationshipSnapshotLoader`'s
-responsibility, not the core builder's. That split is about purity, not
-about which layer is allowed to touch the API: `WatchManager` in §8 lives in
-`core/` and drives its own watch loop through an injected source callable,
-and the snapshot loader is the same shape — an orchestrator that reads
-through an injected `Lister` protocol and performs no Textual work of its
-own. It sits in `ui/` because the app is what owns its worker lifecycle
-(starting, cancelling on a `:ctx` switch, and reporting a failure), not
-because `core/` may not perform reads.
+All the bounded LISTs — the fixed resource catalog, the discovered Gateway API
+kinds, the bounded second phase that follows referenced discovered routing
+kinds not already in that catalog, and target-namespace `ReferenceGrant` reads
+for cross-namespace Gateway Routes — are
+`korvid.ui.relationship_controller.RelationshipSnapshotLoader`'s
+responsibility, along with per-source concurrency and per-snapshot resource
+caps and the `CoverageRecord` a 403/404/network failure becomes. Non-Gateway
+cross-namespace `ROUTES_TO` facts do not trigger that authorization fan-out.
+This split is about purity, not about which layer is allowed to touch the API:
+`WatchManager` in §8 lives in `core/` and drives its own watch loop through an
+injected source callable, and the snapshot loader is the same shape — an
+orchestrator that reads through an injected `Lister` protocol and performs no
+Textual work of its own. It sits in `ui/` because the app is what owns its
+worker lifecycle (starting, cancelling on a `:ctx` switch, and reporting a
+failure), not because `core/` may not perform reads.
 `korvid.ui.widgets.relationship_screen.RelationshipScreen` then renders one
 already-built graph — it performs no I/O either, only bounded BFS traversal
 and row budgeting over data it was handed.

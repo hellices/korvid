@@ -368,6 +368,69 @@ def test_ingress_default_and_path_backends_target_services() -> None:
     assert path_fact.field == "spec.rules[0].http.paths[0].backend.service"
 
 
+def test_ingress_default_and_path_resource_backends_are_extracted() -> None:
+    facts = extract_relationship_facts(
+        "Ingress",
+        "networking.k8s.io",
+        "v1",
+        {
+            "metadata": {"name": "public", "namespace": "prod"},
+            "spec": {
+                "defaultBackend": {
+                    "resource": {
+                        "apiGroup": "storage.example.io",
+                        "kind": "Bucket",
+                        "name": "fallback",
+                    }
+                },
+                "rules": [
+                    {
+                        "http": {
+                            "paths": [
+                                {
+                                    "path": "/assets",
+                                    "backend": {
+                                        "resource": {
+                                            "apiGroup": "storage.example.io",
+                                            "kind": "Bucket",
+                                            "name": "assets",
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ],
+            },
+        },
+    )
+    assert [
+        (
+            fact.target.group,
+            fact.target.kind,
+            fact.target.namespace,
+            fact.target.name,
+            fact.field,
+        )
+        for fact in facts.references
+    ] == [
+        (
+            "storage.example.io",
+            "Bucket",
+            "prod",
+            "fallback",
+            "spec.defaultBackend.resource",
+        ),
+        (
+            "storage.example.io",
+            "Bucket",
+            "prod",
+            "assets",
+            "spec.rules[0].http.paths[0].backend.resource",
+        ),
+    ]
+
+
 def test_pvc_and_pv_binding_references() -> None:
     pvc_facts = extract_relationship_facts(
         "PersistentVolumeClaim",
@@ -479,6 +542,81 @@ def test_grpc_route_backend_refs_are_extracted() -> None:
     assert fact.target.namespace == "edge"
     assert fact.confidence is FactConfidence.DECLARED
     assert fact.field == "spec.rules[0].backendRefs[0]"
+
+
+def test_http_route_rule_request_mirror_backend_is_extracted() -> None:
+    facts = extract_relationship_facts(
+        "HTTPRoute",
+        "gateway.networking.k8s.io",
+        "v1",
+        {
+            "metadata": {"name": "public", "namespace": "edge"},
+            "spec": {
+                "rules": [
+                    {
+                        "filters": [
+                            {
+                                "type": "RequestMirror",
+                                "requestMirror": {
+                                    "backendRef": {
+                                        "group": "",
+                                        "kind": "Service",
+                                        "namespace": "mirror",
+                                        "name": "traffic-copy",
+                                    }
+                                },
+                            }
+                        ]
+                    }
+                ]
+            },
+        },
+    )
+    assert len(facts.references) == 1
+    fact = facts.references[0]
+    assert fact.target.kind == "Service"
+    assert fact.target.namespace == "mirror"
+    assert fact.target.name == "traffic-copy"
+    assert fact.field == "spec.rules[0].filters[0].requestMirror.backendRef"
+
+
+def test_grpc_route_backend_request_mirror_backend_is_extracted() -> None:
+    facts = extract_relationship_facts(
+        "GRPCRoute",
+        "gateway.networking.k8s.io",
+        "v1",
+        {
+            "metadata": {"name": "grpc", "namespace": "edge"},
+            "spec": {
+                "rules": [
+                    {
+                        "backendRefs": [
+                            {
+                                "name": "api",
+                                "filters": [
+                                    {
+                                        "type": "RequestMirror",
+                                        "requestMirror": {
+                                            "backendRef": {
+                                                "name": "traffic-copy",
+                                            }
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            },
+        },
+    )
+    assert [(fact.target.name, fact.field) for fact in facts.references] == [
+        ("api", "spec.rules[0].backendRefs[0]"),
+        (
+            "traffic-copy",
+            "spec.rules[0].backendRefs[0].filters[0].requestMirror.backendRef",
+        ),
+    ]
 
 
 def test_stream_route_backend_refs_are_extracted() -> None:

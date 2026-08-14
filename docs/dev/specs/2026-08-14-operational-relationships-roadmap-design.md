@@ -66,7 +66,8 @@ Facts contain metadata and references only:
 - Pod and pod-template references to PVCs, ConfigMaps, and Secrets by name;
 - Service selectors;
 - EndpointSlice Service ownership and endpoint target references;
-- Ingress and Gateway backend references;
+- Ingress service/resource backends and Gateway forwarding/request-mirror
+  backends;
 - PDB selectors;
 - Pod node placement (live Pods only; a workload's template `nodeName` is
   configuration, not an observed placement).
@@ -96,8 +97,11 @@ is preferred to incrementally editing edges:
 - the builder needs no async lifecycle or subscriber failure policy.
 
 The graph screen performs bounded LISTs for the supported kinds, in parallel
-with a small concurrency cap, then builds one snapshot. It never performs a
-GET per node. Refresh repeats the snapshot operation.
+with a small concurrency cap, then follows referenced discovered routing kinds
+that the first phase did not already cover. Cross-namespace follow-up and
+`ReferenceGrant` authorization are restricted to Gateway API Routes; unrelated
+cross-namespace observations cannot consume that cap. It never performs a GET
+per node. Refresh repeats the snapshot operation.
 
 ### Identity and edge model
 
@@ -251,7 +255,8 @@ graph is incomplete, but the preview must say so.
 - duplicate selectors and empty selectors using the API-version-specific
   Kubernetes semantics;
 - EndpointSlice Service ownership and endpoint target references;
-- Ingress and Gateway backend resolution;
+- Ingress service/resource and Gateway forwarding/request-mirror backend
+  resolution;
 - PVC, ConfigMap, and Secret references without Secret values;
 - PDB selectors and Pod node placement;
 - invalid cross-namespace references;

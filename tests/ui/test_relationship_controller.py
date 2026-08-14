@@ -56,6 +56,10 @@ HTTP_ROUTE_META = ResourceMeta("HTTPRoute", "httproutes", "gateway.networking.k8
 REFERENCE_GRANT_META = ResourceMeta(
     "ReferenceGrant", "referencegrants", "gateway.networking.k8s.io", "v1beta1", True
 )
+ENDPOINT_SLICE_META = ResourceMeta(
+    "EndpointSlice", "endpointslices", "discovery.k8s.io", "v1", True
+)
+CUSTOM_BACKEND_META = ResourceMeta("Backend", "backends", "example.com", "v1", True)
 #: `PersistentVolume`/`PersistentVolumeClaim` deliberately sort in opposite
 #: relative order by `kind` ("PersistentVolume" < "PersistentVolumeClaim",
 #: a prefix) vs by `plural` ("persistentvolumeclaims" < "persistentvolumes",
@@ -476,12 +480,14 @@ def _route_summary(
     *,
     namespace: str = "edge",
     targets: tuple[tuple[str, str], ...] = (("prod", "api"),),
+    target_group: str = "",
+    target_kind: str = "Service",
 ) -> GenericSummary:
-    """An HTTPRoute whose backendRefs name `(namespace, service)` targets."""
+    """An HTTPRoute whose backendRefs name `(namespace, name)` targets."""
     references = tuple(
         ReferenceFact(
             relation=RelationKind.ROUTES_TO,
-            target=TargetReference("", "Service", target_namespace, target_name),
+            target=TargetReference(target_group, target_kind, target_namespace, target_name),
             confidence=FactConfidence.DECLARED,
             field=f"spec.rules[0].backendRefs[{index}]",
         )
@@ -648,6 +654,109 @@ async def test_target_namespace_lists_are_deduped_and_deterministic() -> None:
         (GATEWAY, "referencegrants", "prod"),
         ("", "services", "staging"),
         (GATEWAY, "referencegrants", "staging"),
+    ]
+
+
+async def test_same_namespace_discovered_route_backend_is_listed() -> None:
+    route = _route_summary(
+        targets=(("edge", "api"),),
+        target_group="example.com",
+        target_kind="Backend",
+    )
+    lister = _NamespacedLister(
+        results={
+            (GATEWAY, "httproutes", "edge"): [route],
+            ("example.com", "backends", "edge"): [
+                _generic_summary("api", namespace="edge", kind="Backend")
+            ],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", "edge"),
+        "edge",
+        _aliases(HTTP_ROUTE_META, REFERENCE_GRANT_META, CUSTOM_BACKEND_META),
+    )
+    assert ("example.com", "backends", "edge") in lister.calls
+    assert _routes_to_resolution(graph) is EdgeResolution.RESOLVED
+
+
+async def test_same_namespace_discovered_ingress_resource_backend_is_listed() -> None:
+    ingress = GenericSummary(
+        name="public",
+        namespace="edge",
+        kind="Ingress",
+        created="",
+        uid="public",
+        relationships=RelationshipFacts(
+            api_group="networking.k8s.io",
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.ROUTES_TO,
+                    target=TargetReference("example.com", "Backend", "edge", "api"),
+                    confidence=FactConfidence.DECLARED,
+                    field="spec.defaultBackend.resource",
+                ),
+            ),
+        ),
+    )
+    ingress_meta = ResourceMeta("Ingress", "ingresses", "networking.k8s.io", "v1", True)
+    lister = _NamespacedLister(
+        results={
+            ("networking.k8s.io", "ingresses", "edge"): [ingress],
+            ("example.com", "backends", "edge"): [
+                _generic_summary("api", namespace="edge", kind="Backend")
+            ],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("Ingress", "edge"),
+        "edge",
+        _aliases(ingress_meta, CUSTOM_BACKEND_META),
+    )
+    assert ("example.com", "backends", "edge") in lister.calls
+    assert _routes_to_resolution(graph) is EdgeResolution.RESOLVED
+
+
+async def test_cross_namespace_endpoint_target_does_not_consume_route_follow_up_cap() -> None:
+    endpoint_slice = GenericSummary(
+        name="api-slice",
+        namespace="edge",
+        kind="EndpointSlice",
+        created="",
+        uid="api-slice",
+        relationships=RelationshipFacts(
+            api_group="discovery.k8s.io",
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.ROUTES_TO,
+                    target=TargetReference("", "Pod", "aaa", "api-0"),
+                    confidence=FactConfidence.OBSERVED,
+                    field="endpoints[0].targetRef",
+                ),
+            ),
+        ),
+    )
+    lister = _NamespacedLister(
+        results={
+            (GATEWAY, "httproutes", "edge"): [_route_summary(targets=(("zzz", "api"),))],
+            ("discovery.k8s.io", "endpointslices", "edge"): [endpoint_slice],
+        }
+    )
+    await RelationshipSnapshotLoader(lister, limits=GraphLoadLimits(max_target_lists=2)).load(
+        _root("HTTPRoute", "edge"),
+        "edge",
+        _aliases(
+            HTTP_ROUTE_META,
+            REFERENCE_GRANT_META,
+            SERVICE_META,
+            PODS_META,
+            ENDPOINT_SLICE_META,
+        ),
+    )
+    follow_ups = [call for call in lister.calls if call[2] in {"aaa", "zzz"}]
+    assert follow_ups == [
+        ("", "services", "zzz"),
+        (GATEWAY, "referencegrants", "zzz"),
     ]
 
 

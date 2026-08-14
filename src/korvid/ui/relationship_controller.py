@@ -3,7 +3,8 @@
 `RelationshipSnapshotLoader` is a pure async orchestrator: it LISTs a fixed
 catalog of core/apps/batch/discovery/networking/policy resource kinds plus
 any discovered `gateway.networking.k8s.io` resources (Gateway, `*Route`,
-ReferenceGrant), bounds both fan-out concurrency and the total number of
+ReferenceGrant), follows discovered routing target kinds not already covered
+by that first phase, bounds both fan-out concurrency and the total number of
 resources fed into the graph, classifies per-source failures into
 `CoverageRecord`s, and hands the collected `GraphInput`s to
 `build_relationship_graph` (Task 4). It performs no Textual operations —
@@ -349,8 +350,10 @@ def _cross_namespace_route_targets(
     goes on to issue follow-up LISTs.
     """
     targets: dict[str, set[tuple[str, str]]] = {}
-    for _meta, summaries, _scope in fetched:
+    for meta, summaries, _scope in fetched:
         for summary in summaries:
+            if not is_gateway_route_kind(meta.group, meta.kind):
+                continue
             for fact in summary.relationships.references:
                 target = fact.target
                 if fact.relation is not RelationKind.ROUTES_TO:
@@ -361,40 +364,77 @@ def _cross_namespace_route_targets(
     return targets
 
 
+def _follow_up_route_targets(
+    fetched: Sequence[_FetchedSource],
+) -> dict[str, set[tuple[str, str]]]:
+    """Referenced route target kinds that can affect graph resolution.
+
+    Same-namespace targets are meaningful for every routing source. A
+    cross-namespace target is followed only for a Gateway API Route, where
+    `ReferenceGrant` defines whether the edge is valid. Other cross-namespace
+    `ROUTES_TO` facts (notably EndpointSlice targetRefs) are already invalid
+    and cannot become resolvable by loading the named object.
+    """
+    targets: dict[str, set[tuple[str, str]]] = {}
+    for meta, summaries, _scope in fetched:
+        for summary in summaries:
+            gateway_route = is_gateway_route_kind(meta.group, meta.kind)
+            for fact in summary.relationships.references:
+                target = fact.target
+                if fact.relation is not RelationKind.ROUTES_TO:
+                    continue
+                target_namespace = target.namespace or summary.namespace
+                if not target_namespace:
+                    continue
+                if target_namespace != summary.namespace and not gateway_route:
+                    continue
+                targets.setdefault(target_namespace, set()).add((target.group, target.kind))
+    return targets
+
+
+def _listed_in_first_phase(
+    group_kind: tuple[str, str],
+    target_namespace: str,
+    namespace: str | None,
+    first_phase: Sequence[ResourceMeta],
+) -> bool:
+    if namespace is not None and target_namespace != namespace:
+        return False
+    return any((meta.group, meta.kind) == group_kind and meta.namespaced for meta in first_phase)
+
+
 def _target_namespace_requests(
     fetched: Sequence[_FetchedSource],
     namespace: str | None,
     aliases: Mapping[str, ResourceMeta],
+    first_phase: Sequence[ResourceMeta],
 ) -> list[tuple[ResourceMeta, str]]:
     """The deterministic second-phase `(meta, namespace)` LISTs to run.
 
-    For every namespace a `routes_to` fact explicitly named, this LISTs the
-    referenced kind(s) plus `ReferenceGrant` — nothing else, and never a
-    per-object GET. Requests are sorted by `(namespace, group, plural)` and
-    deduplicated, so the same namespace referenced by a thousand routes
-    still costs one LIST per resource.
+    This LISTs each referenced discovered kind not already covered by the
+    first-phase catalog. Cross-namespace Gateway Route targets also require
+    `ReferenceGrant` in the target namespace. Requests are sorted by
+    `(namespace, group, plural)` and deduplicated, so repeated references
+    still cost one LIST per resource.
 
-    An all-namespaces snapshot (`namespace is None`) returns nothing: every
-    target namespace is already in the first phase's results, so a
-    follow-up could only duplicate a LIST that already ran. A namespace
-    already listed in the first phase is skipped for the same reason. A
-    kind that discovery never reported is skipped rather than guessed at:
+    A kind that discovery never reported is skipped rather than guessed at:
     an API resource absent from discovery has no objects to list. So is a
-    `synthetic` kind — a korvid-invented view (the helm browser and
-    friends) shares the alias map but has no API endpoint at all, exactly
-    as `_selected_relationship_root` already refuses one as a graph root.
+    `synthetic` kind — a korvid-invented view (the helm browser and friends)
+    shares the alias map but has no API endpoint at all, exactly as
+    `_selected_relationship_root` already refuses one as a graph root.
     """
-    if namespace is None:
-        return []
-    targets = _cross_namespace_route_targets(fetched)
+    targets = _follow_up_route_targets(fetched)
+    grant_targets = _cross_namespace_route_targets(fetched)
     by_group_kind = _metas_by_group_kind(aliases)
     requests: list[tuple[ResourceMeta, str]] = []
     for target_namespace in sorted(targets):
-        if target_namespace == namespace:
-            continue  # already listed by the first phase
-        wanted = targets[target_namespace] | {(_GATEWAY_GROUP, _REFERENCE_GRANT_KIND)}
+        wanted = set(targets[target_namespace])
+        if target_namespace in grant_targets:
+            wanted.add((_GATEWAY_GROUP, _REFERENCE_GRANT_KIND))
         metas: dict[tuple[str, str], ResourceMeta] = {}
         for group_kind in wanted:
+            if _listed_in_first_phase(group_kind, target_namespace, namespace, first_phase):
+                continue
             meta = by_group_kind.get(group_kind)
             if meta is not None and meta.namespaced and not meta.synthetic:
                 metas[(meta.group, meta.plural)] = meta
@@ -430,10 +470,7 @@ def _target_partial_coverage(
             resource="*",
             scope=scope,
             state=CoverageState.PARTIAL,
-            detail=(
-                "cross-namespace follow-up listed only referenced kinds "
-                "and ReferenceGrant in this namespace"
-            ),
+            detail="target follow-up listed only referenced kinds in this namespace",
         )
         for scope in sorted({scope for _meta, scope in requests})
     ]
@@ -483,9 +520,11 @@ def _missing_grant_coverage(
         if not _cross_namespace_route_targets(fetched):
             return []
         return [_grant_gap_record("")]
+    target_namespaces = _cross_namespace_route_targets(fetched)
+    requested_scopes = {target_namespace for _meta, target_namespace in requests}
     return [
         _grant_gap_record(target_namespace)
-        for target_namespace in sorted({target_namespace for _meta, target_namespace in requests})
+        for target_namespace in sorted(target_namespaces.keys() & requested_scopes)
     ]
 
 
@@ -548,12 +587,10 @@ class RelationshipSnapshotLoader:
 
         Sources are listed in two phases. The first LISTs the fixed catalog
         in the requested namespace (cluster-scoped kinds cluster-wide). The
-        second follows the `routes_to` references those results declared
-        into the namespaces they explicitly named, LISTing only the
-        referenced kind(s) plus `ReferenceGrant` there — the backend object
-        and the grant that authorizes it both live in the target namespace,
-        so a namespace-only snapshot could never resolve, or fairly deny,
-        a cross-namespace route.
+        second follows `routes_to` references to discovered kinds not already
+        listed there. A cross-namespace Gateway Route also LISTs
+        `ReferenceGrant` in the target namespace, where both the backend and
+        the grant that authorizes it live.
         """
         metas, missing_specs = graph_source_metas(root, namespace, aliases)
         coverage: list[CoverageRecord] = [_missing_coverage(spec) for spec in missing_specs]
@@ -563,7 +600,7 @@ class RelationshipSnapshotLoader:
         fetched = _join_results(results, coverage)
 
         requests, target_cap_record = _cap_target_requests(
-            _target_namespace_requests(fetched, namespace, aliases),
+            _target_namespace_requests(fetched, namespace, aliases, metas),
             self._limits.max_target_lists,
         )
         if target_cap_record is not None:
