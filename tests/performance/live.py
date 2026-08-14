@@ -193,8 +193,12 @@ class LiveLimits:
             identity/context-host lookup, the harness read client connect, and
             the application read client connect.
         initial_render_timeout_seconds: Ceiling for the initial 1,000-row
-            render, and for the first owned watch receipt that gates cursor
-            sampling.
+            render.
+        first_watch_receipt_timeout_seconds: Ceiling for the first owned
+            `MODIFIED` event to reach the app, which gates cursor sampling.
+            Separate from the render ceiling because it bounds a different
+            thing: an API-server round trip plus watch delivery under churn,
+            not local rendering.
         churn_grace_seconds: Allowance added to the profile's own scheduled
             duration when bounding the churn wait.
         convergence_timeout_seconds: Ceiling for the store digest to converge
@@ -209,6 +213,7 @@ class LiveLimits:
     mutation_connect_timeout_seconds: float = 60.0
     read_connect_timeout_seconds: float = 60.0
     initial_render_timeout_seconds: float = 60.0
+    first_watch_receipt_timeout_seconds: float = 60.0
     churn_grace_seconds: float = 300.0
     convergence_timeout_seconds: float = 120.0
 
@@ -1471,7 +1476,7 @@ async def _run_measured_window(
                     pilot,
                     watch_receipt=watch_receipt,
                     churn_task=churn_task,
-                    timeout=limits.initial_render_timeout_seconds,
+                    timeout=limits.first_watch_receipt_timeout_seconds,
                     recorder=recorder,
                 )
 

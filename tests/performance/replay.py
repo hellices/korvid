@@ -592,15 +592,17 @@ async def measure_cursor_input(
     try:
         expected_row = start_row + {"down": 1, "up": -1}[key]
     except KeyError as exc:
-        raise ValueError("cursor input measurement supports only 'down' and 'up'") from exc
+        raise ReplayConfigurationError(
+            "cursor input measurement supports only 'down' and 'up'"
+        ) from exc
     row_count = table.row_count
     if not 0 <= expected_row < row_count:
-        raise ValueError(
+        raise ReplayConfigurationError(
             f"cursor input measurement key {key!r} from start row {start_row} "
             f"expected row {expected_row} outside valid range 0..{row_count - 1}"
         )
     if not table.has_focus:
-        raise ValueError(
+        raise ReplayConfigurationError(
             "cursor input measurement requires the table to have focus; the key is "
             "posted to the app and would otherwise be consumed by whichever widget "
             "does have focus, timing out as if the cursor had not moved"

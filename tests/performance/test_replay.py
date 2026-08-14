@@ -170,7 +170,7 @@ async def test_measure_cursor_input_rejects_out_of_bounds_expected_rows(
             f"cursor input measurement key {key!r} from start row {start_row} "
             f"expected row {expected_row} outside valid range 0..1"
         )
-        with pytest.raises(ValueError, match=re.escape(message)):
+        with pytest.raises(ReplayConfigurationError, match=re.escape(message)):
             await measure_cursor_input(pilot, table, key)
 
 
@@ -1120,7 +1120,7 @@ def test_the_cursor_probe_says_when_the_table_is_not_focused() -> None:
         cursor_row = 0
         row_count = 5
 
-    with pytest.raises(ValueError, match="requires the table to have focus"):
+    with pytest.raises(ReplayConfigurationError, match="requires the table to have focus"):
         asyncio.run(
             measure_cursor_input(None, cast(ResourceTable, _UnfocusedTable()), "down", timeout=0.2)
         )
