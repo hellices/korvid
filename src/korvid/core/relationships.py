@@ -218,9 +218,15 @@ class RelationshipGraph:
         cap stops traversal while a genuine unvisited dependent remains
         beyond it; a depth cap reached only by cycle edges (which loop back
         into resources already visited) does not count as truncation.
+
+        The dependents adjacency is indexed once up front (see
+        `_dependents_index`) rather than rescanning every edge per visited
+        resource, so one traversal costs a single pass over `edges` no
+        matter how many resources it reaches.
         """
         depth_limit = self.limits.max_depth if max_depth is None else max_depth
         node_limit = self.limits.max_nodes if max_nodes is None else max_nodes
+        dependents = _dependents_index(self.edges)
 
         visited = {resource}
         edges: list[RelationshipEdge] = []
@@ -234,7 +240,7 @@ class RelationshipGraph:
             depth += 1
             next_frontier: list[GraphResource] = []
             for current in frontier:
-                for edge in self.dependents_of(current):
+                for edge in dependents.get(current, ()):
                     if edge.subject in visited:
                         cycles.append(edge)
                         continue
@@ -258,12 +264,29 @@ class RelationshipGraph:
             has_unexplored_dependent = any(
                 edge.subject not in visited
                 for current in frontier
-                for edge in self.dependents_of(current)
+                for edge in dependents.get(current, ())
             )
             if has_unexplored_dependent:
                 truncated = True
 
         return TraversalResult(edges=tuple(edges), cycles=tuple(cycles), truncated=truncated)
+
+
+def _dependents_index(
+    edges: Sequence[RelationshipEdge],
+) -> dict[GraphResource, list[RelationshipEdge]]:
+    """Group `edges` by target: the dependents adjacency of a traversal.
+
+    Each target's list keeps the graph's own deterministic edge order, so
+    an indexed traversal visits exactly what a repeated
+    `dependents_of` scan would have, in the same order -- including two
+    parallel edges between the same pair of resources, which stay two
+    entries rather than collapsing into one.
+    """
+    index: dict[GraphResource, list[RelationshipEdge]] = {}
+    for edge in edges:
+        index.setdefault(edge.target, []).append(edge)
+    return index
 
 
 def _input_sort_key(item: GraphInput) -> tuple[str, str, str, str, str]:
@@ -293,9 +316,14 @@ def _grant_authorizes(
 ) -> bool:
     """True when some `ReferenceGrantFact` in the target namespace exactly
     authorizes `subject` (by group/kind/namespace) to reference `target_ref`
-    (by group/kind). No partial or wildcard match is honored: presence of a
-    `ReferenceGrant` object alone never implies authorization -- every field
-    must match exactly.
+    (by group/kind, and by name when the grant names one). No partial or
+    wildcard match is honored: presence of a `ReferenceGrant` object alone
+    never implies authorization -- every field must match exactly.
+
+    `to_name` is the one deliberately optional field, mirroring the Gateway
+    API: `None` (an omitted `spec.to[].name`) authorizes every object of
+    that group/kind in the grant's namespace, while a name authorizes only
+    the object with exactly that name.
     """
     return any(
         grant.from_group == subject.group
@@ -303,6 +331,7 @@ def _grant_authorizes(
         and grant.from_namespace == subject.namespace
         and grant.to_group == target_ref.group
         and grant.to_kind == target_ref.kind
+        and (grant.to_name is None or grant.to_name == target_ref.name)
         for grant in grants
     )
 

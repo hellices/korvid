@@ -8,7 +8,8 @@ states. It never retains summary status/custom data or raw manifests.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import dataclasses
+from collections.abc import Iterable, Iterator, Mapping
 
 import pytest
 
@@ -19,6 +20,7 @@ from korvid.core.relationships import (
     GraphInput,
     GraphLimits,
     GraphResource,
+    RelationshipEdge,
     RelationshipGraph,
     build_relationship_graph,
 )
@@ -207,6 +209,7 @@ def _reference_grant_input(
     from_kind: str = "HTTPRoute",
     to_group: str = "",
     to_kind: str = "Service",
+    to_name: str | None = None,
 ) -> GraphInput:
     grant = ReferenceGrantFact(
         from_group=from_group,
@@ -216,13 +219,14 @@ def _reference_grant_input(
         to_kind=to_kind,
         namespace=namespace,
         field="spec",
+        to_name=to_name,
     )
     return _input(
         "ReferenceGrant",
         "gateway.networking.k8s.io",
         namespace,
-        f"grant-{from_namespace}",
-        f"grant-{from_namespace}",
+        f"grant-{from_namespace}-{to_name or 'all'}",
+        f"grant-{from_namespace}-{to_name or 'all'}",
         relationships=RelationshipFacts(grants=(grant,)),
     )
 
@@ -723,6 +727,130 @@ def test_walk_dependents_cycle_only_frontier_is_not_truncated() -> None:
     assert result.truncated is False
 
 
+class _CountingEdges(tuple[RelationshipEdge, ...]):
+    """A `graph.edges` tuple that records how often it is scanned.
+
+    Used to pin the traversal's *semantic* cost -- how many times it walks
+    the whole edge list -- without asserting on wall-clock time, which is
+    forbidden here and flaky in CI regardless.
+    """
+
+    scans: int
+
+    def __new__(cls, edges: Iterable[RelationshipEdge]) -> _CountingEdges:
+        counting = super().__new__(cls, edges)
+        counting.scans = 0
+        return counting
+
+    def __iter__(self) -> Iterator[RelationshipEdge]:
+        self.scans += 1
+        return super().__iter__()
+
+
+def _counting_graph(graph: RelationshipGraph) -> tuple[RelationshipGraph, _CountingEdges]:
+    edges = _CountingEdges(graph.edges)
+    return dataclasses.replace(graph, edges=edges), edges
+
+
+def test_walk_dependents_scans_the_edge_list_once_per_traversal() -> None:
+    """One traversal must build its dependents adjacency once, not rescan
+    every edge for every visited node: a chain of N dependents previously
+    cost N+ full scans of `graph.edges`, which is quadratic in a large
+    snapshot (up to `max_edges = 50,000`)."""
+    graph = _owner_graph(
+        ("Deployment", "deploy-1"),
+        ("ReplicaSet", "rs-1"),
+        ("Pod", "pod-1"),
+        ("Container", "c-1"),
+        ("Probe", "p-1"),
+    )
+    counting_graph, edges = _counting_graph(graph)
+    root = _resource(counting_graph, "Deployment", "deploy-1")
+    result = counting_graph.walk_dependents(root)
+    assert len(result.edges) == 4
+    assert edges.scans == 1
+
+
+def test_walk_dependents_scan_count_is_independent_of_visited_nodes() -> None:
+    """The scan count must not grow with the number of dependents: a wide
+    fan-out costs exactly the same single index build as a narrow one."""
+    short_graph, short_edges = _counting_graph(
+        _owner_graph(("Deployment", "deploy-1"), ("ReplicaSet", "rs-1"))
+    )
+    wide_graph, wide_edges = _counting_graph(_wide_owner_graph())
+    short_graph.walk_dependents(_resource(short_graph, "Deployment", "deploy-1"))
+    wide_graph.walk_dependents(_resource(wide_graph, "Deployment", "deploy-1"))
+    assert wide_edges.scans == short_edges.scans
+
+
+def test_walk_dependents_preserves_edge_list_order_within_a_depth() -> None:
+    """Traversal order is the graph's own deterministic edge order, per
+    frontier resource -- an adjacency index must not reorder siblings."""
+    graph = _wide_owner_graph()
+    root = _resource(graph, "Deployment", "deploy-1")
+    result = graph.walk_dependents(root)
+    expected = [edge for edge in graph.edges if edge.target == root]
+    assert list(result.edges[: len(expected)]) == expected
+
+
+def test_walk_dependents_keeps_every_parallel_edge_between_the_same_pair() -> None:
+    """Two distinct relationships between the same pair of resources are
+    two edges: the first is traversed, the second revisits an already
+    visited resource and is therefore a cycle -- an adjacency index keyed
+    by resource must not collapse them into one."""
+    deployment = _input("Deployment", "apps", "prod", "api", "deploy-1")
+    pod = _input(
+        "Pod",
+        "",
+        "prod",
+        "api-0",
+        "pod-1",
+        relationships=_facts(
+            references=(
+                _ref(
+                    "owned_by",
+                    "apps",
+                    "Deployment",
+                    "prod",
+                    "api",
+                    uid="deploy-1",
+                    field="metadata.ownerReferences[0]",
+                ),
+                _ref(
+                    "uses_config",
+                    "apps",
+                    "Deployment",
+                    "prod",
+                    "api",
+                    uid="deploy-1",
+                    field="spec.volumes[0].configMap",
+                ),
+            )
+        ),
+    )
+    graph = build_relationship_graph(
+        [deployment, pod], [_complete("deployments"), _complete("pods")]
+    )
+    root = _resource(graph, "Deployment", "api")
+    result = graph.walk_dependents(root)
+    assert len(graph.dependents_of(root)) == 2
+    assert len(result.edges) == 1
+    assert len(result.cycles) == 1
+    assert result.edges[0].evidence.field == "metadata.ownerReferences[0]"
+    assert result.cycles[0].evidence.field == "spec.volumes[0].configMap"
+
+
+def test_walk_dependents_node_cap_cuts_at_the_same_edge_as_the_edge_order() -> None:
+    """The node cap truncates in edge-list order, so the kept prefix is
+    exactly the first `max_nodes` traversable edges."""
+    graph = _wide_owner_graph()
+    root = _resource(graph, "Deployment", "deploy-1")
+    full = graph.walk_dependents(root, max_depth=5, max_nodes=500)
+    capped = graph.walk_dependents(root, max_depth=5, max_nodes=2)
+    assert capped.edges == full.edges[:2]
+    assert capped.truncated is True
+
+
 # --- Task 4: selector joins -------------------------------------------------
 
 
@@ -981,6 +1109,48 @@ def test_reference_grant_constraints_are_exact(
         [_complete("httproutes"), _complete("services"), _complete("referencegrants")],
     )
     assert graph.edges[0].resolution is EdgeResolution.INVALID
+
+
+def test_reference_grant_named_object_does_not_authorize_a_different_name() -> None:
+    """`spec.to[].name` narrows a grant to exactly one object. A grant for
+    Service `payments` must never authorize a route to Service `admin` in
+    the same namespace — ignoring the name silently widens every named
+    grant into a namespace-wide one."""
+    graph = build_relationship_graph(
+        [
+            _http_route_input("public", "edge", backend_namespace="prod", backend_name="admin"),
+            _service_input("admin", None, namespace="prod"),
+            _reference_grant_input("edge", "prod", to_name="payments"),
+        ],
+        [_complete("httproutes"), _complete("services"), _complete("referencegrants")],
+    )
+    assert graph.edges[0].resolution is EdgeResolution.INVALID
+
+
+def test_reference_grant_named_object_authorizes_that_exact_name() -> None:
+    graph = build_relationship_graph(
+        [
+            _http_route_input("public", "edge", backend_namespace="prod", backend_name="payments"),
+            _service_input("payments", None, namespace="prod"),
+            _reference_grant_input("edge", "prod", to_name="payments"),
+        ],
+        [_complete("httproutes"), _complete("services"), _complete("referencegrants")],
+    )
+    assert graph.edges[0].resolution is EdgeResolution.RESOLVED
+
+
+def test_reference_grant_without_to_name_authorizes_every_matching_name() -> None:
+    """An omitted `spec.to[].name` grants every object of that group/kind
+    in the grant's namespace — the pre-existing behavior, unchanged."""
+    graph = build_relationship_graph(
+        [
+            _http_route_input("public", "edge", backend_namespace="prod", backend_name="admin"),
+            _service_input("admin", None, namespace="prod"),
+            _reference_grant_input("edge", "prod", to_name=None),
+        ],
+        [_complete("httproutes"), _complete("services"), _complete("referencegrants")],
+    )
+    assert graph.edges[0].resolution is EdgeResolution.RESOLVED
 
 
 def test_reference_grant_wrong_from_namespace_stays_invalid() -> None:
