@@ -983,6 +983,37 @@ def test_reference_grant_constraints_are_exact(
     assert graph.edges[0].resolution is EdgeResolution.INVALID
 
 
+def test_reference_grant_wrong_from_namespace_stays_invalid() -> None:
+    """A grant whose `from` namespace does not name the actual subject's
+    namespace must not authorize the cross-namespace route, even though
+    every other field (group/kind, target namespace) matches exactly."""
+    graph = build_relationship_graph(
+        [
+            _http_route_input("public", "edge", backend_namespace="prod"),
+            _service_input("api", None, namespace="prod"),
+            _reference_grant_input("other-edge", "prod"),
+        ],
+        [_complete("httproutes"), _complete("services"), _complete("referencegrants")],
+    )
+    assert graph.edges[0].resolution is EdgeResolution.INVALID
+
+
+def test_reference_grant_living_in_wrong_namespace_does_not_authorize() -> None:
+    """A `ReferenceGrant` object whose own namespace differs from the
+    backend's target namespace must not authorize the route, even when its
+    `from`/`to` fields would otherwise match exactly: a grant only ever
+    authorizes references *into* the namespace it lives in."""
+    graph = build_relationship_graph(
+        [
+            _http_route_input("public", "edge", backend_namespace="prod"),
+            _service_input("api", None, namespace="prod"),
+            _reference_grant_input("edge", "staging"),
+        ],
+        [_complete("httproutes"), _complete("services"), _complete("referencegrants")],
+    )
+    assert graph.edges[0].resolution is EdgeResolution.INVALID
+
+
 def test_optional_gateway_unavailable_coverage_does_not_abort_build() -> None:
     """An unavailable Gateway API CRD must not abort building the rest of
     the graph; only `graph.incomplete` reflects the missing coverage."""
@@ -1000,3 +1031,71 @@ def test_optional_gateway_unavailable_coverage_does_not_abort_build() -> None:
     graph = build_relationship_graph([pod], coverage)
     assert graph.incomplete
     assert graph.nodes == (GraphResource("", "Pod", "default", "api-0", "pod-api-0"),)
+
+
+def _workload_managed_by_selector(labels: Mapping[str, str]) -> SelectorFact:
+    return SelectorFact(
+        relation=RelationKind.MANAGED_BY,
+        target_group="",
+        target_kind="Pod",
+        selector=_label_selector(labels),
+        confidence=FactConfidence.DECLARED,
+        field="spec.selector",
+        empty_matches=False,
+        match_is_subject=True,
+    )
+
+
+def test_workload_and_pdb_selector_evidence_is_declaring_resource() -> None:
+    """`match_is_subject=True` (workload `MANAGED_BY`, PDB `PROTECTED_BY`)
+    flips subject/target to the matched Pod, but the evidence pointer must
+    always name the selector-declaring workload/PDB, never the Pod."""
+    deployment = _input(
+        "Deployment",
+        "apps",
+        "default",
+        "web",
+        "deploy-web",
+        relationships=RelationshipFacts(selectors=(_workload_managed_by_selector({"app": "web"}),)),
+    )
+    pdb = _pdb_input("availability", selector={"app": "web"}, empty_matches=False)
+    pod = _pod_input("web-0", labels={"app": "web"})
+    graph = build_relationship_graph(
+        [deployment, pdb, pod],
+        [_complete("deployments"), _complete("poddisruptionbudgets"), _complete("pods")],
+    )
+    managed_edge = next(edge for edge in graph.edges if edge.relation is RelationKind.MANAGED_BY)
+    protected_edge = next(
+        edge for edge in graph.edges if edge.relation is RelationKind.PROTECTED_BY
+    )
+    deployment_resource = _resource(graph, "Deployment", "web")
+    pdb_resource = _resource(graph, "PodDisruptionBudget", "availability")
+    pod_resource = _resource(graph, "Pod", "web-0")
+
+    assert managed_edge.subject == pod_resource
+    assert managed_edge.target == deployment_resource
+    assert managed_edge.evidence.resource == deployment_resource
+
+    assert protected_edge.subject == pod_resource
+    assert protected_edge.target == pdb_resource
+    assert protected_edge.evidence.resource == pdb_resource
+
+
+def test_workload_and_pdb_selectors_do_not_cross_namespaces() -> None:
+    """The shared candidate index restricts workload/PDB selector matches
+    to the declaring resource's own namespace, same as Service selectors."""
+    deployment = _input(
+        "Deployment",
+        "apps",
+        "prod",
+        "web",
+        "deploy-web",
+        relationships=RelationshipFacts(selectors=(_workload_managed_by_selector({"app": "web"}),)),
+    )
+    pdb = _pdb_input("availability", selector={"app": "web"}, empty_matches=False, namespace="prod")
+    other_namespace_pod = _pod_input("web-0", labels={"app": "web"}, namespace="other")
+    graph = build_relationship_graph(
+        [deployment, pdb, other_namespace_pod],
+        [_complete("deployments"), _complete("poddisruptionbudgets"), _complete("pods")],
+    )
+    assert graph.edges == ()
