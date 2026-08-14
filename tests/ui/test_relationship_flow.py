@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator
 from typing import Any, cast
 
 from textual.widgets import DataTable
+from textual.worker import Worker, WorkerState
 
 from korvid.core.relationships import GraphResource
 from korvid.core.store import ResourceStore, Summary
@@ -323,3 +324,103 @@ async def test_g_on_synthetic_view_does_not_open_relationships() -> None:
         assert env.lister.calls == []
         assert not isinstance(app.screen, RelationshipScreen)
         assert any("read-only view" in n.message for n in app._notifications)
+
+
+def _relationship_workers(app: KorvidApp) -> list[Worker[Any]]:
+    return [worker for worker in app.workers if worker.group == "relationships"]
+
+
+async def test_context_switch_cancels_the_inflight_relationship_worker() -> None:
+    """Teardown must cancel the `relationships` group before the client is
+    swapped: a worker still listing through the old client can otherwise
+    fail on a closed transport (or return old-cluster rows) long after the
+    switch, and a bare `RuntimeError` there is a `WorkerFailed` that would
+    take the whole TUI down."""
+    env = _RelEnv(pods=(_pod("api-0", uid="pod-1"),))
+    env.lister.pause()
+    app = env.app
+    async with app.run_test() as pilot:
+        await _show_pods(env, pilot)
+        await pilot.press("g")
+        await until(pilot, lambda: env.lister.calls != [], label="loader started")
+        # Captured while still running: Textual drops finished workers from
+        # `app.workers`, but the objects stay observable.
+        workers = _relationship_workers(app)
+        assert workers
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(pilot, lambda: app.config.kube_context == "ctx-b", label="context switched")
+        # The lister is deliberately *never* resumed: any worker still
+        # alive here would still be listing against the old client.
+        assert all(worker.is_cancelled for worker in workers)
+        assert all(worker.state is WorkerState.CANCELLED for worker in workers)
+        env.lister.resume()
+
+
+async def test_unexpected_loader_failure_notifies_and_keeps_the_app_running() -> None:
+    """An unexpected error inside the relationship worker (a transport or
+    parser bug, not a classified API/OS failure) must surface as a visible
+    notification, not as `WorkerFailed` exiting the TUI."""
+    env = _RelEnv(pods=(_pod("api-0", uid="pod-1"),))
+    env.lister.fail(PODS_META, RuntimeError("decoder exploded"))
+    app = env.app
+    async with app.run_test() as pilot:
+        await _show_pods(env, pilot)
+        await pilot.press("g")
+        await until(
+            pilot,
+            lambda: any(
+                "Relationships failed" in notification.message
+                for notification in app._notifications
+            ),
+            label="failure notified",
+        )
+        assert app.is_running
+        assert not isinstance(app.screen, RelationshipScreen)
+        # Textual's fatal path (`WorkerFailed` -> `_handle_exception`) would
+        # have parked the error here and stopped the app.
+        assert app._exception is None
+
+
+async def test_cancelled_relationship_worker_is_not_reported_as_a_failure() -> None:
+    """Cancellation is normal (a context switch, or an exclusive re-run);
+    only a genuine error earns a notification."""
+    env = _RelEnv(pods=(_pod("api-0", uid="pod-1"),))
+    env.lister.pause()
+    app = env.app
+    async with app.run_test() as pilot:
+        await _show_pods(env, pilot)
+        await pilot.press("g")
+        await until(pilot, lambda: env.lister.calls != [], label="loader started")
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(pilot, lambda: app.config.kube_context == "ctx-b", label="context switched")
+        env.lister.resume()
+        await pilot.pause()
+        assert not any(
+            "Relationships failed" in notification.message for notification in app._notifications
+        )
+
+
+async def test_relationship_screen_is_not_stacked_over_another_modal() -> None:
+    """The load spans an awaited gap: if the user opened another modal
+    meanwhile, the graph must not pop on top of it (the same guard the
+    hierarchy tree and the hint detail fetch already apply)."""
+    env = _RelEnv(pods=(_pod("api-0", uid="pod-1"),))
+    env.lister.pause()
+    app = env.app
+    async with app.run_test() as pilot:
+        await _show_pods(env, pilot)
+        await pilot.press("g")
+        await until(pilot, lambda: env.lister.calls != [], label="loader started")
+        await pilot.press("question_mark")
+        await until(pilot, lambda: len(app.screen_stack) > 1, label="help modal opened")
+        modal = app.screen
+        env.lister.resume()
+        await until(
+            pilot,
+            lambda: all(worker.is_finished for worker in _relationship_workers(app)),
+            label="graph worker finished",
+        )
+        await pilot.pause()
+        assert app.screen is modal
+        assert not isinstance(app.screen, RelationshipScreen)
+        assert not any(isinstance(screen, RelationshipScreen) for screen in app.screen_stack)

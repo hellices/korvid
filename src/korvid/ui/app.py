@@ -50,7 +50,7 @@ from textual.screen import Screen
 from textual.widget import AwaitMount
 from textual.widgets import DataTable, Static
 from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
-from textual.worker import Worker
+from textual.worker import Worker, WorkerError, WorkerState
 
 from korvid.agent.events import AgentError, AgentEvent, ToolCallFinished, ToolCallStarted
 from korvid.agent.navigation import EvidenceTarget, target_for
@@ -264,6 +264,11 @@ _HINT_EVENTS_TIMEOUT = 3.0
 #: Header label -> builtin sort column (issue #138): the reverse of the
 #: table's ▲/▼ decoration map, for header-click sorting.
 _HEADER_SORT_COLUMNS = {"NAME": "name", "AGE": "age", "CPU": "cpu", "MEM": "mem"}
+
+#: The worker group every operational relationship graph load and its goto
+#: follow-up run in (issue #281): cancelled as a unit on a `:ctx` switch,
+#: and the only group whose failures are notified rather than fatal.
+_RELATIONSHIP_GROUP = "relationships"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1937,8 +1942,24 @@ class KorvidApp(App[None]):
         # resurrect old-cluster hints.
         self.workers.cancel_group(self, "hint-events")
         self._hints.teardown()
+        await self._cancel_relationship_workers()
         self.filter_pattern = ""
         self._resource_filter = parse_filter("")
+
+    async def _cancel_relationship_workers(self) -> None:
+        """Stop the `g` graph load (and its goto follow-up) before the swap.
+
+        A relationship worker holds the old client through every LIST it
+        still has in flight: left running, it would either resolve against
+        the old cluster or fail on a transport the swap is about to close.
+        Each cancelled worker is awaited so teardown cannot return while one
+        is still mid-LIST. `WorkerError` covers the three outcomes `wait()`
+        signals for a worker that did not return a value — cancelled,
+        failed, or never started — none of which is actionable here.
+        """
+        for worker in self.workers.cancel_group(self, _RELATIONSHIP_GROUP):
+            with contextlib.suppress(WorkerError):
+                await worker.wait()
 
     async def _retarget_context(self, name: str, old: str | None) -> tuple[bool, str | None]:
         """Swap the connection to *name*; on failure fall back to *old*.
@@ -2901,11 +2922,39 @@ class KorvidApp(App[None]):
         target = self._selected_relationship_root()
         if target is None:
             return
+        self._run_relationship_worker(self._load_relationships(target, self._ctx_epoch))
+
+    def _run_relationship_worker(self, work: Coroutine[Any, Any, None]) -> None:
+        """Start one exclusive `relationships` worker with an error boundary.
+
+        `exit_on_error=False` keeps an unexpected failure (a transport or
+        parser bug that is neither an `ApiStatusError` nor an `OSError`)
+        from becoming `WorkerFailed` and tearing the whole TUI down over a
+        read-only view; `on_worker_state_changed` below turns it into a
+        visible notification instead. Cancellation — a `:ctx` switch, or an
+        exclusive re-run — is a normal outcome and stays silent."""
         self.run_worker(
-            self._load_relationships(target, self._ctx_epoch),
+            work,
             exclusive=True,
-            group="relationships",
+            group=_RELATIONSHIP_GROUP,
+            exit_on_error=False,
         )
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        """Report a failed relationship worker instead of exiting.
+
+        Scoped to this app's own `relationships` workers, which are the
+        only ones started with `exit_on_error=False`: every other group
+        keeps Textual's default crash-on-error behaviour, and a cancelled
+        worker never reaches `WorkerState.ERROR`, so it is never reported.
+        """
+        if event.worker.node is not self or event.worker.group != _RELATIONSHIP_GROUP:
+            return
+        if event.state is not WorkerState.ERROR:
+            return
+        error = event.worker.error
+        detail = f"{type(error).__name__}: {error}" if error is not None else "unknown error"
+        self.notify(f"Relationships failed - {detail[:200]}", severity="error", timeout=10)
 
     async def _load_relationships(self, target: GraphResource, epoch: int) -> None:
         """Load one bounded snapshot and open `RelationshipScreen` over it.
@@ -2919,6 +2968,8 @@ class KorvidApp(App[None]):
         namespace = None if self.current_namespace == ALL_NAMESPACES else self.current_namespace
         graph = await loader.load(target, namespace, self.aliases)
         if self._ctx_switch_crossed(epoch):
+            return
+        if len(self.screen_stack) > 1:  # another dialog opened during the LISTs
             return
         await self.push_screen(
             RelationshipScreen(graph, target),
@@ -2947,11 +2998,7 @@ class KorvidApp(App[None]):
             self.notify(f"{kind} is not a discovered view", severity="warning")
             return
         alias, _namespaced = resolved
-        self.run_worker(
-            self._jump_to_object(alias, namespace, name, epoch=epoch),
-            exclusive=True,
-            group="relationships",
-        )
+        self._run_relationship_worker(self._jump_to_object(alias, namespace, name, epoch=epoch))
 
     async def action_describe(self) -> None:
         """Fetch and display the manifest + events for the currently highlighted row."""

@@ -387,3 +387,43 @@ async def test_many_cycle_edges_row_count_stays_bounded() -> None:
         assert table.row_count <= graph.limits.max_nodes + 4
         assert "cycle" in text.lower()
         assert "capped" in text.lower()
+
+
+def _graph_without_the_root() -> RelationshipGraph:
+    """Complete coverage, but the root is not among the snapshot's nodes —
+    it was deleted/recreated (stale UID) or dropped at a source cap. Its
+    empty Dependencies/Dependents sections say nothing about the real
+    cluster, so the screen must state that explicitly."""
+    other = _resource("Pod", "unrelated-0")
+    return RelationshipGraph(nodes=(other,), edges=(), coverage=())
+
+
+async def test_root_absent_from_the_snapshot_is_stated_even_when_coverage_is_complete() -> None:
+    app = HostApp()
+    root = GraphResource(group="", kind="Pod", namespace=_NAMESPACE, name="api-0", uid="stale-uid")
+    screen = RelationshipScreen(_graph_without_the_root(), root)
+    async with app.run_test():
+        await app.push_screen(screen)
+        banner = str(app.screen.query_one("#relationship-coverage", Static).render())
+        assert "complete" in banner.lower()
+        assert "not present in this snapshot" in banner.lower()
+
+
+async def test_root_present_in_the_snapshot_gets_no_absence_note() -> None:
+    app = HostApp()
+    screen = RelationshipScreen(_graph(), _resource("Deployment", "api"))
+    async with app.run_test():
+        await app.push_screen(screen)
+        banner = str(app.screen.query_one("#relationship-coverage", Static).render())
+        assert "not present in this snapshot" not in banner.lower()
+
+
+async def test_absent_root_note_survives_the_coverage_detail_toggle() -> None:
+    app = HostApp()
+    root = GraphResource(group="", kind="Pod", namespace=_NAMESPACE, name="api-0", uid="stale-uid")
+    screen = RelationshipScreen(_graph_without_the_root(), root)
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.press("c")
+        banner = str(app.screen.query_one("#relationship-coverage", Static).render())
+        assert "not present in this snapshot" in banner.lower()

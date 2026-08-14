@@ -45,6 +45,16 @@ GotoResult = tuple[str, str, str, str, str]
 
 _IDLE_STATUS = "Enter: navigate a resolved row · d: expand dependents · c: coverage detail"
 
+#: Shown when the root itself is not among the snapshot's nodes (a stale
+#: UID after delete/recreate, or a resource dropped at a source cap). Its
+#: empty sections then describe the snapshot, not the cluster, and must not
+#: read as "this resource has no relationships".
+_ABSENT_ROOT_NOTE = (
+    "This resource is not present in this snapshot (deleted, recreated with a "
+    "new uid, or dropped at a source cap) - empty rows below say nothing about "
+    "its real relationships."
+)
+
 
 def _resource_label(resource: GraphResource) -> str:
     """A readable "group/kind/namespace/name" label, blank parts dropped.
@@ -181,6 +191,10 @@ class RelationshipScreen(ModalScreen[GotoResult | None]):
 
     def _render_coverage(self) -> None:
         lines = ["Coverage: incomplete" if self.graph.incomplete else "Coverage: complete"]
+        if self.root not in self._known_nodes:
+            # Independent of coverage: a snapshot can be perfectly complete
+            # and still not contain this exact root identity.
+            lines.append(_ABSENT_ROOT_NOTE)
         for record in self.graph.coverage:
             if record.state is CoverageState.COMPLETE:
                 continue
