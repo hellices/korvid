@@ -448,7 +448,7 @@ async def test_replay_rejects_one_object_input_sampling_before_app_start(
 
 def test_replay_scales_churn_completion_wait_with_profile_duration() -> None:
     """The churn-completion wait must cover the schedule's wall duration at the
-    configured `time_scale`, plus a small explicit render-drain grace."""
+    configured `time_scale`, plus the render-drain allowance."""
     profile = WorkloadProfile(
         schema_version=1,
         id="test-churn-wait",
@@ -462,7 +462,7 @@ def test_replay_scales_churn_completion_wait_with_profile_duration() -> None:
     )
     timeout = replay_module.replay_churn_completion_timeout(profile, ReplayOptions(time_scale=2.0))
 
-    assert timeout == 65.0
+    assert timeout == 30 * 2.0 + replay_module._REPLAY_CHURN_COMPLETION_GRACE_SECONDS
 
 
 async def test_replay_uses_real_app_and_reaches_expected_digest(
@@ -966,3 +966,50 @@ async def test_replay_does_not_re_mark_bursts_after_a_watch_reconnect(
 
     assert report.api.reconnects == 1  # the schedule really was interrupted
     assert len(report.phases.post_burst_drain_seconds) == len(profile.bursts)
+
+
+def test_the_churn_completion_wait_never_shrinks_the_original_drain_allowance() -> None:
+    """Scaling the wait by the schedule must not cut the drain allowance.
+
+    The wait opens right after the first churn event, so it has to cover the
+    rest of the schedule *and* the render drain that follows it. Adding only a
+    5 s constant on top of the schedule leaves that much for the drain alone,
+    where the fixed wait this replaced allowed 30 s. Measured on the committed
+    `burst-50k` profile the drain takes ~27.5 s, so the constant would fail a
+    healthy run rather than a broken one.
+    """
+    large = WorkloadProfile(
+        schema_version=1,
+        id="test-large-drain",
+        seed=186,
+        object_count=50_000,
+        namespace_count=20,
+        steady_events_per_second=200,
+        duration_seconds=30,
+        bursts=(),
+        failures=(),
+    )
+
+    timeout = replay_module.replay_churn_completion_timeout(large, ReplayOptions(time_scale=1.0))
+
+    assert timeout >= large.duration_seconds + 30.0
+
+
+def test_the_churn_completion_wait_keeps_the_drain_allowance_when_time_is_compressed() -> None:
+    """A programmatic `time_scale` below 1 shortens the schedule but not the
+    drain, which is the app's own work at full speed."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-compressed-drain",
+        seed=186,
+        object_count=10_000,
+        namespace_count=20,
+        steady_events_per_second=100,
+        duration_seconds=30,
+        bursts=(),
+        failures=(),
+    )
+
+    timeout = replay_module.replay_churn_completion_timeout(profile, ReplayOptions(time_scale=0.0))
+
+    assert timeout >= 30.0

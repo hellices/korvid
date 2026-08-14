@@ -477,19 +477,15 @@ def test_cli_does_not_hide_unexpected_replay_errors(monkeypatch: pytest.MonkeyPa
 
 def test_cli_reports_one_object_input_sampling_error_without_traceback(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Schema-valid one-object profiles stay loadable, but the benchmark CLI
-    must report the run-time input-sampling contract failure cleanly."""
+    must report the real input-sampling contract failure cleanly.
 
-    async def fail_for_one_object(profile: WorkloadProfile, options: ReplayOptions) -> ReplayReport:
-        del options
-        assert profile.object_count == 1
-        raise ValueError("performance input sampling requires object_count >= 2; got 1")
-
-    monkeypatch.setattr(cli, "run_replay", fail_for_one_object)
-
+    The profile is loaded and `run_replay` really runs, so the message comes
+    from the production validator rather than from a stand-in that could drift
+    away from it.
+    """
     exit_code = cli.main(["replay", "--profile", str(one_object_profile_path(tmp_path))])
 
     assert exit_code == 1
@@ -1434,3 +1430,21 @@ def test_cli_rejects_a_fractional_input_sample_pair_count(tmp_path: Path) -> Non
         cli.main(
             ["replay", "--profile", str(profile_path(tmp_path)), "--input-sample-pairs", "2.5"]
         )
+
+
+def test_cli_does_not_swallow_an_unexpected_value_error_from_the_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Harness misconfiguration should print one clean line, but a `ValueError`
+    escaping the application or the harness is a bug: catching it too broadly
+    hides the traceback that identifies the regression, and the exit code alone
+    cannot tell the two apart."""
+
+    async def explode(_profile: WorkloadProfile, _options: ReplayOptions) -> ReplayReport:
+        raise ValueError("some unrelated bug deep in the render path")
+
+    monkeypatch.setattr(cli, "run_replay", explode)
+    monkeypatch.setattr(cli, "load_profile", lambda _path: _make_minimal_profile())
+
+    with pytest.raises(ValueError, match="some unrelated bug deep in the render path"):
+        cli.main(["replay", "--profile", "profile.json"])

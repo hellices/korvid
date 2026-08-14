@@ -68,10 +68,14 @@ from tests.ui.waits import WaitTimeout, until
 #: Anything else (e.g. the historical literal ``dev``) is not traceable to a
 #: commit and is rejected by `resolve_korvid_sha`.
 _SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
-#: Final churn wait allowance beyond the profile's own scheduled wall duration.
-#: Keeps the replay's workload timing unchanged while still allowing the last
-#: render pass to drain after the final scheduled event.
-_REPLAY_CHURN_COMPLETION_GRACE_SECONDS = 5.0
+#: Drain allowance on top of the schedule's own scaled wall duration. The
+#: completion wait opens right after the *first* churn event, so it has to
+#: cover the rest of the schedule and the render drain that follows it. This
+#: is the drain half, and it stays at the fixed wait's original value: on the
+#: committed `burst-50k` profile the drain alone measures ~27.5 s, so a
+#: smaller constant would fail healthy runs on the largest profiles rather
+#: than catch a stalled one.
+_REPLAY_CHURN_COMPLETION_GRACE_SECONDS = 30.0
 
 
 def _git_head() -> str | None:
@@ -123,6 +127,16 @@ def resolve_korvid_sha(
 async def _sleep_default(delay: float) -> None:
     """Thin wrapper around asyncio.sleep used as the default async sleeper."""
     await asyncio.sleep(delay)
+
+
+class ReplayConfigurationError(ValueError):
+    """The run was asked for something the harness cannot measure.
+
+    Subclasses `ValueError` so existing callers and tests that expect one keep
+    working, but gives the CLI something narrower to catch: an unexpected
+    `ValueError` escaping the application must still surface with its
+    traceback rather than be reported as a configuration mistake.
+    """
 
 
 class ReplayAborted(Exception):
@@ -576,10 +590,12 @@ def validate_input_sample_pairs(options: ReplayOptions) -> None:
     an input percentile computed from zero samples.
 
     Raises:
-        ValueError: `input_sample_pairs` is not a positive integer.
+        ReplayConfigurationError: `input_sample_pairs` is not a positive integer.
     """
     if options.input_sample_pairs < 1:
-        raise ValueError(f"input_sample_pairs must be positive; got {options.input_sample_pairs}")
+        raise ReplayConfigurationError(
+            f"input_sample_pairs must be positive; got {options.input_sample_pairs}"
+        )
 
 
 def validate_input_ack_timeout(options: ReplayOptions) -> None:
@@ -596,10 +612,10 @@ def validate_input_ack_timeout(options: ReplayOptions) -> None:
     seeded cluster mid-churn.
 
     Raises:
-        ValueError: `input_ack_timeout` is not finite and positive.
+        ReplayConfigurationError: `input_ack_timeout` is not finite and positive.
     """
     if not math.isfinite(options.input_ack_timeout) or options.input_ack_timeout <= 0:
-        raise ValueError(
+        raise ReplayConfigurationError(
             f"input_ack_timeout must be finite and positive; got {options.input_ack_timeout}"
         )
 
@@ -616,11 +632,13 @@ def validate_input_sampling_profile(profile: WorkloadProfile) -> None:
     rejects.
     """
     if profile.object_count < 2:
-        raise ValueError(
+        raise ReplayConfigurationError(
             f"performance input sampling requires object_count >= 2; got {profile.object_count}"
         )
     if planned_event_count(profile) < 1:
-        raise ValueError("performance input sampling requires at least one scheduled churn event")
+        raise ReplayConfigurationError(
+            "performance input sampling requires at least one scheduled churn event"
+        )
 
 
 def input_sampling_incomplete_message(pairs: int) -> str:
@@ -629,7 +647,12 @@ def input_sampling_incomplete_message(pairs: int) -> str:
 
 
 def replay_churn_completion_timeout(profile: WorkloadProfile, options: ReplayOptions) -> float:
-    """Bound the final drain wait by the scaled schedule plus render grace."""
+    """Bound the final wait by the scaled schedule plus the drain allowance.
+
+    The schedule term scales with `time_scale` because a slowed replay really
+    does take longer to emit; the drain term does not, because draining is the
+    app's own work at full speed no matter how the schedule was paced.
+    """
     return profile.duration_seconds * options.time_scale + _REPLAY_CHURN_COMPLETION_GRACE_SECONDS
 
 
