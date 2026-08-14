@@ -10,8 +10,6 @@ import logging
 from collections.abc import Callable
 from typing import Protocol
 
-from korvid.k8s.models import reset_age_memo
-
 logger = logging.getLogger(__name__)
 
 ALL_NAMESPACES = "*"
@@ -32,7 +30,15 @@ class Summary(Protocol):
 
 
 class ResourceStore:
-    def __init__(self) -> None:
+    def __init__(self, on_purge: Callable[[], None] | None = None) -> None:
+        """Args:
+        on_purge: Called by `clear_all` after every bucket is dropped, for
+            caches keyed by data this store just retired. Injected rather
+            than imported so `core` keeps knowing only the `Summary`
+            protocol, and so one store's context switch cannot reach into
+            state another store is still rendering from.
+        """
+        self._on_purge = on_purge
         # {(kind, scope): {"namespace/name": obj}}  — composite key avoids collisions
         # in ALL_NAMESPACES scope when two namespaces have same-named objects.
         self._data: dict[tuple[str, str], dict[str, Summary]] = {}
@@ -98,14 +104,15 @@ class ResourceStore:
 
         Context switching (issue #36) purges the whole store: rows from the
         previous cluster must never render against the new one. The age memo
-        is keyed by those objects' creation timestamps, which cannot recur on
-        the next cluster, so it is dropped here too rather than left to age
-        out one entry at a time.
+        Anything keyed by those objects — the injected `on_purge` hook, e.g.
+        the age memo, whose keys are their creation timestamps — is retired
+        with them rather than left to age out one entry at a time.
         """
         kinds = {kind for kind, _ in self._data}
         self._data.clear()
         self._order.clear()
-        reset_age_memo()
+        if self._on_purge is not None:
+            self._on_purge()
         for kind in kinds:
             self._notify(kind)
 

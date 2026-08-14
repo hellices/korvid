@@ -50,6 +50,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.metrics import MetricsPoller
+from korvid.k8s.models import reset_age_memo
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.k8s.telepresence import (
     TRAFFIC_MANAGER_NAME,
@@ -1219,7 +1220,10 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
     Fills *state* as pieces come alive so `_run`'s teardown guard can
     release exactly what was built, however far wiring got.
     """
-    store = ResourceStore()
+    # The age memo is keyed by creation timestamps, so a context switch
+    # retires every key it holds; wired here rather than imported by
+    # `core` so the store keeps knowing only the `Summary` protocol.
+    store = ResourceStore(on_purge=reset_age_memo)
 
     # Start with pods only so the UI appears immediately; full discovery runs
     # in the background and merges into this dict (closures + app share it).

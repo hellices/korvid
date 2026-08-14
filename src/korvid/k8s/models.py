@@ -123,11 +123,21 @@ def _created_epoch(created: str) -> float | None:
 def _remember_age(created: str, window: tuple[float, float, str]) -> None:
     """Keep `window` for `created`, within both of the memo's ceilings.
 
-    At the entry ceiling the oldest answer is evicted rather than the whole
-    memo flushed: every row asks for its age on every repaint, so discarding
-    all of them would drop the entire screen back onto the parse path in a
-    single frame — the cost this memo exists to remove, concentrated into one
-    spike. `dict` preserves insertion order, so the first key is the oldest.
+    At the entry ceiling the first-written answer is evicted rather than the
+    whole memo flushed: every row asks for its age on every repaint, so
+    discarding all of them would drop the entire screen back onto the parse
+    path in a single frame — the cost this memo exists to remove, concentrated
+    into one spike.
+
+    Eviction is first-in-first-out, not least-recently-used: a memo *hit*
+    returns without touching the dict, so a key that is only ever read keeps
+    its original position and can be evicted while it is on screen. That is
+    deliberate. Tracking use would mean one dict mutation per row per repaint
+    — measured at 0.027 ms → 0.050 ms per 1,000-row repaint — to save the
+    single re-parse an evicted visible row costs (~0.015 ms), and only once a
+    session has seen more than `_MAX_AGE_WINDOWS` distinct timestamps. A
+    re-written answer does move to the back, because the eviction below runs
+    before the insert.
     """
     if len(created) > _MAX_TIMESTAMP_LENGTH:
         return

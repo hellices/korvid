@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -17,6 +18,18 @@ from korvid.k8s.models import (
     summary_for,
 )
 from korvid.k8s.relationship_facts import RelationKind, RelationshipFacts
+
+
+@pytest.fixture(autouse=True)
+def _isolate_age_memo() -> Iterator[None]:
+    """`format_age` memoises into module state, so every test in this file
+    starts and ends with an empty memo. Without this the cap and eviction
+    tests would pass or fail depending on what ran before them, which
+    pytest-randomly reorders on every run."""
+    models.reset_age_memo()
+    yield
+    models.reset_age_memo()
+
 
 POD: dict[str, Any] = {
     "metadata": {"name": "checkout-7d9f", "namespace": "prod"},
@@ -1829,7 +1842,6 @@ def test_reaching_the_age_memo_cap_evicts_one_entry_not_all(
     next repaint re-parses the entire screen — the exact cost this memo
     exists to remove, concentrated into one frame. Evict the oldest instead."""
     monkeypatch.setattr(models, "_MAX_AGE_WINDOWS", 3)
-    models._AGE_WINDOWS.clear()
     now = datetime(2031, 9, 2, 0, 10, 0, tzinfo=UTC)
     for minute in range(3):
         assert format_age(f"2031-09-02T00:0{minute}:00Z", now) != "-"
@@ -1850,3 +1862,23 @@ def test_the_age_memo_can_be_reset() -> None:
     models.reset_age_memo()
 
     assert models._AGE_WINDOWS == {}
+
+
+def test_the_age_memo_evicts_the_least_recently_written_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-assigning a `dict` key keeps its original position, so a row that
+    refreshes its answer every minute would still look like the oldest entry
+    and be evicted while it is on screen. Writing a remembered answer has to
+    move it to the back."""
+    monkeypatch.setattr(models, "_MAX_AGE_WINDOWS", 3)
+    base = datetime(2031, 10, 1, 0, 10, 0, tzinfo=UTC)
+    for minute in range(3):
+        format_age(f"2031-10-01T00:0{minute}:00Z", base)
+
+    # The oldest entry rolls over to a new minute, so it is rewritten.
+    format_age("2031-10-01T00:00:00Z", base + timedelta(minutes=1))
+    format_age("2031-10-01T00:05:00Z", base + timedelta(minutes=1))
+
+    assert "2031-10-01T00:00:00Z" in models._AGE_WINDOWS
+    assert "2031-10-01T00:01:00Z" not in models._AGE_WINDOWS

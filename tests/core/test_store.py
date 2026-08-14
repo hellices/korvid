@@ -1,12 +1,10 @@
-from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from korvid.core import store as store_module
 from korvid.core.store import ALL_NAMESPACES, ResourceStore
-from korvid.k8s import models
-from korvid.k8s.models import PodSummary, format_age
+from korvid.k8s.models import PodSummary
 
 
 def _pod(name: str, ns: str = "default") -> PodSummary:
@@ -337,13 +335,29 @@ def test_a_net_zero_swap_behind_the_cache_recovers_instead_of_raising() -> None:
     assert [p.name for p in store.get("pods", "default")] == ["b", "c"]
 
 
-def test_clearing_every_kind_also_drops_the_age_memo() -> None:
-    """A context switch purges every object, so the age strings keyed by their
-    creation timestamps have no reuse value against the next cluster."""
-    now = datetime(2031, 9, 1, 0, 5, 0, tzinfo=UTC)
-    assert format_age("2031-09-01T00:00:00Z", now) == "5m"
-    assert models._AGE_WINDOWS
+def test_clearing_every_kind_runs_the_injected_purge_hook() -> None:
+    """A context switch retires every object, so caches keyed by those objects
+    are dropped with them. The hook is injected rather than imported: `core`
+    keeps knowing only the `Summary` protocol, and a store built without one
+    cannot reach into state another store is still rendering from."""
+    purges = 0
 
-    ResourceStore().clear_all()
+    def on_purge() -> None:
+        nonlocal purges
+        purges += 1
 
-    assert models._AGE_WINDOWS == {}
+    store = ResourceStore(on_purge=on_purge)
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
+
+    store.clear_all()
+
+    assert purges == 1
+
+
+def test_a_store_without_a_purge_hook_clears_cleanly() -> None:
+    store = ResourceStore()
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
+
+    store.clear_all()
+
+    assert store.get("pods", "default") == []
