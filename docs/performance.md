@@ -165,11 +165,16 @@ same-session, interleaved pairs are quoted.
 
 The figures above were re-taken after review hardening added work to the
 per-cell path, and held: −12.3% median against −12.1% as published. Measured
-the same way, the update path and the render path compose almost exactly. On
-the timestamp-bearing workload the render-path change is worth −8.8% on its
-own and this change −12.3% on its own; both together are −19.9% against
-`main`, where multiplying the two predicts −20.0%. Neither change is
-absorbing the other's win.
+the same way at the merged state, the update path and the render path compose
+almost exactly. On the timestamp-bearing workload the render-path change is
+worth −11.5% on its own and this change −14.7% on its own; both together are
+−24.7% against `main`, where multiplying the two predicts −24.5%. Neither
+change is absorbing the other's win.
+
+Those three came from one session; the table above came from an earlier one,
+which is why the same change reads −12.3% there and −14.7% here. Only the
+paired arms within a session are comparable — see the drift note above — so
+the table keeps its own measurement rather than borrowing this one.
 
 Two redundancies were removed, both of which repeated per-object work that
 nothing had invalidated:
