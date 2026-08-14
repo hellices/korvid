@@ -154,10 +154,18 @@ _RETRYABLE_MUTATION_STATUS = 429
 _CANCEL_DRAIN_ATTEMPTS = 3
 
 #: The live churn workload patches only `manifests.TICK_LABEL`, which no Pod
-#: column renders, so the in-place table diff finds no cell to write: this
-#: run's update samples end at a *no-op* diff, never at a rendered frame. The
-#: report carries that fact so the artifacts never publish the figure under
-#: `event_to_render`, the key the 250 ms render budget is stated against.
+#: column renders, so the patch itself gives the in-place table diff no cell to
+#: write. The samples are therefore watch-to-diff-completion, not
+#: event-to-render, and the report says so rather than publishing the figure
+#: under `event_to_render`, the key the 250 ms render budget is stated against.
+#:
+#: "No cell to write" is about the patch, not about every tick: AGE is
+#: recomputed on each update, so a tick that carries a Pod across a minute,
+#: hour or day boundary does change a rendered cell. Over a 30-minute run those
+#: are a small, unpredictable minority of samples. That is exactly why the
+#: figure is published under the weaker name — it bounds handler completion for
+#: a workload whose diffs are almost always no-ops, and never claims to be the
+#: rendered-frame measurement the budget is written against.
 _LIVE_UPDATE_LATENCY_KIND = UpdateLatencyKind.WATCH_TO_DIFF_COMPLETION
 
 
@@ -915,6 +923,14 @@ def make_live_watch_source(
             # has returned from `apply_event` and the store holds the change.
             # Setting before the yield would open a window where the gate is
             # satisfied by an event the application had not applied yet.
+            #
+            # The cost of that strength: the gate opens when the *next* event
+            # arrives, so it trails the first owned event by one inter-event
+            # gap. At this harness's rates (20-24 events/s, a schedule that
+            # runs for the whole measurement) that is tens of milliseconds
+            # against a 60 s bound. It matters only if churn all but stops
+            # right after its first owned event, which is why the waiter's
+            # timeout names that possibility instead of blaming the app.
             if owned and watch_receipt is not None:
                 watch_receipt.set()
 
@@ -955,7 +971,11 @@ async def wait_for_first_watch_receipt(
         pilot,
         lambda: watch_receipt.is_set() or churn_task.done(),
         timeout=timeout,
-        label="first owned watch event received by the application",
+        label=(
+            "first owned watch event applied by the application (the receipt is "
+            "set once the watch source is asked for the event after it, so a "
+            "timeout can also mean churn produced nothing further)"
+        ),
         recorder=recorder,
     )
     return watch_receipt.is_set()

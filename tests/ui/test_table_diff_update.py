@@ -972,6 +972,40 @@ async def test_batching_falls_back_when_the_write_raises_a_table_native_error() 
         assert table._cell_batching_usable is False
 
 
+async def test_retiring_the_fast_path_says_so_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Swallowing the failure keeps the repaint alive; swallowing it silently
+    would let a Textual upgrade undo this widget's reason for touching `_data`
+    at all, leaving nothing behind but a benchmark number that quietly got
+    worse. The two are separable, so retirement is announced exactly once with
+    the Textual version and the reason."""
+    warnings: list[str] = []
+
+    class _Log:
+        def warning(self, message: object) -> None:
+            warnings.append(str(message))
+
+        def __call__(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    monkeypatch.setattr(ResourceTable, "log", property(lambda _self: _Log()))
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        _render_from_a_shadow(table)
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("alpha", phase="Failed"))
+        await until(
+            pilot,
+            lambda: table._cell_batching_usable is False,
+            label="fast path retired",
+        )
+
+    assert len(warnings) == 1
+    assert "update_cell" in warnings[0]
+    assert "render path" in warnings[0]
+
+
 async def test_removing_a_row_above_the_cursor_restores_the_selection() -> None:
     """Textual's cursor is a coordinate, so removing a row above it keeps the
     index and slides a different row under the selection. The in-place path

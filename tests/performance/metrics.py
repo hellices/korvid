@@ -31,7 +31,11 @@ class UpdateLatencyKind(StrEnum):
       published 250 ms render budget is stated against.
     * `WATCH_TO_DIFF_COMPLETION` - the workload changes only metadata no column
       renders (the live driver's `korvid.dev/performance-tick` label), so the
-      diff finds nothing to write and the sample ends at a *no-op* diff.
+      patch gives the diff nothing to write and the sample ends at a no-op
+      diff. Almost always: AGE is recomputed per update, so a tick crossing a
+      minute, hour or day boundary does write a cell. The name claims the
+      weaker thing for that reason — handler completion, whatever the diff
+      turned out to do — rather than a rendered-frame measurement.
 
     The kind travels with the report so artifacts publish the samples under the
     name of what was measured, instead of advertising a metadata-only figure

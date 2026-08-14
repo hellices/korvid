@@ -567,6 +567,54 @@ def check_rendered_rows(table: Any, pods: Iterable[PodSummary]) -> None:
             )
 
 
+def _cursor_sample_preconditions(table: ResourceTable, key: str) -> tuple[int, int, int]:
+    """Start row, expected row and row count for one sample, or refuse to take it.
+
+    Every refusal here is a harness misconfiguration, not a measurement: a key
+    the probe cannot interpret, a move off the end of the table, or a table
+    that is not focused. The last one is the quiet one — the key is posted to
+    the app, so an unfocused table lets whichever widget does have focus eat it
+    and the sample times out as if the cursor had simply been slow.
+    """
+    start_row = table.cursor_row
+    try:
+        expected_row = start_row + {"down": 1, "up": -1}[key]
+    except KeyError as exc:
+        raise ReplayConfigurationError(
+            "cursor input measurement supports only 'down' and 'up'"
+        ) from exc
+    row_count = table.row_count
+    if not 0 <= expected_row < row_count:
+        raise ReplayConfigurationError(
+            f"cursor input measurement key {key!r} from start row {start_row} "
+            f"expected row {expected_row} outside valid range 0..{row_count - 1}"
+        )
+    if not table.has_focus:
+        raise ReplayConfigurationError(
+            "cursor input measurement requires the table to have focus; the key is "
+            "posted to the app and would otherwise be consumed by whichever widget "
+            "does have focus, timing out as if the cursor had not moved"
+        )
+    return start_row, expected_row, row_count
+
+
+def _membership_note(table: ResourceTable, row_count: int) -> str | None:
+    """Name a row-membership change during one sample, or None if it held still.
+
+    The probe waits for one absolute index, so this precondition decides both
+    of its outcomes and has to be asked on both paths. A row leaving or
+    entering while the key is in flight can settle the cursor somewhere else —
+    reported as a timeout, which reads as an input-latency regression — or slide
+    the expected index under the cursor before the key is processed at all,
+    which returns a near-zero sample and biases p95 *down*, arriving in the
+    report as a good result. The second is the more dangerous of the two
+    precisely because nothing else about it looks wrong.
+    """
+    if table.row_count == row_count:
+        return None
+    return f"the row count changed from {row_count} to {table.row_count} during the sample"
+
+
 async def measure_cursor_input(
     pilot: Any,
     table: ResourceTable,
@@ -588,25 +636,7 @@ async def measure_cursor_input(
     already at the front of the ready queue. The poll is therefore the tighter
     upper bound on the acknowledgement, not a source of inflation.
     """
-    start_row = table.cursor_row
-    try:
-        expected_row = start_row + {"down": 1, "up": -1}[key]
-    except KeyError as exc:
-        raise ReplayConfigurationError(
-            "cursor input measurement supports only 'down' and 'up'"
-        ) from exc
-    row_count = table.row_count
-    if not 0 <= expected_row < row_count:
-        raise ReplayConfigurationError(
-            f"cursor input measurement key {key!r} from start row {start_row} "
-            f"expected row {expected_row} outside valid range 0..{row_count - 1}"
-        )
-    if not table.has_focus:
-        raise ReplayConfigurationError(
-            "cursor input measurement requires the table to have focus; the key is "
-            "posted to the app and would otherwise be consumed by whichever widget "
-            "does have focus, timing out as if the cursor had not moved"
-        )
+    start_row, expected_row, row_count = _cursor_sample_preconditions(table, key)
     app = pilot.app
     driver = app._driver
     if driver is None:
@@ -637,19 +667,23 @@ async def measure_cursor_input(
             f"{key} cursor input from row {start_row} to expected row {expected_row} "
             f"was not acknowledged within {timeout}s"
         )
-        if table.row_count != row_count:
-            # The probe waits for one exact index, so a row entering or leaving
-            # while the key was in flight can settle the cursor elsewhere. Name
-            # that, or the run reads as an input-latency regression when the
-            # precondition — a table whose membership holds still for one
-            # keypress — is what actually failed.
-            detail += (
-                f"; the row count changed from {row_count} to {table.row_count} "
-                "during the sample, so the expected index no longer identifies "
-                "the row the cursor was sent to"
-            )
+        moved = _membership_note(table, row_count)
+        if moved is not None:
+            detail += f"; {moved}, so the expected index no longer identifies the row"
         raise WaitTimeout(detail) from exc
-    return now() - started
+    elapsed = now() - started
+    moved = _membership_note(table, row_count)
+    if moved is not None:
+        if aborted():
+            # The run is already failing terminally; the membership change is a
+            # consequence of that (a cleared store, say), not a spoiled sample.
+            # Let the real cause be the one that surfaces.
+            raise _SampleAborted
+        raise WaitTimeout(
+            f"{key} cursor input from row {start_row} reached expected row "
+            f"{expected_row}, but {moved}, so the move cannot be attributed to the key"
+        )
+    return elapsed
 
 
 def validate_time_scale(options: ReplayOptions) -> None:

@@ -1163,3 +1163,29 @@ async def test_cursor_sampling_stops_early_and_partial_when_churn_aborts(
 
     assert pressed == ["down", "up", "down"]  # stopped mid-pair, as documented
     assert len(recorder._input_latency) == 3 < 2 * 5
+
+
+async def test_measure_cursor_input_refuses_a_sample_the_row_membership_moved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe waits for one absolute index, so a row leaving above the cursor
+    slides the expected index under it without the key having been processed at
+    all. That returns almost instantly and would be recorded as an excellent
+    input latency — the mirror image of a timeout, and far more dangerous,
+    because nothing about a fast sample looks wrong. The success path has to
+    ask the same precondition the timeout path already names."""
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(4)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 4, label="pods loaded")
+        table.focus()
+
+        async def drop_a_row_then_wait(delay: float) -> None:
+            if table.row_count == 4:
+                app.store.apply_event("pods", "default", "DELETED", _pod("pod-03"))
+            await asyncio.sleep(delay)
+
+        monkeypatch.setattr(replay_module, "_ack_sleep", drop_a_row_then_wait)
+
+        with pytest.raises(WaitTimeout, match=r"cannot be attributed to the key"):
+            await measure_cursor_input(pilot, table, "down")

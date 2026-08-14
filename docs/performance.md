@@ -166,7 +166,11 @@ nothing, and requests no repaint. The harness nevertheless calls
 figure this run recorded is the interval from **watch-event receipt to
 no-op table-diff completion**. That is a real number about the message path,
 but it is not a rendered-frame measurement and is not compared to the render
-budget here. A no-op diff is strictly less work than one that writes cells and
+budget here. (Almost every tick is a no-op: AGE is recomputed on each update,
+so a tick that carries a Pod across a minute, hour or day boundary does write a
+cell. Those are a small, unpredictable minority, which is the other reason the
+figure is published under the weaker name.) A no-op diff is strictly less work
+than one that writes cells and
 requests a repaint, so 32 ms is a *lower bound* on what a rendered-cell
 workload would record at the same rate — a lower bound can refute a budget,
 never establish it. Measuring event-to-render live needs a churn workload that

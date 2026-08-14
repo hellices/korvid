@@ -713,17 +713,34 @@ class ResourceTable(DataTable[str | Text]):
         """
         try:
             self._data[row_key][column.key] = new_cell
-        except Exception:  # any failure here means "don't trust the fast path"
+        except Exception as exc:  # any failure here means "don't trust the fast path"
             self._cell_batching_verified = True
-            self._cell_batching_usable = False
+            self._retire_cell_batching(f"the private write raised {exc!r}")
             return False
         if self._cell_batching_verified:
             return True
         self._cell_batching_verified = True
         if self._batched_write_holds(row_key, column, new_cell):
             return True
-        self._cell_batching_usable = False
+        self._retire_cell_batching("the render path did not see the private write")
         return False
+
+    def _retire_cell_batching(self, reason: str) -> None:
+        """Drop the fast path for this widget's lifetime, and say so once.
+
+        Swallowing the failure keeps the repaint alive; swallowing it silently
+        would let a Textual upgrade undo this widget's whole reason for
+        writing `_data` at all, with no exception, no log line and nothing to
+        read in a benchmark artifact — only a performance number that got
+        worse for no visible reason. The two are separable, so this says which
+        Textual retired the path and why.
+        """
+        self._cell_batching_usable = False
+        self.log.warning(
+            f"resource table: batched cell writes retired on textual "
+            f"{_textual_version}: {reason}; falling back to update_cell "
+            "(one refresh per changed cell)"
+        )
 
     def _patch_row(self, key: str, cells: list[str | Text], columns: list[Column]) -> bool:
         """Update an existing row's changed cells; True when any cell moved."""
