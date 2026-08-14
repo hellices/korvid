@@ -699,13 +699,21 @@ class ResourceTable(DataTable[str | Text]):
         Guards the write itself, not only its result: a Textual release that
         removed `_data`, changed its key types or changed the row mapping
         raises here, and crashing a repaint is a worse answer than paying for
-        the public API. The first write that lands is then read back, because
-        a release could equally move the structure the renderer consults while
-        leaving this one writable.
+        the public API. The catch is deliberately as wide as that intent —
+        `DataTable` raises its own `RowDoesNotExist`/`CellDoesNotExist` types,
+        and naming a fixed tuple of built-ins would let the next release's
+        exception through the one path that exists to survive it. It matches
+        `_batched_write_holds` for the same reason. A korvid-side mistake is
+        not hidden by this: the fallback repeats the same write through
+        `update_cell`, which raises it in the caller's face.
+
+        The first write that lands is then read back, because a release could
+        equally move the structure the renderer consults while leaving this
+        one writable.
         """
         try:
             self._data[row_key][column.key] = new_cell
-        except (KeyError, TypeError, AttributeError):
+        except Exception:  # any failure here means "don't trust the fast path"
             self._cell_batching_verified = True
             self._cell_batching_usable = False
             return False

@@ -1124,3 +1124,42 @@ def test_the_cursor_probe_says_when_the_table_is_not_focused() -> None:
         asyncio.run(
             measure_cursor_input(None, cast(ResourceTable, _UnfocusedTable()), "down", timeout=0.2)
         )
+
+
+async def test_cursor_sampling_stops_early_and_partial_when_churn_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An aborted probe leaves *fewer* samples than were asked for, and says so
+    only by returning early. Nothing here rescues that: the percentile computed
+    from what it collected would be a partial measurement wearing a complete
+    measurement's label. Both callers therefore raise the abort's own cause
+    before any report is built - `run_replay` with `ReplayAborted` and
+    `run_live_replay` by awaiting the churn task - and this pins the shape that
+    obligation rests on."""
+    pressed: list[str] = []
+
+    async def fake_measure(
+        _pilot: Any,
+        _table: Any,
+        key: str,
+        *,
+        now: Any = None,
+        timeout: float = 5.0,
+        aborted: Any = None,
+    ) -> float:
+        pressed.append(key)
+        return 0.001
+
+    monkeypatch.setattr(replay_module, "measure_cursor_input", fake_measure)
+    recorder = BenchmarkRecorder()
+
+    await replay_module.sample_cursor_input(
+        cast(Any, object()),
+        cast(Any, object()),
+        recorder,
+        pairs=5,
+        aborted=lambda: len(pressed) >= 3,
+    )
+
+    assert pressed == ["down", "up", "down"]  # stopped mid-pair, as documented
+    assert len(recorder._input_latency) == 3 < 2 * 5

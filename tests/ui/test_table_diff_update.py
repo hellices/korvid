@@ -922,6 +922,56 @@ async def test_batching_falls_back_when_the_private_write_itself_fails() -> None
         assert table._cell_batching_usable is False
 
 
+class _TableNativeError(Exception):
+    """Stands for `DataTable`'s own exception types (`RowDoesNotExist`, …).
+
+    Deliberately not a `KeyError`, `TypeError` or `AttributeError`: naming a
+    fixed tuple of built-ins would let a release that raises its own type
+    through the one path whose whole purpose is to survive such a release.
+    """
+
+
+class _NativelyRaisingRow(dict):  # type: ignore[type-arg]  # test double mirroring one row of DataTable._data
+    """A row mapping that rejects direct writes with a non-built-in error."""
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        raise _TableNativeError("DataTable._data rejects this write")
+
+    def force(self, key: Any, value: Any) -> None:
+        dict.__setitem__(self, key, value)
+
+
+async def test_batching_falls_back_when_the_write_raises_a_table_native_error() -> None:
+    """A repaint must survive the write failing, whatever type it fails with.
+    `DataTable` raises its own exception classes, so a guard listing built-ins
+    would let the next release's error escape into the watch tick and kill the
+    repaint — the exact outcome the guard exists to prevent."""
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        swapped = {key: _NativelyRaisingRow(value) for key, value in table._data.items()}
+        table._data = cast(Any, swapped)
+
+        def public_update_cell(row_key: Any, column_key: Any, value: Any, **_kw: Any) -> None:
+            row = cast(_NativelyRaisingRow, table._data[RowKey(getattr(row_key, "value", row_key))])
+            row.force(column_key, value)
+            table._update_count += 1
+            table.refresh()
+
+        table.update_cell = public_update_cell  # type: ignore[method-assign]  # test double
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("alpha", phase="Failed"))
+
+        await until(
+            pilot,
+            lambda: "Failed" in table.render_line(1).text,
+            label="new cell painted through the fallback",
+        )
+
+        assert table._cell_batching_usable is False
+
+
 async def test_removing_a_row_above_the_cursor_restores_the_selection() -> None:
     """Textual's cursor is a coordinate, so removing a row above it keeps the
     index and slides a different row under the selection. The in-place path
