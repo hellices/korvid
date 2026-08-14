@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.selectors import LabelSelector, matches_selector, parse_label_selector
 
 _MIRROR_ANNOTATION = "kubernetes.io/config.mirror"
 #: Phases whose pods no longer count against a PodDisruptionBudget.
@@ -116,34 +117,27 @@ def _target_flags(target: DrainTarget) -> str:
     return flags
 
 
-def _expression_matches(expr: dict[str, Any], labels: dict[str, str]) -> bool:
-    """One matchExpressions entry against a pod's labels."""
-    key = str(expr.get("key", ""))
-    operator = expr.get("operator")
-    values = [str(v) for v in expr.get("values") or []]
-    if operator == "In":
-        return labels.get(key) in values
-    if operator == "NotIn":
-        # apimachinery semantics: a pod *without* the key matches NotIn
-        # (labels.Requirement.Matches returns true when the key is absent).
-        return labels.get(key) not in values
-    if operator == "Exists":
-        return key in labels
-    if operator == "DoesNotExist":
-        return key not in labels
-    # Unknown operator: fail safe by treating the PDB as matching,
-    # so the drain preview over-warns rather than under-warns.
-    return True
+def _parse_pdb_selector(pdb: dict[str, Any]) -> tuple[LabelSelector, bool]:
+    """Parse a PDB's selector and determine ``empty_matches`` from its apiVersion.
+
+    Args:
+        pdb: Raw PDB manifest dict.
+
+    Returns:
+        A ``(selector, empty_matches)`` pair where *empty_matches* is ``True``
+        for ``policy/v1`` (empty selector selects all pods in the namespace)
+        and ``False`` for ``policy/v1beta1`` (empty selector selects no pods).
+    """
+    selector = (pdb.get("spec") or {}).get("selector")
+    empty_matches = str(pdb.get("apiVersion", "policy/v1")) == "policy/v1"
+    return parse_label_selector(selector), empty_matches
 
 
-def _selector_matches(selector: dict[str, Any], labels: dict[str, str]) -> bool:
-    """LabelSelector semantics for PDBs (policy/v1): an empty selector
-    matches every pod in the namespace; matchLabels and matchExpressions
-    are AND-combined."""
-    for key, value in (selector.get("matchLabels") or {}).items():
-        if labels.get(key) != value:
-            return False
-    return all(_expression_matches(expr, labels) for expr in selector.get("matchExpressions") or [])
+def _pdb_selector_matches_labels(
+    parsed: tuple[LabelSelector, bool], labels: dict[str, str]
+) -> bool:
+    selector, empty_matches = parsed
+    return matches_selector(selector, labels, empty_matches=empty_matches)
 
 
 class _BudgetTracker:
@@ -154,6 +148,9 @@ class _BudgetTracker:
 
     def __init__(self, pdbs: list[dict[str, Any]]) -> None:
         self._pdbs = pdbs
+        self._selectors: dict[int, tuple[LabelSelector, bool]] = {
+            id(pdb): _parse_pdb_selector(pdb) for pdb in pdbs
+        }
         self._remaining = {
             id(pdb): int((pdb.get("status") or {}).get("disruptionsAllowed", 0) or 0)
             for pdb in pdbs
@@ -174,7 +171,7 @@ class _BudgetTracker:
             pdb
             for pdb in self._pdbs
             if str((pdb.get("metadata") or {}).get("namespace", "")) == namespace
-            and _pdb_selector_matches(pdb, labels)
+            and _pdb_selector_matches_labels(self._selectors[id(pdb)], labels)
         ]
         if len(matches) > 1:
             names = ", ".join(
@@ -228,15 +225,6 @@ def _pod_is_ready(pod: dict[str, Any]) -> bool:
         for cond in (pod.get("status") or {}).get("conditions") or []
         if isinstance(cond, dict)
     )
-
-
-def _pdb_selector_matches(pdb: dict[str, Any], labels: dict[str, str]) -> bool:
-    """policy/v1 semantics: a null/missing selector matches no pods, while
-    an explicitly empty ``{}`` selector matches every pod in the namespace."""
-    selector = (pdb.get("spec") or {}).get("selector")
-    if selector is None:
-        return False
-    return _selector_matches(selector, labels)
 
 
 def _is_daemonset_pod(pod: dict[str, Any]) -> bool:

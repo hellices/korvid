@@ -43,13 +43,17 @@ def _pdb(
     match_labels: dict[str, str] | None = None,
     match_expressions: list[dict[str, Any]] | None = None,
     disruptions_allowed: int = 0,
+    selector: dict[str, Any] | None = None,
+    api_version: str = "policy/v1",
 ) -> dict[str, Any]:
-    selector: dict[str, Any] = {}
-    if match_labels:
-        selector["matchLabels"] = match_labels
-    if match_expressions:
-        selector["matchExpressions"] = match_expressions
+    if selector is None:
+        selector = {}
+        if match_labels:
+            selector["matchLabels"] = match_labels
+        if match_expressions:
+            selector["matchExpressions"] = match_expressions
     return {
+        "apiVersion": api_version,
         "metadata": {"name": name, "namespace": namespace},
         "spec": {"selector": selector},
         "status": {"disruptionsAllowed": disruptions_allowed},
@@ -386,3 +390,19 @@ def test_plain_throttling_429_is_not_a_pdb_denial() -> None:
 def test_non_429_is_never_a_pdb_denial() -> None:
     exc = ApiStatusError(500, "disruption budget mumble")
     assert is_pdb_denial(exc) is False
+
+
+def test_policy_v1_empty_pdb_selector_matches_all_pods() -> None:
+    plan = build_drain_plan(
+        [_pod("api-0", labels={"app": "api"})],
+        [_pdb("all", selector={}, disruptions_allowed=0, api_version="policy/v1")],
+    )
+    assert plan.targets[0].pdb_blocked == "all"
+
+
+def test_policy_v1beta1_empty_pdb_selector_matches_no_pods() -> None:
+    plan = build_drain_plan(
+        [_pod("api-0", labels={"app": "api"})],
+        [_pdb("legacy", selector={}, disruptions_allowed=0, api_version="policy/v1beta1")],
+    )
+    assert plan.targets[0].pdb_blocked is None
