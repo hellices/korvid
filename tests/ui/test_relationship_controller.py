@@ -21,9 +21,11 @@ from korvid.core.relationships import (
     GraphResource,
     SummaryLike,
 )
+from korvid.core.relationships import build_relationship_graph as _original_build_relationship_graph
 from korvid.k8s.discovery import ResourceMeta, build_alias_map
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.ui import relationship_controller
 from korvid.ui.relationship_controller import (
     GraphLoadLimits,
     RelationshipSnapshotLoader,
@@ -41,6 +43,14 @@ HTTP_ROUTE_META = ResourceMeta("HTTPRoute", "httproutes", "gateway.networking.k8
 REFERENCE_GRANT_META = ResourceMeta(
     "ReferenceGrant", "referencegrants", "gateway.networking.k8s.io", "v1beta1", True
 )
+#: `PersistentVolume`/`PersistentVolumeClaim` deliberately sort in opposite
+#: relative order by `kind` ("PersistentVolume" < "PersistentVolumeClaim",
+#: a prefix) vs by `plural` ("persistentvolumeclaims" < "persistentvolumes",
+#: 'c' < 's'). This divergence is what lets a test tell apart a loader-side
+#: `(group, plural)`-ordered pre-cap from delegating the cap entirely to
+#: `build_relationship_graph`'s `(group, kind, ...)`-ordered one.
+PV_META = ResourceMeta("PersistentVolume", "persistentvolumes", "", "v1", False)
+PVC_META = ResourceMeta("PersistentVolumeClaim", "persistentvolumeclaims", "", "v1", True)
 
 
 def _root(kind: str, namespace: str) -> GraphResource:
@@ -238,3 +248,48 @@ async def test_loader_never_swallows_cancellation() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_loader_pre_caps_by_source_order_before_build_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap must truncate in `(group, plural)` source order *before*
+    `build_relationship_graph` ever sees the inputs — not delegate to that
+    function's own `(group, kind, ...)` sort, which would keep the wrong
+    resource here (`PersistentVolume` sorts before `PersistentVolumeClaim`
+    by kind, but after it by plural)."""
+    captured_inputs: list[object] = []
+
+    def _spy(inputs: object, coverage: object, limits: object) -> object:
+        captured_inputs.extend(inputs)  # type: ignore[arg-type]  # test spy, any iterable
+        return _original_build_relationship_graph(inputs, coverage, limits)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(relationship_controller, "build_relationship_graph", _spy)
+
+    lister = _Lister(
+        results={
+            ("", "persistentvolumes"): [
+                _generic_summary("pv-a", namespace="", kind="PersistentVolume")
+            ],
+            ("", "persistentvolumeclaims"): [
+                _generic_summary("pvc-a", namespace="prod", kind="PersistentVolumeClaim")
+            ],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister, limits=GraphLoadLimits(max_resources=1)).load(
+        _root("Pod", "prod"), "prod", _aliases(PV_META, PVC_META)
+    )
+
+    assert len(captured_inputs) == 1
+    kept = captured_inputs[0]
+    assert kept.meta.kind == "PersistentVolumeClaim"  # type: ignore[attr-defined]
+    assert [node.name for node in graph.nodes] == ["pvc-a"]
+    assert any(record.state is CoverageState.CAPPED for record in graph.coverage)
+
+
+async def test_unrelated_error_propagates_instead_of_becoming_failed_coverage() -> None:
+    lister = _Lister(errors={("", "pods"): RuntimeError("not a network/API failure")})
+    with pytest.raises(RuntimeError, match="not a network/API failure"):
+        await RelationshipSnapshotLoader(lister).load(
+            _root("Pod", "prod"), "prod", _aliases(PODS_META)
+        )

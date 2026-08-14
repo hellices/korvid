@@ -171,6 +171,50 @@ def _api_error_coverage(meta: ResourceMeta, scope: str, exc: ApiStatusError) -> 
     )
 
 
+def _summary_sort_key(summary: SummaryLike) -> tuple[str, str, str]:
+    return (summary.namespace, summary.name, summary.uid)
+
+
+def _cap_inputs(
+    fetched: Sequence[tuple[ResourceMeta, list[SummaryLike]]],
+    max_resources: int,
+) -> tuple[list[GraphInput], CoverageRecord | None]:
+    """Truncate `fetched` to at most `max_resources`, in the caller's
+    `(group, plural)` source order, deterministically ordering each
+    source's own summaries by `(namespace, name, uid)` first.
+
+    This truncation happens before `build_relationship_graph` ever sees the
+    inputs: that function's own cap sorts by `(group, kind, namespace,
+    name, uid)`, which is not always equivalent to `(group, plural)` source
+    order (e.g. `PersistentVolume` sorts before `PersistentVolumeClaim` by
+    kind, but after it by plural) and is not the ordering the loader's
+    caller requested a snapshot in.
+    """
+    inputs: list[GraphInput] = []
+    remaining = max_resources
+    dropped = 0
+    for meta, summaries in fetched:
+        ordered = sorted(summaries, key=_summary_sort_key)
+        if remaining <= 0:
+            dropped += len(ordered)
+            continue
+        keep, drop = ordered[:remaining], ordered[remaining:]
+        inputs.extend(GraphInput(meta=meta, summary=summary) for summary in keep)
+        remaining -= len(keep)
+        dropped += len(drop)
+
+    if dropped == 0:
+        return inputs, None
+    record = CoverageRecord(
+        group="",
+        resource="*",
+        scope="",
+        state=CoverageState.CAPPED,
+        detail=f"{dropped} input resource(s) dropped at the {max_resources}-resource cap",
+    )
+    return inputs, record
+
+
 class Lister(Protocol):
     """The slice of the k8s read surface the loader needs (see `reads.py`)."""
 
@@ -206,12 +250,21 @@ class RelationshipSnapshotLoader:
 
         results = await asyncio.gather(*(self._fetch(meta, namespace, semaphore) for meta in metas))
 
-        inputs: list[GraphInput] = []
+        fetched: list[tuple[ResourceMeta, list[SummaryLike]]] = []
         for meta, summaries, record in results:
             coverage.append(record)
             if summaries is not None:
-                inputs.extend(GraphInput(meta=meta, summary=summary) for summary in summaries)
+                fetched.append((meta, summaries))
 
+        inputs, cap_record = _cap_inputs(fetched, self._limits.max_resources)
+        if cap_record is not None:
+            coverage.append(cap_record)
+
+        # The cap already ran above (in source order); `GraphLimits` here
+        # only carries the configured `max_resources` through into the
+        # resulting graph's metadata — `len(inputs) <= max_resources`
+        # always holds by construction, so this never triggers a second,
+        # differently-ordered cap inside `build_relationship_graph`.
         limits = GraphLimits(max_resources=self._limits.max_resources)
         return build_relationship_graph(inputs, coverage, limits)
 
@@ -228,7 +281,7 @@ class RelationshipSnapshotLoader:
                 summaries = await self._lister.list_objects(meta, list_namespace)
             except ApiStatusError as exc:
                 return meta, None, _api_error_coverage(meta, scope, exc)
-            except Exception as exc:  # declared network/transport failures -> failed
+            except OSError as exc:  # declared network/transport failures -> failed
                 record = CoverageRecord(
                     group=meta.group,
                     resource=meta.plural,
