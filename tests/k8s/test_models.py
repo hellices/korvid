@@ -1572,6 +1572,46 @@ def test_generic_summary_relationship_facts_default_to_empty() -> None:
     assert summary.relationships == RelationshipFacts()
 
 
+def test_summary_for_pdb_list_item_without_api_version_uses_authoritative_version() -> None:
+    """A PodDisruptionBudget LIST item omitting apiVersion must still resolve the
+    v1-vs-v1beta1 empty-selector semantics correctly when the caller supplies the
+    authoritative `version` (from ResourceMeta), matching how `group` is already
+    threaded through instead of relying on the (often-missing) manifest apiVersion
+    (issue #281)."""
+    manifest: dict[str, Any] = {
+        # apiVersion deliberately omitted, as with real LIST items.
+        "metadata": {"name": "all", "namespace": "prod"},
+        "spec": {"selector": {}},
+    }
+    summary_v1 = summary_for("PodDisruptionBudget", manifest, group="policy", version="v1")
+    assert len(summary_v1.relationships.selectors) == 1
+    selector_fact = summary_v1.relationships.selectors[0]
+    assert selector_fact.relation is RelationKind.PROTECTED_BY
+    assert selector_fact.empty_matches is True
+
+    summary_v1beta1 = summary_for(
+        "PodDisruptionBudget", manifest, group="policy", version="v1beta1"
+    )
+    assert summary_v1beta1.relationships.selectors == ()
+
+
+def test_summary_for_pdb_without_version_falls_back_to_manifest_api_version() -> None:
+    """Direct callers that do not supply `version` must keep deriving it from the
+    manifest's `apiVersion`, unchanged from before `version` threading was added."""
+    manifest: dict[str, Any] = {
+        "apiVersion": "policy/v1",
+        "metadata": {"name": "all", "namespace": "prod"},
+        "spec": {"selector": {}},
+    }
+    summary = summary_for("PodDisruptionBudget", manifest)
+    assert len(summary.relationships.selectors) == 1
+    assert summary.relationships.selectors[0].empty_matches is True
+
+    manifest_v1beta1 = dict(manifest, apiVersion="policy/v1beta1")
+    summary_v1beta1 = summary_for("PodDisruptionBudget", manifest_v1beta1)
+    assert summary_v1beta1.relationships.selectors == ()
+
+
 def test_pod_summary_never_retains_secret_values() -> None:
     """PodSummary must carry relationship facts without ever leaking manifest content
     outside the metadata-only safety boundary (issue #281)."""

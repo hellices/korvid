@@ -285,7 +285,7 @@ class KubeClient(ReadOps, WriteOps):
 
     def _object_summary(self, meta: ResourceMeta, manifest: dict[str, Any]) -> GenericSummary:
         """summary_for + configured custom column values (issue #45)."""
-        summary = summary_for(meta.kind, manifest, group=meta.group)
+        summary = summary_for(meta.kind, manifest, group=meta.group, version=meta.version)
         columns = self._custom_columns.get(meta.plural)
         if not columns:
             return summary

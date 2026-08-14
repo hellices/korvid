@@ -1189,7 +1189,7 @@ class FakeDiagnoseKube:
             metadata = obj.get("metadata") or {}
             if meta.namespaced and namespace is not None and metadata.get("namespace") != namespace:
                 continue
-            summaries.append(summary_for(meta.kind, obj, group=meta.group))
+            summaries.append(summary_for(meta.kind, obj, group=meta.group, version=meta.version))
         return summaries
 
     async def list_events_for(
@@ -3262,7 +3262,10 @@ class _RawManifestKube:
         return self._service
 
     async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
-        return [summary_for(meta.kind, m, group=meta.group) for m in self._slice_manifests]
+        return [
+            summary_for(meta.kind, m, group=meta.group, version=meta.version)
+            for m in self._slice_manifests
+        ]
 
 
 @pytest.mark.asyncio
