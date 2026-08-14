@@ -98,7 +98,7 @@ def _graph_with_missing_target() -> RelationshipGraph:
 
 def _cyclic_capped_graph() -> RelationshipGraph:
     """Root Deployment/prod/api has two direct dependents; expanding one
-    level deeper both cycles back to an already-visited node and hits the
+    level deeper repeats an already-reached resource and hits the
     (deliberately tiny) node cap on the other. Coverage also carries a
     forbidden record so the `c` toggle test can assert on it too."""
     root = _resource("Deployment", "api")
@@ -108,9 +108,9 @@ def _cyclic_capped_graph() -> RelationshipGraph:
     edges = (
         _edge(rs1, root, relation=RelationKind.OWNED_BY),
         _edge(rs2, root, relation=RelationKind.OWNED_BY),
-        # rs2 -> rs1 only surfaces one level deeper than root's direct
-        # dependents; rs2 is already visited by then, so it is a genuine
-        # cycle rather than a new dependent of root.
+        # rs2 -> rs1 surfaces one level deeper than root's direct
+        # dependents. rs2 is already reached by then, but it is a sibling
+        # of rs1, not an ancestor of it: a repeat, not a cycle.
         _edge(rs2, rs1, relation=RelationKind.MANAGED_BY),
         _edge(pod_x, rs1, relation=RelationKind.OWNED_BY),  # beyond the node cap -> truncated
     )
@@ -187,9 +187,10 @@ def _many_direct_dependents_graph(count: int = 30, max_nodes: int = 3) -> Relati
 
 
 def _many_cycles_graph(count: int = 50, max_nodes: int = 2) -> RelationshipGraph:
-    """`count` back-edges from rs2 to rs1, all discovered as cycles one
-    level into expansion. `RelationshipGraph.walk_dependents` itself does
-    not cap `cycles` (only `edges`/`added_nodes`), so rendering must cap
+    """`count` genuine back-edges: root <- rs1 <- rs2, and rs1 depends on
+    rs2 `count` times, so every one of those loops back into rs2's own
+    ancestor. `RelationshipGraph.walk_dependents` itself does not cap
+    `cycles` (only `edges`/`added_nodes`), so rendering must cap
     independently or a resource with many cyclic references renders one
     row per cycle."""
     root = _resource("Deployment", "api")
@@ -197,10 +198,10 @@ def _many_cycles_graph(count: int = 50, max_nodes: int = 2) -> RelationshipGraph
     rs2 = _resource("ReplicaSet", "api-rs2")
     edges = [
         _edge(rs1, root, relation=RelationKind.OWNED_BY),
-        _edge(rs2, root, relation=RelationKind.OWNED_BY),
+        _edge(rs2, rs1, relation=RelationKind.OWNED_BY),
     ]
     edges.extend(
-        _edge(rs2, rs1, relation=RelationKind.MANAGED_BY, field=f"spec.selector[{i}]")
+        _edge(rs1, rs2, relation=RelationKind.MANAGED_BY, field=f"spec.selector[{i}]")
         for i in range(count)
     )
     return RelationshipGraph(
@@ -208,6 +209,32 @@ def _many_cycles_graph(count: int = 50, max_nodes: int = 2) -> RelationshipGraph
         edges=tuple(edges),
         coverage=(),
         limits=GraphLimits(max_nodes=max_nodes),
+    )
+
+
+def _cycle_and_repeat_graph() -> RelationshipGraph:
+    """One genuine cycle and one repeat in the same expansion.
+
+    root <- rs1 <- pod; `pod` also depends on rs2 (a sibling of rs1
+    reached from root: a converging repeat, not a loop), and `rs1`
+    depends on `pod`, which *is* a loop back into its own ancestor.
+    """
+    root = _resource("Deployment", "api")
+    rs1 = _resource("ReplicaSet", "api-rs1")
+    rs2 = _resource("ReplicaSet", "api-rs2")
+    pod = _resource("Pod", "api-pod")
+    edges = (
+        _edge(rs1, root, relation=RelationKind.OWNED_BY),
+        _edge(rs2, root, relation=RelationKind.OWNED_BY),
+        _edge(pod, rs1, relation=RelationKind.OWNED_BY),
+        _edge(pod, rs2, relation=RelationKind.MANAGED_BY, field="spec.repeatProbe"),
+        _edge(rs1, pod, relation=RelationKind.USES_CONFIG, field="spec.cycleProbe"),
+    )
+    return RelationshipGraph(
+        nodes=(root, rs1, rs2, pod),
+        edges=edges,
+        coverage=(),
+        limits=GraphLimits(max_nodes=50),
     )
 
 
@@ -289,7 +316,7 @@ async def test_expansion_and_coverage_remain_bounded() -> None:
         table = app.screen.query_one(DataTable)
         await until(pilot, lambda: table.row_count > 4, label="expanded rows rendered")
         text = "\n".join(_all_cells(table))
-        assert "cycle" in text.lower()
+        assert "repeat" in text.lower()
         assert "capped" in text.lower()
         assert table.row_count <= screen.graph.limits.max_nodes + 4
         await pilot.press("c")
@@ -491,3 +518,30 @@ async def test_detailed_coverage_distinguishes_the_same_gvr_in_two_scopes() -> N
         # A scope-less record (the graph-wide caps) keeps its concise form.
         assert "core/*: capped" in detailed
         assert "@:" not in detailed
+
+
+async def test_expansion_labels_a_repeat_dependent_distinctly_from_a_cycle() -> None:
+    """A dependent reached twice is not a loop.
+
+    The expansion must show the genuine back-edge as a cycle row and the
+    second, converging edge as its own repeat row — rendering it as a
+    cycle would tell an operator their resources form a loop they do not
+    have, and dropping it would hide a real relationship.
+    """
+    app = HostApp()
+    screen = RelationshipScreen(_cycle_and_repeat_graph(), _resource("Deployment", "api"))
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.press("d")
+        table = app.screen.query_one(DataTable)
+        await until(pilot, lambda: table.row_count > 4, label="expanded rows rendered")
+        directions = [str(table.get_row_at(row)[0]) for row in range(table.row_count)]
+        cycle_rows = [row for row, label in enumerate(directions) if "cycle" in label]
+        repeat_rows = [row for row, label in enumerate(directions) if "repeat" in label]
+        assert len(cycle_rows) == 1
+        assert len(repeat_rows) == 1
+        cycle_cells = [str(cell) for cell in table.get_row_at(cycle_rows[0])]
+        repeat_cells = [str(cell) for cell in table.get_row_at(repeat_rows[0])]
+        assert "spec.cycleProbe" in cycle_cells
+        assert "api-pod" in " ".join(repeat_cells)
+        assert table.row_count <= screen.graph.limits.max_nodes + 4

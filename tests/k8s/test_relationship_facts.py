@@ -671,3 +671,40 @@ def _placement_template_spec() -> dict[str, object]:
         "imagePullSecrets": [{"name": "wl-pull"}],
         "containers": [{"name": "app", "envFrom": [{"secretRef": {"name": "wl-creds"}}]}],
     }
+
+
+def test_endpoint_target_ref_without_namespace_defaults_to_the_slice_namespace() -> None:
+    """An omitted `targetRef.namespace` means the EndpointSlice's own
+    namespace (Kubernetes ObjectReference semantics), not cluster scope —
+    leaving it blank makes a same-namespace Pod unresolvable by name."""
+    facts = extract_relationship_facts(
+        "EndpointSlice",
+        "discovery.k8s.io",
+        "v1",
+        {
+            "metadata": {"name": "api-abc", "namespace": "prod"},
+            "endpoints": [{"targetRef": {"apiVersion": "v1", "kind": "Pod", "name": "api-0"}}],
+        },
+    )
+    assert len(facts.references) == 1
+    assert facts.references[0].target.namespace == "prod"
+    assert facts.references[0].relation is RelationKind.ROUTES_TO
+
+
+def test_endpoint_target_ref_namespace_stays_authoritative_when_present() -> None:
+    """An explicit namespace wins, including a genuinely cross-namespace
+    one — which the graph then judges under its own cross-namespace rules."""
+    facts = extract_relationship_facts(
+        "EndpointSlice",
+        "discovery.k8s.io",
+        "v1",
+        {
+            "metadata": {"name": "api-abc", "namespace": "prod"},
+            "endpoints": [
+                {"targetRef": {"kind": "Pod", "namespace": "staging", "name": "api-0"}},
+                {"targetRef": {"kind": "Pod", "namespace": "", "name": "api-1"}},
+            ],
+        },
+    )
+    namespaces = [fact.target.namespace for fact in facts.references]
+    assert namespaces == ["staging", "prod"]

@@ -798,8 +798,9 @@ def test_walk_dependents_preserves_edge_list_order_within_a_depth() -> None:
 def test_walk_dependents_keeps_every_parallel_edge_between_the_same_pair() -> None:
     """Two distinct relationships between the same pair of resources are
     two edges: the first is traversed, the second revisits an already
-    visited resource and is therefore a cycle -- an adjacency index keyed
-    by resource must not collapse them into one."""
+    reached resource -- an adjacency index keyed by resource must not
+    collapse them into one. The revisit is not a cycle (the pair does not
+    loop); see the classification tests below."""
     deployment = _input("Deployment", "apps", "prod", "api", "deploy-1")
     pod = _input(
         "Pod",
@@ -837,9 +838,10 @@ def test_walk_dependents_keeps_every_parallel_edge_between_the_same_pair() -> No
     result = graph.walk_dependents(root)
     assert len(graph.dependents_of(root)) == 2
     assert len(result.edges) == 1
-    assert len(result.cycles) == 1
+    assert len(result.revisits) == 1
+    assert result.cycles == ()
     assert result.edges[0].evidence.field == "metadata.ownerReferences[0]"
-    assert result.cycles[0].evidence.field == "spec.volumes[0].configMap"
+    assert result.revisits[0].evidence.field == "spec.volumes[0].configMap"
 
 
 def test_walk_dependents_node_cap_cuts_at_the_same_edge_as_the_edge_order() -> None:
@@ -1444,3 +1446,181 @@ def test_pv_claim_ref_uid_flows_from_the_manifest_into_graph_resolution() -> Non
     edge = next(edge for edge in graph.edges if edge.subject.kind == "PersistentVolume")
     assert edge.resolution is EdgeResolution.MISSING
     assert edge.target.uid == "pvc-old"
+
+
+def test_endpoint_slice_target_without_namespace_resolves_in_its_own_namespace() -> None:
+    """Manifest -> graph: a same-namespace endpoint target that omits
+    `targetRef.namespace` must resolve to the Pod in the slice's namespace,
+    not stay missing against a blank (cluster-scoped) namespace."""
+    facts = extract_relationship_facts(
+        "EndpointSlice",
+        "discovery.k8s.io",
+        "v1",
+        {
+            "metadata": {"name": "api-abc", "namespace": "prod"},
+            "endpoints": [{"targetRef": {"apiVersion": "v1", "kind": "Pod", "name": "api-0"}}],
+        },
+    )
+    slice_input = _input(
+        "EndpointSlice", "discovery.k8s.io", "prod", "api-abc", "eps-1", relationships=facts
+    )
+    pod = _pod_input("api-0", namespace="prod")
+    graph = build_relationship_graph(
+        [slice_input, pod], [_complete("endpointslices"), _complete("pods")]
+    )
+    edge = next(edge for edge in graph.edges if edge.relation is RelationKind.ROUTES_TO)
+    assert edge.resolution is EdgeResolution.RESOLVED
+    assert edge.target.namespace == "prod"
+
+
+def _diamond_graph() -> RelationshipGraph:
+    """`root` <- rs-a, rs-b; `pod-0` depends on both (a diamond, not a cycle)."""
+    root = _input("Deployment", "apps", "prod", "api", "deploy-1")
+    replica_sets = [
+        _input(
+            "ReplicaSet",
+            "apps",
+            "prod",
+            name,
+            name,
+            relationships=_facts(
+                references=(
+                    _ref(
+                        "owned_by",
+                        "apps",
+                        "Deployment",
+                        "prod",
+                        "api",
+                        uid="deploy-1",
+                        field="metadata.ownerReferences[0]",
+                    ),
+                )
+            ),
+        )
+        for name in ("rs-a", "rs-b")
+    ]
+    pod = _input(
+        "Pod",
+        "",
+        "prod",
+        "pod-0",
+        "pod-0",
+        relationships=_facts(
+            references=(
+                _ref(
+                    "owned_by",
+                    "apps",
+                    "ReplicaSet",
+                    "prod",
+                    "rs-a",
+                    uid="rs-a",
+                    field="metadata.ownerReferences[0]",
+                ),
+                _ref(
+                    "uses_config",
+                    "apps",
+                    "ReplicaSet",
+                    "prod",
+                    "rs-b",
+                    uid="rs-b",
+                    field="spec.volumes[0].configMap",
+                ),
+            )
+        ),
+    )
+    return build_relationship_graph(
+        [root, *replica_sets, pod],
+        [_complete("deployments"), _complete("replicasets"), _complete("pods")],
+    )
+
+
+def test_walk_dependents_does_not_call_a_diamond_join_a_cycle() -> None:
+    """Two independent paths converging on one dependent is a DAG, not a
+    cycle: the second path's edge revisits an already-visited resource
+    without ever returning to an ancestor of itself."""
+    graph = _diamond_graph()
+    root = _resource(graph, "Deployment", "api")
+    result = graph.walk_dependents(root)
+    assert result.cycles == ()
+    assert [edge.subject.name for edge in result.edges] == ["rs-a", "rs-b", "pod-0"]
+    assert [edge.evidence.field for edge in result.revisits] == ["spec.volumes[0].configMap"]
+    assert result.truncated is False
+
+
+def test_walk_dependents_reports_parallel_edges_as_revisits_not_cycles() -> None:
+    """Two distinct relationships between the same pair are two edges, but
+    the second is a repeat of a resource already reached — not a loop back
+    into the path that reached it."""
+    deployment = _input("Deployment", "apps", "prod", "api", "deploy-1")
+    pod = _input(
+        "Pod",
+        "",
+        "prod",
+        "api-0",
+        "pod-1",
+        relationships=_facts(
+            references=(
+                _ref(
+                    "owned_by",
+                    "apps",
+                    "Deployment",
+                    "prod",
+                    "api",
+                    uid="deploy-1",
+                    field="metadata.ownerReferences[0]",
+                ),
+                _ref(
+                    "uses_config",
+                    "apps",
+                    "Deployment",
+                    "prod",
+                    "api",
+                    uid="deploy-1",
+                    field="spec.volumes[0].configMap",
+                ),
+            )
+        ),
+    )
+    graph = build_relationship_graph(
+        [deployment, pod], [_complete("deployments"), _complete("pods")]
+    )
+    result = graph.walk_dependents(_resource(graph, "Deployment", "api"))
+    assert [edge.evidence.field for edge in result.edges] == ["metadata.ownerReferences[0]"]
+    assert [edge.evidence.field for edge in result.revisits] == ["spec.volumes[0].configMap"]
+    assert result.cycles == ()
+
+
+def test_walk_dependents_still_reports_a_genuine_back_edge_as_a_cycle() -> None:
+    """A dependent that loops back into an ancestor of the path that
+    reached it is a real cycle and must stay classified as one."""
+    graph = _owner_graph(
+        ("Deployment", "deploy-1"),
+        ("ReplicaSet", "rs-1"),
+        ("Pod", "pod-1"),
+        cycle_to="pod-1",
+    )
+    result = graph.walk_dependents(_resource(graph, "Deployment", "deploy-1"))
+    assert [edge.evidence.field for edge in result.cycles] == ["spec.cycleProbe"]
+    assert result.revisits == ()
+
+
+def test_walk_dependents_reports_a_self_dependency_as_a_cycle() -> None:
+    """A resource that references itself loops back into the path trivially."""
+    config = _input(
+        "ConfigMap",
+        "",
+        "prod",
+        "api-config",
+        "cm-1",
+        relationships=_facts(
+            references=(
+                _ref(
+                    "uses_config", "", "ConfigMap", "prod", "api-config", uid="cm-1", field="spec"
+                ),
+            )
+        ),
+    )
+    graph = build_relationship_graph([config], [_complete("configmaps")])
+    result = graph.walk_dependents(_resource(graph, "ConfigMap", "api-config"))
+    assert [edge.evidence.field for edge in result.cycles] == ["spec"]
+    assert result.edges == ()

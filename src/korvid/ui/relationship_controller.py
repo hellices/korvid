@@ -46,13 +46,16 @@ class GraphSourceSpec:
     `optional` marks a source whose absence from the cluster (a missing
     CRD, not an RBAC denial) is expected and unremarkable — a 404/405 LIST
     response is reported as `CoverageState.UNAVAILABLE` rather than
-    `CoverageState.FAILED`.
+    `CoverageState.FAILED`. `detail` is the text an unavailable record
+    carries, so a source that is absent for a reason other than plain
+    discovery can say which.
     """
 
     group: str
     kind: str
     plural: str
     optional: bool = False
+    detail: str = "not discovered on this cluster"
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,11 +144,14 @@ def graph_source_metas(
     `gateway.networking.k8s.io/*` spec — both destined to become
     `CoverageState.UNAVAILABLE` records before any LIST is attempted.
 
-    `root` and `namespace` are accepted for interface symmetry with
-    `RelationshipSnapshotLoader.load`; the source catalog itself is fixed
-    and does not vary with the currently viewed resource or namespace.
+    The selected `root`'s own kind is included as a source too (see
+    `_root_source`), so opening the graph on a discovered custom resource
+    outside the fixed/Gateway catalogs still LISTs it and keeps the owner
+    references every kind carries. `namespace` is accepted for interface
+    symmetry with `RelationshipSnapshotLoader.load`; the catalog itself
+    does not vary with it.
     """
-    del root, namespace  # unused: the catalog is root/namespace independent
+    del namespace  # unused: the catalog is namespace independent
     selected: dict[tuple[str, str], ResourceMeta] = {}
     missing: list[GraphSourceSpec] = []
 
@@ -164,8 +170,47 @@ def graph_source_metas(
     if not gateway_found:
         missing.append(_GATEWAY_MISSING_SPEC)
 
+    root_missing = _root_source(root, aliases, selected, missing)
+    if root_missing is not None:
+        missing.append(root_missing)
+
     metas = tuple(sorted(selected.values(), key=lambda meta: (meta.group, meta.plural)))
     return metas, tuple(missing)
+
+
+def _root_source(
+    root: GraphResource,
+    aliases: Mapping[str, ResourceMeta],
+    selected: dict[tuple[str, str], ResourceMeta],
+    missing: Sequence[GraphSourceSpec],
+) -> GraphSourceSpec | None:
+    """Add the selected root's own kind to `selected`, or say why not.
+
+    A discovered, non-synthetic kind outside the fixed/Gateway catalogs (a
+    CRD the user is looking at) is added once, keyed the same
+    `(group, plural)` way as every other source, so it simply joins the
+    deterministic source order and is deduplicated against a catalog entry
+    that already covers it.
+
+    When the root's kind has no listable API resource — discovery never
+    reported it, or it is one of korvid's synthetic views — the caller
+    records that honestly instead. No plural is invented for a kind
+    discovery never described: the record names the kind itself.
+    """
+    if any(meta.group == root.group and meta.kind == root.kind for meta in selected.values()):
+        return None
+    if any(spec.group == root.group and spec.kind == root.kind for spec in missing):
+        return None  # a fixed-source record already reports this exact kind
+    meta = _metas_by_group_kind(aliases).get((root.group, root.kind))
+    if meta is not None and not meta.synthetic:
+        selected[(meta.group, meta.plural)] = meta
+        return None
+    detail = (
+        "korvid-invented view with no API resource to list"
+        if meta is not None
+        else "not discovered on this cluster"
+    )
+    return GraphSourceSpec(root.group, root.kind, root.kind, optional=True, detail=detail)
 
 
 def _missing_coverage(spec: GraphSourceSpec) -> CoverageRecord:
@@ -174,7 +219,7 @@ def _missing_coverage(spec: GraphSourceSpec) -> CoverageRecord:
         resource=spec.plural,
         scope="",
         state=CoverageState.UNAVAILABLE,
-        detail="not discovered on this cluster",
+        detail=spec.detail,
     )
 
 
@@ -256,15 +301,16 @@ def _metas_by_group_kind(
     return {(meta.group, meta.kind): meta for meta in aliases.values()}
 
 
-def _routes_to_target_namespaces(
-    fetched: Sequence[tuple[ResourceMeta, list[SummaryLike]]], namespace: str
+def _cross_namespace_route_targets(
+    fetched: Sequence[tuple[ResourceMeta, list[SummaryLike]]],
 ) -> dict[str, set[tuple[str, str]]]:
-    """The `(group, kind)`s each *other* namespace is referenced for.
+    """The `(group, kind)`s each namespace is referenced for from outside it.
 
-    Only `routes_to` facts that explicitly name a different namespace than
-    the one already listed are considered — the graph authorizes exactly
-    those against a `ReferenceGrant`, and nothing else may widen the LIST
-    fan-out beyond the namespaces a route named itself.
+    A `routes_to` fact is cross-namespace when it explicitly names a
+    namespace other than its own subject's — the same test the graph uses
+    to decide an edge needs `ReferenceGrant` authorization. This is derived
+    from the facts alone, so it is meaningful whether or not the snapshot
+    goes on to issue follow-up LISTs.
     """
     targets: dict[str, set[tuple[str, str]]] = {}
     for _meta, summaries in fetched:
@@ -273,7 +319,7 @@ def _routes_to_target_namespaces(
                 target = fact.target
                 if fact.relation is not RelationKind.ROUTES_TO:
                     continue
-                if not target.namespace or target.namespace == namespace:
+                if not target.namespace or target.namespace == summary.namespace:
                     continue
                 targets.setdefault(target.namespace, set()).add((target.group, target.kind))
     return targets
@@ -294,21 +340,22 @@ def _target_namespace_requests(
 
     An all-namespaces snapshot (`namespace is None`) returns nothing: every
     target namespace is already in the first phase's results, so a
-    follow-up could only duplicate a LIST that already ran. A kind that
-    discovery never reported is skipped rather than guessed at: an API
-    resource absent from discovery has no objects to list. So is a
+    follow-up could only duplicate a LIST that already ran. A namespace
+    already listed in the first phase is skipped for the same reason. A
+    kind that discovery never reported is skipped rather than guessed at:
+    an API resource absent from discovery has no objects to list. So is a
     `synthetic` kind — a korvid-invented view (the helm browser and
     friends) shares the alias map but has no API endpoint at all, exactly
     as `_selected_relationship_root` already refuses one as a graph root.
     """
     if namespace is None:
         return []
-    targets = _routes_to_target_namespaces(fetched, namespace)
-    if not targets:
-        return []
+    targets = _cross_namespace_route_targets(fetched)
     by_group_kind = _metas_by_group_kind(aliases)
     requests: list[tuple[ResourceMeta, str]] = []
     for target_namespace in sorted(targets):
+        if target_namespace == namespace:
+            continue  # already listed by the first phase
         wanted = targets[target_namespace] | {(_GATEWAY_GROUP, _REFERENCE_GRANT_KIND)}
         metas: dict[tuple[str, str], ResourceMeta] = {}
         for group_kind in wanted:
@@ -335,6 +382,56 @@ def _cap_target_requests(
         detail=f"{dropped} target-namespace LIST(s) dropped at the {limit}-target-list cap",
     )
     return list(requests[:limit]), record
+
+
+def _grant_gap_record(scope: str) -> CoverageRecord:
+    return CoverageRecord(
+        group=_GATEWAY_GROUP,
+        resource=_REFERENCE_GRANT_KIND,
+        scope=scope,
+        state=CoverageState.UNAVAILABLE,
+        detail=(
+            "ReferenceGrant is not discovered on this cluster; cross-namespace "
+            "references stay denied with no authorization source to read"
+        ),
+    )
+
+
+def _missing_grant_coverage(
+    fetched: Sequence[tuple[ResourceMeta, list[SummaryLike]]],
+    namespace: str | None,
+    requests: Sequence[tuple[ResourceMeta, str]],
+    aliases: Mapping[str, ResourceMeta],
+) -> list[CoverageRecord]:
+    """Records for the namespaces whose authorization source is absent.
+
+    A cluster can serve Gateway Routes without the `ReferenceGrant` kind
+    being discovered at all. Those routes still load and their
+    cross-namespace edges still default-deny — but with no grant source to
+    read, that denial is not evidence, so the gap is recorded instead of
+    the snapshot reporting complete coverage.
+
+    A namespaced snapshot reports one record per target namespace it
+    actually loaded (deduplicated and sorted, so the records stay bounded
+    by the follow-up cap and never describe a namespace this snapshot did
+    not read). An all-namespaces snapshot issues no follow-ups at all, yet
+    has exactly the same gap — it is reported once, cluster-wide, whenever
+    any `routes_to` fact crossed a namespace, never once per route or per
+    target namespace.
+
+    Nothing is reported when the kind *is* discovered (an empty LIST is a
+    read that happened) or when no reference ever crossed a namespace.
+    """
+    if _metas_by_group_kind(aliases).get((_GATEWAY_GROUP, _REFERENCE_GRANT_KIND)) is not None:
+        return []
+    if namespace is None:
+        if not _cross_namespace_route_targets(fetched):
+            return []
+        return [_grant_gap_record("")]
+    return [
+        _grant_gap_record(target_namespace)
+        for target_namespace in sorted({target_namespace for _meta, target_namespace in requests})
+    ]
 
 
 #: One source LIST's outcome: its meta, its summaries (None when the LIST
@@ -416,6 +513,7 @@ class RelationshipSnapshotLoader:
         )
         if target_cap_record is not None:
             coverage.append(target_cap_record)
+        coverage.extend(_missing_grant_coverage(fetched, namespace, requests, aliases))
         if requests:
             target_results = await self._gather(list(requests), semaphore)
             fetched.extend(_join_results(target_results, coverage))

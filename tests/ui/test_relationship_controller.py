@@ -675,3 +675,179 @@ async def test_synthetic_target_kinds_are_never_listed() -> None:
     )
     assert ("", "helmreleases", "prod") not in lister.calls
     assert (GATEWAY, "referencegrants", "prod") in lister.calls
+
+
+#: A discovered, non-synthetic CRD outside the fixed and Gateway catalogs.
+WIDGET_META = ResourceMeta("Widget", "widgets", "example.com", "v1", True)
+
+
+def _widget_summary(name: str = "widget-a", *, namespace: str = "prod") -> GenericSummary:
+    """A CR owned by `apps/Deployment prod/api` (uid `deploy-1`)."""
+    return GenericSummary(
+        name=name,
+        namespace=namespace,
+        kind="Widget",
+        created="",
+        uid=name,
+        relationships=RelationshipFacts(
+            api_group="example.com",
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.OWNED_BY,
+                    target=TargetReference("apps", "Deployment", namespace, "api", "deploy-1"),
+                    confidence=FactConfidence.DECLARED,
+                    field="metadata.ownerReferences[0]",
+                ),
+            ),
+        ),
+    )
+
+
+async def test_missing_reference_grant_discovery_is_visible_per_target_namespace() -> None:
+    """A cluster with Routes but no ReferenceGrant CRD has no authorization
+    source at all. The backend still loads and the edge still default-denies,
+    but coverage must say the grant source was unavailable in that namespace
+    instead of reporting a complete snapshot that "proves" the denial."""
+    lister = _NamespacedLister(
+        results={
+            (GATEWAY, "httproutes", "edge"): [_route_summary()],
+            ("", "services", "prod"): [_generic_summary("api", namespace="prod", kind="Service")],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", "edge"), "edge", _aliases(HTTP_ROUTE_META, SERVICE_META)
+    )
+    records = [
+        record
+        for record in graph.coverage
+        if record.group == GATEWAY and record.resource == "ReferenceGrant"
+    ]
+    assert [(record.scope, record.state) for record in records] == [
+        ("prod", CoverageState.UNAVAILABLE)
+    ]
+    assert graph.incomplete
+    assert _routes_to_resolution(graph) is EdgeResolution.INVALID
+
+
+async def test_discovered_reference_grant_emits_no_unavailable_record() -> None:
+    """The honesty record must not fire when the grant source does exist."""
+    lister = _NamespacedLister(
+        results={
+            (GATEWAY, "httproutes", "edge"): [_route_summary()],
+            ("", "services", "prod"): [_generic_summary("api", namespace="prod", kind="Service")],
+            (GATEWAY, "referencegrants", "prod"): [_grant_summary()],
+        }
+    )
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", "edge"), "edge", _route_aliases()
+    )
+    assert all(record.resource != "ReferenceGrant" for record in graph.coverage)
+    assert _routes_to_resolution(graph) is EdgeResolution.RESOLVED
+
+
+async def test_discovered_custom_resource_root_is_listed_with_its_owner_facts() -> None:
+    """The selected root's own kind must be a source.
+
+    A discovered CRD outside the fixed/Gateway catalogs was never LISTed,
+    so opening the graph on one showed nothing about it — not even the
+    universal owner references every kind carries.
+    """
+    lister = _NamespacedLister(
+        results={
+            ("example.com", "widgets", "prod"): [_widget_summary()],
+            ("apps", "deployments", "prod"): [
+                GenericSummary(
+                    name="api", namespace="prod", kind="Deployment", created="", uid="deploy-1"
+                )
+            ],
+        }
+    )
+    root = GraphResource(group="example.com", kind="Widget", namespace="prod", name="widget-a")
+    graph = await RelationshipSnapshotLoader(lister).load(
+        root, "prod", _aliases(WIDGET_META, DEPLOYMENT_META, PODS_META)
+    )
+    assert ("example.com", "widgets", "prod") in lister.calls
+    owner_edges = [edge for edge in graph.edges if edge.relation is RelationKind.OWNED_BY]
+    assert [edge.subject.kind for edge in owner_edges] == ["Widget"]
+    assert owner_edges[0].resolution is EdgeResolution.RESOLVED
+    assert owner_edges[0].target.uid == "deploy-1"
+
+
+def test_root_source_is_deduped_and_deterministically_ordered() -> None:
+    """The root's kind joins the ordinary `(group, plural)` source order
+    exactly once, even when it is already part of the fixed catalog."""
+    aliases = _aliases(WIDGET_META, PODS_META, SERVICE_META)
+    root = GraphResource(group="example.com", kind="Widget", namespace="prod", name="widget-a")
+    sources, _missing = graph_source_metas(root, "prod", aliases)
+    assert list(sources) == [PODS_META, SERVICE_META, WIDGET_META]
+
+    pod_root = GraphResource(group="", kind="Pod", namespace="prod", name="api-0")
+    pod_sources, _pod_missing = graph_source_metas(pod_root, "prod", aliases)
+    assert list(pod_sources).count(PODS_META) == 1
+
+
+def test_undiscovered_root_kind_is_reported_as_unavailable() -> None:
+    """A root whose kind discovery never reported cannot be listed. Say so
+    with the kind itself rather than inventing a plural for it."""
+    root = GraphResource(group="example.com", kind="Widget", namespace="prod", name="widget-a")
+    sources, missing = graph_source_metas(root, "prod", _aliases(PODS_META))
+    assert all(meta.kind != "Widget" for meta in sources)
+    assert any(spec.group == "example.com" and spec.plural == "Widget" for spec in missing)
+
+
+def test_synthetic_root_kind_is_never_listed() -> None:
+    """A korvid-invented view has no API endpoint; it must not become a
+    source just because it shares the alias map."""
+    root = GraphResource(group="", kind="HelmRelease", namespace="prod", name="release-a")
+    sources, missing = graph_source_metas(root, "prod", _aliases(PODS_META, SYNTHETIC_META))
+    assert all(not meta.synthetic for meta in sources)
+    assert any(spec.plural == "HelmRelease" for spec in missing)
+
+
+async def test_all_namespaces_reports_a_missing_reference_grant_once() -> None:
+    """An all-namespaces snapshot issues no follow-up LISTs, but a cluster
+    with cross-namespace routes and no discovered `ReferenceGrant` kind
+    still has no authorization source. The gap must be recorded once —
+    not once per route, not once per target namespace — instead of every
+    such edge default-denying under complete coverage."""
+    routes: list[SummaryLike] = [
+        _route_summary("route-a", namespace="edge", targets=(("prod", "api"), ("qa", "api"))),
+        _route_summary("route-b", namespace="stage", targets=(("prod", "api"),)),
+    ]
+    lister = _NamespacedLister(results={(GATEWAY, "httproutes", None): routes})
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", ""), None, _aliases(HTTP_ROUTE_META, SERVICE_META)
+    )
+    records = [record for record in graph.coverage if record.resource == "ReferenceGrant"]
+    assert [(record.group, record.scope, record.state) for record in records] == [
+        (GATEWAY, "", CoverageState.UNAVAILABLE)
+    ]
+    assert graph.incomplete
+    assert all(call[2] is None for call in lister.calls)
+
+
+async def test_all_namespaces_without_cross_namespace_routes_reports_no_grant_gap() -> None:
+    """No cross-namespace reference means no authorization decision was
+    ever needed: an absent `ReferenceGrant` kind is then unremarkable."""
+    routes: list[SummaryLike] = [
+        _route_summary("route-a", namespace="edge", targets=(("edge", "api"),))
+    ]
+    lister = _NamespacedLister(results={(GATEWAY, "httproutes", None): routes})
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", ""), None, _aliases(HTTP_ROUTE_META, SERVICE_META)
+    )
+    assert all(record.resource != "ReferenceGrant" for record in graph.coverage)
+
+
+async def test_all_namespaces_with_a_discovered_reference_grant_reports_no_gap() -> None:
+    """The record tracks the *kind* being undiscovered, not the absence of
+    grant objects: a discovered (if empty) ReferenceGrant source is a read
+    that happened, so cross-namespace denials there are evidence."""
+    routes: list[SummaryLike] = [
+        _route_summary("route-a", namespace="edge", targets=(("prod", "api"),))
+    ]
+    lister = _NamespacedLister(results={(GATEWAY, "httproutes", None): routes})
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", ""), None, _route_aliases()
+    )
+    assert all(record.resource != "ReferenceGrant" for record in graph.coverage)

@@ -168,11 +168,22 @@ class GraphLimits:
 
 @dataclass(frozen=True, slots=True)
 class TraversalResult:
-    """The result of a bounded breadth-first `walk_dependents` traversal."""
+    """The result of a bounded breadth-first `walk_dependents` traversal.
+
+    `edges` are the traversal's tree edges — one per newly reached
+    resource. `cycles` are genuine back-edges: the dependent is an
+    *ancestor* of the resource it depends on along the very path the walk
+    took to get there, so the relationship really does loop. `revisits`
+    are every other edge into an already-reached resource (a diamond's
+    second path, a parallel second relationship between the same pair):
+    real relationships that must be reported, but not loops, and not a
+    reason to walk the same resource twice.
+    """
 
     edges: tuple[RelationshipEdge, ...]
     cycles: tuple[RelationshipEdge, ...]
     truncated: bool
+    revisits: tuple[RelationshipEdge, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,26 +223,36 @@ class RelationshipGraph:
     ) -> TraversalResult:
         """Breadth-first traversal of dependents, excluding `resource` itself.
 
-        Resources are deduplicated by full `GraphResource` identity. An edge
-        that returns to an already-visited resource (including `resource`
-        itself) is recorded in `cycles` rather than being traversed again.
+        Resources are deduplicated by full `GraphResource` identity, so no
+        resource is ever walked twice. An edge into an already-reached
+        resource is classified rather than traversed: it is a `cycle` only
+        when its dependent is an *ancestor* on the path the walk took to
+        reach it (a genuine loop), and a `revisit` otherwise — a diamond's
+        second path or a second parallel relationship between the same two
+        resources is a real edge but not a loop. Ancestry is tracked
+        separately from the global visited set precisely because the two
+        answer different questions.
+
         `truncated` is set once the node cap is reached, or when the depth
         cap stops traversal while a genuine unvisited dependent remains
-        beyond it; a depth cap reached only by cycle edges (which loop back
-        into resources already visited) does not count as truncation.
+        beyond it; a depth cap reached only by edges that loop back into
+        resources already visited does not count as truncation.
 
         The dependents adjacency is indexed once up front (see
         `_dependents_index`) rather than rescanning every edge per visited
         resource, so one traversal costs a single pass over `edges` no
-        matter how many resources it reaches.
+        matter how many resources it reaches. The ancestry check walks
+        parent links, which is bounded by the depth cap, never by the
+        graph's size.
         """
         depth_limit = self.limits.max_depth if max_depth is None else max_depth
         node_limit = self.limits.max_nodes if max_nodes is None else max_nodes
         dependents = _dependents_index(self.edges)
 
-        visited = {resource}
+        parent_of: dict[GraphResource, GraphResource | None] = {resource: None}
         edges: list[RelationshipEdge] = []
         cycles: list[RelationshipEdge] = []
+        revisits: list[RelationshipEdge] = []
         frontier = [resource]
         depth = 0
         truncated = False
@@ -242,13 +263,16 @@ class RelationshipGraph:
             next_frontier: list[GraphResource] = []
             for current in frontier:
                 for edge in dependents.get(current, ()):
-                    if edge.subject in visited:
-                        cycles.append(edge)
+                    if edge.subject in parent_of:
+                        target = (
+                            cycles if _is_ancestor(edge.subject, current, parent_of) else revisits
+                        )
+                        target.append(edge)
                         continue
                     if added_nodes >= node_limit:
                         truncated = True
                         break
-                    visited.add(edge.subject)
+                    parent_of[edge.subject] = current
                     added_nodes += 1
                     edges.append(edge)
                     next_frontier.append(edge.subject)
@@ -261,16 +285,43 @@ class RelationshipGraph:
             # expanded. That is only a real truncation if some frontier
             # resource has a genuine unvisited dependent beyond the cap;
             # an edge that only loops back into an already-visited
-            # resource (a cycle) is not unexplored work being dropped.
+            # resource (a cycle or a revisit) is not unexplored work
+            # being dropped.
             has_unexplored_dependent = any(
-                edge.subject not in visited
+                edge.subject not in parent_of
                 for current in frontier
                 for edge in dependents.get(current, ())
             )
             if has_unexplored_dependent:
                 truncated = True
 
-        return TraversalResult(edges=tuple(edges), cycles=tuple(cycles), truncated=truncated)
+        return TraversalResult(
+            edges=tuple(edges),
+            cycles=tuple(cycles),
+            truncated=truncated,
+            revisits=tuple(revisits),
+        )
+
+
+def _is_ancestor(
+    candidate: GraphResource,
+    node: GraphResource,
+    parent_of: Mapping[GraphResource, GraphResource | None],
+) -> bool:
+    """True when `candidate` lies on the traversal path that reached `node`.
+
+    Walks the parent links from `node` back to the traversal root, so it
+    costs at most the depth cap regardless of graph size. `node` itself
+    counts: a resource that depends on itself is a genuine one-step loop.
+    An edge into an already-reached resource that is *not* on this path is
+    a converging (diamond) or parallel edge, not a cycle.
+    """
+    current: GraphResource | None = node
+    while current is not None:
+        if current == candidate:
+            return True
+        current = parent_of.get(current)
+    return False
 
 
 def _dependents_index(

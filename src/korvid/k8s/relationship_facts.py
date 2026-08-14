@@ -479,8 +479,17 @@ def _pdb_selector(spec: Mapping[str, Any], api_version: str) -> list[SelectorFac
     return [fact] if fact is not None else []
 
 
-def _endpoint_targets(manifest: Mapping[str, Any]) -> list[ReferenceFact]:
-    """EndpointSlice `endpoints[].targetRef` -> observed `ROUTES_TO` facts."""
+def _endpoint_targets(manifest: Mapping[str, Any], namespace: str) -> list[ReferenceFact]:
+    """EndpointSlice `endpoints[].targetRef` -> observed `ROUTES_TO` facts.
+
+    `targetRef` is an `ObjectReference`, where an omitted `namespace` means
+    the referring object's own namespace — not cluster scope. `namespace`
+    is the EndpointSlice's namespace and is used as that default, so a
+    same-namespace endpoint target resolves by name instead of being
+    looked up against a blank namespace no namespaced Pod can match. An
+    explicit namespace stays authoritative and is judged by the graph's
+    ordinary cross-namespace rules.
+    """
     endpoints = manifest.get("endpoints")
     if not isinstance(endpoints, list):
         return []
@@ -496,12 +505,14 @@ def _endpoint_targets(manifest: Mapping[str, Any]) -> list[ReferenceFact]:
         if not isinstance(kind, str) or not kind or not isinstance(name, str) or not name:
             continue
         group, _version = _split_api_version(str(target_ref.get("apiVersion") or ""))
-        namespace = str(target_ref.get("namespace") or "")
+        target_namespace = str(target_ref.get("namespace") or "") or namespace
         uid = target_ref.get("uid")
         references.append(
             ReferenceFact(
                 relation=RelationKind.ROUTES_TO,
-                target=TargetReference(group, kind, namespace, name, str(uid) if uid else None),
+                target=TargetReference(
+                    group, kind, target_namespace, name, str(uid) if uid else None
+                ),
                 confidence=FactConfidence.OBSERVED,
                 field=f"endpoints[{index}].targetRef",
             )
@@ -773,11 +784,11 @@ def _handle_endpoint_slice(
     _api_version: str,
     _spec: Mapping[str, Any],
     manifest: Mapping[str, Any],
-    _namespace: str,
+    namespace: str,
 ) -> _HandlerResult:
     if group != "discovery.k8s.io":
         return [], [], []
-    return _endpoint_targets(manifest), [], []
+    return _endpoint_targets(manifest, namespace), [], []
 
 
 def _handle_ingress(

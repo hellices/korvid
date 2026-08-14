@@ -108,6 +108,7 @@ def _capped_reasons(
     direct_omitted: int,
     depth_omitted: int,
     cycle_omitted: int,
+    revisit_omitted: int,
     truncated: bool,
     max_nodes: int,
 ) -> str:
@@ -119,9 +120,22 @@ def _capped_reasons(
         parts.append(f"{depth_omitted} deeper dependent row(s) omitted")
     if cycle_omitted:
         parts.append(f"{cycle_omitted} cycle row(s) omitted")
+    if revisit_omitted:
+        parts.append(f"{revisit_omitted} repeat row(s) omitted")
     if truncated:
         parts.append(f"traversal capped at {max_nodes} node(s)")
     return "; ".join(parts) if parts else f"capped at {max_nodes} node(s)"
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpansionOutcome:
+    """What the bounded expansion rendered and what it had to leave out."""
+
+    index: int
+    depth_omitted: int = 0
+    cycle_omitted: int = 0
+    revisit_omitted: int = 0
+    truncated: bool = False
 
 
 class RelationshipScreen(ModalScreen[GotoResult | None]):
@@ -246,12 +260,16 @@ class RelationshipScreen(ModalScreen[GotoResult | None]):
         index, direct_omitted = self._add_direct_dependents(table, index, budget)
         depth_omitted = 0
         cycle_omitted = 0
+        revisit_omitted = 0
         truncated = False
         if self._expanded:
-            index, depth_omitted, cycle_omitted, truncated = self._add_expansion(
-                table, index, budget
-            )
-        if direct_omitted or depth_omitted or cycle_omitted or truncated:
+            outcome = self._add_expansion(table, index, budget)
+            index = outcome.index
+            depth_omitted = outcome.depth_omitted
+            cycle_omitted = outcome.cycle_omitted
+            revisit_omitted = outcome.revisit_omitted
+            truncated = outcome.truncated
+        if direct_omitted or depth_omitted or cycle_omitted or revisit_omitted or truncated:
             index = self._add_capped_row(
                 table,
                 index,
@@ -260,6 +278,7 @@ class RelationshipScreen(ModalScreen[GotoResult | None]):
                     direct_omitted=direct_omitted,
                     depth_omitted=depth_omitted,
                     cycle_omitted=cycle_omitted,
+                    revisit_omitted=revisit_omitted,
                     truncated=truncated,
                     max_nodes=self.graph.limits.max_nodes,
                 ),
@@ -399,16 +418,17 @@ class RelationshipScreen(ModalScreen[GotoResult | None]):
 
     def _add_expansion(
         self, table: DataTable[str | Text], index: int, budget: _RowBudget
-    ) -> tuple[int, int, int, bool]:
+    ) -> _ExpansionOutcome:
         """Bounded dependent expansion (the `d` toggle).
 
         Reuses `RelationshipGraph.walk_dependents` for the actual bounded
         BFS (cap logic lives there, tested independently); this renders
         the *additional* rows beyond the direct dependents already shown —
-        deeper edges (tagged with an order-independent BFS depth) and
-        cycle edges — sharing the same row `budget` as every other
-        section, since `walk_dependents` does not itself bound `cycles`.
-        Returns `(index, depth_omitted, cycle_omitted, truncated)`.
+        deeper edges (tagged with an order-independent BFS depth), genuine
+        cycle edges, and repeat edges (a diamond's second path or a second
+        parallel relationship, which are real but are not loops) — sharing
+        the same row `budget` as every other section, since
+        `walk_dependents` bounds neither `cycles` nor `revisits`.
         """
         result = self.graph.walk_dependents(self.root)
         depth_of = self._bfs_depths(result.edges)
@@ -423,22 +443,51 @@ class RelationshipScreen(ModalScreen[GotoResult | None]):
                 continue
             depth = depth_of[edge.subject]
             index = self._add_dependent_row(table, index, f"Dependents (depth {depth})", edge)
-        cycle_omitted = 0
-        for edge in result.cycles:
+        index, cycle_omitted = self._add_revisit_rows(
+            table, index, budget, result.cycles, "Dependents (cycle)", "cycle"
+        )
+        index, revisit_omitted = self._add_revisit_rows(
+            table, index, budget, result.revisits, "Dependents (repeat)", "repeat"
+        )
+        return _ExpansionOutcome(
+            index=index,
+            depth_omitted=depth_omitted,
+            cycle_omitted=cycle_omitted,
+            revisit_omitted=revisit_omitted,
+            truncated=result.truncated,
+        )
+
+    def _add_revisit_rows(
+        self,
+        table: DataTable[str | Text],
+        index: int,
+        budget: _RowBudget,
+        edges: tuple[RelationshipEdge, ...],
+        label: str,
+        state: str,
+    ) -> tuple[int, int]:
+        """Render edges into an already-reached resource (cycle or repeat).
+
+        These rows are informational: the resource they name was already
+        rendered elsewhere in the table, so they are not navigation
+        targets and never re-enqueue anything.
+        """
+        omitted = 0
+        for edge in edges:
             if not budget.take():
-                cycle_omitted += 1
+                omitted += 1
                 continue
             table.add_row(
-                "Dependents (cycle)",
+                label,
                 edge.relation.value,
                 Text(_resource_label(edge.subject)),
                 edge.confidence.value,
-                "cycle",
+                state,
                 Text(edge.evidence.field),
                 key=f"row-{index}",
             )
             index += 1
-        return index, depth_omitted, cycle_omitted, result.truncated
+        return index, omitted
 
     # ------------------------------------------------------------------
     # Interaction

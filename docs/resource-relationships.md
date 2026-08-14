@@ -120,16 +120,33 @@ By default the screen shows only the root's **direct** dependencies and
 dependents — one hop. Press `d` to toggle a **bounded transitive expansion**
 of dependents: a breadth-first walk outward from the root, capped at
 `max_depth = 5` hops and `max_nodes = 500` visited resources (shared across
-direct rows, expanded rows, and cycle rows by one counter, so no single
-category can silently grow the table past the cap on its own). Deeper rows
-are labelled with their hop count (`Dependents (depth 2)`, etc.).
+direct rows, expanded rows, cycle rows, and repeat rows by one counter, so
+no single category can silently grow the table past the cap on its own).
+Deeper rows are labelled with their hop count (`Dependents (depth 2)`, etc.).
 
-An edge that loops back to an already-visited resource is recorded as a
-**cycle** row (`Dependents (cycle)`) instead of being traversed again, so a
-Deployment → ReplicaSet → Pod chain — or any other cyclical ownership
-pattern — terminates safely rather than looping forever. When any row
+No resource is ever walked twice. An edge that reaches a resource the walk
+already reached is classified rather than traversed again, and the two
+outcomes mean very different things:
+
+- **`Dependents (cycle)`** — a genuine loop: the dependent is an *ancestor*
+  of the resource it depends on, along the very path the walk took to get
+  there (including the root itself, or a resource that references itself).
+  A Deployment → ReplicaSet → Pod chain that loops back to the Deployment
+  terminates safely here rather than looping forever.
+- **`Dependents (repeat)`** — the same resource reached again by a
+  different edge that is *not* a loop: two independent paths converging on
+  one dependent (a diamond — say a Pod owned by one ReplicaSet and selected
+  by another object that also depends on the root), or two distinct
+  relationships between the same pair of resources (for example a Pod both
+  owned by and mounting config from the same object). The relationship is
+  real and is shown, but nothing about it forms a cycle, and the resource
+  is not expanded a second time.
+
+Both row kinds are informational: they name a resource that already appears
+elsewhere in the table, so they are not navigation targets. When any row
 category is capped, a trailing `(capped)` row explains how many rows were
-omitted and why.
+omitted — counted separately for direct, deeper, cycle, and repeat rows —
+and why.
 
 ## Coverage
 
@@ -261,7 +278,7 @@ it has already listed every namespace.
 | `max_resources` | 10,000 | Total resources fed into the graph across every listed source |
 | `max_edges` | 50,000 | Total joined edges kept in the graph |
 | `max_depth` | 5 | Hops the `d` expansion walks outward from the root |
-| `max_nodes` | 500 | Resources visited by the `d` expansion, and the total render-row budget the screen shares across every category |
+| `max_nodes` | 500 | Resources visited by the `d` expansion, and the total render-row budget the screen shares across every category (direct, deeper, cycle, and repeat rows) |
 | `max_concurrency` | 4 | Concurrent LISTs the snapshot loader runs at once |
 | `max_target_lists` | 32 | Follow-up LISTs into the namespaces `routes_to` references name |
 
