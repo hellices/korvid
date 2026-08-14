@@ -675,9 +675,8 @@ class _DiscardingRow(dict):  # type: ignore[type-arg]  # test double mirroring o
 
 def _discard_private_writes(table: ResourceTable) -> None:
     """Drop `_data` writes while keeping `update_cell` effective."""
-    table._data = {  # type: ignore[assignment]  # test double for DataTable's private store
-        key: _DiscardingRow(value) for key, value in table._data.items()
-    }
+    swapped = {key: _DiscardingRow(value) for key, value in table._data.items()}
+    table._data = cast(Any, swapped)
 
     def public_update_cell(row_key: Any, column_key: Any, value: Any, **_kwargs: Any) -> None:
         row = cast(_DiscardingRow, table._data[RowKey(getattr(row_key, "value", row_key))])
