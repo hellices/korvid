@@ -30,6 +30,7 @@ from tests.performance.profile import Burst, FailureInjection, WorkloadProfile
 from tests.performance.replay import (
     MeasuredKorvidApp,
     ReplayAborted,
+    ReplayConfigurationError,
     ReplayOptions,
     build_manifest,
     measure_cursor_input,
@@ -254,7 +255,13 @@ async def test_replay_passes_its_monotonic_clock_to_cursor_sampling(
 
     await run_replay(
         profile,
-        ReplayOptions(time_scale=0, input_sample_pairs=1, monotonic_fn=injected_clock),
+        ReplayOptions(
+            # A compressed schedule is only allowed alongside an injected
+            # clock; the real-clock arm runs this one-second profile as-is.
+            time_scale=0 if use_injected_clock else 1.0,
+            input_sample_pairs=1,
+            monotonic_fn=injected_clock,
+        ),
     )
 
     assert seen == [injected_clock or monotonic]
@@ -363,7 +370,7 @@ async def test_replay_rejects_input_sampling_when_churn_finishes_early() -> None
         WaitTimeout,
         match="input sampling incomplete: churn finished before all 3 cursor sample pairs completed",
     ):
-        await run_replay(profile, ReplayOptions(time_scale=0, input_sample_pairs=3))
+        await run_replay(profile, ReplayOptions(time_scale=1.0, input_sample_pairs=3))
 
 
 async def test_replay_rejects_a_non_positive_input_sample_pair_count() -> None:
@@ -695,7 +702,7 @@ async def test_replay_forbidden_aborts_with_an_explicit_terminal_error() -> None
         failures=(FailureInjection(kind="forbidden", at_event=5),),
     )
     with pytest.raises(ReplayAborted, match="403"):
-        await run_replay(profile, ReplayOptions(time_scale=0))
+        await run_replay(profile, ReplayOptions(time_scale=1.0))
 
 
 async def test_replay_churn_started_before_input_is_false_without_any_events() -> None:
@@ -717,7 +724,7 @@ async def test_replay_churn_started_before_input_is_false_without_any_events() -
         ValueError,
         match="performance input sampling requires at least one scheduled churn event",
     ):
-        await run_replay(profile, ReplayOptions(time_scale=0))
+        await run_replay(profile, ReplayOptions(time_scale=1.0))
 
 
 async def test_measured_app_counts_only_resource_update_renders() -> None:
@@ -1079,3 +1086,41 @@ async def test_a_membership_change_during_the_probe_is_named_as_such(
 
         with pytest.raises(WaitTimeout, match="row count changed from 4 to 3"):
             await measure_cursor_input(pilot, table, "down", timeout=0.2)
+
+
+async def test_run_replay_rejects_a_compressed_schedule_programmatically() -> None:
+    """The CLI rejects `--time-scale < 1.0` because cursor sampling has to run
+    while churn is still being emitted. The programmatic entry point published
+    the same contract only in its CLI, so a caller following `ReplayOptions`'
+    own documentation could still compress the schedule and fail late."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-compressed",
+        seed=186,
+        object_count=4,
+        namespace_count=2,
+        steady_events_per_second=2,
+        duration_seconds=2,
+        bursts=(),
+        failures=(),
+    )
+
+    with pytest.raises(ReplayConfigurationError, match="time_scale must be finite and >= 1"):
+        await run_replay(profile, ReplayOptions(time_scale=0))
+
+
+def test_the_cursor_probe_says_when_the_table_is_not_focused() -> None:
+    """The probe posts a key straight to the app, so it only moves the cursor
+    when the table holds focus. Without that check an unfocused run reports a
+    timeout that reads like an input-latency regression rather than a harness
+    precondition that was not met."""
+
+    class _UnfocusedTable:
+        has_focus = False
+        cursor_row = 0
+        row_count = 5
+
+    with pytest.raises(ValueError, match="requires the table to have focus"):
+        asyncio.run(
+            measure_cursor_input(None, cast(ResourceTable, _UnfocusedTable()), "down", timeout=0.2)
+        )

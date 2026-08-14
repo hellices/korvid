@@ -704,9 +704,10 @@ async def test_batching_falls_back_when_the_private_store_does_not_take_writes()
 
         await until(
             pilot,
-            lambda: str(table.get_row("default/alpha")[2]) == "Failed",
-            label="cell reached the table through the fallback",
+            lambda: "Failed" in table.render_line(1).text,
+            label="new cell painted through the fallback",
         )
+
         assert table._cell_batching_usable is False
 
 
@@ -776,16 +777,19 @@ async def test_a_row_appended_into_the_viewport_reaches_the_screen() -> None:
         await until(pilot, lambda: table.row_count == 3, label="pods loaded")
         assert table.max_scroll_y == 0  # every row is on screen
         before = table.virtual_size.height
+        assert "pod-03" not in _painted_pods(table)
 
         app.store.apply_event("pods", "default", "ADDED", _pod("pod-03"))
         await until(pilot, lambda: table.row_count == 4, label="row appended")
 
-        assert table.get_row("default/pod-03")[0] == "pod-03"
+        del before
         await until(
             pilot,
-            lambda: table.virtual_size.height > before,
-            label="virtual size grew for the appended row",
+            lambda: "pod-03" in _painted_pods(table),
+            label="appended row painted",
         )
+
+        assert "pod-03" in _painted_line(table, "pod-03")
 
 
 class _RaisingRow(dict):  # type: ignore[type-arg]  # test double mirroring one row of DataTable._data
@@ -822,7 +826,28 @@ async def test_batching_falls_back_when_the_private_write_itself_fails() -> None
 
         await until(
             pilot,
-            lambda: str(table.get_row("default/alpha")[2]) == "Failed",
-            label="cell reached the table through the fallback",
+            lambda: "Failed" in table.render_line(1).text,
+            label="new cell painted through the fallback",
         )
+
         assert table._cell_batching_usable is False
+
+
+async def test_removing_a_row_above_the_cursor_restores_the_selection() -> None:
+    """Textual's cursor is a coordinate, so removing a row above it keeps the
+    index and slides a different row under the selection. The in-place path
+    skips cursor work only when the selected *key* is unchanged, which is what
+    makes that case restore rather than silently reselect its neighbour."""
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(10)])
+    async with app.run_test(size=(120, 20)) as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 10, label="pods loaded")
+        table.focus()
+        table.move_cursor(row=5)
+        await pilot.pause()
+        assert table._cursor_snapshot() == ("default/pod-05", 5)
+
+        app.store.apply_event("pods", "default", "DELETED", _pod("pod-01"))
+        await until(pilot, lambda: table.row_count == 9, label="row removed")
+
+        assert table._cursor_snapshot() == ("default/pod-05", 4)

@@ -149,6 +149,10 @@ async def _sleep_default(delay: float) -> None:
     await asyncio.sleep(delay)
 
 
+class _SampleAborted(Exception):
+    """The run failed terminally while one cursor sample was in flight."""
+
+
 class ReplayConfigurationError(ValueError):
     """The run was asked for something the harness cannot measure.
 
@@ -177,7 +181,9 @@ class ReplayOptions:
 
     Args:
         time_scale: Multiplier applied to every scheduled-event sleep.
-            0 skips all sleeps (fastest); 1.0 replays at real time.
+            1.0 replays at real time; larger values slow the schedule.
+            Values below 1.0 are rejected: cursor samples are taken
+            while churn is still being emitted.
         sample_interval: Seconds between process-memory samples.
         input_ack_timeout: Seconds the cursor probe waits for the table to
             acknowledge an injected key before failing the run. Bounded so a
@@ -568,6 +574,7 @@ async def measure_cursor_input(
     *,
     now: Callable[[], float] = monotonic,
     timeout: float = 5.0,
+    aborted: Callable[[], bool] = lambda: False,
 ) -> float:
     """Measure `down`/`up` key injection until the expected cursor row is reached.
 
@@ -592,6 +599,12 @@ async def measure_cursor_input(
             f"cursor input measurement key {key!r} from start row {start_row} "
             f"expected row {expected_row} outside valid range 0..{row_count - 1}"
         )
+    if not table.has_focus:
+        raise ValueError(
+            "cursor input measurement requires the table to have focus; the key is "
+            "posted to the app and would otherwise be consumed by whichever widget "
+            "does have focus, timing out as if the cursor had not moved"
+        )
     app = pilot.app
     driver = app._driver
     if driver is None:
@@ -604,12 +617,19 @@ async def measure_cursor_input(
         async with asyncio.timeout(timeout):
             turns = 0
             while table.cursor_row != expected_row:
+                if aborted():
+                    # The run has already failed terminally, so nothing will
+                    # move the cursor. Waiting out the full timeout here would
+                    # delay the real error by one ack timeout per sample.
+                    raise _SampleAborted
                 # Zero delay while the acknowledgement is plausibly in flight,
                 # then back off: past this many turns the key is not coming,
                 # and spinning for the rest of the timeout would starve the
                 # churn and render work being measured alongside the probe.
                 await _ack_sleep(0 if turns < _ACK_SPIN_TURNS else _ACK_BACKOFF_SECONDS)
                 turns += 1
+    except _SampleAborted:
+        raise
     except TimeoutError as exc:
         detail = (
             f"{key} cursor input from row {start_row} to expected row {expected_row} "
@@ -628,6 +648,31 @@ async def measure_cursor_input(
             )
         raise WaitTimeout(detail) from exc
     return now() - started
+
+
+def validate_time_scale(options: ReplayOptions) -> None:
+    """Reject a wall-clock schedule compressed below real time.
+
+    Cursor samples are taken while churn is still being emitted, so a schedule
+    that outruns the probe drains before the samples are collected and the run
+    fails its own metric contract late. The CLI rejects this on its arguments;
+    this is the programmatic guard for callers wiring `ReplayOptions` directly.
+
+    A caller that injects its own clock (`monotonic_fn`/`async_sleep`) is
+    exempt: `time_scale` is then virtual, the caller decides when the schedule
+    advances, and outrunning the probe is not possible.
+
+    Raises:
+        ReplayConfigurationError: `time_scale` is not finite and >= 1.0 on a
+            run that will use the real clock.
+    """
+    if options.monotonic_fn is not None or options.async_sleep is not None:
+        return
+    if not math.isfinite(options.time_scale) or options.time_scale < 1.0:
+        raise ReplayConfigurationError(
+            f"time_scale must be finite and >= 1.0 so cursor samples are taken "
+            f"during churn; got {options.time_scale}"
+        )
 
 
 def validate_input_sample_pairs(options: ReplayOptions) -> None:
@@ -744,9 +789,13 @@ async def sample_cursor_input(
                 raise WaitTimeout(input_sampling_incomplete_message(pairs))
             if aborted():
                 return
-            recorder.record_input(
-                await measure_cursor_input(pilot, table, key, now=now, timeout=timeout)
-            )
+            try:
+                elapsed = await measure_cursor_input(
+                    pilot, table, key, now=now, timeout=timeout, aborted=aborted
+                )
+            except _SampleAborted:
+                return
+            recorder.record_input(elapsed)
 
 
 async def wait_for(
@@ -802,6 +851,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
     validate_input_sample_pairs(options)
     validate_input_ack_timeout(options)
     validate_input_sampling_profile(profile)
+    validate_time_scale(options)
     events = scheduled_events(profile)
     failures: dict[int, FailureInjection] = {f.at_event: f for f in profile.failures}
 
