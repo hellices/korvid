@@ -14,6 +14,7 @@ from korvid.k8s.models import (
     StorageClassSummary,
     summary_for,
 )
+from korvid.k8s.relationship_facts import RelationshipFacts
 
 POD: dict[str, Any] = {
     "metadata": {"name": "checkout-7d9f", "namespace": "prod"},
@@ -1549,3 +1550,40 @@ def test_storage_class_non_true_value_produces_empty_fields() -> None:
     assert not summary.is_default
     assert summary.default_annotation_key == ""
     assert summary.default_annotation_value == ""
+
+
+def test_generic_summary_carries_relationship_facts() -> None:
+    """GenericSummary must expose the resource's extracted relationship facts (issue #281)."""
+    summary = summary_for(
+        "Service",
+        {
+            "apiVersion": "v1",
+            "metadata": {"name": "api", "namespace": "prod", "uid": "svc-1"},
+            "spec": {"selector": {"app": "api"}},
+        },
+        group="",
+    )
+    assert summary.relationships.selectors[0].target_kind == "Pod"
+
+
+def test_generic_summary_relationship_facts_default_to_empty() -> None:
+    """A kind with no relationship extractor must default to empty RelationshipFacts."""
+    summary = GenericSummary.from_manifest("ConfigMap", {"metadata": {"name": "cfg"}})
+    assert summary.relationships == RelationshipFacts()
+
+
+def test_pod_summary_never_retains_secret_values() -> None:
+    """PodSummary must carry relationship facts without ever leaking manifest content
+    outside the metadata-only safety boundary (issue #281)."""
+    summary = PodSummary.from_manifest(
+        {
+            "metadata": {"name": "api", "namespace": "prod", "uid": "pod-1"},
+            "spec": {
+                "containers": [{"name": "api"}],
+                "volumes": [{"name": "s", "secret": {"secretName": "api-tls"}}],
+            },
+            "data": {"token": "forbidden-value"},
+        }
+    )
+    assert summary.relationships.references[0].target.name == "api-tls"
+    assert "forbidden-value" not in repr(summary)

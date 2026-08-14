@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 from korvid.k8s.olm import channel_names, package_description
+from korvid.k8s.relationship_facts import RelationshipFacts, extract_relationship_facts
 
 # Full Kubernetes Quantity grammar: signed decimal number (including the
 # bare-point forms '<digits>.' and '.<digits>') followed by an optional
@@ -223,6 +224,18 @@ def _service_owner_uids(meta: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
+def _api_group(api_version: object) -> str:
+    """The bare API group from a manifest's `apiVersion` (`""` for core, `"apps"` for `apps/v1`)."""
+    before, sep, _after = str(api_version or "").partition("/")
+    return before if sep else ""
+
+
+def _api_version(api_version: object) -> str:
+    """The bare API version from a manifest's `apiVersion` (without the group prefix)."""
+    before, sep, after = str(api_version or "").partition("/")
+    return after if sep else before
+
+
 def _labels(meta: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     """`metadata.labels` as a hashable tuple for frozen summaries (issue #44)."""
     labels = meta.get("labels")
@@ -249,9 +262,14 @@ class GenericSummary:
     #: User-configured custom column values (issue #45), in the declared
     #: column order; filled by the client from the raw manifest.
     custom: tuple[str, ...] = ()
+    #: Metadata-only relationship facts extracted from the manifest (issue
+    #: #281); never carries secret data, literal env values, or annotations.
+    relationships: RelationshipFacts = field(default_factory=RelationshipFacts)
 
     @classmethod
-    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> GenericSummary:
+    def from_manifest(
+        cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
+    ) -> GenericSummary:
         meta = manifest.get("metadata") or {}
         spec = manifest.get("spec")
         # CRDs may define spec as an array or scalar; only mappings can carry replicas.
@@ -267,6 +285,12 @@ class GenericSummary:
             owner_uids=_owner_uids(meta),
             labels=_labels(meta),
             desired=replicas,
+            relationships=extract_relationship_facts(
+                kind,
+                _api_group(manifest.get("apiVersion")) if group is None else group,
+                _api_version(manifest.get("apiVersion")),
+                manifest,
+            ),
         )
 
     def age(self, now: datetime | None = None) -> str:
@@ -287,7 +311,9 @@ class ReplicaSetSummary(GenericSummary):
     ready: str = "0/0"
 
     @classmethod
-    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> ReplicaSetSummary:
+    def from_manifest(
+        cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
+    ) -> ReplicaSetSummary:
         meta = manifest.get("metadata") or {}
         spec = manifest.get("spec") or {}
         status = manifest.get("status") or {}
@@ -352,7 +378,9 @@ class StorageClassSummary(GenericSummary):
     default_annotation_value: str = ""
 
     @classmethod
-    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> StorageClassSummary:
+    def from_manifest(
+        cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
+    ) -> StorageClassSummary:
         base = GenericSummary.from_manifest(kind, manifest)
         meta = _str_map(manifest.get("metadata"))
         annotations = _str_map(meta.get("annotations"))
@@ -385,7 +413,9 @@ class PackageManifestSummary(GenericSummary):
     description: str = ""
 
     @classmethod
-    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> PackageManifestSummary:
+    def from_manifest(
+        cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
+    ) -> PackageManifestSummary:
         base = GenericSummary.from_manifest(kind, manifest)
         status = _str_map(manifest.get("status"))
         return cls(
@@ -410,7 +440,9 @@ class EndpointSliceSummary(GenericSummary):
     service_owner_uids: tuple[str, ...] = ()
 
     @classmethod
-    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> EndpointSliceSummary:
+    def from_manifest(
+        cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
+    ) -> EndpointSliceSummary:
         base = GenericSummary.from_manifest(kind, manifest)
         meta = manifest.get("metadata") or {}
         raw_endpoints = manifest.get("endpoints")
@@ -449,7 +481,9 @@ class OLMSubscriptionSummary(GenericSummary):
     state: str = ""
 
     @classmethod
-    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> OLMSubscriptionSummary:
+    def from_manifest(
+        cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
+    ) -> OLMSubscriptionSummary:
         base = GenericSummary.from_manifest(kind, manifest)
         spec = _str_map(manifest.get("spec"))
         status = _str_map(manifest.get("status"))
@@ -471,7 +505,9 @@ class CSVSummary(GenericSummary):
     display_name: str = ""
 
     @classmethod
-    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> CSVSummary:
+    def from_manifest(
+        cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
+    ) -> CSVSummary:
         base = GenericSummary.from_manifest(kind, manifest)
         spec = _str_map(manifest.get("spec"))
         status = _str_map(manifest.get("status"))
@@ -556,7 +592,7 @@ def summary_for(kind: str, manifest: dict[str, Any], *, group: str | None = None
         )
         if is_discovery:
             return EndpointSliceSummary.from_manifest(kind, manifest)
-        return GenericSummary.from_manifest(kind, manifest)
+        return GenericSummary.from_manifest(kind, manifest, group=group)
     if kind == "StorageClass":
         is_storage_class = (
             group == "storage.k8s.io"
@@ -565,7 +601,7 @@ def summary_for(kind: str, manifest: dict[str, Any], *, group: str | None = None
         )
         if is_storage_class:
             return StorageClassSummary.from_manifest(kind, manifest)
-        return GenericSummary.from_manifest(kind, manifest)
+        return GenericSummary.from_manifest(kind, manifest, group=group)
     api_version = str(manifest.get("apiVersion") or "")
     if kind == "PackageManifest" and api_version.startswith(_PACKAGES_GROUP_PREFIX):
         return PackageManifestSummary.from_manifest(kind, manifest)
@@ -576,7 +612,7 @@ def summary_for(kind: str, manifest: dict[str, Any], *, group: str | None = None
         }.get(kind)
         if renderer is not None:
             return renderer.from_manifest(kind, manifest)
-    return GenericSummary.from_manifest(kind, manifest)
+    return GenericSummary.from_manifest(kind, manifest, group=group)
 
 
 def _terminated_reason(terminated: dict[str, Any]) -> str | None:
@@ -900,6 +936,9 @@ class PodSummary:
     #: User-configured custom column values (issue #45), in the declared
     #: column order; filled by the client from the raw manifest.
     custom: tuple[str, ...] = ()
+    #: Metadata-only relationship facts extracted from the manifest (issue
+    #: #281); never carries secret data, literal env values, or annotations.
+    relationships: RelationshipFacts = field(default_factory=RelationshipFacts)
 
     def age(self, now: datetime | None = None) -> str:
         """Return compact age string ("5m", "3h", "2d"); "-" when created is empty."""
@@ -943,6 +982,7 @@ class PodSummary:
             trouble=_pod_trouble(status),
             ready_transition_at=_ready_transition_at(status),
             created=str(meta.get("creationTimestamp") or ""),
+            relationships=extract_relationship_facts("Pod", "", "v1", obj),
         )
 
 
