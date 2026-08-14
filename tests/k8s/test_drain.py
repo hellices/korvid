@@ -406,3 +406,16 @@ def test_policy_v1beta1_empty_pdb_selector_matches_no_pods() -> None:
         [_pdb("legacy", selector={}, disruptions_allowed=0, api_version="policy/v1beta1")],
     )
     assert plan.targets[0].pdb_blocked is None
+
+
+def test_unknown_operator_in_pdb_conservatively_blocks_pod() -> None:
+    """Drain must over-warn for unknown matchExpression operators (e.g. ``Gt``
+    from a future API version) rather than silently ignoring them: if we
+    cannot tell whether the PDB matches, assume it does."""
+    pdb = _pdb(
+        "future-pdb",
+        match_expressions=[{"key": "replicas", "operator": "Gt", "values": ["2"]}],
+        disruptions_allowed=0,
+    )
+    plan = build_drain_plan([_pod("web-1", labels={"replicas": "3"})], [pdb])
+    assert plan.targets[0].pdb_blocked == "future-pdb"

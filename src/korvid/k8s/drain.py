@@ -133,10 +133,20 @@ def _parse_pdb_selector(pdb: dict[str, Any]) -> tuple[LabelSelector, bool]:
     return parse_label_selector(selector), empty_matches
 
 
+_KNOWN_OPERATORS = frozenset({"In", "NotIn", "Exists", "DoesNotExist"})
+
+
 def _pdb_selector_matches_labels(
     parsed: tuple[LabelSelector, bool], labels: dict[str, str]
 ) -> bool:
     selector, empty_matches = parsed
+    # Drain over-warns for unknown operators: if any matchExpression uses an
+    # operator outside the known set, assume the PDB matches the pod rather
+    # than silently ignoring it.  The shared matches_selector returns False for
+    # unknown operators (correct for the graph), but drain must stay
+    # conservative so that a future-API PDB never lets an eviction slip through.
+    if any(expr.operator not in _KNOWN_OPERATORS for expr in selector.match_expressions):
+        return True
     return matches_selector(selector, labels, empty_matches=empty_matches)
 
 
