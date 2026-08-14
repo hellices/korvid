@@ -73,10 +73,11 @@ Facts contain metadata and references only:
 
 Secret `data` and `stringData` are never read into the facts model, and no
 Secret value is ever retained in a summary, the graph, or rendered output.
-The boundary is retention, not transport: a Secret LIST is an ordinary LIST
-and the API server returns whole objects, which the adapter immediately
-reduces to metadata-only facts. Environment literal values, command
-arguments, annotations, and unrelated manifest fields are also excluded.
+Relationship snapshot Secret LISTs request Kubernetes
+`PartialObjectMetadataList`; if the API server cannot provide that
+representation, coverage reports the failure rather than retrying with a
+full-object LIST. Environment literal values, command arguments, annotations,
+and unrelated manifest fields are also excluded.
 
 `GenericSummary`, `PodSummary`, and any specialized summary that flows through
 the resource store carry `RelationshipFacts`. The extraction belongs in

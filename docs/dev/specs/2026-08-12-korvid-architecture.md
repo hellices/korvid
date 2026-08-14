@@ -434,24 +434,24 @@ k8s manifest -> RelationshipFacts -> core RelationshipGraph
 boundary: it walks one raw manifest and extracts only the metadata a
 relationship needs (owner references, label selectors, volume/config
 references, routing backends, live Pod node scheduling, storage bindings),
-never a Secret's `data`, a literal env value, or a command/arg. The
-guarantee is retention, not transport — a Secret LIST returns whole objects
-like any other LIST, and this boundary is what keeps their values out of
-every summary, graph, and rendered row. Every listed object's
-summary (`GenericSummary`/`PodSummary`) carries its `RelationshipFacts`
-alongside the fields the rest of the UI already reads — the extraction runs
-once, at list time, not again when the graph is built.
+never a Secret's `data`, a literal env value, or a command/arg. Relationship
+snapshot Secret LISTs request Kubernetes `PartialObjectMetadataList`; an API
+server that cannot provide that representation produces visible incomplete
+coverage rather than a retry that retrieves full Secret objects. Every listed
+object's summary (`GenericSummary`/`PodSummary`) carries its
+`RelationshipFacts` alongside the fields the rest of the UI already reads —
+the extraction runs once, at list time, not again when the graph is built.
 
 `korvid.core.relationships.build_relationship_graph` is a **pure function**:
 given the already-listed inputs and their `RelationshipFacts`, plus a
 `CoverageRecord` per attempted LIST, it performs no I/O of its own — it joins
 declared/observed reference facts against the resources it was handed by
 UID-or-name, joins selector facts against same-namespace candidates by label
-match, authorizes cross-namespace `routes_to` edges only against an exact
-Gateway `ReferenceGrant` match, and returns one immutable, deterministically
-capped `RelationshipGraph`. Its edge cap is enforced during generation by a
-bounded top-K accumulator, so a quadratic selector join never allocates more
-than `max_edges` edges at a time.
+match, authorizes cross-namespace Gateway Route backend edges only against an
+exact Gateway `ReferenceGrant` match, and returns one immutable,
+deterministically capped `RelationshipGraph`. Its edge cap is enforced during
+generation by a bounded top-K accumulator, so a quadratic selector join never
+allocates more than `max_edges` edges at a time.
 
 All the bounded LISTs — the fixed resource catalog, the discovered Gateway
 API kinds, the bounded second phase that follows `routes_to` references into

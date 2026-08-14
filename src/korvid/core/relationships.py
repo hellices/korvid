@@ -38,6 +38,7 @@ from korvid.k8s.relationship_facts import (
     RelationshipFacts,
     SelectorFact,
     TargetReference,
+    is_gateway_route_kind,
 )
 from korvid.k8s.selectors import matches_selector
 
@@ -403,15 +404,18 @@ def _build_edge(
     # names a different namespace than the subject is invalid; a
     # cluster-scoped subject (e.g. PersistentVolume -> PersistentVolumeClaim)
     # is exempt since it has no namespace of its own to disagree with.
-    # `routes_to` (Gateway/Ingress backends) is authorized here only when an
-    # exact `ReferenceGrantFact` in the target namespace matches the
-    # subject's group/kind/namespace and the target's group/kind (Task 4);
-    # absence of that authorization must default-deny, never silently
-    # resolve, and a `ReferenceGrant` object's mere presence is never
-    # inferred as a match.
+    # A Gateway Route backend is authorized here only when an exact
+    # `ReferenceGrantFact` in the target namespace matches the subject's
+    # group/kind/namespace and the target's group/kind (Task 4). Other
+    # cross-namespace `routes_to` facts, such as EndpointSlice targetRefs,
+    # remain invalid even if a structurally matching grant exists.
     if subject.namespace and target_ref.namespace and target_ref.namespace != subject.namespace:
-        authorized = fact.relation is RelationKind.ROUTES_TO and _grant_authorizes(
-            subject, target_ref, grants_by_namespace.get(target_ref.namespace, ())
+        authorized = (
+            fact.relation is RelationKind.ROUTES_TO
+            and is_gateway_route_kind(subject.group, subject.kind)
+            and _grant_authorizes(
+                subject, target_ref, grants_by_namespace.get(target_ref.namespace, ())
+            )
         )
         if not authorized:
             target = GraphResource(

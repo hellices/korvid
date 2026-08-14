@@ -545,3 +545,31 @@ async def test_expansion_labels_a_repeat_dependent_distinctly_from_a_cycle() -> 
         assert "spec.cycleProbe" in cycle_cells
         assert "api-pod" in " ".join(repeat_cells)
         assert table.row_count <= screen.graph.limits.max_nodes + 4
+
+
+async def test_expansion_does_not_repeat_parallel_direct_dependent_edges() -> None:
+    root = _resource("Deployment", "api")
+    pod = _resource("Pod", "api-pod")
+    graph = RelationshipGraph(
+        nodes=(root, pod),
+        edges=(
+            _edge(pod, root, relation=RelationKind.OWNED_BY),
+            _edge(
+                pod,
+                root,
+                relation=RelationKind.MANAGED_BY,
+                field="metadata.labels[app.kubernetes.io/managed-by]",
+            ),
+        ),
+        coverage=(),
+    )
+    app = HostApp()
+    screen = RelationshipScreen(graph, root)
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        table = app.screen.query_one(DataTable)
+        initial_rows = table.row_count
+        await pilot.press("d")
+        directions = [str(table.get_row_at(row)[0]) for row in range(table.row_count)]
+        assert all("repeat" not in label for label in directions)
+        assert table.row_count == initial_rows

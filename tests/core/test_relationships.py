@@ -1029,6 +1029,42 @@ def test_endpoint_slice_target_ref_resolves_pod() -> None:
     assert graph.edges[0].target.kind == "Pod"
 
 
+def test_reference_grant_does_not_authorize_cross_namespace_endpoint_slice() -> None:
+    pod = _pod_input("api-0", namespace="prod")
+    endpoint_slice = _input(
+        "EndpointSlice",
+        "discovery.k8s.io",
+        "edge",
+        "api-abc123",
+        "eps-1",
+        relationships=_facts(
+            references=(
+                _ref(
+                    "routes_to",
+                    "",
+                    "Pod",
+                    "prod",
+                    "api-0",
+                    uid=pod.summary.uid,
+                    field="endpoints[0].targetRef",
+                ),
+            )
+        ),
+    )
+    grant = _reference_grant_input(
+        "edge",
+        "prod",
+        from_group="discovery.k8s.io",
+        from_kind="EndpointSlice",
+        to_kind="Pod",
+    )
+    graph = build_relationship_graph(
+        [endpoint_slice, pod, grant],
+        [_complete("endpointslices"), _complete("pods"), _complete("referencegrants")],
+    )
+    assert graph.edges[0].resolution is EdgeResolution.INVALID
+
+
 def test_ingress_backend_is_same_namespace_only() -> None:
     ingress = _input(
         "Ingress",
