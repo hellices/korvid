@@ -424,3 +424,28 @@ async def test_relationship_screen_is_not_stacked_over_another_modal() -> None:
         assert app.screen is modal
         assert not isinstance(app.screen, RelationshipScreen)
         assert not any(isinstance(screen, RelationshipScreen) for screen in app.screen_stack)
+
+
+async def test_worker_failure_notification_renders_error_text_literally() -> None:
+    """The failure detail can quote cluster-controlled text (a resource
+    name in a parser error), so it must never be read as Rich markup —
+    the same rule the graph screen applies to every name it renders."""
+    env = _RelEnv(pods=(_pod("api-0", uid="pod-1"),))
+    env.lister.fail(PODS_META, RuntimeError("bad object [red]api-0[/]"))
+    app = env.app
+    async with app.run_test() as pilot:
+        await _show_pods(env, pilot)
+        await pilot.press("g")
+        await until(
+            pilot,
+            lambda: any(
+                "Relationships failed" in notification.message
+                for notification in app._notifications
+            ),
+            label="failure notified",
+        )
+        notification = next(
+            item for item in app._notifications if "Relationships failed" in item.message
+        )
+        assert "[red]api-0[/]" in notification.message
+        assert notification.markup is False

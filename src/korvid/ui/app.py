@@ -2954,7 +2954,15 @@ class KorvidApp(App[None]):
             return
         error = event.worker.error
         detail = f"{type(error).__name__}: {error}" if error is not None else "unknown error"
-        self.notify(f"Relationships failed - {detail[:200]}", severity="error", timeout=10)
+        # markup=False: the detail can quote cluster-controlled text (a
+        # resource name inside a parser error), which must never be read
+        # as Rich markup.
+        self.notify(
+            f"Relationships failed - {detail[:200]}",
+            severity="error",
+            timeout=10,
+            markup=False,
+        )
 
     async def _load_relationships(self, target: GraphResource, epoch: int) -> None:
         """Load one bounded snapshot and open `RelationshipScreen` over it.
