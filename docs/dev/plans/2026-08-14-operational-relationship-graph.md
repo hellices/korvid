@@ -1482,7 +1482,11 @@ async def test_g_opens_relationships_for_selected_resource(app_env: AppEnv) -> N
     async with app_env.app.run_test() as pilot:
         await app_env.show_pods(pilot)
         await pilot.press("g")
-        await until(lambda: isinstance(app_env.app.screen, RelationshipScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app_env.app.screen, RelationshipScreen),
+            label="relationship screen opened",
+        )
         screen = cast(RelationshipScreen, app_env.app.screen)
         assert screen.root.uid == "pod-1"
 
@@ -1494,7 +1498,7 @@ async def test_context_switch_discards_inflight_graph(app_env: AppEnv) -> None:
         await pilot.press("g")
         await app_env.switch_context("other")
         app_env.relationship_lister.resume()
-        await until(lambda: not app_env.app.workers)
+        await until(pilot, lambda: not app_env.app.workers, label="graph worker reaped")
         assert not isinstance(app_env.app.screen, RelationshipScreen)
 ```
 
@@ -1521,9 +1525,17 @@ async def test_graph_goto_reuses_normal_navigation(app_env: AppEnv) -> None:
     async with app_env.app.run_test() as pilot:
         await app_env.show_pods(pilot)
         await pilot.press("g")
-        await until(lambda: isinstance(app_env.app.screen, RelationshipScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app_env.app.screen, RelationshipScreen),
+            label="relationship screen opened",
+        )
         await pilot.press("down", "enter")
-        await until(lambda: app_env.app.current_kind == "pods")
+        await until(
+            pilot,
+            lambda: app_env.app.current_kind == "pods",
+            label="pod view restored",
+        )
         assert app_env.app.current_namespace == "prod"
         assert app_env.app._selected_name() == "api-0"
 ```
