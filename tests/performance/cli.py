@@ -620,6 +620,11 @@ def _execute_live_replay(
                     run_id=args.run_id,
                 )
             )
+    # Unlike `replay`, this handler stays on `ValueError`: the live harness
+    # raises it from 28 environment gates (identity, ownership, artifact and
+    # `az` failures) that are operational faults an operator must see as one
+    # clean line, not as a traceback. `ReplayConfigurationError` is a
+    # `ValueError`, so profile/probe misconfiguration is reported here too.
     except (ValueError, ApiStatusError, WaitTimeout, OSError) as exc:
         print(f"error during replay: {exc}", file=sys.stderr)
         return 1

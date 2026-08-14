@@ -1054,3 +1054,28 @@ async def test_an_unacknowledged_key_stops_spinning_the_event_loop(
     spin = replay_module._ACK_SPIN_TURNS
     assert delays[:spin] == [0] * spin
     assert set(delays[spin:]) == {replay_module._ACK_BACKOFF_SECONDS}
+
+
+async def test_a_membership_change_during_the_probe_is_named_as_such(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe waits for one exact row index, so a row entering or leaving
+    while the key is in flight can settle the cursor somewhere else and burn
+    the whole timeout. That is a harness precondition failing, not the
+    application refusing to move, and the error has to say so — otherwise a
+    benchmark run reports it as an input-latency regression."""
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(4)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 4, label="pods loaded")
+        table.focus()
+        driver = pilot.app._driver
+        assert driver is not None
+
+        def drop_a_row(_event: object) -> None:
+            table.remove_row("default/pod-00")
+
+        monkeypatch.setattr(driver, "send_message", drop_a_row)
+
+        with pytest.raises(WaitTimeout, match="row count changed from 4 to 3"):
+            await measure_cursor_input(pilot, table, "down", timeout=0.2)

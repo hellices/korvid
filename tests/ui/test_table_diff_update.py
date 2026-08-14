@@ -763,3 +763,66 @@ async def test_a_changed_row_under_fixed_rows_still_repaints() -> None:
         )
 
         assert _plain_refreshes(calls) != []
+
+
+async def test_a_row_appended_into_the_viewport_reaches_the_screen() -> None:
+    """The in-place path does not call `refresh()` for an appended row, because
+    Textual's own `add_row` already bumps `_update_count`, marks dimensions
+    dirty and calls `check_idle()`. This pins that contract: a row landing in
+    the painted window must become visible without this widget asking."""
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(3)])
+    async with app.run_test(size=(120, 20)) as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 3, label="pods loaded")
+        assert table.max_scroll_y == 0  # every row is on screen
+        before = table.virtual_size.height
+
+        app.store.apply_event("pods", "default", "ADDED", _pod("pod-03"))
+        await until(pilot, lambda: table.row_count == 4, label="row appended")
+
+        assert table.get_row("default/pod-03")[0] == "pod-03"
+        await until(
+            pilot,
+            lambda: table.virtual_size.height > before,
+            label="virtual size grew for the appended row",
+        )
+
+
+class _RaisingRow(dict):  # type: ignore[type-arg]  # test double mirroring one row of DataTable._data
+    """A row mapping that rejects direct writes outright."""
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        raise TypeError("DataTable._data no longer accepts this write")
+
+    def force(self, key: Any, value: Any) -> None:
+        dict.__setitem__(self, key, value)
+
+
+async def test_batching_falls_back_when_the_private_write_itself_fails() -> None:
+    """The read-back check only runs *after* the write, so it cannot catch a
+    Textual release that removed `_data`, changed its keys, or changed the row
+    mapping — those raise on the write and would crash the update instead of
+    falling back. The write itself has to be guarded."""
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        swapped = {key: _RaisingRow(value) for key, value in table._data.items()}
+        table._data = cast(Any, swapped)
+
+        def public_update_cell(row_key: Any, column_key: Any, value: Any, **_kw: Any) -> None:
+            row = cast(_RaisingRow, table._data[RowKey(getattr(row_key, "value", row_key))])
+            row.force(column_key, value)
+            table._update_count += 1
+            table.refresh()
+
+        table.update_cell = public_update_cell  # type: ignore[method-assign]  # test double
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("alpha", phase="Failed"))
+
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/alpha")[2]) == "Failed",
+            label="cell reached the table through the fallback",
+        )
+        assert table._cell_batching_usable is False

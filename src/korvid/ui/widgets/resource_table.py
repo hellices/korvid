@@ -659,6 +659,30 @@ class ResourceTable(DataTable[str | Text]):
         except Exception:  # any failure here means "don't trust the fast path"
             return False
 
+    def _write_cell_batched(self, row_key: RowKey, column: Column, new_cell: str | Text) -> bool:
+        """Write one cell through the private store; False once it is unusable.
+
+        Guards the write itself, not only its result: a Textual release that
+        removed `_data`, changed its key types or changed the row mapping
+        raises here, and crashing a repaint is a worse answer than paying for
+        the public API. The first write that lands is then read back, because
+        a release could equally move the structure the renderer consults while
+        leaving this one writable.
+        """
+        try:
+            self._data[row_key][column.key] = new_cell
+        except (KeyError, TypeError, AttributeError):
+            self._cell_batching_verified = True
+            self._cell_batching_usable = False
+            return False
+        if self._cell_batching_verified:
+            return True
+        self._cell_batching_verified = True
+        if self._batched_write_holds(row_key, column, new_cell):
+            return True
+        self._cell_batching_usable = False
+        return False
+
     def _patch_row(self, key: str, cells: list[str | Text], columns: list[Column]) -> bool:
         """Update an existing row's changed cells; True when any cell moved."""
         old_cells = self._emitted.get(key)
@@ -673,19 +697,11 @@ class ResourceTable(DataTable[str | Text]):
             if _cells_equal(old_cell, new_cell):
                 continue
             if batched:
-                self._data[row_key][column.key] = new_cell
-                if not self._cell_batching_verified:
-                    self._cell_batching_verified = True
-                    if not self._batched_write_holds(row_key, column, new_cell):
-                        # The installed Textual does not read what this wrote.
-                        # Disable the fast path for good and redo this cell
-                        # (and every later one) through the public API.
-                        self._cell_batching_usable = False
-                        batched = False
-                        self.update_cell(row_key, column.key, new_cell, update_width=False)
-            else:
-                # Unverified Textual major: pay one refresh per cell rather
-                # than write a private store whose shape may have moved.
+                batched = self._write_cell_batched(row_key, column, new_cell)
+            if not batched:
+                # Unverified or no-longer-trusted Textual internals: pay one
+                # refresh per cell rather than write a store whose shape may
+                # have moved.
                 self.update_cell(row_key, column.key, new_cell, update_width=False)
             changed = True
         if changed and batched:

@@ -23,7 +23,7 @@ from tests.performance.metrics import (
     UpdateLatencyKind,
 )
 from tests.performance.profile import FailureInjection, WorkloadProfile
-from tests.performance.replay import ReplayOptions, ReplayReport
+from tests.performance.replay import ReplayConfigurationError, ReplayOptions, ReplayReport
 
 #: Read from production rather than restated: a copy here would let the two
 #: drift and still pass.
@@ -1468,3 +1468,66 @@ def test_the_time_scale_error_names_the_supported_fast_path(
     stderr = capsys.readouterr().err
     assert "no longer supported" in stderr
     assert "duration_seconds" in stderr
+
+
+def test_cli_replay_live_reports_an_operational_value_error_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`replay` narrowed its handler so a stray `ValueError` keeps its
+    traceback. `replay-live` deliberately does not: the live harness raises
+    `ValueError` from its environment gates — identity, ownership, artifacts,
+    `az` — and those are operator-facing faults, not bugs. Narrowing here
+    would print a traceback for a wrong kubecontext.
+    """
+
+    async def gate_failure(*_args: object, **_kwargs: object) -> ReplayReport:
+        raise ValueError("wrong active context: expected aks-context, got other-context")
+
+    monkeypatch.setattr(cli, "run_live_replay", gate_failure)
+
+    assert (
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                str(profile_path(tmp_path)),
+                *_LIVE_IDENTITY_ARGS,
+                *_live_artifacts(tmp_path),
+            ]
+        )
+        == 1
+    )
+
+    stderr = capsys.readouterr().err
+    assert "error during replay: wrong active context" in stderr
+    assert "Traceback" not in stderr
+
+
+def test_cli_replay_live_reports_a_configuration_error_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def reject(*_args: object, **_kwargs: object) -> ReplayReport:
+        raise ReplayConfigurationError("performance input sampling requires object_count >= 2")
+
+    monkeypatch.setattr(cli, "run_live_replay", reject)
+
+    assert (
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                str(profile_path(tmp_path)),
+                *_LIVE_IDENTITY_ARGS,
+                *_live_artifacts(tmp_path),
+            ]
+        )
+        == 1
+    )
+
+    stderr = capsys.readouterr().err
+    assert "error during replay: performance input sampling requires" in stderr
+    assert "Traceback" not in stderr

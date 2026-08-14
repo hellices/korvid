@@ -611,10 +611,22 @@ async def measure_cursor_input(
                 await _ack_sleep(0 if turns < _ACK_SPIN_TURNS else _ACK_BACKOFF_SECONDS)
                 turns += 1
     except TimeoutError as exc:
-        raise WaitTimeout(
+        detail = (
             f"{key} cursor input from row {start_row} to expected row {expected_row} "
             f"was not acknowledged within {timeout}s"
-        ) from exc
+        )
+        if table.row_count != row_count:
+            # The probe waits for one exact index, so a row entering or leaving
+            # while the key was in flight can settle the cursor elsewhere. Name
+            # that, or the run reads as an input-latency regression when the
+            # precondition — a table whose membership holds still for one
+            # keypress — is what actually failed.
+            detail += (
+                f"; the row count changed from {row_count} to {table.row_count} "
+                "during the sample, so the expected index no longer identifies "
+                "the row the cursor was sent to"
+            )
+        raise WaitTimeout(detail) from exc
     return now() - started
 
 
