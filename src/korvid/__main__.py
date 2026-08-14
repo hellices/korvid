@@ -1328,6 +1328,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         agent_follow_bridge=ui_proxy,
         proposal_store=proposal_store,
         save_topbar=lambda expanded: save_topbar_state(DEFAULT_CONFIG_PATH, expanded=expanded),
+        list_relationship_objects=kube.list_objects,
     )
     app_box.append(app)
     # Late-bind the UI bridge: from here on the agent's UI-control tools

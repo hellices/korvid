@@ -78,9 +78,11 @@ async def test_help_overlay_shows_remapped_key() -> None:
 
 async def test_uppercase_alt_binding_follows_the_remap() -> None:
     # sort_by_age is bound to both shift+a and the terminal-delivered "A";
-    # remapping the action must retire both spellings.
+    # remapping the action must retire both spellings. "z" (not "g", now
+    # the operational relationship graph's default key, issue #281) is an
+    # arbitrary free key with no default binding of its own.
     pods = [_pod("bb"), _pod("aa")]
-    app = make_app(pods, config=_config({"sort_by_age": "g"}))
+    app = make_app(pods, config=_config({"sort_by_age": "z"}))
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="pods loaded")
@@ -93,8 +95,8 @@ async def test_uppercase_alt_binding_follows_the_remap() -> None:
         await pilot.press("A")
         await pilot.pause()
         assert not _sorted_by_age()
-        await pilot.press("g")
-        await until(pilot, lambda: _sorted_by_age(), label="g sorts by age")
+        await pilot.press("z")
+        await until(pilot, lambda: _sorted_by_age(), label="z sorts by age")
 
 
 def test_keybindings_doc_documents_every_remappable_action() -> None:

@@ -16,7 +16,15 @@ import subprocess
 import tempfile
 import time
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Mapping
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -64,6 +72,7 @@ from korvid.core.portforward import (
     ForwardRegistry,
     controller_owner,
 )
+from korvid.core.relationships import GraphResource, SummaryLike
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -86,7 +95,7 @@ from korvid.k8s.helmcli import HelmCLI
 from korvid.k8s.logs import LogLine
 from korvid.k8s.managed import manager_of
 from korvid.k8s.metrics import MetricsPoller
-from korvid.k8s.models import ContainerTrouble, PodSummary, manifest_uid
+from korvid.k8s.models import ContainerTrouble, GenericSummary, PodSummary, manifest_uid
 from korvid.k8s.olm import (
     OPERATORS_GROUP,
     PACKAGES_GROUP,
@@ -130,6 +139,7 @@ from korvid.ui.messages import (
 )
 from korvid.ui.navigation import DrillLevel, NavigationStack
 from korvid.ui.operator_controller import OperatorController
+from korvid.ui.relationship_controller import RelationshipSnapshotLoader
 from korvid.ui.shell_controller import ShellController, ShellSettings
 from korvid.ui.transfer import TransferController, TransferProgress
 from korvid.ui.ui_surface import ScreenResultT, Severity, UiSurface
@@ -153,6 +163,7 @@ from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.port_forward_screen import PortForwardScreen
+from korvid.ui.widgets.relationship_screen import GotoResult, RelationshipScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.secret_screen import SecretScreen
@@ -397,6 +408,24 @@ class _ReplayFilter:
             self._last_ts_count = 1
 
 
+class _RelationshipLister:
+    """Adapts the injected `list_relationship_objects` callable to the
+    `Lister` protocol `RelationshipSnapshotLoader` (issue #281, Task 5)
+    expects — the loader itself never imports the app, so it needs a small
+    object with a `list_objects` method rather than a bare callable."""
+
+    def __init__(
+        self,
+        list_objects: Callable[[ResourceMeta, str | None], Awaitable[list[GenericSummary]]],
+    ) -> None:
+        self._list_objects = list_objects
+
+    async def list_objects(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> Sequence[SummaryLike]:
+        return await self._list_objects(meta, namespace)
+
+
 class PaneState:
     """One workspace pane's independent view state (issue #48).
 
@@ -464,6 +493,7 @@ class KorvidApp(App[None]):
             for i in range(1, 10)
         ],
         Binding("d", "describe", "Describe", id="describe"),
+        Binding("g", "relationships", "Relationships", id="relationships"),
         Binding("s", "shell", "Shell", id="shell"),
         Binding("l", "logs", "Logs", id="logs"),
         Binding("shift+l", "logs_multi", "Multi-log", id="logs_multi"),
@@ -618,6 +648,9 @@ class KorvidApp(App[None]):
         telepresence: TelepresenceCLI | None = None,
         probe_traffic_manager: Callable[[], Awaitable[bool]] | None = None,
         agent_follow_bridge: UIBridge | None = None,
+        list_relationship_objects: (
+            Callable[[ResourceMeta, str | None], Awaitable[list[GenericSummary]]] | None
+        ) = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -673,6 +706,17 @@ class KorvidApp(App[None]):
         #: calls - log-pane swaps and describes must never interleave.
         #: None (tests, degraded wiring) falls back to a direct adapter.
         self._agent_follow_bridge = agent_follow_bridge
+        #: Operational relationship graph (issue #281): the loader is a
+        #: pure orchestrator built once around the injected LIST callable;
+        #: it performs no Textual operations, so the app owns the worker
+        #: that runs it (see action_relationships). None disables `g`
+        #: entirely (no cluster connection, or the composition root chose
+        #: not to wire it).
+        self._relationship_loader: RelationshipSnapshotLoader | None = (
+            RelationshipSnapshotLoader(_RelationshipLister(list_relationship_objects))
+            if list_relationship_objects is not None
+            else None
+        )
         #: App-owned execution context (issue #165), captured in on_mount;
         #: None until then. AppUIBridge._dispatch refuses pre-mount calls
         #: as 'UI not ready' (production-reachable: the MCP endpoint goes
@@ -2817,6 +2861,90 @@ class KorvidApp(App[None]):
                 if rows:
                     return rows
         return [(ctr, "-", "-", "-", "-") for ctr in self._get_pod_containers(namespace, name)]
+
+    def _selected_relationship_root(self) -> GraphResource | None:
+        """The exact root identity for `g`: authoritative discovery meta
+        (group/kind) for the current view plus the selected row's
+        namespace/name/UID from the store. None only after an
+        already-visible warning — no selection (`_selected_ns_name` warns
+        itself), or the current view has no discovered `ResourceMeta` (an
+        identity that cannot be built is never silently dropped)."""
+        meta = self.aliases.get(self.current_kind)
+        if meta is None:
+            self.notify(f"{self.current_kind} is not a discovered view", severity="warning")
+            return None
+        namespace, name = self._selected_ns_name()
+        if namespace is None or name is None:
+            return None
+        uid = self._selected_uid(namespace or None, name)
+        return GraphResource(
+            group=meta.group, kind=meta.kind, namespace=namespace, name=name, uid=uid
+        )
+
+    def action_relationships(self) -> None:
+        """Load and show the operational relationship graph for the
+        selected row (issue #281). This action itself performs no I/O —
+        every LIST runs inside the exclusive "relationships" worker
+        started below, exactly like the hierarchy tree's own jump worker."""
+        if self._relationship_loader is None:
+            self.notify("Relationships unavailable in this session", severity="warning")
+            return
+        if not self._ctx_reads_allowed():
+            return
+        target = self._selected_relationship_root()
+        if target is None:
+            return
+        self.run_worker(
+            self._load_relationships(target, self._ctx_epoch),
+            exclusive=True,
+            group="relationships",
+        )
+
+    async def _load_relationships(self, target: GraphResource, epoch: int) -> None:
+        """Load one bounded snapshot and open `RelationshipScreen` over it.
+
+        A :ctx switch crossing *epoch* while the snapshot LISTs are in
+        flight discards the result: it describes the old cluster and must
+        never reach the screen."""
+        loader = self._relationship_loader
+        if loader is None:
+            return  # composition changed under us since action_relationships checked
+        namespace = None if self.current_namespace == ALL_NAMESPACES else self.current_namespace
+        graph = await loader.load(target, namespace, self.aliases)
+        if self._ctx_switch_crossed(epoch):
+            return
+        await self.push_screen(
+            RelationshipScreen(graph, target),
+            functools.partial(self._on_relationship_result, epoch),
+        )
+
+    def _on_relationship_result(self, epoch: int, result: GotoResult | None) -> None:
+        """Enter on a resolved row: reuse `_jump_to_object` — no second
+        navigation path — after translating the graph's (group, kind) back
+        to the discovered view alias `_jump_to_object` expects."""
+        if result is None:
+            return
+        if self._ctx_switch_crossed(epoch):
+            self.notify(
+                "relationship navigation cancelled - the kube context changed"
+                " while the graph was open",
+                severity="warning",
+            )
+            return
+        _, group, kind, namespace, name = result
+        api_version = f"{group}/v1" if group else ""
+        resolved = self._view_for_component(
+            ComponentRef(kind=kind, name=name, api_version=api_version, namespace=namespace)
+        )
+        if resolved is None:
+            self.notify(f"{kind} is not a discovered view", severity="warning")
+            return
+        alias, _namespaced = resolved
+        self.run_worker(
+            self._jump_to_object(alias, namespace, name, epoch=epoch),
+            exclusive=True,
+            group="relationships",
+        )
 
     async def action_describe(self) -> None:
         """Fetch and display the manifest + events for the currently highlighted row."""
