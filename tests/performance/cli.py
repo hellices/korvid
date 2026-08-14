@@ -40,7 +40,6 @@ import math
 import sys
 import tracemalloc
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -64,15 +63,6 @@ _REPLAY_TIME_SCALE_ERROR = (
     "supported. For a fast run use a profile with a smaller "
     "duration_seconds, e.g. tests/performance/profiles/smoke-1k.json"
 )
-
-# v2: `latency.event_to_render` became nullable. It is populated only when the
-# run's samples really are event-to-render (deterministic replay, which churns
-# rendered cells); a metadata-only workload publishes its samples under
-# `latency.watch_to_diff_completion` instead, discriminated by
-# `latency.update_latency_kind`. A v1 consumer that assumed
-# `latency.event_to_render` was always an object would misread a live artifact,
-# so the version is bumped rather than silently reshaped.
-_SCHEMA_VERSION = 2
 
 
 def _to_benchmark_report(replay: ReplayReport) -> BenchmarkReport:
@@ -395,10 +385,9 @@ def _write_outputs(args: argparse.Namespace, replay: ReplayReport) -> int:
         if args.out_path:
             Path(args.out_path).write_text(markdown)
         if args.json_path:
-            payload: dict[str, Any] = {
-                "schema_version": _SCHEMA_VERSION,
-                **report_payload(benchmark),
-            }
+            # `report_payload` stamps `schema_version` itself, so the shape
+            # and the number it declares can only change together.
+            payload = report_payload(benchmark)
             Path(args.json_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
     except OSError as exc:
         print(f"error writing report: {exc}", file=sys.stderr)

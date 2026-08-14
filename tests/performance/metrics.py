@@ -651,8 +651,26 @@ def _latency_payload(summary: LatencySummary) -> dict[str, object]:
     }
 
 
+# v2: `latency.event_to_render` became nullable. It is populated only when the
+# run's samples really are event-to-render (deterministic replay, which churns
+# rendered cells); a metadata-only workload publishes its samples under
+# `latency.watch_to_diff_completion` instead, discriminated by
+# `latency.update_latency_kind`. A v1 consumer that assumed
+# `latency.event_to_render` was always an object would misread a live artifact,
+# so the version is bumped rather than silently reshaped.
+#
+# Lives here, beside the function that decides the shape, so that reshaping the
+# payload and forgetting the number cannot be done in separate edits.
+SCHEMA_VERSION = 2
+
+
 def report_payload(report: BenchmarkReport) -> dict[str, object]:
     """Machine-readable form of *report*.
+
+    Stamps `schema_version` itself. The number and the shape it describes are
+    then one edit apart: a constant kept beside a caller can be forgotten while
+    this function is reshaped, and the artifact would go out claiming a version
+    it no longer has.
 
     `latency.input` carries the cursor-input samples: seconds from key
     injection to cursor-row acknowledgement, not to a terminal repaint.
@@ -674,6 +692,7 @@ def report_payload(report: BenchmarkReport) -> dict[str, object]:
     kind = report.update_latency_kind
     measured = _latency_payload(report.update_latency)
     return {
+        "schema_version": SCHEMA_VERSION,
         "manifest": {
             "profile_id": report.manifest.profile_id,
             "profile_hash": report.manifest.profile_hash,

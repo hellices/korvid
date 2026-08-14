@@ -256,6 +256,7 @@ def test_report_payload_is_json_serializable_and_stable() -> None:
     encoded = json.dumps(payload, sort_keys=True)
 
     assert payload == {
+        "schema_version": 2,
         "manifest": {
             "profile_id": "smoke-1k",
             "profile_hash": "profile-hash",

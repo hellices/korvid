@@ -25,7 +25,7 @@ from typing import Any, Final, cast
 
 import psutil  # type: ignore[import-untyped]  # no inline stubs shipped
 from textual import __version__ as _textual_version
-from textual import events
+from textual.events import Key
 
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -611,7 +611,7 @@ async def measure_cursor_input(
     driver = app._driver
     if driver is None:
         raise RuntimeError("cursor input measurement requires an active Textual test driver")
-    event = events.Key(key, None)
+    event = Key(key, None)
     event.set_sender(app)
     started = now()
     driver.send_message(event)

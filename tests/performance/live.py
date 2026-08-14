@@ -1473,6 +1473,13 @@ async def _run_measured_window(
             )
         )
         try:
+            # Declared here, not left to the dataclass default, so the report's
+            # "measured under churn" flag is answered at the one place that can
+            # answer it. A profile with no scheduled events cannot start churn,
+            # and `validate_input_sampling_profile` rejects it before the run —
+            # but that guard lives in another module, and a flag this claim
+            # rests on must not depend on remembering it.
+            state.churn_started_before_input = False
             if events:
                 # Real ordering signal: input latency is only meaningful once
                 # the *application* has received live churn, so wait for the
