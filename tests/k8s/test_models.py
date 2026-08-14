@@ -1773,3 +1773,23 @@ def test_age_rejects_empty_unparsable_and_future_timestamps() -> None:
     assert format_age("", now) == "-"
     assert format_age("not-a-timestamp", now) == "-"
     assert format_age("2031-03-11T00:06:00Z", now) == "-"
+
+
+def test_age_reads_a_naive_clock_reading_as_utc() -> None:
+    """A timezone-less `created` is documented as UTC, so a timezone-less
+    `now` must be read the same way. Passing it to `datetime.timestamp()`
+    instead resolves it against the host's local zone, which silently returns
+    a different age — or "-" — depending on where the process runs."""
+    created = "2031-04-01T00:00:00Z"
+    aware = datetime(2031, 4, 1, 1, 0, 0, tzinfo=UTC)
+
+    assert format_age(created, aware) == "1h"
+    assert format_age(created, aware.replace(tzinfo=None)) == "1h"
+
+
+def test_a_naive_clock_reading_stays_consistent_across_buckets() -> None:
+    created = "2031-04-02T00:00:00Z"
+
+    assert format_age(created, datetime(2031, 4, 2, 0, 5, 0)) == "5m"
+    assert format_age(created, datetime(2031, 4, 3, 0, 0, 0)) == "1d"
+    assert format_age(created, datetime(2031, 4, 1, 23, 0, 0)) == "-"

@@ -105,6 +105,12 @@ def format_age(created: str, now: datetime | None = None) -> str:
         return "-"
     if now is None:
         now = datetime.now(UTC)
+    elif now.tzinfo is None:
+        # A timezone-less `created` is read as UTC below, so a timezone-less
+        # clock reading is too. `datetime.timestamp()` would instead resolve
+        # it against the host's local zone and return a different age — or
+        # "-" — for the same instant depending on where the process runs.
+        now = now.replace(tzinfo=UTC)
     now_ts = now.timestamp()
     remembered = _AGE_WINDOWS.get(created)
     if remembered is not None and remembered[0] <= now_ts < remembered[1]:
