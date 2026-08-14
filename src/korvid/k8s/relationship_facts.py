@@ -37,6 +37,24 @@ class RelationKind(StrEnum):
     BOUND_TO = "bound_to"
 
 
+#: The one API group whose `*Route` kinds share the standard Gateway API
+#: `spec.rules[].backendRefs[]` shape. A CRD in any other group (e.g.
+#: OpenShift's `route.openshift.io/Route`, or an experimental
+#: `gateway.networking.x-k8s.io` kind) is never interpreted with it.
+GATEWAY_GROUP = "gateway.networking.k8s.io"
+
+
+def is_gateway_route_kind(group: str, kind: str) -> bool:
+    """True for a `gateway.networking.k8s.io` `*Route` kind.
+
+    This is the single definition of "a Gateway Route" shared by the
+    snapshot loader (which decides what to LIST) and the extractor below
+    (which decides what `backendRefs` to read), so the loader can never
+    report complete coverage of a kind no extractor understands.
+    """
+    return group == GATEWAY_GROUP and kind.endswith("Route")
+
+
 class FactConfidence(StrEnum):
     """How a relationship fact was derived."""
 
@@ -90,7 +108,14 @@ class SelectorFact:
 
 @dataclass(frozen=True, slots=True)
 class ReferenceGrantFact:
-    """A `ReferenceGrant`-style cross-namespace reference policy."""
+    """A `ReferenceGrant`-style cross-namespace reference policy.
+
+    `to_name` mirrors `spec.to[].name`, which is optional: `None` means the
+    grant covers every object of `to_group`/`to_kind` in `namespace`, while
+    a name narrows it to exactly that one object. It is never `""` — a
+    blank or non-string name in the manifest is normalized to `None`
+    (Kubernetes treats an empty name the same as an omitted one).
+    """
 
     from_group: str
     from_kind: str
@@ -99,6 +124,7 @@ class ReferenceGrantFact:
     to_kind: str
     namespace: str
     field: str
+    to_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,7 +531,15 @@ def _ingress_backends(spec: Mapping[str, Any], namespace: str) -> list[Reference
 
 
 def _gateway_backends(spec: Mapping[str, Any], namespace: str) -> list[ReferenceFact]:
-    """HTTPRoute `spec.rules[].backendRefs[]` -> declared `ROUTES_TO` facts."""
+    """Gateway Route `spec.rules[].backendRefs[]` -> declared `ROUTES_TO` facts.
+
+    Shared by every `gateway.networking.k8s.io` `*Route` kind (HTTPRoute,
+    GRPCRoute, TLSRoute, TCPRoute, UDPRoute): the Gateway API defines
+    `backendRefs` identically for all of them (`BackendRef` = a
+    group/kind/namespace/name pointer defaulting to a same-namespace
+    `Service`). Only those pointers are read; a rule whose shape does not
+    match is skipped rather than guessed at.
+    """
     rules = spec.get("rules")
     if not isinstance(rules, list):
         return []
@@ -537,7 +571,12 @@ def _gateway_backends(spec: Mapping[str, Any], namespace: str) -> list[Reference
 
 
 def _reference_grants(spec: Mapping[str, Any], namespace: str) -> list[ReferenceGrantFact]:
-    """ReferenceGrant `spec.from`/`spec.to` -> cross-namespace grant facts."""
+    """ReferenceGrant `spec.from`/`spec.to` -> cross-namespace grant facts.
+
+    `spec.to[].name` is carried through when it is a non-empty string and
+    recorded as `None` otherwise, so an unnamed grant stays distinguishable
+    from one naming a specific object.
+    """
     from_refs = spec.get("from")
     to_refs = spec.get("to")
     if not isinstance(from_refs, list) or not isinstance(to_refs, list):
@@ -560,6 +599,7 @@ def _reference_grants(spec: Mapping[str, Any], namespace: str) -> list[Reference
             if not isinstance(to_kind, str) or not to_kind:
                 continue
             to_group = str(to_entry.get("group") or "")
+            to_name = to_entry.get("name")
             grants.append(
                 ReferenceGrantFact(
                     from_group=from_group,
@@ -569,6 +609,7 @@ def _reference_grants(spec: Mapping[str, Any], namespace: str) -> list[Reference
                     to_kind=to_kind,
                     namespace=namespace,
                     field="spec",
+                    to_name=to_name if isinstance(to_name, str) and to_name else None,
                 )
             )
     return grants
@@ -720,14 +761,14 @@ def _handle_ingress(
     return _ingress_backends(spec, namespace), [], []
 
 
-def _handle_http_route(
+def _handle_gateway_route(
     group: str,
     _api_version: str,
     spec: Mapping[str, Any],
     _manifest: Mapping[str, Any],
     namespace: str,
 ) -> _HandlerResult:
-    if group != "gateway.networking.k8s.io":
+    if group != GATEWAY_GROUP:
         return [], [], []
     return _gateway_backends(spec, namespace), [], []
 
@@ -739,7 +780,7 @@ def _handle_reference_grant(
     _manifest: Mapping[str, Any],
     namespace: str,
 ) -> _HandlerResult:
-    if group != "gateway.networking.k8s.io":
+    if group != GATEWAY_GROUP:
         return [], [], []
     return [], [], _reference_grants(spec, namespace)
 
@@ -780,11 +821,28 @@ _KIND_HANDLERS: dict[str, _Handler] = {
     "PodDisruptionBudget": _handle_pdb,
     "EndpointSlice": _handle_endpoint_slice,
     "Ingress": _handle_ingress,
-    "HTTPRoute": _handle_http_route,
     "ReferenceGrant": _handle_reference_grant,
     "PersistentVolumeClaim": _handle_pvc,
     "PersistentVolume": _handle_pv,
 }
+
+
+def _handler_for(kind: str, group: str) -> _Handler | None:
+    """The handler for `kind`, or the shared Gateway Route one.
+
+    Gateway `*Route` kinds are resolved by group+suffix rather than by an
+    enumerated name because the loader LISTs every discovered
+    `gateway.networking.k8s.io` `*Route` — HTTPRoute, GRPCRoute, and the
+    stream routes (TLSRoute/TCPRoute/UDPRoute) all declare backends in the
+    same `spec.rules[].backendRefs[]` shape, and a kind-by-kind table would
+    keep silently reporting complete coverage for the ones it forgot.
+    """
+    handler = _KIND_HANDLERS.get(kind)
+    if handler is not None:
+        return handler
+    if is_gateway_route_kind(group, kind):
+        return _handle_gateway_route
+    return None
 
 
 def extract_relationship_facts(
@@ -814,7 +872,7 @@ def extract_relationship_facts(
     selectors: list[SelectorFact] = []
     grants: list[ReferenceGrantFact] = []
 
-    handler = _KIND_HANDLERS.get(kind)
+    handler = _handler_for(kind, group)
     if handler is not None:
         extra_references, extra_selectors, extra_grants = handler(
             group, api_version, spec, manifest, namespace

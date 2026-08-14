@@ -396,3 +396,132 @@ def test_pvc_and_pv_binding_references() -> None:
     assert pv_fact.target.name == "api-data"
     assert pv_fact.confidence is FactConfidence.DECLARED
     assert pv_fact.field == "spec.claimRef"
+
+
+def test_reference_grant_retains_to_name_when_present() -> None:
+    """`spec.to[].name` narrows a grant to one object; dropping it would
+    silently widen the grant to every object of that group/kind."""
+    facts = extract_relationship_facts(
+        "ReferenceGrant",
+        "gateway.networking.k8s.io",
+        "v1beta1",
+        {
+            "metadata": {"name": "edge-to-payments", "namespace": "prod"},
+            "spec": {
+                "from": [
+                    {
+                        "group": "gateway.networking.k8s.io",
+                        "kind": "HTTPRoute",
+                        "namespace": "edge",
+                    }
+                ],
+                "to": [{"group": "", "kind": "Service", "name": "payments"}],
+            },
+        },
+    )
+    assert len(facts.grants) == 1
+    assert facts.grants[0].to_name == "payments"
+
+
+def test_reference_grant_without_to_name_grants_every_name() -> None:
+    """An omitted (or blank/non-string) `spec.to[].name` means "all objects
+    of this group/kind" and must be recorded as `None`, not `""`."""
+    facts = extract_relationship_facts(
+        "ReferenceGrant",
+        "gateway.networking.k8s.io",
+        "v1beta1",
+        {
+            "metadata": {"name": "edge-to-services", "namespace": "prod"},
+            "spec": {
+                "from": [
+                    {
+                        "group": "gateway.networking.k8s.io",
+                        "kind": "HTTPRoute",
+                        "namespace": "edge",
+                    }
+                ],
+                "to": [
+                    {"group": "", "kind": "Service"},
+                    {"group": "", "kind": "Secret", "name": 3},
+                ],
+            },
+        },
+    )
+    assert [grant.to_name for grant in facts.grants] == [None, None]
+
+
+def test_grpc_route_backend_refs_are_extracted() -> None:
+    """Gateway GRPCRoute shares HTTPRoute's `spec.rules[].backendRefs[]`
+    shape; the loader lists every discovered `*Route`, so extraction must
+    cover it too rather than reporting complete coverage of nothing."""
+    facts = extract_relationship_facts(
+        "GRPCRoute",
+        "gateway.networking.k8s.io",
+        "v1",
+        {
+            "metadata": {"name": "grpc", "namespace": "edge"},
+            "spec": {"rules": [{"backendRefs": [{"kind": "Service", "name": "api"}]}]},
+        },
+    )
+    assert len(facts.references) == 1
+    fact = facts.references[0]
+    assert fact.relation is RelationKind.ROUTES_TO
+    assert fact.target.kind == "Service"
+    assert fact.target.name == "api"
+    assert fact.target.namespace == "edge"
+    assert fact.confidence is FactConfidence.DECLARED
+    assert fact.field == "spec.rules[0].backendRefs[0]"
+
+
+def test_stream_route_backend_refs_are_extracted() -> None:
+    """TLSRoute/TCPRoute/UDPRoute use the same `backendRefs` shape."""
+    for kind in ("TLSRoute", "TCPRoute", "UDPRoute"):
+        facts = extract_relationship_facts(
+            kind,
+            "gateway.networking.k8s.io",
+            "v1alpha2",
+            {
+                "metadata": {"name": "stream", "namespace": "edge"},
+                "spec": {
+                    "rules": [{"backendRefs": [{"name": "db", "namespace": "data", "port": 5432}]}]
+                },
+            },
+        )
+        assert len(facts.references) == 1, kind
+        fact = facts.references[0]
+        assert fact.relation is RelationKind.ROUTES_TO, kind
+        assert fact.target.kind == "Service", kind
+        assert fact.target.namespace == "data", kind
+        assert fact.target.name == "db", kind
+
+
+def test_route_kinds_outside_the_gateway_group_are_not_extracted() -> None:
+    """A CRD that merely ends in `Route` (e.g. an OpenShift `Route`, or a
+    vendor `gateway.networking.x-k8s.io` kind) is neither discovered by the
+    loader nor safe to interpret with the Gateway API's backendRef shape."""
+    for group in ("route.openshift.io", "gateway.networking.x-k8s.io", ""):
+        facts = extract_relationship_facts(
+            "Route",
+            group,
+            "v1",
+            {
+                "metadata": {"name": "legacy", "namespace": "edge"},
+                "spec": {"rules": [{"backendRefs": [{"name": "api"}]}]},
+            },
+        )
+        assert facts.references == (), group
+
+
+def test_gateway_kind_itself_emits_no_backend_refs() -> None:
+    """`Gateway` is discovered and listed, but it declares listeners, not
+    backends — the generic route path must not fire for it."""
+    facts = extract_relationship_facts(
+        "Gateway",
+        "gateway.networking.k8s.io",
+        "v1",
+        {
+            "metadata": {"name": "public", "namespace": "edge"},
+            "spec": {"rules": [{"backendRefs": [{"name": "api"}]}]},
+        },
+    )
+    assert facts.references == ()
