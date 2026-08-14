@@ -10,6 +10,8 @@ import logging
 from collections.abc import Callable
 from typing import Protocol
 
+from korvid.k8s.models import reset_age_memo
+
 logger = logging.getLogger(__name__)
 
 ALL_NAMESPACES = "*"
@@ -66,18 +68,24 @@ class ResourceStore:
             return []
         order = self._order.get((kind, scope))
         # The length check is a tripwire, not the invalidation rule: it costs
-        # O(1) and turns any mutation path that changes the bucket's *size*
-        # without invalidating into a re-ordered read rather than a truncated
-        # table or a KeyError mid-repaint. A net-zero swap — one key leaving
-        # and another arriving between two reads — is invisible to it, so
-        # `apply_event` still has to invalidate for itself.
+        # O(1) and catches any mutation path that changes the bucket's size
+        # without invalidating. A net-zero swap — one key leaving as another
+        # arrives between two reads — is invisible to it, so the reuse below
+        # also recovers from a dead key instead of raising mid-repaint.
         if order is None or len(order) != len(bucket):
-            order = [
-                key
-                for key, _ in sorted(bucket.items(), key=lambda kv: (kv[1].namespace, kv[1].name))
-            ]
-            self._order[(kind, scope)] = order
-        return [bucket[key] for key in order]
+            order = self._settle_order(kind, scope, bucket)
+        try:
+            return [bucket[key] for key in order]
+        except KeyError:
+            return [bucket[key] for key in self._settle_order(kind, scope, bucket)]
+
+    def _settle_order(self, kind: str, scope: str, bucket: dict[str, Summary]) -> list[str]:
+        """Order *bucket*'s keys by `(namespace, name)` and remember it."""
+        order = [
+            key for key, _ in sorted(bucket.items(), key=lambda kv: (kv[1].namespace, kv[1].name))
+        ]
+        self._order[(kind, scope)] = order
+        return order
 
     def clear(self, kind: str, scope: str) -> None:
         """Remove all objects for (kind, scope) and notify subscribers."""
@@ -89,11 +97,15 @@ class ResourceStore:
         """Drop every bucket and notify each affected kind once.
 
         Context switching (issue #36) purges the whole store: rows from the
-        previous cluster must never render against the new one.
+        previous cluster must never render against the new one. The age memo
+        is keyed by those objects' creation timestamps, which cannot recur on
+        the next cluster, so it is dropped here too rather than left to age
+        out one entry at a time.
         """
         kinds = {kind for kind, _ in self._data}
         self._data.clear()
         self._order.clear()
+        reset_age_memo()
         for kind in kinds:
             self._notify(kind)
 

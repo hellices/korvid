@@ -1820,3 +1820,33 @@ def test_the_age_memo_stays_correct_when_it_reaches_its_cap(
 
     assert ages == ["10m", "9m", "8m", "7m", "6m"]
     assert len(models._AGE_WINDOWS) <= 2
+
+
+def test_reaching_the_age_memo_cap_evicts_one_entry_not_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flushing the whole memo would drop every row's answer at once, so the
+    next repaint re-parses the entire screen — the exact cost this memo
+    exists to remove, concentrated into one frame. Evict the oldest instead."""
+    monkeypatch.setattr(models, "_MAX_AGE_WINDOWS", 3)
+    models._AGE_WINDOWS.clear()
+    now = datetime(2031, 9, 2, 0, 10, 0, tzinfo=UTC)
+    for minute in range(3):
+        assert format_age(f"2031-09-02T00:0{minute}:00Z", now) != "-"
+    assert len(models._AGE_WINDOWS) == 3
+
+    format_age("2031-09-02T00:03:00Z", now)
+
+    assert len(models._AGE_WINDOWS) == 3
+    assert "2031-09-02T00:00:00Z" not in models._AGE_WINDOWS
+    assert "2031-09-02T00:02:00Z" in models._AGE_WINDOWS
+
+
+def test_the_age_memo_can_be_reset() -> None:
+    now = datetime(2031, 9, 3, 0, 5, 0, tzinfo=UTC)
+    assert format_age("2031-09-03T00:00:00Z", now) == "5m"
+    assert models._AGE_WINDOWS
+
+    models.reset_age_memo()
+
+    assert models._AGE_WINDOWS == {}

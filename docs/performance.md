@@ -149,16 +149,19 @@ across 20 namespaces at 120 events/s for 20 s.
 
 | Workload | Metric | Before | After | |
 |---|---|---:|---:|---|
-| Committed replay profile | CPU time (median) | 12.88 s | 12.36 s | −4.0% |
-| Plus Pod creation timestamps | CPU time (median) | 18.00 s | 15.03 s | **−16.5%** |
-| Plus Pod creation timestamps | CPU time (best) | 17.92 s | 14.74 s | **−17.7%** |
+| Committed replay profile | CPU time (median) | 13.93 s | 12.90 s | −7.4% |
+| Plus Pod creation timestamps | CPU time (median) | 18.80 s | 16.53 s | **−12.1%** |
+| Plus Pod creation timestamps | CPU time (best) | 18.42 s | 16.18 s | **−12.2%** |
 | Plus Pod creation timestamps | Peak RSS | 127.8 MiB | 127.1 MiB | −0.7 MiB |
 | Plus Pod creation timestamps | `tracemalloc` peak | 28.47 MiB | 28.58 MiB | +0.11 MiB |
 
 Every run kept `dropped updates: 0` and a matching final digest. On the
 timestamp-bearing workload the two arms' samples do not overlap at all
-(17.92–18.11 s against 14.74–15.10 s). On the committed profile they do
-overlap, so −4.0% is the weaker claim of the two.
+(18.42–18.91 s against 16.18–16.88 s). On the committed profile they do
+overlap, so −7.4% is the weaker claim of the two. Absolute CPU time drifts
+between sessions on this machine — an earlier round measured the same change
+at −16.5% with both arms roughly 0.5–1.5 s faster — which is why only
+same-session, interleaved pairs are quoted.
 
 Two redundancies were removed, both of which repeated per-object work that
 nothing had invalidated:
@@ -184,10 +187,10 @@ trade.
 
 **The committed replay profile understates the render path.** Its synthetic
 Pods carry no `created`, so `format_age` short-circuits and the AGE cell costs
-nothing — which is why the same change is worth 4.0% against that profile and
-16.5% once the timestamps a real cluster always sends are present. The
+nothing — which is why the same change is worth 7.4% against that profile and
+12.1% once the timestamps a real cluster always sends are present. The
 timestamps also account for the workload's own cost: adding them raised
-baseline CPU from 12.88 s to 18.00 s. Benchmark numbers taken against the
+baseline CPU from 13.93 s to 18.80 s. Benchmark numbers taken against the
 committed profile are therefore a floor for anything AGE-dependent.
 
 ## Corrected live 1,000-pod smoke result
@@ -275,7 +278,7 @@ that budget can be called passed or missed against a real API server.
 
 **The replay workload has no creation timestamps.** `initial_pods` builds
 `PodSummary` without `created`, so every AGE cell renders "-" and the whole
-age path is skipped. Measured above, that alone accounts for 28% of the
+age path is skipped. Measured above, that alone accounts for 26% of the
 update-path CPU on this workload, so any AGE-dependent figure taken from the
 committed profile is a floor rather than a result. Populating `created` would
 change every published baseline, so it is deliberately left as follow-up work

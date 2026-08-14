@@ -1,10 +1,12 @@
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from korvid.core import store as store_module
 from korvid.core.store import ALL_NAMESPACES, ResourceStore
-from korvid.k8s.models import PodSummary
+from korvid.k8s import models
+from korvid.k8s.models import PodSummary, format_age
 
 
 def _pod(name: str, ns: str = "default") -> PodSummary:
@@ -317,3 +319,31 @@ def test_a_delete_and_an_add_between_two_reads_do_not_reuse_a_dead_key() -> None
     store.apply_event("pods", "default", "ADDED", _pod("c"))
 
     assert [p.name for p in store.get("pods", "default")] == ["b", "c"]
+
+
+def test_a_net_zero_swap_behind_the_cache_recovers_instead_of_raising() -> None:
+    """The length tripwire cannot see one key leaving as another arrives, so a
+    mutation path that forgot to invalidate would reach a dead key. That must
+    re-order the read, not raise `KeyError` in the middle of a repaint."""
+    store = ResourceStore()
+    for name in ("a", "b"):
+        store.apply_event("pods", "default", "ADDED", _pod(name))
+    assert [p.name for p in store.get("pods", "default")] == ["a", "b"]
+
+    bucket = store._data[("pods", "default")]
+    del bucket["default/a"]
+    bucket["default/c"] = _pod("c")
+
+    assert [p.name for p in store.get("pods", "default")] == ["b", "c"]
+
+
+def test_clearing_every_kind_also_drops_the_age_memo() -> None:
+    """A context switch purges every object, so the age strings keyed by their
+    creation timestamps have no reuse value against the next cluster."""
+    now = datetime(2031, 9, 1, 0, 5, 0, tzinfo=UTC)
+    assert format_age("2031-09-01T00:00:00Z", now) == "5m"
+    assert models._AGE_WINDOWS
+
+    ResourceStore().clear_all()
+
+    assert models._AGE_WINDOWS == {}

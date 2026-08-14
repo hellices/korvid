@@ -121,12 +121,30 @@ def _created_epoch(created: str) -> float | None:
 
 
 def _remember_age(created: str, window: tuple[float, float, str]) -> None:
-    """Keep `window` for `created`, within both of the memo's ceilings."""
+    """Keep `window` for `created`, within both of the memo's ceilings.
+
+    At the entry ceiling the oldest answer is evicted rather than the whole
+    memo flushed: every row asks for its age on every repaint, so discarding
+    all of them would drop the entire screen back onto the parse path in a
+    single frame — the cost this memo exists to remove, concentrated into one
+    spike. `dict` preserves insertion order, so the first key is the oldest.
+    """
     if len(created) > _MAX_TIMESTAMP_LENGTH:
         return
-    if len(_AGE_WINDOWS) >= _MAX_AGE_WINDOWS:
-        _AGE_WINDOWS.clear()
+    while len(_AGE_WINDOWS) >= _MAX_AGE_WINDOWS:
+        del _AGE_WINDOWS[next(iter(_AGE_WINDOWS))]
     _AGE_WINDOWS[created] = window
+
+
+def reset_age_memo() -> None:
+    """Forget every remembered age.
+
+    Called when the objects those timestamps belong to are purged wholesale
+    (a context switch): the next cluster's creation timestamps cannot collide
+    with the previous one's, so the entries have no reuse value and would
+    otherwise sit at the ceiling until evicted one at a time.
+    """
+    _AGE_WINDOWS.clear()
 
 
 def format_age(created: str, now: datetime | None = None) -> str:
