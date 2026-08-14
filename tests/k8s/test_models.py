@@ -1864,6 +1864,30 @@ def test_the_age_memo_can_be_reset() -> None:
     assert models._AGE_WINDOWS == {}
 
 
+def test_rewriting_a_remembered_age_forgets_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollover of an entry the memo already holds adds nothing, so it must
+    cost nothing. Evicting first and assigning second looks safe but is not:
+    re-assigning an existing `dict` key does not grow the dict, so the memo
+    drops to one below the ceiling and the entry it threw away is an unrelated
+    timestamp that may well still be on screen. Only a key the memo does not
+    have may push another one out."""
+    monkeypatch.setattr(models, "_MAX_AGE_WINDOWS", 3)
+    base = datetime(2031, 10, 1, 0, 10, 0, tzinfo=UTC)
+    stamps = [f"2031-10-01T00:0{minute}:00Z" for minute in range(3)]
+    for stamp in stamps:
+        format_age(stamp, base)
+    assert len(models._AGE_WINDOWS) == 3  # the memo is full
+
+    # The *middle* entry rolls over to a new minute and is rewritten.
+    format_age(stamps[1], base + timedelta(minutes=1))
+
+    assert set(models._AGE_WINDOWS) == set(stamps)
+    # ...and it moved to the back, so it is not the next one evicted.
+    assert list(models._AGE_WINDOWS)[-1] == stamps[1]
+
+
 def test_the_age_memo_evicts_the_least_recently_written_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

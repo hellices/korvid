@@ -135,12 +135,19 @@ def _remember_age(created: str, window: tuple[float, float, str]) -> None:
     deliberate. Tracking use would mean one dict mutation per row per repaint
     — measured at 0.027 ms → 0.050 ms per 1,000-row repaint — to save the
     single re-parse an evicted visible row costs (~0.015 ms), and only once a
-    session has seen more than `_MAX_AGE_WINDOWS` distinct timestamps. A
-    re-written answer does move to the back, because the eviction below runs
-    before the insert.
+    session has seen more than `_MAX_AGE_WINDOWS` distinct timestamps.
+
+    A key the memo already holds is dropped before the ceiling is consulted,
+    for two reasons. Re-assigning it would not grow the dict, so evicting for
+    it would push out an unrelated timestamp — quite possibly one still on
+    screen — to make room that was never needed. And re-assignment alone
+    leaves a `dict` key where it was, so a row rewriting its answer every
+    minute would keep the position of the oldest entry and be evicted while
+    it is visible; deleting first is what actually moves it to the back.
     """
     if len(created) > _MAX_TIMESTAMP_LENGTH:
         return
+    _AGE_WINDOWS.pop(created, None)
     while len(_AGE_WINDOWS) >= _MAX_AGE_WINDOWS:
         del _AGE_WINDOWS[next(iter(_AGE_WINDOWS))]
     _AGE_WINDOWS[created] = window
