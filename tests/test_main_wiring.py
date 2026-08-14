@@ -6,7 +6,7 @@ import asyncio
 import dataclasses
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 
@@ -1994,3 +1994,92 @@ async def test_prompt_overrides_survive_a_wizard_rebuild_and_a_context_switch(
     assert rebuilt._messages[0]["content"].startswith("You are terse.")
     after = {t["function"]["name"]: t["function"]["description"] for t in rebuilt._tools}
     assert after["get_logs"] == "Mine."
+
+
+class _FakeAppCapturesKwargs:
+    """Records every `KorvidApp` constructor kwarg `_wire_and_run` passes,
+    without building a real Textual app (issue #281 task 7). `instances`
+    lets the test reach the one instance `_wire_and_run` built even though
+    nothing else in the wiring path hands it back to the caller."""
+
+    instances: ClassVar[list[_FakeAppCapturesKwargs]] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.captured = kwargs
+        _FakeAppCapturesKwargs.instances.append(self)
+
+    def on_aliases_updated(self) -> None:
+        pass
+
+    async def run_async(self) -> None:
+        return None
+
+
+class _FakeKubeForWiring:
+    """Minimal double: only the attributes `_wire_and_run` touches before
+    constructing `KorvidApp`. Most are referenced but never called during
+    wiring (they become bound-method kwargs), so a cheap stub is enough -
+    only `detect_cloud_provider` (the bounded cloud-provider probe) and
+    `list_relationship_objects` (asserted below) are actually invoked."""
+
+    def __init__(self) -> None:
+        self.list_calls: list[tuple[Any, str | None]] = []
+        self.relationship_list_calls: list[tuple[Any, str | None]] = []
+
+    async def detect_cloud_provider(self) -> Any:
+        from korvid.k8s.csp import detect_provider
+
+        return detect_provider([])
+
+    async def discover_resources(self) -> list[Any]:
+        return []
+
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+        self.list_calls.append((meta, namespace))
+        return []
+
+    async def list_relationship_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+        self.relationship_list_calls.append((meta, namespace))
+        return []
+
+    def list_namespaces(self) -> Any: ...
+    def get_helm_release_components(self, *a: Any, **k: Any) -> Any: ...
+    def stream_logs(self, *a: Any, **k: Any) -> Any: ...
+    def can_i(self, *a: Any, **k: Any) -> Any: ...
+    def open_pod_exec(self, *a: Any, **k: Any) -> Any: ...
+    def probe_context(self, *a: Any, **k: Any) -> Any: ...
+    def list_pod_metrics(self, *a: Any, **k: Any) -> Any: ...
+
+    async def switch_context(self, name: str | None) -> None:
+        return None
+
+
+async def test_wire_and_run_wires_relationship_lister_from_kube(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The composition root must hand KorvidApp a relationship lister backed
+    by the connected client's own `list_relationship_objects` (issue #281
+    task 7): the `g` binding's exclusive worker calls exactly this callable
+    to resolve a root's dependents/dependencies for the relationship graph."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    _FakeAppCapturesKwargs.instances.clear()
+
+    kube = _FakeKubeForWiring()
+    config = KorvidConfig(readonly=True)  # skips the pods/resize probe round trip
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(config, cast("Any", kube), state)
+
+    # Discovery is fire-and-forget (issue #27's background task): drain it
+    # so it doesn't outlive the test as an orphaned pending task.
+    if state.discovery_box:
+        await state.discovery_box[0]
+
+    assert len(_FakeAppCapturesKwargs.instances) == 1
+    wired = _FakeAppCapturesKwargs.instances[0].captured["list_relationship_objects"]
+    result = await wired("meta", "ns")
+    assert result == []
+    assert kube.relationship_list_calls == [("meta", "ns")]
+    assert kube.list_calls == []

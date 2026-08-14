@@ -156,7 +156,7 @@ class FakeKubeClient(ReadOps):
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         self._deny(meta.plural, namespace)
         return [
-            summary_for(meta.kind, manifest, group=meta.group)
+            summary_for(meta.kind, manifest, group=meta.group, version=meta.version)
             for manifest in self._objects
             if self._matches(manifest, meta, namespace)
         ]

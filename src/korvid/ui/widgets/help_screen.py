@@ -46,6 +46,7 @@ _ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     # `/` filters the table but searches inside the log / describe panes.
     "open_filter": ("Table", "Logs"),
     "describe": ("Table",),
+    "relationships": ("Table",),
     "shell": ("Table",),
     "port_forward": ("Table",),
     "logs": ("Table",),

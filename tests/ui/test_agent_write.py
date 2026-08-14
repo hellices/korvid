@@ -314,8 +314,18 @@ async def test_agent_dialog_shows_namespace(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("scale", "deployments", "web", namespace="prod", replicas=2)
         )
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
-        texts = " ".join(str(s.render()) for s in app.screen.query(Static))
+        await until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ConfirmScreen)
+                and any(
+                    "in namespace prod" in str(widget.render())
+                    for widget in app.screen.query(Static)
+                )
+            ),
+            label="namespace shown in approval dialog",
+        )
+        texts = " ".join(str(widget.render()) for widget in app.screen.query(Static))
         assert "in namespace prod" in texts
         await pilot.press("n")
         await task

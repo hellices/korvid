@@ -25,6 +25,7 @@ documents every view and shows the effective keys, including any remaps.
 | `0` | global | Toggle all-namespaces view |
 | `1`-`9` | global | Jump to a favorite namespace (`favorite_namespaces` config, in order) |
 | `d` | table | Describe selected resource (manifest + events) |
+| `g` | table | Operational relationship graph for the selected resource — direct dependencies/dependents with a coverage banner; `Enter` on a resolved row navigates there, `d` expands dependents, `c` shows coverage detail |
 | `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |
 | `s` | nodes table | Node shell (`kubectl debug node/`; approval dialog — privileged pod with the host filesystem at `/host`, deleted on exit) |
 | `Shift-F` | pods / services table | Port-forward the selected target (local port prompt; prefilled from declared ports) |
@@ -70,7 +71,7 @@ keybindings:
 ```
 
 Action names: `quit`, `help`, `open_command`, `open_filter`,
-`toggle_all_namespaces`, `describe`, `shell`, `logs`, `logs_multi`,
+`toggle_all_namespaces`, `describe`, `relationships`, `shell`, `logs`, `logs_multi`,
 `log_format`, `log_wrap`, `log_timestamps`, `log_save`, `log_previous`,
 `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
 `sort_by_mem`, `sort_picker`, `toggle_topbar`, `toggle_agent`, `interrupt_agent`, `delete_resource`, `rollout_restart`,

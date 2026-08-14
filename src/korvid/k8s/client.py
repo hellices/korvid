@@ -285,7 +285,7 @@ class KubeClient(ReadOps, WriteOps):
 
     def _object_summary(self, meta: ResourceMeta, manifest: dict[str, Any]) -> GenericSummary:
         """summary_for + configured custom column values (issue #45)."""
-        summary = summary_for(meta.kind, manifest, group=meta.group)
+        summary = summary_for(meta.kind, manifest, group=meta.group, version=meta.version)
         columns = self._custom_columns.get(meta.plural)
         if not columns:
             return summary
@@ -733,6 +733,25 @@ class KubeClient(ReadOps, WriteOps):
         path = self._list_path(meta, namespace)
         try:
             data = await self._request_json(path)
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
+        items = data.get("items", [])
+        self._observe_read("list", path, payload=data, object_count=len(items))
+        return [self._object_summary(meta, item) for item in items]
+
+    async def list_relationship_objects(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> list[GenericSummary]:
+        """LIST summaries for a relationship snapshot without Secret payloads."""
+        if meta.group or meta.kind != "Secret":
+            return await self.list_objects(meta, namespace)
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        path = self._list_path(meta, namespace)
+        accept = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1"
+        try:
+            data = await self._request_json(path, header_params={"Accept": accept})
         except ApiStatusError as exc:
             self._observe_read_error(path, exc)
             raise
@@ -1652,7 +1671,11 @@ class KubeClient(ReadOps, WriteOps):
         return _watch_call
 
     async def _request_json(
-        self, path: str, query_params: list[tuple[str, str]] | None = None
+        self,
+        path: str,
+        query_params: list[tuple[str, str]] | None = None,
+        *,
+        header_params: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Raw GET through the ApiClient; wraps ApiException as ApiStatusError."""
         if self._api is None:
@@ -1663,6 +1686,7 @@ class KubeClient(ReadOps, WriteOps):
                 "GET",
                 auth_settings=["BearerToken"],
                 query_params=query_params or [],
+                header_params=header_params,
                 _preload_content=False,
             )
             body = await resp.read()

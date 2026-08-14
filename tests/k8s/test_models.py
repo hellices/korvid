@@ -14,6 +14,7 @@ from korvid.k8s.models import (
     StorageClassSummary,
     summary_for,
 )
+from korvid.k8s.relationship_facts import RelationKind, RelationshipFacts
 
 POD: dict[str, Any] = {
     "metadata": {"name": "checkout-7d9f", "namespace": "prod"},
@@ -1549,3 +1550,151 @@ def test_storage_class_non_true_value_produces_empty_fields() -> None:
     assert not summary.is_default
     assert summary.default_annotation_key == ""
     assert summary.default_annotation_value == ""
+
+
+def test_generic_summary_carries_relationship_facts() -> None:
+    """GenericSummary must expose the resource's extracted relationship facts (issue #281)."""
+    summary = summary_for(
+        "Service",
+        {
+            "apiVersion": "v1",
+            "metadata": {"name": "api", "namespace": "prod", "uid": "svc-1"},
+            "spec": {"selector": {"app": "api"}},
+        },
+        group="",
+    )
+    assert summary.relationships.selectors[0].target_kind == "Pod"
+
+
+def test_generic_summary_relationship_facts_default_to_empty() -> None:
+    """A kind with no relationship extractor must default to empty RelationshipFacts."""
+    summary = GenericSummary.from_manifest("ConfigMap", {"metadata": {"name": "cfg"}})
+    assert summary.relationships == RelationshipFacts()
+
+
+def test_summary_for_pdb_list_item_without_api_version_uses_authoritative_version() -> None:
+    """A PodDisruptionBudget LIST item omitting apiVersion must still resolve the
+    v1-vs-v1beta1 empty-selector semantics correctly when the caller supplies the
+    authoritative `version` (from ResourceMeta), matching how `group` is already
+    threaded through instead of relying on the (often-missing) manifest apiVersion
+    (issue #281)."""
+    manifest: dict[str, Any] = {
+        # apiVersion deliberately omitted, as with real LIST items.
+        "metadata": {"name": "all", "namespace": "prod"},
+        "spec": {"selector": {}},
+    }
+    summary_v1 = summary_for("PodDisruptionBudget", manifest, group="policy", version="v1")
+    assert len(summary_v1.relationships.selectors) == 1
+    selector_fact = summary_v1.relationships.selectors[0]
+    assert selector_fact.relation is RelationKind.PROTECTED_BY
+    assert selector_fact.empty_matches is True
+
+    summary_v1beta1 = summary_for(
+        "PodDisruptionBudget", manifest, group="policy", version="v1beta1"
+    )
+    assert summary_v1beta1.relationships.selectors == ()
+
+
+def test_summary_for_pdb_without_version_falls_back_to_manifest_api_version() -> None:
+    """Direct callers that do not supply `version` must keep deriving it from the
+    manifest's `apiVersion`, unchanged from before `version` threading was added."""
+    manifest: dict[str, Any] = {
+        "apiVersion": "policy/v1",
+        "metadata": {"name": "all", "namespace": "prod"},
+        "spec": {"selector": {}},
+    }
+    summary = summary_for("PodDisruptionBudget", manifest)
+    assert len(summary.relationships.selectors) == 1
+    assert summary.relationships.selectors[0].empty_matches is True
+
+    manifest_v1beta1 = dict(manifest, apiVersion="policy/v1beta1")
+    summary_v1beta1 = summary_for("PodDisruptionBudget", manifest_v1beta1)
+    assert summary_v1beta1.relationships.selectors == ()
+
+
+def test_pod_summary_never_retains_secret_values() -> None:
+    """PodSummary must carry relationship facts without ever leaking manifest content
+    outside the metadata-only safety boundary (issue #281)."""
+    summary = PodSummary.from_manifest(
+        {
+            "metadata": {"name": "api", "namespace": "prod", "uid": "pod-1"},
+            "spec": {
+                "containers": [{"name": "api"}],
+                "volumes": [{"name": "s", "secret": {"secretName": "api-tls"}}],
+            },
+            "data": {"token": "forbidden-value"},
+        }
+    )
+    assert summary.relationships.references[0].target.name == "api-tls"
+    assert "forbidden-value" not in repr(summary)
+
+
+def test_replicaset_summary_carries_relationship_facts_via_authoritative_group() -> None:
+    """ReplicaSetSummary must preserve `relationships` from GenericSummary rather than
+    defaulting empty, and must use the authoritative `group` kwarg (not the manifest's
+    `apiVersion`, which native K8s LIST items commonly omit) (issue #281)."""
+    manifest: dict[str, Any] = {
+        # apiVersion deliberately omitted, as with real LIST items.
+        "metadata": {
+            "name": "web-6d9f88",
+            "namespace": "prod",
+            "uid": "rs-1",
+            "ownerReferences": [
+                {"apiVersion": "apps/v1", "kind": "Deployment", "name": "web", "uid": "dep-1"}
+            ],
+        },
+        "spec": {"replicas": 2, "selector": {"matchLabels": {"app": "web"}}},
+        "status": {"replicas": 2, "readyReplicas": 2},
+    }
+    summary = summary_for("ReplicaSet", manifest, group="apps")
+    assert isinstance(summary, ReplicaSetSummary)
+    assert summary.desired == 2
+    pairs = {
+        (fact.relation, fact.target.kind, fact.target.name)
+        for fact in summary.relationships.references
+    }
+    assert (RelationKind.OWNED_BY, "Deployment", "web") in pairs
+    assert summary.relationships.selectors[0].relation is RelationKind.MANAGED_BY
+    assert summary.relationships.selectors[0].target_kind == "Pod"
+
+
+def test_endpoint_slice_summary_carries_relationship_facts_via_authoritative_group() -> None:
+    """EndpointSliceSummary must preserve `relationships` from GenericSummary, threading
+    the authoritative `group` kwarg through so LIST items that omit `apiVersion` still
+    resolve owner references and target refs correctly (issue #281)."""
+    manifest: dict[str, Any] = {
+        # apiVersion deliberately omitted, as with real LIST items.
+        "metadata": {
+            "name": "api-abc",
+            "namespace": "prod",
+            "uid": "eps-1",
+            "labels": {"kubernetes.io/service-name": "api"},
+            "ownerReferences": [
+                {"apiVersion": "v1", "kind": "Service", "name": "api", "uid": "svc-1"}
+            ],
+        },
+        "addressType": "IPv4",
+        "endpoints": [
+            {
+                "conditions": {"ready": True},
+                "targetRef": {
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "namespace": "prod",
+                    "name": "api-0",
+                    "uid": "pod-1",
+                },
+            }
+        ],
+    }
+    summary = summary_for("EndpointSlice", manifest, group="discovery.k8s.io")
+    assert isinstance(summary, EndpointSliceSummary)
+    assert summary.service_name == "api"
+    pairs = {
+        (fact.relation, fact.target.kind, fact.target.name)
+        for fact in summary.relationships.references
+    }
+    assert (RelationKind.OWNED_BY, "Service", "api") in pairs
+    # ROUTES_TO is gated on the resolved group == "discovery.k8s.io"; this only
+    # succeeds when `group` is threaded through instead of the (missing) apiVersion.
+    assert (RelationKind.ROUTES_TO, "Pod", "api-0") in pairs
