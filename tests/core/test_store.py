@@ -302,3 +302,18 @@ def test_a_bucket_shrunk_behind_the_cache_does_not_raise() -> None:
     del store._data[("pods", "default")]["default/a"]
 
     assert [p.name for p in store.get("pods", "default")] == ["b"]
+
+
+def test_a_delete_and_an_add_between_two_reads_do_not_reuse_a_dead_key() -> None:
+    """The length tripwire cannot see a net-zero membership swap — one key
+    leaves and another arrives between two reads — so this pins the only
+    invariant that rests entirely on `apply_event` invalidating for itself."""
+    store = ResourceStore()
+    for name in ("a", "b"):
+        store.apply_event("pods", "default", "ADDED", _pod(name))
+    assert [p.name for p in store.get("pods", "default")] == ["a", "b"]
+
+    store.apply_event("pods", "default", "DELETED", _pod("a"))
+    store.apply_event("pods", "default", "ADDED", _pod("c"))
+
+    assert [p.name for p in store.get("pods", "default")] == ["b", "c"]

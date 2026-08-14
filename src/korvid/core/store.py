@@ -66,9 +66,11 @@ class ResourceStore:
             return []
         order = self._order.get((kind, scope))
         # The length check is a tripwire, not the invalidation rule: it costs
-        # O(1) and turns a mutation path that ever forgets to invalidate into
-        # a re-ordered read rather than a truncated table or a KeyError in
-        # the middle of a repaint.
+        # O(1) and turns any mutation path that changes the bucket's *size*
+        # without invalidating into a re-ordered read rather than a truncated
+        # table or a KeyError mid-repaint. A net-zero swap — one key leaving
+        # and another arriving between two reads — is invisible to it, so
+        # `apply_event` still has to invalidate for itself.
         if order is None or len(order) != len(bucket):
             order = [
                 key
