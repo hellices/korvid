@@ -133,21 +133,20 @@ def _parse_pdb_selector(pdb: dict[str, Any]) -> tuple[LabelSelector, bool]:
     return parse_label_selector(selector), empty_matches
 
 
-_KNOWN_OPERATORS = frozenset({"In", "NotIn", "Exists", "DoesNotExist"})
-
-
 def _pdb_selector_matches_labels(
     parsed: tuple[LabelSelector, bool], labels: dict[str, str]
 ) -> bool:
+    # Drain over-warns for unknown operators, but only for the expression it
+    # cannot interpret: a selector is an AND of its constraints, so a
+    # matchLabels entry (or a known expression) that definitely does not
+    # match still rules the PDB out.  Treating the whole selector as a match
+    # would report evictions as blocked that the Eviction API would allow;
+    # treating the unknown expression as False would let a future-API PDB
+    # silently pass, which is the failure this side must never have.
     selector, empty_matches = parsed
-    # Drain over-warns for unknown operators: if any matchExpression uses an
-    # operator outside the known set, assume the PDB matches the pod rather
-    # than silently ignoring it.  The shared matches_selector returns False for
-    # unknown operators (correct for the graph), but drain must stay
-    # conservative so that a future-API PDB never lets an eviction slip through.
-    if any(expr.operator not in _KNOWN_OPERATORS for expr in selector.match_expressions):
-        return True
-    return matches_selector(selector, labels, empty_matches=empty_matches)
+    return matches_selector(
+        selector, labels, empty_matches=empty_matches, unknown_operator_matches=True
+    )
 
 
 class _BudgetTracker:

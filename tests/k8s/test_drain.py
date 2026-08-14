@@ -419,3 +419,52 @@ def test_unknown_operator_in_pdb_conservatively_blocks_pod() -> None:
     )
     plan = build_drain_plan([_pod("web-1", labels={"replicas": "3"})], [pdb])
     assert plan.targets[0].pdb_blocked == "future-pdb"
+
+
+def test_unknown_operator_does_not_override_a_definite_match_label_mismatch() -> None:
+    """Over-warning is per expression, not per selector.
+
+    A selector is an AND of every constraint, so ``matchLabels: {app: api}``
+    already proves a pod labelled ``app=web`` is not selected -- no unknown
+    operator elsewhere in the same selector can make it selected. Blocking
+    that pod would report an eviction impact the API would never enforce.
+    """
+    pdb = _pdb(
+        "future-pdb",
+        match_labels={"app": "api"},
+        match_expressions=[{"key": "tier", "operator": "Gt", "values": ["2"]}],
+        disruptions_allowed=0,
+    )
+    plan = build_drain_plan([_pod("web-1", labels={"app": "web", "tier": "3"})], [pdb])
+    assert plan.targets[0].pdb_blocked is None
+
+
+def test_unknown_operator_does_not_override_a_definite_expression_mismatch() -> None:
+    """A known expression that definitely does not match also survives:
+    ``In [api]`` against ``app=web`` is a decided non-match."""
+    pdb = _pdb(
+        "future-pdb",
+        match_expressions=[
+            {"key": "app", "operator": "In", "values": ["api"]},
+            {"key": "tier", "operator": "Gt", "values": ["2"]},
+        ],
+        disruptions_allowed=0,
+    )
+    plan = build_drain_plan([_pod("web-1", labels={"app": "web", "tier": "3"})], [pdb])
+    assert plan.targets[0].pdb_blocked is None
+
+
+def test_unknown_operator_still_blocks_when_every_known_constraint_matches() -> None:
+    """When nothing decides the selector against the pod, the undecidable
+    expression keeps its fail-safe true and the pod stays blocked."""
+    pdb = _pdb(
+        "future-pdb",
+        match_labels={"app": "api"},
+        match_expressions=[
+            {"key": "app", "operator": "Exists"},
+            {"key": "tier", "operator": "Gt", "values": ["2"]},
+        ],
+        disruptions_allowed=0,
+    )
+    plan = build_drain_plan([_pod("api-1", labels={"app": "api", "tier": "3"})], [pdb])
+    assert plan.targets[0].pdb_blocked == "future-pdb"

@@ -36,3 +36,27 @@ def test_unknown_operator_never_matches() -> None:
         {"matchExpressions": [{"key": "app", "operator": "Equals", "values": ["api"]}]}
     )
     assert not matches_selector(selector, {"app": "api"}, empty_matches=True)
+
+
+def test_unknown_operator_matches_is_opt_in_per_expression() -> None:
+    """Callers that must over-warn (drain) opt in per expression; the graph
+    keeps the fail-safe-false default so it never invents an edge."""
+    selector = parse_label_selector(
+        {
+            "matchLabels": {"app": "api"},
+            "matchExpressions": [{"key": "tier", "operator": "Gt", "values": ["2"]}],
+        }
+    )
+    assert not matches_selector(selector, {"app": "api", "tier": "3"}, empty_matches=False)
+    assert matches_selector(
+        selector,
+        {"app": "api", "tier": "3"},
+        empty_matches=False,
+        unknown_operator_matches=True,
+    )
+    assert not matches_selector(
+        selector,
+        {"app": "web", "tier": "3"},
+        empty_matches=False,
+        unknown_operator_matches=True,
+    )

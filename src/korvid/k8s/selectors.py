@@ -78,17 +78,21 @@ def parse_label_selector(raw: object) -> LabelSelector:
     return LabelSelector(labels, tuple(expressions), present=True)
 
 
-def _expression_matches(expr: SelectorExpression, labels: Mapping[str, str]) -> bool:
+def _expression_matches(
+    expr: SelectorExpression, labels: Mapping[str, str], *, unknown_operator_matches: bool
+) -> bool:
     """Evaluate one ``matchExpressions`` entry against a pod's labels.
 
     Args:
         expr: The parsed selector expression.
         labels: The pod's label set.
+        unknown_operator_matches: What an operator outside the known set
+            evaluates to.  ``False`` is fail-safe for the graph (never
+            invent an edge); ``True`` is fail-safe for drain (never let an
+            eviction slip past a PDB korvid cannot interpret).
 
     Returns:
         ``True`` if the expression matches according to Kubernetes semantics.
-        Unknown operators return ``False`` (fail-safe for the graph; callers
-        that want over-warning behaviour must handle that themselves).
     """
     if expr.operator == "In":
         return labels.get(expr.key) in expr.values
@@ -99,7 +103,7 @@ def _expression_matches(expr: SelectorExpression, labels: Mapping[str, str]) -> 
         return expr.key in labels
     if expr.operator == "DoesNotExist":
         return expr.key not in labels
-    return False
+    return unknown_operator_matches
 
 
 def matches_selector(
@@ -107,6 +111,7 @@ def matches_selector(
     labels: Mapping[str, str],
     *,
     empty_matches: bool,
+    unknown_operator_matches: bool = False,
 ) -> bool:
     """Test whether *labels* are selected by *selector*.
 
@@ -118,6 +123,14 @@ def matches_selector(
             ``True`` for ``policy/v1`` PDB semantics (empty selector selects
             every pod in the namespace) and ``False`` for ``policy/v1beta1``
             semantics (empty selector selects no pods).
+        unknown_operator_matches: What a ``matchExpressions`` entry whose
+            operator korvid does not know evaluates to.  It is applied per
+            expression, never to the selector as a whole: a selector is an
+            AND of its constraints, so a ``matchLabels`` entry (or a known
+            expression) that definitely does not match still decides the
+            whole selector against the labels.  Defaults to ``False``
+            (fail-safe for the relationship graph); drain passes ``True``
+            to over-warn rather than miss a PDB it cannot interpret.
 
     Returns:
         ``False`` for an absent selector (``present=False``) regardless of
@@ -132,4 +145,7 @@ def matches_selector(
     for key, value in selector.match_labels:
         if labels.get(key) != value:
             return False
-    return all(_expression_matches(expr, labels) for expr in selector.match_expressions)
+    return all(
+        _expression_matches(expr, labels, unknown_operator_matches=unknown_operator_matches)
+        for expr in selector.match_expressions
+    )
