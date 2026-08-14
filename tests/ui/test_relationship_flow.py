@@ -33,7 +33,7 @@ from korvid.k8s.relationship_facts import (
     TargetReference,
 )
 from korvid.ui.app import ContextSwitchResult, KorvidApp
-from korvid.ui.messages import SwitchContextCommand
+from korvid.ui.messages import NavigateCommand, SwitchContextCommand
 from korvid.ui.widgets.relationship_screen import RelationshipScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 
@@ -41,7 +41,12 @@ from .waits import until
 
 PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 CONFIG_MAPS_META = ResourceMeta("ConfigMap", "configmaps", "", "v1", True)
-_ALIASES = build_alias_map([PODS_META, CONFIG_MAPS_META])
+#: A generic korvid-invented view (not Helm-specific - #281's review flagged
+#: that the synthetic rejection must not be hardcoded to any one kind) with
+#: no backing API resource: navigation may show it, but it can never be a
+#: relationship-graph root.
+SYNTHETIC_META = ResourceMeta("Widget", "widgets", "", "v1", True, synthetic=True)
+_ALIASES = build_alias_map([PODS_META, CONFIG_MAPS_META, SYNTHETIC_META])
 
 
 def _pod(
@@ -75,6 +80,11 @@ def _pod(
 
 def _configmap(name: str, *, namespace: str = "prod") -> GenericSummary:
     return GenericSummary(name=name, namespace=namespace, kind="ConfigMap", created="", uid="cm-1")
+
+
+def _widget(name: str, *, namespace: str = "prod") -> GenericSummary:
+    """A row for the generic synthetic view - see `SYNTHETIC_META`."""
+    return GenericSummary(name=name, namespace=namespace, kind="Widget", created="", uid="widget-1")
 
 
 class _RelationshipLister:
@@ -120,6 +130,7 @@ class _RelEnv:
         *,
         pods: tuple[PodSummary, ...] = (),
         configmaps: tuple[GenericSummary, ...] = (),
+        widgets: tuple[GenericSummary, ...] = (),
         with_lister: bool = True,
         contexts: tuple[str, ...] = ("ctx-a", "ctx-b"),
     ) -> None:
@@ -128,14 +139,15 @@ class _RelEnv:
         self.lister = _RelationshipLister()
         self.switch_calls: list[str | None] = []
         store = ResourceStore()
+        rows_by_kind: dict[str, tuple[Summary, ...]] = {
+            "pods": pods,
+            "configmaps": configmaps,
+            "widgets": widgets,
+        }
 
         async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-            if kind == "pods":
-                for pod in pods:
-                    yield ("ADDED", pod)
-            elif kind == "configmaps":
-                for cfg in configmaps:
-                    yield ("ADDED", cfg)
+            for row in rows_by_kind.get(kind, ()):
+                yield ("ADDED", row)
             while True:
                 await asyncio.sleep(0.01)
 
@@ -286,3 +298,28 @@ async def test_graph_goto_reuses_normal_navigation() -> None:
         assert app.current_namespace == "prod"
         namespace, name = app._selected_ns_name()
         assert (namespace, name) == ("prod", "cm-a")
+
+
+async def test_g_on_synthetic_view_does_not_open_relationships() -> None:
+    """A selected row on a synthetic view (korvid-invented, no backing API
+    resource - e.g. the helm browser, or this generic `widgets` stand-in)
+    can never be a relationship-graph root: it has no discovered source the
+    fixed/discovered graph catalog could ever LIST. `g` must reject it the
+    same way `_write_target` rejects synthetic kinds for writes - a visible
+    warning, never a silent no-op and never an empty modal."""
+    env = _RelEnv(widgets=(_widget("release-a"),))
+    app = env.app
+    async with app.run_test() as pilot:
+        app.post_message(NavigateCommand("widgets"))
+        await until(pilot, lambda: app.current_kind == "widgets", label="widgets view")
+
+        def widgets_visible() -> bool:
+            table = app.query_one(ResourceTable)
+            return table.row_count > 0
+
+        await until(pilot, widgets_visible, label="widget row visible")
+        await pilot.press("g")
+        await pilot.pause()
+        assert env.lister.calls == []
+        assert not isinstance(app.screen, RelationshipScreen)
+        assert any("read-only view" in n.message for n in app._notifications)

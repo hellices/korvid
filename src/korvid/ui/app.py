@@ -2867,11 +2867,18 @@ class KorvidApp(App[None]):
         (group/kind) for the current view plus the selected row's
         namespace/name/UID from the store. None only after an
         already-visible warning — no selection (`_selected_ns_name` warns
-        itself), or the current view has no discovered `ResourceMeta` (an
-        identity that cannot be built is never silently dropped)."""
+        itself), the current view has no discovered `ResourceMeta`, or the
+        view is synthetic (an identity that cannot be built, or cannot ever
+        source a graph, is never silently dropped)."""
         meta = self.aliases.get(self.current_kind)
         if meta is None:
             self.notify(f"{self.current_kind} is not a discovered view", severity="warning")
+            return None
+        if meta.synthetic:
+            # Korvid-invented views (e.g. the helm browser) have no backing
+            # API resource the fixed/discovered graph catalog could ever
+            # LIST - consistent with `_write_target`'s own synthetic check.
+            self.notify(f"{meta.kind} is a read-only view", severity="warning")
             return None
         namespace, name = self._selected_ns_name()
         if namespace is None or name is None:
