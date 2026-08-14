@@ -1479,7 +1479,9 @@ async def test_wait_for_first_watch_receipt_blocks_until_the_receipt_arrives() -
         )
     finally:
         churn_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        # A plain `task.cancel()` carries no message, so the required match
+        # pattern is the empty-message anchor (see `_churn_failed`'s test).
+        with pytest.raises(asyncio.CancelledError, match=r"^$"):
             await churn_task
 
     assert observed is True
@@ -1525,7 +1527,9 @@ async def test_wait_for_first_watch_receipt_times_out_when_nothing_ever_arrives(
             )
     finally:
         churn_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        # A plain `task.cancel()` carries no message, so the required match
+        # pattern is the empty-message anchor (see `_churn_failed`'s test).
+        with pytest.raises(asyncio.CancelledError, match=r"^$"):
             await churn_task
 
     assert pilot.pauses == 2
