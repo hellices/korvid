@@ -368,6 +368,44 @@ def test_ingress_default_and_path_backends_target_services() -> None:
     assert path_fact.field == "spec.rules[0].http.paths[0].backend.service"
 
 
+def test_ingress_tls_secret_references_are_extracted() -> None:
+    facts = extract_relationship_facts(
+        "Ingress",
+        "networking.k8s.io",
+        "v1",
+        {
+            "metadata": {"name": "public", "namespace": "prod"},
+            "spec": {
+                "tls": [
+                    {"hosts": ["api.example.com"], "secretName": "public-tls"},
+                    {"hosts": ["ignored.example.com"]},
+                    {"secretName": ""},
+                ]
+            },
+        },
+    )
+    assert [
+        (
+            fact.relation,
+            fact.target.group,
+            fact.target.kind,
+            fact.target.namespace,
+            fact.target.name,
+            fact.field,
+        )
+        for fact in facts.references
+    ] == [
+        (
+            RelationKind.USES_CONFIG,
+            "",
+            "Secret",
+            "prod",
+            "public-tls",
+            "spec.tls[0].secretName",
+        )
+    ]
+
+
 def test_ingress_default_and_path_resource_backends_are_extracted() -> None:
     facts = extract_relationship_facts(
         "Ingress",

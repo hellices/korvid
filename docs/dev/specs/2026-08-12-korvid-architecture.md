@@ -433,8 +433,9 @@ k8s manifest -> RelationshipFacts -> core RelationshipGraph
 `korvid.k8s.relationship_facts.extract_relationship_facts` is the safety
 boundary: it walks one raw manifest and extracts only the metadata a
 relationship needs (owner references, label selectors, volume/config
-references, Ingress service/resource backends, Gateway forwarding/request-
-mirror backends, live Pod node scheduling, storage bindings), never a Secret's
+references, Ingress service/resource backends and TLS Secret names, Gateway
+forwarding/request-mirror backends, live Pod node scheduling, storage bindings),
+never a Secret's
 `data`, a literal env value, or a command/arg. Relationship snapshot Secret
 LISTs request Kubernetes `PartialObjectMetadataList`; an API server that cannot
 provide that representation produces visible incomplete coverage rather than a

@@ -443,7 +443,9 @@ class RelationshipScreen(ModalScreen[GotoResult | None]):
                 continue
             depth = depth_of[edge.subject]
             index = self._add_dependent_row(table, index, f"Dependents (depth {depth})", edge)
-        additional_cycles = tuple(edge for edge in result.cycles if edge.target != self.root)
+        additional_cycles = tuple(
+            edge for edge in result.cycles if edge.target != self.root or edge.subject == self.root
+        )
         additional_revisits = tuple(edge for edge in result.revisits if edge.target != self.root)
         index, cycle_omitted = self._add_revisit_rows(
             table, index, budget, additional_cycles, "Dependents (cycle)", "cycle"

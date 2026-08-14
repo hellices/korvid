@@ -555,9 +555,31 @@ def _ingress_backend(
     )
 
 
-def _ingress_backends(spec: Mapping[str, Any], namespace: str) -> list[ReferenceFact]:
-    """Ingress service/resource backends -> declared `ROUTES_TO` facts."""
+def _ingress_tls_references(spec: Mapping[str, Any], namespace: str) -> list[ReferenceFact]:
+    tls_entries = spec.get("tls")
+    if not isinstance(tls_entries, list):
+        return []
     references: list[ReferenceFact] = []
+    for index, entry in enumerate(tls_entries):
+        if not isinstance(entry, Mapping):
+            continue
+        secret_name = entry.get("secretName")
+        if not isinstance(secret_name, str) or not secret_name:
+            continue
+        references.append(
+            ReferenceFact(
+                relation=RelationKind.USES_CONFIG,
+                target=TargetReference("", "Secret", namespace, secret_name),
+                confidence=FactConfidence.DECLARED,
+                field=f"spec.tls[{index}].secretName",
+            )
+        )
+    return references
+
+
+def _ingress_backends(spec: Mapping[str, Any], namespace: str) -> list[ReferenceFact]:
+    """Ingress backends and TLS Secrets -> declared relationship facts."""
+    references = _ingress_tls_references(spec, namespace)
     default = _ingress_backend(
         _mapping(spec.get("defaultBackend")), namespace, "spec.defaultBackend"
     )

@@ -65,7 +65,7 @@ Each row shows six columns:
 | `routes_to` | Ingress / Gateway API Route (HTTPRoute, GRPCRoute, TLSRoute, TCPRoute, UDPRoute) | The backend Service it routes to |
 | `routes_to` | EndpointSlice | The Pod named by one `endpoints[].targetRef` (live routing target, not authored config) |
 | `uses_volume` | Pod / workload template | A PersistentVolumeClaim mounted as a volume |
-| `uses_config` | Pod / workload template | A ConfigMap or Secret referenced by name only (`envFrom`, `env[].valueFrom` — across regular, init, and ephemeral containers — a volume, a projected volume source, or `imagePullSecrets`) |
+| `uses_config` | Pod / workload template / Ingress | A ConfigMap or Secret referenced by name only (`envFrom`, `env[].valueFrom` — across regular, init, and ephemeral containers — a volume, a projected volume source, `imagePullSecrets`, or an Ingress TLS `secretName`) |
 | `scheduled_on` | Pod | The Node named in its (live) `spec.nodeName`. Only a live Pod is ever scheduled: a workload's `spec.template.spec.nodeName` is template configuration, not an observed placement of the Deployment/Job itself, so it produces no edge |
 | `bound_to` | PersistentVolumeClaim / PersistentVolume | The bound PersistentVolume / PersistentVolumeClaim on the other side (a PV's `spec.claimRef` UID is kept, so a stale binding is not reattached to a recreated claim of the same name) |
 
@@ -153,13 +153,15 @@ and why.
 Before it can join any facts, korvid LISTs a fixed catalog of resource kinds
 (Pods, Services, ConfigMaps, Secrets, PVCs, PVs, Nodes, Deployments,
 ReplicaSets, StatefulSets, DaemonSets, Jobs, CronJobs, EndpointSlices,
-Ingresses, PodDisruptionBudgets) plus any Gateway API resources
-(`gateway.networking.k8s.io` Gateways, `*Route` kinds, ReferenceGrants) the
-cluster's own API discovery reports. Every discovered `*Route` kind in that
-group is read through the one `spec.rules[].backendRefs[]` shape the Gateway
-API defines for all of them, so HTTPRoute, GRPCRoute, and the stream routes
-(TLSRoute/TCPRoute/UDPRoute) all contribute `routes_to` edges rather than
-being listed and silently ignored. A CRD outside that group whose kind merely
+Ingresses, PodDisruptionBudgets) plus every Gateway API `*Route` and
+`ReferenceGrant` the cluster's own API discovery reports. Bare Gateway objects
+are not automatic sources because listener relationships are outside this
+slice; a selected Gateway root is still listed for its universal owner facts.
+Every discovered `*Route` kind is read through the one
+`spec.rules[].backendRefs[]` shape the Gateway API defines for all of them, so
+HTTPRoute, GRPCRoute, and the stream routes (TLSRoute/TCPRoute/UDPRoute) all
+contribute `routes_to` edges rather than being listed and silently ignored. A
+CRD outside that group whose kind merely
 ends in `Route` (for example an OpenShift `Route`) is neither listed nor
 interpreted. Route `parentRefs` (the Gateway a Route attaches to) are not
 modelled. A second, bounded phase then LISTs the namespaces those results'

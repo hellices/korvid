@@ -66,8 +66,8 @@ Facts contain metadata and references only:
 - Pod and pod-template references to PVCs, ConfigMaps, and Secrets by name;
 - Service selectors;
 - EndpointSlice Service ownership and endpoint target references;
-- Ingress service/resource backends and Gateway forwarding/request-mirror
-  backends;
+- Ingress service/resource backends and TLS Secret references, plus Gateway
+  forwarding/request-mirror backends;
 - PDB selectors;
 - Pod node placement (live Pods only; a workload's template `nodeName` is
   configuration, not an observed placement).
@@ -255,8 +255,8 @@ graph is incomplete, but the preview must say so.
 - duplicate selectors and empty selectors using the API-version-specific
   Kubernetes semantics;
 - EndpointSlice Service ownership and endpoint target references;
-- Ingress service/resource and Gateway forwarding/request-mirror backend
-  resolution;
+- Ingress service/resource backend and TLS Secret resolution, plus Gateway
+  forwarding/request-mirror backend resolution;
 - PVC, ConfigMap, and Secret references without Secret values;
 - PDB selectors and Pod node placement;
 - invalid cross-namespace references;

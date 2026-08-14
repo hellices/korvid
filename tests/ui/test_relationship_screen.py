@@ -573,3 +573,27 @@ async def test_expansion_does_not_repeat_parallel_direct_dependent_edges() -> No
         directions = [str(table.get_row_at(row)[0]) for row in range(table.row_count)]
         assert all("repeat" not in label for label in directions)
         assert table.row_count == initial_rows
+
+
+async def test_expansion_marks_a_root_self_reference_as_a_cycle() -> None:
+    root = _resource("Deployment", "api")
+    graph = RelationshipGraph(
+        nodes=(root,),
+        edges=(
+            _edge(
+                root,
+                root,
+                relation=RelationKind.MANAGED_BY,
+                field="metadata.ownerReferences[0]",
+            ),
+        ),
+        coverage=(),
+    )
+    app = HostApp()
+    screen = RelationshipScreen(graph, root)
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.press("d")
+        table = app.screen.query_one(DataTable)
+        directions = [str(table.get_row_at(row)[0]) for row in range(table.row_count)]
+        assert sum("cycle" in label for label in directions) == 1

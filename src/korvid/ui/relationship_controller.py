@@ -108,18 +108,15 @@ _GATEWAY_MISSING_SPEC = GraphSourceSpec(_GATEWAY_GROUP, "*", "*", optional=True)
 def _is_gateway_resource(meta: ResourceMeta) -> bool:
     """A discovered Gateway API resource this snapshot can actually use.
 
-    `*Route` membership is decided by `is_gateway_route_kind`, the same
-    predicate the fact extractor uses to pick a route's backendRef handler,
-    so no kind is ever LISTed (and reported as `complete` coverage) that
-    the extractor would silently ignore.
+    `*Route` membership is decided by `is_gateway_route_kind`, and
+    `ReferenceGrant` has its own fact handler. A bare `Gateway` is not an
+    automatic source because the phase-one extractor does not interpret its
+    listener relationships; it still joins a snapshot when selected as the
+    root through `_root_source`.
     """
     if meta.group != _GATEWAY_GROUP:
         return False
-    return (
-        meta.kind == "Gateway"
-        or meta.kind == "ReferenceGrant"
-        or is_gateway_route_kind(meta.group, meta.kind)
-    )
+    return meta.kind == "ReferenceGrant" or is_gateway_route_kind(meta.group, meta.kind)
 
 
 def _resolve_fixed(
@@ -163,12 +160,13 @@ def graph_source_metas(
         else:
             selected[(meta.group, meta.plural)] = meta
 
-    gateway_found = False
+    gateway_discovered = False
     for meta in aliases.values():
+        if meta.group == _GATEWAY_GROUP:
+            gateway_discovered = True
         if _is_gateway_resource(meta):
             selected[(meta.group, meta.plural)] = meta
-            gateway_found = True
-    if not gateway_found:
+    if not gateway_discovered:
         missing.append(_GATEWAY_MISSING_SPEC)
 
     root_missing = _root_source(root, aliases, selected, missing)
@@ -442,6 +440,59 @@ def _target_namespace_requests(
     return requests
 
 
+def _unavailable_target_coverage(
+    fetched: Sequence[_FetchedSource],
+    namespace: str | None,
+    aliases: Mapping[str, ResourceMeta],
+    first_phase: Sequence[ResourceMeta],
+    limit: int,
+) -> list[CoverageRecord]:
+    """Bounded records for referenced kinds discovery cannot safely LIST."""
+    by_group_kind = _metas_by_group_kind(aliases)
+    gaps: set[tuple[str, str, str, str]] = set()
+    for target_namespace, group_kinds in _follow_up_route_targets(fetched).items():
+        for group, kind in group_kinds:
+            if _listed_in_first_phase((group, kind), target_namespace, namespace, first_phase):
+                continue
+            meta = by_group_kind.get((group, kind))
+            if meta is not None and meta.namespaced and not meta.synthetic:
+                continue
+            if meta is None:
+                detail = "referenced kind was not discovered; target could not be listed"
+            elif meta.synthetic:
+                detail = "referenced kind is synthetic and has no Kubernetes LIST endpoint"
+            else:
+                detail = "referenced kind is cluster-scoped but the reference names a namespace"
+            gaps.add((target_namespace, group, kind, detail))
+
+    ordered = sorted(gaps)
+    bounded = max(limit, 0)
+    records = [
+        CoverageRecord(
+            group=group,
+            resource=kind,
+            scope=scope,
+            state=CoverageState.UNAVAILABLE,
+            detail=detail,
+        )
+        for scope, group, kind, detail in ordered[:bounded]
+    ]
+    if len(ordered) > bounded:
+        records.append(
+            CoverageRecord(
+                group="",
+                resource="*",
+                scope="",
+                state=CoverageState.CAPPED,
+                detail=(
+                    f"{len(ordered) - bounded} unavailable target coverage record(s) "
+                    f"dropped at the {bounded}-target-list cap"
+                ),
+            )
+        )
+    return records
+
+
 def _cap_target_requests(
     requests: Sequence[tuple[ResourceMeta, str]], max_target_lists: int
 ) -> tuple[list[tuple[ResourceMeta, str]], CoverageRecord | None]:
@@ -605,6 +656,15 @@ class RelationshipSnapshotLoader:
         )
         if target_cap_record is not None:
             coverage.append(target_cap_record)
+        coverage.extend(
+            _unavailable_target_coverage(
+                fetched,
+                namespace,
+                aliases,
+                metas,
+                self._limits.max_target_lists,
+            )
+        )
         coverage.extend(_missing_grant_coverage(fetched, namespace, requests, aliases))
         if requests:
             coverage.extend(_target_partial_coverage(requests))

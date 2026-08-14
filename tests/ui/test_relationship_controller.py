@@ -1,9 +1,9 @@
 """Tests for the bounded relationship snapshot loader (issue #281, Task 5).
 
 `RelationshipSnapshotLoader` is a pure async UI-layer orchestrator: it lists
-a fixed catalog of core/apps/batch/networking/policy resources plus any
-discovered `gateway.networking.k8s.io` resources (Gateway/*Route/
-ReferenceGrant), bounds concurrency and total resource count, classifies
+a fixed catalog of core/apps/batch/networking/policy resources plus discovered
+`gateway.networking.k8s.io` `*Route` and `ReferenceGrant` resources, bounds
+concurrency and total resource count, classifies
 per-source failures into `CoverageRecord`s, and hands the collected
 `GraphInput`s to the already-tested `build_relationship_graph`. It performs
 no Textual operations; the app owns worker lifecycle (starting/cancelling
@@ -53,6 +53,7 @@ NODES_META = ResourceMeta("Node", "nodes", "", "v1", False)
 DEPLOYMENT_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
 JOB_META = ResourceMeta("Job", "jobs", "batch", "v1", True)
 HTTP_ROUTE_META = ResourceMeta("HTTPRoute", "httproutes", "gateway.networking.k8s.io", "v1", True)
+GATEWAY_META = ResourceMeta("Gateway", "gateways", "gateway.networking.k8s.io", "v1", True)
 REFERENCE_GRANT_META = ResourceMeta(
     "ReferenceGrant", "referencegrants", "gateway.networking.k8s.io", "v1beta1", True
 )
@@ -162,6 +163,25 @@ def test_optional_gateway_routes_are_selected_when_discovered() -> None:
     sources, _missing = graph_source_metas(_root("Ingress", "prod"), "prod", aliases)
     assert HTTP_ROUTE_META in sources
     assert REFERENCE_GRANT_META in sources
+
+
+def test_gateway_without_extracted_relationships_is_not_an_automatic_source() -> None:
+    sources, _missing = graph_source_metas(
+        _root("Pod", "prod"), "prod", _aliases(PODS_META, GATEWAY_META)
+    )
+    assert GATEWAY_META not in sources
+
+
+def test_discovered_gateway_root_does_not_report_the_api_group_unavailable() -> None:
+    root = GraphResource(
+        group=GATEWAY,
+        kind="Gateway",
+        namespace="prod",
+        name="public",
+    )
+    sources, missing = graph_source_metas(root, "prod", _aliases(PODS_META, GATEWAY_META))
+    assert GATEWAY_META in sources
+    assert all(spec.group != GATEWAY or spec.plural != "*" for spec in missing)
 
 
 def test_source_order_is_group_plural_sorted() -> None:
@@ -907,6 +927,41 @@ async def test_missing_reference_grant_discovery_is_visible_per_target_namespace
     ]
     assert graph.incomplete
     assert _routes_to_resolution(graph) is EdgeResolution.INVALID
+
+
+async def test_undiscovered_referenced_kind_is_visible_in_coverage() -> None:
+    route = GenericSummary(
+        name="route-a",
+        namespace="edge",
+        kind="HTTPRoute",
+        created="",
+        uid="route-a",
+        relationships=RelationshipFacts(
+            api_group=GATEWAY,
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.ROUTES_TO,
+                    target=TargetReference("example.com", "Backend", "prod", "api"),
+                    confidence=FactConfidence.DECLARED,
+                    field="spec.rules[0].backendRefs[0]",
+                ),
+            ),
+        ),
+    )
+    lister = _NamespacedLister(results={(GATEWAY, "httproutes", "edge"): [route]})
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", "edge"),
+        "edge",
+        _aliases(HTTP_ROUTE_META, REFERENCE_GRANT_META),
+    )
+    assert any(
+        record.group == "example.com"
+        and record.resource == "Backend"
+        and record.scope == "prod"
+        and record.state is CoverageState.UNAVAILABLE
+        for record in graph.coverage
+    )
+    assert graph.incomplete
 
 
 async def test_discovered_reference_grant_emits_no_unavailable_record() -> None:
