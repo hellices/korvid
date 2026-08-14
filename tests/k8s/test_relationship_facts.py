@@ -187,7 +187,12 @@ def test_deployment_selector_targets_pods() -> None:
             "metadata": {"name": "api", "namespace": "prod"},
             "spec": {
                 "selector": {"matchLabels": {"app": "api"}},
-                "template": {"spec": {"nodeName": "node-a"}},
+                "template": {
+                    "spec": {
+                        "nodeName": "node-a",
+                        "volumes": [{"name": "cfg", "configMap": {"name": "api-config"}}],
+                    }
+                },
             },
         },
     )
@@ -201,9 +206,12 @@ def test_deployment_selector_targets_pods() -> None:
     assert selector_fact.field == "spec.selector"
     assert selector_fact.empty_matches is False
     assert selector_fact.match_is_subject is True
-    # spec.template.spec is also extracted through the shared _pod_spec helper.
+    # spec.template.spec is also extracted through the shared _pod_spec helper,
+    # minus node placement: a template's nodeName is not an observed
+    # placement of the Deployment itself (see the SCHEDULED_ON tests below).
     pairs = {(fact.relation, fact.target.kind, fact.target.name) for fact in facts.references}
-    assert (RelationKind.SCHEDULED_ON, "Node", "node-a") in pairs
+    assert (RelationKind.USES_CONFIG, "ConfigMap", "api-config") in pairs
+    assert (RelationKind.SCHEDULED_ON, "Node", "node-a") not in pairs
 
 
 def test_workload_selectors_use_managed_by_not_selects() -> None:
@@ -525,3 +533,141 @@ def test_gateway_kind_itself_emits_no_backend_refs() -> None:
         },
     )
     assert facts.references == ()
+
+
+def test_pv_claim_ref_retains_the_bound_claim_uid() -> None:
+    """`spec.claimRef` is an ObjectReference carrying the bound PVC's UID.
+
+    Dropping it would let a deleted-and-recreated PVC of the same name be
+    reconnected to a stale PV binding, so the UID must survive extraction
+    and feed the graph's UID-first resolution.
+    """
+    facts = extract_relationship_facts(
+        "PersistentVolume",
+        "",
+        "v1",
+        {
+            "metadata": {"name": "pv-1"},
+            "spec": {"claimRef": {"namespace": "prod", "name": "api-data", "uid": "pvc-old"}},
+        },
+    )
+    assert len(facts.references) == 1
+    assert facts.references[0].target.uid == "pvc-old"
+
+
+def test_pv_claim_ref_without_uid_stays_name_resolved() -> None:
+    """A `claimRef` with no (or a blank) UID keeps name-based resolution."""
+    for claim_ref in ({"namespace": "prod", "name": "api-data"}, {"name": "api-data", "uid": ""}):
+        facts = extract_relationship_facts(
+            "PersistentVolume",
+            "",
+            "v1",
+            {"metadata": {"name": "pv-1"}, "spec": {"claimRef": claim_ref}},
+        )
+        assert facts.references[0].target.uid is None, claim_ref
+
+
+def test_pod_ephemeral_containers_config_references_are_extracted() -> None:
+    """Ephemeral (debug) containers declare `envFrom`/`env[].valueFrom` too.
+
+    Skipping them hides a real ConfigMap/Secret dependency while Pod
+    coverage still reports `complete`; the same metadata-only extractor
+    must read them, and still never retain a literal value or key.
+    """
+    manifest = {
+        "metadata": {"name": "api-0", "namespace": "prod"},
+        "spec": {
+            "containers": [],
+            "ephemeralContainers": [
+                {
+                    "name": "debugger",
+                    "envFrom": [
+                        {"secretRef": {"name": "debug-creds"}},
+                        {"configMapRef": {"name": "debug-config"}},
+                    ],
+                    "env": [
+                        {
+                            "name": "TOKEN",
+                            "valueFrom": {"secretKeyRef": {"name": "api-creds", "key": "token"}},
+                        },
+                        {
+                            "name": "TUNE",
+                            "valueFrom": {"configMapKeyRef": {"name": "api-tune", "key": "level"}},
+                        },
+                        {"name": "LITERAL", "value": "must-not-be-retained"},
+                    ],
+                    "command": ["must-not-be-retained"],
+                }
+            ],
+        },
+    }
+    facts = extract_relationship_facts("Pod", "", "v1", manifest)
+    pairs = {(fact.relation, fact.target.kind, fact.target.name) for fact in facts.references}
+    assert (RelationKind.USES_CONFIG, "Secret", "debug-creds") in pairs
+    assert (RelationKind.USES_CONFIG, "ConfigMap", "debug-config") in pairs
+    assert (RelationKind.USES_CONFIG, "Secret", "api-creds") in pairs
+    assert (RelationKind.USES_CONFIG, "ConfigMap", "api-tune") in pairs
+    fields = {fact.field for fact in facts.references}
+    assert "spec.ephemeralContainers[0].envFrom[0].secretRef" in fields
+    assert "spec.ephemeralContainers[0].env[0].valueFrom.secretKeyRef" in fields
+    assert "must-not-be-retained" not in repr(facts)
+    assert "token" not in repr(facts)
+    assert "level" not in repr(facts)
+
+
+def test_live_pod_node_name_is_observed_placement() -> None:
+    """A live Pod's `spec.nodeName` stays an OBSERVED SCHEDULED_ON edge."""
+    facts = extract_relationship_facts(
+        "Pod",
+        "",
+        "v1",
+        {"metadata": {"name": "api-0", "namespace": "prod"}, "spec": {"nodeName": "node-a"}},
+    )
+    scheduled = [fact for fact in facts.references if fact.relation is RelationKind.SCHEDULED_ON]
+    assert len(scheduled) == 1
+    assert scheduled[0].target.kind == "Node"
+    assert scheduled[0].target.name == "node-a"
+    assert scheduled[0].confidence is FactConfidence.OBSERVED
+    assert scheduled[0].field == "spec.nodeName"
+
+
+def test_workload_template_node_name_is_not_observed_placement() -> None:
+    """`spec.template.spec.nodeName` is declarative template configuration.
+
+    Emitting SCHEDULED_ON for it would claim the workload object itself is
+    running on a node (an OBSERVED placement the workload never has), so
+    every pod-template kind must skip it while keeping every other
+    template-derived reference.
+    """
+    cases = [
+        ("Deployment", "apps", {"template": {"spec": _placement_template_spec()}}),
+        ("ReplicaSet", "apps", {"template": {"spec": _placement_template_spec()}}),
+        ("StatefulSet", "apps", {"template": {"spec": _placement_template_spec()}}),
+        ("DaemonSet", "apps", {"template": {"spec": _placement_template_spec()}}),
+        ("Job", "batch", {"template": {"spec": _placement_template_spec()}}),
+        (
+            "CronJob",
+            "batch",
+            {"jobTemplate": {"spec": {"template": {"spec": _placement_template_spec()}}}},
+        ),
+    ]
+    for kind, group, spec in cases:
+        facts = extract_relationship_facts(
+            kind, group, "v1", {"metadata": {"name": "wl", "namespace": "prod"}, "spec": spec}
+        )
+        relations = {fact.relation for fact in facts.references}
+        assert RelationKind.SCHEDULED_ON not in relations, kind
+        names = {(fact.relation, fact.target.kind, fact.target.name) for fact in facts.references}
+        assert (RelationKind.USES_VOLUME, "PersistentVolumeClaim", "wl-data") in names, kind
+        assert (RelationKind.USES_CONFIG, "Secret", "wl-pull") in names, kind
+        assert (RelationKind.USES_CONFIG, "Secret", "wl-creds") in names, kind
+
+
+def _placement_template_spec() -> dict[str, object]:
+    """A pod template spec carrying `nodeName` plus real references."""
+    return {
+        "nodeName": "node-a",
+        "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": "wl-data"}}],
+        "imagePullSecrets": [{"name": "wl-pull"}],
+        "containers": [{"name": "app", "envFrom": [{"secretRef": {"name": "wl-creds"}}]}],
+    }

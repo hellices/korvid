@@ -343,9 +343,15 @@ def _pod_spec(pod_spec: Mapping[str, Any], namespace: str, base: str) -> list[Re
     """Metadata-only references from a `PodSpec` mapping.
 
     Reads only volume references (including projected volume sources),
-    `envFrom`, `env[].valueFrom`, `imagePullSecrets`, and `nodeName`. Never
-    reads container `command`/`args`/`env[].value`, so literal values never
-    reach a relationship fact.
+    `envFrom`, `env[].valueFrom` (across regular, init, and ephemeral
+    containers), and `imagePullSecrets`. Never reads container
+    `command`/`args`/`env[].value`, so literal values never reach a
+    relationship fact.
+
+    Node placement is deliberately *not* read here: a `nodeName` in a
+    workload's pod template is declarative configuration, not an observed
+    placement of the workload object itself. See `_node_placement`, which
+    only the live-Pod handler calls.
     """
     references: list[ReferenceFact] = []
     references.extend(_volume_refs(pod_spec.get("volumes"), namespace, base))
@@ -354,18 +360,32 @@ def _pod_spec(pod_spec: Mapping[str, Any], namespace: str, base: str) -> list[Re
     references.extend(
         _container_refs(pod_spec.get("initContainers"), namespace, base, "initContainers")
     )
-    node_name = pod_spec.get("nodeName")
-    if isinstance(node_name, str) and node_name:
-        references.append(
-            ReferenceFact(
-                relation=RelationKind.SCHEDULED_ON,
-                # Nodes are cluster-scoped: namespace is always "".
-                target=TargetReference("", "Node", "", node_name),
-                confidence=FactConfidence.OBSERVED,
-                field=f"{base}.nodeName",
-            )
-        )
+    references.extend(
+        _container_refs(pod_spec.get("ephemeralContainers"), namespace, base, "ephemeralContainers")
+    )
     return references
+
+
+def _node_placement(pod_spec: Mapping[str, Any], base: str) -> list[ReferenceFact]:
+    """A live Pod's `spec.nodeName` -> an `OBSERVED` `SCHEDULED_ON` fact.
+
+    Only a Pod is ever actually scheduled onto a Node. A workload's
+    `spec.template.spec.nodeName` is a template constraint for the Pods it
+    will create -- reading it here would claim the Deployment/Job object
+    itself is running on that Node, which no controller ever observes.
+    """
+    node_name = pod_spec.get("nodeName")
+    if not isinstance(node_name, str) or not node_name:
+        return []
+    return [
+        ReferenceFact(
+            relation=RelationKind.SCHEDULED_ON,
+            # Nodes are cluster-scoped: namespace is always "".
+            target=TargetReference("", "Node", "", node_name),
+            confidence=FactConfidence.OBSERVED,
+            field=f"{base}.nodeName",
+        )
+    ]
 
 
 def _selector_fact(
@@ -632,16 +652,25 @@ def _pvc_binding(spec: Mapping[str, Any]) -> list[ReferenceFact]:
 
 
 def _pv_binding(spec: Mapping[str, Any]) -> list[ReferenceFact]:
-    """PersistentVolume `spec.claimRef` -> `BOUND_TO` a PersistentVolumeClaim."""
+    """PersistentVolume `spec.claimRef` -> `BOUND_TO` a PersistentVolumeClaim.
+
+    `claimRef` is an `ObjectReference`, so it carries the bound claim's UID.
+    Retaining it lets the graph's UID-first resolution report a binding to a
+    deleted claim as missing instead of silently reattaching it to a
+    replacement claim that merely reuses the name.
+    """
     claim_ref = _mapping(spec.get("claimRef"))
     name = claim_ref.get("name")
     if not isinstance(name, str) or not name:
         return []
     claim_namespace = str(claim_ref.get("namespace") or "")
+    uid = claim_ref.get("uid")
     return [
         ReferenceFact(
             relation=RelationKind.BOUND_TO,
-            target=TargetReference("", "PersistentVolumeClaim", claim_namespace, name),
+            target=TargetReference(
+                "", "PersistentVolumeClaim", claim_namespace, name, str(uid) if uid else None
+            ),
             confidence=FactConfidence.DECLARED,
             field="spec.claimRef",
         )
@@ -675,7 +704,9 @@ def _handle_pod(
 ) -> _HandlerResult:
     if group:
         return [], [], []
-    return _pod_spec(spec, namespace, "spec"), [], []
+    references = _pod_spec(spec, namespace, "spec")
+    references.extend(_node_placement(spec, "spec"))
+    return references, [], []
 
 
 def _make_workload_handler(kind: str) -> _Handler:
