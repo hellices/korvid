@@ -140,19 +140,25 @@ value — and the row repaints as soon as it scrolls into view.
 
 Latency percentiles cannot resolve a change of this size on an unpinned
 machine — identical saturated runs varied between 5 ms and 40 ms p95 here. The
-same fixed workload always performs the same amount of work, so CPU time and
-allocation snapshots are what these numbers are taken from. Workload: 1,000
-Pods across 20 namespaces at 120 events/s for 20 s, median of three runs.
+same fixed workload always performs the same amount of work, so CPU time is
+what these numbers are taken from. Even then, running all the "before" samples
+and then all the "after" samples is not enough: a first attempt that way put a
+13% swing on one arm and reversed the sign of the smaller result. The figures
+below alternate the two arms run by run, five rounds each. Workload: 1,000 Pods
+across 20 namespaces at 120 events/s for 20 s.
 
 | Workload | Metric | Before | After | |
 |---|---|---:|---:|---|
-| Committed replay profile | CPU time | 13.63 s | 12.74 s | **−6.6%** |
-| Committed replay profile | Peak RSS | 127.9 MiB | 129.0 MiB | +1.1 MiB |
-| Plus Pod creation timestamps | CPU time | 18.48 s | 15.20 s | **−17.7%** |
+| Committed replay profile | CPU time (median) | 12.88 s | 12.36 s | −4.0% |
+| Plus Pod creation timestamps | CPU time (median) | 18.00 s | 15.03 s | **−16.5%** |
+| Plus Pod creation timestamps | CPU time (best) | 17.92 s | 14.74 s | **−17.7%** |
 | Plus Pod creation timestamps | Peak RSS | 127.8 MiB | 127.1 MiB | −0.7 MiB |
 | Plus Pod creation timestamps | `tracemalloc` peak | 28.47 MiB | 28.58 MiB | +0.11 MiB |
 
-Every run kept `dropped updates: 0` and a matching final digest.
+Every run kept `dropped updates: 0` and a matching final digest. On the
+timestamp-bearing workload the two arms' samples do not overlap at all
+(17.92–18.11 s against 14.74–15.10 s). On the committed profile they do
+overlap, so −4.0% is the weaker claim of the two.
 
 Two redundancies were removed, both of which repeated per-object work that
 nothing had invalidated:
@@ -167,16 +173,21 @@ nothing had invalidated:
   with the window it is valid for, checked against both ends so a pane
   repainting with an earlier clock reading still gets the right string.
 
-The age memo is the only new retained allocation: 1,000 rows cost ~197 KiB,
-and it is capped at 20,000 entries. Peak RSS moved less than the ±1 MiB
-run-to-run spread at 128 MiB, so it is not a measurable trade.
+The age memo dominates the new retained allocation: 1,000 rows cost ~197 KiB.
+It is capped both by entry count (20,000) and by key length, because `created`
+is unvalidated API-server input and `datetime.fromisoformat` accepts an
+arbitrarily long fractional-second field — a count-only cap would bound
+nothing. The settled order adds one pointer list per bucket (~8 KiB at 1,000
+objects; the key strings are shared with the bucket itself). Peak RSS moved
+less than the ±1 MiB run-to-run spread at 128 MiB, so it is not a measurable
+trade.
 
 **The committed replay profile understates the render path.** Its synthetic
 Pods carry no `created`, so `format_age` short-circuits and the AGE cell costs
-nothing — which is why the same change is worth 6.6% against that profile and
-17.7% once the timestamps a real cluster always sends are present. The
+nothing — which is why the same change is worth 4.0% against that profile and
+16.5% once the timestamps a real cluster always sends are present. The
 timestamps also account for the workload's own cost: adding them raised
-baseline CPU from 13.63 s to 18.48 s. Benchmark numbers taken against the
+baseline CPU from 12.88 s to 18.00 s. Benchmark numbers taken against the
 committed profile are therefore a floor for anything AGE-dependent.
 
 ## Corrected live 1,000-pod smoke result
@@ -264,7 +275,7 @@ that budget can be called passed or missed against a real API server.
 
 **The replay workload has no creation timestamps.** `initial_pods` builds
 `PodSummary` without `created`, so every AGE cell renders "-" and the whole
-age path is skipped. Measured above, that alone accounts for a third of the
+age path is skipped. Measured above, that alone accounts for 28% of the
 update-path CPU on this workload, so any AGE-dependent figure taken from the
 committed profile is a floor rather than a result. Populating `created` would
 change every published baseline, so it is deliberately left as follow-up work
