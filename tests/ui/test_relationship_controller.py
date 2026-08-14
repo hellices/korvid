@@ -625,3 +625,53 @@ async def test_target_namespace_results_participate_in_the_resource_cap() -> Non
     assert sorted(node.name for node in graph.nodes) == ["api", "route-a"]
     assert all(node.kind != "ReferenceGrant" for node in graph.nodes)
     assert any(record.state is CoverageState.CAPPED for record in graph.coverage)
+
+
+#: A korvid-invented view kind: navigable, but with no API endpoint to LIST.
+SYNTHETIC_META = ResourceMeta(
+    "HelmRelease",
+    "helmreleases",
+    "",
+    "v1",
+    True,
+    synthetic=True,
+    backing=("secrets", ""),
+)
+
+
+async def test_synthetic_target_kinds_are_never_listed() -> None:
+    """A synthetic view has no API path, so no follow-up may LIST it.
+
+    A `routes_to` backend can name any group/kind, and korvid's own
+    invented view kinds live in the same alias map — resolving one here
+    would issue a LIST against an endpoint that does not exist, which
+    every other API-call site (and the graph root check) already guards
+    against. The rest of the namespace's follow-up must still run.
+    """
+    route = _route_summary("route-a", targets=(("prod", "release-a"),))
+    route = GenericSummary(
+        name=route.name,
+        namespace=route.namespace,
+        kind=route.kind,
+        created="",
+        uid=route.uid,
+        relationships=RelationshipFacts(
+            api_group=GATEWAY,
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.ROUTES_TO,
+                    target=TargetReference("", "HelmRelease", "prod", "release-a"),
+                    confidence=FactConfidence.DECLARED,
+                    field="spec.rules[0].backendRefs[0]",
+                ),
+            ),
+        ),
+    )
+    lister = _NamespacedLister(results={(GATEWAY, "httproutes", "edge"): [route]})
+    await RelationshipSnapshotLoader(lister).load(
+        _root("HTTPRoute", "edge"),
+        "edge",
+        _aliases(HTTP_ROUTE_META, REFERENCE_GRANT_META, SERVICE_META, SYNTHETIC_META),
+    )
+    assert ("", "helmreleases", "prod") not in lister.calls
+    assert (GATEWAY, "referencegrants", "prod") in lister.calls

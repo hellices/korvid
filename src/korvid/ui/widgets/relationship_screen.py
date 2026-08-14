@@ -19,6 +19,7 @@ misinterpreted as Rich markup.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import ClassVar
@@ -30,6 +31,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Static
 
 from korvid.core.relationships import (
+    CoverageRecord,
     CoverageState,
     EdgeResolution,
     GraphResource,
@@ -39,6 +41,11 @@ from korvid.core.relationships import (
 
 #: DIRECTION | RELATION | RESOURCE | CONFIDENCE | STATE | EVIDENCE
 _COLUMNS = ("DIRECTION", "RELATION", "RESOURCE", "CONFIDENCE", "STATE", "EVIDENCE")
+
+#: Control characters (including DEL) flattened out of a rendered coverage
+#: scope, mirroring what `CoverageRecord` already does to `detail`, so the
+#: banner can never be broken across lines by a pathological namespace.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 #: `("goto", group, kind, namespace, name)` — the dismissed navigation target.
 GotoResult = tuple[str, str, str, str, str]
@@ -189,6 +196,27 @@ class RelationshipScreen(ModalScreen[GotoResult | None]):
     # Rendering
     # ------------------------------------------------------------------
 
+    def _coverage_line(self, record: CoverageRecord) -> str:
+        """One non-`complete` coverage record as a single literal line.
+
+        The concise form (`core/services: forbidden`) is what the banner
+        always showed. Detail mode adds the record's `scope` when it has
+        one, because the cross-namespace `routes_to` follow-ups list the
+        same GVR in several namespaces — without the scope, two denied
+        namespaces render as two identical, unactionable lines. Scope is
+        flattened the way `CoverageRecord` already flattens `detail`
+        (control characters, including newlines, become spaces) so it
+        cannot break the single-line banner; the widget renders with
+        `markup=False`, so a namespace containing markup stays literal.
+        """
+        target = f"{record.group or 'core'}/{record.resource}"
+        if self._coverage_detailed and record.scope:
+            target = f"{target} @{_CONTROL_CHARS.sub(' ', record.scope)}"
+        line = f"{target}: {record.state.value}"
+        if self._coverage_detailed and record.detail:
+            line = f"{line} — {record.detail}"
+        return line
+
     def _render_coverage(self) -> None:
         lines = ["Coverage: incomplete" if self.graph.incomplete else "Coverage: complete"]
         if self.root not in self._known_nodes:
@@ -198,10 +226,7 @@ class RelationshipScreen(ModalScreen[GotoResult | None]):
         for record in self.graph.coverage:
             if record.state is CoverageState.COMPLETE:
                 continue
-            line = f"{record.group or 'core'}/{record.resource}: {record.state.value}"
-            if self._coverage_detailed and record.detail:
-                line = f"{line} — {record.detail}"
-            lines.append(line)
+            lines.append(self._coverage_line(record))
         self.query_one("#relationship-coverage", Static).update("\n".join(lines))
 
     def _render_table(self) -> None:

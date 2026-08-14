@@ -427,3 +427,67 @@ async def test_absent_root_note_survives_the_coverage_detail_toggle() -> None:
         await pilot.press("c")
         banner = str(app.screen.query_one("#relationship-coverage", Static).render())
         assert "not present in this snapshot" in banner.lower()
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 phase-2 findings (PR #285)
+# ---------------------------------------------------------------------------
+
+
+def _multi_scope_coverage_graph() -> RelationshipGraph:
+    """The same GVR denied in two namespaces, plus one scope-less record."""
+    root = _resource("HTTPRoute", "route-a", namespace="edge", group="gateway.networking.k8s.io")
+    coverage = (
+        CoverageRecord(
+            group="",
+            resource="services",
+            scope="prod",
+            state=CoverageState.FORBIDDEN,
+            detail="rbac denied",
+        ),
+        CoverageRecord(
+            group="",
+            resource="services",
+            scope="[red]staging[/]",
+            state=CoverageState.FORBIDDEN,
+            detail="rbac denied",
+        ),
+        CoverageRecord(
+            group="",
+            resource="*",
+            scope="",
+            state=CoverageState.CAPPED,
+            detail="1 target-namespace LIST(s) dropped at the 1-target-list cap",
+        ),
+    )
+    return RelationshipGraph(nodes=(root,), edges=(), coverage=coverage)
+
+
+async def test_detailed_coverage_distinguishes_the_same_gvr_in_two_scopes() -> None:
+    """Two namespaces denying the same resource must be tellable apart.
+
+    Cross-namespace `routes_to` follow-ups list the same GVR in several
+    namespaces, so a scope-less line renders two identical records and the
+    user cannot see *which* namespace to fix. The concise (non-detailed)
+    banner stays as it was; pressing `c` reveals the scope, rendered
+    literally so a namespace containing markup cannot style the banner.
+    """
+    app = HostApp()
+    screen = RelationshipScreen(
+        _multi_scope_coverage_graph(),
+        _resource("HTTPRoute", "route-a", namespace="edge", group="gateway.networking.k8s.io"),
+    )
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        banner = app.screen.query_one("#relationship-coverage", Static)
+        concise = str(banner.render())
+        assert "core/services: forbidden" in concise
+        assert "prod" not in concise
+
+        await pilot.press("c")
+        detailed = str(banner.render())
+        assert "core/services @prod: forbidden" in detailed
+        assert "core/services @[red]staging[/]: forbidden" in detailed
+        # A scope-less record (the graph-wide caps) keeps its concise form.
+        assert "core/*: capped" in detailed
+        assert "@:" not in detailed

@@ -165,10 +165,13 @@ records one of five **coverage states**:
   [Limits](#limits)); this can also appear once per cap even when every
   individual source's own LIST was `complete`.
 
-Press `c` to toggle coverage detail: the underlying error/skip text for each
-non-`complete` record (sanitized: control characters flattened, capped at
-512 characters, so a pathological RBAC/API message cannot break the display
-or grow the snapshot unboundedly).
+Press `c` to toggle coverage detail: the namespace each non-`complete`
+record was scoped to (shown as `core/services @prod: forbidden`, so the
+same resource denied in two namespaces is tellable apart — a scope-less
+record such as a graph-wide cap keeps its concise form) plus the
+underlying error/skip text (sanitized: control characters flattened,
+capped at 512 characters, so a pathological RBAC/API message cannot break
+the display or grow the snapshot unboundedly).
 
 ### Why an incomplete graph cannot prove no dependency
 

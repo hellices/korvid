@@ -296,7 +296,10 @@ def _target_namespace_requests(
     target namespace is already in the first phase's results, so a
     follow-up could only duplicate a LIST that already ran. A kind that
     discovery never reported is skipped rather than guessed at: an API
-    resource absent from discovery has no objects to list.
+    resource absent from discovery has no objects to list. So is a
+    `synthetic` kind — a korvid-invented view (the helm browser and
+    friends) shares the alias map but has no API endpoint at all, exactly
+    as `_selected_relationship_root` already refuses one as a graph root.
     """
     if namespace is None:
         return []
@@ -310,7 +313,7 @@ def _target_namespace_requests(
         metas: dict[tuple[str, str], ResourceMeta] = {}
         for group_kind in wanted:
             meta = by_group_kind.get(group_kind)
-            if meta is not None and meta.namespaced:
+            if meta is not None and meta.namespaced and not meta.synthetic:
                 metas[(meta.group, meta.plural)] = meta
         requests.extend((meta, target_namespace) for _key, meta in sorted(metas.items()))
     return requests
