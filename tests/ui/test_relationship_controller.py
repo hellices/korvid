@@ -293,3 +293,98 @@ async def test_unrelated_error_propagates_instead_of_becoming_failed_coverage() 
         await RelationshipSnapshotLoader(lister).load(
             _root("Pod", "prod"), "prod", _aliases(PODS_META)
         )
+
+
+class _SiblingCancellationLister:
+    """One source blocks until cancelled; another fails once the blocked
+    sibling is provably in flight.
+
+    Lets a test assert that an unexpected error from one LIST does not
+    leave its siblings running against a client the caller is about to
+    close — without any wall-clock sleep to make the race deterministic.
+    """
+
+    def __init__(self, *, blocking: tuple[str, str], failing: tuple[str, str]) -> None:
+        self._blocking = blocking
+        self._failing = failing
+        self._started = asyncio.Event()
+        self.cancelled: list[str] = []
+
+    async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[SummaryLike]:
+        key = (meta.group, meta.plural)
+        if key == self._blocking:
+            self._started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.append(meta.plural)
+                raise
+        elif key == self._failing:
+            await self._started.wait()
+            raise RuntimeError("not a network/API failure")
+        return []
+
+
+async def test_unexpected_source_error_cancels_sibling_lists() -> None:
+    lister = _SiblingCancellationLister(blocking=("", "pods"), failing=("", "secrets"))
+    with pytest.raises(RuntimeError, match="not a network/API failure"):
+        await RelationshipSnapshotLoader(lister).load(
+            _root("Pod", "prod"), "prod", _aliases(PODS_META, SECRETS_META)
+        )
+    assert lister.cancelled == ["pods"]
+
+
+async def test_per_source_api_errors_do_not_cancel_siblings() -> None:
+    """A 403/404/network failure is normal per-source coverage, not a
+    reason to abandon the rest of the snapshot: every other LIST must still
+    run to completion and be classified."""
+    lister = _Lister(
+        results={("", "pods"): [_pod_summary("api-0")], ("", "configmaps"): []},
+        errors={
+            ("", "secrets"): ApiStatusError(403, "Forbidden"),
+            ("", "nodes"): OSError("connection reset"),
+        },
+    )
+    graph = await RelationshipSnapshotLoader(lister).load(
+        _root("Pod", "prod"),
+        "prod",
+        _aliases(PODS_META, SECRETS_META, CONFIG_MAPS_META, NODES_META),
+    )
+    states = {
+        (record.group, record.resource): record.state
+        for record in graph.coverage
+        if record.resource in {"pods", "secrets", "configmaps", "nodes"}
+    }
+    assert states[("", "pods")] is CoverageState.COMPLETE
+    assert states[("", "configmaps")] is CoverageState.COMPLETE
+    assert states[("", "secrets")] is CoverageState.FORBIDDEN
+    assert states[("", "nodes")] is CoverageState.FAILED
+    assert [node.name for node in graph.nodes] == ["api-0"]
+
+
+async def test_source_results_stay_in_source_order_regardless_of_completion_order() -> None:
+    """Results are joined in `(group, plural)` source order even when the
+    LISTs finish in a different order — the cap and the resulting node list
+    must not depend on which API call returned first."""
+
+    class _ReversedCompletionLister:
+        """Finishes `pods` only after `services` has already returned."""
+
+        def __init__(self) -> None:
+            self._services_done = asyncio.Event()
+
+        async def list_objects(
+            self, meta: ResourceMeta, namespace: str | None
+        ) -> list[SummaryLike]:
+            if meta.plural == "services":
+                self._services_done.set()
+                return [_generic_summary("svc-a", kind="Service")]
+            if meta.plural == "pods":
+                await self._services_done.wait()
+                return [_pod_summary("api-0")]
+            return []
+
+    graph = await RelationshipSnapshotLoader(
+        _ReversedCompletionLister(), limits=GraphLoadLimits(max_resources=1)
+    ).load(_root("Pod", "prod"), "prod", _aliases(PODS_META, SERVICE_META))
+    assert [node.name for node in graph.nodes] == ["api-0"]

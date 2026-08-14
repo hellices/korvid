@@ -31,11 +31,12 @@ from korvid.core.relationships import (
 )
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.relationship_facts import GATEWAY_GROUP, is_gateway_route_kind
 
 #: Gateway API resources are an optional cluster feature discovered at
 #: runtime (their plural/version are not fixed), unlike the always-probed
 #: core/apps/batch/networking/policy catalog below.
-_GATEWAY_GROUP = "gateway.networking.k8s.io"
+_GATEWAY_GROUP = GATEWAY_GROUP
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,8 +95,19 @@ _GATEWAY_MISSING_SPEC = GraphSourceSpec(_GATEWAY_GROUP, "*", "*", optional=True)
 
 
 def _is_gateway_resource(meta: ResourceMeta) -> bool:
-    return meta.group == _GATEWAY_GROUP and (
-        meta.kind == "Gateway" or meta.kind == "ReferenceGrant" or meta.kind.endswith("Route")
+    """A discovered Gateway API resource this snapshot can actually use.
+
+    `*Route` membership is decided by `is_gateway_route_kind`, the same
+    predicate the fact extractor uses to pick a route's backendRef handler,
+    so no kind is ever LISTed (and reported as `complete` coverage) that
+    the extractor would silently ignore.
+    """
+    if meta.group != _GATEWAY_GROUP:
+        return False
+    return (
+        meta.kind == "Gateway"
+        or meta.kind == "ReferenceGrant"
+        or is_gateway_route_kind(meta.group, meta.kind)
     )
 
 
@@ -223,6 +235,29 @@ class Lister(Protocol):
     ) -> Sequence[SummaryLike]: ...
 
 
+#: One source LIST's outcome: its meta, its summaries (None when the LIST
+#: failed in a way `_fetch` classifies), and the coverage record it earned.
+_FetchResult = tuple[ResourceMeta, list[SummaryLike] | None, CoverageRecord]
+
+
+async def _cancel_pending(tasks: Sequence[asyncio.Task[_FetchResult]]) -> None:
+    """Cancel and reap every LIST task that has not finished.
+
+    Runs on every exit path of `load`: an unexpected error from one source
+    (or cancellation of the load itself) must not leave siblings listing
+    against a client that is about to be closed. `return_exceptions=True`
+    means a sibling that failed in the same tick is reaped here rather than
+    surfacing as a never-retrieved task exception — and, more importantly,
+    never replaces the original error propagating out of `load`.
+    """
+    pending = [task for task in tasks if not task.done()]
+    if not pending:
+        return
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+
+
 class RelationshipSnapshotLoader:
     """Loads one bounded `RelationshipGraph` snapshot; owns no worker state.
 
@@ -248,7 +283,16 @@ class RelationshipSnapshotLoader:
         coverage: list[CoverageRecord] = [_missing_coverage(spec) for spec in missing_specs]
         semaphore = asyncio.Semaphore(self._limits.max_concurrency)
 
-        results = await asyncio.gather(*(self._fetch(meta, namespace, semaphore) for meta in metas))
+        # Explicit tasks (rather than bare coroutines) so a source failure
+        # `_fetch` deliberately does not classify — or a cancellation of
+        # this load — leaves no sibling LIST running against a client the
+        # caller may be about to close. `gather` still returns results in
+        # source order, so the join below stays deterministic.
+        tasks = [asyncio.create_task(self._fetch(meta, namespace, semaphore)) for meta in metas]
+        try:
+            results = await asyncio.gather(*tasks)
+        finally:
+            await _cancel_pending(tasks)
 
         fetched: list[tuple[ResourceMeta, list[SummaryLike]]] = []
         for meta, summaries, record in results:
@@ -273,7 +317,7 @@ class RelationshipSnapshotLoader:
         meta: ResourceMeta,
         namespace: str | None,
         semaphore: asyncio.Semaphore,
-    ) -> tuple[ResourceMeta, list[SummaryLike] | None, CoverageRecord]:
+    ) -> _FetchResult:
         list_namespace = namespace if meta.namespaced else None
         scope = list_namespace or ""
         async with semaphore:
