@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from time import monotonic
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import psutil  # type: ignore[import-untyped]  # no inline stubs shipped
 from textual import __version__ as _textual_version
@@ -76,6 +76,14 @@ _SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 #: smaller constant would fail healthy runs on the largest profiles rather
 #: than catch a stalled one.
 _REPLAY_CHURN_COMPLETION_GRACE_SECONDS = 30.0
+#: Zero-delay turns the cursor probe spins before backing off. The happy path
+#: settles in a median of 6 turns, so this keeps the probe the tightest
+#: observer of a real acknowledgement while bounding the failure path: a key
+#: that is never acknowledged would otherwise hold the loop at 100% CPU for
+#: the whole timeout, starving the churn and render work being measured
+#: alongside it.
+_ACK_SPIN_TURNS: Final = 64
+_ACK_BACKOFF_SECONDS: Final = 0.001
 
 
 def _git_head() -> str | None:
@@ -582,8 +590,14 @@ async def measure_cursor_input(
     driver.send_message(event)
     try:
         async with asyncio.timeout(timeout):
+            turns = 0
             while table.cursor_row != expected_row:
-                await asyncio.sleep(0)
+                # Zero delay while the acknowledgement is plausibly in flight,
+                # then back off: past this many turns the key is not coming,
+                # and spinning for the rest of the timeout would starve the
+                # churn and render work being measured alongside the probe.
+                await asyncio.sleep(0 if turns < _ACK_SPIN_TURNS else _ACK_BACKOFF_SECONDS)
+                turns += 1
     except TimeoutError as exc:
         raise WaitTimeout(
             f"{key} cursor input from row {start_row} to expected row {expected_row} "

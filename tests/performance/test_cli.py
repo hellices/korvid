@@ -25,9 +25,9 @@ from tests.performance.metrics import (
 from tests.performance.profile import FailureInjection, WorkloadProfile
 from tests.performance.replay import ReplayOptions, ReplayReport
 
-_REPLAY_TIME_SCALE_ERROR = (
-    "--time-scale must be finite and >= 1.0: cursor sampling requires real-time-or-slower churn"
-)
+#: Read from production rather than restated: a copy here would let the two
+#: drift and still pass.
+_REPLAY_TIME_SCALE_ERROR = cli._REPLAY_TIME_SCALE_ERROR
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -1448,3 +1448,23 @@ def test_cli_does_not_swallow_an_unexpected_value_error_from_the_app(
 
     with pytest.raises(ValueError, match="some unrelated bug deep in the render path"):
         cli.main(["replay", "--profile", "profile.json"])
+
+
+def test_the_time_scale_error_names_the_supported_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--time-scale 0` used to be the documented way to skip every sleep, so
+    the rejection has to tell an existing caller what replaced it rather than
+    only stating the constraint."""
+
+    def fail_load(_path: Path) -> WorkloadProfile:
+        raise AssertionError("load_profile must not run for an invalid time scale")
+
+    monkeypatch.setattr(cli, "load_profile", fail_load)
+
+    assert cli.main(["replay", "--profile", "profile.json", "--time-scale", "0"]) == 1
+
+    stderr = capsys.readouterr().err
+    assert "no longer supported" in stderr
+    assert "duration_seconds" in stderr

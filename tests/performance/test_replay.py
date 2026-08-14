@@ -1013,3 +1013,46 @@ def test_the_churn_completion_wait_keeps_the_drain_allowance_when_time_is_compre
     timeout = replay_module.replay_churn_completion_timeout(profile, ReplayOptions(time_scale=0.0))
 
     assert timeout >= 30.0
+
+
+async def test_an_unacknowledged_key_stops_spinning_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key that is never acknowledged must not hold the loop at 100% CPU for
+    the whole timeout.
+
+    The happy path settles in a handful of turns (measured: median 6), so the
+    probe keeps a zero-delay spin that long to stay the tightest observer of a
+    real acknowledgement. Past that the key is not coming, and continuing to
+    spin would starve the churn and render work being measured alongside it —
+    the failure path would then inflate the very percentile it belongs to.
+    """
+    zero_delays = 0
+    total_delays = 0
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(delay: float) -> None:
+        nonlocal zero_delays, total_delays
+        total_delays += 1
+        if delay == 0:
+            zero_delays += 1
+        await real_sleep(delay)
+
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        table.focus()
+        driver = pilot.app._driver
+        assert driver is not None
+        monkeypatch.setattr(driver, "send_message", lambda _event: None)
+        monkeypatch.setattr(asyncio, "sleep", recording_sleep)
+
+        with pytest.raises(WaitTimeout, match="down"):
+            await measure_cursor_input(pilot, table, "down", timeout=0.2)
+
+    # An unbounded spin turns the loop over as fast as it can for the whole
+    # timeout; the backoff caps the zero-delay turns and leaves the rest at
+    # the 1 ms step, which is orders of magnitude fewer iterations.
+    assert zero_delays <= replay_module._ACK_SPIN_TURNS + 5
+    assert total_delays < 1_000

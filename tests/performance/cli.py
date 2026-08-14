@@ -59,7 +59,10 @@ from tests.performance.replay import (
 from tests.ui.waits import WaitTimeout
 
 _REPLAY_TIME_SCALE_ERROR = (
-    "--time-scale must be finite and >= 1.0: cursor sampling requires real-time-or-slower churn"
+    "--time-scale must be finite and >= 1.0: cursor sampling requires "
+    "real-time-or-slower churn, so 0 (skip every sleep) is no longer "
+    "supported. For a fast run use a profile with a smaller "
+    "duration_seconds, e.g. tests/performance/profiles/smoke-1k.json"
 )
 
 # v2: `latency.event_to_render` became nullable. It is populated only when the
