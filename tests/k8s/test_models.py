@@ -14,7 +14,7 @@ from korvid.k8s.models import (
     StorageClassSummary,
     summary_for,
 )
-from korvid.k8s.relationship_facts import RelationshipFacts
+from korvid.k8s.relationship_facts import RelationKind, RelationshipFacts
 
 POD: dict[str, Any] = {
     "metadata": {"name": "checkout-7d9f", "namespace": "prod"},
@@ -1587,3 +1587,74 @@ def test_pod_summary_never_retains_secret_values() -> None:
     )
     assert summary.relationships.references[0].target.name == "api-tls"
     assert "forbidden-value" not in repr(summary)
+
+
+def test_replicaset_summary_carries_relationship_facts_via_authoritative_group() -> None:
+    """ReplicaSetSummary must preserve `relationships` from GenericSummary rather than
+    defaulting empty, and must use the authoritative `group` kwarg (not the manifest's
+    `apiVersion`, which native K8s LIST items commonly omit) (issue #281)."""
+    manifest: dict[str, Any] = {
+        # apiVersion deliberately omitted, as with real LIST items.
+        "metadata": {
+            "name": "web-6d9f88",
+            "namespace": "prod",
+            "uid": "rs-1",
+            "ownerReferences": [
+                {"apiVersion": "apps/v1", "kind": "Deployment", "name": "web", "uid": "dep-1"}
+            ],
+        },
+        "spec": {"replicas": 2, "selector": {"matchLabels": {"app": "web"}}},
+        "status": {"replicas": 2, "readyReplicas": 2},
+    }
+    summary = summary_for("ReplicaSet", manifest, group="apps")
+    assert isinstance(summary, ReplicaSetSummary)
+    assert summary.desired == 2
+    pairs = {
+        (fact.relation, fact.target.kind, fact.target.name)
+        for fact in summary.relationships.references
+    }
+    assert (RelationKind.OWNED_BY, "Deployment", "web") in pairs
+    assert summary.relationships.selectors[0].relation is RelationKind.MANAGED_BY
+    assert summary.relationships.selectors[0].target_kind == "Pod"
+
+
+def test_endpoint_slice_summary_carries_relationship_facts_via_authoritative_group() -> None:
+    """EndpointSliceSummary must preserve `relationships` from GenericSummary, threading
+    the authoritative `group` kwarg through so LIST items that omit `apiVersion` still
+    resolve owner references and target refs correctly (issue #281)."""
+    manifest: dict[str, Any] = {
+        # apiVersion deliberately omitted, as with real LIST items.
+        "metadata": {
+            "name": "api-abc",
+            "namespace": "prod",
+            "uid": "eps-1",
+            "labels": {"kubernetes.io/service-name": "api"},
+            "ownerReferences": [
+                {"apiVersion": "v1", "kind": "Service", "name": "api", "uid": "svc-1"}
+            ],
+        },
+        "addressType": "IPv4",
+        "endpoints": [
+            {
+                "conditions": {"ready": True},
+                "targetRef": {
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "namespace": "prod",
+                    "name": "api-0",
+                    "uid": "pod-1",
+                },
+            }
+        ],
+    }
+    summary = summary_for("EndpointSlice", manifest, group="discovery.k8s.io")
+    assert isinstance(summary, EndpointSliceSummary)
+    assert summary.service_name == "api"
+    pairs = {
+        (fact.relation, fact.target.kind, fact.target.name)
+        for fact in summary.relationships.references
+    }
+    assert (RelationKind.OWNED_BY, "Service", "api") in pairs
+    # ROUTES_TO is gated on the resolved group == "discovery.k8s.io"; this only
+    # succeeds when `group` is threaded through instead of the (missing) apiVersion.
+    assert (RelationKind.ROUTES_TO, "Pod", "api-0") in pairs

@@ -378,9 +378,14 @@ def _selector_fact(
 
 
 def _workload_selector(spec: Mapping[str, Any]) -> list[SelectorFact]:
-    """Deployment/ReplicaSet/StatefulSet/DaemonSet `spec.selector` -> Pod."""
+    """Deployment/ReplicaSet/StatefulSet/DaemonSet/Job `spec.selector` -> Pod.
+
+    Workloads *manage* the pods their selector matches (they own the
+    template that creates them), which is a stronger relation than a
+    Service's traffic-routing `SELECTS`; hence `MANAGED_BY`.
+    """
     fact = _selector_fact(
-        RelationKind.SELECTS,
+        RelationKind.MANAGED_BY,
         "",
         "Pod",
         spec.get("selector"),
@@ -644,7 +649,7 @@ def _make_workload_handler(kind: str) -> _Handler:
     ) -> _HandlerResult:
         if group != expected_group:
             return [], [], []
-        selectors = [] if kind == "Job" else _workload_selector(spec)
+        selectors = _workload_selector(spec)
         template_spec = _mapping(_mapping(spec.get("template")).get("spec"))
         references = _pod_spec(template_spec, namespace, "spec.template.spec")
         return references, selectors, []

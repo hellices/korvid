@@ -79,6 +79,7 @@ def test_policy_v1_empty_pdb_selector_matches_all() -> None:
         {"metadata": {"name": "all", "namespace": "prod"}, "spec": {"selector": {}}},
     )
     assert facts.selectors[0].target_kind == "Pod"
+    assert facts.selectors[0].relation is RelationKind.PROTECTED_BY
     assert facts.selectors[0].empty_matches is True
     assert facts.selectors[0].match_is_subject is True
     assert facts.selectors[0].field == "spec.selector"
@@ -192,7 +193,7 @@ def test_deployment_selector_targets_pods() -> None:
     )
     assert len(facts.selectors) == 1
     selector_fact = facts.selectors[0]
-    assert selector_fact.relation is RelationKind.SELECTS
+    assert selector_fact.relation is RelationKind.MANAGED_BY
     assert selector_fact.target_group == ""
     assert selector_fact.target_kind == "Pod"
     assert selector_fact.selector.match_labels == (("app", "api"),)
@@ -203,6 +204,109 @@ def test_deployment_selector_targets_pods() -> None:
     # spec.template.spec is also extracted through the shared _pod_spec helper.
     pairs = {(fact.relation, fact.target.kind, fact.target.name) for fact in facts.references}
     assert (RelationKind.SCHEDULED_ON, "Node", "node-a") in pairs
+
+
+def test_workload_selectors_use_managed_by_not_selects() -> None:
+    """Deployment/ReplicaSet/StatefulSet/DaemonSet/Job own the pods their
+    selector matches, so they must emit MANAGED_BY (match_is_subject=True),
+    never SELECTS (which is reserved for Service traffic-routing)."""
+    cases = [
+        ("Deployment", "apps"),
+        ("ReplicaSet", "apps"),
+        ("StatefulSet", "apps"),
+        ("DaemonSet", "apps"),
+        ("Job", "batch"),
+    ]
+    for kind, group in cases:
+        facts = extract_relationship_facts(
+            kind,
+            group,
+            "v1",
+            {
+                "metadata": {"name": "wl", "namespace": "prod"},
+                "spec": {"selector": {"matchLabels": {"app": "wl"}}, "template": {"spec": {}}},
+            },
+        )
+        assert len(facts.selectors) == 1, kind
+        selector_fact = facts.selectors[0]
+        assert selector_fact.relation is RelationKind.MANAGED_BY, kind
+        assert selector_fact.match_is_subject is True, kind
+
+
+def test_job_without_selector_emits_no_selector_fact() -> None:
+    """Job's spec.selector is optional (usually controller-managed); when
+    absent, no MANAGED_BY fact should be fabricated."""
+    facts = extract_relationship_facts(
+        "Job",
+        "batch",
+        "v1",
+        {"metadata": {"name": "backup", "namespace": "prod"}, "spec": {"template": {"spec": {}}}},
+    )
+    assert facts.selectors == ()
+
+
+def test_replicaset_owner_reference_points_to_deployment() -> None:
+    """ReplicaSet -> Deployment ownership is retained via the universal
+    owner-reference extraction (not Pod-only)."""
+    facts = extract_relationship_facts(
+        "ReplicaSet",
+        "apps",
+        "v1",
+        {
+            "metadata": {
+                "name": "api-abc",
+                "namespace": "prod",
+                "uid": "rs-1",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "dep-1",
+                    }
+                ],
+            },
+            "spec": {},
+        },
+    )
+    pairs = {
+        (fact.relation, fact.target.group, fact.target.kind, fact.target.name, fact.target.uid)
+        for fact in facts.references
+    }
+    assert (RelationKind.OWNED_BY, "apps", "Deployment", "api", "dep-1") in pairs
+    owner_fact = next(f for f in facts.references if f.relation is RelationKind.OWNED_BY)
+    assert owner_fact.target.namespace == "prod"
+    assert owner_fact.field == "metadata.ownerReferences[0]"
+
+
+def test_endpoint_slice_owner_reference_points_to_service() -> None:
+    """EndpointSlice -> Service ownership is retained via the universal
+    owner-reference extraction (not Pod-only)."""
+    facts = extract_relationship_facts(
+        "EndpointSlice",
+        "discovery.k8s.io",
+        "v1",
+        {
+            "metadata": {
+                "name": "api-abc",
+                "namespace": "prod",
+                "uid": "eps-1",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Service",
+                        "name": "api",
+                        "uid": "svc-1",
+                    }
+                ],
+            },
+        },
+    )
+    pairs = {
+        (fact.relation, fact.target.group, fact.target.kind, fact.target.name, fact.target.uid)
+        for fact in facts.references
+    }
+    assert (RelationKind.OWNED_BY, "", "Service", "api", "svc-1") in pairs
 
 
 def test_service_selector_targets_pods_with_match_is_subject_false() -> None:

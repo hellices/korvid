@@ -314,24 +314,24 @@ class ReplicaSetSummary(GenericSummary):
     def from_manifest(
         cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
     ) -> ReplicaSetSummary:
+        base = GenericSummary.from_manifest(kind, manifest, group=group)
         meta = manifest.get("metadata") or {}
         spec = manifest.get("spec") or {}
         status = manifest.get("status") or {}
         desired = int(spec.get("replicas") or 0)
         return cls(
-            name=str(meta.get("name", "")),
-            namespace=str(meta.get("namespace", "")),
-            kind=kind,
-            created=str(meta.get("creationTimestamp") or ""),
-            uid=str(meta.get("uid") or ""),
-            owner_uids=_owner_uids(meta),
-            labels=_labels(meta),
-            revision=str(
-                (meta.get("annotations") or {}).get("deployment.kubernetes.io/revision") or "-"
-            ),
-            desired=desired,
-            current=int(status.get("replicas") or 0),
-            ready=f"{int(status.get('readyReplicas') or 0)}/{desired}",
+            **(
+                vars(base)
+                | {
+                    "revision": str(
+                        (meta.get("annotations") or {}).get("deployment.kubernetes.io/revision")
+                        or "-"
+                    ),
+                    "desired": desired,
+                    "current": int(status.get("replicas") or 0),
+                    "ready": f"{int(status.get('readyReplicas') or 0)}/{desired}",
+                }
+            )
         )
 
 
@@ -381,7 +381,7 @@ class StorageClassSummary(GenericSummary):
     def from_manifest(
         cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
     ) -> StorageClassSummary:
-        base = GenericSummary.from_manifest(kind, manifest)
+        base = GenericSummary.from_manifest(kind, manifest, group=group)
         meta = _str_map(manifest.get("metadata"))
         annotations = _str_map(meta.get("annotations"))
         provisioner = manifest.get("provisioner")
@@ -416,7 +416,7 @@ class PackageManifestSummary(GenericSummary):
     def from_manifest(
         cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
     ) -> PackageManifestSummary:
-        base = GenericSummary.from_manifest(kind, manifest)
+        base = GenericSummary.from_manifest(kind, manifest, group=group)
         status = _str_map(manifest.get("status"))
         return cls(
             **vars(base),
@@ -443,7 +443,7 @@ class EndpointSliceSummary(GenericSummary):
     def from_manifest(
         cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
     ) -> EndpointSliceSummary:
-        base = GenericSummary.from_manifest(kind, manifest)
+        base = GenericSummary.from_manifest(kind, manifest, group=group)
         meta = manifest.get("metadata") or {}
         raw_endpoints = manifest.get("endpoints")
         endpoints = raw_endpoints if isinstance(raw_endpoints, list) else []
@@ -484,7 +484,7 @@ class OLMSubscriptionSummary(GenericSummary):
     def from_manifest(
         cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
     ) -> OLMSubscriptionSummary:
-        base = GenericSummary.from_manifest(kind, manifest)
+        base = GenericSummary.from_manifest(kind, manifest, group=group)
         spec = _str_map(manifest.get("spec"))
         status = _str_map(manifest.get("status"))
         return cls(
@@ -508,7 +508,7 @@ class CSVSummary(GenericSummary):
     def from_manifest(
         cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
     ) -> CSVSummary:
-        base = GenericSummary.from_manifest(kind, manifest)
+        base = GenericSummary.from_manifest(kind, manifest, group=group)
         spec = _str_map(manifest.get("spec"))
         status = _str_map(manifest.get("status"))
         return cls(
@@ -545,8 +545,10 @@ class PodListSummary(GenericSummary):
     ready_condition: bool = False
 
     @classmethod
-    def from_pod_manifest(cls, kind: str, manifest: dict[str, Any]) -> PodListSummary:
-        base = GenericSummary.from_manifest(kind, manifest)
+    def from_pod_manifest(
+        cls, kind: str, manifest: dict[str, Any], *, group: str | None = None
+    ) -> PodListSummary:
+        base = GenericSummary.from_manifest(kind, manifest, group=group)
         meta = manifest.get("metadata") or {}
         spec = _str_map(manifest.get("spec"))
         status = _str_map(manifest.get("status"))
@@ -579,9 +581,9 @@ def summary_for(kind: str, manifest: dict[str, Any], *, group: str | None = None
             tests that do not have ResourceMeta continue to work unchanged.
     """
     if kind == "Pod":
-        return PodListSummary.from_pod_manifest(kind, manifest)
+        return PodListSummary.from_pod_manifest(kind, manifest, group=group)
     if kind == "ReplicaSet":
-        return ReplicaSetSummary.from_manifest(kind, manifest)
+        return ReplicaSetSummary.from_manifest(kind, manifest, group=group)
     if kind == "EndpointSlice":
         # Use the authoritative group when available to avoid misclassifying
         # LIST items that omit apiVersion/TypeMeta (native K8s behaviour).
@@ -591,7 +593,7 @@ def summary_for(kind: str, manifest: dict[str, Any], *, group: str | None = None
             else str(manifest.get("apiVersion") or "").startswith(_DISCOVERY_GROUP_PREFIX)
         )
         if is_discovery:
-            return EndpointSliceSummary.from_manifest(kind, manifest)
+            return EndpointSliceSummary.from_manifest(kind, manifest, group=group)
         return GenericSummary.from_manifest(kind, manifest, group=group)
     if kind == "StorageClass":
         is_storage_class = (
@@ -600,18 +602,18 @@ def summary_for(kind: str, manifest: dict[str, Any], *, group: str | None = None
             else str(manifest.get("apiVersion") or "").startswith(_STORAGE_CLASS_GROUP_PREFIX)
         )
         if is_storage_class:
-            return StorageClassSummary.from_manifest(kind, manifest)
+            return StorageClassSummary.from_manifest(kind, manifest, group=group)
         return GenericSummary.from_manifest(kind, manifest, group=group)
     api_version = str(manifest.get("apiVersion") or "")
     if kind == "PackageManifest" and api_version.startswith(_PACKAGES_GROUP_PREFIX):
-        return PackageManifestSummary.from_manifest(kind, manifest)
+        return PackageManifestSummary.from_manifest(kind, manifest, group=group)
     if api_version.startswith(_OLM_GROUP_PREFIX):
         renderer: type[GenericSummary] | None = {
             "Subscription": OLMSubscriptionSummary,
             "ClusterServiceVersion": CSVSummary,
         }.get(kind)
         if renderer is not None:
-            return renderer.from_manifest(kind, manifest)
+            return renderer.from_manifest(kind, manifest, group=group)
     return GenericSummary.from_manifest(kind, manifest, group=group)
 
 
