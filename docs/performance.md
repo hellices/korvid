@@ -163,6 +163,14 @@ between sessions on this machine — an earlier round measured the same change
 at −16.5% with both arms roughly 0.5–1.5 s faster — which is why only
 same-session, interleaved pairs are quoted.
 
+The figures above were re-taken after review hardening added work to the
+per-cell path, and held: −12.3% median against −12.1% as published. Measured
+the same way, the update path and the render path compose almost exactly. On
+the timestamp-bearing workload the render-path change is worth −8.8% on its
+own and this change −12.3% on its own; both together are −19.9% against
+`main`, where multiplying the two predicts −20.0%. Neither change is
+absorbing the other's win.
+
 Two redundancies were removed, both of which repeated per-object work that
 nothing had invalidated:
 
