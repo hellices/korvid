@@ -86,6 +86,18 @@ _ACK_SPIN_TURNS: Final = 64
 _ACK_BACKOFF_SECONDS: Final = 0.001
 
 
+async def _ack_sleep(delay: float) -> None:
+    """The only sleep the cursor probe performs.
+
+    A named seam so a test can count the probe's own turns exactly. Patching
+    `asyncio.sleep` globally instead would also count every sleep Textual's
+    message pump performs, which differs by platform — that made an earlier
+    version of the spin test pass on macOS and fail on Windows for reasons
+    that had nothing to do with the probe.
+    """
+    await asyncio.sleep(delay)
+
+
 def _git_head() -> str | None:
     """Resolve the current repository HEAD commit, or `None` if unavailable.
 
@@ -596,7 +608,7 @@ async def measure_cursor_input(
                 # then back off: past this many turns the key is not coming,
                 # and spinning for the rest of the timeout would starve the
                 # churn and render work being measured alongside the probe.
-                await asyncio.sleep(0 if turns < _ACK_SPIN_TURNS else _ACK_BACKOFF_SECONDS)
+                await _ack_sleep(0 if turns < _ACK_SPIN_TURNS else _ACK_BACKOFF_SECONDS)
                 turns += 1
     except TimeoutError as exc:
         raise WaitTimeout(
