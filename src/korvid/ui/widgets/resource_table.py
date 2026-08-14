@@ -172,6 +172,22 @@ def _cells_equal(a: str | Text, b: str | Text) -> bool:
     return a == b
 
 
+def _renders_as(rendered: object, expected: str | Text) -> bool:
+    """Whether a render-path cell carries the text that was written.
+
+    The comparison is on plain text, not style: `default_cell_formatter` hands
+    a `Text` through untouched but turns a `str` into `Text.from_markup`, and
+    the question asked here is only whether the renderer reached the new value
+    at all. Style is already settled by `_cells_equal` on the way in.
+    """
+    expected_plain = (
+        expected.plain if isinstance(expected, Text) else Text.from_markup(expected, end="").plain
+    )
+    if isinstance(rendered, Text):
+        return rendered.plain == expected_plain
+    return isinstance(rendered, str) and rendered == expected_plain
+
+
 def _helm_status_cell(status: str) -> Text:
     return Text(status, style=_HELM_STATUS_STYLE.get(status, "yellow"))
 
@@ -644,20 +660,38 @@ class ResourceTable(DataTable[str | Text]):
         return _VisibleRows(fixed_count, first, first + viewport_height - 1)
 
     def _batched_write_holds(self, row_key: RowKey, column: Column, expected: str | Text) -> bool:
-        """Whether a private-store write is actually visible through the public API.
+        """Whether the *renderer* reaches a private-store write.
 
         The batching gate is a Textual *major version* check, and a version
         string is not evidence about internals: a minor release can move the
         structure the renderer reads while leaving `_data` writable, which
-        would paint stale cells with no error. This reads one written cell
-        back through `get_cell`, so the fast path is proven on the installed
-        Textual rather than assumed. Verified once per widget — the internals
-        cannot change while the process runs.
+        would paint stale cells with no error. Reading the cell back through
+        `get_cell` cannot see that, because `get_cell` returns
+        `_data[row][column]` — the very slot just written, whoever paints
+        from it. So the check asks the render path instead:
+        `_get_row_renderables` is what `render_line` calls, and it reaches the
+        cell through `_row_locations` and `get_row_at`. A release that moved
+        the renderer's source, or the row and column mappings, answers with
+        the old value here and the fast path is dropped.
+
+        Run once per widget — the internals cannot change while the process
+        runs — so the one row rebuilt here costs nothing measurable. The
+        renderable it reads is cached under `_update_count`, and the row was
+        very likely painted at the current count before this write, so the
+        count is bumped first: without that the check would be handed the
+        pre-write snapshot and would retire the fast path on a Textual that
+        works perfectly.
         """
         try:
-            return _cells_equal(self.get_cell(row_key, column.key), expected)
+            self._update_count += 1  # the renderable cache is keyed by this
+            row_index = self._row_locations.get(row_key)
+            column_index = self._column_locations.get(column.key)
+            if row_index is None or column_index is None:
+                return False
+            rendered = self._get_row_renderables(row_index).cells[column_index]
         except Exception:  # any failure here means "don't trust the fast path"
             return False
+        return _renders_as(rendered, expected)
 
     def _write_cell_batched(self, row_key: RowKey, column: Column, new_cell: str | Text) -> bool:
         """Write one cell through the private store; False once it is unusable.

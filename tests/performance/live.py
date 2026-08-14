@@ -886,10 +886,12 @@ def make_live_watch_source(
 
     Args:
         watch_receipt: Optional signal set the first time an owned `MODIFIED`
-            event is recorded here. This is the only evidence the application
-            has really observed live churn: a dispatched mutation proves
-            nothing, because the patch is counted before it is even awaited and
-            its watch event arrives over a different connection. The live
+            event has been *applied* by the application. This is the only
+            evidence the application has really observed live churn: a
+            dispatched mutation proves nothing, because the patch is counted
+            before it is even awaited and its watch event arrives over a
+            different connection. It is set after the event is yielded, so
+            `WatchManager` has already put the change in the store. The live
             harness gates cursor sampling on it (see
             `wait_for_first_watch_receipt`), so an input percentile is never
             measured against a table nothing has updated yet.
@@ -903,12 +905,18 @@ def make_live_watch_source(
         async for event_type, pod in kube.watch_pods(None):
             if pod.namespace not in expected_namespaces:
                 continue
-            if event_type == "MODIFIED" and _owns(pod.labels, run_id):
+            owned = event_type == "MODIFIED" and _owns(pod.labels, run_id)
+            if owned:
                 sequence += 1
                 recorder.record_event(sequence, now())
-                if watch_receipt is not None:
-                    watch_receipt.set()
             yield (event_type, pod)
+            # Set *after* the yield: this generator is resumed only when the
+            # consumer comes back for the next event, so by here `WatchManager`
+            # has returned from `apply_event` and the store holds the change.
+            # Setting before the yield would open a window where the gate is
+            # satisfied by an event the application had not applied yet.
+            if owned and watch_receipt is not None:
+                watch_receipt.set()
 
     return _source
 
@@ -921,15 +929,15 @@ async def wait_for_first_watch_receipt(
     timeout: float,
     recorder: BenchmarkRecorder,
 ) -> bool:
-    """Block until the application has really received one owned watch event.
+    """Block until the application has really applied one owned watch event.
 
     `ChurnProgress.started` is incremented *before* `patch_pod_labels_guarded`
     is awaited, so it only proves a mutation was dispatched. The watch event
     that mutation produces travels over an independent connection and can still
     be in flight when every configured cursor sample has already been taken -
     which would publish an idle-table figure labelled "under churn".
-    `make_live_watch_source` sets *watch_receipt* at the one instant that does
-    prove otherwise, and this waits for it.
+    `make_live_watch_source` sets *watch_receipt* once the application has taken
+    that event into its store, and this waits for it.
 
     The wait also ends when *churn_task* finishes, so a churn run that died (or
     completed) without ever producing an owned watch event aborts by its own

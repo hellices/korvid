@@ -1402,9 +1402,10 @@ async def _failing_churn() -> None:
 
 
 async def test_make_live_watch_source_signals_the_first_owned_watch_receipt() -> None:
-    """The signal the input probe waits on must be set by *watch receipt* of an
-    owned `MODIFIED` event - never by the LIST phase, a foreign namespace, or a
-    Pod that does not carry this run's ownership labels."""
+    """The signal the input probe waits on must be set once an owned `MODIFIED`
+    event has been *applied* - never by the LIST phase, a foreign namespace, a
+    Pod without this run's ownership labels, or an owned event the application
+    has merely been handed."""
     run_id = "run1"
     _, pods = _build_fake_topology(run_id, 2, 4)
     kube = _FakeKubeClient({}, pods)
@@ -1446,6 +1447,14 @@ async def test_make_live_watch_source_signals_the_first_owned_watch_receipt() ->
 
         kube.events.put_nowait(("MODIFIED", owned))
         await agen.__anext__()
+        # Handed over, not yet applied: the consumer has only just been given
+        # the event, so the gate must stay shut.
+        assert not receipt.is_set()
+
+        kube.events.put_nowait(("MODIFIED", owned))
+        await agen.__anext__()
+        # Asking for the next event is the proof: `WatchManager` returns from
+        # `apply_event` before it comes back here, so the store now holds it.
         assert receipt.is_set()
     finally:
         assert isinstance(agen, AsyncGenerator)

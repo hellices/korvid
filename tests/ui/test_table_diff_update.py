@@ -337,6 +337,14 @@ async def test_patching_a_row_advances_the_cache_generation() -> None:
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        # Spend the one-off render-path verification first: it invalidates the
+        # renderable cache to read back through it, which costs a generation
+        # once per widget. What this pins is the steady state after that.
+        warmup: list[str | Text] = list(table.get_row("default/pod-38"))
+        warmup[2] = Text("Pending")
+        assert table._patch_row("default/pod-38", warmup, table.ordered_columns) is True
+        assert table._cell_batching_verified is True
+
         cells: list[str | Text] = list(table.get_row("default/pod-39"))
         cells[2] = Text("Pending")
         before = table._update_count
@@ -711,6 +719,83 @@ async def test_batching_falls_back_when_the_private_store_does_not_take_writes()
         assert table._cell_batching_usable is False
 
 
+def _render_from_a_shadow(table: ResourceTable) -> None:
+    """Serve the render path from a structure that `_data` writes never reach.
+
+    This is the failure a major-version gate cannot see and a read-back through
+    `_data` cannot see either: the write lands, so reading it back succeeds,
+    while the renderer has moved on to another structure and keeps painting the
+    old value. Only the public API is kept in step, as a Textual release would.
+    """
+    shadow = {key: dict(value) for key, value in table._data.items()}
+    ordered = list(table.ordered_columns)
+
+    def get_row_at(row_index: int) -> list[Any]:
+        row_key = table._row_locations.get_key(row_index)
+        if row_key not in shadow:  # rows added later are not part of the model
+            shadow[cast(Any, row_key)] = dict(table._data[cast(Any, row_key)])
+        row = shadow[cast(Any, row_key)]
+        return [row[column.key] for column in ordered]
+
+    table.get_row_at = get_row_at  # type: ignore[method-assign]  # test double
+
+    original_update_cell = table.update_cell
+
+    def update_cell(row_key: Any, column_key: Any, value: Any, **kwargs: Any) -> None:
+        original_update_cell(row_key, column_key, value, **kwargs)
+        shadow[RowKey(getattr(row_key, "value", row_key))][column_key] = value
+
+    table.update_cell = update_cell  # type: ignore[method-assign]  # test double
+
+
+async def test_batching_falls_back_when_the_renderer_reads_another_structure() -> None:
+    """The write can land in `_data` and still never reach the screen, if a
+    release moved the structure the renderer consults. Reading the cell back
+    through `_data` cannot detect that — it returns the value just written no
+    matter who reads it at paint time. The check has to ask the render path.
+    """
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        _render_from_a_shadow(table)
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("alpha", phase="Failed"))
+
+        await until(
+            pilot,
+            lambda: "Failed" in table.render_line(1).text,
+            label="new cell painted through the fallback",
+        )
+
+        assert table._cell_batching_usable is False
+
+
+async def test_the_render_path_check_accepts_every_cell_kind_this_table_uses() -> None:
+    """The check must not disable batching against a Textual that works.
+
+    It compares a formatted render-path cell with the raw value written, and
+    `default_cell_formatter` hands a `Text` straight through while turning a
+    `str` into markup. A comparison blind to that would report a mismatch on
+    the very first write and silently cost the whole optimisation, with no
+    failure to show for it. This walks a real row, writes each cell back as
+    itself, and pins that the check stays quiet for both kinds.
+    """
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+
+        row_key = cast(Any, table._row_locations.get_key(0))
+        kinds = set()
+        for column in table.ordered_columns:
+            value = table.get_cell(row_key, column.key)
+            kinds.add(type(value).__name__)
+            assert table._batched_write_holds(row_key, column, value), column.key
+
+        assert {"str", "Text"} <= kinds  # both kinds really were exercised
+
+
 async def test_fixed_rows_do_not_shift_the_painted_window() -> None:
     """`first = fixed_count + scroll_offset.y` mirrors `DataTable.render_line`,
     which adds `scroll_y` only to lines at or below the fixed block: screen
@@ -782,7 +867,11 @@ async def test_a_row_appended_into_the_viewport_reaches_the_screen() -> None:
         app.store.apply_event("pods", "default", "ADDED", _pod("pod-03"))
         await until(pilot, lambda: table.row_count == 4, label="row appended")
 
-        del before
+        await until(
+            pilot,
+            lambda: table.virtual_size.height > before,
+            label="virtual height republished after append",
+        )
         await until(
             pilot,
             lambda: "pod-03" in _painted_pods(table),
