@@ -275,7 +275,74 @@ def test_cross_namespace_namespaced_owner_is_invalid() -> None:
     )
     graph = build_relationship_graph([child], [_complete("replicasets")])
     assert graph.edges[0].resolution is EdgeResolution.INVALID
-    assert "cross-namespace owner" in graph.edges[0].explanation
+    assert "cross-namespace owned_by" in graph.edges[0].explanation
+
+
+def test_cluster_scoped_subject_bound_to_namespaced_target_is_resolved() -> None:
+    """A cluster-scoped subject (e.g. PersistentVolume) referencing a
+    namespaced target (e.g. its bound PVC) is not a cross-namespace
+    violation: the invalidity rule only applies when the *subject* itself
+    is namespaced and disagrees with a namespaced target."""
+    persistent_volume = _input(
+        "PersistentVolume",
+        "",
+        "",
+        "pv-1",
+        "pv-uid-1",
+        relationships=_facts(
+            references=(
+                _ref(
+                    "bound_to",
+                    "",
+                    "PersistentVolumeClaim",
+                    "prod",
+                    "data",
+                    uid="pvc-1",
+                    field="spec.claimRef",
+                ),
+            )
+        ),
+    )
+    claim = _input("PersistentVolumeClaim", "", "prod", "data", "pvc-1")
+    graph = build_relationship_graph(
+        [persistent_volume, claim],
+        [_complete("persistentvolumes"), _complete("persistentvolumeclaims")],
+    )
+    assert graph.edges[0].resolution is EdgeResolution.RESOLVED
+    assert graph.edges[0].target.uid == "pvc-1"
+
+
+def test_cross_namespace_routes_to_is_invalid_pending_reference_grant_authorization() -> None:
+    """Without Task 4's ReferenceGrant-based authorization, a cross-namespace
+    `routes_to` (Gateway/Ingress backend) reference defaults to invalid even
+    when the target exists -- absence of a grant must never be silently
+    treated as permission."""
+    http_route = _input(
+        "HTTPRoute",
+        "gateway.networking.k8s.io",
+        "prod",
+        "route",
+        "route-1",
+        relationships=_facts(
+            references=(
+                _ref(
+                    "routes_to",
+                    "",
+                    "Service",
+                    "other",
+                    "backend",
+                    uid="svc-1",
+                    field="spec.rules[0].backendRefs[0]",
+                ),
+            )
+        ),
+    )
+    service = _input("Service", "", "other", "backend", "svc-1")
+    graph = build_relationship_graph(
+        [http_route, service], [_complete("httproutes"), _complete("services")]
+    )
+    assert graph.edges[0].resolution is EdgeResolution.INVALID
+    assert "cross-namespace routes_to" in graph.edges[0].explanation
 
 
 def test_cluster_scoped_owner_is_valid() -> None:
@@ -463,3 +530,53 @@ def test_walk_dependents_reports_depth_and_node_caps() -> None:
     assert all(edge.target == root for edge in by_depth.edges)
     assert len(by_nodes.edges) == 1
     assert by_nodes.truncated
+
+
+def test_walk_dependents_not_truncated_when_leaf_is_exactly_at_depth_cap() -> None:
+    """A chain whose true leaf sits exactly at max_depth has nothing left
+    unexplored beyond the cap, so it must not be reported as truncated."""
+    graph = _owner_graph(
+        ("Deployment", "deploy-1"),
+        ("ReplicaSet", "rs-1"),
+        ("Pod", "pod-1"),
+    )
+    root = _resource(graph, "Deployment", "deploy-1")
+    result = graph.walk_dependents(root, max_depth=2, max_nodes=500)
+    assert [(edge.subject.kind, edge.target.kind) for edge in result.edges] == [
+        ("ReplicaSet", "Deployment"),
+        ("Pod", "ReplicaSet"),
+    ]
+    assert result.truncated is False
+
+
+def test_walk_dependents_truncated_when_deeper_dependent_exists_beyond_cap() -> None:
+    """Adding one more level below the depth cap must flip truncated True:
+    there is now a genuine unexplored dependent beyond max_depth."""
+    graph = _owner_graph(
+        ("Deployment", "deploy-1"),
+        ("ReplicaSet", "rs-1"),
+        ("Pod", "pod-1"),
+        ("Container", "c-1"),
+    )
+    root = _resource(graph, "Deployment", "deploy-1")
+    result = graph.walk_dependents(root, max_depth=2, max_nodes=500)
+    assert [(edge.subject.kind, edge.target.kind) for edge in result.edges] == [
+        ("ReplicaSet", "Deployment"),
+        ("Pod", "ReplicaSet"),
+    ]
+    assert result.truncated is True
+
+
+def test_walk_dependents_cycle_only_frontier_is_not_truncated() -> None:
+    """When the only edge beyond the depth cap is a cycle back into an
+    already-visited resource, that alone must not report truncation --
+    there is no genuine unexplored dependent, only a revisit."""
+    graph = _owner_graph(
+        ("Deployment", "deploy-1"),
+        ("ReplicaSet", "rs-1"),
+        ("Pod", "pod-1"),
+        cycle_to="pod-1",
+    )
+    root = _resource(graph, "Deployment", "deploy-1")
+    result = graph.walk_dependents(root, max_depth=2, max_nodes=500)
+    assert result.truncated is False

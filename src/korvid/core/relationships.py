@@ -209,7 +209,9 @@ class RelationshipGraph:
         that returns to an already-visited resource (including `resource`
         itself) is recorded in `cycles` rather than being traversed again.
         `truncated` is set once the node cap is reached, or when the depth
-        cap stops traversal while further dependents remain unexplored.
+        cap stops traversal while a genuine unvisited dependent remains
+        beyond it; a depth cap reached only by cycle edges (which loop back
+        into resources already visited) does not count as truncation.
         """
         depth_limit = self.limits.max_depth if max_depth is None else max_depth
         node_limit = self.limits.max_nodes if max_nodes is None else max_nodes
@@ -242,8 +244,18 @@ class RelationshipGraph:
             frontier = next_frontier
 
         if frontier and not truncated:
-            # The depth cap stopped traversal while dependents remained.
-            truncated = True
+            # The depth cap stopped traversal before the frontier was
+            # expanded. That is only a real truncation if some frontier
+            # resource has a genuine unvisited dependent beyond the cap;
+            # an edge that only loops back into an already-visited
+            # resource (a cycle) is not unexplored work being dropped.
+            has_unexplored_dependent = any(
+                edge.subject not in visited
+                for current in frontier
+                for edge in self.dependents_of(current)
+            )
+            if has_unexplored_dependent:
+                truncated = True
 
         return TraversalResult(edges=tuple(edges), cycles=tuple(cycles), truncated=truncated)
 
@@ -277,14 +289,15 @@ def _build_edge(
     target_ref = fact.target
     evidence = EvidencePointer(resource=subject, field=fact.field)
 
-    # A Gateway backend is the sole relation Task 4 may authorize across
-    # namespaces (via a ReferenceGrant); every other namespaced reference
-    # that names a different namespace than its subject is invalid.
-    if (
-        target_ref.namespace
-        and target_ref.namespace != subject.namespace
-        and fact.relation is not RelationKind.ROUTES_TO
-    ):
+    # Every namespaced reference whose subject is itself namespaced and
+    # names a different namespace than the subject is invalid; a
+    # cluster-scoped subject (e.g. PersistentVolume -> PersistentVolumeClaim)
+    # is exempt since it has no namespace of its own to disagree with.
+    # `routes_to` (Gateway/Ingress backends) is *not* exempted here: Task 4
+    # is responsible for explicitly authorizing specific cross-namespace
+    # routes via a matching `ReferenceGrantFact`; absence of that
+    # authorization must default-deny, never silently resolve.
+    if subject.namespace and target_ref.namespace and target_ref.namespace != subject.namespace:
         target = GraphResource(
             group=target_ref.group,
             kind=target_ref.kind,
@@ -293,7 +306,7 @@ def _build_edge(
             uid=target_ref.uid,
         )
         explanation = (
-            "cross-namespace owner reference: subject namespace "
+            f"cross-namespace {fact.relation.value} reference: subject namespace "
             f"{subject.namespace!r} does not match target namespace "
             f"{target_ref.namespace!r}"
         )
