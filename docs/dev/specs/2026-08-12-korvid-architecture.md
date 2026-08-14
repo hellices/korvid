@@ -423,6 +423,42 @@ from the store). It is not a cached summary handed over earlier, which is what
 keeps the agent's idea of "what you are looking at" from drifting away from
 what is rendered.
 
+### The operational relationship graph (issue #281)
+
+```text
+k8s manifest -> RelationshipFacts -> core RelationshipGraph
+             -> ui RelationshipSnapshotLoader -> RelationshipScreen
+```
+
+`korvid.k8s.relationship_facts.extract_relationship_facts` is the safety
+boundary: it walks one raw manifest and extracts only the metadata a
+relationship needs (owner references, label selectors, volume/config
+references, routing backends, node scheduling, storage bindings), never a
+Secret's `data`, a literal env value, or a command/arg. Every listed object's
+summary (`GenericSummary`/`PodSummary`) carries its `RelationshipFacts`
+alongside the fields the rest of the UI already reads — the extraction runs
+once, at list time, not again when the graph is built.
+
+`korvid.core.relationships.build_relationship_graph` is a **pure function**:
+given the already-listed inputs and their `RelationshipFacts`, plus a
+`CoverageRecord` per attempted LIST, it performs no I/O of its own — it joins
+declared/observed reference facts against the resources it was handed by
+UID-or-name, joins selector facts against same-namespace candidates by label
+match, authorizes cross-namespace `routes_to` edges only against an exact
+Gateway `ReferenceGrant` match, and returns one immutable, deterministically
+capped `RelationshipGraph`.
+
+All the bounded LISTs — the fixed resource catalog, the discovered Gateway
+API kinds, per-source concurrency and per-snapshot resource caps, and the
+per-source `CoverageRecord` a 403/404/network failure becomes — are
+`korvid.ui.relationship_controller.RelationshipSnapshotLoader`'s
+responsibility, not the core builder's. This is the same core/ui split
+`WatchManager`/`ResourceStore` draw in §8 above: `core/` computes, the
+`k8s/`-facing I/O happens one layer up, in `ui/`.
+`korvid.ui.widgets.relationship_screen.RelationshipScreen` then renders one
+already-built graph — it performs no I/O either, only bounded BFS traversal
+and row budgeting over data it was handed.
+
 ---
 
 ## 9. Where a change belongs
@@ -523,3 +559,4 @@ surface, and no amount of client-side cleverness makes it one.
 | [`docs/agent.md`](../../agent.md) | Provider setup, profiles, prompt configuration |
 | [`docs/evals/methodology.md`](../../evals/methodology.md) | How the numbers in the scoreboard are produced |
 | [`docs/dev/ui-controllers.md`](../ui-controllers.md) | The in-progress `ui/` decomposition |
+| [`docs/resource-relationships.md`](../../resource-relationships.md) | The operational relationship graph from the user's side: relation kinds, coverage states, limits, Secret safety |

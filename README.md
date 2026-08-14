@@ -118,6 +118,13 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
   mode, protected contexts, node cordon / drain with PDB-aware impact
   plans, port-forwarding with liveness tracking, file transfer over the
   exec API, distroless debug fallback, and node shells.
+- **[Resource relationships](https://github.com/hellices/korvid/blob/main/docs/resource-relationships.md)** — press `g`
+  on a selected resource for its dependencies and dependents (owner refs,
+  selectors, config/volume mounts, routing backends, storage bindings),
+  bounded transitive expansion with cycle-safe traversal, per-source RBAC/
+  availability coverage with an incomplete-graph warning, exact Gateway
+  `ReferenceGrant` cross-namespace authorization, and a metadata-only
+  extraction that never reads a Secret's value.
 - **[Helm and operators](https://github.com/hellices/korvid/blob/main/docs/helm-operators.md)** — a release browser that
   needs no helm binary, search-first chart install / upgrade / rollback /
   uninstall wizards with dry-run previews, chart repo management, and the
