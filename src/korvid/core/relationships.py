@@ -14,14 +14,16 @@ the resource that declares or exhibits the relationship and
 `RelationshipEdge.target` is the resource it references or matches. Reverse
 (`dependents_of`) queries return the resources that depend on a given one.
 
-Named/UID-based reference resolution only; selector- and routing-based joins
-(Task 4) are out of scope here.
+Named/UID-based reference resolution (Task 3) is joined here with
+deterministic selector-based edges (Service/workload/PDB label selectors ->
+Pod) and cross-namespace Gateway backend authorization via an exact
+`ReferenceGrant` field match (Task 4).
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -30,9 +32,13 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.relationship_facts import (
     FactConfidence,
     ReferenceFact,
+    ReferenceGrantFact,
     RelationKind,
     RelationshipFacts,
+    SelectorFact,
+    TargetReference,
 )
+from korvid.k8s.selectors import matches_selector
 
 #: Control characters (including DEL) flattened out of coverage detail text.
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
@@ -280,11 +286,33 @@ def _node_for(item: GraphInput) -> GraphResource:
     )
 
 
+def _grant_authorizes(
+    subject: GraphResource,
+    target_ref: TargetReference,
+    grants: tuple[ReferenceGrantFact, ...],
+) -> bool:
+    """True when some `ReferenceGrantFact` in the target namespace exactly
+    authorizes `subject` (by group/kind/namespace) to reference `target_ref`
+    (by group/kind). No partial or wildcard match is honored: presence of a
+    `ReferenceGrant` object alone never implies authorization -- every field
+    must match exactly.
+    """
+    return any(
+        grant.from_group == subject.group
+        and grant.from_kind == subject.kind
+        and grant.from_namespace == subject.namespace
+        and grant.to_group == target_ref.group
+        and grant.to_kind == target_ref.kind
+        for grant in grants
+    )
+
+
 def _build_edge(
     subject: GraphResource,
     fact: ReferenceFact,
     by_uid: dict[tuple[str, str], GraphResource],
     by_name: dict[tuple[str, str, str, str], GraphResource],
+    grants_by_namespace: Mapping[str, tuple[ReferenceGrantFact, ...]],
 ) -> RelationshipEdge:
     target_ref = fact.target
     evidence = EvidencePointer(resource=subject, field=fact.field)
@@ -293,32 +321,38 @@ def _build_edge(
     # names a different namespace than the subject is invalid; a
     # cluster-scoped subject (e.g. PersistentVolume -> PersistentVolumeClaim)
     # is exempt since it has no namespace of its own to disagree with.
-    # `routes_to` (Gateway/Ingress backends) is *not* exempted here: Task 4
-    # is responsible for explicitly authorizing specific cross-namespace
-    # routes via a matching `ReferenceGrantFact`; absence of that
-    # authorization must default-deny, never silently resolve.
+    # `routes_to` (Gateway/Ingress backends) is authorized here only when an
+    # exact `ReferenceGrantFact` in the target namespace matches the
+    # subject's group/kind/namespace and the target's group/kind (Task 4);
+    # absence of that authorization must default-deny, never silently
+    # resolve, and a `ReferenceGrant` object's mere presence is never
+    # inferred as a match.
     if subject.namespace and target_ref.namespace and target_ref.namespace != subject.namespace:
-        target = GraphResource(
-            group=target_ref.group,
-            kind=target_ref.kind,
-            namespace=target_ref.namespace,
-            name=target_ref.name,
-            uid=target_ref.uid,
+        authorized = fact.relation is RelationKind.ROUTES_TO and _grant_authorizes(
+            subject, target_ref, grants_by_namespace.get(target_ref.namespace, ())
         )
-        explanation = (
-            f"cross-namespace {fact.relation.value} reference: subject namespace "
-            f"{subject.namespace!r} does not match target namespace "
-            f"{target_ref.namespace!r}"
-        )
-        return RelationshipEdge(
-            subject=subject,
-            target=target,
-            relation=fact.relation,
-            confidence=fact.confidence,
-            evidence=evidence,
-            resolution=EdgeResolution.INVALID,
-            explanation=explanation,
-        )
+        if not authorized:
+            target = GraphResource(
+                group=target_ref.group,
+                kind=target_ref.kind,
+                namespace=target_ref.namespace,
+                name=target_ref.name,
+                uid=target_ref.uid,
+            )
+            explanation = (
+                f"cross-namespace {fact.relation.value} reference: subject namespace "
+                f"{subject.namespace!r} does not match target namespace "
+                f"{target_ref.namespace!r}"
+            )
+            return RelationshipEdge(
+                subject=subject,
+                target=target,
+                relation=fact.relation,
+                confidence=fact.confidence,
+                evidence=evidence,
+                resolution=EdgeResolution.INVALID,
+                explanation=explanation,
+            )
 
     if target_ref.uid is not None:
         resolved = by_uid.get((target_ref.group, target_ref.uid))
@@ -380,6 +414,144 @@ def _build_edge(
     )
 
 
+def _selector_targets_by_group_kind_namespace(
+    sorted_inputs: Sequence[GraphInput], nodes: Sequence[GraphResource]
+) -> dict[tuple[str, str, str], list[tuple[GraphResource, dict[str, str]]]]:
+    """Index every node (with its label set) by `(group, kind, namespace)`.
+
+    `nodes` and `sorted_inputs` share the same deterministic order (both are
+    derived from the same already-sorted input sequence), so each bucket's
+    candidates come out pre-sorted by resource identity without any extra
+    sort step.
+    """
+    index: dict[tuple[str, str, str], list[tuple[GraphResource, dict[str, str]]]] = {}
+    for item, resource in zip(sorted_inputs, nodes, strict=True):
+        key = (resource.group, resource.kind, resource.namespace)
+        index.setdefault(key, []).append((resource, dict(item.summary.labels)))
+    return index
+
+
+def _build_selector_edge(
+    declaring: GraphResource, fact: SelectorFact, matched: GraphResource
+) -> RelationshipEdge:
+    """Build one selector-derived edge.
+
+    When `fact.match_is_subject` is `False` (e.g. Service `SELECTS`), the
+    selector-declaring object is the edge subject and the matched object is
+    the target. When `True` (e.g. workload `MANAGED_BY`, PDB
+    `PROTECTED_BY`), the matched object is the edge subject instead -- but
+    the evidence resource remains the selector-declaring object either way.
+    """
+    subject, target = (matched, declaring) if fact.match_is_subject else (declaring, matched)
+    return RelationshipEdge(
+        subject=subject,
+        target=target,
+        relation=fact.relation,
+        confidence=fact.confidence,
+        evidence=EvidencePointer(resource=declaring, field=fact.field),
+        resolution=EdgeResolution.RESOLVED,
+        explanation="",
+    )
+
+
+def _selector_edges(
+    sorted_inputs: Sequence[GraphInput],
+    nodes: Sequence[GraphResource],
+) -> list[RelationshipEdge]:
+    """Join every `SelectorFact` against same-namespace candidate targets.
+
+    A selector never crosses namespaces: candidates are restricted to the
+    selector-declaring resource's own namespace. One edge is created per
+    matching target; an empty or absent selector (per `matches_selector`'s
+    `empty_matches` policy) simply yields no candidates matched, not a
+    missing/invalid edge.
+    """
+    index = _selector_targets_by_group_kind_namespace(sorted_inputs, nodes)
+    edges: list[RelationshipEdge] = []
+    for item, declaring in zip(sorted_inputs, nodes, strict=True):
+        for fact in item.summary.relationships.selectors:
+            candidates = index.get((fact.target_group, fact.target_kind, declaring.namespace), ())
+            for matched, labels in candidates:
+                if matches_selector(fact.selector, labels, empty_matches=fact.empty_matches):
+                    edges.append(_build_selector_edge(declaring, fact, matched))
+    return edges
+
+
+def _edge_sort_key(
+    edge: RelationshipEdge,
+) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str]:
+    """Deterministic ordering: subject, relation, target, evidence field."""
+    return (
+        edge.subject.group,
+        edge.subject.kind,
+        edge.subject.namespace,
+        edge.subject.name,
+        edge.subject.uid or "",
+        edge.relation.value,
+        edge.target.group,
+        edge.target.kind,
+        edge.target.namespace,
+        edge.target.name,
+        edge.target.uid or "",
+        edge.evidence.field,
+    )
+
+
+def _node_indexes(
+    sorted_inputs: Sequence[GraphInput],
+) -> tuple[
+    list[GraphResource],
+    dict[tuple[str, str], GraphResource],
+    dict[tuple[str, str, str, str], GraphResource],
+]:
+    nodes: list[GraphResource] = []
+    by_uid: dict[tuple[str, str], GraphResource] = {}
+    by_name: dict[tuple[str, str, str, str], GraphResource] = {}
+    for item in sorted_inputs:
+        resource = _node_for(item)
+        nodes.append(resource)
+        by_name[(resource.group, resource.kind, resource.namespace, resource.name)] = resource
+        if resource.uid is not None:
+            by_uid[(resource.group, resource.uid)] = resource
+    return nodes, by_uid, by_name
+
+
+def _grants_by_namespace(
+    sorted_inputs: Sequence[GraphInput],
+) -> dict[str, tuple[ReferenceGrantFact, ...]]:
+    """Index every observed `ReferenceGrantFact` by its own (target) namespace."""
+    grants: dict[str, list[ReferenceGrantFact]] = {}
+    for item in sorted_inputs:
+        for grant in item.summary.relationships.grants:
+            grants.setdefault(grant.namespace, []).append(grant)
+    return {namespace: tuple(namespace_grants) for namespace, namespace_grants in grants.items()}
+
+
+def _reference_edges(
+    sorted_inputs: Sequence[GraphInput],
+    nodes: Sequence[GraphResource],
+    by_uid: dict[tuple[str, str], GraphResource],
+    by_name: dict[tuple[str, str, str, str], GraphResource],
+    grants_by_namespace: Mapping[str, tuple[ReferenceGrantFact, ...]],
+) -> list[RelationshipEdge]:
+    edges: list[RelationshipEdge] = []
+    for item, subject in zip(sorted_inputs, nodes, strict=True):
+        for fact in item.summary.relationships.references:
+            edges.append(_build_edge(subject, fact, by_uid, by_name, grants_by_namespace))
+    return edges
+
+
+def _deduplicate_edges(edges: Sequence[RelationshipEdge]) -> list[RelationshipEdge]:
+    seen: set[RelationshipEdge] = set()
+    deduplicated: list[RelationshipEdge] = []
+    for edge in edges:
+        if edge in seen:
+            continue
+        seen.add(edge)
+        deduplicated.append(edge)
+    return deduplicated
+
+
 #: Frozen singleton so the default argument below is a name lookup, not a
 #: call (ruff B008), while still behaving as `limits=GraphLimits()`.
 _DEFAULT_LIMITS = GraphLimits()
@@ -415,25 +587,13 @@ def build_relationship_graph(
             )
         )
 
-    nodes: list[GraphResource] = []
-    by_uid: dict[tuple[str, str], GraphResource] = {}
-    by_name: dict[tuple[str, str, str, str], GraphResource] = {}
-    for item in sorted_inputs:
-        resource = _node_for(item)
-        nodes.append(resource)
-        by_name[(resource.group, resource.kind, resource.namespace, resource.name)] = resource
-        if resource.uid is not None:
-            by_uid[(resource.group, resource.uid)] = resource
+    nodes, by_uid, by_name = _node_indexes(sorted_inputs)
+    grants_by_namespace = _grants_by_namespace(sorted_inputs)
 
-    edges: list[RelationshipEdge] = []
-    seen_edges: set[RelationshipEdge] = set()
-    for item, subject in zip(sorted_inputs, nodes, strict=True):
-        for fact in item.summary.relationships.references:
-            edge = _build_edge(subject, fact, by_uid, by_name)
-            if edge in seen_edges:
-                continue
-            seen_edges.add(edge)
-            edges.append(edge)
+    candidate_edges = _reference_edges(sorted_inputs, nodes, by_uid, by_name, grants_by_namespace)
+    candidate_edges += _selector_edges(sorted_inputs, nodes)
+    edges = _deduplicate_edges(candidate_edges)
+    edges.sort(key=_edge_sort_key)
 
     if len(edges) > limits.max_edges:
         dropped_edges = len(edges) - limits.max_edges

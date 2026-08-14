@@ -8,6 +8,10 @@ states. It never retains summary status/custom data or raw manifests.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
+import pytest
+
 from korvid.core.relationships import (
     CoverageRecord,
     CoverageState,
@@ -23,10 +27,13 @@ from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.relationship_facts import (
     FactConfidence,
     ReferenceFact,
+    ReferenceGrantFact,
     RelationKind,
     RelationshipFacts,
+    SelectorFact,
     TargetReference,
 )
+from korvid.k8s.selectors import LabelSelector, SelectorExpression
 
 
 def _meta(kind: str, group: str) -> ResourceMeta:
@@ -84,6 +91,140 @@ def _complete(resource: str) -> CoverageRecord:
 
 def _resource(graph: RelationshipGraph, kind: str, name: str) -> GraphResource:
     return next(node for node in graph.nodes if node.kind == kind and node.name == name)
+
+
+def _label_selector(labels: Mapping[str, str]) -> LabelSelector:
+    return LabelSelector(match_labels=tuple(sorted(labels.items())), present=True)
+
+
+def _service_input(
+    name: str,
+    labels: Mapping[str, str] | None,
+    *,
+    namespace: str = "default",
+) -> GraphInput:
+    """A Service with a `SELECTS` `SelectorFact` (`None` labels = no selector at all)."""
+    selectors: tuple[SelectorFact, ...] = ()
+    if labels is not None:
+        selectors = (
+            SelectorFact(
+                relation=RelationKind.SELECTS,
+                target_group="",
+                target_kind="Pod",
+                selector=_label_selector(labels),
+                confidence=FactConfidence.DECLARED,
+                field="spec.selector",
+                empty_matches=False,
+                match_is_subject=False,
+            ),
+        )
+    return _input(
+        "Service",
+        "",
+        namespace,
+        name,
+        f"svc-{name}",
+        relationships=RelationshipFacts(selectors=selectors),
+    )
+
+
+def _pod_input(
+    name: str,
+    *,
+    labels: Mapping[str, str] | None = None,
+    namespace: str = "default",
+) -> GraphInput:
+    summary = PodSummary(
+        name=name,
+        namespace=namespace,
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node="node-a",
+        uid=f"pod-{name}",
+        labels=tuple(sorted((labels or {}).items())),
+    )
+    return GraphInput(meta=_meta("Pod", ""), summary=summary)
+
+
+def _pdb_input(
+    name: str,
+    *,
+    selector: Mapping[str, str],
+    empty_matches: bool,
+    namespace: str = "default",
+) -> GraphInput:
+    fact = SelectorFact(
+        relation=RelationKind.PROTECTED_BY,
+        target_group="",
+        target_kind="Pod",
+        selector=_label_selector(selector),
+        confidence=FactConfidence.DECLARED,
+        field="spec.selector",
+        empty_matches=empty_matches,
+        match_is_subject=True,
+    )
+    return _input(
+        "PodDisruptionBudget",
+        "policy",
+        namespace,
+        name,
+        f"pdb-{name}",
+        relationships=RelationshipFacts(selectors=(fact,)),
+    )
+
+
+def _http_route_input(
+    name: str,
+    namespace: str,
+    *,
+    backend_namespace: str,
+    backend_name: str = "api",
+) -> GraphInput:
+    reference = ReferenceFact(
+        relation=RelationKind.ROUTES_TO,
+        target=TargetReference(
+            group="", kind="Service", namespace=backend_namespace, name=backend_name
+        ),
+        confidence=FactConfidence.DECLARED,
+        field="spec.rules[0].backendRefs[0]",
+    )
+    return _input(
+        "HTTPRoute",
+        "gateway.networking.k8s.io",
+        namespace,
+        name,
+        f"httproute-{name}",
+        relationships=RelationshipFacts(references=(reference,)),
+    )
+
+
+def _reference_grant_input(
+    from_namespace: str,
+    namespace: str,
+    *,
+    from_group: str = "gateway.networking.k8s.io",
+    from_kind: str = "HTTPRoute",
+    to_group: str = "",
+    to_kind: str = "Service",
+) -> GraphInput:
+    grant = ReferenceGrantFact(
+        from_group=from_group,
+        from_kind=from_kind,
+        from_namespace=from_namespace,
+        to_group=to_group,
+        to_kind=to_kind,
+        namespace=namespace,
+        field="spec",
+    )
+    return _input(
+        "ReferenceGrant",
+        "gateway.networking.k8s.io",
+        namespace,
+        f"grant-{from_namespace}",
+        f"grant-{from_namespace}",
+        relationships=RelationshipFacts(grants=(grant,)),
+    )
 
 
 def _owner_graph(*chain: tuple[str, str], cycle_to: str | None = None) -> RelationshipGraph:
@@ -580,3 +721,282 @@ def test_walk_dependents_cycle_only_frontier_is_not_truncated() -> None:
     root = _resource(graph, "Deployment", "deploy-1")
     result = graph.walk_dependents(root, max_depth=2, max_nodes=500)
     assert result.truncated is False
+
+
+# --- Task 4: selector joins -------------------------------------------------
+
+
+def test_service_selector_creates_declared_pod_dependencies() -> None:
+    service = _service_input("api", {"app": "api"})
+    api = _pod_input("api-0", labels={"app": "api"})
+    worker = _pod_input("worker-0", labels={"app": "worker"})
+    graph = build_relationship_graph(
+        [service, api, worker], [_complete("services"), _complete("pods")]
+    )
+    edges = graph.dependencies_of(_resource(graph, "Service", "api"))
+    assert [(edge.target.kind, edge.target.name) for edge in edges] == [("Pod", "api-0")]
+    assert edges[0].relation.value == "selects"
+    assert edges[0].confidence.value == "declared"
+
+
+def test_duplicate_selectors_create_edges_for_each_subject() -> None:
+    api = _pod_input("api-0", labels={"app": "api"})
+    graph = build_relationship_graph(
+        [
+            _service_input("public", {"app": "api"}),
+            _service_input("internal", {"app": "api"}),
+            api,
+        ],
+        [_complete("services"), _complete("pods")],
+    )
+    assert [(edge.subject.name, edge.target.name) for edge in graph.edges] == [
+        ("internal", "api-0"),
+        ("public", "api-0"),
+    ]
+
+
+def test_selectors_do_not_cross_namespaces() -> None:
+    graph = build_relationship_graph(
+        [
+            _service_input("api", {"app": "api"}, namespace="prod"),
+            _pod_input("api-0", labels={"app": "api"}, namespace="other"),
+        ],
+        [_complete("services"), _complete("pods")],
+    )
+    assert graph.edges == ()
+
+
+def test_policy_v1_empty_pdb_selector_matches_every_pod_in_namespace() -> None:
+    graph = build_relationship_graph(
+        [_pdb_input("availability", selector={}, empty_matches=True), _pod_input("api-0")],
+        [_complete("poddisruptionbudgets"), _complete("pods")],
+    )
+    assert graph.edges[0].relation.value == "protected_by"
+    assert graph.edges[0].subject.kind == "Pod"
+    assert graph.edges[0].target.kind == "PodDisruptionBudget"
+
+
+def test_service_absent_and_empty_selectors_create_no_edges() -> None:
+    absent_service = _service_input("no-selector", None)
+    empty_selector_fact = SelectorFact(
+        relation=RelationKind.SELECTS,
+        target_group="",
+        target_kind="Pod",
+        selector=LabelSelector(present=True),
+        confidence=FactConfidence.DECLARED,
+        field="spec.selector",
+        empty_matches=False,
+        match_is_subject=False,
+    )
+    empty_service = _input(
+        "Service",
+        "",
+        "default",
+        "empty-selector",
+        "svc-empty-selector",
+        relationships=RelationshipFacts(selectors=(empty_selector_fact,)),
+    )
+    pod = _pod_input("api-0", labels={"app": "api"})
+    graph = build_relationship_graph(
+        [absent_service, empty_service, pod], [_complete("services"), _complete("pods")]
+    )
+    assert graph.edges == ()
+
+
+def test_workload_and_pdb_match_expressions() -> None:
+    deployment_selector = SelectorFact(
+        relation=RelationKind.MANAGED_BY,
+        target_group="",
+        target_kind="Pod",
+        selector=LabelSelector(
+            match_expressions=(SelectorExpression("tier", "In", ("web",)),), present=True
+        ),
+        confidence=FactConfidence.DECLARED,
+        field="spec.selector",
+        empty_matches=False,
+        match_is_subject=True,
+    )
+    deployment = _input(
+        "Deployment",
+        "apps",
+        "default",
+        "web",
+        "deploy-web",
+        relationships=RelationshipFacts(selectors=(deployment_selector,)),
+    )
+    pdb_selector = SelectorFact(
+        relation=RelationKind.PROTECTED_BY,
+        target_group="",
+        target_kind="Pod",
+        selector=LabelSelector(
+            match_expressions=(SelectorExpression("tier", "NotIn", ("batch",)),), present=True
+        ),
+        confidence=FactConfidence.DECLARED,
+        field="spec.selector",
+        empty_matches=False,
+        match_is_subject=True,
+    )
+    pdb = _input(
+        "PodDisruptionBudget",
+        "policy",
+        "default",
+        "availability",
+        "pdb-1",
+        relationships=RelationshipFacts(selectors=(pdb_selector,)),
+    )
+    matching_pod = _pod_input("web-0", labels={"tier": "web"})
+    other_pod = _pod_input("batch-0", labels={"tier": "batch"})
+    graph = build_relationship_graph(
+        [deployment, pdb, matching_pod, other_pod],
+        [_complete("deployments"), _complete("poddisruptionbudgets"), _complete("pods")],
+    )
+    managed = [edge for edge in graph.edges if edge.relation is RelationKind.MANAGED_BY]
+    protected = [edge for edge in graph.edges if edge.relation is RelationKind.PROTECTED_BY]
+    assert [edge.subject.name for edge in managed] == ["web-0"]
+    assert [edge.subject.name for edge in protected] == ["web-0"]
+
+
+def test_unmatched_selector_creates_no_edge_without_changing_coverage() -> None:
+    service = _service_input("api", {"app": "api"})
+    pod = _pod_input("worker-0", labels={"app": "worker"})
+    coverage = [_complete("services"), _complete("pods")]
+    graph = build_relationship_graph([service, pod], coverage)
+    assert graph.edges == ()
+    assert graph.coverage == tuple(coverage)
+
+
+# --- Task 4: EndpointSlice and routing joins --------------------------------
+
+
+def test_endpoint_slice_target_ref_resolves_pod() -> None:
+    pod = _pod_input("api-0", namespace="prod")
+    endpoint_slice = _input(
+        "EndpointSlice",
+        "discovery.k8s.io",
+        "prod",
+        "api-abc123",
+        "eps-1",
+        relationships=_facts(
+            references=(
+                _ref(
+                    "routes_to",
+                    "",
+                    "Pod",
+                    "prod",
+                    "api-0",
+                    uid=pod.summary.uid,
+                    field="endpoints[0].targetRef",
+                ),
+            )
+        ),
+    )
+    graph = build_relationship_graph(
+        [endpoint_slice, pod], [_complete("endpointslices"), _complete("pods")]
+    )
+    assert graph.edges[0].resolution is EdgeResolution.RESOLVED
+    assert graph.edges[0].target.kind == "Pod"
+
+
+def test_ingress_backend_is_same_namespace_only() -> None:
+    ingress = _input(
+        "Ingress",
+        "networking.k8s.io",
+        "prod",
+        "web",
+        "ing-1",
+        relationships=_facts(
+            references=(
+                _ref(
+                    "routes_to",
+                    "",
+                    "Service",
+                    "prod",
+                    "api",
+                    field="spec.rules[0].http.paths[0].backend.service",
+                ),
+            )
+        ),
+    )
+    service = _service_input("api", None, namespace="prod")
+    graph = build_relationship_graph(
+        [ingress, service], [_complete("ingresses"), _complete("services")]
+    )
+    assert graph.edges[0].resolution is EdgeResolution.RESOLVED
+    assert graph.edges[0].target.uid == service.summary.uid
+
+
+def test_http_route_same_namespace_backend_resolves() -> None:
+    route = _http_route_input("public", "prod", backend_namespace="prod")
+    service = _service_input("api", None, namespace="prod")
+    graph = build_relationship_graph(
+        [route, service], [_complete("httproutes"), _complete("services")]
+    )
+    assert graph.edges[0].resolution is EdgeResolution.RESOLVED
+    assert graph.edges[0].target.uid == service.summary.uid
+
+
+def test_cross_namespace_route_requires_matching_reference_grant() -> None:
+    route = _http_route_input("public", "edge", backend_namespace="prod")
+    service = _service_input("api", None, namespace="prod")
+    without_grant = build_relationship_graph(
+        [route, service], [_complete("httproutes"), _complete("services")]
+    )
+    assert without_grant.edges[0].resolution is EdgeResolution.INVALID
+
+    with_grant = build_relationship_graph(
+        [route, service, _reference_grant_input("edge", "prod")],
+        [
+            _complete("httproutes"),
+            _complete("services"),
+            _complete("referencegrants"),
+        ],
+    )
+    assert with_grant.edges[0].resolution is EdgeResolution.RESOLVED
+    assert with_grant.edges[0].target.uid == service.summary.uid
+
+
+@pytest.mark.parametrize(
+    ("from_group", "from_kind", "to_kind"),
+    [
+        ("wrong.example", "HTTPRoute", "Service"),
+        ("gateway.networking.k8s.io", "GRPCRoute", "Service"),
+        ("gateway.networking.k8s.io", "HTTPRoute", "ConfigMap"),
+    ],
+)
+def test_reference_grant_constraints_are_exact(
+    from_group: str, from_kind: str, to_kind: str
+) -> None:
+    graph = build_relationship_graph(
+        [
+            _http_route_input("public", "edge", backend_namespace="prod"),
+            _service_input("api", None, namespace="prod"),
+            _reference_grant_input(
+                "edge",
+                "prod",
+                from_group=from_group,
+                from_kind=from_kind,
+                to_kind=to_kind,
+            ),
+        ],
+        [_complete("httproutes"), _complete("services"), _complete("referencegrants")],
+    )
+    assert graph.edges[0].resolution is EdgeResolution.INVALID
+
+
+def test_optional_gateway_unavailable_coverage_does_not_abort_build() -> None:
+    """An unavailable Gateway API CRD must not abort building the rest of
+    the graph; only `graph.incomplete` reflects the missing coverage."""
+    pod = _pod_input("api-0")
+    coverage = [
+        _complete("pods"),
+        CoverageRecord(
+            "gateway.networking.k8s.io",
+            "gateways",
+            "",
+            CoverageState.UNAVAILABLE,
+            "CRD not installed",
+        ),
+    ]
+    graph = build_relationship_graph([pod], coverage)
+    assert graph.incomplete
+    assert graph.nodes == (GraphResource("", "Pod", "default", "api-0", "pod-api-0"),)
