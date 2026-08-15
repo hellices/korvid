@@ -1969,6 +1969,8 @@ def test_release_docs_require_homebrew_tap_merge_and_version_verification() -> N
     assert 'formula_path="$PWD/dist/v0.2.0/korvid.rb"' in runbook
     assert 'if [ ! -f "$formula_path" ]' in runbook
     assert 'cp "$formula_path" Formula/korvid.rb' in runbook
+    assert 'if cmp -s "$formula_path" Formula/korvid.rb' in runbook
+    assert "formula is already present on tap main" in runbook
     assert (
         runbook.count('gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1')
         == 2
