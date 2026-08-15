@@ -144,9 +144,10 @@ same fixed workload delivers the same events and reaches the same final state,
 so CPU time is what these numbers are taken from. What is fixed is the
 *external* schedule, not the internal work: repaint throughput rises when a
 repaint gets cheaper, so the arms do not perform equal amounts of application
-work — see the counts in the 2×2 section below, which put the optimised arm at
-roughly 3.5× the repaints. That makes a CPU-time ratio a conservative reading
-of the change rather than a like-for-like one. Even then, running all the
+work. Both arms in this update-path comparison use the new render path; the
+counts in the 2×2 section below put the optimised arm at roughly 1.2× the
+repaints (3.91 M versus 3.19 M). That makes a CPU-time ratio a conservative
+reading of the change rather than a like-for-like one. Even then, running all the
 "before" samples and then all the "after" samples is not enough: a first
 attempt that way put a 13% swing on one arm and reversed the sign of the
 smaller result. The figures below alternate the two arms run by run, five
