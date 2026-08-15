@@ -230,7 +230,10 @@ class RecordingLister:
         self._rows = rows
         self._order = order
         self.calls: list[tuple[str, str | None]] = []
-        self.errors: dict[str, Exception] = {}
+        #: `BaseException`, not `Exception`: a client torn down under a
+        #: running LIST raises `asyncio.CancelledError`, which the flow must
+        #: propagate rather than fold into the fail-open advisory.
+        self.errors: dict[str, BaseException] = {}
         self.delay = 0.0
         #: Fired once, inside the first LIST: how a test simulates a context
         #: switch or selection change landing while the snapshot is loading.

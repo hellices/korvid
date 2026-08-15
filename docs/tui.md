@@ -209,6 +209,7 @@ one?
 
     graph-derived impact (advisory):
       delete apps/Deployment/prod/web
+      advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
       known direct dependents (may be affected): 1 or more
         - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]
       known transitive dependents (may be affected): 1 or more
@@ -217,7 +218,6 @@ one?
       scope: prod
       graph coverage: incomplete - a missing dependent here does not prove none exists
         - gateway.networking.k8s.io/*: unavailable
-      advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
 
 Every count reads `1 or more` above because the Gateway API group could not
 be listed: that one incomplete coverage record is enough to make the whole
@@ -225,7 +225,10 @@ answer a floor rather than a total (see the `N or more` bullet below). With
 every source `complete` and neither bound hit, the same summary renders
 exact counts.
 
-The section is **advisory**. It never predicts failure, never replaces the
+The section is **advisory**, and says so on its second body line — directly
+under the action, before the first count, because that is where the hedge is
+still on screen with the target rather than below a body that can run to the
+preview's caps. It never predicts failure, never replaces the
 server dry-run, and never blocks approval: the y/typed-name gate, the UID
 precondition, the RBAC pre-check, and the fail-closed audit log are exactly
 what they were. Scale, edit, resize, cordon/uncordon, drain, Helm, and

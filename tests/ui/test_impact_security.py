@@ -8,11 +8,13 @@ drives the real `Ctrl-D` / `r` flow through the Task 4 harness.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import unicodedata
 from pathlib import Path
 from typing import Any
 
+import pytest
 from textual import events
 
 from korvid.k8s.discovery import ResourceMeta
@@ -391,6 +393,83 @@ async def test_rollout_restart_declined_with_an_impact_section_runs_no_operation
         assert "rollout restart apps/Deployment/prod/web" in impact_text(env.app)
         await pilot.press("n")
         await pilot.pause()
+        assert env.ops.calls == []
+        assert not audit_path.exists()
+
+
+async def test_cancelling_the_delete_flow_during_the_impact_load_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """A cancelled snapshot cancels the *write flow*, it does not open a dialog.
+
+    Cancellation here is not hypothetical: `:ctx` tears the API client down
+    under whatever is awaiting it, and the impact load is an awaited read
+    inside the delete flow like any other. `_impact_preview` re-raises
+    `asyncio.CancelledError` instead of folding it into the fail-open
+    "impact unavailable" advisory, and this pins what that means end to end
+    - the cancellation reaches the caller, so the flow never runs on to push
+    a confirmation describing a snapshot it never got, and the whole
+    approval path stops where it was: no dialog, no keystroke gate to
+    answer, no operation, no write reservation (which would block `:ctx`
+    itself), no audit record.
+
+    Distinct from the timeout case, which is a *bounded* failure the user
+    keeps their approval through: there the dialog opens with the static
+    advisory. Here nothing survives the cancellation at all.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    #: Blocks every LIST until the flow is cancelled; far beyond
+    #: `_IMPACT_TIMEOUT`, so a timeout could not reach the dialog first and
+    #: quietly turn this into the already-covered fail-open case.
+    env.lister.delay = 60.0
+    reservations_during_load: list[int] = []
+    env.lister.on_first_call = lambda: reservations_during_load.append(
+        env.app._active_cluster_writes
+    )
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        flow = asyncio.create_task(env.app.action_delete_resource())
+        await until(pilot, lambda: env.lister.calls != [], label="impact snapshot listing")
+        flow.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flow
+        # `cancelled()` is the propagation assertion: a flow that swallowed
+        # the cancellation and returned would complete normally instead.
+        assert flow.cancelled()
+        await pilot.pause()
+        assert not isinstance(env.app.screen, ConfirmScreen)
+        assert len(env.app.screen_stack) == 1
+        assert reservations_during_load == [0]
+        assert env.app._active_cluster_writes == 0
+        assert env.ops.calls == []
+        assert not audit_path.exists()
+
+
+async def test_a_cancelled_snapshot_read_is_not_downgraded_to_the_unavailable_advisory(
+    tmp_path: Path,
+) -> None:
+    """The same invariant from the other side: the LIST itself is cancelled.
+
+    A client closed mid-read raises `asyncio.CancelledError` out of the
+    lister rather than an API error. The fail-open branch must not treat it
+    as one: converting it to the static advisory would resurrect a write
+    flow whose cluster connection is already gone, and would open an
+    approval dialog for a target nothing re-validated.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    env.lister.errors["deployments"] = asyncio.CancelledError()
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        with pytest.raises(asyncio.CancelledError):
+            await env.app.action_delete_resource()
+        await pilot.pause()
+        assert env.lister.calls != []
+        assert not isinstance(env.app.screen, ConfirmScreen)
+        assert len(env.app.screen_stack) == 1
+        assert not env.app.screen.query(".confirm-impact")
+        assert env.app._active_cluster_writes == 0
         assert env.ops.calls == []
         assert not audit_path.exists()
 

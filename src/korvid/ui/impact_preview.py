@@ -28,8 +28,12 @@ from korvid.k8s.relationship_facts import FactConfidence
 
 IMPACT_TITLE = "graph-derived impact (advisory):"
 
-#: Always the last line: the summary describes known relationships, not a
-#: prediction, and it never gates the approval the user asked for.
+#: Rendered directly under the action line - ahead of every count, path,
+#: unresolved reference and coverage row - because it frames all of them:
+#: the summary describes known relationships, not a prediction, and it never
+#: gates the approval the user asked for. Below a body that can run to the
+#: preview's caps, the one line saying so is the one most likely scrolled
+#: past.
 ADVISORY_LINE = (
     "  advisory only: known relationships from one bounded snapshot - not a prediction of"
     " failure, no replacement for the server dry-run, and never a block on approval."
@@ -116,8 +120,13 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     if not summary.target_present:
         # Directly under the action line: every count below is about the
         # snapshot, and without the target in it they say nothing about
-        # the object the user is about to act on.
+        # the object the user is about to act on. It qualifies that
+        # identity, so it stays adjacent to it and the advisory follows.
         lines.append(_TARGET_MISSING_LINE)
+    # Before the sections, not after them: the hedge applies to every count
+    # below it, and the body between here and the end can run to the
+    # preview's caps.
+    lines.append(ADVISORY_LINE)
     lines.extend(_section(_DIRECT_TITLE, summary.direct, capped=capped))
     lines.extend(_section(_TRANSITIVE_TITLE, summary.transitive, capped=capped))
     lines.extend(_inferred_lines(summary))
@@ -127,7 +136,6 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     lines.append(_scope_line(summary))
     lines.extend(_coverage_lines(summary))
     lines.extend(_cap_lines(summary))
-    lines.append(ADVISORY_LINE)
     return tuple(_bounded(line) for line in lines)
 
 

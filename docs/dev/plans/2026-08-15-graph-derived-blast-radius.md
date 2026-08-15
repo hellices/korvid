@@ -1154,6 +1154,7 @@ git commit -m "feat: add graph-derived impact summaries" \
   - `graph-derived impact (advisory):`
   - `  <action label> <group/kind/namespace/name>` (`delete` or `rollout restart`) — a label at or under `_MAX_TEXT` renders verbatim; over it, `_MIN_NAME_BUDGET` characters are reserved for `name` no matter how long `group/kind/namespace` is, the qualifier gets the rest, and both are cut in the *middle* (never the end) by `_elide`, so a long-group CRD or a name that differs only late (`-blue`/`-green`, a ReplicaSet hash, a pod suffix) still keeps a distinguishing head and tail instead of collapsing every object of that type into one identical line.
   - `  target not found in this snapshot - dependents unknown` (only when `target_present` is False, directly under the action line: it changes how every count below reads)
+  - `ADVISORY_LINE` — directly under the action line (under the target-missing line when there is one, which qualifies that identity): the hedge frames every count below it, and the body under it can run to the preview's caps, so a last-line advisory is the line most likely scrolled past. Exactly one occurrence, whatever the summary holds.
   - `  known direct dependents (may be affected): <n>` or `: none in this snapshot`
   - `    - <resource> via <relation> (<confidence>) at <field>[ -> ...][ [inferred]]`
   - `  known transitive dependents (may be affected): <n>` or `: none in this snapshot`
@@ -1165,7 +1166,6 @@ git commit -m "feat: add graph-derived impact summaries" \
   - `  scope: <namespace>` or `  scope: all namespaces` — **always**, including for `complete` coverage, which is only ever complete within that scope
   - `  graph coverage: complete` or `  graph coverage: incomplete - a missing dependent here does not prove none exists` plus `    - <group>/<resource>[ @<scope>]: <state>`
   - `  traversal capped: ...` and/or `  snapshot truncated: ...`
-  - `ADVISORY_LINE`
 - Bounds: at most 10 item lines per dependent section, 5 unresolved lines, 5 coverage lines, 3 rendered hops per path; every overflow adds one `    ... <n> more ... (preview capped)` line. Cluster-controlled fragments are flattened one Unicode-category-aware character at a time — `Cc` (C0/C1 controls, including NEL), `Cf` (bidi overrides, directional isolates, zero-width joiners/marks), `Cs` (lone surrogates) and `Zl`/`Zp` (line/paragraph separators) become a literal space each, length-preserving, so a hidden or reordering character shows up as a gap rather than silently reshaping what an approver reads — then truncated at `_MAX_TEXT` (120) characters: `_resource_label` cuts the *middle* of an over-long qualifier and name (reserving `_MIN_NAME_BUDGET` for the name), every other fragment (`_safe`: evidence field paths, scopes, coverage records) is cut at the end since its start identifies it. Every composed line is then capped at `_MAX_LINE` (240) characters by `_bounded`, which reserves and re-appends the trailing ` [inferred]` marker so the composed-line cap can never truncate over it — a path line concatenates several fragments, so the per-fragment bound alone does not bound the line in a 70-column modal. Every cut, whatever it fell on, is marked with `_TRUNCATION_SUFFIX` so a shortened fragment or line never reads as a complete claim.
 
 - [ ] **Step 1: Write the failing renderer tests**
@@ -1297,6 +1297,7 @@ def test_render_produces_the_exact_deterministic_line_sequence() -> None:
     assert render_impact_lines(summary) == (
         "graph-derived impact (advisory):",
         "  delete apps/Deployment/prod/web",
+        ADVISORY_LINE,
         "  known direct dependents (may be affected): 1 or more",
         "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]",
         "  known transitive dependents (may be affected): 1 or more",
@@ -1305,7 +1306,6 @@ def test_render_produces_the_exact_deterministic_line_sequence() -> None:
         "  scope: prod",
         "  graph coverage: incomplete - a missing dependent here does not prove none exists",
         "    - core/secrets @prod: forbidden",
-        ADVISORY_LINE,
     )
 
 
@@ -1325,7 +1325,7 @@ def test_empty_sections_and_complete_coverage_are_stated_explicitly() -> None:
     assert "  known direct dependents (may be affected): none in this snapshot" in lines
     assert "  known transitive dependents (may be affected): none in this snapshot" in lines
     assert "  graph coverage: complete" in lines
-    assert lines[-1] == ADVISORY_LINE
+    assert lines[2] == ADVISORY_LINE
 
 
 def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
@@ -1557,6 +1557,10 @@ def test_a_target_missing_from_the_snapshot_says_dependents_are_unknown() -> Non
     """
     lines = render_impact_lines(_summary(target_present=False))
     assert lines[2] == "  target not found in this snapshot - dependents unknown"
+    # The missing-target line qualifies the identity on the action line, so
+    # it stays adjacent to it; the advisory follows, still ahead of every
+    # section below.
+    assert lines[3] == ADVISORY_LINE
     assert "  known direct dependents (may be affected): none in this snapshot" in lines
     assert "  known transitive dependents (may be affected): none in this snapshot" in lines
     assert not any("or more" in line for line in lines)
@@ -1592,7 +1596,7 @@ def test_coverage_records_are_bounded_with_one_exact_overflow_line() -> None:
     assert listed[1] == "    - apps/widgets-1 @prod: forbidden"
     assert overflow == [f"    ... {omitted} more coverage records not shown (preview capped)"]
     assert max(len(line) for line in lines) <= _MAX_LINE
-    assert lines[-1] == ADVISORY_LINE
+    assert lines[2] == ADVISORY_LINE
 
 
 def test_a_single_incomplete_coverage_record_needs_no_overflow_line() -> None:
@@ -1633,7 +1637,7 @@ def test_every_composed_line_stays_within_the_total_line_bound() -> None:
     capped = [line for line in lines if len(line) == _MAX_LINE]
     assert capped
     assert all(line.endswith(_TRUNCATION_SUFFIX) for line in capped)
-    assert lines[-1] == ADVISORY_LINE
+    assert lines[2] == ADVISORY_LINE
 
 
 def test_unresolved_references_are_listed_and_bounded() -> None:
@@ -2106,7 +2110,7 @@ def test_c1_bidi_and_zero_width_controls_are_flattened_ordinary_unicode_is_not()
     )
 
 
-def test_no_line_claims_a_guaranteed_failure_and_the_advisory_is_always_last() -> None:
+def test_no_line_claims_a_guaranteed_failure_and_the_advisory_leads_the_body() -> None:
     lines = render_impact_lines(
         _summary(
             direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
@@ -2118,8 +2122,44 @@ def test_no_line_claims_a_guaranteed_failure_and_the_advisory_is_always_last() -
     for claim in ("will fail", "will break", "guaranteed", "definitely", "certain to"):
         assert claim not in body
     assert "advisory" in lines[0]
-    assert lines[-1] == ADVISORY_LINE
+    assert lines[2] == ADVISORY_LINE
     assert "never a block on approval" in ADVISORY_LINE
+
+
+def test_the_advisory_appears_once_directly_under_the_action_line() -> None:
+    """The hedge frames the counts, so it has to be read before them.
+
+    Last-line placement put it under every dependent, unresolved-reference
+    and coverage row - up to the preview's caps, a screenful the reader
+    scrolls past - so the one line saying "this is not a prediction" was the
+    one most likely never seen. Directly under the action line it is on
+    screen with the target itself, before the first count.
+
+    Exactly one occurrence, whatever the summary holds: a repeated advisory
+    would read as two different claims about two different parts of the
+    body.
+    """
+    long_summary = _summary(
+        direct=tuple(
+            ImpactItem(
+                resource=GraphResource(
+                    group="apps", kind="ReplicaSet", namespace="prod", name=f"web-{index}"
+                ),
+                path=(_OWNS_DEPLOY,),
+            )
+            for index in range(20)
+        ),
+        coverage=(_FORBIDDEN_SECRETS,),
+        traversal_capped=True,
+    )
+    for lines in (render_impact_lines(_summary()), render_impact_lines(long_summary)):
+        assert lines.count(ADVISORY_LINE) == 1
+        assert lines[:3] == (IMPACT_TITLE, "  delete apps/Deployment/prod/web", ADVISORY_LINE)
+        sections = [
+            index for index, line in enumerate(lines) if "dependents (may be affected)" in line
+        ]
+        assert sections
+        assert lines.index(ADVISORY_LINE) < min(sections)
 
 
 def test_secret_identity_is_rendered_without_any_value_field() -> None:
@@ -2194,8 +2234,12 @@ from korvid.k8s.relationship_facts import FactConfidence
 
 IMPACT_TITLE = "graph-derived impact (advisory):"
 
-#: Always the last line: the summary describes known relationships, not a
-#: prediction, and it never gates the approval the user asked for.
+#: Rendered directly under the action line - ahead of every count, path,
+#: unresolved reference and coverage row - because it frames all of them:
+#: the summary describes known relationships, not a prediction, and it never
+#: gates the approval the user asked for. Below a body that can run to the
+#: preview's caps, the one line saying so is the one most likely scrolled
+#: past.
 ADVISORY_LINE = (
     "  advisory only: known relationships from one bounded snapshot - not a prediction of"
     " failure, no replacement for the server dry-run, and never a block on approval."
@@ -2282,8 +2326,13 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     if not summary.target_present:
         # Directly under the action line: every count below is about the
         # snapshot, and without the target in it they say nothing about
-        # the object the user is about to act on.
+        # the object the user is about to act on. It qualifies that
+        # identity, so it stays adjacent to it and the advisory follows.
         lines.append(_TARGET_MISSING_LINE)
+    # Before the sections, not after them: the hedge applies to every count
+    # below it, and the body between here and the end can run to the
+    # preview's caps.
+    lines.append(ADVISORY_LINE)
     lines.extend(_section(_DIRECT_TITLE, summary.direct, capped=capped))
     lines.extend(_section(_TRANSITIVE_TITLE, summary.transitive, capped=capped))
     lines.extend(_inferred_lines(summary))
@@ -2293,7 +2342,6 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     lines.append(_scope_line(summary))
     lines.extend(_coverage_lines(summary))
     lines.extend(_cap_lines(summary))
-    lines.append(ADVISORY_LINE)
     return tuple(_bounded(line) for line in lines)
 
 
@@ -3098,7 +3146,10 @@ class RecordingLister:
         self._rows = rows
         self._order = order
         self.calls: list[tuple[str, str | None]] = []
-        self.errors: dict[str, Exception] = {}
+        #: `BaseException`, not `Exception`: a client torn down under a
+        #: running LIST raises `asyncio.CancelledError`, which the flow must
+        #: propagate rather than fold into the fail-open advisory.
+        self.errors: dict[str, BaseException] = {}
         self.delay = 0.0
         #: Fired once, inside the first LIST: how a test simulates a context
         #: switch or selection change landing while the snapshot is loading.
@@ -3820,10 +3871,12 @@ drives the real `Ctrl-D` / `r` flow through the Task 4 harness.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from textual import events
 
 from korvid.k8s.discovery import ResourceMeta
@@ -3932,6 +3985,68 @@ async def test_the_impact_load_never_writes_reserves_or_audits(tmp_path: Path) -
     async with env.app.run_test() as pilot:
         await open_delete_dialog(env, pilot, "deploy", expect="web")
         assert env.lister.calls != []
+        assert env.app._active_cluster_writes == 0
+        assert env.ops.calls == []
+        assert not audit_path.exists()
+
+
+async def test_cancelling_the_delete_flow_during_the_impact_load_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """A cancelled snapshot cancels the *write flow*, it does not open a dialog.
+
+    `:ctx` tears the API client down under whatever is awaiting it, and the
+    impact load is an awaited read inside the delete flow like any other.
+    `_impact_preview` re-raises `asyncio.CancelledError` rather than folding
+    it into the fail-open advisory, so the flow never runs on to push a
+    confirmation describing a snapshot it never got: no dialog, no operation,
+    no write reservation, no audit record. Distinct from the timeout case,
+    where the dialog *does* open with the static advisory.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    env.lister.delay = 60.0  # blocks well past `_IMPACT_TIMEOUT`
+    reservations_during_load: list[int] = []
+    env.lister.on_first_call = lambda: reservations_during_load.append(
+        env.app._active_cluster_writes
+    )
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        flow = asyncio.create_task(env.app.action_delete_resource())
+        await until(pilot, lambda: env.lister.calls != [], label="impact snapshot listing")
+        flow.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flow
+        assert flow.cancelled()  # a swallowed cancellation would complete normally
+        await pilot.pause()
+        assert not isinstance(env.app.screen, ConfirmScreen)
+        assert len(env.app.screen_stack) == 1
+        assert reservations_during_load == [0]
+        assert env.app._active_cluster_writes == 0
+        assert env.ops.calls == []
+        assert not audit_path.exists()
+
+
+async def test_a_cancelled_snapshot_read_is_not_downgraded_to_the_unavailable_advisory(
+    tmp_path: Path,
+) -> None:
+    """The same invariant from the other side: the LIST itself is cancelled.
+
+    A client closed mid-read raises `asyncio.CancelledError` out of the
+    lister rather than an API error, and the fail-open branch must not treat
+    it as one - that would resurrect a write flow whose connection is gone.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    env.lister.errors["deployments"] = asyncio.CancelledError()
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        with pytest.raises(asyncio.CancelledError):
+            await env.app.action_delete_resource()
+        await pilot.pause()
+        assert env.lister.calls != []
+        assert not isinstance(env.app.screen, ConfirmScreen)
+        assert len(env.app.screen_stack) == 1
         assert env.app._active_cluster_writes == 0
         assert env.ops.calls == []
         assert not audit_path.exists()
@@ -4096,6 +4211,7 @@ one?
 
     graph-derived impact (advisory):
       delete apps/Deployment/prod/web
+      advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
       known direct dependents (may be affected): 1 or more
         - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]
       known transitive dependents (may be affected): 1 or more
@@ -4104,7 +4220,6 @@ one?
       scope: prod
       graph coverage: incomplete - a missing dependent here does not prove none exists
         - gateway.networking.k8s.io/*: unavailable
-      advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
 
 Every count reads `1 or more` above because the Gateway API group could not
 be listed: that one incomplete coverage record is enough to make the whole
@@ -4112,7 +4227,10 @@ answer a floor rather than a total (see the `N or more` bullet below). With
 every source `complete` and neither bound hit, the same summary renders
 exact counts.
 
-The section is **advisory**. It never predicts failure, never replaces the
+The section is **advisory**, and says so on its second body line — directly
+under the action, before the first count, because that is where the hedge is
+still on screen with the target rather than below a body that can run to the
+preview's caps. It never predicts failure, never replaces the
 server dry-run, and never blocks approval: the y/typed-name gate, the UID
 precondition, the RBAC pre-check, and the fail-closed audit log are exactly
 what they were. Scale, edit, resize, cordon/uncordon, drain, Helm, and
@@ -4338,7 +4456,7 @@ Expected:
 | Caps reported, never silent | Task 1 (`traversal_capped`, `graph_truncated`) + Task 2 (`_cap_lines`) |
 | Rendered beside the existing server dry-run preview | Task 3 (`.confirm-impact` above `.confirm-preview`) |
 | Approval possible while the graph is incomplete, and the preview says so | Task 2 + Task 4 (`test_incomplete_graph_still_renders_a_summary_with_the_coverage_warning`) |
-| No impact summary can approve, execute, reserve, or bypass a write | Task 5 (`test_the_impact_load_never_writes_reserves_or_audits`, `test_declined_delete_with_an_impact_section_runs_no_operation`, `test_keystroke_buffered_during_the_impact_load_cannot_approve`) |
+| No impact summary can approve, execute, reserve, or bypass a write | Task 5 (`test_the_impact_load_never_writes_reserves_or_audits`, `test_declined_delete_with_an_impact_section_runs_no_operation`, `test_keystroke_buffered_during_the_impact_load_cannot_approve`, and - for a flow cancelled mid-snapshot - `test_cancelling_the_delete_flow_during_the_impact_load_writes_nothing`, `test_a_cancelled_snapshot_read_is_not_downgraded_to_the_unavailable_advisory`) |
 | Fresh-keystroke, typed-name, context epoch, UID, RBAC, dry-run unchanged | Task 3 (gate tests) + Task 4 (ordering + both revalidation tests) + the untouched suites re-run in Tasks 3-5 |
 | Audit failure still prevents the operation factory | Task 5 (`test_audit_failure_still_blocks_the_operation_factory`) |
 | No Secret value or manifest content anywhere | Task 2 (`test_secret_identity_is_rendered_without_any_value_field`) + Task 5 (`test_no_secret_value_or_manifest_content_reaches_the_dialog`) |

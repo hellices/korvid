@@ -123,6 +123,7 @@ def test_render_produces_the_exact_deterministic_line_sequence() -> None:
     assert render_impact_lines(summary) == (
         "graph-derived impact (advisory):",
         "  delete apps/Deployment/prod/web",
+        ADVISORY_LINE,
         "  known direct dependents (may be affected): 1 or more",
         "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]",
         "  known transitive dependents (may be affected): 1 or more",
@@ -131,7 +132,6 @@ def test_render_produces_the_exact_deterministic_line_sequence() -> None:
         "  scope: prod",
         "  graph coverage: incomplete - a missing dependent here does not prove none exists",
         "    - core/secrets @prod: forbidden",
-        ADVISORY_LINE,
     )
 
 
@@ -151,7 +151,7 @@ def test_empty_sections_and_complete_coverage_are_stated_explicitly() -> None:
     assert "  known direct dependents (may be affected): none in this snapshot" in lines
     assert "  known transitive dependents (may be affected): none in this snapshot" in lines
     assert "  graph coverage: complete" in lines
-    assert lines[-1] == ADVISORY_LINE
+    assert lines[2] == ADVISORY_LINE
 
 
 def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
@@ -383,6 +383,10 @@ def test_a_target_missing_from_the_snapshot_says_dependents_are_unknown() -> Non
     """
     lines = render_impact_lines(_summary(target_present=False))
     assert lines[2] == "  target not found in this snapshot - dependents unknown"
+    # The missing-target line qualifies the identity on the action line, so
+    # it stays adjacent to it; the advisory follows, still ahead of every
+    # section below.
+    assert lines[3] == ADVISORY_LINE
     assert "  known direct dependents (may be affected): none in this snapshot" in lines
     assert "  known transitive dependents (may be affected): none in this snapshot" in lines
     assert not any("or more" in line for line in lines)
@@ -418,7 +422,7 @@ def test_coverage_records_are_bounded_with_one_exact_overflow_line() -> None:
     assert listed[1] == "    - apps/widgets-1 @prod: forbidden"
     assert overflow == [f"    ... {omitted} more coverage records not shown (preview capped)"]
     assert max(len(line) for line in lines) <= _MAX_LINE
-    assert lines[-1] == ADVISORY_LINE
+    assert lines[2] == ADVISORY_LINE
 
 
 def test_a_single_incomplete_coverage_record_needs_no_overflow_line() -> None:
@@ -459,7 +463,7 @@ def test_every_composed_line_stays_within_the_total_line_bound() -> None:
     capped = [line for line in lines if len(line) == _MAX_LINE]
     assert capped
     assert all(line.endswith(_TRUNCATION_SUFFIX) for line in capped)
-    assert lines[-1] == ADVISORY_LINE
+    assert lines[2] == ADVISORY_LINE
 
 
 def test_unresolved_references_are_listed_and_bounded() -> None:
@@ -932,7 +936,7 @@ def test_c1_bidi_and_zero_width_controls_are_flattened_ordinary_unicode_is_not()
     )
 
 
-def test_no_line_claims_a_guaranteed_failure_and_the_advisory_is_always_last() -> None:
+def test_no_line_claims_a_guaranteed_failure_and_the_advisory_leads_the_body() -> None:
     lines = render_impact_lines(
         _summary(
             direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
@@ -944,8 +948,44 @@ def test_no_line_claims_a_guaranteed_failure_and_the_advisory_is_always_last() -
     for claim in ("will fail", "will break", "guaranteed", "definitely", "certain to"):
         assert claim not in body
     assert "advisory" in lines[0]
-    assert lines[-1] == ADVISORY_LINE
+    assert lines[2] == ADVISORY_LINE
     assert "never a block on approval" in ADVISORY_LINE
+
+
+def test_the_advisory_appears_once_directly_under_the_action_line() -> None:
+    """The hedge frames the counts, so it has to be read before them.
+
+    Last-line placement put it under every dependent, unresolved-reference
+    and coverage row - up to the preview's caps, a screenful the reader
+    scrolls past - so the one line saying "this is not a prediction" was the
+    one most likely never seen. Directly under the action line it is on
+    screen with the target itself, before the first count.
+
+    Exactly one occurrence, whatever the summary holds: a repeated advisory
+    would read as two different claims about two different parts of the
+    body.
+    """
+    long_summary = _summary(
+        direct=tuple(
+            ImpactItem(
+                resource=GraphResource(
+                    group="apps", kind="ReplicaSet", namespace="prod", name=f"web-{index}"
+                ),
+                path=(_OWNS_DEPLOY,),
+            )
+            for index in range(20)
+        ),
+        coverage=(_FORBIDDEN_SECRETS,),
+        traversal_capped=True,
+    )
+    for lines in (render_impact_lines(_summary()), render_impact_lines(long_summary)):
+        assert lines.count(ADVISORY_LINE) == 1
+        assert lines[:3] == (IMPACT_TITLE, "  delete apps/Deployment/prod/web", ADVISORY_LINE)
+        sections = [
+            index for index, line in enumerate(lines) if "dependents (may be affected)" in line
+        ]
+        assert sections
+        assert lines.index(ADVISORY_LINE) < min(sections)
 
 
 def test_secret_identity_is_rendered_without_any_value_field() -> None:
