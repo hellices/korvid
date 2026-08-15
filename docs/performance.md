@@ -192,11 +192,24 @@ suggests alone — the opposite of the overlap one might expect, and not
 something the single-change numbers can be extrapolated to.
 
 The likely reading: with the old render path a repaint rewrites every row's
-cells, so computing AGE is a small share of a large cost and memoising it
-saves 2.3%. The render-path change removes the bulk of those writes; the
-per-object work is then a much larger share of what is left, and the same memo
-is worth 17.6% of it. Neither number is wrong — they answer different
-questions, and only the 2×2 answers "what did the pair buy".
+cells, so the update path's per-object work is a small share of a large cost
+and removing it saves 2.3%. The render-path change removes the bulk of those
+writes; that per-object work is then a much larger share of what is left, and
+removing it is worth 17.6% of it. Neither number is wrong — they answer
+different questions, and only the 2×2 answers "what did the pair buy".
+
+That 17.6% is the update path as a whole, which is two changes in two files.
+Splitting them the same way, on the new render path:
+
+| Update-path change | Before | After | |
+|---|---:|---:|---|
+| AGE memo (`models.py`) | 17.28 s | 14.64 s | **−15.3%** (7 rounds) |
+| Settled row order (`store.py`) | 15.58 s | 14.93 s | −4.2% |
+
+The memo carries almost all of it. The two are close to additive — their
+savings sum to 3.29 s against the 3.12 s the pair removes — so they overlap
+slightly rather than reinforcing each other the way the render-path pairing
+does.
 
 The 2×2 came from one session; the table above came from an earlier one, so
 the same change reads −12.3% there. Only the paired arms within a session are
