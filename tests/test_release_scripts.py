@@ -1540,6 +1540,7 @@ def test_release_docs_runbook_requires_protected_tags_and_maintainer_approval() 
 
 def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> None:
     runbook = _release_runbook()
+    normalized = " ".join(runbook.split())
     stop_processes = runbook.index("Stop all korvid processes")
     remove_files = runbook.index("Then remove the retained files")
     assert "~/.config/korvid/config.yaml" in runbook
@@ -1551,7 +1552,7 @@ def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> N
     assert f"python -m pip install 'korvid[all]=={_project_version()}'" in runbook
     assert "python -m pip uninstall -y korvid" in runbook
     assert "opt-in cleanup" in runbook
-    assert "rerun your package manager with the full desired extra set" in runbook
+    assert "rerun your package manager with the full desired extra set" in normalized
     assert 'state_root="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"' in runbook
     assert 'data_root="${XDG_DATA_HOME:-$HOME/.local/share}/korvid"' in runbook
     assert 'rm -f "$state_root/audit.jsonl"' in runbook
@@ -1609,13 +1610,14 @@ def test_release_docs_runbook_gives_the_five_trusted_publisher_claims() -> None:
     every field is matched exactly against the OIDC token. A runbook that says
     "register a trusted publisher" without the values is why `v0.1.1` stopped."""
     runbook = " ".join(_release_runbook().split())
-    assert "https://pypi.org/manage/account/publishing/" in runbook
+    assert "https://pypi.org/manage/project/korvid/settings/publishing/" in runbook
     assert "| PyPI Project Name | `korvid` |" in runbook
     assert "| Owner | `hellices` |" in runbook
     assert "| Repository name | `korvid` |" in runbook
     assert "| Workflow name | `release.yml` |" in runbook
     assert "| Environment name | `release` |" in runbook
-    assert "pending" in runbook
+    assert "Verify the active GitHub publisher" in runbook
+    assert "Do not create a second project" in runbook
     assert "Two-factor authentication must be enabled" in runbook
     assert "No API token is created" in runbook
 
@@ -1936,6 +1938,7 @@ def test_release_docs_require_homebrew_tap_merge_and_version_verification() -> N
     assert f"gh release download v{version} --pattern korvid.rb" in runbook
     assert 'gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch' in runbook
     assert 'gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash' in runbook
+    assert "git switch -c bump-korvid-" in runbook
     assert f"korvid --version  # korvid {version}" in runbook
     assert "tag-revalidated `uv.lock`" in normalized
     assert "not separately attested or listed in `SHA256SUMS`" in normalized

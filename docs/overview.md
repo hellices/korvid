@@ -60,16 +60,18 @@ client.
 
 Neither optional adapter is required, and neither implies the other.
 
-The two extras are **independent**, not a ladder. Each adds to the cockpit on
-its own: `korvid[mcp]` gives an editor's assistant cluster sight without
-installing an embedded agent at all, and `korvid[agent]` needs no MCP. Install
-what you want:
+The two adapter extras are **independent**, not a ladder. Each adds to the
+cockpit on its own: `korvid[mcp]` gives an editor's assistant cluster sight
+without installing an embedded agent at all, and `korvid[agent]` needs no MCP.
+Observability is an add-on to either tool surface, not a standalone base-TUI
+surface. Install what you want:
 
 ```sh
 uv tool install korvid                 # cockpit only
 uv tool install 'korvid[agent]'        # + embedded AI agent
 uv tool install 'korvid[mcp]'          # + MCP server for external agents
-uv tool install 'korvid[observability]' # + Prometheus/Loki investigation
+uv tool install 'korvid[agent,observability]' # agent + Prometheus/Loki tools
+uv tool install 'korvid[mcp,observability]'   # MCP + Prometheus/Loki tools
 uv tool install 'korvid[all]'          # agent,mcp,observability
 
 brew install hellices/korvid/korvid    # macOS/Linux, no Python needed (= agent)
@@ -170,15 +172,17 @@ Four installs, four shapes — the two optional adapters occupy independent port
 flowchart TB
     subgraph ROW1["  "]
         direction LR
-        subgraph C4["korvid[all]  —  agent + MCP"]
+        subgraph C4["korvid[all]  —  agent + MCP + observability"]
             direction TB
             C4A["Agent<br/>OPTIONAL"]
             C4M["MCP<br/>OPTIONAL"]
+            C4O["Prometheus/Loki<br/>OPTIONAL"]
             C4T["TUI<br/>INCLUDED"]
             C4R["Core"]
             C4K["K8s<br/>INCLUDED"]
             C4A --> C4R
             C4M --> C4R
+            C4O --> C4R
             C4T --> C4R --> C4K
         end
 

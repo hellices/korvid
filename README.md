@@ -186,7 +186,8 @@ release runbook.
 python -m pip install 'korvid==0.2.0'             # base TUI only
 python -m pip install 'korvid[agent]==0.2.0'      # :ai / Ctrl-A
 python -m pip install 'korvid[mcp]==0.2.0'        # korvid --mcp
-python -m pip install 'korvid[observability]==0.2.0'  # Prometheus / Loki
+python -m pip install 'korvid[agent,observability]==0.2.0'  # agent + Prometheus/Loki
+python -m pip install 'korvid[mcp,observability]==0.2.0'    # MCP + Prometheus/Loki
 python -m pip install 'korvid[all]==0.2.0'        # recommended first install
 python -m pip install 'korvid[all,entra]==0.2.0'  # add Entra auth too
 ```
