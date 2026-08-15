@@ -1154,10 +1154,10 @@ git commit -m "feat: add graph-derived impact summaries" \
   - `  known direct dependents (may be affected): <n>` or `: none in this snapshot`
   - `    - <resource> via <relation> (<confidence>) at <field>[ -> ...][ [inferred]]`
   - `  known transitive dependents (may be affected): <n>` or `: none in this snapshot`
-  - `  inferred relationships are labelled and never block this write` (only when some item is inferred)
+  - `  inferred relationships are labelled and never block this write` (only when some item, cycle, revisit, or unresolved reference is inferred)
   - `  relationship cycles: <n> (loop edges classified, not expanded)` (only when non-empty)
   - `  additional known paths: <n> (already-listed dependents reached again)` (only when `revisits` is non-empty: converging or parallel edges are counted, never expanded into a second item)
-  - `  unresolved references in the affected set: <n>` plus `    - <subject> <relation> -> <target> (<resolution>) at <field>`
+  - `  unresolved references in the affected set: <n>` plus `    - <subject> <relation> (<confidence>) -> <target> (<resolution>) at <field>`
   - `  scope: <namespace>` or `  scope: all namespaces` — **always**, including for `complete` coverage, which is only ever complete within that scope
   - `  graph coverage: complete` or `  graph coverage: incomplete - a missing dependent here does not prove none exists` plus `    - <group>/<resource>[ @<scope>]: <state>`
   - `  traversal capped: ...` and/or `  snapshot truncated: ...`
@@ -1529,6 +1529,7 @@ from collections.abc import Sequence
 
 from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary
 from korvid.core.relationships import CoverageState, GraphResource, RelationshipEdge
+from korvid.k8s.relationship_facts import FactConfidence
 
 IMPACT_TITLE = "graph-derived impact (advisory):"
 
@@ -1635,7 +1636,20 @@ def _hop(edge: RelationshipEdge) -> str:
 
 
 def _inferred_lines(summary: ImpactSummary) -> list[str]:
-    if any(item.inferred for item in (*summary.direct, *summary.transitive)):
+    """Whether any edge anywhere in this summary was heuristically derived.
+
+    Checked across every edge collection the summary carries - not just the
+    listed dependent paths - because a cycle, a revisit, or an unresolved
+    reference renders its own line regardless of confidence, and an inferred
+    edge folded into one of those must still surface the same warning an
+    inferred dependent path gets.
+    """
+    listed_inferred = any(item.inferred for item in (*summary.direct, *summary.transitive))
+    aggregate_inferred = any(
+        edge.confidence is FactConfidence.INFERRED
+        for edge in (*summary.cycles, *summary.revisits, *summary.unresolved)
+    )
+    if listed_inferred or aggregate_inferred:
         return [_INFERRED_NOTE_LINE]
     return []
 
@@ -1685,10 +1699,19 @@ def _unresolved_lines(summary: ImpactSummary) -> list[str]:
 
 
 def _unresolved_line(edge: RelationshipEdge) -> str:
+    """One dangling reference, with its own confidence next to its relation.
+
+    A cycle or a revisit only ever gets the aggregate `_INFERRED_NOTE_LINE`
+    because those are counted, never individually listed; an unresolved
+    reference *is* individually listed, so its confidence goes right after
+    the relation - matching `_hop`'s `relation (confidence) at field`
+    grammar - rather than folding an inferred one into that same generic
+    note with no way to tell which listed reference was heuristic.
+    """
     return (
-        f"    - {_resource_label(edge.subject)} {edge.relation.value} ->"
-        f" {_resource_label(edge.target)} ({edge.resolution.value})"
-        f" at {_safe(edge.evidence.field)}"
+        f"    - {_resource_label(edge.subject)} {edge.relation.value}"
+        f" ({edge.confidence.value}) -> {_resource_label(edge.target)}"
+        f" ({edge.resolution.value}) at {_safe(edge.evidence.field)}"
     )
 
 
@@ -3257,7 +3280,11 @@ Reading it:
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references
   held by the target or by something it takes down — a mounted ConfigMap
-  that no longer exists, say — whatever relation they use.
+  that no longer exists, say — whatever relation they use. Each line names
+  its own confidence (`declared`, `observed`, or `inferred`) next to the
+  relation, the same way a dependent path does, so a heuristically-derived
+  dangling reference is identifiable on its own line, not only through the
+  `[inferred]`/aggregate note above.
 - `scope` is the namespace the snapshot covered. `all namespaces` appears
   for a cluster-scoped target (a Node, a PersistentVolume) or an
   all-namespaces view; otherwise the coverage below it is only ever
