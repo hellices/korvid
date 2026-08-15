@@ -142,18 +142,18 @@ Latency percentiles cannot resolve a change of this size on an unpinned
 machine — identical saturated runs varied between 5 ms and 40 ms p95 here. The
 same fixed workload delivers the same events and reaches the same final state,
 so CPU time is what these numbers are taken from. What is fixed is the
-*external* schedule, not the internal work: repaint throughput rises when a
-repaint gets cheaper, so the arms do not perform equal amounts of application
-work. Both arms in this update-path comparison use the new render path; the
-AGE-evaluation counts in the 2×2 section below put the optimised arm at roughly
-1.2× the render passes (3.91 M versus 3.19 M evaluations, or about 3,910 versus
-3,190 passes over this 1,000-row view). That makes a CPU-time ratio a conservative
-reading of the change rather than a like-for-like one. Even then, running all the
-"before" samples and then all the "after" samples is not enough: a first
-attempt that way put a 13% swing on one arm and reversed the sign of the
-smaller result. The figures below alternate the two arms run by run, five
-rounds each. Workload: 1,000 Pods across 20 namespaces at 120 events/s for
-20 s.
+*external* schedule, not the internal work: table-update throughput rises when
+an update pass gets cheaper, so the arms do not perform equal amounts of
+application work. Both arms in this update-path comparison use the new render
+path; the AGE-evaluation counts in the 2×2 section below put the optimised arm
+at roughly 1.2× the table-update passes (3.91 M versus 3.19 M evaluations, or
+about 3,910 versus 3,190 passes over this 1,000-row view). That makes a CPU-time
+ratio a conservative reading of the change rather than a like-for-like one.
+Even then, running all the "before" samples and then all the "after" samples is
+not enough: a first attempt that way put a 13% swing on one arm and reversed
+the sign of the smaller result. The figures below alternate the two arms run by
+run, five rounds each. Workload: 1,000 Pods across 20 namespaces at 120 events/s
+for 20 s.
 
 | Workload | Metric | Before | After | |
 |---|---|---:|---:|---|
@@ -236,26 +236,27 @@ runs:
 | new update path only | 1.20 M / 1.22 M | | 3,538 |
 | both | 3.91 M / 3.83 M | **~3.6×** | 3,543 |
 
-AGE is evaluated for every row on every repaint — it feeds the stamp that
-decides whether the row can be reused, so it runs *before* the memo can spare
-anything, and 99.7% of those rows are then reused unchanged. Row rebuilds
+AGE is evaluated for every row on every table-update pass — it feeds the stamp
+that decides whether the row can be reused, so it runs *before* the memo can
+spare anything, and 99.7% of those rows are then reused unchanged. Row rebuilds
 track the events, so they are flat across all four arms. The quantity that
 triples is exactly the quantity the update-path change makes cheap.
 
-Repaints are not a fixed quantity of the workload: the cheaper a repaint gets,
-the more of them the run completes before the schedule ends. The render-path
-change roughly triples them, so the same optimisation has about three times as
-many opportunities to pay. That explains the direction but only a minority of
-the size: tripling the 0.16-second isolated saving predicts roughly 0.48 seconds,
-well below the 1.89-second saving with the new render path. Nothing measured
-here separates the remainder, so the residual is left unexplained rather than
-narrated.
+Table-update passes are not a fixed quantity of the workload: the cheaper a
+pass gets, the more of them the run completes before the schedule ends. The
+render-path change roughly triples them, so the same optimisation has about
+three times as many opportunities to pay. That explains the direction but only
+a minority of the size: tripling the 0.16-second isolated saving predicts
+roughly 0.48 seconds, well below the 1.89-second saving with the new render
+path. Nothing measured here separates the remainder, so the residual is left
+unexplained rather than narrated.
 
 Two consequences worth stating. The arms do not perform equal work: the
-fully-optimised arm completes roughly 3.5× the repaints of the unoptimised one
-while using less CPU, so a percentage of CPU time understates what changed —
-the display is also refreshed far more often. And every event still lands, in
-every arm: the digests match and no arm dropped an update.
+fully-optimised arm completes roughly 3.5× the table-update passes of the
+unoptimised one while using less CPU, so a percentage of CPU time understates
+the total update work completed. This counter does not establish that the
+display itself refreshed more often. And every event still lands, in every arm:
+the digests match and no arm dropped an update.
 
 **Inside the update path**, the same treatment separates the AGE memo from the
 settled row order (9 rounds, own session):
