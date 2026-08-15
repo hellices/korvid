@@ -140,12 +140,18 @@ value — and the row repaints as soon as it scrolls into view.
 
 Latency percentiles cannot resolve a change of this size on an unpinned
 machine — identical saturated runs varied between 5 ms and 40 ms p95 here. The
-same fixed workload always performs the same amount of work, so CPU time is
-what these numbers are taken from. Even then, running all the "before" samples
-and then all the "after" samples is not enough: a first attempt that way put a
-13% swing on one arm and reversed the sign of the smaller result. The figures
-below alternate the two arms run by run, five rounds each. Workload: 1,000 Pods
-across 20 namespaces at 120 events/s for 20 s.
+same fixed workload delivers the same events and reaches the same final state,
+so CPU time is what these numbers are taken from. What is fixed is the
+*external* schedule, not the internal work: repaint throughput rises when a
+repaint gets cheaper, so the arms do not perform equal amounts of application
+work — see the counts in the 2×2 section below, which put the optimised arm at
+roughly 3.5× the repaints. That makes a CPU-time ratio a conservative reading
+of the change rather than a like-for-like one. Even then, running all the
+"before" samples and then all the "after" samples is not enough: a first
+attempt that way put a 13% swing on one arm and reversed the sign of the
+smaller result. The figures below alternate the two arms run by run, five
+rounds each. Workload: 1,000 Pods across 20 namespaces at 120 events/s for
+20 s.
 
 | Workload | Metric | Before | After | |
 |---|---|---:|---:|---|
@@ -183,10 +189,13 @@ differenced within a round before anything is summarised. That does not make
 load artifacts impossible: the four arms still run one after another, so a
 short spike can land on a single arm. What it bounds is the *time* between the
 arms being compared, which is what slow drift needs to separate them. Anything
-faster than that survives, which is why the interaction is reported as nine
-per-round values and how often they agree on a sign, rather than as one
-number. Each arm reverts a set of source files to the pre-merge commit; the
-empty set is the shipped tree.
+faster than that survives, which is why the interaction is reported below as
+its nine per-round values, together with how often they agree on a sign,
+rather than as one number. Each arm starts by restoring every file the matrix
+touches to `HEAD`, then reverts its own set to the pre-merge commit
+`fb674c5` — without the restore, an arm inherits whatever the previous arm
+reverted, which is a sharper version of the same error this section is about.
+The empty set is the shipped tree.
 
 **Render path (`resource_table.py`) × update path (`store.py` + `models.py`)**,
 9 rounds, timestamp-bearing workload:
@@ -199,10 +208,17 @@ empty set is the shipped tree.
 Within-round savings: render path 1.77 s, update path 0.16 s, the pair 3.66 s.
 The pair removes **2.04 s more than the two removed separately** — and does so
 in **9 rounds out of 9**, so the sign does not depend on which round is
-trusted, and no single spike can produce it. (That 2.04 s is the median of the
-nine per-round interactions, not the difference of the three medians quoted
-before it; differencing first is the whole point.) Adding or multiplying the
-single-change numbers underestimates the pair by roughly a factor of two.
+trusted, and no single spike can produce it. The nine per-round interactions,
+in the order they were run:
+
+```
++2.79  +2.27  +0.79  +2.85  +2.24  +2.02  +0.10  +2.04  +1.98   (seconds)
+```
+
+(The 2.04 s is the median of those nine, not the difference of the three
+medians quoted before them; differencing first is the whole point.) Adding or
+multiplying the single-change numbers underestimates the pair by roughly a
+factor of two.
 
 The mechanism is not Amdahl's law. Removing an additive cost changes the
 *share* the remaining work holds, but it cannot turn a 0.16 s saving into a
@@ -246,10 +262,16 @@ settled row order (9 rounds, own session):
 | **old AGE handling** | 18.41 s | 18.00 s (−2.2%) |
 | **new AGE handling** | 16.18 s (−12.1%) | 15.73 s (**−14.6%**) |
 
-Within-round savings: memo 2.11 s, row order 0.42 s, the pair 2.77 s — an
-interaction of +0.16 s that is positive in only 6 rounds of 9 and spans −0.49
-to +0.91 s. These two are additive as far as this measurement can tell; the
-memo carries most of the update path, and the row order is a real but small
+Within-round savings: memo 2.11 s, row order 0.42 s, the pair 2.77 s. The nine
+per-round interactions:
+
+```
++0.91  −0.20  +0.06  +0.68  −0.42  +0.23  +0.50  +0.16  −0.49   (seconds)
+```
+
+A median of +0.16 s, positive in only 6 rounds of 9, spanning −0.49 to
++0.91 s. These two are additive as far as this measurement can tell; the memo
+carries most of the update path, and the row order is a real but small
 addition. The contrast with the render pairing is the point: one interaction
 is unanimous and worth 2 s, the other changes sign round to round.
 
