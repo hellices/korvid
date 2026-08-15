@@ -169,52 +169,65 @@ per-cell path, and held: −12.3% median against −12.1% as published.
 ### The two changes do not compose independently
 
 An earlier revision of this section claimed the render-path change and the
-update-path change multiply out, on the strength of two single-change runs and
-one figure read as their combination. That was wrong on both counts: the
-"combined" run had swapped only the render-path file, so it never measured a
-tree with both changes off, and the two effects are not independent to begin
-with. The full 2×2 was measured on the merged tree, same session, arms
-interleaved, 5 rounds each, on the timestamp-bearing workload. Each cell is
-produced by checking the relevant source files out of the pre-merge commit
-(`resource_table.py` for the render path, `store.py` + `models.py` for the
-update path) and leaving the rest of the tree alone — listing only *some* of
-them is exactly the mistake above, because the unlisted files stay optimised
-in both arms:
+update-path change multiply out. That was wrong twice over. The figure quoted
+as "both together" came from a run that reverted only the render-path file, so
+the update-path change was present in *both* arms and no arm ever had both
+changes off. And the two effects are not independent to begin with.
+
+Answering "do these interact" needs every cell of the 2×2 against the same
+machine state, which two separate two-arm runs do not provide — a first
+attempt at the split below produced two runs that disagreed about the shared
+cell (14.64 s against 14.93 s) by more than the effect being claimed. All four
+arms are therefore run round-robin *within* each round, and the arms are
+differenced within a round before anything is summarised: a load episode
+inflates every arm of the round it lands on, so the within-round saving is the
+part the machine cannot fake. Each arm reverts a set of source files to the
+pre-merge commit; the empty set is the shipped tree.
+
+**Render path (`resource_table.py`) × update path (`store.py` + `models.py`)**,
+9 rounds, timestamp-bearing workload:
 
 | | old render path | new render path |
 |---|---:|---:|
-| **old update path** | 20.29 s | 17.74 s (−12.6%) |
-| **new update path** | 19.82 s (−2.3%) | 14.62 s (**−27.9%**) |
+| **old update path** | 20.31 s | 18.60 s (−8.4%) |
+| **new update path** | 20.14 s (−0.8%) | 16.64 s (**−18.1%**) |
 
-Multiplying the two single-change results predicts −14.6%. The measured
-combination is −27.9%, so the pair is worth roughly twice what either change
-suggests alone — the opposite of the overlap one might expect, and not
-something the single-change numbers can be extrapolated to.
+Within-round savings: render path 1.77 s, update path 0.16 s, the pair 3.66 s.
+The pair removes **2.04 s more than the two removed separately** — and does so
+in **9 rounds out of 9**, so the sign does not depend on which round is
+trusted. (That 2.04 s is the median of the nine per-round interactions, not
+the difference of the three medians quoted before it; differencing first is
+the whole point.) Adding or multiplying the single-change numbers
+underestimates the pair by roughly a factor of two.
 
-The likely reading: with the old render path a repaint rewrites every row's
-cells, so the update path's per-object work is a small share of a large cost
-and removing it saves 2.3%. The render-path change removes the bulk of those
-writes; that per-object work is then a much larger share of what is left, and
-removing it is worth 17.6% of it. Neither number is wrong — they answer
+The likely reading: while a repaint still rewrites every row's cells, the
+update path's per-object work is a small share of a large cost, so removing it
+is worth 0.16 s. The render-path change removes the bulk of those writes; the
+same per-object work is then a much larger share of what remains, and removing
+it is worth 1.89 s. Neither single-change number is wrong — they answer
 different questions, and only the 2×2 answers "what did the pair buy".
 
-That 17.6% is the update path as a whole, which is two changes in two files.
-Splitting them the same way, on the new render path:
+**Inside the update path**, the same treatment separates the AGE memo from the
+settled row order (9 rounds, own session):
 
-| Update-path change | Before | After | |
-|---|---:|---:|---|
-| AGE memo (`models.py`) | 17.28 s | 14.64 s | **−15.3%** (7 rounds) |
-| Settled row order (`store.py`) | 15.58 s | 14.93 s | −4.2% |
+| | old row order | new row order |
+|---|---:|---:|
+| **old AGE handling** | 18.41 s | 18.00 s (−2.2%) |
+| **new AGE handling** | 16.18 s (−12.1%) | 15.73 s (**−14.6%**) |
 
-The memo carries almost all of it. The two are close to additive — their
-savings sum to 3.29 s against the 3.12 s the pair removes — so they overlap
-slightly rather than reinforcing each other the way the render-path pairing
-does.
+Within-round savings: memo 2.11 s, row order 0.42 s, the pair 2.77 s — an
+interaction of +0.16 s that is positive in only 6 rounds of 9 and spans −0.49
+to +0.91 s. These two are additive as far as this measurement can tell; the
+memo carries most of the update path, and the row order is a real but small
+addition. The contrast with the render pairing is the point: one interaction
+is unanimous and worth 2 s, the other changes sign round to round.
 
-The 2×2 came from one session; the table above came from an earlier one, so
-the same change reads −12.3% there. Only the paired arms within a session are
-comparable — see the drift note above — so the table keeps its own
-measurement rather than borrowing these.
+Absolute times are not comparable between the two tables — they were measured
+in different sessions on a shared machine, and the second ran under heavier
+load. Only the arms within one table, and the within-round differences, are.
+The headline table further up came from a third session, which is why the same
+change reads −12.3% there; it keeps its own measurement rather than borrowing
+any of these.
 
 Two redundancies were removed, both of which repeated per-object work that
 nothing had invalidated:
