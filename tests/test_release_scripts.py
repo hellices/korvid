@@ -1222,12 +1222,31 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
     build_requirements = pyproject["build-system"]["requires"]
     assert build_requirements
     assert all("==" in requirement for requirement in build_requirements)
+    constraints_input = (
+        Path(__file__).parents[1] / "scripts" / "release" / "build-constraints.in"
+    ).read_text()
+    input_requirements = {
+        line.strip()
+        for line in constraints_input.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert set(build_requirements) <= input_requirements
     constraints = (
         Path(__file__).parents[1] / "scripts" / "release" / "build-constraints.txt"
     ).read_text()
-    assert all(requirement in constraints for requirement in build_requirements)
-    assert "tomlkit==0.15.1" in constraints
-    assert "--hash=sha256:" in constraints
+    constraint_blocks: dict[str, list[str]] = {}
+    current_requirement = ""
+    for line in constraints.splitlines():
+        if line and not line[0].isspace():
+            current_requirement = line.removesuffix("\\").strip()
+            constraint_blocks[current_requirement] = []
+        elif current_requirement:
+            constraint_blocks[current_requirement].append(line.strip())
+    assert input_requirements <= constraint_blocks.keys()
+    assert all(
+        any(part.startswith("--hash=sha256:") for part in parts)
+        for parts in constraint_blocks.values()
+    )
 
 
 def test_release_audit_covers_every_shipped_extra() -> None:
