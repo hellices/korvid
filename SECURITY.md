@@ -26,12 +26,10 @@ best-effort basis.
 
 ## Supported versions
 
-Before the first public `v0.1.2` release, there is **no supported release**:
-`v0.1.0` and `v0.1.1` are immutable, unpublished audit history, and `main` is
-development-only and may contain unfixed issues. Once `v0.1.2` publishes, the
-latest `0.1.x` patch release is the supported line; `main` remains
-development-only and is not a supported target for security fixes. This policy
-will be revised as the release cadence matures past `0.1.x`.
+Only the latest patch in the current minor line is supported. For this release,
+that is the latest `0.2.x` version. `0.1.2` is superseded, `v0.1.0` and
+`v0.1.1` remain immutable unpublished audit history, and `main` is
+development-only and is not a supported target for security fixes.
 
 ## Coordinated disclosure
 

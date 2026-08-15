@@ -13,7 +13,7 @@ formula reproducible offline, which matters on a network that cannot
 reach `files.pythonhosted.org` at all.
 
 Usage:
-    generate_homebrew_formula.py --version 0.1.2 [--lock uv.lock] [-o korvid.rb]
+    generate_homebrew_formula.py --version 0.2.0 [--lock uv.lock] [-o korvid.rb]
 
 The project's own sdist URL and hash come from PyPI, since the lock names
 the local project rather than a published artifact.

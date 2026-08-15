@@ -1412,11 +1412,12 @@ def test_readme_has_no_relative_links_because_pypi_cannot_follow_them() -> None:
     assert not relative, f"README links PyPI cannot resolve: {sorted(set(relative))}"
 
 
-def test_release_docs_readme_pins_first_release_install_and_links_the_runbook() -> None:
+def test_release_docs_readme_pins_current_install_and_links_the_runbook() -> None:
     version = _project_version()
     readme = _readme()
     assert f"python -m pip install 'korvid[all]=={version}'" in readme
-    assert f"v{version} is the first public PyPI release" in readme
+    assert "`v0.1.2` is the first public PyPI release" in readme
+    assert f"`v{version}` is the current feature release" in readme
     assert "docs/release.md" in readme
 
 
@@ -1448,6 +1449,7 @@ def test_readme_recommends_an_isolated_install_for_an_application() -> None:
 #: Nothing else belongs here: this list is the escape hatch for the guard
 #: below, so an entry is a statement that a released version number was burned.
 _UNPUBLISHED_TAGS = frozenset({"0.1.0", "0.1.1"})
+_PUBLISHED_PREDECESSORS = frozenset({"0.1.2"})
 
 
 def test_release_docs_never_name_a_version_other_than_the_project_version() -> None:
@@ -1465,13 +1467,14 @@ def test_release_docs_never_name_a_version_other_than_the_project_version() -> N
     look at the line and decide rather than let it rot.
     """
     version = _project_version()
-    allowed = _UNPUBLISHED_TAGS | {version}
+    allowed = _UNPUBLISHED_TAGS | _PUBLISHED_PREDECESSORS | {version}
     for name, text in (("README.md", _readme()), ("docs/release.md", _release_runbook())):
         found = set(re.findall(r"\b[0-9]+\.[0-9]+\.[0-9]+\b", text))
         stale = found - allowed
         assert not stale, (
             f"{name} names {sorted(stale)}; the project version is {version} and the"
-            f" only other versions the docs may name are {sorted(_UNPUBLISHED_TAGS)}"
+            " only other versions the docs may name are the explicit historical set"
+            f" {sorted(_UNPUBLISHED_TAGS | _PUBLISHED_PREDECESSORS)}"
         )
         assert version in found, f"{name} never names the version being shipped ({version})"
 
@@ -1544,14 +1547,14 @@ def test_release_readme_discloses_the_retained_os_keyring_credential() -> None:
     ) in readme
 
 
-def test_release_docs_runbook_marks_recovery_boundaries_and_first_release_upgrade_limit() -> None:
+def test_release_docs_runbook_marks_recovery_boundaries_and_upgrade_source() -> None:
     version = _project_version()
     runbook = _release_runbook()
     assert "Deleting or moving a published tag/version is not rollback" in runbook
     assert "resume the idempotent workflow only when the staged assets match" in runbook
     assert "stop and diagnose" in runbook
-    assert f"v{version} cannot prove a cross-version PyPI upgrade" in runbook
-    assert f"validate upgrading from `{version}`" in runbook
+    assert "install published `korvid[all]==0.1.2`" in runbook
+    assert f"candidate `{version}` wheel" in runbook
 
 
 def test_release_docs_preserve_failed_tags_as_unpublished_audit_history() -> None:
@@ -1562,7 +1565,7 @@ def test_release_docs_preserve_failed_tags_as_unpublished_audit_history() -> Non
     `publish-pypi` and was rejected for a missing trusted publisher, so the
     build path is proven and the registration is not.
     """
-    runbook = _release_runbook()
+    runbook = " ".join(_release_runbook().split())
     assert "`v0.1.0` remains immutable, unpublished audit history" in runbook
     assert "before build, attestation, staging, PyPI publication, or GitHub Release" in runbook
     assert "`v0.1.1` is unpublished audit history" in runbook
@@ -1586,11 +1589,12 @@ def test_release_docs_runbook_gives_the_five_trusted_publisher_claims() -> None:
     assert "No API token is created" in runbook
 
 
-def test_security_policy_starts_supported_releases_at_the_project_version() -> None:
+def test_security_policy_supports_only_the_current_minor_line() -> None:
     version = _project_version()
     policy = _security_policy()
-    assert f"Before the first public `v{version}` release" in policy
-    assert f"Once `v{version}` publishes" in policy
+    major, minor, _patch = version.split(".")
+    assert f"latest `{major}.{minor}.x` version" in policy
+    assert "`0.1.2` is superseded" in policy
 
 
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:
@@ -1883,7 +1887,7 @@ def test_release_docs_keep_a_source_install_fallback_before_publication() -> Non
     source_install = "pip install 'korvid[all] @ git+https://github.com/hellices/korvid'"
     assert source_install in runbook
     assert source_install in readme
-    assert "PyPI is the release path" in readme
+    assert "Tagged versions should be installed from PyPI" in readme
 
 
 def test_release_docs_describe_fresh_installs_and_extra_expansion_separately() -> None:
