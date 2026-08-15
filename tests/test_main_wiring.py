@@ -1161,20 +1161,22 @@ def test_missing_first_party_module_is_not_treated_as_missing_extra(
         _build_mcp_controller(KorvidConfig(), cast("KubeClient", object()), {}, None)
 
 
-def test_mcp_only_install_does_not_compose_the_agent(
+def test_httpx_without_keyring_does_not_compose_the_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An [mcp]-only install has httpx (mcp depends on it transitively) but
-    not keyring — the agent wiring must still degrade and must not load the
-    embedded-agent loop, and TokenStore's lazy keyring import must not fool
-    the capability probe."""
+    """An observability-only install has httpx but not keyring.
+
+    The agent wiring must still degrade without loading the embedded-agent
+    loop, and TokenStore's lazy keyring import must not fool the capability
+    probe.
+    """
     import sys
 
     from korvid.__main__ import _build_agent_wiring
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
-    _uninstall_packages(monkeypatch, "keyring")  # httpx stays importable
+    _uninstall_packages(monkeypatch, "keyring")  # observability keeps httpx importable
     for cached in list(sys.modules):
         if cached in ("korvid.agent.runtime", "korvid.agent.profiles"):
             monkeypatch.delitem(sys.modules, cached)
