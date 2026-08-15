@@ -1516,9 +1516,11 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     assert "`release`" in runbook
     assert "`.github/workflows/release.yml`" in runbook
     assert "`hellices/korvid`" in runbook
+    assert "git fetch origin main" in runbook
+    assert "COMMIT=$(git rev-parse origin/main)" in runbook
     assert "gh workflow run Release --ref main" in runbook
     assert 'gh run watch "$RUN_ID" --exit-status' in runbook
-    assert f'git tag -a v{version} COMMIT -m "korvid v{version}"' in runbook
+    assert f'git tag -a v{version} "$COMMIT" -m "korvid v{version}"' in runbook
     assert f"git push origin refs/tags/v{version}" in runbook
     assert f"gh release download v{version} --dir dist/v{version}" in runbook
     assert (
@@ -1587,6 +1589,9 @@ def test_release_docs_runbook_marks_recovery_boundaries_and_upgrade_source() -> 
     assert "Install published `korvid[all]==0.1.2`" in runbook
     assert "Download the exact wheel produced by the confirmed exact-main dry run" in runbook
     assert 'DRY_RUN_COMMIT=$(gh run view "$RUN_ID" --json headSha' in runbook
+    assert "${RUN_ID:?set RUN_ID to the confirmed dry-run workflow ID}" in runbook
+    assert "${COMMIT:?set COMMIT to the reviewed origin/main SHA}" in runbook
+    assert '[ "$DRY_RUN_COMMIT" != "$COMMIT" ]' in runbook
     assert 'gh run download "$RUN_ID" --name dist' in runbook
     assert f"korvid-{version}-py3-none-any.whl" in runbook
     assert "'korvid[all]==0.1.2'" in runbook

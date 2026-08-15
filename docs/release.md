@@ -85,8 +85,13 @@ the repository's **default branch**, so the first dry run is possible only once
 the release workflow has landed on `main`.
 
 ```sh
+set -eu
+git fetch origin main
+COMMIT=$(git rev-parse origin/main)
+test -n "$COMMIT"
 gh workflow run Release --ref main
 RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')
+test -n "$RUN_ID"
 gh run watch "$RUN_ID" --exit-status
 ```
 
@@ -121,8 +126,14 @@ Download the exact wheel produced by the confirmed exact-main dry run; do not
 substitute a local build or an artifact from another run:
 
 ```sh
-DRY_RUN_COMMIT=$(gh run view "$RUN_ID" --json headSha --jq '.headSha')
-test "$DRY_RUN_COMMIT" = "$COMMIT"
+: "${RUN_ID:?set RUN_ID to the confirmed dry-run workflow ID}"
+: "${COMMIT:?set COMMIT to the reviewed origin/main SHA}"
+set -eu
+DRY_RUN_COMMIT=$(gh run view "$RUN_ID" --json headSha --jq '.headSha') || exit 1
+if [ -z "$DRY_RUN_COMMIT" ] || [ "$DRY_RUN_COMMIT" != "$COMMIT" ]; then
+  echo "dry-run commit $DRY_RUN_COMMIT does not match reviewed commit $COMMIT" >&2
+  exit 1
+fi
 candidate_dir="dist/dry-run-$RUN_ID"
 gh run download "$RUN_ID" --name dist --dir "$candidate_dir"
 CANDIDATE="$PWD/$candidate_dir/korvid-0.2.0-py3-none-any.whl"
@@ -164,7 +175,7 @@ Do not create or push the release tag until this gate passes.
 Create the annotated tag from the reviewed commit, then push only that tag:
 
 ```sh
-git tag -a v0.2.0 COMMIT -m "korvid v0.2.0"
+git tag -a v0.2.0 "$COMMIT" -m "korvid v0.2.0"
 git push origin refs/tags/v0.2.0
 RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')
 gh run watch "$RUN_ID" --exit-status
