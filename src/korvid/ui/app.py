@@ -5141,9 +5141,19 @@ class KorvidApp(App[None]):
         group/kind/namespace/name/uid identity the write will target, so a
         recreated same-named object is reported as absent from the snapshot
         rather than summarized as the one on screen. Display support only,
-        and fail-open in three distinct ways:
+        and fail-open in four distinct ways:
 
         - no loader wired (no cluster connection) -> None, no section at all;
+        - no uid for the selected row -> None, no section and no LIST. The
+          summary is keyed on the exact incarnation, so a uid-less identity
+          matches no snapshot node and would render `target not found in
+          this snapshot` for a row that is plainly on screen - a claim about
+          the object rather than about korvid's missing uid. Resolving the
+          target by name instead is worse: it would silently reconnect the
+          preview to whatever object currently holds that name, exactly the
+          reconnection `GraphResource` refuses for an unresolved reference.
+          Nothing else changes - the approval gate, the uid-less write, and
+          the audit record are what they were;
         - a timeout or unexpected failure *anywhere* in load, summarize, or
           render -> the static "impact unavailable" advisory, because an API
           error message can embed a response body (for a Secret, its data)
@@ -5156,7 +5166,7 @@ class KorvidApp(App[None]):
         it returns text.
         """
         loader = self._relationship_loader
-        if loader is None:
+        if loader is None or uid is None:
             return None
         root = GraphResource(
             group=meta.group, kind=meta.kind, namespace=ns or "", name=name, uid=uid

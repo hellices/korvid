@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import unicodedata
 
+import pytest
+
 from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary
 from korvid.core.relationships import (
     CoverageRecord,
@@ -23,6 +25,8 @@ from korvid.core.relationships import (
 from korvid.k8s.relationship_facts import FactConfidence, RelationKind
 from korvid.ui.impact_preview import (
     _ACTION_LABEL,
+    _COVERAGE_INCOMPLETE_LINE,
+    _MAX_COVERAGE_LINES,
     _MAX_LINE,
     _MAX_TEXT,
     _MIN_NAME_BUDGET,
@@ -105,7 +109,12 @@ def _summary(
 def test_render_produces_the_exact_deterministic_line_sequence() -> None:
     """Exact-match on purpose: nothing beyond identity, relation, confidence,
     evidence field, scope, and coverage state may ever reach an approval
-    dialog."""
+    dialog.
+
+    The forbidden coverage record here is the reason both counts read as
+    lower bounds: a source that could not be listed may hold dependents the
+    walk never saw, exactly like a cap does.
+    """
     summary = _summary(
         direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
         transitive=(ImpactItem(resource=_POD, path=(_OWNS_DEPLOY, _OWNS_RS)),),
@@ -114,9 +123,9 @@ def test_render_produces_the_exact_deterministic_line_sequence() -> None:
     assert render_impact_lines(summary) == (
         "graph-derived impact (advisory):",
         "  delete apps/Deployment/prod/web",
-        "  known direct dependents (may be affected): 1",
+        "  known direct dependents (may be affected): 1 or more",
         "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]",
-        "  known transitive dependents (may be affected): 1",
+        "  known transitive dependents (may be affected): 1 or more",
         "    - Pod/prod/web-abc-1 via owned_by (declared) at metadata.ownerReferences[0]"
         " -> owned_by (declared) at metadata.ownerReferences[0]",
         "  scope: prod",
@@ -164,8 +173,8 @@ def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
         " and are not listed" in lines
     )
     assert (
-        "  snapshot truncated: the relationship snapshot hit an input cap, so some"
-        " resources were never joined" in lines
+        "  snapshot truncated: the relationship snapshot hit a resource or an edge cap,"
+        " so some resources or relationships were never joined" in lines
     )
 
 
@@ -215,11 +224,11 @@ def test_dependent_and_unresolved_counts_are_lower_bounds_when_traversal_is_capp
 
 
 def test_every_count_is_a_lower_bound_when_the_snapshot_was_truncated() -> None:
-    """A truncated snapshot never joined some resources, so the walk was
-    complete only over an incomplete graph: every cluster-derived count -
-    dependents, cycles, revisits, and the affected-set unresolved tally -
-    can be short by whatever the snapshot dropped, even though the traversal
-    itself never hit a cap."""
+    """A truncated snapshot dropped input resources or candidate edges before
+    the walk began, so the walk was complete only over an incomplete graph:
+    every cluster-derived count - dependents, cycles, revisits, and the
+    affected-set unresolved tally - can be short by whatever the snapshot
+    dropped, even though the traversal itself never hit a cap."""
     lines = render_impact_lines(
         _summary(
             direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
@@ -238,10 +247,27 @@ def test_every_count_is_a_lower_bound_when_the_snapshot_was_truncated() -> None:
     assert "  unresolved references in the affected set: 1 or more" in lines
 
 
-def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
-    """The other half of the contract: with a complete walk over a complete
-    snapshot the counts *are* the totals, and hedging them would understate
-    what the summary actually knows."""
+@pytest.mark.parametrize(
+    "state",
+    [
+        CoverageState.PARTIAL,
+        CoverageState.FORBIDDEN,
+        CoverageState.UNAVAILABLE,
+        CoverageState.FAILED,
+        CoverageState.CAPPED,
+    ],
+)
+def test_every_count_is_a_lower_bound_when_coverage_is_incomplete(state: CoverageState) -> None:
+    """Incomplete coverage bounds the answer exactly like a cap does.
+
+    A source that was forbidden, absent, failed, partially listed or capped
+    was never joined into the snapshot at all, so a dependent living there
+    could not be walked to - whatever `traversal_capped` and
+    `graph_truncated` say. `graph coverage: incomplete` already says the
+    absence of a dependent proves nothing; an exact `1` next to it would
+    contradict that line by reading as the complete tally.
+    """
+    record = CoverageRecord(group="", resource="secrets", scope="prod", state=state)
     lines = render_impact_lines(
         _summary(
             direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
@@ -249,6 +275,36 @@ def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
             cycles=(_OWNS_DEPLOY,),
             revisits=(_OWNS_RS,),
             unresolved=(_MISSING_CONFIG,),
+            coverage=(record,),
+            traversal_capped=False,
+            graph_truncated=False,
+        )
+    )
+    assert "  known direct dependents (may be affected): 1 or more" in lines
+    assert "  known transitive dependents (may be affected): 1 or more" in lines
+    assert "  relationship cycles: 1 or more (loop edges classified, not expanded)" in lines
+    assert "  additional known paths: 1 or more (already-listed dependents reached again)" in lines
+    assert "  unresolved references in the affected set: 1 or more" in lines
+    assert _COVERAGE_INCOMPLETE_LINE in lines
+
+
+def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
+    """The other half of the contract: with a complete walk over a complete
+    snapshot - the target present, every coverage record `complete`, neither
+    bound hit - the counts *are* the totals, and hedging them would
+    understate what the summary actually knows."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            transitive=(ImpactItem(resource=_POD, path=(_OWNS_DEPLOY, _OWNS_RS)),),
+            cycles=(_OWNS_DEPLOY,),
+            revisits=(_OWNS_RS,),
+            unresolved=(_MISSING_CONFIG,),
+            coverage=(
+                CoverageRecord(
+                    group="apps", resource="replicasets", scope="prod", state=CoverageState.COMPLETE
+                ),
+            ),
             traversal_capped=False,
             graph_truncated=False,
         )
@@ -258,6 +314,7 @@ def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
     assert "  relationship cycles: 1 (loop edges classified, not expanded)" in lines
     assert "  additional known paths: 1 (already-listed dependents reached again)" in lines
     assert "  unresolved references in the affected set: 1" in lines
+    assert "  graph coverage: complete" in lines
     assert not any("or more" in line for line in lines)
 
 
@@ -317,12 +374,64 @@ def test_the_snapshot_scope_is_always_stated_even_when_coverage_is_complete() ->
 
 def test_a_target_missing_from_the_snapshot_says_dependents_are_unknown() -> None:
     """Without the target in the graph, "none in this snapshot" below is a
-    statement about the snapshot, not about the object being deleted."""
+    statement about the snapshot, not about the object being deleted.
+
+    A missing target makes the whole answer incomplete, but every section is
+    empty in that case, so nothing is hedged: `none in this snapshot` stays
+    as it is, and no `0 or more` is invented for a section that has no count
+    at all.
+    """
     lines = render_impact_lines(_summary(target_present=False))
     assert lines[2] == "  target not found in this snapshot - dependents unknown"
     assert "  known direct dependents (may be affected): none in this snapshot" in lines
+    assert "  known transitive dependents (may be affected): none in this snapshot" in lines
+    assert not any("or more" in line for line in lines)
     present = render_impact_lines(_summary())
     assert not any(line.startswith("  target not found") for line in present)
+
+
+def test_coverage_records_are_bounded_with_one_exact_overflow_line() -> None:
+    """More incomplete sources than the preview lists must not grow the
+    dialog: the listed records stop at `_MAX_COVERAGE_LINES` and exactly one
+    overflow line states how many were omitted.
+
+    That count is exact, like every other `preview capped` line: it counts
+    what this renderer cut from records the summary actually holds, not what
+    the snapshot never saw.
+    """
+    omitted = 4
+    records = tuple(
+        CoverageRecord(
+            group="apps" if index % 2 else "",
+            resource=f"widgets-{index}",
+            scope="prod",
+            state=CoverageState.FORBIDDEN,
+        )
+        for index in range(_MAX_COVERAGE_LINES + omitted)
+    )
+    lines = render_impact_lines(_summary(coverage=records))
+    listed = [line for line in lines if line.startswith("    - ") and "widgets-" in line]
+    overflow = [line for line in lines if "more coverage records not shown" in line]
+    assert _COVERAGE_INCOMPLETE_LINE in lines
+    assert len(listed) == _MAX_COVERAGE_LINES
+    assert listed[0] == "    - core/widgets-0 @prod: forbidden"
+    assert listed[1] == "    - apps/widgets-1 @prod: forbidden"
+    assert overflow == [f"    ... {omitted} more coverage records not shown (preview capped)"]
+    assert max(len(line) for line in lines) <= _MAX_LINE
+    assert lines[-1] == ADVISORY_LINE
+
+
+def test_a_single_incomplete_coverage_record_needs_no_overflow_line() -> None:
+    """The boundary: exactly `_MAX_COVERAGE_LINES` records are all listed and
+    nothing claims anything was cut."""
+    records = tuple(
+        CoverageRecord(group="", resource=f"widgets-{index}", scope="", state=CoverageState.PARTIAL)
+        for index in range(_MAX_COVERAGE_LINES)
+    )
+    lines = render_impact_lines(_summary(coverage=records))
+    assert sum(1 for line in lines if "widgets-" in line) == _MAX_COVERAGE_LINES
+    assert "    - core/widgets-0: partial" in lines  # no scope, no `@` suffix
+    assert not any("coverage records not shown" in line for line in lines)
 
 
 def test_every_composed_line_stays_within_the_total_line_bound() -> None:

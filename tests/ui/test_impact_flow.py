@@ -808,12 +808,23 @@ async def test_same_name_replacement_during_the_impact_load_aborts_the_restart(
         )
 
 
-async def test_a_row_without_a_uid_still_opens_the_dialog_after_the_impact_load(
+async def test_a_row_without_a_uid_opens_the_dialog_with_no_impact_section(
     tmp_path: Path,
 ) -> None:
-    """The uid recheck is a *tightening*: a summary type that carries no uid
-    (the write then runs without a precondition) must still reach a dialog,
-    exactly as before issue #283."""
+    """A summary type that carries no uid gets no impact section at all.
+
+    The summary is keyed on the exact identity the write targets, uid
+    included: without one there is nothing to match a snapshot node against.
+    Resolving the target by name instead would silently reconnect the
+    dialog to whatever object currently holds that name - the same
+    reconnection `GraphResource` refuses for an unresolved reference - and
+    keeping the uid-less identity would render `target not found in this
+    snapshot` for a row that is plainly on screen, which reads as "this
+    object is gone" rather than "korvid has no uid for it". So the preview
+    is omitted, the snapshot is never even loaded (no LIST fan-out for an
+    answer that could not be trusted), and the approval flow is exactly what
+    it was before issue #283.
+    """
     env = ImpactEnv(
         tmp_path / "audit.jsonl",
         rows={
@@ -823,7 +834,10 @@ async def test_a_row_without_a_uid_still_opens_the_dialog_after_the_impact_load(
     )
     async with env.app.run_test() as pilot:
         await open_delete_dialog(env, pilot, "deploy", expect="web")
-        assert "delete apps/Deployment/prod/web" in impact_text(env.app)
+        assert not env.app.screen.query(".confirm-impact")
+        assert env.app.screen.query(".confirm-preview")
+        assert env.lister.calls == []
+        assert env.ops.calls == []
 
 
 async def test_impact_loads_after_the_permission_check_and_the_dry_run_preview(

@@ -53,8 +53,8 @@ _TRAVERSAL_CAPPED_LINE = (
     "  traversal capped: more dependents exist beyond the traversal limits and are not listed"
 )
 _SNAPSHOT_TRUNCATED_LINE = (
-    "  snapshot truncated: the relationship snapshot hit an input cap, so some resources"
-    " were never joined"
+    "  snapshot truncated: the relationship snapshot hit a resource or an edge cap, so some"
+    " resources or relationships were never joined"
 )
 _INFERRED_NOTE_LINE = "  inferred relationships are labelled and never block this write"
 _TARGET_MISSING_LINE = "  target not found in this snapshot - dependents unknown"
@@ -211,25 +211,34 @@ def _inferred_lines(summary: ImpactSummary) -> list[str]:
 def _counts_are_lower_bounds(summary: ImpactSummary) -> bool:
     """Whether every cluster-derived count in this summary may be short.
 
-    Two independent bounds produce the same reading problem. A capped
-    traversal stopped walking before it could reach every dependent, cycle
-    or revisit; a truncated snapshot means the walk was exhaustive only over
-    a graph that itself dropped resources, so edges into and out of what was
-    never joined are missing from every collection the summary carries -
-    including the unresolved set, which is bounded by an affected set the
-    same walk produced. Either way an exact `N` reads as "this is all of
-    it", which is exactly what neither case knows.
+    This is `ImpactSummary.incomplete` - deliberately the same predicate the
+    summary already uses for "this answer cannot be read as exhaustive",
+    because every way of being incomplete produces the same reading problem.
+    A capped traversal stopped walking before it could reach every dependent,
+    cycle or revisit. A truncated snapshot dropped input resources or
+    candidate edges at the graph's own caps, so the walk was exhaustive only
+    over a graph that was already missing parts. Incomplete coverage means a
+    whole source was never listed - forbidden, absent, failed, partial or
+    capped - so a dependent living there could not be reached either. And a
+    target the snapshot never saw makes every count a statement about the
+    snapshot rather than about the object. Any of them leaves an exact `N`
+    reading as "this is all of it", which is exactly what none of these
+    cases knows.
+
+    A missing target hedges nothing in practice: with no target node the
+    walk produces no items, so every section renders `none in this snapshot`
+    - a statement, not a count - and no `0 or more` is invented.
     """
-    return summary.traversal_capped or summary.graph_truncated
+    return summary.incomplete
 
 
 def _count_label(count: int, *, capped: bool) -> str:
     """Render a cluster-derived count, marked as a lower bound when capped.
 
-    `capped` is `_counts_are_lower_bounds`, never one flag on its own: the
-    caveat lines below the counts say *which* bound was hit, while the count
-    itself only needs to say that it is a floor. "N or more" says so; the
-    exact count would misread as exhaustive.
+    `capped` is `_counts_are_lower_bounds` - the whole-answer predicate,
+    never one flag on its own: the caveat lines below the counts say *which*
+    bound was hit, while the count itself only needs to say that it is a
+    floor. "N or more" says so; the exact count would misread as exhaustive.
     """
     return f"{count} or more" if capped else str(count)
 

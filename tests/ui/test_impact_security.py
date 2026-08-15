@@ -316,6 +316,40 @@ async def test_rich_markup_in_a_resource_name_renders_literally(tmp_path: Path) 
         assert "apps/ReplicaSet/prod/[bold red]web-abc[/]" in impact_text(env.app)
 
 
+async def test_a_uid_less_row_still_confirms_and_writes_with_no_snapshot_read(
+    tmp_path: Path,
+) -> None:
+    """Omitting the section must cost the user nothing but the section.
+
+    A row whose summary type carries no uid gets no impact preview (there is
+    no identity to match a snapshot node against, and korvid never
+    name-resolves one), but the approval gate, the keystroke confirmation
+    and the write itself are untouched - and the snapshot is never loaded,
+    so the omission also costs no LIST fan-out.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(
+        audit_path,
+        rows={
+            "deployments": [
+                GenericSummary(
+                    name="web", namespace="prod", kind="Deployment", created="", desired=1, uid=""
+                )
+            ],
+            "replicasets": [_plain_replicaset()],
+        },
+    )
+    async with env.app.run_test() as pilot:
+        await open_delete_dialog(env, pilot, "deploy", expect="web")
+        assert not env.app.screen.query(".confirm-impact")
+        assert env.ops.calls == []
+        await pilot.press("y")
+        await until(pilot, lambda: env.ops.calls, label="approved uid-less delete ran")
+        assert env.ops.calls == [("delete", "deployments", "prod", "web", None)]
+        assert env.lister.calls == []
+        assert audit_path.exists()
+
+
 async def test_impact_preview_works_with_the_agent_disabled(tmp_path: Path) -> None:
     """No LLM, no provider: the summary is a deterministic graph query."""
     env = ImpactEnv(tmp_path / "audit.jsonl")

@@ -1161,7 +1161,7 @@ git commit -m "feat: add graph-derived impact summaries" \
   - `  relationship cycles: <n> (loop edges classified, not expanded)` (only when non-empty)
   - `  additional known paths: <n> (already-listed dependents reached again)` (only when `revisits` is non-empty: converging or parallel edges are counted, never expanded into a second item)
   - `  unresolved references in the affected set: <n>` plus `    - <subject> <relation> (<confidence>) -> <target> (<resolution>) at <field>`
-  - **Every `<n>` above renders as `<n> or more` when `traversal_capped` or `graph_truncated` is True** (`_counts_are_lower_bounds`, fed to the one `_count_label` helper): a capped walk may have stopped before reaching every dependent, cycle, revisit or affected-set unresolved reference, and a truncated snapshot never joined some resources at all, so in both cases the count is a floor rather than a total. `none in this snapshot` is not a count and is left alone; the `... <n> more ... (preview capped)` overflow lines stay exact, since they count what the preview cut from rows the summary holds.
+  - **Every `<n>` above renders as `<n> or more` whenever the answer as a whole could not be exhaustive** (`_counts_are_lower_bounds`, which *is* `ImpactSummary.incomplete`, fed to the one `_count_label` helper): a capped walk may have stopped before reaching every dependent, cycle, revisit or affected-set unresolved reference; a truncated snapshot dropped input resources or candidate edges before the walk began; incomplete coverage means a whole source (forbidden, absent, failed, partial, capped) was never joined, so a dependent living there could not be reached either; and a target the snapshot never saw makes every count a statement about the snapshot rather than about the object. In each case the count is a floor rather than a total, and an exact `<n>` next to `graph coverage: incomplete` would contradict the line below it. `none in this snapshot` is not a count and is left alone — which is also why a missing target hedges nothing in practice, its sections all being empty; the `... <n> more ... (preview capped)` overflow lines stay exact, since they count what the preview cut from rows the summary holds.
   - `  scope: <namespace>` or `  scope: all namespaces` — **always**, including for `complete` coverage, which is only ever complete within that scope
   - `  graph coverage: complete` or `  graph coverage: incomplete - a missing dependent here does not prove none exists` plus `    - <group>/<resource>[ @<scope>]: <state>`
   - `  traversal capped: ...` and/or `  snapshot truncated: ...`
@@ -1185,6 +1185,8 @@ from __future__ import annotations
 
 import unicodedata
 
+import pytest
+
 from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary
 from korvid.core.relationships import (
     CoverageRecord,
@@ -1197,6 +1199,8 @@ from korvid.core.relationships import (
 from korvid.k8s.relationship_facts import FactConfidence, RelationKind
 from korvid.ui.impact_preview import (
     _ACTION_LABEL,
+    _COVERAGE_INCOMPLETE_LINE,
+    _MAX_COVERAGE_LINES,
     _MAX_LINE,
     _MAX_TEXT,
     _MIN_NAME_BUDGET,
@@ -1279,7 +1283,12 @@ def _summary(
 def test_render_produces_the_exact_deterministic_line_sequence() -> None:
     """Exact-match on purpose: nothing beyond identity, relation, confidence,
     evidence field, scope, and coverage state may ever reach an approval
-    dialog."""
+    dialog.
+
+    The forbidden coverage record here is the reason both counts read as
+    lower bounds: a source that could not be listed may hold dependents the
+    walk never saw, exactly like a cap does.
+    """
     summary = _summary(
         direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
         transitive=(ImpactItem(resource=_POD, path=(_OWNS_DEPLOY, _OWNS_RS)),),
@@ -1288,9 +1297,9 @@ def test_render_produces_the_exact_deterministic_line_sequence() -> None:
     assert render_impact_lines(summary) == (
         "graph-derived impact (advisory):",
         "  delete apps/Deployment/prod/web",
-        "  known direct dependents (may be affected): 1",
+        "  known direct dependents (may be affected): 1 or more",
         "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]",
-        "  known transitive dependents (may be affected): 1",
+        "  known transitive dependents (may be affected): 1 or more",
         "    - Pod/prod/web-abc-1 via owned_by (declared) at metadata.ownerReferences[0]"
         " -> owned_by (declared) at metadata.ownerReferences[0]",
         "  scope: prod",
@@ -1338,8 +1347,8 @@ def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
         " and are not listed" in lines
     )
     assert (
-        "  snapshot truncated: the relationship snapshot hit an input cap, so some"
-        " resources were never joined" in lines
+        "  snapshot truncated: the relationship snapshot hit a resource or an edge cap,"
+        " so some resources or relationships were never joined" in lines
     )
 
 
@@ -1389,11 +1398,11 @@ def test_dependent_and_unresolved_counts_are_lower_bounds_when_traversal_is_capp
 
 
 def test_every_count_is_a_lower_bound_when_the_snapshot_was_truncated() -> None:
-    """A truncated snapshot never joined some resources, so the walk was
-    complete only over an incomplete graph: every cluster-derived count -
-    dependents, cycles, revisits, and the affected-set unresolved tally -
-    can be short by whatever the snapshot dropped, even though the traversal
-    itself never hit a cap."""
+    """A truncated snapshot dropped input resources or candidate edges before
+    the walk began, so the walk was complete only over an incomplete graph:
+    every cluster-derived count - dependents, cycles, revisits, and the
+    affected-set unresolved tally - can be short by whatever the snapshot
+    dropped, even though the traversal itself never hit a cap."""
     lines = render_impact_lines(
         _summary(
             direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
@@ -1412,10 +1421,27 @@ def test_every_count_is_a_lower_bound_when_the_snapshot_was_truncated() -> None:
     assert "  unresolved references in the affected set: 1 or more" in lines
 
 
-def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
-    """The other half of the contract: with a complete walk over a complete
-    snapshot the counts *are* the totals, and hedging them would understate
-    what the summary actually knows."""
+@pytest.mark.parametrize(
+    "state",
+    [
+        CoverageState.PARTIAL,
+        CoverageState.FORBIDDEN,
+        CoverageState.UNAVAILABLE,
+        CoverageState.FAILED,
+        CoverageState.CAPPED,
+    ],
+)
+def test_every_count_is_a_lower_bound_when_coverage_is_incomplete(state: CoverageState) -> None:
+    """Incomplete coverage bounds the answer exactly like a cap does.
+
+    A source that was forbidden, absent, failed, partially listed or capped
+    was never joined into the snapshot at all, so a dependent living there
+    could not be walked to - whatever `traversal_capped` and
+    `graph_truncated` say. `graph coverage: incomplete` already says the
+    absence of a dependent proves nothing; an exact `1` next to it would
+    contradict that line by reading as the complete tally.
+    """
+    record = CoverageRecord(group="", resource="secrets", scope="prod", state=state)
     lines = render_impact_lines(
         _summary(
             direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
@@ -1423,6 +1449,36 @@ def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
             cycles=(_OWNS_DEPLOY,),
             revisits=(_OWNS_RS,),
             unresolved=(_MISSING_CONFIG,),
+            coverage=(record,),
+            traversal_capped=False,
+            graph_truncated=False,
+        )
+    )
+    assert "  known direct dependents (may be affected): 1 or more" in lines
+    assert "  known transitive dependents (may be affected): 1 or more" in lines
+    assert "  relationship cycles: 1 or more (loop edges classified, not expanded)" in lines
+    assert "  additional known paths: 1 or more (already-listed dependents reached again)" in lines
+    assert "  unresolved references in the affected set: 1 or more" in lines
+    assert _COVERAGE_INCOMPLETE_LINE in lines
+
+
+def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
+    """The other half of the contract: with a complete walk over a complete
+    snapshot - the target present, every coverage record `complete`, neither
+    bound hit - the counts *are* the totals, and hedging them would
+    understate what the summary actually knows."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            transitive=(ImpactItem(resource=_POD, path=(_OWNS_DEPLOY, _OWNS_RS)),),
+            cycles=(_OWNS_DEPLOY,),
+            revisits=(_OWNS_RS,),
+            unresolved=(_MISSING_CONFIG,),
+            coverage=(
+                CoverageRecord(
+                    group="apps", resource="replicasets", scope="prod", state=CoverageState.COMPLETE
+                ),
+            ),
             traversal_capped=False,
             graph_truncated=False,
         )
@@ -1432,6 +1488,7 @@ def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
     assert "  relationship cycles: 1 (loop edges classified, not expanded)" in lines
     assert "  additional known paths: 1 (already-listed dependents reached again)" in lines
     assert "  unresolved references in the affected set: 1" in lines
+    assert "  graph coverage: complete" in lines
     assert not any("or more" in line for line in lines)
 
 
@@ -1491,12 +1548,64 @@ def test_the_snapshot_scope_is_always_stated_even_when_coverage_is_complete() ->
 
 def test_a_target_missing_from_the_snapshot_says_dependents_are_unknown() -> None:
     """Without the target in the graph, "none in this snapshot" below is a
-    statement about the snapshot, not about the object being deleted."""
+    statement about the snapshot, not about the object being deleted.
+
+    A missing target makes the whole answer incomplete, but every section is
+    empty in that case, so nothing is hedged: `none in this snapshot` stays
+    as it is, and no `0 or more` is invented for a section that has no count
+    at all.
+    """
     lines = render_impact_lines(_summary(target_present=False))
     assert lines[2] == "  target not found in this snapshot - dependents unknown"
     assert "  known direct dependents (may be affected): none in this snapshot" in lines
+    assert "  known transitive dependents (may be affected): none in this snapshot" in lines
+    assert not any("or more" in line for line in lines)
     present = render_impact_lines(_summary())
     assert not any(line.startswith("  target not found") for line in present)
+
+
+def test_coverage_records_are_bounded_with_one_exact_overflow_line() -> None:
+    """More incomplete sources than the preview lists must not grow the
+    dialog: the listed records stop at `_MAX_COVERAGE_LINES` and exactly one
+    overflow line states how many were omitted.
+
+    That count is exact, like every other `preview capped` line: it counts
+    what this renderer cut from records the summary actually holds, not what
+    the snapshot never saw.
+    """
+    omitted = 4
+    records = tuple(
+        CoverageRecord(
+            group="apps" if index % 2 else "",
+            resource=f"widgets-{index}",
+            scope="prod",
+            state=CoverageState.FORBIDDEN,
+        )
+        for index in range(_MAX_COVERAGE_LINES + omitted)
+    )
+    lines = render_impact_lines(_summary(coverage=records))
+    listed = [line for line in lines if line.startswith("    - ") and "widgets-" in line]
+    overflow = [line for line in lines if "more coverage records not shown" in line]
+    assert _COVERAGE_INCOMPLETE_LINE in lines
+    assert len(listed) == _MAX_COVERAGE_LINES
+    assert listed[0] == "    - core/widgets-0 @prod: forbidden"
+    assert listed[1] == "    - apps/widgets-1 @prod: forbidden"
+    assert overflow == [f"    ... {omitted} more coverage records not shown (preview capped)"]
+    assert max(len(line) for line in lines) <= _MAX_LINE
+    assert lines[-1] == ADVISORY_LINE
+
+
+def test_a_single_incomplete_coverage_record_needs_no_overflow_line() -> None:
+    """The boundary: exactly `_MAX_COVERAGE_LINES` records are all listed and
+    nothing claims anything was cut."""
+    records = tuple(
+        CoverageRecord(group="", resource=f"widgets-{index}", scope="", state=CoverageState.PARTIAL)
+        for index in range(_MAX_COVERAGE_LINES)
+    )
+    lines = render_impact_lines(_summary(coverage=records))
+    assert sum(1 for line in lines if "widgets-" in line) == _MAX_COVERAGE_LINES
+    assert "    - core/widgets-0: partial" in lines  # no scope, no `@` suffix
+    assert not any("coverage records not shown" in line for line in lines)
 
 
 def test_every_composed_line_stays_within_the_total_line_bound() -> None:
@@ -2110,8 +2219,8 @@ _TRAVERSAL_CAPPED_LINE = (
     "  traversal capped: more dependents exist beyond the traversal limits and are not listed"
 )
 _SNAPSHOT_TRUNCATED_LINE = (
-    "  snapshot truncated: the relationship snapshot hit an input cap, so some resources"
-    " were never joined"
+    "  snapshot truncated: the relationship snapshot hit a resource or an edge cap, so some"
+    " resources or relationships were never joined"
 )
 _INFERRED_NOTE_LINE = "  inferred relationships are labelled and never block this write"
 _TARGET_MISSING_LINE = "  target not found in this snapshot - dependents unknown"
@@ -2268,25 +2377,34 @@ def _inferred_lines(summary: ImpactSummary) -> list[str]:
 def _counts_are_lower_bounds(summary: ImpactSummary) -> bool:
     """Whether every cluster-derived count in this summary may be short.
 
-    Two independent bounds produce the same reading problem. A capped
-    traversal stopped walking before it could reach every dependent, cycle
-    or revisit; a truncated snapshot means the walk was exhaustive only over
-    a graph that itself dropped resources, so edges into and out of what was
-    never joined are missing from every collection the summary carries -
-    including the unresolved set, which is bounded by an affected set the
-    same walk produced. Either way an exact `N` reads as "this is all of
-    it", which is exactly what neither case knows.
+    This is `ImpactSummary.incomplete` - deliberately the same predicate the
+    summary already uses for "this answer cannot be read as exhaustive",
+    because every way of being incomplete produces the same reading problem.
+    A capped traversal stopped walking before it could reach every dependent,
+    cycle or revisit. A truncated snapshot dropped input resources or
+    candidate edges at the graph's own caps, so the walk was exhaustive only
+    over a graph that was already missing parts. Incomplete coverage means a
+    whole source was never listed - forbidden, absent, failed, partial or
+    capped - so a dependent living there could not be reached either. And a
+    target the snapshot never saw makes every count a statement about the
+    snapshot rather than about the object. Any of them leaves an exact `N`
+    reading as "this is all of it", which is exactly what none of these
+    cases knows.
+
+    A missing target hedges nothing in practice: with no target node the
+    walk produces no items, so every section renders `none in this snapshot`
+    - a statement, not a count - and no `0 or more` is invented.
     """
-    return summary.traversal_capped or summary.graph_truncated
+    return summary.incomplete
 
 
 def _count_label(count: int, *, capped: bool) -> str:
     """Render a cluster-derived count, marked as a lower bound when capped.
 
-    `capped` is `_counts_are_lower_bounds`, never one flag on its own: the
-    caveat lines below the counts say *which* bound was hit, while the count
-    itself only needs to say that it is a floor. "N or more" says so; the
-    exact count would misread as exhaustive.
+    `capped` is `_counts_are_lower_bounds` - the whole-answer predicate,
+    never one flag on its own: the caveat lines below the counts say *which*
+    bound was hit, while the count itself only needs to say that it is a
+    floor. "N or more" says so; the exact count would misread as exhaustive.
     """
     return f"{count} or more" if capped else str(count)
 
@@ -2775,7 +2893,7 @@ git commit -m "feat: show a graph-derived impact section in write confirmations"
 - Produces:
   - `_IMPACT_TIMEOUT: float = 5.0` module constant in `src/korvid/ui/app.py`.
   - `KorvidApp._impact_scope(self, meta: ResourceMeta) -> str | None` — the one place that decides the snapshot's namespace: the pane's scope for a namespaced target, `None` (every namespace) for a cluster-scoped one or an all-namespaces pane. Its return value is passed to **both** `loader.load(...)` and `summarize_impact(..., scope=...)`, so the rendered scope can never disagree with what was listed.
-  - `KorvidApp._impact_preview(self, action: ImpactAction, meta: ResourceMeta, ns: str | None, name: str, uid: str | None) -> tuple[str, ...] | None`.
+  - `KorvidApp._impact_preview(self, action: ImpactAction, meta: ResourceMeta, ns: str | None, name: str, uid: str | None) -> tuple[str, ...] | None`. Returns `None` — no section at all, and no snapshot load — when no loader is wired **or** when the row carries no `uid`: the summary is matched to a snapshot node by exact identity, so a uid-less target would either read as `target not found in this snapshot` (a claim about the object, when the truth is that korvid has no uid for it) or, if resolved by name instead, silently reconnect the preview to whatever object holds that name now. Pinned by `tests/ui/test_impact_flow.py::test_a_row_without_a_uid_opens_the_dialog_with_no_impact_section` (dialog opens, no `.confirm-impact`, no LIST) and `tests/ui/test_impact_security.py::test_a_uid_less_row_still_confirms_and_writes_with_no_snapshot_read` (approval, write, and audit unchanged).
   - `KorvidApp._push_write_confirmation(..., impact_lines: tuple[str, ...] | None = None)`.
   - `KorvidApp._confirm_screen(..., impact_lines: tuple[str, ...] | None = None)`.
   - `tests/ui/test_impact_flow.py::ImpactEnv`, `::RecordingLister`, `::RecordingOps`, `::to_view`, `::open_delete_dialog`, `::impact_text`, `::CATALOG_ALIASES` — the shared harness Task 5 imports by name.
@@ -3476,9 +3594,15 @@ Add the scope helper and the loader wrapper immediately after `_dry_run_preview`
         group/kind/namespace/name/uid identity the write will target, so a
         recreated same-named object is reported as absent from the snapshot
         rather than summarized as the one on screen. Display support only,
-        and fail-open in three distinct ways:
+        and fail-open in four distinct ways:
 
         - no loader wired (no cluster connection) -> None, no section at all;
+        - no uid for the selected row -> None, no section and no LIST: the
+          summary is keyed on the exact incarnation, so a uid-less identity
+          matches no snapshot node and would render `target not found in
+          this snapshot` for a row plainly on screen, while resolving the
+          target by name would silently reconnect the preview to whatever
+          object holds that name now;
         - a timeout or unexpected failure -> the static "impact unavailable"
           advisory, because an API error message can embed a response body
           (for a Secret, its data) and must never reach the dialog;
@@ -3489,7 +3613,7 @@ Add the scope helper and the loader wrapper immediately after `_dry_run_preview`
         it returns text.
         """
         loader = self._relationship_loader
-        if loader is None:
+        if loader is None or uid is None:
             return None
         root = GraphResource(
             group=meta.group, kind=meta.kind, namespace=ns or "", name=name, uid=uid
@@ -3972,15 +4096,21 @@ one?
 
     graph-derived impact (advisory):
       delete apps/Deployment/prod/web
-      known direct dependents (may be affected): 1
+      known direct dependents (may be affected): 1 or more
         - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]
-      known transitive dependents (may be affected): 1
+      known transitive dependents (may be affected): 1 or more
         - Pod/prod/web-abc-1 via owned_by (declared) at metadata.ownerReferences[0] -> owned_by (declared) at metadata.ownerReferences[0]
-      additional known paths: 1 (already-listed dependents reached again)
+      additional known paths: 1 or more (already-listed dependents reached again)
       scope: prod
       graph coverage: incomplete - a missing dependent here does not prove none exists
         - gateway.networking.k8s.io/*: unavailable
       advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
+
+Every count reads `1 or more` above because the Gateway API group could not
+be listed: that one incomplete coverage record is enough to make the whole
+answer a floor rather than a total (see the `N or more` bullet below). With
+every source `complete` and neither bound hit, the same summary renders
+exact counts.
 
 The section is **advisory**. It never predicts failure, never replaces the
 server dry-run, and never blocks approval: the y/typed-name gate, the UID
@@ -4002,13 +4132,18 @@ Reading it:
 - Every cluster-derived count — both dependent sections, `relationship
   cycles`, `additional known paths`, and `unresolved references in the
   affected set` — renders as `N or more` instead of an exact `N` whenever
-  `traversal capped` or `snapshot truncated` is shown. A capped walk stops
-  before it reaches every dependent, and a truncated snapshot was already
-  missing resources before the walk began, so in either case `N` is a floor
-  and an exact number would read as exhaustive. `none in this snapshot` is
-  left as-is: it is already a statement about the snapshot, not a count.
-  The `... N more not shown (preview capped)` lines also stay exact — they
-  count what the preview cut from rows it holds, not what was never found.
+  the answer as a whole could not be exhaustive: `traversal capped`,
+  `snapshot truncated`, `graph coverage: incomplete`, or `target not found
+  in this snapshot`. A capped walk stops before it reaches every dependent,
+  a truncated snapshot was already missing resources or relationships
+  before the walk began, and a source that could not be listed was never
+  joined at all — so in each case `N` is a floor and an exact number would
+  read as exhaustive (and would contradict the coverage line right below
+  it). `none in this snapshot` is left as-is: it is already a statement
+  about the snapshot, not a count — which is also why a missing target,
+  whose sections are all empty, hedges nothing. The `... N more not shown
+  (preview capped)` lines also stay exact — they count what the preview cut
+  from rows it holds, not what was never found.
 - `[inferred]` marks a hop derived by a heuristic rather than read from a
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references
@@ -4029,8 +4164,19 @@ Reading it:
 - `graph coverage: incomplete` means some source could not be listed
   (RBAC, an absent API, a cap): a missing dependent is then *unknown*, not
   *absent*.
-- `traversal capped` / `snapshot truncated` mean the answer was bounded on
-  purpose (3 hops, 50 resources) rather than complete.
+- `traversal capped` and `snapshot truncated` are two different bounds, not
+  one:
+  - `traversal capped` means the *impact* walk itself — the dependent search
+    for this one action — hit its own limit: 3 hops, 50 dependents.
+  - `snapshot truncated` means the underlying relationship snapshot (the
+    same one the graph view `g` builds) hit one of its own, much larger
+    input caps while gathering raw objects and candidate edges before the
+    impact walk ever started: either the resource cap (input objects were
+    dropped, so some resources were never joined) or the edge cap
+    (candidate relationships were dropped, so some edges between resources
+    that *are* present were never kept). Both are coarser, earlier limits
+    than the 50-dependent traversal cap above (see
+    [Limits](resource-relationships.md#limits) for the exact numbers).
 
 The snapshot is the same bounded, read-only LIST fan-out the relationship
 view (`g`) performs — scoped to the current namespace for a namespaced
@@ -4040,6 +4186,16 @@ out or fails, the dialog says `impact unavailable; approval remains
 available` and the approval proceeds normally. If the context switches or
 the selection moves while it loads, the write is cancelled before any
 dialog opens.
+
+The summary is matched to the target by **exact identity, UID included**.
+When the selected row carries no UID (a summary type that does not expose
+one), the section is omitted entirely: the dialog opens with the dry-run
+preview only, and no snapshot is loaded at all. korvid does not fall back to
+matching by name — that would silently reconnect the preview to whatever
+object currently holds the name — and it does not show `target not found in
+this snapshot` either, which would read as "the object is gone" when the
+truth is only that korvid has no UID to match on. Approval, the typed-name
+gate, the write, and the audit record are unaffected.
 ```
 
 Append to `docs/resource-relationships.md` (at the end of the file):
@@ -4072,15 +4228,29 @@ dependent are counted as `additional known paths`), bounded to 3 hops and 50
 resources, and classifies a genuine loop as a cycle rather than expanding it
 twice.
 
-The snapshot is scoped like the graph view's: the current namespace for a
-namespaced target, and cluster-wide for a cluster-scoped one such as a Node
-or PersistentVolume, so a dependent in another namespace is not silently
-omitted. The preview always states which scope it used.
+The snapshot's own scope is the pane's namespace for a namespaced target, and
+every namespace for a cluster-scoped one such as a Node or PersistentVolume
+(or when the pane is already showing all namespaces) — so a dependent in
+another namespace is never silently omitted from the preview. This is
+*not* simply "the same scope the graph view uses": the graph view (`g`)
+always LISTs namespaced sources in the pane's current namespace, regardless
+of whether the selected row itself is namespaced or cluster-scoped (see
+[What this view does not do](#what-this-view-does-not-do)) — so inspecting
+a cluster-scoped row from a namespaced pane with `g` only sees dependents in
+that one namespace unless you press `0` first. The write preview computes
+its scope from the *target's* own namespaced-ness instead, so a cluster-scoped
+delete or rollout restart is never under-scoped by the pane you happen to be
+in. The preview always states which scope it used.
 
 Everything the answer does not know is stated: a target that was not in the
 snapshot at all (an object recreated under the same name has a new UID),
 coverage that is not `complete`, a truncated snapshot, and either traversal
-cap. The summary is advisory — see [Write impact
+cap. Any of those also turns every count into a lower bound (`N or more`)
+rather than an exact total. The target is matched by exact identity
+including its UID, and never by name: a row whose summary carries no UID
+gets no impact section at all — the preview is omitted and no snapshot is
+loaded — rather than a summary silently attached to whichever object holds
+that name now. The summary is advisory — see [Write impact
 preview](tui.md#write-impact-preview) for how it appears and what it never
 does.
 

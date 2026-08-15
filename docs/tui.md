@@ -209,15 +209,21 @@ one?
 
     graph-derived impact (advisory):
       delete apps/Deployment/prod/web
-      known direct dependents (may be affected): 1
+      known direct dependents (may be affected): 1 or more
         - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]
-      known transitive dependents (may be affected): 1
+      known transitive dependents (may be affected): 1 or more
         - Pod/prod/web-abc-1 via owned_by (declared) at metadata.ownerReferences[0] -> owned_by (declared) at metadata.ownerReferences[0]
-      additional known paths: 1 (already-listed dependents reached again)
+      additional known paths: 1 or more (already-listed dependents reached again)
       scope: prod
       graph coverage: incomplete - a missing dependent here does not prove none exists
         - gateway.networking.k8s.io/*: unavailable
       advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
+
+Every count reads `1 or more` above because the Gateway API group could not
+be listed: that one incomplete coverage record is enough to make the whole
+answer a floor rather than a total (see the `N or more` bullet below). With
+every source `complete` and neither bound hit, the same summary renders
+exact counts.
 
 The section is **advisory**. It never predicts failure, never replaces the
 server dry-run, and never blocks approval: the y/typed-name gate, the UID
@@ -239,13 +245,18 @@ Reading it:
 - Every cluster-derived count — both dependent sections, `relationship
   cycles`, `additional known paths`, and `unresolved references in the
   affected set` — renders as `N or more` instead of an exact `N` whenever
-  `traversal capped` or `snapshot truncated` is shown. A capped walk stops
-  before it reaches every dependent, and a truncated snapshot was already
-  missing resources before the walk began, so in either case `N` is a floor
-  and an exact number would read as exhaustive. `none in this snapshot` is
-  left as-is: it is already a statement about the snapshot, not a count.
-  The `... N more not shown (preview capped)` lines also stay exact — they
-  count what the preview cut from rows it holds, not what was never found.
+  the answer as a whole could not be exhaustive: `traversal capped`,
+  `snapshot truncated`, `graph coverage: incomplete`, or `target not found
+  in this snapshot`. A capped walk stops before it reaches every dependent,
+  a truncated snapshot was already missing resources or relationships
+  before the walk began, and a source that could not be listed was never
+  joined at all — so in each case `N` is a floor and an exact number would
+  read as exhaustive (and would contradict the coverage line right below
+  it). `none in this snapshot` is left as-is: it is already a statement
+  about the snapshot, not a count — which is also why a missing target,
+  whose sections are all empty, hedges nothing. The `... N more not shown
+  (preview capped)` lines also stay exact — they count what the preview cut
+  from rows it holds, not what was never found.
 - `[inferred]` marks a hop derived by a heuristic rather than read from a
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references
@@ -271,9 +282,13 @@ Reading it:
   - `traversal capped` means the *impact* walk itself — the dependent search
     for this one action — hit its own limit: 3 hops, 50 dependents.
   - `snapshot truncated` means the underlying relationship snapshot (the
-    same one the graph view `g` builds) hit its own, much larger input caps
-    while gathering raw objects/edges before the impact walk ever started —
-    a coarser, earlier limit than the 50-dependent traversal cap above (see
+    same one the graph view `g` builds) hit one of its own, much larger
+    input caps while gathering raw objects and candidate edges before the
+    impact walk ever started: either the resource cap (input objects were
+    dropped, so some resources were never joined) or the edge cap
+    (candidate relationships were dropped, so some edges between resources
+    that *are* present were never kept). Both are coarser, earlier limits
+    than the 50-dependent traversal cap above (see
     [Limits](resource-relationships.md#limits) for the exact numbers).
 
 The snapshot is the same bounded, read-only LIST fan-out the relationship
@@ -284,3 +299,13 @@ out or fails, the dialog says `impact unavailable; approval remains
 available` and the approval proceeds normally. If the context switches or
 the selection moves while it loads, the write is cancelled before any
 dialog opens.
+
+The summary is matched to the target by **exact identity, UID included**.
+When the selected row carries no UID (a summary type that does not expose
+one), the section is omitted entirely: the dialog opens with the dry-run
+preview only, and no snapshot is loaded at all. korvid does not fall back to
+matching by name — that would silently reconnect the preview to whatever
+object currently holds the name — and it does not show `target not found in
+this snapshot` either, which would read as "the object is gone" when the
+truth is only that korvid has no UID to match on. Approval, the typed-name
+gate, the write, and the audit record are unaffected.

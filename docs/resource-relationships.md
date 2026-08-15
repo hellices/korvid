@@ -419,7 +419,12 @@ in. The preview always states which scope it used.
 Everything the answer does not know is stated: a target that was not in the
 snapshot at all (an object recreated under the same name has a new UID),
 coverage that is not `complete`, a truncated snapshot, and either traversal
-cap. The summary is advisory — see [Write impact
+cap. Any of those also turns every count into a lower bound (`N or more`)
+rather than an exact total. The target is matched by exact identity
+including its UID, and never by name: a row whose summary carries no UID
+gets no impact section at all — the preview is omitted and no snapshot is
+loaded — rather than a summary silently attached to whichever object holds
+that name now. The summary is advisory — see [Write impact
 preview](tui.md#write-impact-preview) for how it appears and what it never
 does.
 
