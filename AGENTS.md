@@ -131,9 +131,9 @@ For each review round on a PR:
    no unresolved blocking findings. After **2 consecutive low-confidence-only
    rounds**, stop making speculative changes and do not request another Copilot
    review. Any new credible blocking finding resets this counter.
-9. At the limit, resolve or document the remaining advisory findings and proceed
-   toward merge. Never use the round limit to ignore a credible blocking finding or
-   bypass a required check.
+9. At the limit, resolve or document the remaining advisory findings and proceed to
+   handing the PR back to the maintainer. Never use the round limit to ignore a
+   credible blocking finding or bypass a required check.
 10. Before handing the PR back, verify **every** required check:
     `gh pr view N --json statusCheckRollup` must be all SUCCESS. Then report that
     the PR is ready and **stop**. This loop ends in a report, never in a merge —

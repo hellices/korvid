@@ -1197,9 +1197,17 @@ def test_agent_instructions_forbid_merging_and_merge_automation() -> None:
     assert "No merge automation, in any form." in instructions
     assert "Do not run `gh pr merge`, do not enable auto-merge" in instructions
     assert "do not add a workflow, action, script or scheduled job that merges" in instructions
+    # The tap is where the formula every `brew install korvid` resolves lives,
+    # and its release PR is the one an agent is most likely to treat as
+    # paperwork.
+    assert "the release PR the release workflow opens there" in instructions
+    assert "Never approve your own work" in instructions
     # The review loop is where the original incident came from: its last step
     # used to be `gh pr merge N --squash`.
     assert "This loop ends in a report, never in a merge" in instructions
+    # ...and no earlier step may point the other way.
+    loop = _agent_instructions().split("## Review Loop", 1)[1]
+    assert "toward merge" not in loop
 
 
 def _project_version() -> str:
