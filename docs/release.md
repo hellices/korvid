@@ -223,8 +223,17 @@ After publication, find the generated tap PR, wait for its checks, and merge it:
 
 ```sh
 TAP_PR=$(gh pr list --repo hellices/homebrew-korvid \
-  --search '"korvid 0.2.0" in:title' --state open \
-  --json number --jq '.[0].number')
+  --state open \
+  --json number,title,headRefName,headRepositoryOwner \
+  --jq '[.[] | select(
+    .title == "korvid 0.2.0" and
+    .headRefName == "bump-korvid-0.2.0" and
+    .headRepositoryOwner.login == "hellices"
+  )] | if length == 1 then .[0].number else empty end')
+if [ -z "$TAP_PR" ]; then
+  echo "trusted bump-korvid-0.2.0 tap PR not found; use the manual path below" >&2
+  exit 1
+fi
 gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch
 gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash
 ```
@@ -252,7 +261,7 @@ Finally verify the tap, not merely the formula attached to the source release:
 ```sh
 brew update
 brew upgrade hellices/korvid/korvid || brew install hellices/korvid/korvid
-korvid --version  # korvid 0.2.0
+korvid --version | grep -Fx 'korvid 0.2.0'
 brew test hellices/korvid/korvid
 ```
 
