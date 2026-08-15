@@ -1218,12 +1218,15 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
     assert (
         "uv build --build-constraints scripts/release/build-constraints.txt --require-hashes"
     ) in workflow
-    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text()
-    assert '"hatchling==1.31.0"' in pyproject
+    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    build_requirements = pyproject["build-system"]["requires"]
+    assert build_requirements
+    assert all("==" in requirement for requirement in build_requirements)
     constraints = (
         Path(__file__).parents[1] / "scripts" / "release" / "build-constraints.txt"
     ).read_text()
-    assert "hatchling==1.31.0" in constraints
+    assert all(requirement in constraints for requirement in build_requirements)
+    assert "tomlkit==0.15.1" in constraints
     assert "--hash=sha256:" in constraints
 
 
