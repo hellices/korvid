@@ -97,8 +97,8 @@ _AGENT_INSTALL_HINT = (
 
 #: Top-level packages each extra provides, probed explicitly before any
 #: feature module is imported. Detection cannot rely on catching
-#: ModuleNotFoundError: parts of an extra may arrive transitively (mcp
-#: installs httpx) or be imported lazily (TokenStore falls back when
+#: ModuleNotFoundError: parts of an extra may arrive transitively or be
+#: imported lazily (TokenStore falls back when
 #: keyring is absent), which would misreport the capability as installed.
 _MCP_EXTRA_ROOTS = frozenset({"mcp", "anyio", "starlette", "uvicorn"})
 _AGENT_EXTRA_ROOTS = frozenset({"httpx", "keyring"})

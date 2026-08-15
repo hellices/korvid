@@ -43,12 +43,12 @@ _VARIANT_KORVID_MODULES = {
     "all": _BASE_KORVID_MODULES | _AGENT_KORVID_MODULES | _MCP_KORVID_MODULES,
 }
 #: Feature packages that must be absent, so an extra can never leak into a
-#: narrower variant. `mcp` depends on httpx, so httpx is only forbidden where
-#: no selected extra legitimately provides it.
+#: narrower variant. MCP 2 uses the distinct `httpx2` distribution, so plain
+#: MCP must not leak the `httpx` dependency used by agent/observability.
 _VARIANT_FORBIDDEN_MODULES = {
     "base": frozenset({"httpx", "keyring", "mcp"}),
     "agent": frozenset({"mcp"}),
-    "mcp": frozenset({"keyring"}),
+    "mcp": frozenset({"httpx", "keyring"}),
     "all": frozenset(),
 }
 

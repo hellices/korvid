@@ -488,11 +488,10 @@ def test_smoke_install_required_korvid_modules_follow_the_selected_variant() -> 
 
 
 def test_smoke_install_forbids_optional_feature_packages_outside_their_variant() -> None:
-    """`mcp` pulls httpx transitively, so httpx is only forbidden where no
-    selected extra provides it."""
+    """MCP 2 uses httpx2, so a plain MCP install must not leak agent/obs httpx."""
     assert smoke_install.forbidden_modules("base") == {"httpx", "keyring", "mcp"}
     assert smoke_install.forbidden_modules("agent") == {"mcp"}
-    assert smoke_install.forbidden_modules("mcp") == {"keyring"}
+    assert smoke_install.forbidden_modules("mcp") == {"httpx", "keyring"}
     assert smoke_install.forbidden_modules("all") == set()
 
 
@@ -1330,8 +1329,13 @@ def test_release_notes_exist_for_the_version_being_shipped() -> None:
     assert f"# korvid v{version}" in notes
     assert "## Install" in notes
     assert f"korvid[all]=={version}" in notes
+    assert f"uv tool install 'korvid[all]=={version}'" in notes
+    assert "uv tool install --upgrade" not in notes
+    assert f"pipx install --force 'korvid[all]=={version}'" in notes
     assert "## Verify" in notes
     assert "gh attestation verify" in notes
+    verify = notes[notes.index("## Verify") : notes.index("## Known limits")]
+    assert "```sh\nset -eu" in verify
 
 
 def test_release_notes_state_the_security_posture_the_project_claims() -> None:
@@ -1443,11 +1447,12 @@ def test_readme_has_no_relative_links_because_pypi_cannot_follow_them() -> None:
     assert not relative, f"README links PyPI cannot resolve: {sorted(set(relative))}"
 
 
-def test_release_docs_readme_pins_first_release_install_and_links_the_runbook() -> None:
+def test_release_docs_readme_pins_current_install_and_links_the_runbook() -> None:
     version = _project_version()
     readme = _readme()
     assert f"python -m pip install 'korvid[all]=={version}'" in readme
-    assert f"v{version} is the first public PyPI release" in readme
+    assert "`v0.1.2` is the first public PyPI release" in readme
+    assert f"`v{version}` is the current feature release" in readme
     assert "docs/release.md" in readme
 
 
@@ -1479,6 +1484,7 @@ def test_readme_recommends_an_isolated_install_for_an_application() -> None:
 #: Nothing else belongs here: this list is the escape hatch for the guard
 #: below, so an entry is a statement that a released version number was burned.
 _UNPUBLISHED_TAGS = frozenset({"0.1.0", "0.1.1"})
+_PUBLISHED_PREDECESSORS = frozenset({"0.1.2"})
 
 
 def test_release_docs_never_name_a_version_other_than_the_project_version() -> None:
@@ -1496,13 +1502,14 @@ def test_release_docs_never_name_a_version_other_than_the_project_version() -> N
     look at the line and decide rather than let it rot.
     """
     version = _project_version()
-    allowed = _UNPUBLISHED_TAGS | {version}
+    allowed = _UNPUBLISHED_TAGS | _PUBLISHED_PREDECESSORS | {version}
     for name, text in (("README.md", _readme()), ("docs/release.md", _release_runbook())):
         found = set(re.findall(r"\b[0-9]+\.[0-9]+\.[0-9]+\b", text))
         stale = found - allowed
         assert not stale, (
             f"{name} names {sorted(stale)}; the project version is {version} and the"
-            f" only other versions the docs may name are {sorted(_UNPUBLISHED_TAGS)}"
+            " only other versions the docs may name are the explicit historical set"
+            f" {sorted(_UNPUBLISHED_TAGS | _PUBLISHED_PREDECESSORS)}"
         )
         assert version in found, f"{name} never names the version being shipped ({version})"
 
@@ -1514,10 +1521,17 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     assert "`release`" in runbook
     assert "`.github/workflows/release.yml`" in runbook
     assert "`hellices/korvid`" in runbook
+    assert "git fetch origin main" in runbook
+    assert "COMMIT=$(git rev-parse origin/main)" in runbook
     assert "gh workflow run Release --ref main" in runbook
     assert 'gh run watch "$RUN_ID" --exit-status' in runbook
-    assert f'git tag -a v{version} COMMIT -m "korvid v{version}"' in runbook
+    assert f'git tag -a v{version} "$COMMIT" -m "korvid v{version}"' in runbook
     assert f"git push origin refs/tags/v{version}" in runbook
+    assert "TAG_RUN_ID=$(gh run list --workflow Release --event push" in runbook
+    assert f'--branch v{version} --commit "$COMMIT"' in runbook
+    assert 'TAG_RUN_COMMIT=$(gh run view "$TAG_RUN_ID" --json headSha' in runbook
+    assert 'test "$TAG_RUN_COMMIT" = "$COMMIT"' in runbook
+    assert 'gh run watch "$TAG_RUN_ID" --exit-status' in runbook
     assert f"gh release download v{version} --dir dist/v{version}" in runbook
     assert (
         f"gh attestation verify dist/v{version}/korvid-{version}-py3-none-any.whl"
@@ -1525,6 +1539,12 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     ) in runbook
     assert (f"gh attestation verify dist/v{version}/SHA256SUMS --repo hellices/korvid") in runbook
     assert (f"cd dist/v{version} && shasum --algorithm 256 --check SHA256SUMS") in runbook
+    verify = runbook[
+        runbook.index("## Verify the published artifacts") : runbook.index(
+            "## Publish and verify the Homebrew tap"
+        )
+    ]
+    assert "```sh\nset -eu" in verify
     assert "PyPI publication is irreversible" in runbook
     assert "annotated tag publication is irreversible" in runbook
 
@@ -1537,6 +1557,7 @@ def test_release_docs_runbook_requires_protected_tags_and_maintainer_approval() 
 
 def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> None:
     runbook = _release_runbook()
+    normalized = " ".join(runbook.split())
     stop_processes = runbook.index("Stop all korvid processes")
     remove_files = runbook.index("Then remove the retained files")
     assert "~/.config/korvid/config.yaml" in runbook
@@ -1548,7 +1569,7 @@ def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> N
     assert f"python -m pip install 'korvid[all]=={_project_version()}'" in runbook
     assert "python -m pip uninstall -y korvid" in runbook
     assert "opt-in cleanup" in runbook
-    assert "rerun your package manager with the full desired extra set" in runbook
+    assert "rerun your package manager with the full desired extra set" in normalized
     assert 'state_root="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"' in runbook
     assert 'data_root="${XDG_DATA_HOME:-$HOME/.local/share}/korvid"' in runbook
     assert 'rm -f "$state_root/audit.jsonl"' in runbook
@@ -1575,14 +1596,29 @@ def test_release_readme_discloses_the_retained_os_keyring_credential() -> None:
     ) in readme
 
 
-def test_release_docs_runbook_marks_recovery_boundaries_and_first_release_upgrade_limit() -> None:
+def test_release_docs_runbook_marks_recovery_boundaries_and_upgrade_source() -> None:
     version = _project_version()
     runbook = _release_runbook()
     assert "Deleting or moving a published tag/version is not rollback" in runbook
     assert "resume the idempotent workflow only when the staged assets match" in runbook
     assert "stop and diagnose" in runbook
-    assert f"v{version} cannot prove a cross-version PyPI upgrade" in runbook
-    assert f"validate upgrading from `{version}`" in runbook
+    assert "Install published `korvid[all]==0.1.2`" in runbook
+    assert "Download the exact wheel produced by the confirmed exact-main dry run" in runbook
+    assert 'DRY_RUN_COMMIT=$(gh run view "$RUN_ID" --json headSha' in runbook
+    assert "${RUN_ID:?set RUN_ID to the confirmed dry-run workflow ID}" in runbook
+    assert "${COMMIT:?set COMMIT to the reviewed origin/main SHA}" in runbook
+    assert '[ "$DRY_RUN_COMMIT" != "$COMMIT" ]' in runbook
+    assert 'gh run download "$RUN_ID" --name dist' in runbook
+    assert f"korvid-{version}-py3-none-any.whl" in runbook
+    assert "'korvid[all]==0.1.2'" in runbook
+    assert f"'korvid {version}'" in runbook
+    upgrade_start = runbook.index("## Required cross-version upgrade gate")
+    publish_start = runbook.index(f"## Publish `v{version}`")
+    assert upgrade_start < publish_start
+    assert runbook[upgrade_start:publish_start].count("set -eu") == 2
+    publish = runbook[publish_start : runbook.index("## Safe recovery boundaries")]
+    assert f"local tag v{version} already exists; refusing to push it" in publish
+    assert f"git rev-list -n 1 refs/tags/v{version}" in publish
 
 
 def test_release_docs_preserve_failed_tags_as_unpublished_audit_history() -> None:
@@ -1593,7 +1629,7 @@ def test_release_docs_preserve_failed_tags_as_unpublished_audit_history() -> Non
     `publish-pypi` and was rejected for a missing trusted publisher, so the
     build path is proven and the registration is not.
     """
-    runbook = _release_runbook()
+    runbook = " ".join(_release_runbook().split())
     assert "`v0.1.0` remains immutable, unpublished audit history" in runbook
     assert "before build, attestation, staging, PyPI publication, or GitHub Release" in runbook
     assert "`v0.1.1` is unpublished audit history" in runbook
@@ -1606,22 +1642,25 @@ def test_release_docs_runbook_gives_the_five_trusted_publisher_claims() -> None:
     every field is matched exactly against the OIDC token. A runbook that says
     "register a trusted publisher" without the values is why `v0.1.1` stopped."""
     runbook = " ".join(_release_runbook().split())
-    assert "https://pypi.org/manage/account/publishing/" in runbook
+    assert "https://pypi.org/manage/project/korvid/settings/publishing/" in runbook
     assert "| PyPI Project Name | `korvid` |" in runbook
     assert "| Owner | `hellices` |" in runbook
     assert "| Repository name | `korvid` |" in runbook
     assert "| Workflow name | `release.yml` |" in runbook
     assert "| Environment name | `release` |" in runbook
-    assert "pending" in runbook
+    assert "Verify the active GitHub publisher" in runbook
+    assert "Do not create a second project" in runbook
     assert "Two-factor authentication must be enabled" in runbook
     assert "No API token is created" in runbook
 
 
-def test_security_policy_starts_supported_releases_at_the_project_version() -> None:
+def test_security_policy_supports_only_the_current_minor_line() -> None:
     version = _project_version()
-    policy = _security_policy()
-    assert f"Before the first public `v{version}` release" in policy
-    assert f"Once `v{version}` publishes" in policy
+    policy = " ".join(_security_policy().split())
+    major, minor, _patch = version.split(".")
+    assert f"Until `v{version}` is published, that remains `0.1.2`" in policy
+    assert f"latest `{major}.{minor}.x` version" in policy
+    assert "After publication" in policy
 
 
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:
@@ -1914,13 +1953,51 @@ def test_release_docs_keep_a_source_install_fallback_before_publication() -> Non
     source_install = "pip install 'korvid[all] @ git+https://github.com/hellices/korvid'"
     assert source_install in runbook
     assert source_install in readme
-    assert "PyPI is the release path" in readme
+    assert "Tagged versions should be installed from PyPI" in readme
+    quick_start = readme[readme.index("## Quick start") : readme.index("## Features")]
+    assert "Until `0.2.0` is published on PyPI" in quick_start
+    assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in quick_start
 
 
 def test_release_docs_describe_fresh_installs_and_extra_expansion_separately() -> None:
     runbook = _release_runbook()
     assert "fresh install of each variant" in runbook
     assert "separate base-to-extra expansion check" in runbook
+
+
+def test_release_docs_require_homebrew_tap_merge_and_version_verification() -> None:
+    version = _project_version()
+    runbook = _release_runbook()
+    normalized = " ".join(runbook.split())
+    assert "HOMEBREW_TAP_TOKEN" in runbook
+    assert f"gh release download v{version} --pattern korvid.rb" in runbook
+    assert 'formula_path="$PWD/dist/v0.2.0/korvid.rb"' in runbook
+    assert 'if [ ! -f "$formula_path" ]' in runbook
+    assert 'cp "$formula_path" Formula/korvid.rb' in runbook
+    assert 'if cmp -s "$formula_path" Formula/korvid.rb' in runbook
+    assert "formula is already present on tap main" in runbook
+    assert (
+        runbook.count('gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1')
+        == 2
+    )
+    assert runbook.count('gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash') == 2
+    assert "--json number,title,baseRefName,headRefName,headRepositoryOwner" in runbook
+    assert '.baseRefName == "main"' in runbook
+    assert '.headRefName == "bump-korvid-0.2.0"' in runbook
+    assert '.headRepositoryOwner.login == "hellices"' in runbook
+    assert "trusted bump-korvid-0.2.0 tap PR not found" in runbook
+    assert "branch=bump-korvid-" in runbook
+    assert 'git show-ref --verify --quiet "refs/remotes/origin/$branch"' in runbook
+    assert 'git switch --track -c "$branch" "origin/$branch"' in runbook
+    assert "git diff --cached --quiet" in runbook
+    assert "TAP_PR_URL=$(gh pr create" in runbook
+    assert "could not identify created tap PR" in runbook
+    assert f"korvid --version | grep -Fx 'korvid {version}'" in runbook
+    assert "tag-revalidated `uv.lock`" in normalized
+    assert "not separately attested or listed in `SHA256SUMS`" in normalized
+    assert "attested release asset" not in runbook
+    verify = runbook[runbook.index("Finally verify the tap") : runbook.index("## Install")]
+    assert "```sh\nset -eu" in verify
 
 
 # --- metadata ---------------------------------------------------------------

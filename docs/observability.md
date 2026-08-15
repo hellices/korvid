@@ -19,12 +19,15 @@ exactly the pod you want to read after a restart.
 ## Install
 
 ```bash
-pip install 'korvid[observability]'
+pip install 'korvid[agent,observability]'  # embedded agent tools
+pip install 'korvid[mcp,observability]'    # external MCP tools
 ```
 
-The connector boundary itself is stdlib. The extra provides the HTTP
-client, and it is already present if you installed `korvid[agent]` or
-`korvid[all]`.
+Observability is a tool add-on for the agent or MCP surface; it does not add a
+standalone base-TUI panel. The connector boundary itself is stdlib. The extra
+provides the `httpx` client, which is also present transitively with the agent
+or `all` extras. A plain MCP install uses the separate `httpx2` distribution
+and therefore must add the observability extra explicitly.
 
 ## Configure
 
