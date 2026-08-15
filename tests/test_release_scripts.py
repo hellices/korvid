@@ -1178,6 +1178,24 @@ def _security_policy() -> str:
     return (Path(__file__).parents[1] / "SECURITY.md").read_text()
 
 
+def _offsets_of(text: str, needle: str) -> list[int]:
+    """Return every start offset of `needle` in `text`.
+
+    Args:
+        text: The text to scan.
+        needle: The substring to locate.
+
+    Returns:
+        The offsets, in order.
+    """
+    offsets: list[int] = []
+    start = text.find(needle)
+    while start != -1:
+        offsets.append(start)
+        start = text.find(needle, start + 1)
+    return offsets
+
+
 def _agent_instructions() -> str:
     path = Path(__file__).parents[1] / "AGENTS.md"
     assert path.is_file(), "AGENTS.md is missing"
@@ -1216,6 +1234,9 @@ def test_agent_instructions_forbid_merging_and_merge_automation() -> None:
     assert "No merge automation, in any form." in instructions
     assert "Do not run `gh pr merge`, do not enable auto-merge" in instructions
     assert "do not add a workflow, action, script or scheduled job that merges" in instructions
+    # The incident quality-gates.md records went through the REST endpoint, so
+    # of every route named here this is the one with a precedent.
+    assert "Do not use the REST/GraphQL merge endpoints" in instructions
     # The tap is where the formula every `brew install korvid` resolves lives,
     # and its release PR is the one an agent is most likely to treat as
     # paperwork.
@@ -2037,7 +2058,16 @@ def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
     # script. Both paths stop at green and hand the merge back by name.
     assert "gh pr merge" not in runbook
     assert runbook.count("now merge PR #$TAP_PR yourself") == 2
-    assert 'gh pr diff "$TAP_PR" --repo hellices/homebrew-korvid' in runbook
+    # Claiming "reviewed" without showing the diff is the runbook lying to the
+    # maintainer it is handing the merge to. Both paths must show it, and show
+    # it *before* they make the claim - asserting it merely appears once let
+    # the manual path go without.
+    diff_cmd = 'gh pr diff "$TAP_PR" --repo hellices/homebrew-korvid'
+    assert runbook.count(diff_cmd) == 2
+    for claim in _offsets_of(runbook, "reviewed and green"):
+        preceding = runbook.rfind(diff_cmd, 0, claim)
+        assert preceding != -1, "a path claims review without showing the diff"
+        assert "reviewed and green" not in runbook[preceding:claim]
     assert "--json number,title,baseRefName,headRefName,headRepositoryOwner" in runbook
     assert '.baseRefName == "main"' in runbook
     assert '.headRefName == "bump-korvid-0.2.0"' in runbook

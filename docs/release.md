@@ -299,6 +299,7 @@ else
   case "$TAP_PR" in
     ""|*[!0-9]*) echo "could not identify created tap PR: $TAP_PR_URL" >&2; exit 1 ;;
   esac
+  gh pr diff "$TAP_PR" --repo hellices/homebrew-korvid
   gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1
   echo "reviewed and green - now merge PR #$TAP_PR yourself"
 fi
