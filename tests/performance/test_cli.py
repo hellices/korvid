@@ -20,9 +20,14 @@ from tests.performance.metrics import (
     ProcessSummary,
     RunManifest,
     ScenarioResult,
+    UpdateLatencyKind,
 )
 from tests.performance.profile import FailureInjection, WorkloadProfile
-from tests.performance.replay import ReplayOptions, ReplayReport
+from tests.performance.replay import ReplayConfigurationError, ReplayOptions, ReplayReport
+
+#: Read from production rather than restated: a copy here would let the two
+#: drift and still pass.
+_REPLAY_TIME_SCALE_ERROR = cli._REPLAY_TIME_SCALE_ERROR
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -123,6 +128,27 @@ def profile_path(tmp_path: Path) -> Path:
     return path
 
 
+def one_object_profile_path(tmp_path: Path) -> Path:
+    """Write a schema-valid single-object profile to *tmp_path* and return its path."""
+    path = tmp_path / "single-object.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "id": "single-object",
+                "seed": 0,
+                "object_count": 1,
+                "namespace_count": 1,
+                "steady_events_per_second": 0,
+                "duration_seconds": 1,
+                "bursts": [],
+                "failures": [],
+            }
+        )
+    )
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Fake coroutines for monkeypatching
 # ---------------------------------------------------------------------------
@@ -141,7 +167,7 @@ async def fake_run_replay(
         rendered_updates=0,
         render_passes=0,
         coalesced_updates=0,
-        event_to_render=_make_latency(),
+        update_latency=_make_latency(),
         input_latency=_make_latency(),
         churn_started_before_input=True,
         process=_make_process(),
@@ -164,7 +190,7 @@ async def fake_failed_report(
         rendered_updates=0,
         render_passes=0,
         coalesced_updates=0,
-        event_to_render=_make_latency(),
+        update_latency=_make_latency(),
         input_latency=_make_latency(),
         churn_started_before_input=True,
         process=_make_process(),
@@ -283,7 +309,7 @@ def test_cli_writes_json_and_markdown(tmp_path: Path, monkeypatch: pytest.Monkey
             "--profile",
             str(profile_path(tmp_path)),
             "--time-scale",
-            "0",
+            "1.0",
             "--json",
             str(json_path),
             "--out",
@@ -291,9 +317,45 @@ def test_cli_writes_json_and_markdown(tmp_path: Path, monkeypatch: pytest.Monkey
         ]
     )
     assert result == 0
-    assert json.loads(json_path.read_text())["schema_version"] == 1
+    assert json.loads(json_path.read_text())["schema_version"] == 2
     assert json_path.read_text().index('"api"') < json_path.read_text().index('"schema_version"')
     assert "# Large-cluster benchmark" in markdown_path.read_text()
+
+
+def test_cli_replay_publishes_a_rendered_cell_run_as_event_to_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deterministic replay churns rendered cells, so its artifacts keep the
+    `event_to_render` key and label the published render budget is stated
+    against - and leave the metadata-only key unavailable."""
+    json_path = tmp_path / "result.json"
+    markdown_path = tmp_path / "result.md"
+    monkeypatch.setattr(cli, "run_replay", fake_run_replay)
+
+    result = cli.main(
+        [
+            "replay",
+            "--profile",
+            str(profile_path(tmp_path)),
+            "--json",
+            str(json_path),
+            "--out",
+            str(markdown_path),
+        ]
+    )
+
+    assert result == 0
+    latency = json.loads(json_path.read_text())["latency"]
+    assert latency["update_latency_kind"] == "event_to_render"
+    assert latency["event_to_render"] == {
+        "count": 0,
+        "p50_seconds": None,
+        "p95_seconds": None,
+        "p99_seconds": None,
+        "maximum_seconds": None,
+    }
+    assert latency["watch_to_diff_completion"] is None
+    assert "- Event to render p95: `n/a`" in markdown_path.read_text()
 
 
 @pytest.mark.parametrize("failed_replay", [fake_failed_report, fake_dropped_report])
@@ -309,7 +371,6 @@ def test_cli_returns_nonzero_for_digest_or_drop_failure(
 @pytest.mark.parametrize(
     ("option", "value", "message"),
     [
-        ("--time-scale", "-1", "--time-scale must be non-negative"),
         ("--sample-interval", "0", "--sample-interval must be positive"),
     ],
 )
@@ -321,6 +382,54 @@ def test_cli_rejects_invalid_timing_options(
 ) -> None:
     assert cli.main(["replay", "--profile", "profile.json", option, value]) == 1
     assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "0.1", "0.999", "nan", "inf", "-inf"])
+def test_cli_replay_rejects_compressed_time_scales_before_loading_the_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    """Compressed replay churn drains before the cursor probe can finish, so the
+    CLI must reject it during validation instead of failing later with a replay
+    `WaitTimeout`."""
+
+    def fail_load(_path: Path) -> WorkloadProfile:
+        raise AssertionError("load_profile must not run for an invalid time scale")
+
+    monkeypatch.setattr(cli, "load_profile", fail_load)
+
+    time_scale_arg = f"--time-scale={value}" if value.startswith("-") else "--time-scale"
+    argv = ["replay", "--profile", "profile.json", time_scale_arg]
+    if time_scale_arg == "--time-scale":
+        argv.append(value)
+    exit_code = cli.main(argv)
+
+    assert exit_code == 1
+    assert capsys.readouterr().err == f"error: {_REPLAY_TIME_SCALE_ERROR}\n"
+
+
+def test_cli_replay_accepts_and_forwards_time_scale_1_point_0(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = _replay_options_for(
+        ["replay", "--profile", str(profile_path(tmp_path)), "--time-scale", "1.0"],
+        monkeypatch,
+    )
+
+    assert options.time_scale == 1.0
+
+
+def test_cli_replay_help_explains_the_real_time_scale_floor(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["replay", "--help"])
+
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "must be finite and >= 1.0" in help_text
+    assert "cursor sampling requires churn at real time or slower" in help_text
 
 
 def test_cli_reports_expected_replay_errors(
@@ -344,7 +453,7 @@ def test_cli_reports_terminal_replay_abort_without_traceback(
     )
     monkeypatch.setattr(cli, "load_profile", lambda _path: profile)
 
-    assert cli.main(["replay", "--profile", "profile.json", "--time-scale", "0"]) == 1
+    assert cli.main(["replay", "--profile", "profile.json", "--time-scale", "1.0"]) == 1
     stderr = capsys.readouterr().err
     assert "error during replay: replay aborted:" in stderr
     assert "Traceback" not in stderr
@@ -364,6 +473,41 @@ def test_cli_does_not_hide_unexpected_replay_errors(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(cli, "run_replay", fake_programmer_error)
     with pytest.raises(TypeError, match="unexpected replay defect"):
         cli.main(["replay", "--profile", "profile.json"])
+
+
+def test_cli_reports_one_object_input_sampling_error_without_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Schema-valid one-object profiles stay loadable, but the benchmark CLI
+    must report the real input-sampling contract failure cleanly.
+
+    The profile is loaded and `run_replay` really runs, so the message comes
+    from the production validator rather than from a stand-in that could drift
+    away from it.
+    """
+    exit_code = cli.main(["replay", "--profile", str(one_object_profile_path(tmp_path))])
+
+    assert exit_code == 1
+    stderr = capsys.readouterr().err
+    assert stderr == (
+        "error during replay: performance input sampling requires object_count >= 2; got 1\n"
+    )
+    assert "Traceback" not in stderr
+
+
+def test_cli_reports_zero_event_input_sampling_error_without_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = cli.main(["replay", "--profile", str(profile_path(tmp_path))])
+
+    assert exit_code == 1
+    stderr = capsys.readouterr().err
+    assert stderr == (
+        "error during replay: performance input sampling requires at least one scheduled churn event\n"
+    )
+    assert "Traceback" not in stderr
 
 
 def test_cli_writes_seed_manifests_yaml(tmp_path: Path) -> None:
@@ -587,7 +731,7 @@ def test_cli_replay_live_writes_json_and_markdown(
         ]
     )
     assert result == 0
-    assert json.loads(json_path.read_text())["schema_version"] == 1
+    assert json.loads(json_path.read_text())["schema_version"] == 2
     assert "# Large-cluster benchmark" in markdown_path.read_text()
     assert len(calls) == 1
     assert calls[0]["context"] == "aks-context"
@@ -595,6 +739,62 @@ def test_cli_replay_live_writes_json_and_markdown(
     assert calls[0]["expected_cluster_id"] == _LIVE_IDENTITY_ARGS[3]
     # No --time-scale option: production real-time replay always uses 1.0.
     assert calls[0]["options"].time_scale == 1.0  # type: ignore[attr-defined]
+
+
+async def fake_live_metadata_only_report(
+    profile: WorkloadProfile,
+    options: ReplayOptions,
+    *,
+    context: str,
+    expected_cluster_id: str,
+    run_id: str,
+) -> ReplayReport:
+    """A live run exactly as `run_live_replay` reports one: its churn patches
+    only the tick label, so its update samples end at a no-op table diff."""
+    report = await fake_run_replay(profile, options)
+    return replace(
+        report,
+        update_latency=LatencySummary(
+            count=3,
+            p50_seconds=0.03,
+            p95_seconds=0.032,
+            p99_seconds=0.032,
+            maximum_seconds=0.032,
+        ),
+        update_latency_kind=UpdateLatencyKind.WATCH_TO_DIFF_COMPLETION,
+    )
+
+
+def test_cli_replay_live_never_publishes_a_no_op_diff_as_event_to_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The artifacts are the evidence. A metadata-only live run must serialize
+    its samples under `latency.watch_to_diff_completion`, leave
+    `latency.event_to_render` unavailable, and never print an event-to-render
+    figure in the Markdown a human reads the render budget from."""
+    json_path = tmp_path / "aks186-live.json"
+    markdown_path = tmp_path / "aks186-live.md"
+    monkeypatch.setattr(cli, "run_live_replay", fake_live_metadata_only_report)
+
+    result = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            *_live_artifacts(tmp_path),
+        ]
+    )
+
+    assert result == 0
+    latency = json.loads(json_path.read_text())["latency"]
+    assert latency["update_latency_kind"] == "watch_to_diff_completion"
+    assert latency["event_to_render"] is None
+    assert latency["watch_to_diff_completion"]["p95_seconds"] == 0.032
+
+    markdown = markdown_path.read_text()
+    assert "- Watch receipt to diff completion p95: `0.032s`" in markdown
+    assert "Event to render" not in markdown
 
 
 @pytest.mark.parametrize(
@@ -789,7 +989,9 @@ def test_replay_and_seed_manifests_commands_still_work(
 ) -> None:
     """Adding `replay-live` must not disturb the pre-existing subcommands."""
     monkeypatch.setattr(cli, "run_replay", fake_run_replay)
-    assert cli.main(["replay", "--profile", str(profile_path(tmp_path)), "--time-scale", "0"]) == 0
+    assert (
+        cli.main(["replay", "--profile", str(profile_path(tmp_path)), "--time-scale", "1.0"]) == 0
+    )
 
     output_path = tmp_path / "seed.yaml"
     assert (
@@ -890,7 +1092,7 @@ def test_cli_reports_output_write_errors_instead_of_raising(
             "--profile",
             str(written_profile),
             "--time-scale",
-            "0",
+            "1.0",
             output_option,
             str(tmp_path / "report.out"),
         ]
@@ -996,3 +1198,336 @@ def test_cli_replay_live_reports_an_unwritable_allocation_snapshot(
 
     assert exit_code == 1
     assert "allocation snapshot" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Cursor-input probe knobs (`--input-ack-timeout`, `--input-sample-pairs`)
+# ---------------------------------------------------------------------------
+
+
+def _make_recording_replay(
+    calls: list[dict[str, object]],
+) -> Callable[..., Awaitable[ReplayReport]]:
+    """Build a fake `run_replay` that records every call's arguments into
+    *calls* (a fresh list per test, to stay independent of execution order)."""
+
+    async def fake(profile: WorkloadProfile, options: ReplayOptions) -> ReplayReport:
+        calls.append({"profile": profile, "options": options})
+        return await fake_run_replay(profile, options)
+
+    return fake
+
+
+def _replay_options_for(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> ReplayOptions:
+    """Run `replay` with *argv* and return the `ReplayOptions` it constructed."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_replay", _make_recording_replay(calls))
+    assert cli.main(argv) == 0
+    options = calls[0]["options"]
+    assert isinstance(options, ReplayOptions)
+    return options
+
+
+def _live_options_for(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> ReplayOptions:
+    """Run `replay-live` with *argv* and return the `ReplayOptions` it built."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay(calls))
+    assert cli.main(argv) == 0
+    options = calls[0]["options"]
+    assert isinstance(options, ReplayOptions)
+    return options
+
+
+def test_cli_replay_passes_the_input_probe_knobs_into_replay_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ReplayOptions` documents the cursor-probe timeout and the sample-pair
+    count as run knobs; if the CLI never forwards them, every real run is
+    pinned to the defaults and the documentation is a false claim."""
+    options = _replay_options_for(
+        [
+            "replay",
+            "--profile",
+            str(profile_path(tmp_path)),
+            "--time-scale",
+            "1.0",
+            "--input-ack-timeout",
+            "12.5",
+            "--input-sample-pairs",
+            "7",
+        ],
+        monkeypatch,
+    )
+
+    assert options.input_ack_timeout == 12.5
+    assert options.input_sample_pairs == 7
+
+
+def test_cli_replay_defaults_the_input_probe_knobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = _replay_options_for(
+        ["replay", "--profile", str(profile_path(tmp_path)), "--time-scale", "1.0"],
+        monkeypatch,
+    )
+
+    assert options.input_ack_timeout == 5.0
+    assert options.input_sample_pairs == 25
+
+
+def test_cli_replay_live_passes_the_input_probe_knobs_into_replay_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = _live_options_for(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            "--input-ack-timeout",
+            "30",
+            "--input-sample-pairs",
+            "40",
+            *_live_artifacts(tmp_path),
+        ],
+        monkeypatch,
+    )
+
+    assert options.input_ack_timeout == 30.0
+    assert options.input_sample_pairs == 40
+
+
+def test_cli_replay_live_defaults_the_input_probe_knobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = _live_options_for(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            *_live_artifacts(tmp_path),
+        ],
+        monkeypatch,
+    )
+
+    assert options.input_ack_timeout == 5.0
+    assert options.input_sample_pairs == 25
+
+
+@pytest.mark.parametrize("value", ["0", "-1.5"])
+def test_cli_replay_rejects_a_non_positive_input_ack_timeout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    """A zero or negative acknowledgement bound would abort the probe before
+    the key can possibly be acknowledged, reporting a harness misconfiguration
+    as an application timeout."""
+    exit_code = cli.main(
+        ["replay", "--profile", str(profile_path(tmp_path)), "--input-ack-timeout", value]
+    )
+
+    assert exit_code == 1
+    assert "--input-ack-timeout must be finite and positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_cli_replay_rejects_a_non_finite_input_ack_timeout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setattr(cli, "run_replay", fake_run_replay)
+
+    exit_code = cli.main(
+        ["replay", "--profile", str(profile_path(tmp_path)), f"--input-ack-timeout={value}"]
+    )
+
+    assert exit_code == 1
+    assert "--input-ack-timeout must be finite and positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+def test_cli_replay_rejects_a_non_positive_input_sample_pair_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    """Zero pairs would publish an input percentile computed from no samples."""
+    exit_code = cli.main(
+        ["replay", "--profile", str(profile_path(tmp_path)), "--input-sample-pairs", value]
+    )
+
+    assert exit_code == 1
+    assert "--input-sample-pairs must be positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-1.5"])
+def test_cli_replay_live_rejects_a_non_positive_input_ack_timeout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    exit_code = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            f"--input-ack-timeout={value}",
+            *_live_artifacts(tmp_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "--input-ack-timeout must be finite and positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_cli_replay_live_rejects_a_non_finite_input_ack_timeout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay([]))
+
+    exit_code = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            f"--input-ack-timeout={value}",
+            *_live_artifacts(tmp_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "--input-ack-timeout must be finite and positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+def test_cli_replay_live_rejects_a_non_positive_input_sample_pair_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    exit_code = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            "--input-sample-pairs",
+            value,
+            *_live_artifacts(tmp_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "--input-sample-pairs must be positive" in capsys.readouterr().err
+
+
+def test_cli_rejects_a_fractional_input_sample_pair_count(tmp_path: Path) -> None:
+    """The pair count is a count, not a rate: argparse must reject `2.5`
+    outright rather than silently truncating it to a different workload."""
+    with pytest.raises(SystemExit, match="2"):
+        cli.main(
+            ["replay", "--profile", str(profile_path(tmp_path)), "--input-sample-pairs", "2.5"]
+        )
+
+
+def test_cli_does_not_swallow_an_unexpected_value_error_from_the_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Harness misconfiguration should print one clean line, but a `ValueError`
+    escaping the application or the harness is a bug: catching it too broadly
+    hides the traceback that identifies the regression, and the exit code alone
+    cannot tell the two apart."""
+
+    async def explode(_profile: WorkloadProfile, _options: ReplayOptions) -> ReplayReport:
+        raise ValueError("some unrelated bug deep in the render path")
+
+    monkeypatch.setattr(cli, "run_replay", explode)
+    monkeypatch.setattr(cli, "load_profile", lambda _path: _make_minimal_profile())
+
+    with pytest.raises(ValueError, match="some unrelated bug deep in the render path"):
+        cli.main(["replay", "--profile", "profile.json"])
+
+
+def test_the_time_scale_error_names_the_supported_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--time-scale 0` used to be the documented way to skip every sleep, so
+    the rejection has to tell an existing caller what replaced it rather than
+    only stating the constraint."""
+
+    def fail_load(_path: Path) -> WorkloadProfile:
+        raise AssertionError("load_profile must not run for an invalid time scale")
+
+    monkeypatch.setattr(cli, "load_profile", fail_load)
+
+    assert cli.main(["replay", "--profile", "profile.json", "--time-scale", "0"]) == 1
+
+    stderr = capsys.readouterr().err
+    assert "no longer supported" in stderr
+    assert "duration_seconds" in stderr
+
+
+def test_cli_replay_live_reports_an_operational_value_error_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`replay` narrowed its handler so a stray `ValueError` keeps its
+    traceback. `replay-live` deliberately does not: the live harness raises
+    `ValueError` from its environment gates — identity, ownership, artifacts,
+    `az` — and those are operator-facing faults, not bugs. Narrowing here
+    would print a traceback for a wrong kubecontext.
+    """
+
+    async def gate_failure(*_args: object, **_kwargs: object) -> ReplayReport:
+        raise ValueError("wrong active context: expected aks-context, got other-context")
+
+    monkeypatch.setattr(cli, "run_live_replay", gate_failure)
+
+    assert (
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                str(profile_path(tmp_path)),
+                *_LIVE_IDENTITY_ARGS,
+                *_live_artifacts(tmp_path),
+            ]
+        )
+        == 1
+    )
+
+    stderr = capsys.readouterr().err
+    assert "error during replay: wrong active context" in stderr
+    assert "Traceback" not in stderr
+
+
+def test_cli_replay_live_reports_a_configuration_error_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def reject(*_args: object, **_kwargs: object) -> ReplayReport:
+        raise ReplayConfigurationError("performance input sampling requires object_count >= 2")
+
+    monkeypatch.setattr(cli, "run_live_replay", reject)
+
+    assert (
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                str(profile_path(tmp_path)),
+                *_LIVE_IDENTITY_ARGS,
+                *_live_artifacts(tmp_path),
+            ]
+        )
+        == 1
+    )
+
+    stderr = capsys.readouterr().err
+    assert "error during replay: performance input sampling requires" in stderr
+    assert "Traceback" not in stderr

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -20,10 +21,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from time import monotonic
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import psutil  # type: ignore[import-untyped]  # no inline stubs shipped
 from textual import __version__ as _textual_version
+from textual.events import Key
 
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -45,8 +47,14 @@ from tests.performance.metrics import (
     ProcessSummary,
     RunManifest,
     ScenarioResult,
+    UpdateLatencyKind,
 )
-from tests.performance.profile import FailureInjection, WorkloadProfile, burst_end_offsets
+from tests.performance.profile import (
+    FailureInjection,
+    WorkloadProfile,
+    burst_end_offsets,
+    planned_event_count,
+)
 from tests.performance.workload import (
     ScheduledEvent,
     apply_events,
@@ -60,6 +68,34 @@ from tests.ui.waits import WaitTimeout, until
 #: Anything else (e.g. the historical literal ``dev``) is not traceable to a
 #: commit and is rejected by `resolve_korvid_sha`.
 _SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+#: Drain allowance on top of the schedule's own scaled wall duration. The
+#: completion wait opens right after the *first* churn event, so it has to
+#: cover the rest of the schedule and the render drain that follows it. This
+#: is the drain half, and it stays at the fixed wait's original value: on the
+#: committed `burst-50k` profile the drain alone measures ~27.5 s, so a
+#: smaller constant would fail healthy runs on the largest profiles rather
+#: than catch a stalled one.
+_REPLAY_CHURN_COMPLETION_GRACE_SECONDS = 30.0
+#: Zero-delay turns the cursor probe spins before backing off. The happy path
+#: settles in a median of 6 turns, so this keeps the probe the tightest
+#: observer of a real acknowledgement while bounding the failure path: a key
+#: that is never acknowledged would otherwise hold the loop at 100% CPU for
+#: the whole timeout, starving the churn and render work being measured
+#: alongside it.
+_ACK_SPIN_TURNS: Final = 64
+_ACK_BACKOFF_SECONDS: Final = 0.001
+
+
+async def _ack_sleep(delay: float) -> None:
+    """The only sleep the cursor probe performs.
+
+    A named seam so a test can count the probe's own turns exactly. Patching
+    `asyncio.sleep` globally instead would also count every sleep Textual's
+    message pump performs, which differs by platform — that made an earlier
+    version of the spin test pass on macOS and fail on Windows for reasons
+    that had nothing to do with the probe.
+    """
+    await asyncio.sleep(delay)
 
 
 def _git_head() -> str | None:
@@ -113,6 +149,20 @@ async def _sleep_default(delay: float) -> None:
     await asyncio.sleep(delay)
 
 
+class _SampleAborted(Exception):
+    """The run failed terminally while one cursor sample was in flight."""
+
+
+class ReplayConfigurationError(ValueError):
+    """The run was asked for something the harness cannot measure.
+
+    Subclasses `ValueError` so existing callers and tests that expect one keep
+    working, but gives the CLI something narrower to catch: an unexpected
+    `ValueError` escaping the application must still surface with its
+    traceback rather than be reported as a configuration mistake.
+    """
+
+
 class ReplayAborted(Exception):
     """A replay ended before its schedule completed and can never complete.
 
@@ -131,8 +181,22 @@ class ReplayOptions:
 
     Args:
         time_scale: Multiplier applied to every scheduled-event sleep.
-            0 skips all sleeps (fastest); 1.0 replays at real time.
+            1.0 replays at real time; larger values slow the schedule.
+            Values below 1.0 are rejected: cursor samples are taken
+            while churn is still being emitted.
         sample_interval: Seconds between process-memory samples.
+        input_ack_timeout: Seconds the cursor probe waits for the table to
+            acknowledge an injected key before failing the run. Bounded so a
+            saturated client aborts with a named timeout instead of hanging;
+            raise it for a slow remote cluster, lower it to fail fast.
+        input_sample_pairs: Number of `down`/`up` cursor round trips the input
+            probe performs, so the reported percentile rests on
+            `2 * input_sample_pairs` samples. Two samples make a point
+            observation, not a percentile; the default of 25 pairs (50
+            samples) is enough for a usable p95 while staying short next to
+            the churn schedule it runs inside. Must be positive - each pair
+            restores the original cursor row, so the surrounding row and
+            digest checks are unaffected by the count.
         monotonic_fn: Monotonic clock callable injected for testing.
             Production runs leave this `None` (uses `time.monotonic`).
         async_sleep: Async sleep callable injected for testing.
@@ -144,6 +208,8 @@ class ReplayOptions:
 
     time_scale: float = 1.0
     sample_interval: float = 1.0
+    input_ack_timeout: float = 5.0
+    input_sample_pairs: int = 25
     monotonic_fn: Callable[[], float] | None = field(default=None, hash=False, compare=False)
     async_sleep: Callable[[float], Awaitable[None]] | None = field(
         default=None, hash=False, compare=False
@@ -166,10 +232,16 @@ class ReplayReport:
     rendered_updates: int
     render_passes: int
     coalesced_updates: int
-    event_to_render: LatencySummary
+    #: Watch-event receipt to resource-update-handler completion, qualified by
+    #: `update_latency_kind`: a rendered-cell interval for the deterministic
+    #: replay, a no-op-diff interval for the metadata-only live workload.
+    update_latency: LatencySummary
     input_latency: LatencySummary
-    #: Whether at least one churn event had actually been emitted (replay) or
-    #: dispatched (live) when input latency was first measured.
+    #: Whether the application had really observed live churn when input
+    #: latency was first measured: at least one churn event emitted (replay) or
+    #: one owned `MODIFIED` event received at watch receipt (live). Dispatching
+    #: a mutation is deliberately *not* enough - it is counted before the patch
+    #: is awaited, and its watch event arrives over an independent connection.
     churn_started_before_input: bool
     process: ProcessSummary
     api: ApiSummary
@@ -177,6 +249,10 @@ class ReplayReport:
     #: depth, post-burst drain) the numeric budgets are stated against.
     phases: PhaseSummary
     manifest: RunManifest
+    #: What `update_latency` measured. Defaults to the rendered-cell meaning:
+    #: the deterministic replay really does rewrite rendered cells, so every
+    #: construction that does not say otherwise keeps its published semantics.
+    update_latency_kind: UpdateLatencyKind = UpdateLatencyKind.EVENT_TO_RENDER
     #: Requested-versus-achieved churn accounting; `None` for deterministic
     #: replay, which drives its own source rather than a real API server.
     churn: ChurnSummary | None = None
@@ -196,6 +272,17 @@ class MeasuredKorvidApp(KorvidApp):
     `ui/app.py`). Counting those would inflate `render_passes` and - worse -
     let an unrelated repaint flush the pending-event backlog, attributing a
     watch event's latency to a keypress that happened to repaint first.
+
+    What the recorded instant means: the table-update handler for that batch
+    has *completed*. When the event changed a cell the table renders, that
+    includes the in-place cell writes and the repaint request; when it did not
+    - a metadata-only mutation such as the live driver's
+    `korvid.dev/performance-tick` label, which no Pod column renders - the
+    diff finds nothing to write and the sample times a no-op. Which of the two
+    a run produced is declared by `ReplayReport.update_latency_kind`, so the
+    artifacts publish the samples under the metric name that was actually
+    measured instead of comparing a metadata-only figure with the
+    rendered-frame budget.
     """
 
     def __init__(self, *args: Any, recorder: BenchmarkRecorder, **kwargs: Any) -> None:
@@ -480,6 +567,273 @@ def check_rendered_rows(table: Any, pods: Iterable[PodSummary]) -> None:
             )
 
 
+def _cursor_sample_preconditions(table: ResourceTable, key: str) -> tuple[int, int, int]:
+    """Start row, expected row and row count for one sample, or refuse to take it.
+
+    Every refusal here is a harness misconfiguration, not a measurement: a key
+    the probe cannot interpret, a move off the end of the table, or a table
+    that is not focused. The last one is the quiet one — the key is posted to
+    the app, so an unfocused table lets whichever widget does have focus eat it
+    and the sample times out as if the cursor had simply been slow.
+    """
+    start_row = table.cursor_row
+    try:
+        expected_row = start_row + {"down": 1, "up": -1}[key]
+    except KeyError as exc:
+        raise ReplayConfigurationError(
+            "cursor input measurement supports only 'down' and 'up'"
+        ) from exc
+    row_count = table.row_count
+    if not 0 <= expected_row < row_count:
+        raise ReplayConfigurationError(
+            f"cursor input measurement key {key!r} from start row {start_row} "
+            f"expected row {expected_row} outside valid range 0..{row_count - 1}"
+        )
+    if not table.has_focus:
+        raise ReplayConfigurationError(
+            "cursor input measurement requires the table to have focus; the key is "
+            "posted to the app and would otherwise be consumed by whichever widget "
+            "does have focus, timing out as if the cursor had not moved"
+        )
+    return start_row, expected_row, row_count
+
+
+def _membership_note(table: ResourceTable, row_count: int) -> str | None:
+    """Name a row-membership change during one sample, or None if it held still.
+
+    The probe waits for one absolute index, so this precondition decides both
+    of its outcomes and has to be asked on both paths. A row leaving or
+    entering while the key is in flight can settle the cursor somewhere else —
+    reported as a timeout, which reads as an input-latency regression — or slide
+    the expected index under the cursor before the key is processed at all,
+    which returns a near-zero sample and biases p95 *down*, arriving in the
+    report as a good result. The second is the more dangerous of the two
+    precisely because nothing else about it looks wrong.
+    """
+    if table.row_count == row_count:
+        return None
+    return f"the row count changed from {row_count} to {table.row_count} during the sample"
+
+
+async def measure_cursor_input(
+    pilot: Any,
+    table: ResourceTable,
+    key: str,
+    *,
+    now: Callable[[], float] = monotonic,
+    timeout: float = 5.0,
+    aborted: Callable[[], bool] = lambda: False,
+) -> float:
+    """Measure `down`/`up` key injection until the expected cursor row is reached.
+
+    The wait is a tight poll rather than a watcher on `cursor_coordinate`,
+    which was measured rather than assumed: under saturating churn (1,000
+    objects at 240 events/s) the poll costs a median of 6 event-loop turns per
+    sample, and an event-driven watcher measured *higher* p95 — 89.7 ms
+    against 76.8 ms, consistently across three interleaved rounds. A reactive
+    watcher is woken through Textual's own callback machinery and then has to
+    be rescheduled itself, so it observes the change later than a poll that is
+    already at the front of the ready queue. The poll is therefore the tighter
+    upper bound on the acknowledgement, not a source of inflation.
+    """
+    start_row, expected_row, row_count = _cursor_sample_preconditions(table, key)
+    app = pilot.app
+    driver = app._driver
+    if driver is None:
+        raise RuntimeError("cursor input measurement requires an active Textual test driver")
+    event = Key(key, None)
+    event.set_sender(app)
+    started = now()
+    driver.send_message(event)
+    try:
+        async with asyncio.timeout(timeout):
+            turns = 0
+            while table.cursor_row != expected_row:
+                if aborted():
+                    # The run has already failed terminally, so nothing will
+                    # move the cursor. Waiting out the full timeout here would
+                    # delay the real error by one ack timeout per sample.
+                    raise _SampleAborted
+                # Zero delay while the acknowledgement is plausibly in flight,
+                # then back off: past this many turns the key is not coming,
+                # and spinning for the rest of the timeout would starve the
+                # churn and render work being measured alongside the probe.
+                await _ack_sleep(0 if turns < _ACK_SPIN_TURNS else _ACK_BACKOFF_SECONDS)
+                turns += 1
+    except _SampleAborted:
+        raise
+    except TimeoutError as exc:
+        detail = (
+            f"{key} cursor input from row {start_row} to expected row {expected_row} "
+            f"was not acknowledged within {timeout}s"
+        )
+        moved = _membership_note(table, row_count)
+        if moved is not None:
+            detail += f"; {moved}, so the expected index no longer identifies the row"
+        raise WaitTimeout(detail) from exc
+    elapsed = now() - started
+    moved = _membership_note(table, row_count)
+    if moved is not None:
+        if aborted():
+            # The run is already failing terminally; the membership change is a
+            # consequence of that (a cleared store, say), not a spoiled sample.
+            # Let the real cause be the one that surfaces.
+            raise _SampleAborted
+        raise WaitTimeout(
+            f"{key} cursor input from row {start_row} reached expected row "
+            f"{expected_row}, but {moved}, so the move cannot be attributed to the key"
+        )
+    return elapsed
+
+
+def validate_time_scale(options: ReplayOptions) -> None:
+    """Reject a wall-clock schedule compressed below real time.
+
+    Cursor samples are taken while churn is still being emitted, so a schedule
+    that outruns the probe drains before the samples are collected and the run
+    fails its own metric contract late. The CLI rejects this on its arguments;
+    this is the programmatic guard for callers wiring `ReplayOptions` directly.
+
+    A caller that injects its own clock (`monotonic_fn`/`async_sleep`) is
+    exempt: `time_scale` is then virtual, the caller decides when the schedule
+    advances, and outrunning the probe is not possible.
+
+    Raises:
+        ReplayConfigurationError: `time_scale` is not finite and >= 1.0 on a
+            run that will use the real clock.
+    """
+    if options.monotonic_fn is not None or options.async_sleep is not None:
+        return
+    if not math.isfinite(options.time_scale) or options.time_scale < 1.0:
+        raise ReplayConfigurationError(
+            f"time_scale must be finite and >= 1.0 so cursor samples are taken "
+            f"during churn; got {options.time_scale}"
+        )
+
+
+def validate_input_sample_pairs(options: ReplayOptions) -> None:
+    """Reject a sample-pair count that cannot produce a usable percentile.
+
+    Called at the top of both harness entry points - before any cluster
+    identity, ownership, or mutation work - so a misconfigured run fails
+    immediately rather than after paying for a full setup and then publishing
+    an input percentile computed from zero samples.
+
+    Raises:
+        ReplayConfigurationError: `input_sample_pairs` is not a positive integer.
+    """
+    if options.input_sample_pairs < 1:
+        raise ReplayConfigurationError(
+            f"input_sample_pairs must be positive; got {options.input_sample_pairs}"
+        )
+
+
+def validate_input_ack_timeout(options: ReplayOptions) -> None:
+    """Reject a cursor-probe bound that cannot bound anything.
+
+    `sample_cursor_input` wraps each key press in `asyncio.timeout(...)`, and
+    that timeout never fires for `inf` or `nan` - an unacknowledged key would
+    hang the run forever, contradicting the documented bounded probe. A
+    non-positive bound is the mirror image: it aborts before the key can
+    possibly be acknowledged. The CLI rejects both on its own arguments; this
+    is the programmatic guard, called at the top of both harness entry points
+    - before app startup or any live cluster identity, ownership, or mutation
+    work - so a misconfigured run fails immediately instead of hanging a
+    seeded cluster mid-churn.
+
+    Raises:
+        ReplayConfigurationError: `input_ack_timeout` is not finite and positive.
+    """
+    if not math.isfinite(options.input_ack_timeout) or options.input_ack_timeout <= 0:
+        raise ReplayConfigurationError(
+            f"input_ack_timeout must be finite and positive; got {options.input_ack_timeout}"
+        )
+
+
+def validate_input_sampling_profile(profile: WorkloadProfile) -> None:
+    """Reject benchmark profiles that cannot satisfy the cursor probe.
+
+    The replay harness measures input latency as `down`/`up` cursor round trips
+    during churn. With fewer than two rows the first `down` move is impossible,
+    and with no scheduled churn events the probe records only idle cursor moves.
+    Both are profile contract errors that must fail before app startup or any
+    live-cluster external work. `load_profile` intentionally stays generic:
+    other consumers can still use a schema-valid profile that this benchmark
+    rejects.
+    """
+    if profile.object_count < 2:
+        raise ReplayConfigurationError(
+            f"performance input sampling requires object_count >= 2; got {profile.object_count}"
+        )
+    if planned_event_count(profile) < 1:
+        raise ReplayConfigurationError(
+            "performance input sampling requires at least one scheduled churn event"
+        )
+
+
+def input_sampling_incomplete_message(pairs: int) -> str:
+    """Name the metric-contract failure when churn ends before sampling does."""
+    return f"input sampling incomplete: churn finished before all {pairs} cursor sample pairs completed"
+
+
+def replay_churn_completion_timeout(profile: WorkloadProfile, options: ReplayOptions) -> float:
+    """Bound the final wait by the scaled schedule plus the drain allowance.
+
+    The schedule term scales with `time_scale` because a slowed replay really
+    does take longer to emit; the drain term does not, because draining is the
+    app's own work at full speed no matter how the schedule was paced.
+    """
+    return profile.duration_seconds * options.time_scale + _REPLAY_CHURN_COMPLETION_GRACE_SECONDS
+
+
+async def sample_cursor_input(
+    pilot: Any,
+    table: ResourceTable,
+    recorder: BenchmarkRecorder,
+    *,
+    pairs: int,
+    now: Callable[[], float] = monotonic,
+    timeout: float = 5.0,
+    aborted: Callable[[], bool] = lambda: False,
+    incomplete: Callable[[], bool] = lambda: False,
+) -> None:
+    """Record *pairs* `down`/`up` cursor round trips into *recorder*.
+
+    A pair, not a single key press, is the unit: `up` undoes `down`, so the
+    cursor is on its original row both between pairs and when the loop ends.
+    Every check that follows the probe - rendered-row freshness, row count,
+    digest convergence - therefore sees the selection the run started with,
+    whatever the configured count is.
+
+    *aborted* and *incomplete* are re-asked before every single sample rather
+    than once per pair. A churn task that dies mid-pair would otherwise leave
+    nothing updating the table, and the remaining samples would each record
+    their own timeout as input latency. A churn run that finishes cleanly
+    before the configured sample count is satisfied would likewise dilute the
+    reported percentile with idle cursor moves, so that case fails the run by
+    name instead of publishing a partial metric. Stopping mid-pair can leave
+    the cursor one row down, which is why the caller's failure path must not
+    depend on the cursor position - by the time this returns early the run is
+    already failing.
+
+    Shared by the deterministic replay and the live harness so both publish
+    the same measurement over the same sample size.
+    """
+    for _ in range(pairs):
+        for key in ("down", "up"):
+            if incomplete():
+                raise WaitTimeout(input_sampling_incomplete_message(pairs))
+            if aborted():
+                return
+            try:
+                elapsed = await measure_cursor_input(
+                    pilot, table, key, now=now, timeout=timeout, aborted=aborted
+                )
+            except _SampleAborted:
+                return
+            recorder.record_input(elapsed)
+
+
 async def wait_for(
     pilot: Any,
     condition: Callable[[], object],
@@ -517,14 +871,23 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
     The function:
     1. Creates `ResourceStore`, `BenchmarkRecorder`, and one `_ReplaySource`.
     2. Emits initial Pods as ``ADDED`` (one logical LIST + WATCH OPEN).
-    3. Waits on `churn_ready` after initial population.
-    4. Waits until the `ResourceTable` shows all objects.
-    5. Records key-press input latency.
-    6. Signals the source to start scheduled-event churn.
+    3. Waits until the `ResourceTable` shows all objects.
+    4. Signals the source to start scheduled-event churn.
+    5. Waits for the first churn event to be emitted.
+    6. Records `options.input_sample_pairs` down/up cursor input samples.
     7. Awaits churn completion and the final render pass.
     8. Stops the watch manager and process sampler in `finally`.
     9. Compares the table/store digest to the source's expected state.
+
+    Raises:
+        ValueError: `options.input_sample_pairs` is not positive,
+            `options.input_ack_timeout` is not finite and positive, or the
+            profile cannot support cursor input sampling.
     """
+    validate_input_sample_pairs(options)
+    validate_input_ack_timeout(options)
+    validate_input_sampling_profile(profile)
+    validate_time_scale(options)
     events = scheduled_events(profile)
     failures: dict[int, FailureInjection] = {f.at_event: f for f in profile.failures}
 
@@ -594,12 +957,21 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                     recorder=recorder,
                 )
             churn_started_before_input = source.emitted_events > 0
-            t0 = monotonic()
-            await pilot.press("down")
-            recorder.record_input(monotonic() - t0)
-            t0 = monotonic()
-            await pilot.press("up")
-            recorder.record_input(monotonic() - t0)
+            await sample_cursor_input(
+                pilot,
+                table,
+                recorder,
+                pairs=options.input_sample_pairs,
+                now=options.monotonic_fn if options.monotonic_fn is not None else monotonic,
+                timeout=options.input_ack_timeout,
+                aborted=lambda: source.terminal_failure is not None,
+                incomplete=lambda: (
+                    bool(events)
+                    and churn_done.is_set()
+                    and recorder.pending_count() == 0
+                    and source.terminal_failure is None
+                ),
+            )
 
             # Wait for all events to be emitted and all renders to complete.
             await wait_for(
@@ -608,7 +980,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                     source.terminal_failure is not None
                     or (churn_done.is_set() and recorder.pending_count() == 0)
                 ),
-                timeout=30.0,
+                timeout=replay_churn_completion_timeout(profile, options),
                 label="churn complete and all events rendered",
                 recorder=recorder,
             )
@@ -657,7 +1029,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
         rendered_updates=benchmark.rendered_updates,
         render_passes=benchmark.render_passes,
         coalesced_updates=benchmark.coalesced_updates,
-        event_to_render=benchmark.event_to_render,
+        update_latency=benchmark.update_latency,
         input_latency=benchmark.input_latency,
         churn_started_before_input=churn_started_before_input,
         process=benchmark.process,

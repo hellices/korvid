@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
-from typing import Final, Self, cast
+from typing import Final, NamedTuple, Self, cast
 
 from rich.cells import cell_len
 from rich.text import Text
+from textual import __version__ as _textual_version
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
 from textual.widgets.data_table import Column, RowDoesNotExist, RowKey
@@ -94,6 +95,48 @@ def _phase_cell(phase: str) -> Text:
 # the linear rebuild path instead of a quadratic remove loop.
 _MAX_IN_PLACE_REMOVALS = 8
 
+#: Textual major version whose `DataTable` internals this widget writes to
+#: directly (`_data` plus the `_update_count` cache generation).
+_TEXTUAL_CELL_BATCH_MAJOR: Final = 8
+
+
+def _supports_cell_batching(version: str) -> bool:
+    """Whether *version* is the Textual major this widget may batch cells for.
+
+    Batching writes `DataTable._data` and bumps `_update_count` itself, so a
+    run of changed cells costs one cache generation and at most one repaint
+    instead of one full-widget refresh per cell. Both attributes are
+    private, so the fast path is allowed only on the major version it was
+    verified against; any other major falls back to the public
+    `update_cell`, which is slower but cannot silently write the wrong
+    store or leave a stale cache behind.
+    """
+    major, _, _ = version.partition(".")
+    try:
+        return int(major) == _TEXTUAL_CELL_BATCH_MAJOR
+    except ValueError:
+        return False
+
+
+#: Resolved once at import — the installed Textual cannot change mid-session.
+_BATCH_CELL_WRITES = _supports_cell_batching(_textual_version)
+
+
+class _VisibleRows(NamedTuple):
+    """The row indices Textual is currently painting.
+
+    `first`/`last` are inclusive bounds on the scrollable window; rows below
+    `fixed_count` are pinned to the top and always painted.
+    """
+
+    fixed_count: int
+    first: int
+    last: int
+
+    def contains(self, row_index: int) -> bool:
+        """Whether the row at *row_index* is on screen (O(1))."""
+        return row_index < self.fixed_count or self.first <= row_index <= self.last
+
 
 def _cell_width(cell: str | Text) -> int:
     """Rendered width of a table cell, matching DataTable's measurement.
@@ -127,6 +170,22 @@ def _cells_equal(a: str | Text, b: str | Text) -> bool:
             return False
         return a.plain == b.plain and str(a.style) == str(b.style)
     return a == b
+
+
+def _renders_as(rendered: object, expected: str | Text) -> bool:
+    """Whether a render-path cell carries the text that was written.
+
+    The comparison is on plain text, not style: `default_cell_formatter` hands
+    a `Text` through untouched but turns a `str` into `Text.from_markup`, and
+    the question asked here is only whether the renderer reached the new value
+    at all. Style is already settled by `_cells_equal` on the way in.
+    """
+    expected_plain = (
+        expected.plain if isinstance(expected, Text) else Text.from_markup(expected, end="").plain
+    )
+    if isinstance(rendered, Text):
+        return rendered.plain == expected_plain
+    return isinstance(rendered, str) and rendered == expected_plain
 
 
 def _helm_status_cell(status: str) -> Text:
@@ -377,6 +436,12 @@ class ResourceTable(DataTable[str | Text]):
         self._emitted: dict[str, list[str | Text]] = {}
         #: Single clock reading per repaint; see `show()`.
         self._render_now: datetime = datetime.now(UTC)
+        #: Whether the private-store fast path has been proven against the
+        #: installed Textual, and whether it held. The major-version gate says
+        #: only that this Textual *may* be batched; the first batched write
+        #: reads itself back to confirm the renderer sees it.
+        self._cell_batching_verified = False
+        self._cell_batching_usable = True
 
     def show(
         self,
@@ -429,15 +494,11 @@ class ResourceTable(DataTable[str | Text]):
         pending, self._pending_rows = self._pending_rows, []
         self._prune_memo(pending)
         if same_view and sort == self._last_sort and self._apply_in_place(pending):
-            # Nothing was cleared, so the scroll offset never moved; only
-            # the cursor may have slid when rows above it were removed —
-            # and even with scroll=False, Textual's cursor watcher schedules
-            # a deferred _scroll_cursor_into_view on an index change, so the
-            # viewport must be re-asserted after it (same as the rebuild
-            # path below). When the index is unchanged no deferred scroll
-            # was scheduled — re-asserting anyway would yank back a user
-            # scroll that lands before the callback runs.
-            if restore is not None:
+            # In-place updates and appends leave the selected key alone.
+            # Avoid reassigning the same cursor coordinate: DataTable treats
+            # move_cursor() as repaint work even when nothing selected moved.
+            current = self._cursor_snapshot()
+            if restore is not None and (current is None or current[0] != restore[0]):
                 offset = (self.scroll_x, self.scroll_y)
                 self._restore_cursor(*restore, scroll=False)
                 if self.cursor_row != restore[1]:
@@ -554,17 +615,132 @@ class ResourceTable(DataTable[str | Text]):
         for key in doomed:
             self.remove_row(key)
         columns = self.ordered_columns
+        # One geometry read for the whole batch: removals are done, and the
+        # appends below only extend the bottom, so no surviving row's index
+        # moves while the loop runs.
+        visible = self._visible_rows()
         touched: list[tuple[str, list[str | Text]]] = []
+        repaint = False
         for key, cells in pending:
             if key not in current_set:
                 self.add_row(*cells, key=key)
                 touched.append((key, cells))
             elif self._patch_row(key, cells, columns):
                 touched.append((key, cells))
+                repaint = repaint or visible.contains(self.get_row_index(key))
         self._emitted = dict(pending)
         if touched:
             self._absorb_widths(touched)
+            if repaint:
+                self.refresh()
         return True
+
+    def _visible_rows(self) -> _VisibleRows:
+        """Row-index bounds of the painted viewport, computed once per batch.
+
+        Every row this widget puts in the table is exactly one line high:
+        `add_row` is always called without `height`, so it takes
+        `DataTable`'s `height=1` default, and no row carries a label or auto
+        height. A row's y-offset is therefore its index, and the window is
+        integer arithmetic — no `_get_row_region`, which sums the height of
+        every preceding row and would make one watch tick O(rows) per
+        changed row.
+
+        The offset mirrors `DataTable.render_line`, which shifts everything
+        below the header and the fixed rows by `scroll_offset.y` — that is
+        `scroll_y` *rounded*. Truncating instead would slide the window one
+        row up at any fractional offset (mid-animation, momentum or
+        wheel-step scrolling) and misread the last painted row as
+        off-screen, so its change would never reach the screen.
+        """
+        fixed_count = min(self.fixed_rows, self.row_count)
+        header_height = self.header_height if self.show_header else 0
+        viewport_height = max(self.size.height - header_height - fixed_count, 0)
+        first = fixed_count + self.scroll_offset.y
+        return _VisibleRows(fixed_count, first, first + viewport_height - 1)
+
+    def _batched_write_holds(self, row_key: RowKey, column: Column, expected: str | Text) -> bool:
+        """Whether the *renderer* reaches a private-store write.
+
+        The batching gate is a Textual *major version* check, and a version
+        string is not evidence about internals: a minor release can move the
+        structure the renderer reads while leaving `_data` writable, which
+        would paint stale cells with no error. Reading the cell back through
+        `get_cell` cannot see that, because `get_cell` returns
+        `_data[row][column]` — the very slot just written, whoever paints
+        from it. So the check asks the render path instead:
+        `_get_row_renderables` is what `render_line` calls, and it reaches the
+        cell through `_row_locations` and `get_row_at`. A release that moved
+        the renderer's source, or the row and column mappings, answers with
+        the old value here and the fast path is dropped.
+
+        Run once per widget — the internals cannot change while the process
+        runs — so the one row rebuilt here costs nothing measurable. The
+        renderable it reads is cached under `_update_count`, and the row was
+        very likely painted at the current count before this write, so the
+        count is bumped first: without that the check would be handed the
+        pre-write snapshot and would retire the fast path on a Textual that
+        works perfectly.
+        """
+        try:
+            self._update_count += 1  # the renderable cache is keyed by this
+            row_index = self._row_locations.get(row_key)
+            column_index = self._column_locations.get(column.key)
+            if row_index is None or column_index is None:
+                return False
+            rendered = self._get_row_renderables(row_index).cells[column_index]
+        except Exception:  # any failure here means "don't trust the fast path"
+            return False
+        return _renders_as(rendered, expected)
+
+    def _write_cell_batched(self, row_key: RowKey, column: Column, new_cell: str | Text) -> bool:
+        """Write one cell through the private store; False once it is unusable.
+
+        Guards the write itself, not only its result: a Textual release that
+        removed `_data`, changed its key types or changed the row mapping
+        raises here, and crashing a repaint is a worse answer than paying for
+        the public API. The catch is deliberately as wide as that intent —
+        `DataTable` raises its own `RowDoesNotExist`/`CellDoesNotExist` types,
+        and naming a fixed tuple of built-ins would let the next release's
+        exception through the one path that exists to survive it. It matches
+        `_batched_write_holds` for the same reason. A korvid-side mistake is
+        not hidden by this: the fallback repeats the same write through
+        `update_cell`, which raises it in the caller's face.
+
+        The first write that lands is then read back, because a release could
+        equally move the structure the renderer consults while leaving this
+        one writable.
+        """
+        try:
+            self._data[row_key][column.key] = new_cell
+        except Exception as exc:  # any failure here means "don't trust the fast path"
+            self._cell_batching_verified = True
+            self._retire_cell_batching(f"the private write raised {exc!r}")
+            return False
+        if self._cell_batching_verified:
+            return True
+        self._cell_batching_verified = True
+        if self._batched_write_holds(row_key, column, new_cell):
+            return True
+        self._retire_cell_batching("the render path did not see the private write")
+        return False
+
+    def _retire_cell_batching(self, reason: str) -> None:
+        """Drop the fast path for this widget's lifetime, and say so once.
+
+        Swallowing the failure keeps the repaint alive; swallowing it silently
+        would let a Textual upgrade undo this widget's whole reason for
+        writing `_data` at all, with no exception, no log line and nothing to
+        read in a benchmark artifact — only a performance number that got
+        worse for no visible reason. The two are separable, so this says which
+        Textual retired the path and why.
+        """
+        self._cell_batching_usable = False
+        self.log.warning(
+            f"resource table: batched cell writes retired on textual "
+            f"{_textual_version}: {reason}; falling back to update_cell "
+            "(one refresh per changed cell)"
+        )
 
     def _patch_row(self, key: str, cells: list[str | Text], columns: list[Column]) -> bool:
         """Update an existing row's changed cells; True when any cell moved."""
@@ -574,10 +750,25 @@ class ResourceTable(DataTable[str | Text]):
         if old_cells is None:
             old_cells = self.get_row(key)
         changed = False
+        batched = _BATCH_CELL_WRITES and self._cell_batching_usable
+        row_key = RowKey(key)
         for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
-            if not _cells_equal(old_cell, new_cell):
-                self.update_cell(key, column.key, new_cell, update_width=False)
-                changed = True
+            if _cells_equal(old_cell, new_cell):
+                continue
+            if batched:
+                batched = self._write_cell_batched(row_key, column, new_cell)
+            if not batched:
+                # Unverified or no-longer-trusted Textual internals: pay one
+                # refresh per cell rather than write a store whose shape may
+                # have moved.
+                self.update_cell(row_key, column.key, new_cell, update_width=False)
+            changed = True
+        if changed and batched:
+            # One cache generation for the whole row: `_update_count` is what
+            # invalidates DataTable's line and offset caches, so a row that
+            # was updated off-screen paints its new cells as soon as it is
+            # scrolled into view.
+            self._update_count += 1
         return changed
 
     def _absorb_widths(self, rows: Iterable[tuple[str, list[str | Text]]]) -> None:
@@ -596,6 +787,15 @@ class ResourceTable(DataTable[str | Text]):
         display width is exactly its length, and both markup parsing and the
         newline truncation `_cell_width` performs can only shorten it — so a
         cell that short cannot widen its column no matter how it renders.
+
+        A grown column repaints on its own, so this returns nothing and the
+        caller must not gate its repaint on it: setting
+        `_require_update_dimensions` makes `DataTable._on_idle` run
+        `_update_dimensions`, which republishes `virtual_size` from the new
+        column widths, and that reactive assignment schedules a layout
+        repaint. Reintroducing a "did it grow" flag here would invite the
+        unsafe inverse — treating "no growth" as "no repaint needed", which
+        is exactly the off-screen case this widget deliberately skips.
         """
         columns = self.ordered_columns
         widths = [column.content_width for column in columns]

@@ -221,6 +221,17 @@ The kubelet-owned `status` subresource is never written: an externally patched
 `status.phase` is reconciled back on the next node sync, which would both
 corrupt digest parity and violate the metadata-only rule above.
 
+That rule has a measurement consequence for the event-to-render budget below.
+`PodSummary.labels` is not a rendered Pod column - it feeds the client-side
+`-l` filter - so a `korvid.dev/performance-tick` patch produces a real watch
+event and a real store change, but no changed table cell: the in-place diff
+writes nothing and requests no repaint. The harness records the instant the
+resource-update handler returns, which for this workload is the completion of
+a *no-op* table diff. That is a usable message-path interval, but it is not an
+event-to-rendered-cell measurement, so metadata-only churn alone cannot
+qualify the 250 ms event-to-render budget; doing that live requires a churn
+workload that mutates a rendered field and is observed on the table.
+
 The generator rate and observed API throttling are both recorded; requested
 rate is never reported as achieved rate. Reports carry the requested event
 count and rate next to the observed event count, churn wall time, achieved
@@ -310,6 +321,11 @@ These budgets define usable behavior for the live 1,000-Pod profile:
 | Post-warm-up RSS slope over 30 minutes | <= 1 MiB/minute |
 | Peak RSS at 1,000 Pods | <= 512 MiB |
 | Failed UI-at-scale scenarios | 0 |
+
+The event-to-render row is stated against churn that changes a rendered cell.
+The current live driver's metadata-only churn does not (see above), so that
+budget is qualified by deterministic replay only until a rendered-cell live
+workload exists.
 
 `drive_ui_scenarios` records a key sequence that never reached its target state
 as `ScenarioResult(ok=False)` rather than raising, so `replay-live` folds those

@@ -43,7 +43,13 @@ from tests.performance.live import (
     run_live_replay,
 )
 from tests.performance.manifests import build_seed_manifests
-from tests.performance.metrics import BenchmarkRecorder
+from tests.performance.metrics import (
+    BenchmarkRecorder,
+    UpdateLatencyKind,
+    render_markdown,
+    report_payload,
+)
+from tests.performance.pacing import sample_paced_schedule
 from tests.performance.profile import Burst, WorkloadProfile
 from tests.performance.replay import ReplayOptions
 from tests.performance.workload import scheduled_events, summary_digest
@@ -437,6 +443,18 @@ def _tiny_live_profile(*, seed: int = 1) -> WorkloadProfile:
         bursts=(),
         failures=(),
     )
+
+
+def _paced_live_profile(*, seed: int = 1) -> WorkloadProfile:
+    """`_tiny_live_profile` with a schedule that outlives the cursor probe.
+
+    The harness fails a run whose churn finishes before input sampling does -
+    an input percentile measured against an idle cluster is not the figure the
+    report claims - so a `run_live_replay` test must schedule more events than
+    the probe takes samples. Paired with `sample_paced_schedule`, the extra
+    events cost event-loop turns, not wall time.
+    """
+    return dataclasses.replace(_tiny_live_profile(seed=seed), steady_events_per_second=10)
 
 
 # ---------------------------------------------------------------------------
@@ -1013,20 +1031,19 @@ async def test_verify_ownership_returns_validated_pod_snapshot() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_run_live_replay_full_happy_path_matches_cluster_digest() -> None:
+async def test_run_live_replay_full_happy_path_matches_cluster_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
     harness_clients: list[_FakeKubeClient] = []
     app_clients: list[_FakeKubeClient] = []
     deps = _happy_deps(
         namespaces, pods, RUN_ID, harness_clients=harness_clients, app_clients=app_clients
     )
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(
-        time_scale=1.0, sample_interval=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep
-    )
+    options = sample_paced_schedule(monkeypatch).options(sample_interval=1.0)
 
     report = await run_live_replay(
-        _tiny_live_profile(),
+        _paced_live_profile(),
         options,
         context=CONTEXT,
         expected_cluster_id=CLUSTER_ID,
@@ -1078,6 +1095,40 @@ async def test_run_live_replay_full_happy_path_matches_cluster_digest() -> None:
     assert app_client.list_pods_calls == []
 
     assert report.churn_started_before_input
+
+
+async def test_churn_failed_reports_only_a_finished_task_that_did_not_succeed() -> None:
+    """One predicate, used before each cursor sample: a churn task that is
+    still running (or finished cleanly) must not suppress the measurement,
+    while a crashed or cancelled one must."""
+
+    async def never() -> None:
+        await asyncio.Event().wait()
+
+    async def fine() -> None:
+        return None
+
+    async def boom() -> None:
+        raise RuntimeError("churn died")
+
+    running = asyncio.create_task(never())
+    assert live._churn_failed(running) is False
+    running.cancel()
+    # `CancelledError` from a plain `task.cancel()` carries no message, so the
+    # required match pattern is the empty-message anchor (a literal `""` would
+    # match anything and pytest warns about it).
+    with pytest.raises(asyncio.CancelledError, match=r"^$"):
+        await running
+    assert live._churn_failed(running) is True
+
+    finished = asyncio.create_task(fine())
+    await finished
+    assert live._churn_failed(finished) is False
+
+    crashed = asyncio.create_task(boom())
+    with pytest.raises(RuntimeError, match="churn died"):
+        await crashed
+    assert live._churn_failed(crashed) is True
 
 
 async def test_run_live_replay_aborts_and_still_closes_clients_on_guard_failure() -> None:
@@ -1237,7 +1288,9 @@ async def test_make_live_watch_source_records_owned_modified_events_at_receipt()
         await agen.aclose()
 
 
-async def test_run_live_replay_records_at_receipt_when_the_patch_ack_lags() -> None:
+async def test_run_live_replay_records_at_receipt_when_the_patch_ack_lags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Reproduces the ack-race the review found: a real API server delivers the
     watch event over a different connection than the patch response, so the
     event can be rendered *before* the patch call returns. Recording at ack
@@ -1261,11 +1314,10 @@ async def test_run_live_replay_records_at_receipt_when_the_patch_ack_lags() -> N
             lambda: app_clients[-1], run_id
         ),
     )
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+    options = sample_paced_schedule(monkeypatch).options()
 
     report = await run_live_replay(
-        _tiny_live_profile(),
+        _paced_live_profile(),
         options,
         context=CONTEXT,
         expected_cluster_id=CLUSTER_ID,
@@ -1274,8 +1326,417 @@ async def test_run_live_replay_records_at_receipt_when_the_patch_ack_lags() -> N
     )
 
     assert report.dropped_updates == 0
-    assert report.event_to_render.count == 2
+    assert report.churn is not None
+    # Every churned event is still rendered exactly once, and none of them is
+    # left pending by the record-at-receipt ordering.
+    assert report.update_latency.count == report.churn.observed_events
     assert report.expected_digest == report.final_digest
+
+
+async def test_run_live_replay_publishes_a_metadata_only_update_metric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live churn workload patches only `TICK_LABEL`, which no Pod column
+    renders, so its samples end at a *no-op* diff. The report - and every
+    artifact built from it - must say so instead of publishing the figure under
+    the rendered-frame metric name the 250 ms budget is stated against."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(namespaces, pods, RUN_ID)
+
+    report = await run_live_replay(
+        _paced_live_profile(),
+        sample_paced_schedule(monkeypatch).options(),
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert report.update_latency_kind is UpdateLatencyKind.WATCH_TO_DIFF_COMPLETION
+    assert report.update_latency.count > 0
+
+    latency = report_payload(_report_as_benchmark(report))["latency"]
+    assert isinstance(latency, dict)
+    assert latency["update_latency_kind"] == "watch_to_diff_completion"
+    assert latency["event_to_render"] is None
+    watch_to_diff = latency["watch_to_diff_completion"]
+    assert isinstance(watch_to_diff, dict)
+    assert watch_to_diff["count"] == report.update_latency.count
+
+    markdown = render_markdown(_report_as_benchmark(report))
+    assert "- Watch receipt to diff completion p95:" in markdown
+    assert "Event to render" not in markdown
+
+
+# ---------------------------------------------------------------------------
+# C1b: cursor sampling is gated on a real watch receipt, not on patch dispatch
+# ---------------------------------------------------------------------------
+
+
+class _CountingPilot:
+    """Pilot stand-in for `until`, which spends a *virtual* pause budget.
+
+    `until` decrements its remaining timeout by the step it asked for rather
+    than by measured elapsed time, so a `pause` that merely yields makes the
+    poll count exactly `timeout / 0.05` - deterministic, with no wall time and
+    no timing assertion.
+    """
+
+    def __init__(self, *, on_pause: Callable[[int], None] | None = None) -> None:
+        self.pauses = 0
+        self._on_pause = on_pause
+
+    async def pause(self, delay: float = 0.0) -> None:
+        self.pauses += 1
+        if self._on_pause is not None:
+            self._on_pause(self.pauses)
+        await asyncio.sleep(0)
+
+
+async def _never_finishing_churn() -> None:
+    await asyncio.Event().wait()
+
+
+async def _failing_churn() -> None:
+    raise ApiStatusError(422, "test operation failed for guarded patch")
+
+
+async def test_make_live_watch_source_signals_the_first_owned_watch_receipt() -> None:
+    """The signal the input probe waits on must be set once an owned `MODIFIED`
+    event has been *applied* - never by the LIST phase, a foreign namespace, a
+    Pod without this run's ownership labels, or an owned event the application
+    has merely been handed."""
+    run_id = "run1"
+    _, pods = _build_fake_topology(run_id, 2, 4)
+    kube = _FakeKubeClient({}, pods)
+    recorder = BenchmarkRecorder()
+    receipt = asyncio.Event()
+    expected_namespaces = frozenset(namespace for namespace, _name in pods)
+    source = make_live_watch_source(
+        kube,
+        expected_namespaces,
+        run_id=run_id,
+        recorder=recorder,
+        watch_receipt=receipt,
+    )
+
+    agen = source("pods", "*")
+    try:
+        for _ in range(len(pods)):
+            await agen.__anext__()
+        assert not receipt.is_set()
+
+        owned = next(iter(pods.values()))
+        foreign = PodSummary(
+            name="stray",
+            namespace="default",
+            phase="Running",
+            ready="1/1",
+            restarts=0,
+            node="node-x",
+        )
+        kube.events.put_nowait(("MODIFIED", foreign))
+        kube.events.put_nowait(("MODIFIED", dataclasses.replace(owned, labels=())))
+        kube.events.put_nowait(("ADDED", owned))
+        # The foreign-namespace event is filtered out entirely; the unowned
+        # MODIFIED and the owned ADDED are both yielded but neither is churn
+        # this run caused.
+        await agen.__anext__()
+        await agen.__anext__()
+        assert not receipt.is_set()
+
+        kube.events.put_nowait(("MODIFIED", owned))
+        await agen.__anext__()
+        # Handed over, not yet applied: the consumer has only just been given
+        # the event, so the gate must stay shut.
+        assert not receipt.is_set()
+
+        kube.events.put_nowait(("MODIFIED", owned))
+        await agen.__anext__()
+        # Asking for the next event is the proof: `WatchManager` returns from
+        # `apply_event` before it comes back here, so the store now holds it.
+        assert receipt.is_set()
+    finally:
+        assert isinstance(agen, AsyncGenerator)
+        await agen.aclose()
+
+
+async def test_wait_for_first_watch_receipt_blocks_until_the_receipt_arrives() -> None:
+    """Cursor sampling may only begin once the application has actually
+    received an owned watch event, so the wait must not return while churn is
+    merely dispatched."""
+    receipt = asyncio.Event()
+    churn_task = asyncio.create_task(_never_finishing_churn())
+    pilot = _CountingPilot(on_pause=lambda count: receipt.set() if count == 3 else None)
+
+    try:
+        observed = await live.wait_for_first_watch_receipt(
+            pilot,
+            watch_receipt=receipt,
+            churn_task=churn_task,
+            timeout=5.0,
+            recorder=BenchmarkRecorder(),
+        )
+    finally:
+        churn_task.cancel()
+        # A plain `task.cancel()` carries no message, so the required match
+        # pattern is the empty-message anchor (see `_churn_failed`'s test).
+        with pytest.raises(asyncio.CancelledError, match=r"^$"):
+            await churn_task
+
+    assert observed is True
+    assert pilot.pauses == 3
+
+
+async def test_wait_for_first_watch_receipt_returns_false_when_churn_dies_first() -> None:
+    """A churn task that died before any watch event must end the wait at once
+    and report "no receipt" - the caller aborts the probe rather than timing
+    out on a table nothing is updating."""
+    receipt = asyncio.Event()
+    churn_task = asyncio.create_task(_failing_churn())
+    await asyncio.sleep(0)
+    pilot = _CountingPilot()
+
+    observed = await live.wait_for_first_watch_receipt(
+        pilot,
+        watch_receipt=receipt,
+        churn_task=churn_task,
+        timeout=5.0,
+        recorder=BenchmarkRecorder(),
+    )
+
+    assert observed is False
+    assert pilot.pauses == 0
+    assert isinstance(churn_task.exception(), ApiStatusError)
+
+
+async def test_wait_for_first_watch_receipt_times_out_when_nothing_ever_arrives() -> None:
+    """Neither a receipt nor a finished churn task is a hang: the bounded wait
+    fails by name."""
+    churn_task = asyncio.create_task(_never_finishing_churn())
+    pilot = _CountingPilot()
+
+    try:
+        with pytest.raises(WaitTimeout, match="owned watch event"):
+            await live.wait_for_first_watch_receipt(
+                pilot,
+                watch_receipt=asyncio.Event(),
+                churn_task=churn_task,
+                timeout=0.1,
+                recorder=BenchmarkRecorder(),
+            )
+    finally:
+        churn_task.cancel()
+        # A plain `task.cancel()` carries no message, so the required match
+        # pattern is the empty-message anchor (see `_churn_failed`'s test).
+        with pytest.raises(asyncio.CancelledError, match=r"^$"):
+            await churn_task
+
+    assert pilot.pauses == 2
+
+
+class _WithheldWatchMutationClient(_FakeMutationClient):
+    """Applies the guarded patch but withholds the watch event until released.
+
+    Models the real race the review named: `progress.started` is incremented
+    before `patch_pod_labels_guarded` is awaited, so mutation dispatch proves
+    nothing about the application having seen a single watch event.
+    """
+
+    def __init__(
+        self,
+        kube: Callable[[], _FakeKubeClient],
+        run_id: str,
+        *,
+        release: asyncio.Event,
+    ) -> None:
+        super().__init__(kube, run_id)
+        self._release = release
+
+    async def _apply(self, namespace: str, name: str, *, uid: str, tick: str) -> None:
+        await self._release.wait()
+        await super()._apply(namespace, name, uid=uid, tick=tick)
+
+
+async def _poll_until(
+    predicate: Callable[[], bool],
+    run: asyncio.Task[Any],
+    *,
+    label: str,
+    attempts: int = 1000,
+) -> None:
+    """Poll *predicate* while *run* is still going, or fail by name.
+
+    Bounded so a broken run surfaces its own failure instead of hanging the
+    test; nothing here asserts on how long anything took.
+    """
+    for _ in range(attempts):
+        if predicate():
+            return
+        if run.done():
+            await run
+            raise AssertionError(f"the live run finished before {label}")
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{label} never happened")
+
+
+async def test_run_live_replay_does_not_sample_input_before_the_first_watch_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The decisive claim: with the watch event withheld, cursor sampling must
+    not start even though every gate the old code used (mutation dispatched,
+    churn task alive) is already satisfied.
+
+    The observation window below is not a timing assertion - the assertions are
+    on *what was observed*, never on how long it took. It exists because
+    `until` polls through the real Textual pilot, so a run gated on mutation
+    dispatch would have entered sampling within it.
+    """
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    app_clients: list[_FakeKubeClient] = []
+    mutation_clients: list[_WithheldWatchMutationClient] = []
+    release = asyncio.Event()
+
+    def mutation_factory(run_id_arg: str) -> _WithheldWatchMutationClient:
+        client = _WithheldWatchMutationClient(lambda: app_clients[-1], run_id_arg, release=release)
+        mutation_clients.append(client)
+        return client
+
+    deps = _happy_deps(
+        namespaces,
+        pods,
+        RUN_ID,
+        app_clients=app_clients,
+        mutation_client_factory=mutation_factory,
+    )
+
+    pairs = 3
+    schedule = sample_paced_schedule(monkeypatch, pairs=pairs)
+
+    backlog_at_sampling: list[int] = []
+    real_sample = replay_mod.sample_cursor_input
+
+    async def spy(pilot: Any, table: Any, recorder: BenchmarkRecorder, **kwargs: Any) -> None:
+        backlog_at_sampling.append(recorder.phases().max_backlog_depth)
+        await real_sample(pilot, table, recorder, **kwargs)
+
+    monkeypatch.setattr(live, "sample_cursor_input", spy)
+
+    run = asyncio.create_task(
+        run_live_replay(
+            _paced_live_profile(),
+            schedule.options(),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+    )
+    try:
+        await _poll_until(
+            lambda: bool(mutation_clients) and bool(mutation_clients[0].calls),
+            run,
+            label="the first guarded patch was dispatched",
+        )
+        for _ in range(6):
+            await asyncio.sleep(0.05)
+        assert backlog_at_sampling == []
+    finally:
+        release.set()
+
+    report = await run
+
+    assert backlog_at_sampling != []
+    assert backlog_at_sampling[0] >= 1
+    assert report.input_latency.count == 2 * pairs
+    assert report.churn_started_before_input
+
+
+async def test_run_live_replay_propagates_churn_failure_before_any_watch_receipt() -> None:
+    """Churn that dies before the first watch receipt must abort the run with
+    the underlying API status, not sit out the receipt wait and report a
+    timeout - and never hang."""
+
+    class _AlwaysFailingMutationClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def connect(self) -> None:
+            return None
+
+        async def patch_pod_labels_guarded(
+            self, namespace: str, name: str, *, uid: str, tick: str
+        ) -> None:
+            raise ApiStatusError(422, "test operation failed for guarded patch")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(
+        namespaces,
+        pods,
+        RUN_ID,
+        mutation_client_factory=lambda _run_id: _AlwaysFailingMutationClient(),
+    )
+    monotonic_fn, async_sleep = _virtual_clock()
+
+    with pytest.raises(ApiStatusError, match="test operation failed"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(
+                time_scale=1.0,
+                monotonic_fn=monotonic_fn,
+                async_sleep=async_sleep,
+                input_sample_pairs=2,
+            ),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+            limits=LiveLimits(initial_render_timeout_seconds=30.0),
+        )
+
+
+async def test_run_live_replay_fails_when_churn_completes_without_a_watch_receipt() -> None:
+    """Churn that completed cleanly while the application saw no owned watch
+    event cannot support an "under churn" input percentile: the run fails by
+    name instead of publishing idle cursor moves."""
+
+    class _SilentMutationClient(_FakeMutationClient):
+        """Applies the guarded patch but never wakes the watch."""
+
+        async def _apply(self, namespace: str, name: str, *, uid: str, tick: str) -> None:
+            return None
+
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    app_clients: list[_FakeKubeClient] = []
+    deps = _happy_deps(
+        namespaces,
+        pods,
+        RUN_ID,
+        app_clients=app_clients,
+        mutation_client_factory=lambda run_id_arg: _SilentMutationClient(
+            lambda: app_clients[-1], run_id_arg
+        ),
+    )
+    monotonic_fn, async_sleep = _virtual_clock()
+
+    with pytest.raises(WaitTimeout, match="input sampling incomplete"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(
+                time_scale=1.0,
+                monotonic_fn=monotonic_fn,
+                async_sleep=async_sleep,
+                input_sample_pairs=2,
+            ),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+            limits=LiveLimits(initial_render_timeout_seconds=30.0),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1283,15 +1744,16 @@ async def test_run_live_replay_records_at_receipt_when_the_patch_ack_lags() -> N
 # ---------------------------------------------------------------------------
 
 
-async def test_run_live_replay_churns_the_tick_label_and_preserves_everything_else() -> None:
+async def test_run_live_replay_churns_the_tick_label_and_preserves_everything_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
     mutation_clients: list[_FakeMutationClient] = []
     deps = _happy_deps(namespaces, pods, RUN_ID, mutation_clients=mutation_clients)
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+    options = sample_paced_schedule(monkeypatch).options()
 
     report = await run_live_replay(
-        _tiny_live_profile(),
+        _paced_live_profile(),
         options,
         context=CONTEXT,
         expected_cluster_id=CLUSTER_ID,
@@ -1311,7 +1773,9 @@ async def test_run_live_replay_churns_the_tick_label_and_preserves_everything_el
     assert report.expected_digest == report.final_digest
 
 
-async def test_run_live_replay_reads_ground_truth_while_the_watch_is_live() -> None:
+async def test_run_live_replay_reads_ground_truth_while_the_watch_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The ground-truth read and the convergence wait must both happen inside
     the measured window: reading after `watch_manager.stop_all()` compares a
     frozen store against a cluster that was still changing."""
@@ -1321,8 +1785,7 @@ async def test_run_live_replay_reads_ground_truth_while_the_watch_is_live() -> N
     deps = _happy_deps(
         namespaces, pods, RUN_ID, harness_clients=harness_clients, app_clients=app_clients
     )
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+    options = sample_paced_schedule(monkeypatch).options()
 
     watch_live_during_reads: list[bool] = []
 
@@ -1332,7 +1795,7 @@ async def test_run_live_replay_reads_ground_truth_while_the_watch_is_live() -> N
 
     async def run() -> None:
         await run_live_replay(
-            _tiny_live_profile(),
+            _paced_live_profile(),
             options,
             context=CONTEXT,
             expected_cluster_id=CLUSTER_ID,
@@ -1355,7 +1818,9 @@ async def test_run_live_replay_reads_ground_truth_while_the_watch_is_live() -> N
     assert all(watch_live_during_reads)
 
 
-async def test_run_live_replay_waits_for_the_store_digest_to_converge() -> None:
+async def test_run_live_replay_waits_for_the_store_digest_to_converge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Watch propagation lags the patch acknowledgement. Without an explicit
     convergence wait the store digest is read while the last events are still
     in flight, producing a false digest mismatch (CLI exit 1)."""
@@ -1380,11 +1845,10 @@ async def test_run_live_replay_waits_for_the_store_digest_to_converge() -> None:
             lambda: app_clients[-1], run_id
         ),
     )
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+    options = sample_paced_schedule(monkeypatch).options()
 
     report = await run_live_replay(
-        _tiny_live_profile(),
+        _paced_live_profile(),
         options,
         context=CONTEXT,
         expected_cluster_id=CLUSTER_ID,
@@ -1771,13 +2235,14 @@ async def test_drive_live_churn_bounds_every_mutation_attempt() -> None:
     assert progress.completed == 0
 
 
-async def test_run_live_replay_reports_requested_and_achieved_churn_rate() -> None:
+async def test_run_live_replay_reports_requested_and_achieved_churn_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The design doc forbids presenting a requested rate as an achieved one:
     both must be reported, and they must be allowed to differ."""
     namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
     deps = _happy_deps(namespaces, pods, RUN_ID)
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+    options = sample_paced_schedule(monkeypatch).options()
 
     profile = dataclasses.replace(_tiny_live_profile(), duration_seconds=2)
     report = await run_live_replay(
@@ -1790,18 +2255,23 @@ async def test_run_live_replay_reports_requested_and_achieved_churn_rate() -> No
     )
 
     assert report.churn is not None
-    # 4 events requested over 2 seconds (2 events/s requested); the driver
-    # observed all 4 within a 1.0 s window, i.e. a different achieved rate.
+    # 4 events requested over 2 seconds (2 events/s requested). The test's
+    # pacing seam lets one scheduled event through per completed cursor sample,
+    # so the run consumes 3 of the 4 inter-event delays inside the measured
+    # window and the achieved rate lands somewhere else entirely - which is the
+    # point: the two figures are reported separately and may differ.
     assert report.churn.requested_events == 4
     assert report.churn.requested_events_per_second == 2.0
     assert report.churn.observed_events == 4
-    assert report.churn.wall_seconds == 1.0
-    assert report.churn.achieved_events_per_second == 4.0
+    assert report.churn.wall_seconds == 1.5
+    assert report.churn.achieved_events_per_second == pytest.approx(4 / 1.5)
     assert report.churn.requested_events_per_second != report.churn.achieved_events_per_second
     assert report.churn.mutation_throttles == 0
 
 
-async def test_run_live_replay_counts_mutation_throttles_outside_read_telemetry() -> None:
+async def test_run_live_replay_counts_mutation_throttles_outside_read_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Harness write traffic must never be reported as application read-path
     API telemetry."""
 
@@ -1810,12 +2280,19 @@ async def test_run_live_replay_counts_mutation_throttles_outside_read_telemetry(
             self, kube: Callable[[], _FakeKubeClient] | _FakeKubeClient, run_id: str
         ) -> None:
             super().__init__(kube, run_id)
+            self.attempts = 0
             self.throttled = False
 
         async def patch_pod_labels_guarded(
             self, namespace: str, name: str, *, uid: str, tick: str
         ) -> None:
-            if not self.throttled:
+            self.attempts += 1
+            # Throttle the *second* guarded patch, not the first: cursor
+            # sampling now waits for the first patch's watch event, and this
+            # test's pacing seam gates every injected sleep - including the
+            # retry backoff - on a completed cursor sample. Throttling the
+            # first patch would therefore deadlock the seam, not the harness.
+            if self.attempts > 1 and not self.throttled:
                 self.throttled = True
                 raise ApiStatusError(429, "Too Many Requests")
             await super().patch_pod_labels_guarded(namespace, name, uid=uid, tick=tick)
@@ -1829,11 +2306,10 @@ async def test_run_live_replay_counts_mutation_throttles_outside_read_telemetry(
             lambda: app_clients[-1], run_id
         ),
     )
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+    options = sample_paced_schedule(monkeypatch).options()
 
     report = await run_live_replay(
-        _tiny_live_profile(),
+        _paced_live_profile(),
         options,
         context=CONTEXT,
         expected_cluster_id=CLUSTER_ID,
@@ -1988,7 +2464,9 @@ async def test_read_and_validate_owned_pods_rejects_identity_or_ownership_loss(
         await read_and_validate_owned_pods(kube, run_id=RUN_ID, expected=expected)
 
 
-async def test_run_live_replay_rejects_a_pod_that_lost_ownership_during_churn() -> None:
+async def test_run_live_replay_rejects_a_pod_that_lost_ownership_during_churn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
     harness_clients: list[_FakeKubeClient] = []
     deps = _happy_deps(namespaces, pods, RUN_ID, harness_clients=harness_clients)
@@ -2007,12 +2485,11 @@ async def test_run_live_replay_rejects_a_pod_that_lost_ownership_during_churn() 
         return client
 
     deps = dataclasses.replace(deps, harness_kube_client_factory=harness_factory)
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+    options = sample_paced_schedule(monkeypatch).options()
 
     with pytest.raises(ValueError, match="post-churn ownership revalidation failed"):
         await run_live_replay(
-            _tiny_live_profile(),
+            _paced_live_profile(),
             options,
             context=CONTEXT,
             expected_cluster_id=CLUSTER_ID,
@@ -2055,7 +2532,9 @@ async def test_run_live_replay_names_watch_api_errors_in_a_wait_timeout() -> Non
         )
 
 
-async def test_run_live_replay_connects_the_mutation_client_before_the_app_starts() -> None:
+async def test_run_live_replay_connects_the_mutation_client_before_the_app_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`load_kube_config` can invoke an exec credential plugin; that latency is
     paid once, up front, under an explicit bound - not inside the first
     measured mutation."""
@@ -2083,11 +2562,10 @@ async def test_run_live_replay_connects_the_mutation_client_before_the_app_start
         return original_kube_factory(read_telemetry)  # type: ignore[return-value]
 
     deps = dataclasses.replace(deps, kube_client_factory=recording_kube_factory)
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+    options = sample_paced_schedule(monkeypatch).options()
 
     await run_live_replay(
-        _tiny_live_profile(),
+        _paced_live_profile(),
         options,
         context=CONTEXT,
         expected_cluster_id=CLUSTER_ID,
@@ -2128,16 +2606,17 @@ async def test_run_live_replay_bounds_the_mutation_client_connect() -> None:
     assert created[0].closed
 
 
-async def test_run_live_replay_measures_input_latency_with_the_injected_clock() -> None:
+async def test_run_live_replay_measures_input_latency_with_the_injected_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Churn uses the injected clock; input latency must use the same one, or a
     virtual-clock latency assertion measures nothing."""
     namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
     deps = _happy_deps(namespaces, pods, RUN_ID)
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+    options = sample_paced_schedule(monkeypatch, pairs=3).options()
 
     report = await run_live_replay(
-        _tiny_live_profile(),
+        _paced_live_profile(),
         options,
         context=CONTEXT,
         expected_cluster_id=CLUSTER_ID,
@@ -2145,8 +2624,188 @@ async def test_run_live_replay_measures_input_latency_with_the_injected_clock() 
         deps=deps,
     )
 
-    assert report.input_latency.count == 2
+    assert report.input_latency.count == 6
     assert report.input_latency.maximum_seconds == 0.0
+
+
+async def test_run_live_replay_takes_the_configured_number_of_cursor_sample_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live input figure must rest on the same configurable sample size as
+    replay, and each `down`/`up` pair must return the cursor to its original
+    row so the post-churn row and digest checks see an unmoved selection."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(namespaces, pods, RUN_ID)
+    options = sample_paced_schedule(monkeypatch, pairs=5).options()
+
+    report = await run_live_replay(
+        # Ten samples need a schedule with more than ten events left to run,
+        # or churn legitimately finishes mid-probe and the run fails by name.
+        dataclasses.replace(_paced_live_profile(), steady_events_per_second=20),
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert report.input_latency.count == 10
+
+
+async def test_run_live_replay_keeps_churn_running_throughout_input_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live probe must measure against an actively mutating cluster for
+    its whole duration, never against a driver held after the first mutation.
+
+    Pacing comes from injected seams, not wall time: the churn driver's
+    inter-event sleep waits for a permit that each completed cursor sample
+    releases, so guarded mutations keep landing while the probe runs.
+    """
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    mutation_clients: list[_FakeMutationClient] = []
+    deps = _happy_deps(namespaces, pods, RUN_ID, mutation_clients=mutation_clients)
+
+    pairs = 3
+    total_samples = 2 * pairs
+    schedule = sample_paced_schedule(monkeypatch, pairs=pairs)
+
+    snapshots: list[int] = []
+    paced_measure = replay_mod.measure_cursor_input
+
+    async def spy(*args: Any, **kwargs: Any) -> float:
+        elapsed = await paced_measure(*args, **kwargs)
+        snapshots.append(len(mutation_clients[0].calls))
+        return float(elapsed)
+
+    monkeypatch.setattr(replay_mod, "measure_cursor_input", spy)
+
+    report = await run_live_replay(
+        _paced_live_profile(),
+        schedule.options(),
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert len(snapshots) == total_samples
+    assert report.input_latency.count == total_samples
+    # The decisive claim: churn is not gated to a single mutation for the
+    # whole probe - more than one guarded patch lands while sampling runs.
+    assert snapshots[-1] - snapshots[0] >= 2
+    assert snapshots == sorted(snapshots)
+    assert report.churn_started_before_input
+
+
+async def test_run_live_replay_rejects_input_sampling_when_churn_finishes_early() -> None:
+    """A cleanly completed churn task must fail the run if input sampling did
+    not finish first; otherwise the reported percentile includes idle samples."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(namespaces, pods, RUN_ID)
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(
+        time_scale=1.0,
+        monotonic_fn=monotonic_fn,
+        async_sleep=async_sleep,
+        input_sample_pairs=3,
+    )
+
+    with pytest.raises(
+        WaitTimeout,
+        match="input sampling incomplete: churn finished before all 3 cursor sample pairs completed",
+    ):
+        await run_live_replay(
+            dataclasses.replace(_tiny_live_profile(), steady_events_per_second=1),
+            options,
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
+async def test_run_live_replay_rejects_a_non_positive_input_sample_pair_count() -> None:
+    """Zero pairs would publish an input percentile computed from no samples.
+    Rejected before any cluster identity, ownership, or mutation work."""
+    deps = LiveDependencies(
+        command_runner=_never_called("command_runner"),
+        active_context=_never_called("active_context"),
+        context_host=_never_called("context_host"),
+        kube_client_factory=_never_called("kube_client_factory"),
+        harness_kube_client_factory=_never_called("harness_kube_client_factory"),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+    )
+
+    with pytest.raises(ValueError, match="input_sample_pairs must be positive"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0, input_sample_pairs=0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [0.0, -1.0, float("nan"), float("inf"), float("-inf")],
+    ids=["zero", "negative", "nan", "positive-infinity", "negative-infinity"],
+)
+async def test_run_live_replay_rejects_a_non_finite_or_non_positive_input_ack_timeout(
+    timeout: float,
+) -> None:
+    """A live run reaches the cursor probe only after cluster identity,
+    ownership and churn have already started, so an unbounded
+    `asyncio.timeout(inf)`/`nan` would hang a seeded cluster indefinitely.
+    Every external seam below fails the test if it is called, proving the
+    rejection happens before any cluster or subprocess work."""
+    deps = LiveDependencies(
+        command_runner=_never_called("command_runner"),
+        active_context=_never_called("active_context"),
+        context_host=_never_called("context_host"),
+        kube_client_factory=_never_called("kube_client_factory"),
+        harness_kube_client_factory=_never_called("harness_kube_client_factory"),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+        resolve_sha=_never_called("resolve_sha"),
+    )
+
+    with pytest.raises(ValueError, match="input_ack_timeout must be finite and positive"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0, input_ack_timeout=timeout),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
+async def test_run_live_replay_rejects_zero_event_profiles_before_external_work() -> None:
+    """Zero-event live profiles must fail before identity, ownership, or SHA work."""
+    deps = LiveDependencies(
+        command_runner=_never_called("command_runner"),
+        active_context=_never_called("active_context"),
+        context_host=_never_called("context_host"),
+        kube_client_factory=_never_called("kube_client_factory"),
+        harness_kube_client_factory=_never_called("harness_kube_client_factory"),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+        resolve_sha=_never_called("resolve_sha"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="performance input sampling requires at least one scheduled churn event",
+    ):
+        await run_live_replay(
+            dataclasses.replace(_tiny_live_profile(), steady_events_per_second=0),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
 
 
 async def test_run_live_replay_rejects_a_profile_whose_bursts_escape_its_duration() -> None:
@@ -2474,19 +3133,18 @@ async def test_run_live_replay_fails_closed_when_sha_cannot_be_resolved() -> Non
         )
 
 
-async def test_run_live_replay_builds_a_live_specific_manifest() -> None:
+async def test_run_live_replay_builds_a_live_specific_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Retained live evidence must record which cluster matrix was qualified:
     the verified context/ARM id plus Kubernetes server version and node-pool
     metadata, resolved through bounded seams and persisted in the manifest."""
     namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
     deps = _happy_deps(namespaces, pods, RUN_ID)
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(
-        time_scale=1.0, sample_interval=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep
-    )
+    options = sample_paced_schedule(monkeypatch).options(sample_interval=1.0)
 
     report = await run_live_replay(
-        _tiny_live_profile(),
+        _paced_live_profile(),
         options,
         context=CONTEXT,
         expected_cluster_id=CLUSTER_ID,
@@ -2525,20 +3183,19 @@ async def test_run_live_replay_builds_a_live_specific_manifest() -> None:
     assert "perftest" in markdown
 
 
-async def test_run_live_replay_exercises_ui_at_scale_scenarios_during_churn() -> None:
+async def test_run_live_replay_exercises_ui_at_scale_scenarios_during_churn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A passing live run must provide UI-at-scale evidence: filter, sort,
     namespace switch, split pane, describe, and multi-log are driven through the
     real Textual pilot during active churn and their outcomes/latencies are
     recorded, without weakening the digest/ownership safety guarantees."""
     namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
     deps = _happy_deps(namespaces, pods, RUN_ID)
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(
-        time_scale=1.0, sample_interval=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep
-    )
+    options = sample_paced_schedule(monkeypatch).options(sample_interval=1.0)
 
     report = await run_live_replay(
-        _tiny_live_profile(),
+        _paced_live_profile(),
         options,
         context=CONTEXT,
         expected_cluster_id=CLUSTER_ID,
@@ -2617,7 +3274,9 @@ async def test_ui_scenarios_are_not_marked_ok_when_the_app_state_never_changes()
     assert [scenario.name for scenario in results if scenario.ok] == []
 
 
-async def test_run_live_replay_times_the_post_burst_drain() -> None:
+async def test_run_live_replay_times_the_post_burst_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The live churn driver must mark each burst boundary.
 
     Without it `post_burst_drain_seconds` stays empty and
@@ -2627,10 +3286,7 @@ async def test_run_live_replay_times_the_post_burst_drain() -> None:
     """
     namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
     deps = _happy_deps(namespaces, pods, RUN_ID)
-    monotonic_fn, async_sleep = _virtual_clock()
-    options = ReplayOptions(
-        time_scale=1.0, sample_interval=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep
-    )
+    options = sample_paced_schedule(monkeypatch).options(sample_interval=1.0)
     profile = dataclasses.replace(
         _tiny_live_profile(),
         steady_events_per_second=2,

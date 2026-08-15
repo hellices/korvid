@@ -151,8 +151,9 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
   responsibility boundaries, and a readiness checklist.
 - **[Performance and scale](https://github.com/hellices/korvid/blob/main/docs/performance.md)** — the measured envelope
   (1,000 pods at 24 watch events/second for 31 minutes against a real
-  cluster), the budgets that pass and the two that miss, and the known
-  limits — including which size makes interaction feel sluggish.
+  cluster), which budgets pass and which miss, which cursor-input figures were
+  withdrawn as invalid measurements, and the corrected 30-second live
+  smoke evidence and its remaining qualification limits.
 - **[Threat model](https://github.com/hellices/korvid/blob/main/docs/threat-model.md)** — exactly what crosses the
   embedded-provider boundary, what is redacted, the MCP and plugin trust
   boundaries, and the residual risks that are not mitigated. See

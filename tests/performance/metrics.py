@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from enum import StrEnum
 from time import monotonic
 from types import MappingProxyType
 
@@ -15,6 +16,34 @@ import psutil  # type: ignore[import-untyped]  # dependency ships without inline
 from korvid.k8s.telemetry import ReadTelemetryEvent
 
 _MIB = 1024 * 1024
+
+
+class UpdateLatencyKind(StrEnum):
+    """What a run's recorded update-latency samples actually measured.
+
+    `BenchmarkRecorder` times every watch event from application receipt to the
+    resource-update handler returning. Whether that interval is a *rendered*
+    update depends entirely on the workload:
+
+    * `EVENT_TO_RENDER` - the workload rewrites cells the table renders (the
+      deterministic replay churns phase/ready/restarts), so the sample ends at
+      an in-place cell write plus repaint request. This is the metric the
+      published 250 ms render budget is stated against.
+    * `WATCH_TO_DIFF_COMPLETION` - the workload changes only metadata no column
+      renders (the live driver's `korvid.dev/performance-tick` label), so the
+      patch gives the diff nothing to write and the sample ends at a no-op
+      diff. Almost always: AGE is recomputed per update, so a tick crossing a
+      minute, hour or day boundary does write a cell. The name claims the
+      weaker thing for that reason — handler completion, whatever the diff
+      turned out to do — rather than a rendered-frame measurement.
+
+    The kind travels with the report so artifacts publish the samples under the
+    name of what was measured, instead of advertising a metadata-only figure
+    against the rendered-frame budget.
+    """
+
+    EVENT_TO_RENDER = "event_to_render"
+    WATCH_TO_DIFF_COMPLETION = "watch_to_diff_completion"
 
 
 def _nearest_rank(samples: Sequence[float], percentile: float) -> float:
@@ -307,7 +336,17 @@ class PhaseSummary:
 @dataclass(frozen=True)
 class BenchmarkReport:
     manifest: RunManifest
-    event_to_render: LatencySummary
+    #: Watch-event receipt to resource-update-handler completion.
+    #: `update_latency_kind` states whether that interval ended at a rendered
+    #: cell or at a no-op diff; nothing else in the report can tell the two
+    #: apart, so the two are never published under the same name.
+    update_latency: LatencySummary
+    #: Cursor-input latency: the interval from injecting one key event into
+    #: the running app to the `ResourceTable` cursor row being observed on
+    #: its new index. It is an *acknowledgement* measurement, not a terminal
+    #: paint time and not a test-driver quiescence heuristic (Textual's
+    #: `Pilot.press` CPU-idle waits are deliberately excluded). Serialised as
+    #: `latency.input` in the JSON report.
     input_latency: LatencySummary
     process: ProcessSummary
     api: ApiSummary
@@ -317,6 +356,10 @@ class BenchmarkReport:
     coalesced_updates: int
     dropped_updates: int
     final_digest: str
+    #: What `update_latency` measured. Defaults to the rendered-cell meaning so
+    #: every existing rendered-cell construction keeps its published semantics;
+    #: a metadata-only workload must say so explicitly.
+    update_latency_kind: UpdateLatencyKind = UpdateLatencyKind.EVENT_TO_RENDER
     #: The workload digest the run is expected to converge to. Persisting it
     #: (and `digest_match`) means a report can demonstrate digest correctness
     #: after the process exits and name which side differed. `None` only for
@@ -421,7 +464,7 @@ class ProcessSampler:
 class BenchmarkRecorder:
     def __init__(self) -> None:
         self._pending_events: list[tuple[int, float]] = []
-        self._event_to_render: list[float] = []
+        self._update_latency: list[float] = []
         self._input_latency: list[float] = []
         self._api_events: list[ReadTelemetryEvent] = []
         self._rendered_updates = 0
@@ -504,7 +547,7 @@ class BenchmarkRecorder:
         self._rendered_updates += len(pending)
         self._coalesced_updates += max(len(pending) - 1, 0)
         for _, received_at in pending:
-            self._event_to_render.append(rendered_at - received_at)
+            self._update_latency.append(rendered_at - received_at)
         # The backlog is empty again: resolve every burst whose end has already
         # passed into a drain measurement (end -> backlog-clear interval).
         if self._burst_end_pending:
@@ -514,6 +557,13 @@ class BenchmarkRecorder:
             self._burst_end_pending = [end for end in self._burst_end_pending if end > rendered_at]
 
     def record_input(self, latency_seconds: float) -> None:
+        """Record one cursor-input sample.
+
+        *latency_seconds* must be measured from key injection to the
+        `ResourceTable` cursor row acknowledging the move (see
+        `replay.measure_cursor_input`) — never from a driver idle-wait
+        helper, which measures the harness, not the application.
+        """
         self._input_latency.append(latency_seconds)
 
     def record_api(self, event: ReadTelemetryEvent) -> None:
@@ -569,10 +619,12 @@ class BenchmarkRecorder:
         final_digest: str,
         expected_digest: str | None = None,
         churn: ChurnSummary | None = None,
+        update_latency_kind: UpdateLatencyKind = UpdateLatencyKind.EVENT_TO_RENDER,
     ) -> BenchmarkReport:
         return BenchmarkReport(
             manifest=manifest,
-            event_to_render=LatencySummary.from_samples(self._event_to_render),
+            update_latency=LatencySummary.from_samples(self._update_latency),
+            update_latency_kind=update_latency_kind,
             input_latency=LatencySummary.from_samples(self._input_latency),
             process=ProcessSummary.from_samples(
                 process_samples,
@@ -593,10 +645,58 @@ class BenchmarkRecorder:
         )
 
 
+def _latency_payload(summary: LatencySummary) -> dict[str, object]:
+    return {
+        "count": summary.count,
+        "p50_seconds": summary.p50_seconds,
+        "p95_seconds": summary.p95_seconds,
+        "p99_seconds": summary.p99_seconds,
+        "maximum_seconds": summary.maximum_seconds,
+    }
+
+
+# v2: `latency.event_to_render` became nullable. It is populated only when the
+# run's samples really are event-to-render (deterministic replay, which churns
+# rendered cells); a metadata-only workload publishes its samples under
+# `latency.watch_to_diff_completion` instead, discriminated by
+# `latency.update_latency_kind`. A v1 consumer that assumed
+# `latency.event_to_render` was always an object would misread a live artifact,
+# so the version is bumped rather than silently reshaped.
+#
+# Lives here, beside the function that decides the shape, so that reshaping the
+# payload and forgetting the number cannot be done in separate edits.
+SCHEMA_VERSION = 2
+
+
 def report_payload(report: BenchmarkReport) -> dict[str, object]:
+    """Machine-readable form of *report*.
+
+    Stamps `schema_version` itself. The number and the shape it describes are
+    then one edit apart: a constant kept beside a caller can be forgotten while
+    this function is reshaped, and the artifact would go out claiming a version
+    it no longer has.
+
+    `latency.input` carries the cursor-input samples: seconds from key
+    injection to cursor-row acknowledgement, not to a terminal repaint.
+
+    The update-latency samples are unrelated - they time a watch event from
+    application receipt to the table-update handler completing - and are
+    published under the key naming what the run's workload actually produced,
+    declared by `latency.update_latency_kind`. A rendered-cell workload fills
+    `latency.event_to_render` (the key the 250 ms render budget is stated
+    against) and leaves `latency.watch_to_diff_completion` null; a
+    metadata-only workload (the live driver's `korvid.dev/performance-tick`
+    label) produces a no-op diff, so it fills
+    `latency.watch_to_diff_completion` and leaves `latency.event_to_render`
+    null. Exactly one of the two is ever populated, so no consumer can read a
+    metadata-only figure as a rendered-frame result.
+    """
     api_operations = dict(report.api.operations)
     api_paths = {path: dict(counts) for path, counts in report.api.paths.items()}
+    kind = report.update_latency_kind
+    measured = _latency_payload(report.update_latency)
     return {
+        "schema_version": SCHEMA_VERSION,
         "manifest": {
             "profile_id": report.manifest.profile_id,
             "profile_hash": report.manifest.profile_hash,
@@ -619,20 +719,12 @@ def report_payload(report: BenchmarkReport) -> dict[str, object]:
             ],
         },
         "latency": {
-            "event_to_render": {
-                "count": report.event_to_render.count,
-                "p50_seconds": report.event_to_render.p50_seconds,
-                "p95_seconds": report.event_to_render.p95_seconds,
-                "p99_seconds": report.event_to_render.p99_seconds,
-                "maximum_seconds": report.event_to_render.maximum_seconds,
-            },
-            "input": {
-                "count": report.input_latency.count,
-                "p50_seconds": report.input_latency.p50_seconds,
-                "p95_seconds": report.input_latency.p95_seconds,
-                "p99_seconds": report.input_latency.p99_seconds,
-                "maximum_seconds": report.input_latency.maximum_seconds,
-            },
+            "update_latency_kind": kind.value,
+            "event_to_render": (measured if kind is UpdateLatencyKind.EVENT_TO_RENDER else None),
+            "watch_to_diff_completion": (
+                measured if kind is UpdateLatencyKind.WATCH_TO_DIFF_COMPLETION else None
+            ),
+            "input": _latency_payload(report.input_latency),
         },
         "process": {
             "sample_count": report.process.sample_count,
@@ -700,6 +792,17 @@ def _churn_payload(churn: ChurnSummary | None) -> dict[str, object] | None:
     }
 
 
+#: Human-readable name of each update-latency metric, used for the Markdown
+#: label so an artifact never prints "Event to render" for a run that measured
+#: a no-op diff.
+_UPDATE_LATENCY_LABELS: Mapping[UpdateLatencyKind, str] = MappingProxyType(
+    {
+        UpdateLatencyKind.EVENT_TO_RENDER: "Event to render",
+        UpdateLatencyKind.WATCH_TO_DIFF_COMPLETION: "Watch receipt to diff completion",
+    }
+)
+
+
 def render_markdown(report: BenchmarkReport) -> str:
     churn = report.churn
     operation_lines = [
@@ -713,6 +816,13 @@ def render_markdown(report: BenchmarkReport) -> str:
         f"(ok={str(scenario.ok).lower()})"
         for scenario in report.ui_scenarios
     ] or ["- none"]
+    update_label = _UPDATE_LATENCY_LABELS[report.update_latency_kind]
+    update_latency_lines = [
+        f"- Update latency metric: `{report.update_latency_kind.value}`",
+        f"- {update_label} p95: `{_format_seconds(report.update_latency.p95_seconds)}`",
+        f"- {update_label} p99: `{_format_seconds(report.update_latency.p99_seconds)}`",
+        f"- {update_label} max: `{_format_seconds(report.update_latency.maximum_seconds)}`",
+    ]
     manifest_lines = [
         f"- Profile ID: `{report.manifest.profile_id}`",
         f"- Profile hash: `{report.manifest.profile_hash}`",
@@ -735,10 +845,9 @@ def render_markdown(report: BenchmarkReport) -> str:
         *manifest_lines,
         "",
         "## Latency",
-        f"- Event to render p95: `{_format_seconds(report.event_to_render.p95_seconds)}`",
-        f"- Event to render p99: `{_format_seconds(report.event_to_render.p99_seconds)}`",
-        f"- Event to render max: `{_format_seconds(report.event_to_render.maximum_seconds)}`",
-        f"- Input latency p95: `{_format_seconds(report.input_latency.p95_seconds)}`",
+        *update_latency_lines,
+        f"- Input latency p95 (key injection to cursor-row acknowledgement): "
+        f"`{_format_seconds(report.input_latency.p95_seconds)}`",
         "",
         "## Process",
         f"- CPU max: `{_format_float(report.process.cpu_percent_max)}`",
