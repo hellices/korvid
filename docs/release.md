@@ -184,8 +184,19 @@ fi
 git tag -a v0.2.0 "$COMMIT" -m "korvid v0.2.0"
 test "$(git rev-list -n 1 refs/tags/v0.2.0)" = "$COMMIT"
 git push origin refs/tags/v0.2.0
-RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')
-gh run watch "$RUN_ID" --exit-status
+TAG_RUN_ID=
+attempt=0
+while [ -z "$TAG_RUN_ID" ] && [ "$attempt" -lt 30 ]; do
+  TAG_RUN_ID=$(gh run list --workflow Release --event push \
+    --branch v0.2.0 --commit "$COMMIT" --limit 1 \
+    --json databaseId --jq '.[0].databaseId // empty') || exit 1
+  attempt=$((attempt + 1))
+  [ -n "$TAG_RUN_ID" ] || sleep 2
+done
+test -n "$TAG_RUN_ID"
+TAG_RUN_COMMIT=$(gh run view "$TAG_RUN_ID" --json headSha --jq '.headSha')
+test "$TAG_RUN_COMMIT" = "$COMMIT"
+gh run watch "$TAG_RUN_ID" --exit-status
 ```
 
 The push starts `.github/workflows/release.yml`, which revalidates the tag

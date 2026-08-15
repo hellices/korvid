@@ -1527,6 +1527,11 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     assert 'gh run watch "$RUN_ID" --exit-status' in runbook
     assert f'git tag -a v{version} "$COMMIT" -m "korvid v{version}"' in runbook
     assert f"git push origin refs/tags/v{version}" in runbook
+    assert "TAG_RUN_ID=$(gh run list --workflow Release --event push" in runbook
+    assert f'--branch v{version} --commit "$COMMIT"' in runbook
+    assert 'TAG_RUN_COMMIT=$(gh run view "$TAG_RUN_ID" --json headSha' in runbook
+    assert 'test "$TAG_RUN_COMMIT" = "$COMMIT"' in runbook
+    assert 'gh run watch "$TAG_RUN_ID" --exit-status' in runbook
     assert f"gh release download v{version} --dir dist/v{version}" in runbook
     assert (
         f"gh attestation verify dist/v{version}/korvid-{version}-py3-none-any.whl"
