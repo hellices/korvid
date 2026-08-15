@@ -1329,6 +1329,8 @@ def test_release_notes_exist_for_the_version_being_shipped() -> None:
     assert f"# korvid v{version}" in notes
     assert "## Install" in notes
     assert f"korvid[all]=={version}" in notes
+    assert f"uv tool install 'korvid[all]=={version}'" in notes
+    assert "uv tool install --upgrade" not in notes
     assert f"pipx install --force 'korvid[all]=={version}'" in notes
     assert "## Verify" in notes
     assert "gh attestation verify" in notes
@@ -1974,7 +1976,10 @@ def test_release_docs_require_homebrew_tap_merge_and_version_verification() -> N
     assert '.headRefName == "bump-korvid-0.2.0"' in runbook
     assert '.headRepositoryOwner.login == "hellices"' in runbook
     assert "trusted bump-korvid-0.2.0 tap PR not found" in runbook
-    assert "git switch -c bump-korvid-" in runbook
+    assert "branch=bump-korvid-" in runbook
+    assert 'git show-ref --verify --quiet "refs/remotes/origin/$branch"' in runbook
+    assert 'git switch --track -c "$branch" "origin/$branch"' in runbook
+    assert "git diff --cached --quiet" in runbook
     assert "TAP_PR_URL=$(gh pr create" in runbook
     assert "could not identify created tap PR" in runbook
     assert f"korvid --version | grep -Fx 'korvid {version}'" in runbook
