@@ -1,0 +1,224 @@
+"""Bounded, literal text for the advisory blast-radius section (issue #283).
+
+Pure and Textual-free on purpose: `ImpactSummary` in, `tuple[str, ...]` out,
+so the exact wording an approval dialog shows is testable without a Pilot and
+cannot drift between the dialog and the tests.
+
+Every heading is machine-defined here; the only cluster-derived text that
+reaches a line is a resource identity, a relation/confidence/resolution enum
+value, an evidence field path, and a namespace/coverage scope - each
+flattened of control characters and length-capped, with the composed line
+capped again at `_MAX_LINE` because one line concatenates several of them.
+Nothing is formatted as Rich markup: `ConfirmScreen` appends these lines to
+a `rich.text.Text`, so a resource named `[bold red]web[/]` renders
+literally.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Sequence
+
+from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary
+from korvid.core.relationships import CoverageState, GraphResource, RelationshipEdge
+
+IMPACT_TITLE = "graph-derived impact (advisory):"
+
+#: Always the last line: the summary describes known relationships, not a
+#: prediction, and it never gates the approval the user asked for.
+ADVISORY_LINE = (
+    "  advisory only: known relationships from one bounded snapshot - not a prediction of"
+    " failure, no replacement for the server dry-run, and never a block on approval."
+)
+
+#: What the app renders when the snapshot could not be loaded at all (a
+#: timeout or an unexpected failure). Static text: an exception message can
+#: embed a response body, which must never reach the dialog.
+IMPACT_UNAVAILABLE_LINES: tuple[str, ...] = (
+    IMPACT_TITLE,
+    "  impact unavailable; approval remains available",
+)
+
+_DIRECT_TITLE = "known direct dependents (may be affected)"
+_TRANSITIVE_TITLE = "known transitive dependents (may be affected)"
+_COVERAGE_COMPLETE_LINE = "  graph coverage: complete"
+_COVERAGE_INCOMPLETE_LINE = (
+    "  graph coverage: incomplete - a missing dependent here does not prove none exists"
+)
+_TRAVERSAL_CAPPED_LINE = (
+    "  traversal capped: more dependents exist beyond the traversal limits and are not listed"
+)
+_SNAPSHOT_TRUNCATED_LINE = (
+    "  snapshot truncated: the relationship snapshot hit an input cap, so some resources"
+    " were never joined"
+)
+_INFERRED_NOTE_LINE = "  inferred relationships are labelled and never block this write"
+_TARGET_MISSING_LINE = "  target not found in this snapshot - dependents unknown"
+_ALL_NAMESPACES_LABEL = "all namespaces"
+
+_ACTION_LABEL = {
+    ImpactAction.DELETE: "delete",
+    ImpactAction.ROLLOUT_RESTART: "rollout restart",
+}
+
+#: Hard output bounds: an approval dialog must stay reviewable, and a
+#: pathological cluster must not be able to grow it.
+_MAX_ITEM_LINES = 10
+_MAX_UNRESOLVED_LINES = 5
+_MAX_COVERAGE_LINES = 5
+_MAX_PATH_HOPS = 3
+_MAX_TEXT = 120
+#: Total bound per composed line. `_MAX_TEXT` bounds each cluster-derived
+#: *fragment*, but an item line concatenates an identity and up to three
+#: hops; the dialog body is 70 columns wide, so a line that would wrap into
+#: a screenful on its own is truncated here instead.
+_MAX_LINE = 240
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
+    """Render one `ImpactSummary` as bounded, literal preview lines."""
+    lines = [
+        IMPACT_TITLE,
+        f"  {_ACTION_LABEL[summary.action]} {_resource_label(summary.target)}",
+    ]
+    if not summary.target_present:
+        # Directly under the action line: every count below is about the
+        # snapshot, and without the target in it they say nothing about
+        # the object the user is about to act on.
+        lines.append(_TARGET_MISSING_LINE)
+    lines.extend(_section(_DIRECT_TITLE, summary.direct))
+    lines.extend(_section(_TRANSITIVE_TITLE, summary.transitive))
+    lines.extend(_inferred_lines(summary))
+    lines.extend(_cycle_lines(summary))
+    lines.extend(_revisit_lines(summary))
+    lines.extend(_unresolved_lines(summary))
+    lines.append(_scope_line(summary))
+    lines.extend(_coverage_lines(summary))
+    lines.extend(_cap_lines(summary))
+    lines.append(ADVISORY_LINE)
+    return tuple(line[:_MAX_LINE] for line in lines)
+
+
+def _section(title: str, items: Sequence[ImpactItem]) -> list[str]:
+    """One dependent section: an explicit count, bounded rows, an overflow
+    note. "none in this snapshot" is information - distinct from a section
+    that was omitted."""
+    if not items:
+        return [f"  {title}: none in this snapshot"]
+    lines = [f"  {title}: {len(items)}"]
+    lines.extend(_item_line(item) for item in items[:_MAX_ITEM_LINES])
+    if len(items) > _MAX_ITEM_LINES:
+        lines.append(f"    ... {len(items) - _MAX_ITEM_LINES} more not shown (preview capped)")
+    return lines
+
+
+def _item_line(item: ImpactItem) -> str:
+    hops = " -> ".join(_hop(edge) for edge in item.path[:_MAX_PATH_HOPS])
+    if len(item.path) > _MAX_PATH_HOPS:
+        hops = f"{hops} -> ... {len(item.path) - _MAX_PATH_HOPS} more hops"
+    marker = " [inferred]" if item.inferred else ""
+    return f"    - {_resource_label(item.resource)} via {hops}{marker}"
+
+
+def _hop(edge: RelationshipEdge) -> str:
+    return f"{edge.relation.value} ({edge.confidence.value}) at {_safe(edge.evidence.field)}"
+
+
+def _inferred_lines(summary: ImpactSummary) -> list[str]:
+    if any(item.inferred for item in (*summary.direct, *summary.transitive)):
+        return [_INFERRED_NOTE_LINE]
+    return []
+
+
+def _cycle_lines(summary: ImpactSummary) -> list[str]:
+    if not summary.cycles:
+        return []
+    return [f"  relationship cycles: {len(summary.cycles)} (loop edges classified, not expanded)"]
+
+
+def _revisit_lines(summary: ImpactSummary) -> list[str]:
+    """Converging or parallel edges into an already-listed dependent.
+
+    Counted, never expanded: each dependent is listed once with the first
+    path that reached it, and this line says how many further known paths
+    the summary folded away - so "1 dependent" cannot be misread as "only
+    one relationship".
+    """
+    if not summary.revisits:
+        return []
+    return [
+        f"  additional known paths: {len(summary.revisits)}"
+        " (already-listed dependents reached again)"
+    ]
+
+
+def _scope_line(summary: ImpactSummary) -> str:
+    """The namespace this snapshot covered, always stated.
+
+    `graph coverage: complete` means complete *within this scope*; a
+    namespaced snapshot that never listed another namespace must not read
+    as a cluster-wide answer.
+    """
+    scope = _ALL_NAMESPACES_LABEL if summary.scope is None else _safe(summary.scope)
+    return f"  scope: {scope}"
+
+
+def _unresolved_lines(summary: ImpactSummary) -> list[str]:
+    if not summary.unresolved:
+        return []
+    lines = [f"  unresolved references in the affected set: {len(summary.unresolved)}"]
+    lines.extend(_unresolved_line(edge) for edge in summary.unresolved[:_MAX_UNRESOLVED_LINES])
+    if len(summary.unresolved) > _MAX_UNRESOLVED_LINES:
+        omitted = len(summary.unresolved) - _MAX_UNRESOLVED_LINES
+        lines.append(f"    ... {omitted} more not shown (preview capped)")
+    return lines
+
+
+def _unresolved_line(edge: RelationshipEdge) -> str:
+    return (
+        f"    - {_resource_label(edge.subject)} {edge.relation.value} ->"
+        f" {_resource_label(edge.target)} ({edge.resolution.value})"
+        f" at {_safe(edge.evidence.field)}"
+    )
+
+
+def _coverage_lines(summary: ImpactSummary) -> list[str]:
+    incomplete = [
+        record for record in summary.coverage if record.state is not CoverageState.COMPLETE
+    ]
+    if not incomplete:
+        return [_COVERAGE_COMPLETE_LINE]
+    lines = [_COVERAGE_INCOMPLETE_LINE]
+    for record in incomplete[:_MAX_COVERAGE_LINES]:
+        scope = f" @{_safe(record.scope)}" if record.scope else ""
+        target = f"{_safe(record.group or 'core')}/{_safe(record.resource)}"
+        lines.append(f"    - {target}{scope}: {record.state.value}")
+    if len(incomplete) > _MAX_COVERAGE_LINES:
+        omitted = len(incomplete) - _MAX_COVERAGE_LINES
+        lines.append(f"    ... {omitted} more coverage records not shown (preview capped)")
+    return lines
+
+
+def _cap_lines(summary: ImpactSummary) -> list[str]:
+    lines: list[str] = []
+    if summary.traversal_capped:
+        lines.append(_TRAVERSAL_CAPPED_LINE)
+    if summary.graph_truncated:
+        lines.append(_SNAPSHOT_TRUNCATED_LINE)
+    return lines
+
+
+def _resource_label(resource: GraphResource) -> str:
+    """`group/kind/namespace/name`, blank parts dropped (the graph screen's
+    own convention), flattened and capped."""
+    parts = (resource.group, resource.kind, resource.namespace, resource.name)
+    return _safe("/".join(part for part in parts if part))
+
+
+def _safe(text: str) -> str:
+    """Flatten control characters (including newlines/tabs) and cap length,
+    so cluster-controlled text can neither break the dialog layout nor grow
+    the preview unboundedly."""
+    return _CONTROL_CHARS.sub(" ", text)[:_MAX_TEXT]
