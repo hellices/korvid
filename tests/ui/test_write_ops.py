@@ -23,6 +23,7 @@ from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.portforward import OWNER_CHAIN_PLURALS, WORKLOAD_PLURALS
 from korvid.core.session_timeline import (
+    AppendResult,
     SessionTimeline,
     TimelineResourceRef,
     TimelineSource,
@@ -55,6 +56,22 @@ _ALIASES = {
     "deployments": _DEPLOY_META,
     "nodes": _NODES_META,
 }
+
+
+class _FailingWriteTimeline(SessionTimeline):
+    def append_write(
+        self,
+        *,
+        epoch: int,
+        action: str,
+        kind_alias: str,
+        display_kind: str,
+        namespace: str | None,
+        name: str,
+        uid: str | None,
+        outcome: str,
+    ) -> AppendResult:
+        raise RuntimeError("timeline unavailable")
 
 
 class Recorder(WriteOps):
@@ -1578,6 +1595,27 @@ async def test_run_write_records_timeline_after_intent_and_success_audit(tmp_pat
         "default",
         "web-1",
     )
+    assert [json.loads(line)["outcome"] for line in audit_path.read_text().splitlines()] == [
+        "intent",
+        "success",
+    ]
+
+
+async def test_timeline_failure_does_not_replace_durable_write_audit(tmp_path: Path) -> None:
+    timeline = _FailingWriteTimeline(max_entries=8, max_bytes=4096)
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(Recorder(), audit_path, session_timeline=timeline)
+    ran = False
+
+    async def op() -> None:
+        nonlocal ran
+        ran = True
+
+    async with app.run_test():
+        result = await app._run_write("delete", _PODS_META, "default", "web-1", lambda: op())
+        assert result == "done"
+        assert ran is True
+        assert any("Timeline skipped write entry" in item.message for item in app._notifications)
     assert [json.loads(line)["outcome"] for line in audit_path.read_text().splitlines()] == [
         "intent",
         "success",

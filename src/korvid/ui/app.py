@@ -1382,6 +1382,19 @@ class KorvidApp(App[None]):
             f"Timeline skipped {label}: {result.diagnostic}", severity="warning", markup=False
         )
 
+    def _append_timeline(self, label: str, append: Callable[[], AppendResult]) -> None:
+        try:
+            result = append()
+        except Exception as exc:
+            logger.warning("Timeline append failed for %s", label, exc_info=exc)
+            self.notify(
+                f"Timeline skipped {label}: internal timeline error",
+                severity="warning",
+                markup=False,
+            )
+            return
+        self._record_timeline_result(label, result)
+
     def _record_timeline_watch_event(
         self, kind: str, scope: str, event_type: str, obj: Summary
     ) -> None:
@@ -1398,9 +1411,9 @@ class KorvidApp(App[None]):
             return
         meta = self.aliases.get(kind)
         display_kind = meta.kind if meta is not None else str(getattr(obj, "kind", "") or kind)
-        self._record_timeline_result(
+        self._append_timeline(
             "watch delta",
-            timeline.append_watch(
+            lambda: timeline.append_watch(
                 epoch=self._ctx_epoch,
                 kind_alias=self._canonical_kind(kind),
                 display_kind=display_kind,
@@ -1459,10 +1472,13 @@ class KorvidApp(App[None]):
                     if epoch != self._ctx_epoch:
                         return
                     failures = 0
-                    self._record_timeline_result(
+                    self._append_timeline(
                         "Warning event",
-                        timeline.append_warning_event(
-                            epoch=epoch, event=event, kind_alias=self._event_kind_alias(event)
+                        functools.partial(
+                            timeline.append_warning_event,
+                            epoch=epoch,
+                            event=event,
+                            kind_alias=self._event_kind_alias(event),
                         ),
                     )
                 failures = 0
@@ -1530,9 +1546,9 @@ class KorvidApp(App[None]):
         timeline = self._session_timeline
         if timeline is None:
             return
-        self._record_timeline_result(
+        self._append_timeline(
             "context switch",
-            timeline.append_context_switch(
+            lambda: timeline.append_context_switch(
                 epoch=epoch,
                 phase=phase,
                 from_context=from_context,
@@ -4945,9 +4961,9 @@ class KorvidApp(App[None]):
         timeline = self._session_timeline
         if timeline is None:
             return
-        self._record_timeline_result(
+        self._append_timeline(
             "write entry",
-            timeline.append_write(
+            lambda: timeline.append_write(
                 epoch=self._ctx_epoch,
                 action=action,
                 kind_alias=self._canonical_meta_kind(meta),

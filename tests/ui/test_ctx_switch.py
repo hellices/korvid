@@ -9,13 +9,14 @@ session restarts on the new cluster with capabilities re-probed.
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.session_timeline import (
+    AppendResult,
     ContextSwitchPayload,
     SessionTimeline,
     TimelineSource,
@@ -35,6 +36,19 @@ from .waits import until
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _ALIASES = {"pods": _PODS_META, "po": _PODS_META}
+
+
+class _FailingContextTimeline(SessionTimeline):
+    def append_context_switch(
+        self,
+        *,
+        epoch: int,
+        phase: Literal["started", "completed", "failed"],
+        from_context: str | None,
+        to_context: str | None,
+        note: str = "",
+    ) -> AppendResult:
+        raise RuntimeError("timeline unavailable")
 
 
 def _pod(name: str, ns: str = "default") -> PodSummary:
@@ -1300,6 +1314,17 @@ async def test_successful_switch_records_started_then_completed_in_distinct_epoc
             label="both context entries recorded",
         )
     assert _ctx_phases(timeline) == [(0, "started"), (1, "completed")]
+
+
+async def test_timeline_failure_does_not_abort_context_switch() -> None:
+    timeline = _FailingContextTimeline(max_entries=16, max_bytes=8192)
+    env = _CtxEnv(timeline=timeline)
+    async with env.app.run_test():
+        await env.app._switch_context_flow("ctx-b")
+        assert env.app.config.kube_context == "ctx-b"
+        assert any(
+            "Timeline skipped context switch" in item.message for item in env.app._notifications
+        )
 
 
 async def test_refused_switch_records_nothing_before_the_guards_pass() -> None:

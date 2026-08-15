@@ -181,9 +181,10 @@ class SessionTimelineScreen(ModalScreen[TimelineGotoResult | None]):
             resource_label = "-"
             if entry.resource is not None:
                 resource_label = _resource_label(entry.resource)
-                self._targets[row_key] = _RowTarget(
-                    entry.resource.kind_alias, entry.resource.namespace, entry.resource.name
-                )
+                if entry.epoch == self._current_epoch:
+                    self._targets[row_key] = _RowTarget(
+                        entry.resource.kind_alias, entry.resource.namespace, entry.resource.name
+                    )
             table.add_row(
                 str(entry.sequence),
                 Text(entry.occurred_at),

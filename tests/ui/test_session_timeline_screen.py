@@ -303,6 +303,31 @@ async def test_enter_on_non_resource_row_is_inert_and_updates_status() -> None:
         assert "no navigable resource" in status.lower()
 
 
+async def test_enter_on_prior_epoch_resource_is_inert() -> None:
+    timeline = SessionTimeline(max_entries=8, max_bytes=4096)
+    timeline.append_watch(
+        epoch=0,
+        kind_alias="pods",
+        display_kind="Pod",
+        namespace="default",
+        name="old-cluster-api",
+        uid="old-uid",
+        verb="ADDED",
+    )
+    app = HostApp()
+    screen = SessionTimelineScreen(timeline, current_epoch=1, resource_toggle=None)
+    async with app.run_test() as pilot:
+        await app.push_screen(screen, lambda value: setattr(app, "result", value))
+        await pilot.press("e")
+        table = app.screen.query_one(DataTable)
+        assert table.row_count == 1
+        await pilot.press("enter")
+        assert app.result == "unset"
+        assert app.screen is screen
+        status = str(app.screen.query_one("#timeline-status", Static).render())
+        assert "no navigable resource" in status.lower()
+
+
 async def test_escape_dismisses_with_none() -> None:
     timeline = SessionTimeline(max_entries=8, max_bytes=4096)
     app = HostApp()
