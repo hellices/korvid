@@ -152,6 +152,48 @@ gh attestation verify dist/v0.2.0/SHA256SUMS --repo hellices/korvid
 The attestation check establishes the provenance of `SHA256SUMS`; the final
 command then verifies every downloaded release asset against that manifest.
 
+## Publish and verify the Homebrew tap
+
+The release workflow attaches `korvid.rb` to the GitHub Release and then opens
+a pull request against `hellices/homebrew-korvid`. A successful korvid release
+does not prove that tap PR was merged: if `HOMEBREW_TAP_TOKEN` is unavailable,
+the job prints a manual recovery command and exits successfully after preserving
+the formula as a release asset.
+
+After publication, find the generated tap PR, wait for its checks, and merge it:
+
+```sh
+TAP_PR=$(gh pr list --repo hellices/homebrew-korvid \
+  --search '"korvid 0.2.0" in:title' --state open \
+  --json number --jq '.[0].number')
+gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch
+gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash
+```
+
+If no PR exists, use the attested release asset to create one manually:
+
+```sh
+gh release download v0.2.0 --pattern korvid.rb --dir dist/v0.2.0
+gh repo clone hellices/homebrew-korvid dist/homebrew-korvid
+cd dist/homebrew-korvid
+git switch -c release/korvid-0.2.0
+cp ../v0.2.0/korvid.rb Formula/korvid.rb
+git add Formula/korvid.rb
+git commit -m "korvid 0.2.0"
+git push -u origin release/korvid-0.2.0
+gh pr create --title "korvid 0.2.0" \
+  --body "Generated from the verified korvid v0.2.0 release asset."
+```
+
+Finally verify the tap, not merely the formula attached to the source release:
+
+```sh
+brew update
+brew upgrade hellices/korvid/korvid || brew install hellices/korvid/korvid
+korvid --version  # korvid 0.2.0
+brew test hellices/korvid/korvid
+```
+
 ## Install, reinstall, and uninstall from PyPI
 
 The simplest install is the full feature set:

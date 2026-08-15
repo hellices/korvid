@@ -82,9 +82,9 @@ fetches a suitable interpreter for you instead of making that your problem.
 choice inside a virtualenv or a container image you control — just don't
 point it at your system Python.
 
-`korvid[all]` is the simplest install: the TUI, embedded agent, and MCP server
-together. For slimmer extras, upgrade guidance, retained local state, and the
-exact `v0.2.0` publish procedure, see the
+`korvid[all]` is the simplest install: the TUI, embedded agent, MCP server, and
+read-only observability connectors together. For slimmer extras, upgrade
+guidance, retained local state, and the exact `v0.2.0` publish procedure, see the
 [release runbook](https://github.com/hellices/korvid/blob/main/docs/release.md).
 
 | Key | Action |
@@ -176,15 +176,17 @@ The protected `v0.1.0` workflow failed before publication, so that tag remains
 immutable, unpublished audit history. `v0.1.1` reached the publish step and
 stopped there, because the PyPI Trusted Publisher had not been registered yet;
 it is unpublished audit history too. `v0.1.2` is the first public PyPI release;
-`v0.2.0` is the current feature release. The smoke matrix proves clean installs of
-`korvid`, `korvid[agent]`, `korvid[mcp]`, and `korvid[all]`, plus uninstall.
-The `v0.2.0` pre-release validation also upgrades the published `0.1.2`
-installation to the candidate wheel before the release tag is created.
+`v0.2.0` is the current feature release. The smoke matrix proves clean installs
+of `korvid`, `korvid[agent]`, `korvid[mcp]`, and `korvid[all]`, plus uninstall.
+Before creating the release tag, a maintainer separately upgrades a clean
+published `0.1.2` installation to the candidate wheel as documented in the
+release runbook.
 
 ```sh
 python -m pip install 'korvid==0.2.0'             # base TUI only
 python -m pip install 'korvid[agent]==0.2.0'      # :ai / Ctrl-A
 python -m pip install 'korvid[mcp]==0.2.0'        # korvid --mcp
+python -m pip install 'korvid[observability]==0.2.0'  # Prometheus / Loki
 python -m pip install 'korvid[all]==0.2.0'        # recommended first install
 python -m pip install 'korvid[all,entra]==0.2.0'  # add Entra auth too
 ```
@@ -242,8 +244,8 @@ protected `release` environment must allow protected tags only and require
 approval; PyPI's Trusted Publisher must bind exactly to `hellices/korvid`,
 `.github/workflows/release.yml`, and that environment. The in-workflow source
 check is defense in depth, not a replacement for this external trust boundary.
-The operator procedure, irreversible boundaries, and recovery rules for the
-each release are in the [release runbook](https://github.com/hellices/korvid/blob/main/docs/release.md).
+The operator procedure, irreversible boundaries, and recovery rules for each
+release are in the [release runbook](https://github.com/hellices/korvid/blob/main/docs/release.md).
 
 ```sh
 python -m pip install 'korvid[all]==0.2.0'

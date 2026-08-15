@@ -1591,10 +1591,11 @@ def test_release_docs_runbook_gives_the_five_trusted_publisher_claims() -> None:
 
 def test_security_policy_supports_only_the_current_minor_line() -> None:
     version = _project_version()
-    policy = _security_policy()
+    policy = " ".join(_security_policy().split())
     major, minor, _patch = version.split(".")
+    assert f"Until `v{version}` is published, that remains `0.1.2`" in policy
     assert f"latest `{major}.{minor}.x` version" in policy
-    assert "`0.1.2` is superseded" in policy
+    assert "After publication" in policy
 
 
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:
@@ -1894,6 +1895,16 @@ def test_release_docs_describe_fresh_installs_and_extra_expansion_separately() -
     runbook = _release_runbook()
     assert "fresh install of each variant" in runbook
     assert "separate base-to-extra expansion check" in runbook
+
+
+def test_release_docs_require_homebrew_tap_merge_and_version_verification() -> None:
+    version = _project_version()
+    runbook = _release_runbook()
+    assert "HOMEBREW_TAP_TOKEN" in runbook
+    assert f"gh release download v{version} --pattern korvid.rb" in runbook
+    assert 'gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch' in runbook
+    assert 'gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash' in runbook
+    assert f"korvid --version  # korvid {version}" in runbook
 
 
 # --- metadata ---------------------------------------------------------------
