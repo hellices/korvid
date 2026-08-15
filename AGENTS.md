@@ -90,8 +90,13 @@ src/korvid/
 ## Pull Requests
 
 - Do NOT open a pull request without explicit human instruction.
+- **Do NOT merge a pull request without explicit human instruction.** Merging is
+  the maintainer's decision, not a step you complete on your own. Do not run
+  `gh pr merge`, do not enable auto-merge. When a PR is ready, say so and stop.
+- Never approve your own work (`gh pr review --approve`).
 - CI must be green: ruff, mypy, pytest (3.11/3.12/3.13), coverage ≥ 80%, tach, deptry.
-- `main` rejects direct pushes (branch ruleset) — always work on a branch and merge via PR.
+- `main` rejects direct pushes (branch ruleset) — always work on a branch and
+  land it through a PR the maintainer merges.
 
 ## Review Loop
 
@@ -121,9 +126,10 @@ For each review round on a PR:
 9. At the limit, resolve or document the remaining advisory findings and proceed
    toward merge. Never use the round limit to ignore a credible blocking finding or
    bypass a required check.
-10. Before merging, verify **every** required check:
-    `gh pr view N --json statusCheckRollup` must be all SUCCESS. Then
-    `gh pr merge N --squash`.
+10. Before handing the PR back, verify **every** required check:
+    `gh pr view N --json statusCheckRollup` must be all SUCCESS. Then report that
+    the PR is ready and **stop**. Merge only if the maintainer asks you to; the
+    default end of this loop is a report, not `gh pr merge`.
 
 ## Testing Gotchas
 
