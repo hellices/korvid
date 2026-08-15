@@ -238,7 +238,9 @@ does not prove that tap PR was merged: if `HOMEBREW_TAP_TOKEN` is unavailable,
 the job prints a manual recovery command and exits successfully after preserving
 the formula as a release asset.
 
-After publication, find the generated tap PR, wait for its checks, and merge it:
+After publication, find the generated tap PR, review the formula diff, and wait
+for its checks. **The merge itself is the maintainer's**, by hand — this is the
+formula every `brew install korvid` resolves, and an agent must never merge it.
 
 ```sh
 set -eu
@@ -255,8 +257,9 @@ if [ -z "$TAP_PR" ]; then
   echo "trusted bump-korvid-0.2.0 tap PR not found; use the manual path below" >&2
   exit 1
 fi
+gh pr diff "$TAP_PR" --repo hellices/homebrew-korvid
 gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1
-gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash
+echo "reviewed and green - now merge PR #$TAP_PR yourself"
 ```
 
 If no PR exists, use the formula release asset to create one manually. Its
@@ -297,7 +300,7 @@ else
     ""|*[!0-9]*) echo "could not identify created tap PR: $TAP_PR_URL" >&2; exit 1 ;;
   esac
   gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1
-  gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash
+  echo "reviewed and green - now merge PR #$TAP_PR yourself"
 fi
 ```
 

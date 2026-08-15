@@ -90,9 +90,17 @@ src/korvid/
 ## Pull Requests
 
 - Do NOT open a pull request without explicit human instruction.
-- **Do NOT merge a pull request without explicit human instruction.** Merging is
-  the maintainer's decision, not a step you complete on your own. Do not run
-  `gh pr merge`, do not enable auto-merge. When a PR is ready, say so and stop.
+- **The maintainer merges. You never do.** This is not a default you may
+  override when a PR looks ready, when every check is green, when the change is
+  trivial, or when you were told to "finish" something. Merging is a separate
+  human decision made after the work is handed back.
+- **No merge automation, in any form.** Do not run `gh pr merge`, do not enable
+  auto-merge, do not add a workflow, action, script or scheduled job that
+  merges. Do not use the REST/GraphQL merge endpoints. If a task seems to
+  require automating a merge, stop and ask instead.
+- The same applies to the `hellices/homebrew-korvid` tap, including the release
+  PR the release workflow opens there. A release is not finished by merging it
+  for the maintainer.
 - Never approve your own work (`gh pr review --approve`).
 - CI must be green: ruff, mypy, pytest (3.11/3.12/3.13), coverage ≥ 80%, tach, deptry.
 - `main` rejects direct pushes (branch ruleset) — always work on a branch and
@@ -128,8 +136,8 @@ For each review round on a PR:
    bypass a required check.
 10. Before handing the PR back, verify **every** required check:
     `gh pr view N --json statusCheckRollup` must be all SUCCESS. Then report that
-    the PR is ready and **stop**. Merge only if the maintainer asks you to; the
-    default end of this loop is a report, not `gh pr merge`.
+    the PR is ready and **stop**. This loop ends in a report, never in a merge —
+    see [Pull Requests](#pull-requests).
 
 ## Testing Gotchas
 
