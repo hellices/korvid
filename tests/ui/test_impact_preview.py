@@ -270,6 +270,79 @@ def test_inferred_items_are_labelled_and_declared_never_blocks() -> None:
     assert "  inferred relationships are labelled and never block this write" in lines
 
 
+def test_an_inferred_cycle_edge_still_triggers_the_inferred_note_with_no_inferred_items() -> None:
+    """A cycle line never carries an `[inferred]` marker of its own, but an
+    inferred edge folded into `cycles` still makes an inferred hop part of
+    this summary - the note must fire even when every listed dependent path
+    is declared."""
+    inferred_cycle_edge = RelationshipEdge(
+        subject=_POD,
+        target=_DEPLOY,
+        relation=RelationKind.MANAGED_BY,
+        confidence=FactConfidence.INFERRED,
+        evidence=EvidencePointer(resource=_POD, field="spec.selector"),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            cycles=(inferred_cycle_edge,),
+        )
+    )
+    assert not any("[inferred]" in line for line in lines if line.startswith("    - "))
+    assert "  inferred relationships are labelled and never block this write" in lines
+    assert max(len(line) for line in lines) <= _MAX_LINE
+
+
+def test_an_inferred_revisit_edge_still_triggers_the_inferred_note_with_no_inferred_items() -> None:
+    """Same guarantee for a revisit: the dependent it points at was already
+    listed via a declared path, so no item line ever carries the marker,
+    but the revisited edge itself is inferred and must still surface the
+    warning."""
+    inferred_revisit_edge = RelationshipEdge(
+        subject=_POD,
+        target=_RS,
+        relation=RelationKind.MANAGED_BY,
+        confidence=FactConfidence.INFERRED,
+        evidence=EvidencePointer(resource=_POD, field="spec.selector"),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            revisits=(inferred_revisit_edge,),
+        )
+    )
+    assert not any("[inferred]" in line for line in lines if line.startswith("    - "))
+    assert "  inferred relationships are labelled and never block this write" in lines
+    assert max(len(line) for line in lines) <= _MAX_LINE
+
+
+def test_an_inferred_unresolved_edge_still_triggers_the_inferred_note_with_no_inferred_items() -> (
+    None
+):
+    """An unresolved reference is rendered by its own line grammar, which
+    never includes an `[inferred]` marker, but a heuristically-derived
+    unresolved edge still means an inferred hop reached this summary."""
+    inferred_unresolved_edge = RelationshipEdge(
+        subject=_POD,
+        target=GraphResource(group="", kind="ConfigMap", namespace="prod", name="gone"),
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.INFERRED,
+        evidence=EvidencePointer(resource=_POD, field="spec.volumes[0].configMap"),
+        resolution=EdgeResolution.MISSING,
+    )
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            unresolved=(inferred_unresolved_edge,),
+        )
+    )
+    assert not any("[inferred]" in line for line in lines if line.startswith("    - "))
+    assert "  inferred relationships are labelled and never block this write" in lines
+    assert max(len(line) for line in lines) <= _MAX_LINE
+
+
 def test_a_long_three_hop_path_keeps_its_inferred_marker_within_the_line_bound() -> None:
     """Nothing pathological here: real names and real field paths.
 

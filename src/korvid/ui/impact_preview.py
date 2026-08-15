@@ -24,6 +24,7 @@ from collections.abc import Sequence
 
 from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary
 from korvid.core.relationships import CoverageState, GraphResource, RelationshipEdge
+from korvid.k8s.relationship_facts import FactConfidence
 
 IMPACT_TITLE = "graph-derived impact (advisory):"
 
@@ -172,7 +173,20 @@ def _hop(edge: RelationshipEdge) -> str:
 
 
 def _inferred_lines(summary: ImpactSummary) -> list[str]:
-    if any(item.inferred for item in (*summary.direct, *summary.transitive)):
+    """Whether any edge anywhere in this summary was heuristically derived.
+
+    Checked across every edge collection the summary carries - not just the
+    listed dependent paths - because a cycle, a revisit, or an unresolved
+    reference renders its own line regardless of confidence, and an inferred
+    edge folded into one of those must still surface the same warning an
+    inferred dependent path gets.
+    """
+    listed_inferred = any(item.inferred for item in (*summary.direct, *summary.transitive))
+    aggregate_inferred = any(
+        edge.confidence is FactConfidence.INFERRED
+        for edge in (*summary.cycles, *summary.revisits, *summary.unresolved)
+    )
+    if listed_inferred or aggregate_inferred:
         return [_INFERRED_NOTE_LINE]
     return []
 
