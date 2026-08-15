@@ -492,3 +492,128 @@ async def test_managed_note_does_not_change_the_approval_gate() -> None:
         await pilot.press("y")
         await pilot.pause()
         assert app.result is True
+
+
+# ---------------------------------------------------------------------------
+# Graph-derived impact section (issue #283)
+# ---------------------------------------------------------------------------
+
+_IMPACT_LINES = (
+    "graph-derived impact (advisory):",
+    "  delete apps/Deployment/prod/web",
+    "  known direct dependents (may be affected): 1",
+    "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]",
+    "  graph coverage: complete",
+)
+
+
+async def test_impact_section_renders_above_the_dry_run_preview() -> None:
+    """The advisory section is additional context for the dry-run diff, so it
+    must read before it, not replace or follow it."""
+    from textual.containers import VerticalScroll
+
+    app = HostApp()
+    async with app.run_test() as pilot:
+        screen = ConfirmScreen(
+            "Delete deployments/web?",
+            "DELETE apps/deployments/web in prod",
+            preview=["- apps/Deployment prod/web"],
+            impact_lines=_IMPACT_LINES,
+        )
+        await app.push_screen(screen)
+        await pilot.pause()
+        children = list(screen.query_one(VerticalScroll).children)
+        impact = screen.query_one(".confirm-impact", Static)
+        preview = screen.query_one(".confirm-preview", Static)
+        rendered = str(impact.render())
+        assert children.index(impact) < children.index(preview)
+        assert "graph-derived impact (advisory):" in rendered
+        assert "known direct dependents (may be affected): 1" in rendered
+        assert "graph coverage: complete" in rendered
+        assert "dry-run" in str(preview.render())
+
+
+async def test_no_impact_widget_without_impact_lines() -> None:
+    """No snapshot means no section at all - distinct from an empty one."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(
+            ConfirmScreen("Delete pod", "DELETE pods/web-1", preview=["- pod prod/web-1"])
+        )
+        await pilot.pause()
+        assert not app.screen.query(".confirm-impact")
+
+
+async def test_impact_lines_render_cluster_markup_literally() -> None:
+    """A resource named `[bold red]web[/]` must not style the dialog."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        screen = ConfirmScreen(
+            "Delete deployments/web?",
+            "DELETE apps/deployments/web in prod",
+            impact_lines=(
+                "graph-derived impact (advisory):",
+                "    - Pod/prod/[bold red]web[/] via owned_by (declared) at"
+                " metadata.ownerReferences[0]",
+            ),
+        )
+        await app.push_screen(screen)
+        await pilot.pause()
+        rendered = str(screen.query_one(".confirm-impact", Static).render())
+        assert "[bold red]web[/]" in rendered
+
+
+async def test_impact_section_does_not_relax_the_typed_name_gate() -> None:
+    """An impact section is context, not consent: the typed-name gate still
+    owns the decision."""
+    app = HostApp()
+    results: list[bool | None] = []
+    async with app.run_test() as pilot:
+        await app.push_screen(
+            ConfirmScreen(
+                "Delete node",
+                "delete nodes/worker-1",
+                require_name="worker-1",
+                impact_lines=_IMPACT_LINES,
+            ),
+            results.append,
+        )
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        assert results == []
+        # The stray "y" landed as ordinary text in the typed-name field (the
+        # pinned behavior per test_ctrl_n_declines_with_a_require_name_gate:
+        # under a typed gate, y/n are input text, not shortcuts) - clear it
+        # before typing the real name the gate demands.
+        await pilot.press("backspace")
+        for ch in "worker-1":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert results == [True]
+
+
+async def test_impact_section_does_not_relax_the_stale_key_cutoff() -> None:
+    """A `y` created while the impact snapshot was loading predates the
+    dialog and must never approve it."""
+    from textual import events
+
+    app = HostApp()
+    results: list[bool | None] = []
+    async with app.run_test() as pilot:
+        stale = events.Key("y", "y")
+        await pilot.pause()
+        dialog = ConfirmScreen(
+            "Delete deployments/web?",
+            "DELETE apps/deployments/web in prod",
+            impact_lines=_IMPACT_LINES,
+        )
+        await app.push_screen(dialog, results.append)
+        await pilot.pause()
+        dialog.post_message(stale)
+        await pilot.pause()
+        assert results == []
+        await pilot.press("y")
+        await pilot.pause()
+        assert results == [True]
