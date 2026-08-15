@@ -20,7 +20,9 @@ from korvid.core.relationships import (
 )
 from korvid.k8s.relationship_facts import FactConfidence, RelationKind
 from korvid.ui.impact_preview import (
+    _ACTION_LABEL,
     _MAX_LINE,
+    _TRUNCATION_SUFFIX,
     ADVISORY_LINE,
     IMPACT_TITLE,
     IMPACT_UNAVAILABLE_LINES,
@@ -186,7 +188,8 @@ def test_a_target_missing_from_the_snapshot_says_dependents_are_unknown() -> Non
 def test_every_composed_line_stays_within_the_total_line_bound() -> None:
     """Per-fragment caps do not bound a line that concatenates an identity
     and three hops; the modal is 70 columns wide, so the composed line is
-    capped too."""
+    capped too - and a capped line says so, rather than reading as a
+    complete claim that happens to stop mid-path."""
     hostile = GraphResource(group="", kind="Pod", namespace="prod", name="w" * 400)
     edge = RelationshipEdge(
         subject=hostile,
@@ -204,6 +207,9 @@ def test_every_composed_line_stays_within_the_total_line_bound() -> None:
         )
     )
     assert max(len(line) for line in lines) <= _MAX_LINE
+    capped = [line for line in lines if len(line) == _MAX_LINE]
+    assert capped
+    assert all(line.endswith(_TRUNCATION_SUFFIX) for line in capped)
     assert lines[-1] == ADVISORY_LINE
 
 
@@ -259,6 +265,77 @@ def test_inferred_items_are_labelled_and_declared_never_blocks() -> None:
     )
     assert "    - Pod/prod/web-abc-1 via managed_by (inferred) at spec.selector [inferred]" in lines
     assert "  inferred relationships are labelled and never block this write" in lines
+
+
+def test_a_long_three_hop_path_keeps_its_inferred_marker_within_the_line_bound() -> None:
+    """Nothing pathological here: real names and real field paths.
+
+    A Pod reached through three hops of ordinary Kubernetes field paths
+    already composes past `_MAX_LINE`, and the ` [inferred]` marker is the
+    *last* thing on the line. Capping the composed line last would drop
+    exactly the label that says one hop was guessed, turning a heuristic
+    chain into what reads like a declared one. The marker's width is
+    reserved instead, and the cut is shown.
+    """
+    pod = GraphResource(
+        group="",
+        kind="Pod",
+        namespace="payments-production-eu-west-1",
+        name="checkout-api-canary-7f9c8b5d64-2xk9p",
+        uid="pod-9",
+    )
+    declared = RelationshipEdge(
+        subject=pod,
+        target=_DEPLOY,
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(
+            resource=pod, field="spec.template.spec.volumes[0].projected.sources[1].configMap.name"
+        ),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    inferred = RelationshipEdge(
+        subject=pod,
+        target=_DEPLOY,
+        relation=RelationKind.MANAGED_BY,
+        confidence=FactConfidence.INFERRED,
+        evidence=EvidencePointer(
+            resource=pod, field="spec.selector.matchLabels[app.kubernetes.io/instance]"
+        ),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    last = RelationshipEdge(
+        subject=pod,
+        target=_DEPLOY,
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(
+            resource=pod,
+            field="spec.template.spec.initContainers[0].env[3].valueFrom.secretKeyRef.name",
+        ),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    lines = render_impact_lines(
+        _summary(transitive=(ImpactItem(resource=pod, path=(declared, inferred, last)),))
+    )
+    item = next(line for line in lines if line.startswith("    - Pod/payments-production"))
+    assert len(item) == _MAX_LINE
+    assert item.endswith(f"{_TRUNCATION_SUFFIX} [inferred]")
+    assert item.startswith(
+        "    - Pod/payments-production-eu-west-1/checkout-api-canary-7f9c8b5d64-2xk9p"
+        " via uses_config (declared) at"
+        " spec.template.spec.volumes[0].projected.sources[1].configMap.name"
+        " -> managed_by (inferred) at"
+    )
+    assert "  inferred relationships are labelled and never block this write" in lines
+    assert max(len(line) for line in lines) <= _MAX_LINE
+
+
+def test_every_impact_action_has_a_rendered_label() -> None:
+    """`_ACTION_LABEL` is indexed, not defaulted: a new `ImpactAction`
+    without a label would raise a `KeyError` inside a write dialog rather
+    than render an unlabelled action."""
+    assert set(_ACTION_LABEL) == set(ImpactAction)
 
 
 def test_cluster_text_stays_literal_and_control_characters_are_flattened() -> None:

@@ -5110,9 +5110,11 @@ class KorvidApp(App[None]):
         and fail-open in three distinct ways:
 
         - no loader wired (no cluster connection) -> None, no section at all;
-        - a timeout or unexpected failure -> the static "impact unavailable"
-          advisory, because an API error message can embed a response body
-          (for a Secret, its data) and must never reach the dialog;
+        - a timeout or unexpected failure *anywhere* in load, summarize, or
+          render -> the static "impact unavailable" advisory, because an API
+          error message can embed a response body (for a Secret, its data)
+          and must never reach the dialog, and because a summarizer or
+          renderer bug must cost the user the section, not the approval;
         - cancellation (a `:ctx` switch tearing the client down) propagates
           untouched, exactly like every other awaited read here.
 
@@ -5129,6 +5131,7 @@ class KorvidApp(App[None]):
         try:
             async with asyncio.timeout(_IMPACT_TIMEOUT):
                 graph = await loader.load(root, scope, self.aliases)
+                return render_impact_lines(summarize_impact(graph, action, root, scope=scope))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -5136,7 +5139,6 @@ class KorvidApp(App[None]):
             # sensitive-data), and never anything derived from a manifest.
             logger.debug("impact summary unavailable for %s: %s", action, type(exc).__name__)
             return IMPACT_UNAVAILABLE_LINES
-        return render_impact_lines(summarize_impact(graph, action, root, scope=scope))
 
     async def _push_write_confirmation(
         self,

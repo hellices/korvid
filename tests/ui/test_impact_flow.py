@@ -13,11 +13,13 @@ still revalidate. This module owns the shared harness (`ImpactEnv`) that
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import pytest
 from textual.widgets import Static
 
 from korvid.core.audit import AuditLog
@@ -92,6 +94,41 @@ def _replicaset() -> GenericSummary:
         relationships=RelationshipFacts(
             api_group="apps",
             references=(_owner("Deployment", "web", "deploy-1", group="apps"),),
+        ),
+    )
+
+
+def _staging_deployment() -> GenericSummary:
+    """A Deployment in another namespace: visible only to a cluster-wide
+    snapshot, and never a dependent of `prod/web`."""
+    return GenericSummary(
+        name="api", namespace="staging", kind="Deployment", created="", desired=1, uid="deploy-3"
+    )
+
+
+def _staging_replicaset() -> GenericSummary:
+    return GenericSummary(
+        name="api-def",
+        namespace="staging",
+        kind="ReplicaSet",
+        created="",
+        uid="rs-2",
+        relationships=RelationshipFacts(
+            api_group="apps",
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.OWNED_BY,
+                    target=TargetReference(
+                        group="apps",
+                        kind="Deployment",
+                        namespace="staging",
+                        name="api",
+                        uid="deploy-3",
+                    ),
+                    confidence=FactConfidence.DECLARED,
+                    field="metadata.ownerReferences[0]",
+                ),
+            ),
         ),
     )
 
@@ -530,6 +567,96 @@ async def test_unexpected_loader_failure_renders_the_static_unavailable_advisory
     async with env.app.run_test() as pilot:
         await open_delete_dialog(env, pilot, "deploy", expect="web")
         assert "impact unavailable; approval remains available" in impact_text(env.app)
+
+
+async def test_a_renderer_failure_renders_the_static_unavailable_advisory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fail-open boundary covers summarize and render, not just the load.
+
+    A bug in either would otherwise escape `_impact_preview` into the write
+    action and take the whole approval dialog with it - the user would lose a
+    legitimate confirmation to a *display* failure. Its message is withheld
+    for the same reason the loader's is: an exception string can carry
+    cluster-derived text.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+
+    def boom(summary: Any) -> tuple[str, ...]:
+        raise RuntimeError("renderer exploded on AKIAEXAMPLEPAYLOAD")
+
+    monkeypatch.setattr("korvid.ui.app.render_impact_lines", boom)
+    async with env.app.run_test() as pilot:
+        await open_delete_dialog(env, pilot, "deploy", expect="web")
+        text = impact_text(env.app)
+        assert "impact unavailable; approval remains available" in text
+        assert "AKIAEXAMPLEPAYLOAD" not in text
+        assert "known direct dependents" not in text
+        assert env.app.screen.query(".confirm-preview")
+        assert env.ops.calls == []
+
+
+async def test_a_summarizer_failure_keeps_the_dialog_and_logs_the_type_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("summarizer exploded on AKIAEXAMPLEPAYLOAD")
+
+    monkeypatch.setattr("korvid.ui.app.summarize_impact", boom)
+    with caplog.at_level(logging.DEBUG, logger="korvid.ui.app"):
+        async with env.app.run_test() as pilot:
+            await open_delete_dialog(env, pilot, "deploy", expect="web")
+            text = impact_text(env.app)
+            assert "impact unavailable; approval remains available" in text
+            assert "AKIAEXAMPLEPAYLOAD" not in text
+            assert env.ops.calls == []
+    assert "AKIAEXAMPLEPAYLOAD" not in caplog.text
+    assert any(
+        "impact summary unavailable" in record.getMessage()
+        and "RuntimeError" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_a_namespaced_target_in_an_all_namespaces_pane_covers_every_namespace(
+    tmp_path: Path,
+) -> None:
+    """A Deployment is namespaced, but the *pane* is `all`: the snapshot must
+    follow what the user is looking at, not the config default. Scoping it to
+    `prod` here would list one namespace's dependents while the pane claims to
+    show every namespace, and the dialog would then report complete coverage
+    of a scope the user never chose."""
+    rows: dict[str, list[Any]] = {
+        "deployments": [_deployment("web", "deploy-1"), _staging_deployment()],
+        "replicasets": [_replicaset(), _staging_replicaset()],
+    }
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
+    async with env.app.run_test() as pilot:
+        # In an all-namespaces pane the first column is NAMESPACE, so the
+        # cursor row is identified by both cells.
+        await to_view(pilot, "deploy all", expect="prod")
+        table = pilot.app.query_one(ResourceTable)
+        assert str(table.get_row_at(0)[1]) == "web"
+        await pilot.press("ctrl+d")
+        await until(
+            pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="confirm dialog opened"
+        )
+        text = impact_text(env.app)
+        assert "delete apps/Deployment/prod/web" in text
+        assert "scope: all namespaces" in text
+        assert "scope: prod" not in text
+        # `None` is what `_impact_scope` hands the loader, and the same value
+        # reaches `summarize_impact`: every LIST is cluster-wide.
+        assert env.lister.calls != []
+        assert {namespace for _, namespace in env.lister.calls} == {None}
+        # The staging ReplicaSet is in the snapshot but owned by another
+        # Deployment: a cluster-wide scope must not widen the affected set.
+        assert "known direct dependents (may be affected): 1" in text
+        assert "apps/ReplicaSet/prod/web-abc via owned_by (declared)" in text
+        assert "staging" not in text
+        assert env.ops.calls == []
 
 
 async def test_scale_dialog_has_no_impact_section(tmp_path: Path) -> None:

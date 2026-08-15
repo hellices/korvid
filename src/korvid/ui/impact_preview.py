@@ -8,7 +8,9 @@ Every heading is machine-defined here; the only cluster-derived text that
 reaches a line is a resource identity, a relation/confidence/resolution enum
 value, an evidence field path, and a namespace/coverage scope - each
 flattened of control characters and length-capped, with the composed line
-capped again at `_MAX_LINE` because one line concatenates several of them.
+capped again at `_MAX_LINE` because one line concatenates several of them -
+reserving room for the ` [inferred]` marker and marking the cut, so a capped
+line never reads as a complete claim.
 Nothing is formatted as Rich markup: `ConfirmScreen` appends these lines to
 a `rich.text.Text`, so a resource named `[bold red]web[/]` renders
 literally.
@@ -73,6 +75,9 @@ _MAX_TEXT = 120
 #: hops; the dialog body is 70 columns wide, so a line that would wrap into
 #: a screenful on its own is truncated here instead.
 _MAX_LINE = 240
+#: Shown in place of what `_MAX_LINE` cut, so a capped line reads as capped
+#: rather than as a complete claim that happens to stop mid-path.
+_TRUNCATION_SUFFIX = "..."
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -98,7 +103,23 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     lines.extend(_coverage_lines(summary))
     lines.extend(_cap_lines(summary))
     lines.append(ADVISORY_LINE)
-    return tuple(line[:_MAX_LINE] for line in lines)
+    return tuple(_bounded(line) for line in lines)
+
+
+def _bounded(line: str, *, marker: str = "") -> str:
+    """Cap one composed line at `_MAX_LINE`, keeping `marker` and showing the cut.
+
+    `marker` is machine-defined text whose meaning must survive the cap (the
+    ` [inferred]` label): it is the last thing on an item line, so capping
+    the composed line afterwards would drop exactly the word that says a hop
+    was guessed and leave a heuristic chain reading like a declared one. Its
+    width is reserved instead, and what was removed is marked, so a line that
+    stops mid-path cannot be read as a complete one.
+    """
+    budget = _MAX_LINE - len(marker)
+    if len(line) <= budget:
+        return line + marker
+    return line[: budget - len(_TRUNCATION_SUFFIX)] + _TRUNCATION_SUFFIX + marker
 
 
 def _section(title: str, items: Sequence[ImpactItem]) -> list[str]:
@@ -119,7 +140,7 @@ def _item_line(item: ImpactItem) -> str:
     if len(item.path) > _MAX_PATH_HOPS:
         hops = f"{hops} -> ... {len(item.path) - _MAX_PATH_HOPS} more hops"
     marker = " [inferred]" if item.inferred else ""
-    return f"    - {_resource_label(item.resource)} via {hops}{marker}"
+    return _bounded(f"    - {_resource_label(item.resource)} via {hops}", marker=marker)
 
 
 def _hop(edge: RelationshipEdge) -> str:
