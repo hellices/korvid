@@ -144,6 +144,7 @@ Install published `korvid[all]==0.1.2` in a clean environment, then upgrade that
 same environment from the downloaded candidate:
 
 ```sh
+set -eu
 upgrade_root=$(mktemp -d)
 uv venv --python 3.12 "$upgrade_root/venv"
 upgrade_python="$upgrade_root/venv/bin/python"
@@ -175,7 +176,13 @@ Do not create or push the release tag until this gate passes.
 Create the annotated tag from the reviewed commit, then push only that tag:
 
 ```sh
+set -eu
+if git rev-parse --quiet --verify refs/tags/v0.2.0 >/dev/null; then
+  echo "local tag v0.2.0 already exists; refusing to push it" >&2
+  exit 1
+fi
 git tag -a v0.2.0 "$COMMIT" -m "korvid v0.2.0"
+test "$(git rev-list -n 1 refs/tags/v0.2.0)" = "$COMMIT"
 git push origin refs/tags/v0.2.0
 RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')
 gh run watch "$RUN_ID" --exit-status
@@ -222,11 +229,13 @@ the formula as a release asset.
 After publication, find the generated tap PR, wait for its checks, and merge it:
 
 ```sh
+set -eu
 TAP_PR=$(gh pr list --repo hellices/homebrew-korvid \
   --state open \
-  --json number,title,headRefName,headRepositoryOwner \
+  --json number,title,baseRefName,headRefName,headRepositoryOwner \
   --jq '[.[] | select(
     .title == "korvid 0.2.0" and
+    .baseRefName == "main" and
     .headRefName == "bump-korvid-0.2.0" and
     .headRepositoryOwner.login == "hellices"
   )] | if length == 1 then .[0].number else empty end')
@@ -234,7 +243,7 @@ if [ -z "$TAP_PR" ]; then
   echo "trusted bump-korvid-0.2.0 tap PR not found; use the manual path below" >&2
   exit 1
 fi
-gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch
+gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1
 gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash
 ```
 
@@ -244,6 +253,7 @@ trust basis is the release workflow: it is generated from the tag-revalidated
 `SHA256SUMS`.
 
 ```sh
+set -eu
 gh release download v0.2.0 --pattern korvid.rb --dir dist/v0.2.0
 gh repo clone hellices/homebrew-korvid dist/homebrew-korvid
 cd dist/homebrew-korvid

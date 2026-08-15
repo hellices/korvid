@@ -1596,9 +1596,13 @@ def test_release_docs_runbook_marks_recovery_boundaries_and_upgrade_source() -> 
     assert f"korvid-{version}-py3-none-any.whl" in runbook
     assert "'korvid[all]==0.1.2'" in runbook
     assert f"'korvid {version}'" in runbook
-    assert runbook.index("## Required cross-version upgrade gate") < runbook.index(
-        f"## Publish `v{version}`"
-    )
+    upgrade_start = runbook.index("## Required cross-version upgrade gate")
+    publish_start = runbook.index(f"## Publish `v{version}`")
+    assert upgrade_start < publish_start
+    assert runbook[upgrade_start:publish_start].count("set -eu") == 2
+    publish = runbook[publish_start : runbook.index("## Safe recovery boundaries")]
+    assert f"local tag v{version} already exists; refusing to push it" in publish
+    assert f"git rev-list -n 1 refs/tags/v{version}" in publish
 
 
 def test_release_docs_preserve_failed_tags_as_unpublished_audit_history() -> None:
@@ -1951,9 +1955,10 @@ def test_release_docs_require_homebrew_tap_merge_and_version_verification() -> N
     normalized = " ".join(runbook.split())
     assert "HOMEBREW_TAP_TOKEN" in runbook
     assert f"gh release download v{version} --pattern korvid.rb" in runbook
-    assert 'gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch' in runbook
+    assert 'gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1' in runbook
     assert 'gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash' in runbook
-    assert "--json number,title,headRefName,headRepositoryOwner" in runbook
+    assert "--json number,title,baseRefName,headRefName,headRepositoryOwner" in runbook
+    assert '.baseRefName == "main"' in runbook
     assert '.headRefName == "bump-korvid-0.2.0"' in runbook
     assert '.headRepositoryOwner.login == "hellices"' in runbook
     assert "trusted bump-korvid-0.2.0 tap PR not found" in runbook
