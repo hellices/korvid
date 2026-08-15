@@ -7,9 +7,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from korvid.core.config import KorvidConfig
+from korvid.core.session_timeline import SessionTimeline
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.help_screen import HelpScreen
 from korvid.ui.widgets.resource_table import ResourceTable
+from korvid.ui.widgets.session_timeline_screen import SessionTimelineScreen
 
 from .test_app import _pod, make_app
 from .waits import until
@@ -97,6 +99,23 @@ async def test_uppercase_alt_binding_follows_the_remap() -> None:
         assert not _sorted_by_age()
         await pilot.press("z")
         await until(pilot, lambda: _sorted_by_age(), label="z sorts by age")
+
+
+async def test_timeline_binding_can_be_remapped() -> None:
+    timeline = SessionTimeline(max_entries=8, max_bytes=4096)
+    app = make_app([_pod("web")], config=_config({"timeline": "ctrl+g"}), session_timeline=timeline)
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        await pilot.press("T")  # freed default must be inert now
+        await pilot.pause()
+        assert not isinstance(app.screen, SessionTimelineScreen)
+        await pilot.press("ctrl+g")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, SessionTimelineScreen),
+            label="timeline opens on remap",
+        )
 
 
 def test_keybindings_doc_documents_every_remappable_action() -> None:

@@ -482,3 +482,23 @@ async def test_worker_failure_notification_renders_error_text_literally() -> Non
         )
         assert "[red]api-0[/]" in notification.message
         assert notification.markup is False
+
+
+async def test_unresolved_relationship_kind_renders_literally() -> None:
+    env = _RelEnv(pods=(_pod("api-0", uid="pod-1"),))
+    app = env.app
+    async with app.run_test() as pilot:
+        app._on_relationship_result(
+            app._ctx_epoch,
+            ("goto", "evil.example.io", "[/bold]", "default", "api-0"),
+        )
+        await until(
+            pilot,
+            lambda: any("is not a discovered view" in item.message for item in app._notifications),
+            label="unresolved relationship notified",
+        )
+        notification = next(
+            item for item in app._notifications if "is not a discovered view" in item.message
+        )
+        assert "[/bold]" in notification.message
+        assert notification.markup is False

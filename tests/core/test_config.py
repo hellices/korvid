@@ -37,6 +37,38 @@ def test_load_from_yaml(tmp_path: Path) -> None:
     assert cfg.keybindings == {"quit": "q"}
 
 
+def test_timeline_config_defaults(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("")
+
+    cfg = load_config(cfg_file)
+
+    assert cfg.timeline_max_entries == 500
+    assert cfg.timeline_max_bytes == 262144
+
+
+def test_timeline_config_parses_nested_values(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("timeline:\n  max_entries: 32\n  max_bytes: 8192\n")
+
+    cfg = load_config(cfg_file)
+
+    assert cfg.timeline_max_entries == 32
+    assert cfg.timeline_max_bytes == 8192
+
+
+def test_timeline_config_invalid_values_warn_and_fallback(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("timeline:\n  max_entries: 0\n  max_bytes: nope\n")
+
+    cfg = load_config(cfg_file)
+
+    assert cfg.timeline_max_entries == 500
+    assert cfg.timeline_max_bytes == 262144
+    assert any("timeline.max_entries" in warning for warning in cfg.warnings)
+    assert any("timeline.max_bytes" in warning for warning in cfg.warnings)
+
+
 def test_explicit_agent_off_wins(tmp_path: Path) -> None:
     f = tmp_path / "config.yaml"
     f.write_text("agent:\n  provider: anthropic\n  enabled: false\n")

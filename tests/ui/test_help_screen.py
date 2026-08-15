@@ -86,6 +86,12 @@ def test_collect_help_includes_hidden_bindings() -> None:
     assert any(desc == "Wrap" for _, desc in groups["Logs"])
 
 
+def test_collect_help_groups_timeline_under_table() -> None:
+    """`T` (issue #282) is pressed from the resource table, like `g`."""
+    groups = dict(collect_help([Binding("T", "timeline", "Timeline")], []))
+    assert ("T", "Timeline") in groups["Table"]
+
+
 def test_every_app_binding_action_has_an_explicit_group() -> None:
     """New app bindings must be classified — the overlay may not silently drift."""
     from korvid.ui.widgets.help_screen import _ACTION_GROUPS

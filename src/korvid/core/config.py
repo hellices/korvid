@@ -189,6 +189,8 @@ class KorvidConfig:
     log_buffer_lines: int = 5000
     log_wrap: bool = False
     log_timestamps: bool = False
+    timeline_max_entries: int = 500
+    timeline_max_bytes: int = 262144
     readonly: bool = False
     #: Contexts (kubeconfig names or fnmatch globs, issue #83) where every
     #: write demands typing the context name and the status bar shows a red
@@ -301,6 +303,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     )
     network_value = raw.get("network")
     network_raw: dict[str, Any] = network_value if isinstance(network_value, dict) else {}
+    timeline_value = raw.get("timeline")
+    timeline_raw: dict[str, Any] = timeline_value if isinstance(timeline_value, dict) else {}
     images_value = debug_raw.get("images")
     debug_images: dict[str, str] | None
     if "images" not in debug_raw:
@@ -375,6 +379,20 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
         log_wrap=logs_raw.get("wrap") is True,
         log_timestamps=logs_raw.get("timestamps") is True,
+        timeline_max_entries=_mapping_positive_int(
+            timeline_raw,
+            "max_entries",
+            KorvidConfig.timeline_max_entries,
+            "timeline",
+            warnings,
+        ),
+        timeline_max_bytes=_mapping_positive_int(
+            timeline_raw,
+            "max_bytes",
+            KorvidConfig.timeline_max_bytes,
+            "timeline",
+            warnings,
+        ),
         readonly=raw.get("readonly") is True,
         protected_contexts=_parse_protected_contexts(raw.get("protected_contexts")),
         agent_disable_in_protected=agent_raw.get("disable_in_protected") is True,
@@ -482,7 +500,7 @@ def _observability_rejections(raw: Mapping[str, Any], label: str, warnings: list
     return rejected
 
 
-def _observability_int(
+def _mapping_positive_int(
     raw: Mapping[str, Any], key: str, default: int, label: str, warnings: list[str]
 ) -> int:
     if key not in raw:
@@ -627,10 +645,10 @@ def _parse_observability_backend(
             f" the token will cross the network unencrypted"
         )
     defaults = ObservabilityBackend(url=url)
-    max_window = _observability_int(
+    max_window = _mapping_positive_int(
         value, "max_window_minutes", defaults.max_window_minutes, label, warnings
     )
-    default_window = _observability_int(
+    default_window = _mapping_positive_int(
         value, "default_window_minutes", defaults.default_window_minutes, label, warnings
     )
     if default_window > max_window:
@@ -648,14 +666,16 @@ def _parse_observability_backend(
             timeout_seconds=_observability_timeout(value, label, warnings),
             default_window_minutes=default_window,
             max_window_minutes=max_window,
-            max_series=_observability_int(
+            max_series=_mapping_positive_int(
                 value, "max_series", defaults.max_series, label, warnings
             ),
-            max_lines=_observability_int(value, "max_lines", defaults.max_lines, label, warnings),
-            max_response_bytes=_observability_int(
+            max_lines=_mapping_positive_int(
+                value, "max_lines", defaults.max_lines, label, warnings
+            ),
+            max_response_bytes=_mapping_positive_int(
                 value, "max_response_bytes", defaults.max_response_bytes, label, warnings
             ),
-            max_concurrency=_observability_int(
+            max_concurrency=_mapping_positive_int(
                 value, "max_concurrency", defaults.max_concurrency, label, warnings
             ),
             label_mappings=mappings,
