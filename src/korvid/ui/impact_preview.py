@@ -99,6 +99,7 @@ _CONTROL_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     """Render one `ImpactSummary` as bounded, literal preview lines."""
+    capped = _counts_are_lower_bounds(summary)
     lines = [
         IMPACT_TITLE,
         f"  {_ACTION_LABEL[summary.action]} {_resource_label(summary.target)}",
@@ -108,12 +109,12 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
         # snapshot, and without the target in it they say nothing about
         # the object the user is about to act on.
         lines.append(_TARGET_MISSING_LINE)
-    lines.extend(_section(_DIRECT_TITLE, summary.direct))
-    lines.extend(_section(_TRANSITIVE_TITLE, summary.transitive))
+    lines.extend(_section(_DIRECT_TITLE, summary.direct, capped=capped))
+    lines.extend(_section(_TRANSITIVE_TITLE, summary.transitive, capped=capped))
     lines.extend(_inferred_lines(summary))
-    lines.extend(_cycle_lines(summary))
-    lines.extend(_revisit_lines(summary))
-    lines.extend(_unresolved_lines(summary))
+    lines.extend(_cycle_lines(summary, capped=capped))
+    lines.extend(_revisit_lines(summary, capped=capped))
+    lines.extend(_unresolved_lines(summary, capped=capped))
     lines.append(_scope_line(summary))
     lines.extend(_coverage_lines(summary))
     lines.extend(_cap_lines(summary))
@@ -147,13 +148,20 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - len(_TRUNCATION_SUFFIX)].rstrip(".") + _TRUNCATION_SUFFIX
 
 
-def _section(title: str, items: Sequence[ImpactItem]) -> list[str]:
+def _section(title: str, items: Sequence[ImpactItem], *, capped: bool) -> list[str]:
     """One dependent section: an explicit count, bounded rows, an overflow
     note. "none in this snapshot" is information - distinct from a section
-    that was omitted."""
+    that was omitted, and already scoped to the snapshot, so a cap has
+    nothing to hedge there.
+
+    The header count is a lower bound whenever the answer could not be
+    exhaustive; the overflow note stays exact, because it counts what *this
+    preview* cut from items the summary actually holds, not what the walk
+    never found.
+    """
     if not items:
         return [f"  {title}: none in this snapshot"]
-    lines = [f"  {title}: {len(items)}"]
+    lines = [f"  {title}: {_count_label(len(items), capped=capped)}"]
     lines.extend(_item_line(item) for item in items[:_MAX_ITEM_LINES])
     if len(items) > _MAX_ITEM_LINES:
         lines.append(f"    ... {len(items) - _MAX_ITEM_LINES} more not shown (preview capped)")
@@ -191,37 +199,51 @@ def _inferred_lines(summary: ImpactSummary) -> list[str]:
     return []
 
 
+def _counts_are_lower_bounds(summary: ImpactSummary) -> bool:
+    """Whether every cluster-derived count in this summary may be short.
+
+    Two independent bounds produce the same reading problem. A capped
+    traversal stopped walking before it could reach every dependent, cycle
+    or revisit; a truncated snapshot means the walk was exhaustive only over
+    a graph that itself dropped resources, so edges into and out of what was
+    never joined are missing from every collection the summary carries -
+    including the unresolved set, which is bounded by an affected set the
+    same walk produced. Either way an exact `N` reads as "this is all of
+    it", which is exactly what neither case knows.
+    """
+    return summary.traversal_capped or summary.graph_truncated
+
+
 def _count_label(count: int, *, capped: bool) -> str:
     """Render a cluster-derived count, marked as a lower bound when capped.
 
-    A capped traversal stops classifying edges once it hits its limits, so
-    any count folded out of that walk - a cycle, a revisit - may be an
-    undercount, not the true total. "N or more" says so; the exact count
-    would misread as exhaustive.
+    `capped` is `_counts_are_lower_bounds`, never one flag on its own: the
+    caveat lines below the counts say *which* bound was hit, while the count
+    itself only needs to say that it is a floor. "N or more" says so; the
+    exact count would misread as exhaustive.
     """
     return f"{count} or more" if capped else str(count)
 
 
-def _cycle_lines(summary: ImpactSummary) -> list[str]:
+def _cycle_lines(summary: ImpactSummary, *, capped: bool) -> list[str]:
     if not summary.cycles:
         return []
-    count = _count_label(len(summary.cycles), capped=summary.traversal_capped)
+    count = _count_label(len(summary.cycles), capped=capped)
     return [f"  relationship cycles: {count} (loop edges classified, not expanded)"]
 
 
-def _revisit_lines(summary: ImpactSummary) -> list[str]:
+def _revisit_lines(summary: ImpactSummary, *, capped: bool) -> list[str]:
     """Converging or parallel edges into an already-listed dependent.
 
     Counted, never expanded: each dependent is listed once with the first
     path that reached it, and this line says how many further known paths
     the summary folded away - so "1 dependent" cannot be misread as "only
-    one relationship". When traversal was capped, that count is a lower
-    bound rather than the exact tally - the walk may have stopped before
-    finding every revisit.
+    one relationship". When the answer could not be exhaustive, that count
+    is a lower bound rather than the exact tally.
     """
     if not summary.revisits:
         return []
-    count = _count_label(len(summary.revisits), capped=summary.traversal_capped)
+    count = _count_label(len(summary.revisits), capped=capped)
     return [f"  additional known paths: {count} (already-listed dependents reached again)"]
 
 
@@ -236,10 +258,17 @@ def _scope_line(summary: ImpactSummary) -> str:
     return f"  scope: {scope}"
 
 
-def _unresolved_lines(summary: ImpactSummary) -> list[str]:
+def _unresolved_lines(summary: ImpactSummary, *, capped: bool) -> list[str]:
+    """Dangling references held by the affected set.
+
+    The set they are bounded by is the one the traversal produced, so this
+    count inherits the same floor semantics as the dependent sections: an
+    unreached dependent's dangling references were never in scope to count.
+    """
     if not summary.unresolved:
         return []
-    lines = [f"  unresolved references in the affected set: {len(summary.unresolved)}"]
+    count = _count_label(len(summary.unresolved), capped=capped)
+    lines = [f"  unresolved references in the affected set: {count}"]
     lines.extend(_unresolved_line(edge) for edge in summary.unresolved[:_MAX_UNRESOLVED_LINES])
     if len(summary.unresolved) > _MAX_UNRESOLVED_LINES:
         omitted = len(summary.unresolved) - _MAX_UNRESOLVED_LINES

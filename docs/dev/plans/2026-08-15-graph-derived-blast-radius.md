@@ -1155,9 +1155,10 @@ git commit -m "feat: add graph-derived impact summaries" \
   - `    - <resource> via <relation> (<confidence>) at <field>[ -> ...][ [inferred]]`
   - `  known transitive dependents (may be affected): <n>` or `: none in this snapshot`
   - `  inferred relationships are labelled and never block this write` (only when some item, cycle, revisit, or unresolved reference is inferred)
-  - `  relationship cycles: <n> (loop edges classified, not expanded)` (only when non-empty; `<n>` renders as `<n> or more` when `traversal_capped` is True, since a capped walk may have stopped before classifying every cycle)
-  - `  additional known paths: <n> (already-listed dependents reached again)` (only when `revisits` is non-empty: converging or parallel edges are counted, never expanded into a second item; `<n>` renders as `<n> or more` when `traversal_capped` is True, for the same reason)
+  - `  relationship cycles: <n> (loop edges classified, not expanded)` (only when non-empty)
+  - `  additional known paths: <n> (already-listed dependents reached again)` (only when `revisits` is non-empty: converging or parallel edges are counted, never expanded into a second item)
   - `  unresolved references in the affected set: <n>` plus `    - <subject> <relation> (<confidence>) -> <target> (<resolution>) at <field>`
+  - **Every `<n>` above renders as `<n> or more` when `traversal_capped` or `graph_truncated` is True** (`_counts_are_lower_bounds`, fed to the one `_count_label` helper): a capped walk may have stopped before reaching every dependent, cycle, revisit or affected-set unresolved reference, and a truncated snapshot never joined some resources at all, so in both cases the count is a floor rather than a total. `none in this snapshot` is not a count and is left alone; the `... <n> more ... (preview capped)` overflow lines stay exact, since they count what the preview cut from rows the summary holds.
   - `  scope: <namespace>` or `  scope: all namespaces` — **always**, including for `complete` coverage, which is only ever complete within that scope
   - `  graph coverage: complete` or `  graph coverage: incomplete - a missing dependent here does not prove none exists` plus `    - <group>/<resource>[ @<scope>]: <state>`
   - `  traversal capped: ...` and/or `  snapshot truncated: ...`
@@ -1217,6 +1218,14 @@ _OWNS_RS = RelationshipEdge(
     confidence=FactConfidence.DECLARED,
     evidence=EvidencePointer(resource=_POD, field="metadata.ownerReferences[0]"),
     resolution=EdgeResolution.RESOLVED,
+)
+_MISSING_CONFIG = RelationshipEdge(
+    subject=_POD,
+    target=GraphResource(group="", kind="ConfigMap", namespace="prod", name="gone"),
+    relation=RelationKind.USES_CONFIG,
+    confidence=FactConfidence.DECLARED,
+    evidence=EvidencePointer(resource=_POD, field="spec.volumes[0].configMap"),
+    resolution=EdgeResolution.MISSING,
 )
 _FORBIDDEN_SECRETS = CoverageRecord(
     group="",
@@ -1351,6 +1360,97 @@ def test_revisit_count_is_a_lower_bound_when_traversal_is_capped() -> None:
         )
     )
     assert "  additional known paths: 1 or more (already-listed dependents reached again)" in lines
+
+
+def test_dependent_and_unresolved_counts_are_lower_bounds_when_traversal_is_capped() -> None:
+    """A capped walk stopped before it could reach every dependent, so the
+    listed sections and the affected-set-bounded unresolved tally are floors,
+    not totals: an exact `1` there reads as "this is all of it"."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            transitive=(ImpactItem(resource=_POD, path=(_OWNS_DEPLOY, _OWNS_RS)),),
+            unresolved=(_MISSING_CONFIG,),
+            traversal_capped=True,
+        )
+    )
+    assert "  known direct dependents (may be affected): 1 or more" in lines
+    assert "  known transitive dependents (may be affected): 1 or more" in lines
+    assert "  unresolved references in the affected set: 1 or more" in lines
+
+
+def test_every_count_is_a_lower_bound_when_the_snapshot_was_truncated() -> None:
+    """A truncated snapshot never joined some resources, so the walk was
+    complete only over an incomplete graph: every cluster-derived count -
+    dependents, cycles, revisits, and the affected-set unresolved tally -
+    can be short by whatever the snapshot dropped, even though the traversal
+    itself never hit a cap."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            transitive=(ImpactItem(resource=_POD, path=(_OWNS_DEPLOY, _OWNS_RS)),),
+            cycles=(_OWNS_DEPLOY,),
+            revisits=(_OWNS_RS,),
+            unresolved=(_MISSING_CONFIG,),
+            traversal_capped=False,
+            graph_truncated=True,
+        )
+    )
+    assert "  known direct dependents (may be affected): 1 or more" in lines
+    assert "  known transitive dependents (may be affected): 1 or more" in lines
+    assert "  relationship cycles: 1 or more (loop edges classified, not expanded)" in lines
+    assert "  additional known paths: 1 or more (already-listed dependents reached again)" in lines
+    assert "  unresolved references in the affected set: 1 or more" in lines
+
+
+def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
+    """The other half of the contract: with a complete walk over a complete
+    snapshot the counts *are* the totals, and hedging them would understate
+    what the summary actually knows."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            transitive=(ImpactItem(resource=_POD, path=(_OWNS_DEPLOY, _OWNS_RS)),),
+            cycles=(_OWNS_DEPLOY,),
+            revisits=(_OWNS_RS,),
+            unresolved=(_MISSING_CONFIG,),
+            traversal_capped=False,
+            graph_truncated=False,
+        )
+    )
+    assert "  known direct dependents (may be affected): 1" in lines
+    assert "  known transitive dependents (may be affected): 1" in lines
+    assert "  relationship cycles: 1 (loop edges classified, not expanded)" in lines
+    assert "  additional known paths: 1 (already-listed dependents reached again)" in lines
+    assert "  unresolved references in the affected set: 1" in lines
+    assert not any("or more" in line for line in lines)
+
+
+def test_a_capped_section_still_reports_its_preview_overflow_exactly() -> None:
+    """The header count hedges what the *traversal* may have missed; the
+    `more not shown` line counts what *this preview* cut from items it
+    actually holds, which is exact - hedging it would suggest the renderer
+    dropped an unknown number of rows it had in hand."""
+    items = tuple(
+        ImpactItem(
+            resource=GraphResource(group="", kind="Pod", namespace="prod", name=f"web-{index}"),
+            path=(_OWNS_DEPLOY,),
+        )
+        for index in range(12)
+    )
+    lines = render_impact_lines(_summary(direct=items, traversal_capped=True))
+    assert "  known direct dependents (may be affected): 12 or more" in lines
+    assert "    ... 2 more not shown (preview capped)" in lines
+
+
+def test_empty_sections_stay_none_in_this_snapshot_even_when_capped() -> None:
+    """"none in this snapshot" is already scoped to the snapshot and is not a
+    count, so a cap has nothing to hedge: the caveat lines below say what was
+    bounded, and `0 or more` would be noise."""
+    lines = render_impact_lines(_summary(traversal_capped=True, graph_truncated=True))
+    assert "  known direct dependents (may be affected): none in this snapshot" in lines
+    assert "  known transitive dependents (may be affected): none in this snapshot" in lines
+    assert not any("or more" in line for line in lines)
 
 
 def test_revisited_paths_are_counted_never_expanded() -> None:
@@ -1625,6 +1725,7 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     """Render one `ImpactSummary` as bounded, literal preview lines."""
+    capped = _counts_are_lower_bounds(summary)
     lines = [
         IMPACT_TITLE,
         f"  {_ACTION_LABEL[summary.action]} {_resource_label(summary.target)}",
@@ -1634,12 +1735,12 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
         # snapshot, and without the target in it they say nothing about
         # the object the user is about to act on.
         lines.append(_TARGET_MISSING_LINE)
-    lines.extend(_section(_DIRECT_TITLE, summary.direct))
-    lines.extend(_section(_TRANSITIVE_TITLE, summary.transitive))
+    lines.extend(_section(_DIRECT_TITLE, summary.direct, capped=capped))
+    lines.extend(_section(_TRANSITIVE_TITLE, summary.transitive, capped=capped))
     lines.extend(_inferred_lines(summary))
-    lines.extend(_cycle_lines(summary))
-    lines.extend(_revisit_lines(summary))
-    lines.extend(_unresolved_lines(summary))
+    lines.extend(_cycle_lines(summary, capped=capped))
+    lines.extend(_revisit_lines(summary, capped=capped))
+    lines.extend(_unresolved_lines(summary, capped=capped))
     lines.append(_scope_line(summary))
     lines.extend(_coverage_lines(summary))
     lines.extend(_cap_lines(summary))
@@ -1647,13 +1748,20 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     return tuple(line[:_MAX_LINE] for line in lines)
 
 
-def _section(title: str, items: Sequence[ImpactItem]) -> list[str]:
+def _section(title: str, items: Sequence[ImpactItem], *, capped: bool) -> list[str]:
     """One dependent section: an explicit count, bounded rows, an overflow
     note. "none in this snapshot" is information - distinct from a section
-    that was omitted."""
+    that was omitted, and already scoped to the snapshot, so a cap has
+    nothing to hedge there.
+
+    The header count is a lower bound whenever the answer could not be
+    exhaustive; the overflow note stays exact, because it counts what *this
+    preview* cut from items the summary actually holds, not what the walk
+    never found.
+    """
     if not items:
         return [f"  {title}: none in this snapshot"]
-    lines = [f"  {title}: {len(items)}"]
+    lines = [f"  {title}: {_count_label(len(items), capped=capped)}"]
     lines.extend(_item_line(item) for item in items[:_MAX_ITEM_LINES])
     if len(items) > _MAX_ITEM_LINES:
         lines.append(f"    ... {len(items) - _MAX_ITEM_LINES} more not shown (preview capped)")
@@ -1691,37 +1799,51 @@ def _inferred_lines(summary: ImpactSummary) -> list[str]:
     return []
 
 
+def _counts_are_lower_bounds(summary: ImpactSummary) -> bool:
+    """Whether every cluster-derived count in this summary may be short.
+
+    Two independent bounds produce the same reading problem. A capped
+    traversal stopped walking before it could reach every dependent, cycle
+    or revisit; a truncated snapshot means the walk was exhaustive only over
+    a graph that itself dropped resources, so edges into and out of what was
+    never joined are missing from every collection the summary carries -
+    including the unresolved set, which is bounded by an affected set the
+    same walk produced. Either way an exact `N` reads as "this is all of
+    it", which is exactly what neither case knows.
+    """
+    return summary.traversal_capped or summary.graph_truncated
+
+
 def _count_label(count: int, *, capped: bool) -> str:
     """Render a cluster-derived count, marked as a lower bound when capped.
 
-    A capped traversal stops classifying edges once it hits its limits, so
-    any count folded out of that walk - a cycle, a revisit - may be an
-    undercount, not the true total. "N or more" says so; the exact count
-    would misread as exhaustive.
+    `capped` is `_counts_are_lower_bounds`, never one flag on its own: the
+    caveat lines below the counts say *which* bound was hit, while the count
+    itself only needs to say that it is a floor. "N or more" says so; the
+    exact count would misread as exhaustive.
     """
     return f"{count} or more" if capped else str(count)
 
 
-def _cycle_lines(summary: ImpactSummary) -> list[str]:
+def _cycle_lines(summary: ImpactSummary, *, capped: bool) -> list[str]:
     if not summary.cycles:
         return []
-    count = _count_label(len(summary.cycles), capped=summary.traversal_capped)
+    count = _count_label(len(summary.cycles), capped=capped)
     return [f"  relationship cycles: {count} (loop edges classified, not expanded)"]
 
 
-def _revisit_lines(summary: ImpactSummary) -> list[str]:
+def _revisit_lines(summary: ImpactSummary, *, capped: bool) -> list[str]:
     """Converging or parallel edges into an already-listed dependent.
 
     Counted, never expanded: each dependent is listed once with the first
     path that reached it, and this line says how many further known paths
     the summary folded away - so "1 dependent" cannot be misread as "only
-    one relationship". When traversal was capped, that count is a lower
-    bound rather than the exact tally - the walk may have stopped before
-    finding every revisit.
+    one relationship". When the answer could not be exhaustive, that count
+    is a lower bound rather than the exact tally.
     """
     if not summary.revisits:
         return []
-    count = _count_label(len(summary.revisits), capped=summary.traversal_capped)
+    count = _count_label(len(summary.revisits), capped=capped)
     return [f"  additional known paths: {count} (already-listed dependents reached again)"]
 
 
@@ -1736,10 +1858,17 @@ def _scope_line(summary: ImpactSummary) -> str:
     return f"  scope: {scope}"
 
 
-def _unresolved_lines(summary: ImpactSummary) -> list[str]:
+def _unresolved_lines(summary: ImpactSummary, *, capped: bool) -> list[str]:
+    """Dangling references held by the affected set.
+
+    The set they are bounded by is the one the traversal produced, so this
+    count inherits the same floor semantics as the dependent sections: an
+    unreached dependent's dangling references were never in scope to count.
+    """
     if not summary.unresolved:
         return []
-    lines = [f"  unresolved references in the affected set: {len(summary.unresolved)}"]
+    count = _count_label(len(summary.unresolved), capped=capped)
+    lines = [f"  unresolved references in the affected set: {count}"]
     lines.extend(_unresolved_line(edge) for edge in summary.unresolved[:_MAX_UNRESOLVED_LINES])
     if len(summary.unresolved) > _MAX_UNRESOLVED_LINES:
         omitted = len(summary.unresolved) - _MAX_UNRESOLVED_LINES
@@ -3325,10 +3454,18 @@ Reading it:
 - `additional known paths` counts relationships that reach a dependent
   already listed above (a second route, a second mount). They are counted
   rather than repeated, so a count of dependents is never inflated.
-- `relationship cycles` and `additional known paths` render as `N or more`
-  instead of an exact `N` whenever `traversal capped` is also shown: a
-  capped walk stops classifying edges once it hits its limit, so the count
-  it folded away may be an undercount, not the true total.
+- `relationship cycles` and `additional known paths` count edges the walk
+  folded away rather than expanding them.
+- Every cluster-derived count — both dependent sections, `relationship
+  cycles`, `additional known paths`, and `unresolved references in the
+  affected set` — renders as `N or more` instead of an exact `N` whenever
+  `traversal capped` or `snapshot truncated` is shown. A capped walk stops
+  before it reaches every dependent, and a truncated snapshot was already
+  missing resources before the walk began, so in either case `N` is a floor
+  and an exact number would read as exhaustive. `none in this snapshot` is
+  left as-is: it is already a statement about the snapshot, not a count.
+  The `... N more not shown (preview capped)` lines also stay exact — they
+  count what the preview cut from rows it holds, not what was never found.
 - `[inferred]` marks a hop derived by a heuristic rather than read from a
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references

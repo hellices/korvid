@@ -53,6 +53,14 @@ _OWNS_RS = RelationshipEdge(
     evidence=EvidencePointer(resource=_POD, field="metadata.ownerReferences[0]"),
     resolution=EdgeResolution.RESOLVED,
 )
+_MISSING_CONFIG = RelationshipEdge(
+    subject=_POD,
+    target=GraphResource(group="", kind="ConfigMap", namespace="prod", name="gone"),
+    relation=RelationKind.USES_CONFIG,
+    confidence=FactConfidence.DECLARED,
+    evidence=EvidencePointer(resource=_POD, field="spec.volumes[0].configMap"),
+    resolution=EdgeResolution.MISSING,
+)
 _FORBIDDEN_SECRETS = CoverageRecord(
     group="",
     resource="secrets",
@@ -186,6 +194,97 @@ def test_revisit_count_is_a_lower_bound_when_traversal_is_capped() -> None:
         )
     )
     assert "  additional known paths: 1 or more (already-listed dependents reached again)" in lines
+
+
+def test_dependent_and_unresolved_counts_are_lower_bounds_when_traversal_is_capped() -> None:
+    """A capped walk stopped before it could reach every dependent, so the
+    listed sections and the affected-set-bounded unresolved tally are floors,
+    not totals: an exact `1` there reads as "this is all of it"."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            transitive=(ImpactItem(resource=_POD, path=(_OWNS_DEPLOY, _OWNS_RS)),),
+            unresolved=(_MISSING_CONFIG,),
+            traversal_capped=True,
+        )
+    )
+    assert "  known direct dependents (may be affected): 1 or more" in lines
+    assert "  known transitive dependents (may be affected): 1 or more" in lines
+    assert "  unresolved references in the affected set: 1 or more" in lines
+
+
+def test_every_count_is_a_lower_bound_when_the_snapshot_was_truncated() -> None:
+    """A truncated snapshot never joined some resources, so the walk was
+    complete only over an incomplete graph: every cluster-derived count -
+    dependents, cycles, revisits, and the affected-set unresolved tally -
+    can be short by whatever the snapshot dropped, even though the traversal
+    itself never hit a cap."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            transitive=(ImpactItem(resource=_POD, path=(_OWNS_DEPLOY, _OWNS_RS)),),
+            cycles=(_OWNS_DEPLOY,),
+            revisits=(_OWNS_RS,),
+            unresolved=(_MISSING_CONFIG,),
+            traversal_capped=False,
+            graph_truncated=True,
+        )
+    )
+    assert "  known direct dependents (may be affected): 1 or more" in lines
+    assert "  known transitive dependents (may be affected): 1 or more" in lines
+    assert "  relationship cycles: 1 or more (loop edges classified, not expanded)" in lines
+    assert "  additional known paths: 1 or more (already-listed dependents reached again)" in lines
+    assert "  unresolved references in the affected set: 1 or more" in lines
+
+
+def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
+    """The other half of the contract: with a complete walk over a complete
+    snapshot the counts *are* the totals, and hedging them would understate
+    what the summary actually knows."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            transitive=(ImpactItem(resource=_POD, path=(_OWNS_DEPLOY, _OWNS_RS)),),
+            cycles=(_OWNS_DEPLOY,),
+            revisits=(_OWNS_RS,),
+            unresolved=(_MISSING_CONFIG,),
+            traversal_capped=False,
+            graph_truncated=False,
+        )
+    )
+    assert "  known direct dependents (may be affected): 1" in lines
+    assert "  known transitive dependents (may be affected): 1" in lines
+    assert "  relationship cycles: 1 (loop edges classified, not expanded)" in lines
+    assert "  additional known paths: 1 (already-listed dependents reached again)" in lines
+    assert "  unresolved references in the affected set: 1" in lines
+    assert not any("or more" in line for line in lines)
+
+
+def test_a_capped_section_still_reports_its_preview_overflow_exactly() -> None:
+    """The header count hedges what the *traversal* may have missed; the
+    `more not shown` line counts what *this preview* cut from items it
+    actually holds, which is exact - hedging it would suggest the renderer
+    dropped an unknown number of rows it had in hand."""
+    items = tuple(
+        ImpactItem(
+            resource=GraphResource(group="", kind="Pod", namespace="prod", name=f"web-{index}"),
+            path=(_OWNS_DEPLOY,),
+        )
+        for index in range(12)
+    )
+    lines = render_impact_lines(_summary(direct=items, traversal_capped=True))
+    assert "  known direct dependents (may be affected): 12 or more" in lines
+    assert "    ... 2 more not shown (preview capped)" in lines
+
+
+def test_empty_sections_stay_none_in_this_snapshot_even_when_capped() -> None:
+    """ "none in this snapshot" is already scoped to the snapshot and is not a
+    count, so a cap has nothing to hedge: the caveat lines below say what was
+    bounded, and `0 or more` would be noise."""
+    lines = render_impact_lines(_summary(traversal_capped=True, graph_truncated=True))
+    assert "  known direct dependents (may be affected): none in this snapshot" in lines
+    assert "  known transitive dependents (may be affected): none in this snapshot" in lines
+    assert not any("or more" in line for line in lines)
 
 
 def test_revisited_paths_are_counted_never_expanded() -> None:

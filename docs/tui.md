@@ -234,10 +234,18 @@ Reading it:
 - `additional known paths` counts relationships that reach a dependent
   already listed above (a second route, a second mount). They are counted
   rather than repeated, so a count of dependents is never inflated.
-- `relationship cycles` and `additional known paths` render as `N or more`
-  instead of an exact `N` whenever `traversal capped` is also shown: a
-  capped walk stops classifying edges once it hits its limit, so the count
-  it folded away may be an undercount, not the true total.
+- `relationship cycles` and `additional known paths` count edges the walk
+  folded away rather than expanding them.
+- Every cluster-derived count — both dependent sections, `relationship
+  cycles`, `additional known paths`, and `unresolved references in the
+  affected set` — renders as `N or more` instead of an exact `N` whenever
+  `traversal capped` or `snapshot truncated` is shown. A capped walk stops
+  before it reaches every dependent, and a truncated snapshot was already
+  missing resources before the walk began, so in either case `N` is a floor
+  and an exact number would read as exhaustive. `none in this snapshot` is
+  left as-is: it is already a statement about the snapshot, not a count.
+  The `... N more not shown (preview capped)` lines also stay exact — they
+  count what the preview cut from rows it holds, not what was never found.
 - `[inferred]` marks a hop derived by a heuristic rather than read from a
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references
