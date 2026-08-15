@@ -69,7 +69,8 @@ what you want:
 uv tool install korvid                 # cockpit only
 uv tool install 'korvid[agent]'        # + embedded AI agent
 uv tool install 'korvid[mcp]'          # + MCP server for external agents
-uv tool install 'korvid[all]'          # both of the above (= agent,mcp)
+uv tool install 'korvid[observability]' # + Prometheus/Loki investigation
+uv tool install 'korvid[all]'          # agent,mcp,observability
 
 brew install hellices/korvid/korvid    # macOS/Linux, no Python needed (= agent)
 ```
