@@ -72,6 +72,15 @@ _MAX_UNRESOLVED_LINES = 5
 _MAX_COVERAGE_LINES = 5
 _MAX_PATH_HOPS = 3
 _MAX_TEXT = 120
+#: Reserved for the resource *name* inside `_MAX_TEXT`, whatever precedes
+#: it. `group/kind/namespace` can exceed the fragment bound on its own (a
+#: CRD group, a long kind, a long namespace), and a label that spends the
+#: bound left to right renders a type with no object in it - the same text
+#: for every object of that type. Half of this goes to the head and half to
+#: the tail of the name, which is enough for both the workload prefix an
+#: approver reads and the generated suffix (`-blue`, a ReplicaSet hash, a
+#: pod suffix) that late-differing names are told apart by.
+_MIN_NAME_BUDGET = 48
 #: Total bound per composed line. `_MAX_TEXT` bounds each cluster-derived
 #: *fragment*, but an item line concatenates an identity and up to three
 #: hops; the dialog body is 70 columns wide, so a line that would wrap into
@@ -321,9 +330,56 @@ def _cap_lines(summary: ImpactSummary) -> list[str]:
 
 def _resource_label(resource: GraphResource) -> str:
     """`group/kind/namespace/name`, blank parts dropped (the graph screen's
-    own convention), flattened and capped."""
-    parts = (resource.group, resource.kind, resource.namespace, resource.name)
-    return _safe("/".join(part for part in parts if part))
+    own convention), flattened and bounded by an explicit budget.
+
+    A label under `_MAX_TEXT` is returned verbatim; only an over-long one is
+    reshaped, so ordinary identities render byte for byte as before.
+
+    Over the bound, the parts are not equal. `group/kind/namespace` says
+    *what kind of thing* is affected; `name` says *which one*, and it is the
+    only part an approver can match against the object they asked to write
+    to. Spending the bound left to right - which is what capping the joined
+    string does - drops the name first, so a long-group CRD renders one
+    identical line for every object of that type. The name is given
+    `_MIN_NAME_BUDGET` characters no matter what precedes it (more when the
+    qualifier is short, never more than it needs), the qualifier gets the
+    rest, and both are cut in the middle rather than at the end, so a head
+    and a tail of each survive with the removal marked in between.
+    """
+    qualifier = "/".join(
+        _flatten(part) for part in (resource.group, resource.kind, resource.namespace) if part
+    )
+    name = _flatten(resource.name)
+    label = "/".join(part for part in (qualifier, name) if part)
+    if len(label) <= _MAX_TEXT:
+        return label
+    if not name:  # a malformed reference: nothing to protect, bound the rest
+        return _elide(qualifier, _MAX_TEXT)
+    if not qualifier:
+        return _elide(name, _MAX_TEXT)
+    name_budget = min(len(name), max(_MIN_NAME_BUDGET, _MAX_TEXT - 1 - len(qualifier)))
+    return f"{_elide(qualifier, _MAX_TEXT - 1 - name_budget)}/{_elide(name, name_budget)}"
+
+
+def _elide(text: str, limit: int) -> str:
+    """Cut the *middle* of `text` to `limit`, marking the cut.
+
+    The counterpart to `_truncate` for text whose end identifies it as much
+    as its start: a generated resource name differing only in its suffix
+    survives a middle cut and is lost entirely to an end cut. The split is
+    deterministic - the head takes the odd character - so the same input
+    always renders the same label. Dots adjacent to the cut are removed for
+    the reason `_truncate` removes them: `.....` reads as data rather than
+    as one mark.
+    """
+    if len(text) <= limit:
+        return text
+    if limit <= len(_TRUNCATION_SUFFIX):
+        return _TRUNCATION_SUFFIX[: max(limit, 0)]
+    available = limit - len(_TRUNCATION_SUFFIX)
+    head_length = available - available // 2
+    tail = text[len(text) - available // 2 :].lstrip(".") if available // 2 else ""
+    return f"{text[:head_length].rstrip('.')}{_TRUNCATION_SUFFIX}{tail}"
 
 
 def _flatten(text: str) -> str:

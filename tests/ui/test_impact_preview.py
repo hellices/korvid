@@ -25,6 +25,7 @@ from korvid.ui.impact_preview import (
     _ACTION_LABEL,
     _MAX_LINE,
     _MAX_TEXT,
+    _MIN_NAME_BUDGET,
     _TRUNCATION_SUFFIX,
     ADVISORY_LINE,
     IMPACT_TITLE,
@@ -559,45 +560,176 @@ def _owned_by(subject: GraphResource, field: str) -> RelationshipEdge:
     )
 
 
-def test_two_long_identities_sharing_a_prefix_stay_distinguishable_when_truncated() -> None:
-    """The per-fragment `_MAX_TEXT` cap must *say* it cut.
+def _identities(lines: tuple[str, ...], prefix: str) -> list[str]:
+    """The identity fragment of every item line starting with `prefix`."""
+    return [line[len("    - ") :].split(" via ")[0] for line in lines if line.startswith(prefix)]
 
-    Two dependents whose legal DNS names share a long prefix render as two
-    identities capped at the same width. Without a visible marker both lines
-    read as complete identities, and an approver comparing them cannot tell
-    a full name from a silently shortened one - the dangerous reading, since
-    the rest of the name is exactly what distinguishes the two objects. The
-    cut is marked, and everything the cap had room for is still shown, so
-    the two lines remain distinguishable as far as the suffix allows.
-    """
-    shared = "checkout-api-" + "a" * 80
-    blue = GraphResource(group="", kind="Pod", namespace="prod", name=f"{shared}-blue-{'x' * 150}")
-    green = GraphResource(
-        group="", kind="Pod", namespace="prod", name=f"{shared}-green-{'x' * 150}"
-    )
-    lines = render_impact_lines(
+
+def _dependent_lines(*resources: GraphResource) -> tuple[str, ...]:
+    """Render one direct-dependent item line per resource, one declared hop each."""
+    return render_impact_lines(
         _summary(
-            direct=(
-                ImpactItem(resource=blue, path=(_owned_by(blue, "metadata.ownerReferences[0]"),)),
-                ImpactItem(resource=green, path=(_owned_by(green, "metadata.ownerReferences[0]"),)),
+            direct=tuple(
+                ImpactItem(
+                    resource=resource,
+                    path=(_owned_by(resource, "metadata.ownerReferences[0]"),),
+                )
+                for resource in resources
             )
         )
     )
-    items = [line for line in lines if line.startswith("    - Pod/prod/checkout-api-")]
-    assert len(items) == 2
-    identities = [line[len("    - ") :].split(" via ")[0] for line in items]
+
+
+def test_two_long_identities_sharing_a_prefix_stay_distinguishable_when_truncated() -> None:
+    """The per-fragment `_MAX_TEXT` cap must *say* it cut, and keep the tail.
+
+    Two dependents whose legal DNS names share a long prefix render as two
+    identities bounded at the same width. Without a visible marker both
+    lines read as complete identities, and an approver comparing them cannot
+    tell a full name from a silently shortened one - the dangerous reading,
+    since the rest of the name is exactly what distinguishes the two
+    objects. A prefix-only cut is worse still: it drops precisely the
+    generated suffix (`-blue` / `-green`, a ReplicaSet hash, a pod
+    suffix) that names differing late are told apart by. The budget keeps a
+    head *and* a tail of the name and marks what it removed in between.
+    """
+    shared = "checkout-api-" + "a" * 80 + "-" + "x" * 150
+    blue = GraphResource(group="", kind="Pod", namespace="prod", name=f"{shared}-blue")
+    green = GraphResource(group="", kind="Pod", namespace="prod", name=f"{shared}-green")
+    lines = _dependent_lines(blue, green)
+    identities = _identities(lines, "    - Pod/prod/checkout-api-")
+    assert len(identities) == 2
     for identity, resource in zip(identities, (blue, green), strict=True):
         assert len(identity) <= _MAX_TEXT
-        assert identity.endswith(_TRUNCATION_SUFFIX)
-        assert not identity.endswith(_TRUNCATION_SUFFIX * 2)
+        assert _TRUNCATION_SUFFIX in identity
+        assert _TRUNCATION_SUFFIX * 2 not in identity
         full = f"Pod/prod/{resource.name}"
-        assert full.startswith(identity[: -len(_TRUNCATION_SUFFIX)])
-        assert full not in identity  # the tail the cap dropped is really gone
+        head, tail = identity.split(_TRUNCATION_SUFFIX, 1)
+        assert full.startswith(head)
+        assert full.endswith(tail)
+        assert full not in identity  # the middle the budget dropped is really gone
     assert identities[0] != identities[1]
-    assert "-blue-" in identities[0]
-    assert "-green-" in identities[1]
-    # A short identity is never marked: the suffix means "cut", nothing else.
+    assert identities[0].endswith("-blue")
+    assert identities[1].endswith("-green")
+    # A short identity is never marked: the marker means "cut", nothing else.
     assert "  delete apps/Deployment/prod/web" in lines
+
+
+def test_a_long_group_kind_and_namespace_never_push_the_name_out_of_the_label() -> None:
+    """The name is the last thing a bounded identity may lose.
+
+    A CRD can carry a long group, a long kind and a long namespace; joined
+    ahead of the name they can exceed `_MAX_TEXT` on their own, so a
+    prefix-only cut renders `<group>/<kind>/<names...` - an approval line
+    naming a *type* and no object at all, identical for every object of that
+    type. `_MIN_NAME_BUDGET` is reserved for the name regardless of what
+    precedes it, and spent on a head and a tail, so two objects differing
+    near the start and two differing near the end all stay distinct.
+    """
+    group = "platform-workloads-" + "g" * 70 + ".internal.example.com"
+    kind = "CheckoutServiceDeploymentBinding" + "K" * 40
+    namespace = "team-" + "n" * 70 + "-shard-7"
+    assert len(f"{group}/{kind}/{namespace}") > _MAX_TEXT
+    base = "checkout-api-" + "c" * 80
+    names = (f"{base}-blue", f"{base}-green", f"blue-{base}", f"green-{base}")
+    resources = tuple(
+        GraphResource(group=group, kind=kind, namespace=namespace, name=name) for name in names
+    )
+    lines = _dependent_lines(*resources)
+    identities = _identities(lines, "    - platform-workloads-")
+    assert len(identities) == 4
+    assert len(set(identities)) == 4  # differing near the start *or* near the end
+    for identity, name in zip(identities, names, strict=True):
+        assert len(identity) <= _MAX_TEXT
+        assert _TRUNCATION_SUFFIX in identity
+        assert identity.startswith("platform-workloads-")  # the qualifier head survives
+        assert "-shard-7/" in identity  # ...and so does the namespace tail
+        keeps = identity.split("-shard-7/", 1)[1]
+        assert len(keeps.replace(_TRUNCATION_SUFFIX, "")) >= _MIN_NAME_BUDGET - 8
+        assert keeps.startswith(name[:10])
+        assert keeps.endswith(name[-10:])
+    assert max(len(line) for line in lines) <= _MAX_LINE
+
+
+def test_a_difference_the_budget_cannot_keep_is_still_marked_as_shortened() -> None:
+    """The residual limit, stated: no bounded label can distinguish every
+    pair of 250-character names. Two names differing only in the middle
+    render identically - but both carry the marker, so neither line reads as
+    a complete identity, and the preview never claims an exactness it does
+    not have."""
+    head, tail = "checkout-api-" + "a" * 90, "x" * 150
+    blue = GraphResource(group="", kind="Pod", namespace="prod", name=f"{head}-blue-{tail}")
+    green = GraphResource(group="", kind="Pod", namespace="prod", name=f"{head}-green-{tail}")
+    identities = _identities(_dependent_lines(blue, green), "    - Pod/prod/checkout-api-")
+    assert len(identities) == 2
+    for identity in identities:
+        assert _TRUNCATION_SUFFIX in identity
+        assert len(identity) <= _MAX_TEXT
+
+
+def test_a_label_with_blank_parts_drops_them_and_still_holds_the_bound() -> None:
+    """`GraphResource` does not validate its fields, so an unresolved
+    reference can carry a blank namespace, a blank kind, or - malformed -
+    a blank name. Blank parts are dropped, never rendered as an empty
+    segment or a trailing slash, and the bound still holds when the name is
+    the only part there is."""
+    nameless = GraphResource(group="", kind="ConfigMap", namespace="prod", name="")
+    bare = GraphResource(group="", kind="", namespace="", name="n" * 400)
+    long_kindless = GraphResource(group="", kind="", namespace="", name="a" * 60 + "-tail")
+    identities = _identities(_dependent_lines(nameless, bare, long_kindless), "    - ")
+    assert identities[0] == "ConfigMap/prod"
+    assert identities[2] == "a" * 60 + "-tail"
+    assert len(identities[1]) == _MAX_TEXT
+    assert identities[1] == "n" * 59 + _TRUNCATION_SUFFIX + "n" * 58
+    assert not any(identity.endswith("/") or "//" in identity for identity in identities)
+
+
+def test_labels_within_the_bound_are_rendered_byte_for_byte() -> None:
+    """Nothing about the budget may touch an ordinary label. Every label up
+    to and including `_MAX_TEXT` characters renders exactly as
+    `group/kind/namespace/name` with blank parts dropped - no marker, no
+    reshaping, no lost character."""
+    name = "b" * (_MAX_TEXT - len("apps/Deployment/prod/"))
+    exact = GraphResource(group="apps", kind="Deployment", namespace="prod", name=name)
+    assert len(f"apps/Deployment/prod/{name}") == _MAX_TEXT
+    cluster_scoped = GraphResource(
+        group="rbac.authorization.k8s.io", kind="ClusterRole", namespace="", name="view"
+    )
+    lines = _dependent_lines(exact, _POD, cluster_scoped)
+    assert lines[1] == "  delete apps/Deployment/prod/web"
+    identities = _identities(lines, "    - ")
+    assert identities == [
+        f"apps/Deployment/prod/{name}",
+        "Pod/prod/web-abc-1",
+        "rbac.authorization.k8s.io/ClusterRole/view",
+    ]
+    assert not any(_TRUNCATION_SUFFIX in identity for identity in identities)
+
+
+def test_a_bounded_label_stays_flat_and_literal_for_unicode_and_control_input() -> None:
+    """The budget runs on flattened text, so a hostile name cannot buy width
+    with characters that render as nothing. Control, bidi and zero-width
+    characters are still one space each (length-preserving, so two names
+    cannot collapse into one), ordinary Unicode still survives, no markup is
+    interpreted, and the bound holds on both."""
+    hostile_name = "[bold red]checkout\u202e" + "\u200b" * 60 + "rogue\u0085" * 20 + "\u2066tail[/]"
+    hostile = GraphResource(group="", kind="Pod", namespace="prod", name=hostile_name)
+    unicode_name = "配置-café-🚀-" + "書" * 200 + "-末尾"
+    friendly = GraphResource(group="", kind="ConfigMap", namespace="prod", name=unicode_name)
+    lines = _dependent_lines(hostile, friendly)
+    identities = _identities(lines, "    - ")
+    assert len(identities) == 2
+    for identity in identities:
+        assert len(identity) <= _MAX_TEXT
+        assert _TRUNCATION_SUFFIX in identity
+        assert not any(
+            unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for char in identity
+        )
+    assert identities[0].startswith("Pod/prod/[bold red]checkout")
+    assert identities[0].endswith("tail[/]")
+    assert identities[1].startswith("ConfigMap/prod/配置-café-🚀")
+    assert identities[1].endswith("-末尾")
+    assert max(len(line) for line in lines) <= _MAX_LINE
 
 
 def test_a_long_evidence_path_is_truncated_visibly_below_the_line_bound() -> None:
