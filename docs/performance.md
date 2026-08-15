@@ -179,10 +179,14 @@ machine state, which two separate two-arm runs do not provide — a first
 attempt at the split below produced two runs that disagreed about the shared
 cell (14.64 s against 14.93 s) by more than the effect being claimed. All four
 arms are therefore run round-robin *within* each round, and the arms are
-differenced within a round before anything is summarised: a load episode
-inflates every arm of the round it lands on, so the within-round saving is the
-part the machine cannot fake. Each arm reverts a set of source files to the
-pre-merge commit; the empty set is the shipped tree.
+differenced within a round before anything is summarised. That does not make
+load artifacts impossible: the four arms still run one after another, so a
+short spike can land on a single arm. What it bounds is the *time* between the
+arms being compared, which is what slow drift needs to separate them. Anything
+faster than that survives, which is why the interaction is reported as nine
+per-round values and how often they agree on a sign, rather than as one
+number. Each arm reverts a set of source files to the pre-merge commit; the
+empty set is the shipped tree.
 
 **Render path (`resource_table.py`) × update path (`store.py` + `models.py`)**,
 9 rounds, timestamp-bearing workload:
@@ -195,10 +199,10 @@ pre-merge commit; the empty set is the shipped tree.
 Within-round savings: render path 1.77 s, update path 0.16 s, the pair 3.66 s.
 The pair removes **2.04 s more than the two removed separately** — and does so
 in **9 rounds out of 9**, so the sign does not depend on which round is
-trusted. (That 2.04 s is the median of the nine per-round interactions, not
-the difference of the three medians quoted before it; differencing first is
-the whole point.) Adding or multiplying the single-change numbers
-underestimates the pair by roughly a factor of two.
+trusted, and no single spike can produce it. (That 2.04 s is the median of the
+nine per-round interactions, not the difference of the three medians quoted
+before it; differencing first is the whole point.) Adding or multiplying the
+single-change numbers underestimates the pair by roughly a factor of two.
 
 The likely reading: while a repaint still rewrites every row's cells, the
 update path's per-object work is a small share of a large cost, so removing it
