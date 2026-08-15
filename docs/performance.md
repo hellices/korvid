@@ -207,20 +207,26 @@ single-change numbers underestimates the pair by roughly a factor of two.
 The mechanism is not Amdahl's law. Removing an additive cost changes the
 *share* the remaining work holds, but it cannot turn a 0.16 s saving into a
 1.89 s one — the absolute saving would stay put. Something has to make the
-per-object work run more often, and it does. Counting the row builds each arm
-actually performs over the same 20 s schedule (two runs, `format_age` calls):
+per-object work run more often, and it does. Counting `format_age` evaluations
+over the same 20 s schedule (two runs), against the row rebuilds in the same
+runs:
 
-| Arm | row builds | |
-|---|---:|---|
-| neither | 1.09 M / 1.03 M | |
-| new render path only | 3.19 M / 3.17 M | **~3×** |
-| new update path only | 1.20 M / 1.22 M | |
-| both | 3.91 M / 3.83 M | **~3.6×** |
+| Arm | AGE evaluations | | row rebuilds |
+|---|---:|---|---:|
+| neither | 1.09 M / 1.03 M | | 3,538 |
+| new render path only | 3.19 M / 3.17 M | **~3×** | 3,543 |
+| new update path only | 1.20 M / 1.22 M | | 3,538 |
+| both | 3.91 M / 3.83 M | **~3.6×** | 3,543 |
+
+AGE is evaluated for every row on every repaint — it feeds the stamp that
+decides whether the row can be reused, so it runs *before* the memo can spare
+anything, and 99.7% of those rows are then reused unchanged. Row rebuilds
+track the events, so they are flat across all four arms. The quantity that
+triples is exactly the quantity the update-path change makes cheap.
 
 Repaints are not a fixed quantity of the workload: the cheaper a repaint gets,
 the more of them the run completes before the schedule ends. The render-path
-change roughly triples them, and the per-row work the update path removes runs
-once per row per repaint — so the same optimisation has about three times as
+change roughly triples them, so the same optimisation has about three times as
 many opportunities to pay. That is the direction and most of the size of the
 interaction. The counts do not account for all of it, and nothing here
 separates the remainder, so the residual is left unexplained rather than
