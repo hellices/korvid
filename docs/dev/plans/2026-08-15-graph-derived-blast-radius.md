@@ -1147,9 +1147,12 @@ git commit -m "feat: add graph-derived impact summaries" \
   - `ADVISORY_LINE: str`.
   - `IMPACT_UNAVAILABLE_LINES: tuple[str, ...]` — the static two-line advisory the app renders when the snapshot could not be loaded.
   - `_MAX_LINE: int = 240` — the total per-line bound applied *after* a line is composed (the test imports it by name so the constant and its test cannot drift).
+  - `_MAX_TEXT: int = 120` — the per-fragment bound applied before a line is composed; also the point past which `_resource_label` stops returning a label verbatim and reshapes it under budget.
+  - `_MIN_NAME_BUDGET: int = 48` — characters reserved for the resource *name* inside an over-long `_resource_label`, whatever precedes it (more when the qualifier is short, never more than the name needs). Tested by name for the same reason `_MAX_LINE` is.
+  - `_TRUNCATION_SUFFIX: str = "..."` — the mark every cut (a fragment, a composed line, or an elided name) leaves behind, so a shortened line can never be mistaken for a complete one.
 - Line grammar (exact, machine-defined; no cluster text may reach a heading):
   - `graph-derived impact (advisory):`
-  - `  <action label> <group/kind/namespace/name>` (`delete` or `rollout restart`)
+  - `  <action label> <group/kind/namespace/name>` (`delete` or `rollout restart`) — a label at or under `_MAX_TEXT` renders verbatim; over it, `_MIN_NAME_BUDGET` characters are reserved for `name` no matter how long `group/kind/namespace` is, the qualifier gets the rest, and both are cut in the *middle* (never the end) by `_elide`, so a long-group CRD or a name that differs only late (`-blue`/`-green`, a ReplicaSet hash, a pod suffix) still keeps a distinguishing head and tail instead of collapsing every object of that type into one identical line.
   - `  target not found in this snapshot - dependents unknown` (only when `target_present` is False, directly under the action line: it changes how every count below reads)
   - `  known direct dependents (may be affected): <n>` or `: none in this snapshot`
   - `    - <resource> via <relation> (<confidence>) at <field>[ -> ...][ [inferred]]`
@@ -1163,7 +1166,7 @@ git commit -m "feat: add graph-derived impact summaries" \
   - `  graph coverage: complete` or `  graph coverage: incomplete - a missing dependent here does not prove none exists` plus `    - <group>/<resource>[ @<scope>]: <state>`
   - `  traversal capped: ...` and/or `  snapshot truncated: ...`
   - `ADVISORY_LINE`
-- Bounds: at most 10 item lines per dependent section, 5 unresolved lines, 5 coverage lines, 3 rendered hops per path; every overflow adds one `    ... <n> more ... (preview capped)` line. Cluster-controlled fragments are flattened of control characters and truncated at 120 characters, and every composed line is then capped at `_MAX_LINE` (240) characters — a path line concatenates several fragments, so the per-fragment bound alone does not bound the line in a 70-column modal.
+- Bounds: at most 10 item lines per dependent section, 5 unresolved lines, 5 coverage lines, 3 rendered hops per path; every overflow adds one `    ... <n> more ... (preview capped)` line. Cluster-controlled fragments are flattened one Unicode-category-aware character at a time — `Cc` (C0/C1 controls, including NEL), `Cf` (bidi overrides, directional isolates, zero-width joiners/marks), `Cs` (lone surrogates) and `Zl`/`Zp` (line/paragraph separators) become a literal space each, length-preserving, so a hidden or reordering character shows up as a gap rather than silently reshaping what an approver reads — then truncated at `_MAX_TEXT` (120) characters: `_resource_label` cuts the *middle* of an over-long qualifier and name (reserving `_MIN_NAME_BUDGET` for the name), every other fragment (`_safe`: evidence field paths, scopes, coverage records) is cut at the end since its start identifies it. Every composed line is then capped at `_MAX_LINE` (240) characters by `_bounded`, which reserves and re-appends the trailing ` [inferred]` marker so the composed-line cap can never truncate over it — a path line concatenates several fragments, so the per-fragment bound alone does not bound the line in a 70-column modal. Every cut, whatever it fell on, is marked with `_TRUNCATION_SUFFIX` so a shortened fragment or line never reads as a complete claim.
 
 - [ ] **Step 1: Write the failing renderer tests**
 
@@ -1180,6 +1183,8 @@ the advisory wording.
 
 from __future__ import annotations
 
+import unicodedata
+
 from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary
 from korvid.core.relationships import (
     CoverageRecord,
@@ -1191,7 +1196,11 @@ from korvid.core.relationships import (
 )
 from korvid.k8s.relationship_facts import FactConfidence, RelationKind
 from korvid.ui.impact_preview import (
+    _ACTION_LABEL,
     _MAX_LINE,
+    _MAX_TEXT,
+    _MIN_NAME_BUDGET,
+    _TRUNCATION_SUFFIX,
     ADVISORY_LINE,
     IMPACT_TITLE,
     IMPACT_UNAVAILABLE_LINES,
@@ -1444,7 +1453,7 @@ def test_a_capped_section_still_reports_its_preview_overflow_exactly() -> None:
 
 
 def test_empty_sections_stay_none_in_this_snapshot_even_when_capped() -> None:
-    """"none in this snapshot" is already scoped to the snapshot and is not a
+    """ "none in this snapshot" is already scoped to the snapshot and is not a
     count, so a cap has nothing to hedge: the caveat lines below say what was
     bounded, and `0 or more` would be noise."""
     lines = render_impact_lines(_summary(traversal_capped=True, graph_truncated=True))
@@ -1493,7 +1502,8 @@ def test_a_target_missing_from_the_snapshot_says_dependents_are_unknown() -> Non
 def test_every_composed_line_stays_within_the_total_line_bound() -> None:
     """Per-fragment caps do not bound a line that concatenates an identity
     and three hops; the modal is 70 columns wide, so the composed line is
-    capped too."""
+    capped too - and a capped line says so, rather than reading as a
+    complete claim that happens to stop mid-path."""
     hostile = GraphResource(group="", kind="Pod", namespace="prod", name="w" * 400)
     edge = RelationshipEdge(
         subject=hostile,
@@ -1511,6 +1521,9 @@ def test_every_composed_line_stays_within_the_total_line_bound() -> None:
         )
     )
     assert max(len(line) for line in lines) <= _MAX_LINE
+    capped = [line for line in lines if len(line) == _MAX_LINE]
+    assert capped
+    assert all(line.endswith(_TRUNCATION_SUFFIX) for line in capped)
     assert lines[-1] == ADVISORY_LINE
 
 
@@ -1568,6 +1581,363 @@ def test_inferred_items_are_labelled_and_declared_never_blocks() -> None:
     assert "  inferred relationships are labelled and never block this write" in lines
 
 
+def test_an_inferred_cycle_edge_still_triggers_the_inferred_note_with_no_inferred_items() -> None:
+    """A cycle line never carries an `[inferred]` marker of its own, but an
+    inferred edge folded into `cycles` still makes an inferred hop part of
+    this summary - the note must fire even when every listed dependent path
+    is declared."""
+    inferred_cycle_edge = RelationshipEdge(
+        subject=_POD,
+        target=_DEPLOY,
+        relation=RelationKind.MANAGED_BY,
+        confidence=FactConfidence.INFERRED,
+        evidence=EvidencePointer(resource=_POD, field="spec.selector"),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            cycles=(inferred_cycle_edge,),
+        )
+    )
+    assert not any("[inferred]" in line for line in lines if line.startswith("    - "))
+    assert "  inferred relationships are labelled and never block this write" in lines
+    assert max(len(line) for line in lines) <= _MAX_LINE
+
+
+def test_an_inferred_revisit_edge_still_triggers_the_inferred_note_with_no_inferred_items() -> None:
+    """Same guarantee for a revisit: the dependent it points at was already
+    listed via a declared path, so no item line ever carries the marker,
+    but the revisited edge itself is inferred and must still surface the
+    warning."""
+    inferred_revisit_edge = RelationshipEdge(
+        subject=_POD,
+        target=_RS,
+        relation=RelationKind.MANAGED_BY,
+        confidence=FactConfidence.INFERRED,
+        evidence=EvidencePointer(resource=_POD, field="spec.selector"),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            revisits=(inferred_revisit_edge,),
+        )
+    )
+    assert not any("[inferred]" in line for line in lines if line.startswith("    - "))
+    assert "  inferred relationships are labelled and never block this write" in lines
+    assert max(len(line) for line in lines) <= _MAX_LINE
+
+
+def test_an_inferred_unresolved_edge_is_individually_identifiable_by_its_confidence() -> None:
+    """An unresolved reference is rendered by its own line grammar, which
+    never includes the `[inferred]` marker, but its confidence - unlike a
+    cycle's or a revisit's - is shown right on that line, so an inferred
+    unresolved edge is identifiable on its own, not only through the
+    aggregate note below."""
+    inferred_unresolved_edge = RelationshipEdge(
+        subject=_POD,
+        target=GraphResource(group="", kind="ConfigMap", namespace="prod", name="gone"),
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.INFERRED,
+        evidence=EvidencePointer(resource=_POD, field="spec.volumes[0].configMap"),
+        resolution=EdgeResolution.MISSING,
+    )
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            unresolved=(inferred_unresolved_edge,),
+        )
+    )
+    assert not any("[inferred]" in line for line in lines if line.startswith("    - "))
+    assert (
+        "    - Pod/prod/web-abc-1 uses_config (inferred) -> ConfigMap/prod/gone (missing)"
+        " at spec.volumes[0].configMap" in lines
+    )
+    assert "  inferred relationships are labelled and never block this write" in lines
+    assert max(len(line) for line in lines) <= _MAX_LINE
+
+
+def test_a_long_three_hop_path_keeps_its_inferred_marker_within_the_line_bound() -> None:
+    """Nothing pathological here: real names and real field paths.
+
+    A Pod reached through three hops of ordinary Kubernetes field paths
+    already composes past `_MAX_LINE`, and the ` [inferred]` marker is the
+    *last* thing on the line. Capping the composed line last would drop
+    exactly the label that says one hop was guessed, turning a heuristic
+    chain into what reads like a declared one. The marker's width is
+    reserved instead, and the cut is shown.
+    """
+    pod = GraphResource(
+        group="",
+        kind="Pod",
+        namespace="payments-production-eu-west-1",
+        name="checkout-api-canary-7f9c8b5d64-2xk9p",
+        uid="pod-9",
+    )
+    declared = RelationshipEdge(
+        subject=pod,
+        target=_DEPLOY,
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(
+            resource=pod, field="spec.template.spec.volumes[0].projected.sources[1].configMap.name"
+        ),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    inferred = RelationshipEdge(
+        subject=pod,
+        target=_DEPLOY,
+        relation=RelationKind.MANAGED_BY,
+        confidence=FactConfidence.INFERRED,
+        evidence=EvidencePointer(
+            resource=pod, field="spec.selector.matchLabels[app.kubernetes.io/instance]"
+        ),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    last = RelationshipEdge(
+        subject=pod,
+        target=_DEPLOY,
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(
+            resource=pod,
+            field="spec.template.spec.initContainers[0].env[3].valueFrom.secretKeyRef.name",
+        ),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    lines = render_impact_lines(
+        _summary(transitive=(ImpactItem(resource=pod, path=(declared, inferred, last)),))
+    )
+    item = next(line for line in lines if line.startswith("    - Pod/payments-production"))
+    assert len(item) == _MAX_LINE
+    assert item.endswith(f"{_TRUNCATION_SUFFIX} [inferred]")
+    assert item.startswith(
+        "    - Pod/payments-production-eu-west-1/checkout-api-canary-7f9c8b5d64-2xk9p"
+        " via uses_config (declared) at"
+        " spec.template.spec.volumes[0].projected.sources[1].configMap.name"
+        " -> managed_by (inferred) at"
+    )
+    assert "  inferred relationships are labelled and never block this write" in lines
+    assert max(len(line) for line in lines) <= _MAX_LINE
+
+
+def _owned_by(subject: GraphResource, field: str) -> RelationshipEdge:
+    """One declared `owned_by` hop from `subject`, with `field` as evidence."""
+    return RelationshipEdge(
+        subject=subject,
+        target=_DEPLOY,
+        relation=RelationKind.OWNED_BY,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=subject, field=field),
+        resolution=EdgeResolution.RESOLVED,
+    )
+
+
+def _identities(lines: tuple[str, ...], prefix: str) -> list[str]:
+    """The identity fragment of every item line starting with `prefix`."""
+    return [line[len("    - ") :].split(" via ")[0] for line in lines if line.startswith(prefix)]
+
+
+def _dependent_lines(*resources: GraphResource) -> tuple[str, ...]:
+    """Render one direct-dependent item line per resource, one declared hop each."""
+    return render_impact_lines(
+        _summary(
+            direct=tuple(
+                ImpactItem(
+                    resource=resource,
+                    path=(_owned_by(resource, "metadata.ownerReferences[0]"),),
+                )
+                for resource in resources
+            )
+        )
+    )
+
+
+def test_two_long_identities_sharing_a_prefix_stay_distinguishable_when_truncated() -> None:
+    """The per-fragment `_MAX_TEXT` cap must *say* it cut, and keep the tail.
+
+    Two dependents whose legal DNS names share a long prefix render as two
+    identities bounded at the same width. Without a visible marker both
+    lines read as complete identities, and an approver comparing them cannot
+    tell a full name from a silently shortened one - the dangerous reading,
+    since the rest of the name is exactly what distinguishes the two
+    objects. A prefix-only cut is worse still: it drops precisely the
+    generated suffix (`-blue` / `-green`, a ReplicaSet hash, a pod
+    suffix) that names differing late are told apart by. The budget keeps a
+    head *and* a tail of the name and marks what it removed in between.
+    """
+    shared = "checkout-api-" + "a" * 80 + "-" + "x" * 150
+    blue = GraphResource(group="", kind="Pod", namespace="prod", name=f"{shared}-blue")
+    green = GraphResource(group="", kind="Pod", namespace="prod", name=f"{shared}-green")
+    lines = _dependent_lines(blue, green)
+    identities = _identities(lines, "    - Pod/prod/checkout-api-")
+    assert len(identities) == 2
+    for identity, resource in zip(identities, (blue, green), strict=True):
+        assert len(identity) <= _MAX_TEXT
+        assert _TRUNCATION_SUFFIX in identity
+        assert _TRUNCATION_SUFFIX * 2 not in identity
+        full = f"Pod/prod/{resource.name}"
+        head, tail = identity.split(_TRUNCATION_SUFFIX, 1)
+        assert full.startswith(head)
+        assert full.endswith(tail)
+        assert full not in identity  # the middle the budget dropped is really gone
+    assert identities[0] != identities[1]
+    assert identities[0].endswith("-blue")
+    assert identities[1].endswith("-green")
+    # A short identity is never marked: the marker means "cut", nothing else.
+    assert "  delete apps/Deployment/prod/web" in lines
+
+
+def test_a_long_group_kind_and_namespace_never_push_the_name_out_of_the_label() -> None:
+    """The name is the last thing a bounded identity may lose.
+
+    A CRD can carry a long group, a long kind and a long namespace; joined
+    ahead of the name they can exceed `_MAX_TEXT` on their own, so a
+    prefix-only cut renders `<group>/<kind>/<names...` - an approval line
+    naming a *type* and no object at all, identical for every object of that
+    type. `_MIN_NAME_BUDGET` is reserved for the name regardless of what
+    precedes it, and spent on a head and a tail, so two objects differing
+    near the start and two differing near the end all stay distinct.
+    """
+    group = "platform-workloads-" + "g" * 70 + ".internal.example.com"
+    kind = "CheckoutServiceDeploymentBinding" + "K" * 40
+    namespace = "team-" + "n" * 70 + "-shard-7"
+    assert len(f"{group}/{kind}/{namespace}") > _MAX_TEXT
+    base = "checkout-api-" + "c" * 80
+    names = (f"{base}-blue", f"{base}-green", f"blue-{base}", f"green-{base}")
+    resources = tuple(
+        GraphResource(group=group, kind=kind, namespace=namespace, name=name) for name in names
+    )
+    lines = _dependent_lines(*resources)
+    identities = _identities(lines, "    - platform-workloads-")
+    assert len(identities) == 4
+    assert len(set(identities)) == 4  # differing near the start *or* near the end
+    for identity, name in zip(identities, names, strict=True):
+        assert len(identity) <= _MAX_TEXT
+        assert _TRUNCATION_SUFFIX in identity
+        assert identity.startswith("platform-workloads-")  # the qualifier head survives
+        assert "-shard-7/" in identity  # ...and so does the namespace tail
+        keeps = identity.split("-shard-7/", 1)[1]
+        assert len(keeps.replace(_TRUNCATION_SUFFIX, "")) >= _MIN_NAME_BUDGET - 8
+        assert keeps.startswith(name[:10])
+        assert keeps.endswith(name[-10:])
+    assert max(len(line) for line in lines) <= _MAX_LINE
+
+
+def test_a_difference_the_budget_cannot_keep_is_still_marked_as_shortened() -> None:
+    """The residual limit, stated: no bounded label can distinguish every
+    pair of 250-character names. Two names differing only in the middle
+    render identically - but both carry the marker, so neither line reads as
+    a complete identity, and the preview never claims an exactness it does
+    not have."""
+    head, tail = "checkout-api-" + "a" * 90, "x" * 150
+    blue = GraphResource(group="", kind="Pod", namespace="prod", name=f"{head}-blue-{tail}")
+    green = GraphResource(group="", kind="Pod", namespace="prod", name=f"{head}-green-{tail}")
+    identities = _identities(_dependent_lines(blue, green), "    - Pod/prod/checkout-api-")
+    assert len(identities) == 2
+    for identity in identities:
+        assert _TRUNCATION_SUFFIX in identity
+        assert len(identity) <= _MAX_TEXT
+
+
+def test_a_label_with_blank_parts_drops_them_and_still_holds_the_bound() -> None:
+    """`GraphResource` does not validate its fields, so an unresolved
+    reference can carry a blank namespace, a blank kind, or - malformed -
+    a blank name. Blank parts are dropped, never rendered as an empty
+    segment or a trailing slash, and the bound still holds when the name is
+    the only part there is."""
+    nameless = GraphResource(group="", kind="ConfigMap", namespace="prod", name="")
+    bare = GraphResource(group="", kind="", namespace="", name="n" * 400)
+    long_kindless = GraphResource(group="", kind="", namespace="", name="a" * 60 + "-tail")
+    identities = _identities(_dependent_lines(nameless, bare, long_kindless), "    - ")
+    assert identities[0] == "ConfigMap/prod"
+    assert identities[2] == "a" * 60 + "-tail"
+    assert len(identities[1]) == _MAX_TEXT
+    assert identities[1] == "n" * 59 + _TRUNCATION_SUFFIX + "n" * 58
+    assert not any(identity.endswith("/") or "//" in identity for identity in identities)
+
+
+def test_labels_within_the_bound_are_rendered_byte_for_byte() -> None:
+    """Nothing about the budget may touch an ordinary label. Every label up
+    to and including `_MAX_TEXT` characters renders exactly as
+    `group/kind/namespace/name` with blank parts dropped - no marker, no
+    reshaping, no lost character."""
+    name = "b" * (_MAX_TEXT - len("apps/Deployment/prod/"))
+    exact = GraphResource(group="apps", kind="Deployment", namespace="prod", name=name)
+    assert len(f"apps/Deployment/prod/{name}") == _MAX_TEXT
+    cluster_scoped = GraphResource(
+        group="rbac.authorization.k8s.io", kind="ClusterRole", namespace="", name="view"
+    )
+    lines = _dependent_lines(exact, _POD, cluster_scoped)
+    assert lines[1] == "  delete apps/Deployment/prod/web"
+    identities = _identities(lines, "    - ")
+    assert identities == [
+        f"apps/Deployment/prod/{name}",
+        "Pod/prod/web-abc-1",
+        "rbac.authorization.k8s.io/ClusterRole/view",
+    ]
+    assert not any(_TRUNCATION_SUFFIX in identity for identity in identities)
+
+
+def test_a_bounded_label_stays_flat_and_literal_for_unicode_and_control_input() -> None:
+    """The budget runs on flattened text, so a hostile name cannot buy width
+    with characters that render as nothing. Control, bidi and zero-width
+    characters are still one space each (length-preserving, so two names
+    cannot collapse into one), ordinary Unicode still survives, no markup is
+    interpreted, and the bound holds on both."""
+    hostile_name = "[bold red]checkout\u202e" + "\u200b" * 60 + "rogue\u0085" * 20 + "\u2066tail[/]"
+    hostile = GraphResource(group="", kind="Pod", namespace="prod", name=hostile_name)
+    unicode_name = "配置-café-🚀-" + "書" * 200 + "-末尾"
+    friendly = GraphResource(group="", kind="ConfigMap", namespace="prod", name=unicode_name)
+    lines = _dependent_lines(hostile, friendly)
+    identities = _identities(lines, "    - ")
+    assert len(identities) == 2
+    for identity in identities:
+        assert len(identity) <= _MAX_TEXT
+        assert _TRUNCATION_SUFFIX in identity
+        assert not any(
+            unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for char in identity
+        )
+    assert identities[0].startswith("Pod/prod/[bold red]checkout")
+    assert identities[0].endswith("tail[/]")
+    assert identities[1].startswith("ConfigMap/prod/配置-café-🚀")
+    assert identities[1].endswith("-末尾")
+    assert max(len(line) for line in lines) <= _MAX_LINE
+
+
+def test_a_long_evidence_path_is_truncated_visibly_below_the_line_bound() -> None:
+    """The same marker on the other cluster-derived fragment.
+
+    A single hop off a short identity composes well inside `_MAX_LINE`, so
+    the composed-line cap cannot fire here: whatever marks this cut is the
+    per-fragment cap doing it. An evidence path that stops mid-field without
+    a marker reads as the whole path - a claim about *where* a relationship
+    was found, pointing at a field that is not the one that was read.
+    """
+    field = "spec.template.spec.initContainers[0].env[7].valueFrom.secretKeyRef." + "n" * 120
+    lines = render_impact_lines(
+        _summary(direct=(ImpactItem(resource=_POD, path=(_owned_by(_POD, field),)),))
+    )
+    item = next(line for line in lines if line.startswith("    - Pod/prod/web-abc-1 via"))
+    assert len(item) < _MAX_LINE
+    rendered = item.split(" at ", 1)[1]
+    assert len(rendered) <= _MAX_TEXT
+    assert rendered.endswith(_TRUNCATION_SUFFIX)
+    assert not rendered.endswith(_TRUNCATION_SUFFIX * 2)
+    kept = rendered[: -len(_TRUNCATION_SUFFIX)]
+    assert field.startswith(kept)
+    assert kept.startswith("spec.template.spec.initContainers[0].env[7].valueFrom.secretKeyRef")
+    assert field not in item
+
+
+def test_every_impact_action_has_a_rendered_label() -> None:
+    """`_ACTION_LABEL` is indexed, not defaulted: a new `ImpactAction`
+    without a label would raise a `KeyError` inside a write dialog rather
+    than render an unlabelled action."""
+    assert set(_ACTION_LABEL) == set(ImpactAction)
+
+
 def test_cluster_text_stays_literal_and_control_characters_are_flattened() -> None:
     hostile = GraphResource(group="", kind="Pod", namespace="prod", name="[bold red]web\nrogue[/]")
     edge = RelationshipEdge(
@@ -1583,6 +1953,48 @@ def test_cluster_text_stays_literal_and_control_characters_are_flattened() -> No
     assert "[bold red]web rogue[/]" in body
     assert "metadata ownerReferences[0]" in body
     assert not any("\n" in line or "\t" in line for line in lines)
+
+
+def test_c1_bidi_and_zero_width_controls_are_flattened_ordinary_unicode_is_not() -> None:
+    """C0 is not the whole control surface. C1 (U+0085 NEL), the bidi
+    overrides (U+202E) and the directional isolates (U+2066..U+2069) all
+    reorder or break a rendered line, and a zero-width character (U+200B)
+    can hide the difference between two identities. Ordinary Unicode - a
+    non-Latin name, an emoji - is text, and must survive untouched."""
+    hostile = GraphResource(
+        group="",
+        kind="ConfigMap",
+        namespace="prod",
+        name="app\u202econfig\u2066rogue\u2069\u200b\u0085x",
+    )
+    edge = RelationshipEdge(
+        subject=_POD,
+        target=hostile,
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=_POD, field="spec.volumes[0]\u009c.configMap"),
+        resolution=EdgeResolution.MISSING,
+    )
+    lines = render_impact_lines(_summary(unresolved=(edge,)))
+    body = "\n".join(lines)
+    assert not any(
+        unicodedata.category(ch) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for line in lines for ch in line
+    )
+    assert "ConfigMap/prod/app config rogue   x" in body
+    assert "spec.volumes[0] .configMap" in body
+
+    friendly = GraphResource(group="", kind="ConfigMap", namespace="prod", name="配置-café-🚀")
+    ok_edge = RelationshipEdge(
+        subject=_POD,
+        target=friendly,
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=_POD, field="spec.volumes[0].configMap"),
+        resolution=EdgeResolution.MISSING,
+    )
+    assert "ConfigMap/prod/配置-café-🚀" in "\n".join(
+        render_impact_lines(_summary(unresolved=(ok_edge,)))
+    )
 
 
 def test_no_line_claims_a_guaranteed_failure_and_the_advisory_is_always_last() -> None:
@@ -1653,7 +2065,9 @@ Every heading is machine-defined here; the only cluster-derived text that
 reaches a line is a resource identity, a relation/confidence/resolution enum
 value, an evidence field path, and a namespace/coverage scope - each
 flattened of control characters and length-capped, with the composed line
-capped again at `_MAX_LINE` because one line concatenates several of them.
+capped again at `_MAX_LINE` because one line concatenates several of them -
+reserving room for the ` [inferred]` marker and marking every cut, so
+neither a capped fragment nor a capped line ever reads as a complete claim.
 Nothing is formatted as Rich markup: `ConfirmScreen` appends these lines to
 a `rich.text.Text`, so a resource named `[bold red]web[/]` renders
 literally.
@@ -1662,6 +2076,7 @@ literally.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 
 from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary
@@ -1714,13 +2129,38 @@ _MAX_UNRESOLVED_LINES = 5
 _MAX_COVERAGE_LINES = 5
 _MAX_PATH_HOPS = 3
 _MAX_TEXT = 120
+#: Reserved for the resource *name* inside `_MAX_TEXT`, whatever precedes
+#: it. `group/kind/namespace` can exceed the fragment bound on its own (a
+#: CRD group, a long kind, a long namespace), and a label that spends the
+#: bound left to right renders a type with no object in it - the same text
+#: for every object of that type. Half of this goes to the head and half to
+#: the tail of the name, which is enough for both the workload prefix an
+#: approver reads and the generated suffix (`-blue`, a ReplicaSet hash, a
+#: pod suffix) that late-differing names are told apart by.
+_MIN_NAME_BUDGET = 48
 #: Total bound per composed line. `_MAX_TEXT` bounds each cluster-derived
 #: *fragment*, but an item line concatenates an identity and up to three
 #: hops; the dialog body is 70 columns wide, so a line that would wrap into
 #: a screenful on its own is truncated here instead.
 _MAX_LINE = 240
+#: Shown in place of what either cap cut (`_MAX_TEXT` on one fragment,
+#: `_MAX_LINE` on the composed line), so shortened text reads as shortened
+#: rather than as a complete claim that happens to stop mid-name or
+#: mid-path.
+_TRUNCATION_SUFFIX = "..."
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+_ASCII_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+#: Unicode general categories that carry no glyph of their own but change
+#: how everything around them renders, and that a cluster can therefore use
+#: to make an approval line say something other than what it contains:
+#: `Cc` (C0/C1 controls, including NEL), `Cf` (bidi overrides U+202A-202E,
+#: directional isolates U+2066-2069, zero-width joiners and marks), `Cs`
+#: (lone surrogates, which no terminal can encode), and `Zl`/`Zp` (the
+#: line and paragraph separators - line breaks by another name).
+#: Everything else, including non-Latin scripts and emoji, is ordinary text
+#: and passes through untouched.
+_CONTROL_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 
 def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
@@ -1745,7 +2185,33 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     lines.extend(_coverage_lines(summary))
     lines.extend(_cap_lines(summary))
     lines.append(ADVISORY_LINE)
-    return tuple(line[:_MAX_LINE] for line in lines)
+    return tuple(_bounded(line) for line in lines)
+
+
+def _bounded(line: str, *, marker: str = "") -> str:
+    """Cap one composed line at `_MAX_LINE`, keeping `marker` and showing the cut.
+
+    `marker` is machine-defined text whose meaning must survive the cap (the
+    ` [inferred]` label): it is the last thing on an item line, so capping
+    the composed line afterwards would drop exactly the word that says a hop
+    was guessed and leave a heuristic chain reading like a declared one. Its
+    width is reserved instead, and what was removed is marked, so a line that
+    stops mid-path cannot be read as a complete one.
+    """
+    return _truncate(line, _MAX_LINE - len(marker)) + marker
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Cut `text` to `limit`, marking the cut with `_TRUNCATION_SUFFIX`.
+
+    The one place either cap drops text, so a cut always looks the same
+    wherever it happened. Trailing dots are removed before the suffix is
+    appended: a fragment inside this text may already have been marked, and
+    `.....` reads as data rather than as one truncation mark.
+    """
+    if len(text) <= limit:
+        return text
+    return text[: limit - len(_TRUNCATION_SUFFIX)].rstrip(".") + _TRUNCATION_SUFFIX
 
 
 def _section(title: str, items: Sequence[ImpactItem], *, capped: bool) -> list[str]:
@@ -1773,7 +2239,7 @@ def _item_line(item: ImpactItem) -> str:
     if len(item.path) > _MAX_PATH_HOPS:
         hops = f"{hops} -> ... {len(item.path) - _MAX_PATH_HOPS} more hops"
     marker = " [inferred]" if item.inferred else ""
-    return f"    - {_resource_label(item.resource)} via {hops}{marker}"
+    return _bounded(f"    - {_resource_label(item.resource)} via {hops}", marker=marker)
 
 
 def _hop(edge: RelationshipEdge) -> str:
@@ -1921,16 +2387,93 @@ def _cap_lines(summary: ImpactSummary) -> list[str]:
 
 def _resource_label(resource: GraphResource) -> str:
     """`group/kind/namespace/name`, blank parts dropped (the graph screen's
-    own convention), flattened and capped."""
-    parts = (resource.group, resource.kind, resource.namespace, resource.name)
-    return _safe("/".join(part for part in parts if part))
+    own convention), flattened and bounded by an explicit budget.
+
+    A label under `_MAX_TEXT` is returned verbatim; only an over-long one is
+    reshaped, so ordinary identities render byte for byte as before.
+
+    Over the bound, the parts are not equal. `group/kind/namespace` says
+    *what kind of thing* is affected; `name` says *which one*, and it is the
+    only part an approver can match against the object they asked to write
+    to. Spending the bound left to right - which is what capping the joined
+    string does - drops the name first, so a long-group CRD renders one
+    identical line for every object of that type. The name is given
+    `_MIN_NAME_BUDGET` characters no matter what precedes it (more when the
+    qualifier is short, never more than it needs), the qualifier gets the
+    rest, and both are cut in the middle rather than at the end, so a head
+    and a tail of each survive with the removal marked in between.
+    """
+    qualifier = "/".join(
+        _flatten(part) for part in (resource.group, resource.kind, resource.namespace) if part
+    )
+    name = _flatten(resource.name)
+    label = "/".join(part for part in (qualifier, name) if part)
+    if len(label) <= _MAX_TEXT:
+        return label
+    if not name:  # a malformed reference: nothing to protect, bound the rest
+        return _elide(qualifier, _MAX_TEXT)
+    if not qualifier:
+        return _elide(name, _MAX_TEXT)
+    name_budget = min(len(name), max(_MIN_NAME_BUDGET, _MAX_TEXT - 1 - len(qualifier)))
+    return f"{_elide(qualifier, _MAX_TEXT - 1 - name_budget)}/{_elide(name, name_budget)}"
+
+
+def _elide(text: str, limit: int) -> str:
+    """Cut the *middle* of `text` to `limit`, marking the cut.
+
+    The counterpart to `_truncate` for text whose end identifies it as much
+    as its start: a generated resource name differing only in its suffix
+    survives a middle cut and is lost entirely to an end cut. The split is
+    deterministic - the head takes the odd character - so the same input
+    always renders the same label. Dots adjacent to the cut are removed for
+    the reason `_truncate` removes them: `.....` reads as data rather than
+    as one mark.
+    """
+    if len(text) <= limit:
+        return text
+    if limit <= len(_TRUNCATION_SUFFIX):
+        return _TRUNCATION_SUFFIX[: max(limit, 0)]
+    available = limit - len(_TRUNCATION_SUFFIX)
+    head_length = available - available // 2
+    tail = text[len(text) - available // 2 :].lstrip(".") if available // 2 else ""
+    return f"{text[:head_length].rstrip('.')}{_TRUNCATION_SUFFIX}{tail}"
+
+
+def _flatten(text: str) -> str:
+    """Replace every non-rendering control/format character with a space.
+
+    Category-based rather than a codepoint range: C0 and DEL are only the
+    ASCII part of the problem. A `Cf` character such as U+202E
+    (RIGHT-TO-LEFT OVERRIDE) or U+2066 (LEFT-TO-RIGHT ISOLATE) reverses the
+    visual order of everything after it, so an unflattened name could make
+    an approval dialog display an identity - or an evidence path - that is
+    not the one the write targets.
+
+    One space per character, never a deletion: the replacement is
+    length-preserving, so a hidden character shows up as a gap instead of
+    silently collapsing two different identities into one that looks
+    identical.
+    """
+    if text.isascii():
+        return _ASCII_CONTROL_CHARS.sub(" ", text)
+    return "".join(
+        " " if unicodedata.category(char) in _CONTROL_CATEGORIES else char for char in text
+    )
 
 
 def _safe(text: str) -> str:
-    """Flatten control characters (including newlines/tabs) and cap length,
-    so cluster-controlled text can neither break the dialog layout nor grow
-    the preview unboundedly."""
-    return _CONTROL_CHARS.sub(" ", text)[:_MAX_TEXT]
+    """Flatten control characters (including newlines/tabs, C1, and the bidi
+    and zero-width format characters) and cap length, so cluster-controlled
+    text can neither break or reorder the dialog layout nor grow the preview
+    unboundedly.
+
+    A cut is marked with `_TRUNCATION_SUFFIX` for the same reason the
+    composed-line cap marks its own: a shortened resource identity or
+    evidence path that stops silently reads as the whole name or the whole
+    field path, and two long identities sharing a prefix would render as one
+    apparently complete - and apparently identical - claim.
+    """
+    return _truncate(_flatten(text), _MAX_TEXT)
 ```
 
 - [ ] **Step 4: Run the focused validation to verify GREEN**
@@ -1946,7 +2489,7 @@ uv run tach check
 ```
 
 Expected:
-- `pytest`: PASS (51 tests: the 14 renderer tests plus Task 1's 37, which must not regress — the renderer's exact-sequence test and the model share every field name)
+- `pytest`: PASS (71 tests: the 34 renderer tests plus Task 1's 37, which must not regress — the renderer's exact-sequence test and the model share every field name)
 - `ruff check --fix`: `All checks passed!`
 - `ruff format`: unchanged or formatting-only changes in the two touched files
 - `mypy`: `Success: no issues found in 1 source file`
@@ -3649,4 +4192,4 @@ Expected:
 - `ImpactSummary.incomplete` (Task 1) and the renderer's separate target/coverage/cap lines (Task 2) are deliberately different views of completeness: `incomplete` is the single boolean, the lines say *which* reason applies.
 - The impact traversal deliberately duplicates `RelationshipGraph.walk_dependents` rather than extending it (rationale in Task 1's Interfaces and the module docstring); the parity test keeps the one shared invariant honest.
 
-**Sample verification (run while writing this plan, re-runnable by the implementer):** every ` ```python ` block was extracted and parsed (`ast.parse`); the two `_push_write_confirmation` / `_confirm_screen` blocks are signature-only fragments by design, everything else parses standalone. Each block was then checked with `ruff format --diff` (line-length 100, py311) at its real indentation and with `ruff check` under the repo's rule set — clean. Task 1's and Task 2's modules were type-checked with `mypy --strict` (`Success: no issues found in 2 source files`) and their test blocks were executed against them: **37 core tests and 14 renderer tests pass**, with only `test_the_impact_model_imports_no_textual` unrunnable outside the real package (its subprocess imports `korvid.core.impact` by name). The Task 4 expectations that depend on the graph builder — the delete/restart line text, the cluster-scoped Node scope, the stale-UID target, the unresolved `uses_config` warning, and the Service that must not appear — were reproduced against `build_relationship_graph` with the same fixtures and match exactly. The `action_delete_resource` (8 → 9) and `action_rollout_restart` (6 → 7) complexity numbers were measured with `ruff --select C901` against today's `src/korvid/ui/app.py`, and every `src/korvid/ui/app.py` line reference in the blast-radius list was re-read at HEAD.
+**Sample verification (run while writing this plan, re-runnable by the implementer):** every ` ```python ` block was extracted and parsed (`ast.parse`); the two `_push_write_confirmation` / `_confirm_screen` blocks are signature-only fragments by design, everything else parses standalone. Each block was then checked with `ruff format --diff` (line-length 100, py311) at its real indentation and with `ruff check` under the repo's rule set — clean. Task 1's and Task 2's modules were type-checked with `mypy --strict` (`Success: no issues found in 2 source files`) and their test blocks were executed against them: **37 core tests and 34 renderer tests pass**, with only `test_the_impact_model_imports_no_textual` unrunnable outside the real package (its subprocess imports `korvid.core.impact` by name). The Task 4 expectations that depend on the graph builder — the delete/restart line text, the cluster-scoped Node scope, the stale-UID target, the unresolved `uses_config` warning, and the Service that must not appear — were reproduced against `build_relationship_graph` with the same fixtures and match exactly. The `action_delete_resource` (8 → 9) and `action_rollout_restart` (6 → 7) complexity numbers were measured with `ruff --select C901` against today's `src/korvid/ui/app.py`, and every `src/korvid/ui/app.py` line reference in the blast-radius list was re-read at HEAD.
