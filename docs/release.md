@@ -117,11 +117,47 @@ dispatch SHA is rejected.
 
 ## Required cross-version upgrade gate
 
-Before tagging `v0.2.0`, install published `korvid[all]==0.1.2` in a clean
-environment, upgrade that environment from the candidate `0.2.0` wheel, and
-repeat the version, import, launcher, and state checks used by the smoke
-matrix. Record that result with the dry-run evidence. Do not create or push the
-release tag until this gate passes.
+Download the exact wheel produced by the confirmed exact-main dry run; do not
+substitute a local build or an artifact from another run:
+
+```sh
+DRY_RUN_COMMIT=$(gh run view "$RUN_ID" --json headSha --jq '.headSha')
+test "$DRY_RUN_COMMIT" = "$COMMIT"
+candidate_dir="dist/dry-run-$RUN_ID"
+gh run download "$RUN_ID" --name dist --dir "$candidate_dir"
+CANDIDATE="$PWD/$candidate_dir/korvid-0.2.0-py3-none-any.whl"
+test -f "$CANDIDATE"
+```
+
+Install published `korvid[all]==0.1.2` in a clean environment, then upgrade that
+same environment from the downloaded candidate:
+
+```sh
+upgrade_root=$(mktemp -d)
+uv venv --python 3.12 "$upgrade_root/venv"
+upgrade_python="$upgrade_root/venv/bin/python"
+upgrade_korvid="$upgrade_root/venv/bin/korvid"
+uv pip install --python "$upgrade_python" 'korvid[all]==0.1.2'
+"$upgrade_korvid" --version | grep -Fx 'korvid 0.1.2'
+candidate_url=$("$upgrade_python" -c \
+  'import pathlib, sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$CANDIDATE")
+uv pip install --python "$upgrade_python" --upgrade \
+  "korvid[all] @ $candidate_url"
+"$upgrade_korvid" --version | grep -Fx 'korvid 0.2.0'
+"$upgrade_korvid" --help >/dev/null
+"$upgrade_python" -c \
+  'import korvid.mcp.server, korvid.obs.prometheus, korvid.providers.registry'
+runtime_root="$upgrade_root/runtime"
+env HOME="$runtime_root/home" \
+  XDG_CONFIG_HOME="$runtime_root/config" \
+  XDG_DATA_HOME="$runtime_root/data" \
+  XDG_STATE_HOME="$runtime_root/state" \
+  "$upgrade_korvid" --version >/dev/null
+test ! -e "$runtime_root"
+```
+
+Record the run ID, exact commit, and command result with the release evidence.
+Do not create or push the release tag until this gate passes.
 
 ## Publish `v0.2.0`
 

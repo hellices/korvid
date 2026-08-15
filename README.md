@@ -61,6 +61,12 @@ uv tool install 'korvid[all]==0.2.0'    # or: pipx install 'korvid[all]==0.2.0'
 korvid                                  # uses your current kubeconfig context
 ```
 
+Until `0.2.0` is published on PyPI, install the reviewed `main` source instead:
+
+```sh
+uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'
+```
+
 On macOS or Linux with Homebrew, this works too and needs no Python at all:
 
 ```sh

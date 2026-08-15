@@ -156,9 +156,11 @@ deliberately — and it stays off until you turn it on.
 
 ---
 
-## Four valid compositions
+## Four agent/MCP adapter compositions
 
-Four installs, four shapes — the two optional adapters occupy independent ports.
+Four core shapes come from the two independent agent/MCP adapters.
+Observability is an optional tool overlay on any shape containing agent or MCP;
+`korvid[all]` includes that overlay.
 
 <!-- LAYOUT NOTE (Mermaid 11 nested-subgraph rendering):
      The subgraph declaration order below is C4 → C2 (ROW1) then C3 → C1 (ROW2).
