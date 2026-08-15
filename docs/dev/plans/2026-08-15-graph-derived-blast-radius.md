@@ -1155,8 +1155,8 @@ git commit -m "feat: add graph-derived impact summaries" \
   - `    - <resource> via <relation> (<confidence>) at <field>[ -> ...][ [inferred]]`
   - `  known transitive dependents (may be affected): <n>` or `: none in this snapshot`
   - `  inferred relationships are labelled and never block this write` (only when some item, cycle, revisit, or unresolved reference is inferred)
-  - `  relationship cycles: <n> (loop edges classified, not expanded)` (only when non-empty)
-  - `  additional known paths: <n> (already-listed dependents reached again)` (only when `revisits` is non-empty: converging or parallel edges are counted, never expanded into a second item)
+  - `  relationship cycles: <n> (loop edges classified, not expanded)` (only when non-empty; `<n>` renders as `<n> or more` when `traversal_capped` is True, since a capped walk may have stopped before classifying every cycle)
+  - `  additional known paths: <n> (already-listed dependents reached again)` (only when `revisits` is non-empty: converging or parallel edges are counted, never expanded into a second item; `<n>` renders as `<n> or more` when `traversal_capped` is True, for the same reason)
   - `  unresolved references in the affected set: <n>` plus `    - <subject> <relation> (<confidence>) -> <target> (<resolution>) at <field>`
   - `  scope: <namespace>` or `  scope: all namespaces` — **always**, including for `complete` coverage, which is only ever complete within that scope
   - `  graph coverage: complete` or `  graph coverage: incomplete - a missing dependent here does not prove none exists` plus `    - <group>/<resource>[ @<scope>]: <state>`
@@ -1302,6 +1302,10 @@ def test_empty_sections_and_complete_coverage_are_stated_explicitly() -> None:
 
 
 def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
+    """When traversal is capped, the cycle count is a lower bound: the walk
+    stopped classifying edges before it could confirm there were no more, so
+    "1" here would misread as exhaustive when it is only what was seen
+    before the cap."""
     lines = render_impact_lines(
         _summary(
             direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
@@ -1310,7 +1314,7 @@ def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
             graph_truncated=True,
         )
     )
-    assert "  relationship cycles: 1 (loop edges classified, not expanded)" in lines
+    assert "  relationship cycles: 1 or more (loop edges classified, not expanded)" in lines
     assert (
         "  traversal capped: more dependents exist beyond the traversal limits"
         " and are not listed" in lines
@@ -1321,11 +1325,44 @@ def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
     )
 
 
+def test_cycle_count_is_exact_when_traversal_is_not_capped() -> None:
+    """Without a cap, the walk classified every reachable edge, so the exact
+    count stands - "or more" would understate confidence the traversal
+    actually has."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            cycles=(_OWNS_DEPLOY,),
+            traversal_capped=False,
+        )
+    )
+    assert "  relationship cycles: 1 (loop edges classified, not expanded)" in lines
+
+
+def test_revisit_count_is_a_lower_bound_when_traversal_is_capped() -> None:
+    """Same reasoning as the capped cycle count: a capped walk may have
+    stopped before finding every converging or parallel edge, so "1" would
+    misread as the complete tally of folded-away paths."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            revisits=(_OWNS_RS,),
+            traversal_capped=True,
+        )
+    )
+    assert "  additional known paths: 1 or more (already-listed dependents reached again)" in lines
+
+
 def test_revisited_paths_are_counted_never_expanded() -> None:
     """A dependent reached twice is one item plus a count, not two items:
-    "2 dependents" when there is one would overstate the blast radius."""
+    "2 dependents" when there is one would overstate the blast radius. Not
+    capped here, so the count is exact rather than a lower bound."""
     lines = render_impact_lines(
-        _summary(direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),), revisits=(_OWNS_RS,))
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            revisits=(_OWNS_RS,),
+            traversal_capped=False,
+        )
     )
     assert "  known direct dependents (may be affected): 1" in lines
     assert "  additional known paths: 1 (already-listed dependents reached again)" in lines
@@ -1654,10 +1691,22 @@ def _inferred_lines(summary: ImpactSummary) -> list[str]:
     return []
 
 
+def _count_label(count: int, *, capped: bool) -> str:
+    """Render a cluster-derived count, marked as a lower bound when capped.
+
+    A capped traversal stops classifying edges once it hits its limits, so
+    any count folded out of that walk - a cycle, a revisit - may be an
+    undercount, not the true total. "N or more" says so; the exact count
+    would misread as exhaustive.
+    """
+    return f"{count} or more" if capped else str(count)
+
+
 def _cycle_lines(summary: ImpactSummary) -> list[str]:
     if not summary.cycles:
         return []
-    return [f"  relationship cycles: {len(summary.cycles)} (loop edges classified, not expanded)"]
+    count = _count_label(len(summary.cycles), capped=summary.traversal_capped)
+    return [f"  relationship cycles: {count} (loop edges classified, not expanded)"]
 
 
 def _revisit_lines(summary: ImpactSummary) -> list[str]:
@@ -1666,14 +1715,14 @@ def _revisit_lines(summary: ImpactSummary) -> list[str]:
     Counted, never expanded: each dependent is listed once with the first
     path that reached it, and this line says how many further known paths
     the summary folded away - so "1 dependent" cannot be misread as "only
-    one relationship".
+    one relationship". When traversal was capped, that count is a lower
+    bound rather than the exact tally - the walk may have stopped before
+    finding every revisit.
     """
     if not summary.revisits:
         return []
-    return [
-        f"  additional known paths: {len(summary.revisits)}"
-        " (already-listed dependents reached again)"
-    ]
+    count = _count_label(len(summary.revisits), capped=summary.traversal_capped)
+    return [f"  additional known paths: {count} (already-listed dependents reached again)"]
 
 
 def _scope_line(summary: ImpactSummary) -> str:
@@ -3276,6 +3325,10 @@ Reading it:
 - `additional known paths` counts relationships that reach a dependent
   already listed above (a second route, a second mount). They are counted
   rather than repeated, so a count of dependents is never inflated.
+- `relationship cycles` and `additional known paths` render as `N or more`
+  instead of an exact `N` whenever `traversal capped` is also shown: a
+  capped walk stops classifying edges once it hits its limit, so the count
+  it folded away may be an undercount, not the true total.
 - `[inferred]` marks a hop derived by a heuristic rather than read from a
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references

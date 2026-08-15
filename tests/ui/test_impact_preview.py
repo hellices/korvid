@@ -137,6 +137,10 @@ def test_empty_sections_and_complete_coverage_are_stated_explicitly() -> None:
 
 
 def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
+    """When traversal is capped, the cycle count is a lower bound: the walk
+    stopped classifying edges before it could confirm there were no more, so
+    "1" here would misread as exhaustive when it is only what was seen
+    before the cap."""
     lines = render_impact_lines(
         _summary(
             direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
@@ -145,7 +149,7 @@ def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
             graph_truncated=True,
         )
     )
-    assert "  relationship cycles: 1 (loop edges classified, not expanded)" in lines
+    assert "  relationship cycles: 1 or more (loop edges classified, not expanded)" in lines
     assert (
         "  traversal capped: more dependents exist beyond the traversal limits"
         " and are not listed" in lines
@@ -156,11 +160,44 @@ def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
     )
 
 
+def test_cycle_count_is_exact_when_traversal_is_not_capped() -> None:
+    """Without a cap, the walk classified every reachable edge, so the exact
+    count stands - "or more" would understate confidence the traversal
+    actually has."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            cycles=(_OWNS_DEPLOY,),
+            traversal_capped=False,
+        )
+    )
+    assert "  relationship cycles: 1 (loop edges classified, not expanded)" in lines
+
+
+def test_revisit_count_is_a_lower_bound_when_traversal_is_capped() -> None:
+    """Same reasoning as the capped cycle count: a capped walk may have
+    stopped before finding every converging or parallel edge, so "1" would
+    misread as the complete tally of folded-away paths."""
+    lines = render_impact_lines(
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            revisits=(_OWNS_RS,),
+            traversal_capped=True,
+        )
+    )
+    assert "  additional known paths: 1 or more (already-listed dependents reached again)" in lines
+
+
 def test_revisited_paths_are_counted_never_expanded() -> None:
     """A dependent reached twice is one item plus a count, not two items:
-    "2 dependents" when there is one would overstate the blast radius."""
+    "2 dependents" when there is one would overstate the blast radius. Not
+    capped here, so the count is exact rather than a lower bound."""
     lines = render_impact_lines(
-        _summary(direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),), revisits=(_OWNS_RS,))
+        _summary(
+            direct=(ImpactItem(resource=_RS, path=(_OWNS_DEPLOY,)),),
+            revisits=(_OWNS_RS,),
+            traversal_capped=False,
+        )
     )
     assert "  known direct dependents (may be affected): 1" in lines
     assert "  additional known paths: 1 (already-listed dependents reached again)" in lines

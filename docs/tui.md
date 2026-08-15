@@ -234,6 +234,10 @@ Reading it:
 - `additional known paths` counts relationships that reach a dependent
   already listed above (a second route, a second mount). They are counted
   rather than repeated, so a count of dependents is never inflated.
+- `relationship cycles` and `additional known paths` render as `N or more`
+  instead of an exact `N` whenever `traversal capped` is also shown: a
+  capped walk stops classifying edges once it hits its limit, so the count
+  it folded away may be an undercount, not the true total.
 - `[inferred]` marks a hop derived by a heuristic rather than read from a
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references

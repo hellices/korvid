@@ -191,10 +191,22 @@ def _inferred_lines(summary: ImpactSummary) -> list[str]:
     return []
 
 
+def _count_label(count: int, *, capped: bool) -> str:
+    """Render a cluster-derived count, marked as a lower bound when capped.
+
+    A capped traversal stops classifying edges once it hits its limits, so
+    any count folded out of that walk - a cycle, a revisit - may be an
+    undercount, not the true total. "N or more" says so; the exact count
+    would misread as exhaustive.
+    """
+    return f"{count} or more" if capped else str(count)
+
+
 def _cycle_lines(summary: ImpactSummary) -> list[str]:
     if not summary.cycles:
         return []
-    return [f"  relationship cycles: {len(summary.cycles)} (loop edges classified, not expanded)"]
+    count = _count_label(len(summary.cycles), capped=summary.traversal_capped)
+    return [f"  relationship cycles: {count} (loop edges classified, not expanded)"]
 
 
 def _revisit_lines(summary: ImpactSummary) -> list[str]:
@@ -203,14 +215,14 @@ def _revisit_lines(summary: ImpactSummary) -> list[str]:
     Counted, never expanded: each dependent is listed once with the first
     path that reached it, and this line says how many further known paths
     the summary folded away - so "1 dependent" cannot be misread as "only
-    one relationship".
+    one relationship". When traversal was capped, that count is a lower
+    bound rather than the exact tally - the walk may have stopped before
+    finding every revisit.
     """
     if not summary.revisits:
         return []
-    return [
-        f"  additional known paths: {len(summary.revisits)}"
-        " (already-listed dependents reached again)"
-    ]
+    count = _count_label(len(summary.revisits), capped=summary.traversal_capped)
+    return [f"  additional known paths: {count} (already-listed dependents reached again)"]
 
 
 def _scope_line(summary: ImpactSummary) -> str:
