@@ -238,7 +238,11 @@ Reading it:
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references
   held by the target or by something it takes down — a mounted ConfigMap
-  that no longer exists, say — whatever relation they use.
+  that no longer exists, say — whatever relation they use. Each line names
+  its own confidence (`declared`, `observed`, or `inferred`) next to the
+  relation, the same way a dependent path does, so a heuristically-derived
+  dangling reference is identifiable on its own line, not only through the
+  `[inferred]`/aggregate note above.
 - `scope` is the namespace the snapshot covered. `all namespaces` appears
   for a cluster-scoped target (a Node, a PersistentVolume) or an
   all-namespaces view; otherwise the coverage below it is only ever

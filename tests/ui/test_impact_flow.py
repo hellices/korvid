@@ -472,7 +472,7 @@ async def test_rollout_restart_warns_about_an_unresolved_config_reference(tmp_pa
         text = impact_text(env.app)
         assert "unresolved references in the affected set: 1" in text
         assert (
-            "Pod/prod/web-abc-1 uses_config -> ConfigMap/prod/app-config (missing)"
+            "Pod/prod/web-abc-1 uses_config (declared) -> ConfigMap/prod/app-config (missing)"
             " at spec.volumes[0].configMap" in text
         )
         assert env.ops.calls == []

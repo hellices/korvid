@@ -233,7 +233,7 @@ def test_unresolved_references_are_listed_and_bounded() -> None:
     lines = render_impact_lines(_summary(unresolved=unresolved))
     assert "  unresolved references in the affected set: 7" in lines
     assert (
-        "    - Pod/prod/web-abc-1 uses_config -> ConfigMap/prod/gone-0 (missing)"
+        "    - Pod/prod/web-abc-1 uses_config (declared) -> ConfigMap/prod/gone-0 (missing)"
         " at spec.volumes[0].configMap" in lines
     )
     assert "    ... 2 more not shown (preview capped)" in lines
@@ -318,12 +318,12 @@ def test_an_inferred_revisit_edge_still_triggers_the_inferred_note_with_no_infer
     assert max(len(line) for line in lines) <= _MAX_LINE
 
 
-def test_an_inferred_unresolved_edge_still_triggers_the_inferred_note_with_no_inferred_items() -> (
-    None
-):
+def test_an_inferred_unresolved_edge_is_individually_identifiable_by_its_confidence() -> None:
     """An unresolved reference is rendered by its own line grammar, which
-    never includes an `[inferred]` marker, but a heuristically-derived
-    unresolved edge still means an inferred hop reached this summary."""
+    never includes the `[inferred]` marker, but its confidence - unlike a
+    cycle's or a revisit's - is shown right on that line, so an inferred
+    unresolved edge is identifiable on its own, not only through the
+    aggregate note below."""
     inferred_unresolved_edge = RelationshipEdge(
         subject=_POD,
         target=GraphResource(group="", kind="ConfigMap", namespace="prod", name="gone"),
@@ -339,6 +339,10 @@ def test_an_inferred_unresolved_edge_still_triggers_the_inferred_note_with_no_in
         )
     )
     assert not any("[inferred]" in line for line in lines if line.startswith("    - "))
+    assert (
+        "    - Pod/prod/web-abc-1 uses_config (inferred) -> ConfigMap/prod/gone (missing)"
+        " at spec.volumes[0].configMap" in lines
+    )
     assert "  inferred relationships are labelled and never block this write" in lines
     assert max(len(line) for line in lines) <= _MAX_LINE
 

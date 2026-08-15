@@ -236,10 +236,19 @@ def _unresolved_lines(summary: ImpactSummary) -> list[str]:
 
 
 def _unresolved_line(edge: RelationshipEdge) -> str:
+    """One dangling reference, with its own confidence next to its relation.
+
+    A cycle or a revisit only ever gets the aggregate `_INFERRED_NOTE_LINE`
+    because those are counted, never individually listed; an unresolved
+    reference *is* individually listed, so its confidence goes right after
+    the relation - matching `_hop`'s `relation (confidence) at field`
+    grammar - rather than folding an inferred one into that same generic
+    note with no way to tell which listed reference was heuristic.
+    """
     return (
-        f"    - {_resource_label(edge.subject)} {edge.relation.value} ->"
-        f" {_resource_label(edge.target)} ({edge.resolution.value})"
-        f" at {_safe(edge.evidence.field)}"
+        f"    - {_resource_label(edge.subject)} {edge.relation.value}"
+        f" ({edge.confidence.value}) -> {_resource_label(edge.target)}"
+        f" ({edge.resolution.value}) at {_safe(edge.evidence.field)}"
     )
 
 
