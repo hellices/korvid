@@ -25,8 +25,9 @@ pip install 'korvid[mcp,observability]'    # external MCP tools
 
 Observability is a tool add-on for the agent or MCP surface; it does not add a
 standalone base-TUI panel. The connector boundary itself is stdlib. The extra
-provides the HTTP client, which is also present transitively with the agent,
-MCP, or `all` extras.
+provides the `httpx` client, which is also present transitively with the agent
+or `all` extras. A plain MCP install uses the separate `httpx2` distribution
+and therefore must add the observability extra explicitly.
 
 ## Configure
 

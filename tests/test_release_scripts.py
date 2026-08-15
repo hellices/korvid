@@ -488,11 +488,10 @@ def test_smoke_install_required_korvid_modules_follow_the_selected_variant() -> 
 
 
 def test_smoke_install_forbids_optional_feature_packages_outside_their_variant() -> None:
-    """`mcp` pulls httpx transitively, so httpx is only forbidden where no
-    selected extra provides it."""
+    """MCP 2 uses httpx2, so a plain MCP install must not leak agent/obs httpx."""
     assert smoke_install.forbidden_modules("base") == {"httpx", "keyring", "mcp"}
     assert smoke_install.forbidden_modules("agent") == {"mcp"}
-    assert smoke_install.forbidden_modules("mcp") == {"keyring"}
+    assert smoke_install.forbidden_modules("mcp") == {"httpx", "keyring"}
     assert smoke_install.forbidden_modules("all") == set()
 
 
