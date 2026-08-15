@@ -579,7 +579,9 @@ async def test_impact_lines_render_cluster_markup_literally() -> None:
         )
         await app.push_screen(screen)
         await pilot.pause()
-        rendered = str(screen.query_one(".confirm-impact", Static).render())
+        impact = screen.query_one(".confirm-impact", Static)
+        rendered = str(impact.render())
+        assert impact._render_markup is False
         assert "[bold red]web[/]" in rendered
 
 

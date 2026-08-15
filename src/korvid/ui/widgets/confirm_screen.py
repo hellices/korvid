@@ -159,7 +159,7 @@ class ConfirmScreen(ModalScreen[bool | None]):
             if self._managed_note is not None:
                 yield Static(f"⚠ {self._managed_note}", classes="confirm-managed", markup=False)
             if self._impact_lines:
-                yield Static(self._impact_text(), classes="confirm-impact")
+                yield Static(self._impact_text(), classes="confirm-impact", markup=False)
             if self._preview is not None:
                 yield Static(self._preview_text(), classes="confirm-preview")
             if self._typed_gate is None:
