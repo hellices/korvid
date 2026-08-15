@@ -1184,6 +1184,25 @@ def _agent_instructions() -> str:
     return path.read_text()
 
 
+def _agent_instructions_section(heading: str) -> str:
+    """Return one `##` section of `AGENTS.md`, stopping at the next one.
+
+    Splitting on the heading alone runs to the end of the file, which turns a
+    check about one section into a check about everything after it.
+
+    Args:
+        heading: The section heading, without the leading `## `.
+
+    Returns:
+        The section body up to the next `##` heading, with whitespace
+        collapsed so a phrase still matches when Markdown wraps it across
+        lines.
+    """
+    after = _agent_instructions().split(f"## {heading}", 1)
+    assert len(after) == 2, f"AGENTS.md has no '## {heading}' section"
+    return " ".join(after[1].split("\n## ", 1)[0].split())
+
+
 def test_agent_instructions_forbid_merging_and_merge_automation() -> None:
     """A pull request once merged here before the maintainer saw it.
 
@@ -1205,9 +1224,11 @@ def test_agent_instructions_forbid_merging_and_merge_automation() -> None:
     # The review loop is where the original incident came from: its last step
     # used to be `gh pr merge N --squash`.
     assert "This loop ends in a report, never in a merge" in instructions
-    # ...and no earlier step may point the other way.
-    loop = _agent_instructions().split("## Review Loop", 1)[1]
+    # ...and no earlier step may point the other way. Scope this to the
+    # section: "toward merge" is a fair phrase for the rest of the file.
+    loop = _agent_instructions_section("Review Loop")
     assert "toward merge" not in loop
+    assert "Testing Gotchas" not in loop, "the slice ran past the section it names"
 
 
 def _project_version() -> str:
