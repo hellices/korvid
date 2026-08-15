@@ -19,6 +19,7 @@ literally.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 
 from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary
@@ -81,7 +82,18 @@ _MAX_LINE = 240
 #: mid-path.
 _TRUNCATION_SUFFIX = "..."
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+_ASCII_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+#: Unicode general categories that carry no glyph of their own but change
+#: how everything around them renders, and that a cluster can therefore use
+#: to make an approval line say something other than what it contains:
+#: `Cc` (C0/C1 controls, including NEL), `Cf` (bidi overrides U+202A-202E,
+#: directional isolates U+2066-2069, zero-width joiners and marks), `Cs`
+#: (lone surrogates, which no terminal can encode), and `Zl`/`Zp` (the
+#: line and paragraph separators - line breaks by another name).
+#: Everything else, including non-Latin scripts and emoji, is ordinary text
+#: and passes through untouched.
+_CONTROL_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 
 def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
@@ -250,10 +262,33 @@ def _resource_label(resource: GraphResource) -> str:
     return _safe("/".join(part for part in parts if part))
 
 
+def _flatten(text: str) -> str:
+    """Replace every non-rendering control/format character with a space.
+
+    Category-based rather than a codepoint range: C0 and DEL are only the
+    ASCII part of the problem. A `Cf` character such as U+202E
+    (RIGHT-TO-LEFT OVERRIDE) or U+2066 (LEFT-TO-RIGHT ISOLATE) reverses the
+    visual order of everything after it, so an unflattened name could make
+    an approval dialog display an identity - or an evidence path - that is
+    not the one the write targets.
+
+    One space per character, never a deletion: the replacement is
+    length-preserving, so a hidden character shows up as a gap instead of
+    silently collapsing two different identities into one that looks
+    identical.
+    """
+    if text.isascii():
+        return _ASCII_CONTROL_CHARS.sub(" ", text)
+    return "".join(
+        " " if unicodedata.category(char) in _CONTROL_CATEGORIES else char for char in text
+    )
+
+
 def _safe(text: str) -> str:
-    """Flatten control characters (including newlines/tabs) and cap length,
-    so cluster-controlled text can neither break the dialog layout nor grow
-    the preview unboundedly.
+    """Flatten control characters (including newlines/tabs, C1, and the bidi
+    and zero-width format characters) and cap length, so cluster-controlled
+    text can neither break or reorder the dialog layout nor grow the preview
+    unboundedly.
 
     A cut is marked with `_TRUNCATION_SUFFIX` for the same reason the
     composed-line cap marks its own: a shortened resource identity or
@@ -261,4 +296,4 @@ def _safe(text: str) -> str:
     field path, and two long identities sharing a prefix would render as one
     apparently complete - and apparently identical - claim.
     """
-    return _truncate(_CONTROL_CHARS.sub(" ", text), _MAX_TEXT)
+    return _truncate(_flatten(text), _MAX_TEXT)

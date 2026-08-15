@@ -210,7 +210,11 @@ class ConfirmScreen(ModalScreen[bool | None]):
         lines = self._impact_lines or ()
         if not lines:
             return Text()
-        text = Text(lines[0], style="bold")
+        # Appended, not a base style: a `Text` style applies to every span
+        # added later, so `Text(title, style="bold")` would bold the whole
+        # section and make an advisory note shout louder than the operation.
+        text = Text()
+        text.append(lines[0], style="bold")
         for line in lines[1:]:
             text.append(f"\n{line}")
         return text

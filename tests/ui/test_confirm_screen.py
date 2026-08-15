@@ -533,6 +533,26 @@ async def test_impact_section_renders_above_the_dry_run_preview() -> None:
         assert "dry-run" in str(preview.render())
 
 
+async def test_only_the_impact_title_line_is_bold() -> None:
+    """The title is the section heading; the facts under it are body text.
+    Bolding every line (a `Text` *base* style applies to appended spans too)
+    makes an advisory section shout louder than the operation itself."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        screen = ConfirmScreen(
+            "Delete deployments/web?",
+            "DELETE apps/deployments/web in prod",
+            impact_lines=_IMPACT_LINES,
+        )
+        await app.push_screen(screen)
+        await pilot.pause()
+        text = screen._impact_text()
+        assert text.style == ""
+        bold = [span for span in text.spans if "bold" in str(span.style)]
+        assert len(bold) == 1
+        assert text.plain[bold[0].start : bold[0].end] == _IMPACT_LINES[0]
+
+
 async def test_no_impact_widget_without_impact_lines() -> None:
     """No snapshot means no section at all - distinct from an empty one."""
     app = HostApp()

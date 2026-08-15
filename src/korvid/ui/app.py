@@ -4881,6 +4881,40 @@ class KorvidApp(App[None]):
             return False
         return True
 
+    def _write_identity_intact(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        *,
+        phase: str,
+        epoch: int,
+    ) -> bool:
+        """`_write_context_intact` plus the captured UID.
+
+        Kind, namespace and name all survive a delete-and-recreate under the
+        same name, so the context check alone cannot see one: the dialog
+        would describe (and the impact summary would explain) an object that
+        no longer exists, while the write pins the uid the user saw and can
+        only 409. The uid is the one part of the identity that changes, so
+        an awaited gap that could span a replacement rechecks it here.
+
+        A row whose summary type carries no uid (``uid is None``) keeps the
+        pre-existing behaviour exactly: nothing to compare, no new refusal.
+        """
+        if not self._write_context_intact(action, meta, ns, name, phase=phase, epoch=epoch):
+            return False
+        if uid is None or self._selected_uid(ns, name) == uid:
+            return True
+        self.notify(
+            f"{action} {self._gvr_label(meta)}/{name} cancelled -"
+            f" the selection changed during {phase}",
+            severity="warning",
+        )
+        return False
+
     async def _precheck_keybinding_write(
         self, action: str, meta: ResourceMeta, ns: str | None, name: str
     ) -> bool:
@@ -5280,12 +5314,12 @@ class KorvidApp(App[None]):
             "delete", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
             return
-        # The snapshot is another awaited gap: a `:ctx` switch or a moved
-        # selection during it must abort before a dialog describes the row
-        # the user is no longer on (issue #283).
+        # The snapshot is another awaited gap: a `:ctx` switch, a moved
+        # selection, or a same-named replacement during it must abort before
+        # a dialog describes the row the user is no longer on (issue #283).
         impact = await self._impact_preview(ImpactAction.DELETE, meta, ns, name, uid)
-        if not self._write_context_intact(
-            "delete", meta, ns, name, phase="the impact summary", epoch=epoch
+        if not self._write_identity_intact(
+            "delete", meta, ns, name, uid, phase="the impact summary", epoch=epoch
         ):
             return
         operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
@@ -5337,8 +5371,8 @@ class KorvidApp(App[None]):
             return
         # Same awaited-gap revalidation as delete - see action_delete_resource.
         impact = await self._impact_preview(ImpactAction.ROLLOUT_RESTART, meta, ns, name, uid)
-        if not self._write_context_intact(
-            "rollout_restart", meta, ns, name, phase="the impact summary", epoch=epoch
+        if not self._write_identity_intact(
+            "rollout_restart", meta, ns, name, uid, phase="the impact summary", epoch=epoch
         ):
             return
 

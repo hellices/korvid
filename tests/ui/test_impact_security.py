@@ -9,6 +9,7 @@ drives the real `Ctrl-D` / `r` flow through the Task 4 harness.
 from __future__ import annotations
 
 import json
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,108 @@ def _pod_using_secret() -> PodSummary:
             )
         ),
     )
+
+
+def _plain_replicaset() -> GenericSummary:
+    """A ReplicaSet owned by `prod/web`, so the Pod below is inside the
+    affected set of a `web` delete."""
+    return GenericSummary(
+        name="web-abc",
+        namespace="prod",
+        kind="ReplicaSet",
+        created="",
+        uid="rs-1",
+        relationships=RelationshipFacts(
+            api_group="apps",
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.OWNED_BY,
+                    target=TargetReference(
+                        group="apps", kind="Deployment", namespace="prod", name="web", uid="d-1"
+                    ),
+                    confidence=FactConfidence.DECLARED,
+                    field="metadata.ownerReferences[0]",
+                ),
+            ),
+        ),
+    )
+
+
+def _pod_with_a_bidi_dangling_reference() -> PodSummary:
+    """A Pod in the affected set whose dangling ConfigMap reference carries
+    bidi overrides and isolates in both the target name and the evidence
+    field path.
+
+    U+202E (RIGHT-TO-LEFT OVERRIDE) and U+2066..U+2069 (directional
+    isolates) reorder everything after them when a terminal renders the
+    line: unflattened, a cluster could make `.../delete-me` read as
+    `.../em-eteled`, or make an evidence path appear to point at a field it
+    does not. An approval dialog is exactly where that must not happen.
+    """
+    return PodSummary(
+        name="web-abc-1",
+        namespace="prod",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node=None,
+        uid="pod-1",
+        relationships=RelationshipFacts(
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.OWNED_BY,
+                    target=TargetReference(
+                        group="apps",
+                        kind="ReplicaSet",
+                        namespace="prod",
+                        name="web-abc",
+                        uid="rs-1",
+                    ),
+                    confidence=FactConfidence.DECLARED,
+                    field="metadata.ownerReferences[0]",
+                ),
+                ReferenceFact(
+                    relation=RelationKind.USES_CONFIG,
+                    target=TargetReference(
+                        group="",
+                        kind="ConfigMap",
+                        namespace="prod",
+                        name="app\u202econfig\u2066rogue\u2069",
+                    ),
+                    confidence=FactConfidence.DECLARED,
+                    field="spec.volumes[0]\u0085.configMap\u202e",
+                ),
+            )
+        ),
+    )
+
+
+async def test_bidi_controls_in_a_dangling_reference_never_reach_the_dialog(
+    tmp_path: Path,
+) -> None:
+    """A dangling reference is cluster-controlled text on its most exposed
+    path: name, resolution and evidence field all reach the dialog. No
+    Unicode control or format character may survive the render - the line
+    must read left to right exactly as it was composed."""
+    rows: dict[str, list[Any]] = {
+        "deployments": [
+            GenericSummary(
+                name="web", namespace="prod", kind="Deployment", created="", desired=1, uid="d-1"
+            )
+        ],
+        "replicasets": [_plain_replicaset()],
+        "pods": [_pod_with_a_bidi_dangling_reference()],
+    }
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
+    async with env.app.run_test() as pilot:
+        await open_delete_dialog(env, pilot, "deploy", expect="web")
+        text = impact_text(env.app)
+        assert "unresolved references in the affected set: 1" in text
+        assert not any(unicodedata.category(ch) in {"Cc", "Cf"} for ch in text.replace("\n", ""))
+        # Flattened, not dropped: the identity and the field path still read
+        # as bounded fragments rather than silently losing characters.
+        assert "ConfigMap/prod/app config rogue  (missing)" in text
+        assert "spec.volumes[0] .configMap" in text
 
 
 async def test_declined_delete_with_an_impact_section_runs_no_operation(tmp_path: Path) -> None:

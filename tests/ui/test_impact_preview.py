@@ -9,6 +9,8 @@ the advisory wording.
 
 from __future__ import annotations
 
+import unicodedata
+
 from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary
 from korvid.core.relationships import (
     CoverageRecord,
@@ -432,6 +434,48 @@ def test_cluster_text_stays_literal_and_control_characters_are_flattened() -> No
     assert "[bold red]web rogue[/]" in body
     assert "metadata ownerReferences[0]" in body
     assert not any("\n" in line or "\t" in line for line in lines)
+
+
+def test_c1_bidi_and_zero_width_controls_are_flattened_ordinary_unicode_is_not() -> None:
+    """C0 is not the whole control surface. C1 (U+0085 NEL), the bidi
+    overrides (U+202E) and the directional isolates (U+2066..U+2069) all
+    reorder or break a rendered line, and a zero-width character (U+200B)
+    can hide the difference between two identities. Ordinary Unicode - a
+    non-Latin name, an emoji - is text, and must survive untouched."""
+    hostile = GraphResource(
+        group="",
+        kind="ConfigMap",
+        namespace="prod",
+        name="app\u202econfig\u2066rogue\u2069\u200b\u0085x",
+    )
+    edge = RelationshipEdge(
+        subject=_POD,
+        target=hostile,
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=_POD, field="spec.volumes[0]\u009c.configMap"),
+        resolution=EdgeResolution.MISSING,
+    )
+    lines = render_impact_lines(_summary(unresolved=(edge,)))
+    body = "\n".join(lines)
+    assert not any(
+        unicodedata.category(ch) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for line in lines for ch in line
+    )
+    assert "ConfigMap/prod/app config rogue   x" in body
+    assert "spec.volumes[0] .configMap" in body
+
+    friendly = GraphResource(group="", kind="ConfigMap", namespace="prod", name="配置-café-🚀")
+    ok_edge = RelationshipEdge(
+        subject=_POD,
+        target=friendly,
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=_POD, field="spec.volumes[0].configMap"),
+        resolution=EdgeResolution.MISSING,
+    )
+    assert "ConfigMap/prod/配置-café-🚀" in "\n".join(
+        render_impact_lines(_summary(unresolved=(ok_edge,)))
+    )
 
 
 def test_no_line_claims_a_guaranteed_failure_and_the_advisory_is_always_last() -> None:

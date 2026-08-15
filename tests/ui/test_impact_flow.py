@@ -748,6 +748,84 @@ async def test_selection_change_during_the_impact_load_aborts_before_the_dialog(
         )
 
 
+def _replace_selected_row_with_a_new_incarnation(app: KorvidApp) -> None:
+    """Swap the selected `web` row for a same-named object with another uid.
+
+    Exactly what a delete-and-recreate between the two awaits looks like on
+    screen: identical kind, namespace and name, so every identity check
+    except the uid still passes.
+    """
+    app.store.apply_event(
+        app.current_kind, app.current_scope, "MODIFIED", _deployment("web", "deploy-9")
+    )
+
+
+async def test_same_name_replacement_during_the_impact_load_aborts_the_delete(
+    tmp_path: Path,
+) -> None:
+    """The row the user pressed Ctrl-D on is replaced under the same name
+    while the snapshot loads. The dialog would name `web` and the summary
+    would describe `web`, but the write pins the uid the user saw - so the
+    approval could only ever 409, and the text would describe an object the
+    user never selected. Refuse before the dialog exists."""
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    env.lister.on_first_call = lambda: _replace_selected_row_with_a_new_incarnation(app)
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await app.action_delete_resource()
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        await until(
+            pilot,
+            lambda: any(
+                "the selection changed during the impact summary" in n.message
+                for n in app._notifications
+            ),
+            label="impact-summary uid refusal",
+        )
+
+
+async def test_same_name_replacement_during_the_impact_load_aborts_the_restart(
+    tmp_path: Path,
+) -> None:
+    """Same guard on the `r` flow - see the delete case above."""
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    env.lister.on_first_call = lambda: _replace_selected_row_with_a_new_incarnation(app)
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await app.action_rollout_restart()
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        await until(
+            pilot,
+            lambda: any(
+                "the selection changed during the impact summary" in n.message
+                for n in app._notifications
+            ),
+            label="impact-summary uid refusal",
+        )
+
+
+async def test_a_row_without_a_uid_still_opens_the_dialog_after_the_impact_load(
+    tmp_path: Path,
+) -> None:
+    """The uid recheck is a *tightening*: a summary type that carries no uid
+    (the write then runs without a precondition) must still reach a dialog,
+    exactly as before issue #283."""
+    env = ImpactEnv(
+        tmp_path / "audit.jsonl",
+        rows={
+            "deployments": [_deployment("web", ""), _deployment("zz-api", "deploy-2")],
+            "replicasets": [_replicaset()],
+        },
+    )
+    async with env.app.run_test() as pilot:
+        await open_delete_dialog(env, pilot, "deploy", expect="web")
+        assert "delete apps/Deployment/prod/web" in impact_text(env.app)
+
+
 async def test_impact_loads_after_the_permission_check_and_the_dry_run_preview(
     tmp_path: Path,
 ) -> None:
