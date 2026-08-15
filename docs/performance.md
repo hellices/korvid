@@ -243,9 +243,10 @@ triples is exactly the quantity the update-path change makes cheap.
 Repaints are not a fixed quantity of the workload: the cheaper a repaint gets,
 the more of them the run completes before the schedule ends. The render-path
 change roughly triples them, so the same optimisation has about three times as
-many opportunities to pay. That is the direction and most of the size of the
-interaction. The counts do not account for all of it, and nothing here
-separates the remainder, so the residual is left unexplained rather than
+many opportunities to pay. That explains the direction but only a minority of
+the size: tripling the 0.16-second isolated saving predicts roughly 0.48 seconds,
+well below the 1.89-second saving with the new render path. Nothing measured
+here separates the remainder, so the residual is left unexplained rather than
 narrated.
 
 Two consequences worth stating. The arms do not perform equal work: the
