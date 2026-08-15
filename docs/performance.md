@@ -164,17 +164,44 @@ at −16.5% with both arms roughly 0.5–1.5 s faster — which is why only
 same-session, interleaved pairs are quoted.
 
 The figures above were re-taken after review hardening added work to the
-per-cell path, and held: −12.3% median against −12.1% as published. Measured
-the same way at the merged state, the update path and the render path compose
-almost exactly. On the timestamp-bearing workload the render-path change is
-worth −11.5% on its own and this change −14.7% on its own; both together are
-−24.7% against `main`, where multiplying the two predicts −24.5%. Neither
-change is absorbing the other's win.
+per-cell path, and held: −12.3% median against −12.1% as published.
 
-Those three came from one session; the table above came from an earlier one,
-which is why the same change reads −12.3% there and −14.7% here. Only the
-paired arms within a session are comparable — see the drift note above — so
-the table keeps its own measurement rather than borrowing this one.
+### The two changes do not compose independently
+
+An earlier revision of this section claimed the render-path change and the
+update-path change multiply out, on the strength of two single-change runs and
+one figure read as their combination. That was wrong on both counts: the
+"combined" run had swapped only the render-path file, so it never measured a
+tree with both changes off, and the two effects are not independent to begin
+with. The full 2×2 was measured on the merged tree, same session, arms
+interleaved, 5 rounds each, on the timestamp-bearing workload. Each cell is
+produced by checking the relevant source files out of the pre-merge commit
+(`resource_table.py` for the render path, `store.py` + `models.py` for the
+update path) and leaving the rest of the tree alone — listing only *some* of
+them is exactly the mistake above, because the unlisted files stay optimised
+in both arms:
+
+| | old render path | new render path |
+|---|---:|---:|
+| **old update path** | 20.29 s | 17.74 s (−12.6%) |
+| **new update path** | 19.82 s (−2.3%) | 14.62 s (**−27.9%**) |
+
+Multiplying the two single-change results predicts −14.6%. The measured
+combination is −27.9%, so the pair is worth roughly twice what either change
+suggests alone — the opposite of the overlap one might expect, and not
+something the single-change numbers can be extrapolated to.
+
+The likely reading: with the old render path a repaint rewrites every row's
+cells, so computing AGE is a small share of a large cost and memoising it
+saves 2.3%. The render-path change removes the bulk of those writes; the
+per-object work is then a much larger share of what is left, and the same memo
+is worth 17.6% of it. Neither number is wrong — they answer different
+questions, and only the 2×2 answers "what did the pair buy".
+
+The 2×2 came from one session; the table above came from an earlier one, so
+the same change reads −12.3% there. Only the paired arms within a session are
+comparable — see the drift note above — so the table keeps its own
+measurement rather than borrowing these.
 
 Two redundancies were removed, both of which repeated per-object work that
 nothing had invalidated:
