@@ -255,7 +255,11 @@ trust basis is the release workflow: it is generated from the tag-revalidated
 
 ```sh
 set -eu
-gh release download v0.2.0 --pattern korvid.rb --dir dist/v0.2.0
+formula_path="$PWD/dist/v0.2.0/korvid.rb"
+if [ ! -f "$formula_path" ]; then
+  gh release download v0.2.0 --pattern korvid.rb --dir dist/v0.2.0
+fi
+test -f "$formula_path"
 gh repo clone hellices/homebrew-korvid dist/homebrew-korvid
 cd dist/homebrew-korvid
 branch=bump-korvid-0.2.0
@@ -264,7 +268,7 @@ if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
 else
   git switch -c "$branch"
 fi
-cp ../v0.2.0/korvid.rb Formula/korvid.rb
+cp "$formula_path" Formula/korvid.rb
 git add Formula/korvid.rb
 if git diff --cached --quiet; then
   echo "verified formula is already present on $branch"
