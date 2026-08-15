@@ -1931,11 +1931,15 @@ def test_release_docs_describe_fresh_installs_and_extra_expansion_separately() -
 def test_release_docs_require_homebrew_tap_merge_and_version_verification() -> None:
     version = _project_version()
     runbook = _release_runbook()
+    normalized = " ".join(runbook.split())
     assert "HOMEBREW_TAP_TOKEN" in runbook
     assert f"gh release download v{version} --pattern korvid.rb" in runbook
     assert 'gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch' in runbook
     assert 'gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash' in runbook
     assert f"korvid --version  # korvid {version}" in runbook
+    assert "tag-revalidated `uv.lock`" in normalized
+    assert "not separately attested or listed in `SHA256SUMS`" in normalized
+    assert "attested release asset" not in runbook
 
 
 # --- metadata ---------------------------------------------------------------
