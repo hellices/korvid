@@ -9,8 +9,8 @@ reaches a line is a resource identity, a relation/confidence/resolution enum
 value, an evidence field path, and a namespace/coverage scope - each
 flattened of control characters and length-capped, with the composed line
 capped again at `_MAX_LINE` because one line concatenates several of them -
-reserving room for the ` [inferred]` marker and marking the cut, so a capped
-line never reads as a complete claim.
+reserving room for the ` [inferred]` marker and marking every cut, so
+neither a capped fragment nor a capped line ever reads as a complete claim.
 Nothing is formatted as Rich markup: `ConfirmScreen` appends these lines to
 a `rich.text.Text`, so a resource named `[bold red]web[/]` renders
 literally.
@@ -75,8 +75,10 @@ _MAX_TEXT = 120
 #: hops; the dialog body is 70 columns wide, so a line that would wrap into
 #: a screenful on its own is truncated here instead.
 _MAX_LINE = 240
-#: Shown in place of what `_MAX_LINE` cut, so a capped line reads as capped
-#: rather than as a complete claim that happens to stop mid-path.
+#: Shown in place of what either cap cut (`_MAX_TEXT` on one fragment,
+#: `_MAX_LINE` on the composed line), so shortened text reads as shortened
+#: rather than as a complete claim that happens to stop mid-name or
+#: mid-path.
 _TRUNCATION_SUFFIX = "..."
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
@@ -116,10 +118,20 @@ def _bounded(line: str, *, marker: str = "") -> str:
     width is reserved instead, and what was removed is marked, so a line that
     stops mid-path cannot be read as a complete one.
     """
-    budget = _MAX_LINE - len(marker)
-    if len(line) <= budget:
-        return line + marker
-    return line[: budget - len(_TRUNCATION_SUFFIX)] + _TRUNCATION_SUFFIX + marker
+    return _truncate(line, _MAX_LINE - len(marker)) + marker
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Cut `text` to `limit`, marking the cut with `_TRUNCATION_SUFFIX`.
+
+    The one place either cap drops text, so a cut always looks the same
+    wherever it happened. Trailing dots are removed before the suffix is
+    appended: a fragment inside this text may already have been marked, and
+    `.....` reads as data rather than as one truncation mark.
+    """
+    if len(text) <= limit:
+        return text
+    return text[: limit - len(_TRUNCATION_SUFFIX)].rstrip(".") + _TRUNCATION_SUFFIX
 
 
 def _section(title: str, items: Sequence[ImpactItem]) -> list[str]:
@@ -241,5 +253,12 @@ def _resource_label(resource: GraphResource) -> str:
 def _safe(text: str) -> str:
     """Flatten control characters (including newlines/tabs) and cap length,
     so cluster-controlled text can neither break the dialog layout nor grow
-    the preview unboundedly."""
-    return _CONTROL_CHARS.sub(" ", text)[:_MAX_TEXT]
+    the preview unboundedly.
+
+    A cut is marked with `_TRUNCATION_SUFFIX` for the same reason the
+    composed-line cap marks its own: a shortened resource identity or
+    evidence path that stops silently reads as the whole name or the whole
+    field path, and two long identities sharing a prefix would render as one
+    apparently complete - and apparently identical - claim.
+    """
+    return _truncate(_CONTROL_CHARS.sub(" ", text), _MAX_TEXT)

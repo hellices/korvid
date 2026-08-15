@@ -22,6 +22,7 @@ from korvid.k8s.relationship_facts import FactConfidence, RelationKind
 from korvid.ui.impact_preview import (
     _ACTION_LABEL,
     _MAX_LINE,
+    _MAX_TEXT,
     _TRUNCATION_SUFFIX,
     ADVISORY_LINE,
     IMPACT_TITLE,
@@ -329,6 +330,84 @@ def test_a_long_three_hop_path_keeps_its_inferred_marker_within_the_line_bound()
     )
     assert "  inferred relationships are labelled and never block this write" in lines
     assert max(len(line) for line in lines) <= _MAX_LINE
+
+
+def _owned_by(subject: GraphResource, field: str) -> RelationshipEdge:
+    """One declared `owned_by` hop from `subject`, with `field` as evidence."""
+    return RelationshipEdge(
+        subject=subject,
+        target=_DEPLOY,
+        relation=RelationKind.OWNED_BY,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=subject, field=field),
+        resolution=EdgeResolution.RESOLVED,
+    )
+
+
+def test_two_long_identities_sharing_a_prefix_stay_distinguishable_when_truncated() -> None:
+    """The per-fragment `_MAX_TEXT` cap must *say* it cut.
+
+    Two dependents whose legal DNS names share a long prefix render as two
+    identities capped at the same width. Without a visible marker both lines
+    read as complete identities, and an approver comparing them cannot tell
+    a full name from a silently shortened one - the dangerous reading, since
+    the rest of the name is exactly what distinguishes the two objects. The
+    cut is marked, and everything the cap had room for is still shown, so
+    the two lines remain distinguishable as far as the suffix allows.
+    """
+    shared = "checkout-api-" + "a" * 80
+    blue = GraphResource(group="", kind="Pod", namespace="prod", name=f"{shared}-blue-{'x' * 150}")
+    green = GraphResource(
+        group="", kind="Pod", namespace="prod", name=f"{shared}-green-{'x' * 150}"
+    )
+    lines = render_impact_lines(
+        _summary(
+            direct=(
+                ImpactItem(resource=blue, path=(_owned_by(blue, "metadata.ownerReferences[0]"),)),
+                ImpactItem(resource=green, path=(_owned_by(green, "metadata.ownerReferences[0]"),)),
+            )
+        )
+    )
+    items = [line for line in lines if line.startswith("    - Pod/prod/checkout-api-")]
+    assert len(items) == 2
+    identities = [line[len("    - ") :].split(" via ")[0] for line in items]
+    for identity, resource in zip(identities, (blue, green), strict=True):
+        assert len(identity) <= _MAX_TEXT
+        assert identity.endswith(_TRUNCATION_SUFFIX)
+        assert not identity.endswith(_TRUNCATION_SUFFIX * 2)
+        full = f"Pod/prod/{resource.name}"
+        assert full.startswith(identity[: -len(_TRUNCATION_SUFFIX)])
+        assert full not in identity  # the tail the cap dropped is really gone
+    assert identities[0] != identities[1]
+    assert "-blue-" in identities[0]
+    assert "-green-" in identities[1]
+    # A short identity is never marked: the suffix means "cut", nothing else.
+    assert "  delete apps/Deployment/prod/web" in lines
+
+
+def test_a_long_evidence_path_is_truncated_visibly_below_the_line_bound() -> None:
+    """The same marker on the other cluster-derived fragment.
+
+    A single hop off a short identity composes well inside `_MAX_LINE`, so
+    the composed-line cap cannot fire here: whatever marks this cut is the
+    per-fragment cap doing it. An evidence path that stops mid-field without
+    a marker reads as the whole path - a claim about *where* a relationship
+    was found, pointing at a field that is not the one that was read.
+    """
+    field = "spec.template.spec.initContainers[0].env[7].valueFrom.secretKeyRef." + "n" * 120
+    lines = render_impact_lines(
+        _summary(direct=(ImpactItem(resource=_POD, path=(_owned_by(_POD, field),)),))
+    )
+    item = next(line for line in lines if line.startswith("    - Pod/prod/web-abc-1 via"))
+    assert len(item) < _MAX_LINE
+    rendered = item.split(" at ", 1)[1]
+    assert len(rendered) <= _MAX_TEXT
+    assert rendered.endswith(_TRUNCATION_SUFFIX)
+    assert not rendered.endswith(_TRUNCATION_SUFFIX * 2)
+    kept = rendered[: -len(_TRUNCATION_SUFFIX)]
+    assert field.startswith(kept)
+    assert kept.startswith("spec.template.spec.initContainers[0].env[7].valueFrom.secretKeyRef")
+    assert field not in item
 
 
 def test_every_impact_action_has_a_rendered_label() -> None:

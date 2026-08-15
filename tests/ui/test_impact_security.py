@@ -138,16 +138,40 @@ async def test_the_impact_load_never_writes_reserves_or_audits(tmp_path: Path) -
 
 async def test_audit_failure_still_blocks_the_operation_factory(tmp_path: Path) -> None:
     """Fail-closed auditing is unchanged: an unwritable audit log blocks the
-    write even though the dialog showed an impact summary."""
+    write even though the dialog showed an impact summary.
+
+    Waits on the app's own blocked notification rather than on a fixed
+    sleep: an empty `env.ops.calls` after an arbitrary pause is also what a
+    write that simply had not started yet looks like, so the assertion has
+    to be anchored to the fail-closed outcome actually being reached. The
+    error toast is emitted on the audit-failure branch only (a successful or
+    a failed mutation produces different text), and the write reservation is
+    released when the app-owned worker returns - so once both are observed,
+    an empty `calls` means the operation factory was never invoked.
+    """
     audit_path = tmp_path / "audit.jsonl"
     audit_path.mkdir()  # a directory at the log path makes appends fail
     env = ImpactEnv(audit_path)
+    blocked = "delete deployments/web blocked: audit log unavailable"
     async with env.app.run_test() as pilot:
         await open_delete_dialog(env, pilot, "deploy", expect="web")
         assert "known direct dependents" in impact_text(env.app)
         await pilot.press("y")
-        await pilot.pause(0.3)  # the write path must stay blocked
+        await until(
+            pilot,
+            lambda: any(str(note.message) == blocked for note in env.app._notifications),
+            label="fail-closed block notification",
+        )
+        await until(
+            pilot,
+            lambda: env.app._active_cluster_writes == 0,
+            label="write worker finished",
+        )
+        assert [
+            note.severity for note in env.app._notifications if str(note.message) == blocked
+        ] == ["error"]
         assert env.ops.calls == []
+        assert list(audit_path.iterdir()) == []  # the log path is still the empty directory
 
 
 async def test_graph_failure_does_not_block_a_legitimate_confirmation(tmp_path: Path) -> None:
