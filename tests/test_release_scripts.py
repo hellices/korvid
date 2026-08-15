@@ -1955,14 +1955,19 @@ def test_release_docs_require_homebrew_tap_merge_and_version_verification() -> N
     normalized = " ".join(runbook.split())
     assert "HOMEBREW_TAP_TOKEN" in runbook
     assert f"gh release download v{version} --pattern korvid.rb" in runbook
-    assert 'gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1' in runbook
-    assert 'gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash' in runbook
+    assert (
+        runbook.count('gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1')
+        == 2
+    )
+    assert runbook.count('gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash') == 2
     assert "--json number,title,baseRefName,headRefName,headRepositoryOwner" in runbook
     assert '.baseRefName == "main"' in runbook
     assert '.headRefName == "bump-korvid-0.2.0"' in runbook
     assert '.headRepositoryOwner.login == "hellices"' in runbook
     assert "trusted bump-korvid-0.2.0 tap PR not found" in runbook
     assert "git switch -c bump-korvid-" in runbook
+    assert "TAP_PR_URL=$(gh pr create" in runbook
+    assert "could not identify created tap PR" in runbook
     assert f"korvid --version | grep -Fx 'korvid {version}'" in runbook
     assert "tag-revalidated `uv.lock`" in normalized
     assert "not separately attested or listed in `SHA256SUMS`" in normalized
