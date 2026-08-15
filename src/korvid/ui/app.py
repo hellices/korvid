@@ -63,6 +63,7 @@ from korvid.core.debugimage import (
 )
 from korvid.core.errors import explain_api_error
 from korvid.core.filters import ResourceFilter, parse_filter
+from korvid.core.impact import ImpactAction, summarize_impact
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
@@ -121,6 +122,7 @@ from korvid.ui.drain import DrainController
 from korvid.ui.forward_controller import ForwardController
 from korvid.ui.helm_controller import HelmController
 from korvid.ui.hints import EventsFetcher, HintController, pod_needs_hint
+from korvid.ui.impact_preview import IMPACT_UNAVAILABLE_LINES, render_impact_lines
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -264,6 +266,13 @@ _UID_LOOKUP_TIMEOUT = 10.0
 #: after which it opens without a preview - a preview must never block the
 #: approval flow.
 _PREVIEW_TIMEOUT = 3.0
+
+#: Upper bound on the advisory blast-radius snapshot (issue #283). The
+#: section is display support, so it gets its own hard deadline: a slow or
+#: hung snapshot must never wedge an approval the user already asked for.
+#: Larger than `_PREVIEW_TIMEOUT` because the snapshot is a bounded LIST
+#: fan-out, not a single dry-run round trip.
+_IMPACT_TIMEOUT = 5.0
 
 #: Upper bound on a helm preview (issue #31): `helm ... --dry-run` shells out
 #: and may pull the chart from a repo, so it gets more budget than an API
@@ -5066,6 +5075,69 @@ class KorvidApp(App[None]):
             logger.debug("dry-run preview failed; dialog opens without it", exc_info=True)
             return None
 
+    def _impact_scope(self, meta: ResourceMeta) -> str | None:
+        """The namespace an impact snapshot must cover for this target.
+
+        The pane's namespace for a namespaced target, and *every* namespace
+        for a cluster-scoped one (or an all-namespaces pane). A Node or
+        PersistentVolume is reachable from every namespace: scoping its
+        snapshot to the pane the user happens to be in would both hide the
+        Pods it runs elsewhere and let the dialog report complete coverage
+        of a namespace that was never the whole question. The same value is
+        handed to the loader and to `summarize_impact`, so the scope the
+        text states is always the scope that was listed.
+        """
+        scope = self._pane.scope
+        if not meta.namespaced or scope == ALL_NAMESPACES:
+            return None
+        return scope
+
+    async def _impact_preview(
+        self,
+        action: ImpactAction,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+    ) -> tuple[str, ...] | None:
+        """Advisory blast-radius lines for a write dialog (issue #283).
+
+        Reuses the relationship snapshot loader `g` already owns - no new
+        LIST/GET interface and no per-node fan-out - with the exact
+        group/kind/namespace/name/uid identity the write will target, so a
+        recreated same-named object is reported as absent from the snapshot
+        rather than summarized as the one on screen. Display support only,
+        and fail-open in three distinct ways:
+
+        - no loader wired (no cluster connection) -> None, no section at all;
+        - a timeout or unexpected failure -> the static "impact unavailable"
+          advisory, because an API error message can embed a response body
+          (for a Secret, its data) and must never reach the dialog;
+        - cancellation (a `:ctx` switch tearing the client down) propagates
+          untouched, exactly like every other awaited read here.
+
+        The summary itself can never approve, execute, or reserve a write:
+        it returns text.
+        """
+        loader = self._relationship_loader
+        if loader is None:
+            return None
+        root = GraphResource(
+            group=meta.group, kind=meta.kind, namespace=ns or "", name=name, uid=uid
+        )
+        scope = self._impact_scope(meta)
+        try:
+            async with asyncio.timeout(_IMPACT_TIMEOUT):
+                graph = await loader.load(root, scope, self.aliases)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Type only: never the message (CodeQL py/clear-text-logging-
+            # sensitive-data), and never anything derived from a manifest.
+            logger.debug("impact summary unavailable for %s: %s", action, type(exc).__name__)
+            return IMPACT_UNAVAILABLE_LINES
+        return render_impact_lines(summarize_impact(graph, action, root, scope=scope))
+
     async def _push_write_confirmation(
         self,
         title: str,
@@ -5081,6 +5153,7 @@ class KorvidApp(App[None]):
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
         managed_note: str | None = None,
+        impact_lines: tuple[str, ...] | None = None,
     ) -> None:
         """The standard write-approval flow (issue #91 U1): push a confirm
         dialog and, on approval, launch `_run_write` on an app-owned worker.
@@ -5106,6 +5179,7 @@ class KorvidApp(App[None]):
                 preview=preview,
                 preview_title=preview_title,
                 managed_note=managed_note,
+                impact_lines=impact_lines,
             ),
             _done,
         )
@@ -5204,6 +5278,14 @@ class KorvidApp(App[None]):
             "delete", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
             return
+        # The snapshot is another awaited gap: a `:ctx` switch or a moved
+        # selection during it must abort before a dialog describes the row
+        # the user is no longer on (issue #283).
+        impact = await self._impact_preview(ImpactAction.DELETE, meta, ns, name, uid)
+        if not self._write_context_intact(
+            "delete", meta, ns, name, phase="the impact summary", epoch=epoch
+        ):
+            return
         operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
         require = None if meta.namespaced else name
         await self._push_write_confirmation(
@@ -5217,6 +5299,7 @@ class KorvidApp(App[None]):
             require_name=require,
             preview=preview,
             managed_note=note,
+            impact_lines=impact,
         )
 
     async def action_rollout_restart(self) -> None:
@@ -5250,6 +5333,12 @@ class KorvidApp(App[None]):
             "rollout_restart", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
             return
+        # Same awaited-gap revalidation as delete - see action_delete_resource.
+        impact = await self._impact_preview(ImpactAction.ROLLOUT_RESTART, meta, ns, name, uid)
+        if not self._write_context_intact(
+            "rollout_restart", meta, ns, name, phase="the impact summary", epoch=epoch
+        ):
+            return
 
         await self._push_write_confirmation(
             f"Rollout restart {self._gvr_label(meta)}/{name}?",
@@ -5264,6 +5353,7 @@ class KorvidApp(App[None]):
             ),
             preview=preview,
             managed_note=note,
+            impact_lines=impact,
         )
 
     async def _fetch_manifest_for_edit(
@@ -6378,6 +6468,7 @@ class KorvidApp(App[None]):
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
         managed_note: str | None = None,
+        impact_lines: tuple[str, ...] | None = None,
     ) -> ConfirmScreen:
         """Build every write-approval dialog through one place so the
         protected-context layer (issue #83) can never be forgotten: while a
@@ -6391,6 +6482,7 @@ class KorvidApp(App[None]):
             preview_title=preview_title,
             protected_context=self._protected_context,
             managed_note=managed_note,
+            impact_lines=impact_lines,
         )
 
     # ------------------------------------------------------------------
