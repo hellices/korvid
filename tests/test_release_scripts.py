@@ -1228,6 +1228,7 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
         spec.count("==") == 1
         and not any(operator in spec.replace("==", "") for operator in "<>!~")
         and all(part.strip() for part in spec.split("=="))
+        and "*" not in spec.split("==", 1)[1]
         for spec in requirement_specs
     )
     constraints_input = (
