@@ -9,7 +9,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from korvid.core.redaction import RedactionRecord, redact_text
+from korvid.core.redaction import RedactionRecord, redact_text, strip_control_characters
+
+_MAX_WARNING_REASON_CHARS = 128
+_MAX_WARNING_NOTE_CHARS = 240
+_MAX_EVENT_TIMESTAMP_CHARS = 64
 
 
 class TimelineSource(StrEnum):
@@ -110,6 +114,11 @@ def _normalize_text(raw: object, path: str) -> str:
     return " ".join(redacted.split())
 
 
+def _strip_controls(raw: object, path: str) -> str:
+    records: list[RedactionRecord] = []
+    return strip_control_characters(str(raw or ""), path, records)
+
+
 def _resource_ref(
     *,
     kind_alias: str | None,
@@ -187,23 +196,32 @@ class SessionTimeline:
         )
         resource = _resource_ref(
             kind_alias=kind_alias,
-            display_kind=str(involved.get("kind") or "Event"),
-            namespace=str(involved.get("namespace") or ""),
-            name=str(involved.get("name") or ""),
-            uid=str(involved.get("uid") or "") or None,
+            display_kind=_strip_controls(
+                involved.get("kind") or "Event", "timeline.event.resource.kind"
+            ),
+            namespace=_strip_controls(
+                involved.get("namespace"), "timeline.event.resource.namespace"
+            ),
+            name=_strip_controls(involved.get("name"), "timeline.event.resource.name"),
+            uid=_strip_controls(involved.get("uid"), "timeline.event.resource.uid") or None,
         )
         payload = WarningEventPayload(
-            reason=_normalize_text(event.get("reason") or "Warning", "timeline.event.reason"),
-            note=_normalize_text(event.get("message") or "", "timeline.event.message"),
+            reason=_normalize_text(event.get("reason") or "Warning", "timeline.event.reason")[
+                :_MAX_WARNING_REASON_CHARS
+            ],
+            note=_normalize_text(event.get("message") or "", "timeline.event.message")[
+                :_MAX_WARNING_NOTE_CHARS
+            ],
             count=count,
         )
-        occurred_at = str(
+        occurred_at = _strip_controls(
             event.get("lastTimestamp")
             or event.get("eventTime")
             or event.get("firstTimestamp")
             or metadata.get("creationTimestamp")
-            or _utc_now()
-        )
+            or _utc_now(),
+            "timeline.event.occurred_at",
+        )[:_MAX_EVENT_TIMESTAMP_CHARS]
         return self._append(
             epoch=epoch,
             source=TimelineSource.EVENT,
@@ -229,7 +247,7 @@ class SessionTimeline:
                 phase=phase,
                 from_context=from_context,
                 to_context=to_context,
-                note=" ".join(note.split()),
+                note=" ".join(note.split())[:160],
             ),
         )
 
@@ -258,7 +276,7 @@ class SessionTimeline:
             resource=resource,
             payload=WriteAuditPayload(
                 action=" ".join(action.split()),
-                outcome=" ".join(outcome.split()),
+                outcome=" ".join(outcome.split())[:160],
             ),
         )
 

@@ -162,7 +162,8 @@ watch deltas (ADDED/MODIFIED/DELETED), Warning events, context switches, and
 audit-logged writes, newest first. It performs no cluster I/O of its own —
 it only renders what the running session already recorded — so it opens
 instantly, with or without a row selected, and works the same with the AI
-agent disabled.
+agent disabled. The table does not refresh itself while open; reopening it,
+or changing a filter, renders a fresh snapshot of the entries currently stored.
 
 By default the timeline shows only the current kube context's epoch, every
 source, every resource. Inside the modal:

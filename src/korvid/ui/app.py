@@ -1402,7 +1402,7 @@ class KorvidApp(App[None]):
             "watch delta",
             timeline.append_watch(
                 epoch=self._ctx_epoch,
-                kind_alias=kind,
+                kind_alias=self._canonical_kind(kind),
                 display_kind=display_kind,
                 namespace=str(getattr(obj, "namespace", "") or ""),
                 name=str(getattr(obj, "name", "") or ""),
@@ -2602,13 +2602,18 @@ class KorvidApp(App[None]):
         meta = self.aliases.get(kind)
         if meta is None:
             return kind
+        return self._canonical_meta_kind(meta)
+
+    def _canonical_meta_kind(self, meta: ResourceMeta) -> str:
         if self.aliases.get(meta.plural) == meta:
             return meta.plural
-        # The bare plural belongs to a different meta (a same-plural CRD from
-        # another group won the alias collision): keep the qualified alias as
-        # the canonical view kind so watching, rendering, and writes all
-        # resolve the meta this alias actually names.
-        return kind
+        qualified = self._gvr_label(meta)
+        if self.aliases.get(qualified) == meta:
+            return qualified
+        return min(
+            (alias for alias, candidate in self.aliases.items() if candidate == meta),
+            default=qualified,
+        )
 
     async def _drill_down_selected(self, row_key: str) -> None:
         """Keyboard Enter: push a drill level for the selected row."""
@@ -3158,7 +3163,7 @@ class KorvidApp(App[None]):
             return
         meta = self.aliases.get(kind)
         if meta is None:
-            self.notify(f"{kind} is not a discovered view", severity="warning")
+            self.notify(f"{kind} is not a discovered view", severity="warning", markup=False)
             return
         await self._navigate(kind, namespace if meta.namespaced and namespace else None)
         row_key = f"{namespace}/{name}"
@@ -3173,6 +3178,7 @@ class KorvidApp(App[None]):
         self.notify(
             f"{name} is not visible in {kind} - it may be gone or outside the current scope",
             severity="warning",
+            markup=False,
         )
 
     def _focus_row(self, row_key: str) -> bool:
@@ -3374,7 +3380,7 @@ class KorvidApp(App[None]):
             ComponentRef(kind=kind, name=name, api_version=api_version, namespace=namespace)
         )
         if resolved is None:
-            self.notify(f"{kind} is not a discovered view", severity="warning")
+            self.notify(f"{kind} is not a discovered view", severity="warning", markup=False)
             return
         alias, _namespaced = resolved
         self._run_relationship_worker(self._jump_to_object(alias, namespace, name, epoch=epoch))
@@ -4944,7 +4950,7 @@ class KorvidApp(App[None]):
             timeline.append_write(
                 epoch=self._ctx_epoch,
                 action=action,
-                kind_alias=meta.plural,
+                kind_alias=self._canonical_meta_kind(meta),
                 display_kind=meta.kind,
                 namespace=namespace,
                 name=name,

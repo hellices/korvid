@@ -22,7 +22,12 @@ import yaml
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.portforward import OWNER_CHAIN_PLURALS, WORKLOAD_PLURALS
-from korvid.core.session_timeline import SessionTimeline, TimelineSource, WriteAuditPayload
+from korvid.core.session_timeline import (
+    SessionTimeline,
+    TimelineResourceRef,
+    TimelineSource,
+    WriteAuditPayload,
+)
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
@@ -38,6 +43,12 @@ from .waits import until
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
 _NODES_META = ResourceMeta("Node", "nodes", "", "v1", False, ("no",))
+_MESSAGING_SUBS_META = ResourceMeta(
+    "Subscription", "subscriptions", "messaging.example.io", "v1", True, ()
+)
+_OLM_SUBS_META = ResourceMeta(
+    "Subscription", "subscriptions", "operators.coreos.com", "v1alpha1", True, ()
+)
 
 _ALIASES = {
     "pods": _PODS_META,
@@ -104,6 +115,7 @@ def make_app(
     check_calls: list[tuple[str, str, str, str | None, str, str]] | None = None,
     extra_pods: list[Summary] | None = None,
     session_timeline: SessionTimeline | None = None,
+    aliases: dict[str, ResourceMeta] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -150,7 +162,7 @@ def make_app(
         config=KorvidConfig(namespace="default", readonly=readonly),
         store=store,
         watch_manager=WatchManager(store, source),
-        aliases=dict(_ALIASES),
+        aliases=dict(_ALIASES if aliases is None else aliases),
         get_manifest=get_manifest,  # type: ignore[arg-type]  # tests pass duck-typed callables
         edit_text=edit_text,  # type: ignore[arg-type]  # tests pass duck-typed callables
         write_ops=recorder,
@@ -1569,6 +1581,57 @@ async def test_run_write_records_timeline_after_intent_and_success_audit(tmp_pat
     assert [json.loads(line)["outcome"] for line in audit_path.read_text().splitlines()] == [
         "intent",
         "success",
+    ]
+
+
+async def test_write_timeline_uses_qualified_alias_when_bare_plural_collides(
+    tmp_path: Path,
+) -> None:
+    timeline = SessionTimeline(max_entries=8, max_bytes=4096)
+    aliases = {
+        "subscriptions": _MESSAGING_SUBS_META,
+        "sub": _OLM_SUBS_META,
+        "subscriptions.operators.coreos.com": _OLM_SUBS_META,
+    }
+    app = make_app(
+        Recorder(),
+        tmp_path / "audit.jsonl",
+        session_timeline=timeline,
+        aliases=aliases,
+    )
+
+    async def op() -> None:
+        return None
+
+    async with app.run_test():
+        result = await app._run_write("delete", _OLM_SUBS_META, "default", "database", lambda: op())
+    assert result == "done"
+    entry = timeline.snapshot(epoch=0, source=TimelineSource.WRITE, resource=None).entries[0]
+    assert entry.resource is not None
+    assert entry.resource.kind_alias == "subscriptions.operators.coreos.com"
+    app._record_timeline_watch_event(
+        "sub",
+        "default",
+        "ADDED",
+        GenericSummary(
+            name="database",
+            namespace="default",
+            kind="Subscription",
+            created="",
+            uid="sub-uid",
+        ),
+    )
+    resource = TimelineResourceRef(
+        kind_alias="subscriptions.operators.coreos.com",
+        display_kind="Subscription",
+        namespace="default",
+        name="database",
+    )
+    matching = timeline.snapshot(epoch=0, source=None, resource=resource).entries
+    assert [item.source for item in matching] == [
+        TimelineSource.WRITE,
+        TimelineSource.WRITE,
+        TimelineSource.WATCH,
     ]
 
 

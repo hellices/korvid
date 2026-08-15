@@ -532,7 +532,8 @@ async def test_watch_warning_events_uses_warning_selector_without_backfill() -> 
 
     assert [event["message"] for event in seen] == ["new warning"]
     request_json.assert_awaited_once_with(
-        "/api/v1/events", query_params=[("fieldSelector", "type=Warning")]
+        "/api/v1/events",
+        query_params=[("fieldSelector", "type=Warning"), ("limit", "1")],
     )
     assert fake_watch.captured_kwargs["resource_version"] == "77"
 
@@ -549,7 +550,8 @@ async def test_watch_warning_events_namespaced_path_and_selector() -> None:
         async for _ in client.watch_warning_events("team-a"):
             pass
     request_json.assert_awaited_once_with(
-        "/api/v1/namespaces/team-a/events", query_params=[("fieldSelector", "type=Warning")]
+        "/api/v1/namespaces/team-a/events",
+        query_params=[("fieldSelector", "type=Warning"), ("limit", "1")],
     )
     assert fake_watch.captured_kwargs["resource_version"] == "1"
 

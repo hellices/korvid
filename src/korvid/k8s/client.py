@@ -1630,16 +1630,17 @@ class KubeClient(ReadOps, WriteOps):
             if namespace is None
             else f"/api/v1/namespaces/{_path_segment(namespace)}/events"
         )
-        query = [("fieldSelector", "type=Warning")]
+        selector_query = [("fieldSelector", "type=Warning")]
+        list_query = [*selector_query, ("limit", "1")]
         try:
-            data = await self._request_json(path, query_params=query)
+            data = await self._request_json(path, query_params=list_query)
         except ApiStatusError as exc:
             self._observe_read_error(path, exc)
             raise
         items = data.get("items", [])
         self._observe_read("list", path, payload=data, object_count=len(items))
         resource_version = str((data.get("metadata") or {}).get("resourceVersion") or "") or None
-        watch_func = self._make_raw_watch_callable(path, extra_query=query)
+        watch_func = self._make_raw_watch_callable(path, extra_query=selector_query)
         watch_kwargs: dict[str, Any] = {}
         if resource_version is not None:
             watch_kwargs["resource_version"] = resource_version
