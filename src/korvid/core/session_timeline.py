@@ -120,7 +120,8 @@ def _normalize_text(raw: object, path: str) -> str:
 
 def _strip_controls(raw: object, path: str) -> str:
     records: list[RedactionRecord] = []
-    return strip_control_characters(str(raw or ""), path, records)
+    stripped = strip_control_characters(str(raw or ""), path, records)
+    return " ".join(stripped.split())
 
 
 def _resource_ref(

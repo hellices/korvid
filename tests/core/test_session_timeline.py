@@ -205,12 +205,12 @@ def test_warning_projection_stores_only_normalized_text() -> None:
 def test_warning_projection_strips_control_characters_from_structural_fields() -> None:
     timeline = SessionTimeline(max_entries=4, max_bytes=4096)
     event = _warning("container failed", uid="uid\x1b-1")
-    event["lastTimestamp"] = "2026-08-15T00:00:00Z\x1b[31m"
+    event["lastTimestamp"] = "2026-08-15T00:00:00Z\n\t\x1b[31m"
     event["involvedObject"] = {
-        "kind": "Po\x1bd",
-        "namespace": "def\x1bault",
-        "name": "api\x1b-1",
-        "uid": "uid\x1b-1",
+        "kind": "Po\n\x1bd",
+        "namespace": "def\t\x1bault",
+        "name": "api\r\x1b-1",
+        "uid": "uid\n\x1b-1",
     }
 
     result = timeline.append_warning_event(epoch=0, event=event, kind_alias="pods")
@@ -227,7 +227,9 @@ def test_warning_projection_strips_control_characters_from_structural_fields() -
         entry.resource.uid or "",
     )
     assert all("\x1b" not in value for value in structural_values)
+    assert all(not {"\n", "\r", "\t"} & set(value) for value in structural_values)
     assert all("\N{REPLACEMENT CHARACTER}" in value for value in structural_values)
+    assert not {"\n", "\r", "\t"} & set(entry.occurred_at)
 
 
 def test_warning_projection_bounds_cluster_authored_text_fields() -> None:
