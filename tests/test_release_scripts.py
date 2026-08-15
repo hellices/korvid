@@ -1586,6 +1586,9 @@ def test_release_docs_runbook_marks_recovery_boundaries_and_upgrade_source() -> 
     assert "stop and diagnose" in runbook
     assert "install published `korvid[all]==0.1.2`" in runbook
     assert f"candidate `{version}` wheel" in runbook
+    assert runbook.index("## Required cross-version upgrade gate") < runbook.index(
+        f"## Publish `v{version}`"
+    )
 
 
 def test_release_docs_preserve_failed_tags_as_unpublished_audit_history() -> None:

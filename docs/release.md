@@ -115,6 +115,14 @@ The dry run's source policy compares the checked-out `HEAD` against the live
 `origin/main`, which the workflow re-fetches explicitly after checkout. A stale
 dispatch SHA is rejected.
 
+## Required cross-version upgrade gate
+
+Before tagging `v0.2.0`, install published `korvid[all]==0.1.2` in a clean
+environment, upgrade that environment from the candidate `0.2.0` wheel, and
+repeat the version, import, launcher, and state checks used by the smoke
+matrix. Record that result with the dry-run evidence. Do not create or push the
+release tag until this gate passes.
+
 ## Publish `v0.2.0`
 
 Create the annotated tag from the reviewed commit, then push only that tag:
@@ -326,13 +334,7 @@ rm -rf "$data_root/logs" "$data_root/agent-payloads"
 
 The package uninstall command does not run that cleanup for you.
 
-## Upgrade validation and remaining dry-run limits
-
-Before tagging `v0.2.0`, install published `korvid[all]==0.1.2` in a clean
-environment, upgrade that environment from the candidate `0.2.0` wheel, and
-repeat the version, import, launcher, and state checks used by the smoke
-matrix. Record that result with the dry-run evidence before claiming the
-cross-version upgrade path.
+## Remaining dry-run limits
 
 No dry run can prove the publication path itself. Attestation, staging, PyPI
 upload, finalization, compare-assets recovery, and pre-publication tag
