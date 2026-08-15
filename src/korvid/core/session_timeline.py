@@ -14,6 +14,10 @@ from korvid.core.redaction import RedactionRecord, redact_text, strip_control_ch
 _MAX_WARNING_REASON_CHARS = 128
 _MAX_WARNING_NOTE_CHARS = 240
 _MAX_EVENT_TIMESTAMP_CHARS = 64
+_MAX_RESOURCE_KIND_CHARS = 128
+_MAX_RESOURCE_NAMESPACE_CHARS = 63
+_MAX_RESOURCE_NAME_CHARS = 253
+_MAX_RESOURCE_UID_CHARS = 128
 
 
 class TimelineSource(StrEnum):
@@ -198,12 +202,17 @@ class SessionTimeline:
             kind_alias=kind_alias,
             display_kind=_strip_controls(
                 involved.get("kind") or "Event", "timeline.event.resource.kind"
-            ),
+            )[:_MAX_RESOURCE_KIND_CHARS],
             namespace=_strip_controls(
                 involved.get("namespace"), "timeline.event.resource.namespace"
-            ),
-            name=_strip_controls(involved.get("name"), "timeline.event.resource.name"),
-            uid=_strip_controls(involved.get("uid"), "timeline.event.resource.uid") or None,
+            )[:_MAX_RESOURCE_NAMESPACE_CHARS],
+            name=_strip_controls(involved.get("name"), "timeline.event.resource.name")[
+                :_MAX_RESOURCE_NAME_CHARS
+            ],
+            uid=_strip_controls(involved.get("uid"), "timeline.event.resource.uid")[
+                :_MAX_RESOURCE_UID_CHARS
+            ]
+            or None,
         )
         payload = WarningEventPayload(
             reason=_normalize_text(event.get("reason") or "Warning", "timeline.event.reason")[

@@ -235,6 +235,12 @@ def test_warning_projection_bounds_cluster_authored_text_fields() -> None:
     event = _warning("m" * 400)
     event["reason"] = "r" * 200
     event["lastTimestamp"] = "t" * 100
+    event["involvedObject"] = {
+        "kind": "k" * 200,
+        "namespace": "s" * 100,
+        "name": "n" * 400,
+        "uid": "u" * 200,
+    }
 
     result = timeline.append_warning_event(epoch=0, event=event, kind_alias="pods")
 
@@ -244,6 +250,11 @@ def test_warning_projection_bounds_cluster_authored_text_fields() -> None:
     assert len(entry.payload.reason) == 128
     assert len(entry.payload.note) == 240
     assert len(entry.occurred_at) == 64
+    assert entry.resource is not None
+    assert len(entry.resource.display_kind) == 128
+    assert len(entry.resource.namespace) == 63
+    assert len(entry.resource.name) == 253
+    assert len(entry.resource.uid or "") == 128
 
 
 def test_warning_projection_redacts_credentials_before_storage() -> None:
