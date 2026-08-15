@@ -204,12 +204,33 @@ nine per-round interactions, not the difference of the three medians quoted
 before it; differencing first is the whole point.) Adding or multiplying the
 single-change numbers underestimates the pair by roughly a factor of two.
 
-The likely reading: while a repaint still rewrites every row's cells, the
-update path's per-object work is a small share of a large cost, so removing it
-is worth 0.16 s. The render-path change removes the bulk of those writes; the
-same per-object work is then a much larger share of what remains, and removing
-it is worth 1.89 s. Neither single-change number is wrong — they answer
-different questions, and only the 2×2 answers "what did the pair buy".
+The mechanism is not Amdahl's law. Removing an additive cost changes the
+*share* the remaining work holds, but it cannot turn a 0.16 s saving into a
+1.89 s one — the absolute saving would stay put. Something has to make the
+per-object work run more often, and it does. Counting the row builds each arm
+actually performs over the same 20 s schedule (two runs, `format_age` calls):
+
+| Arm | row builds | |
+|---|---:|---|
+| neither | 1.09 M / 1.03 M | |
+| new render path only | 3.19 M / 3.17 M | **~3×** |
+| new update path only | 1.20 M / 1.22 M | |
+| both | 3.91 M / 3.83 M | **~3.6×** |
+
+Repaints are not a fixed quantity of the workload: the cheaper a repaint gets,
+the more of them the run completes before the schedule ends. The render-path
+change roughly triples them, and the per-row work the update path removes runs
+once per row per repaint — so the same optimisation has about three times as
+many opportunities to pay. That is the direction and most of the size of the
+interaction. The counts do not account for all of it, and nothing here
+separates the remainder, so the residual is left unexplained rather than
+narrated.
+
+Two consequences worth stating. The arms do not perform equal work: the
+fully-optimised arm completes roughly 3.5× the repaints of the unoptimised one
+while using less CPU, so a percentage of CPU time understates what changed —
+the display is also refreshed far more often. And every event still lands, in
+every arm: the digests match and no arm dropped an update.
 
 **Inside the update path**, the same treatment separates the AGE memo from the
 settled row order (9 rounds, own session):
