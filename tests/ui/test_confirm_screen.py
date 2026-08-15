@@ -581,7 +581,11 @@ async def test_impact_lines_render_cluster_markup_literally() -> None:
         await pilot.pause()
         impact = screen.query_one(".confirm-impact", Static)
         rendered = str(impact.render())
-        assert impact._render_markup is False
+        text = screen._impact_text()
+        malicious = "[bold red]web[/]"
+        start = text.plain.index(malicious)
+        end = start + len(malicious)
+        assert all(span.end <= start or span.start >= end for span in text.spans)
         assert "[bold red]web[/]" in rendered
 
 
