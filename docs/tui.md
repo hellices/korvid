@@ -250,8 +250,15 @@ Reading it:
 - `graph coverage: incomplete` means some source could not be listed
   (RBAC, an absent API, a cap): a missing dependent is then *unknown*, not
   *absent*.
-- `traversal capped` / `snapshot truncated` mean the answer was bounded on
-  purpose (3 hops, 50 resources) rather than complete.
+- `traversal capped` and `snapshot truncated` are two different bounds, not
+  one:
+  - `traversal capped` means the *impact* walk itself — the dependent search
+    for this one action — hit its own limit: 3 hops, 50 dependents.
+  - `snapshot truncated` means the underlying relationship snapshot (the
+    same one the graph view `g` builds) hit its own, much larger input caps
+    while gathering raw objects/edges before the impact walk ever started —
+    a coarser, earlier limit than the 50-dependent traversal cap above (see
+    [Limits](resource-relationships.md#limits) for the exact numbers).
 
 The snapshot is the same bounded, read-only LIST fan-out the relationship
 view (`g`) performs — scoped to the current namespace for a namespaced

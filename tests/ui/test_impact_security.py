@@ -114,12 +114,23 @@ async def test_keystroke_buffered_during_the_impact_load_cannot_approve(tmp_path
 
 async def test_the_impact_load_never_writes_reserves_or_audits(tmp_path: Path) -> None:
     """Loading a snapshot is a read: it must take no write reservation (which
-    would block `:ctx`), run no operation, and write no audit record."""
+    would block `:ctx`), run no operation, and write no audit record.
+
+    Sampled *during* the first LIST (via `on_first_call`), not only after the
+    dialog has opened: a reservation taken and released before the dialog
+    appears would pass a post-load-only assertion while still blocking `:ctx`
+    for the moment it mattered.
+    """
     audit_path = tmp_path / "audit.jsonl"
     env = ImpactEnv(audit_path)
+    reservations_during_load: list[int] = []
+    env.lister.on_first_call = lambda: reservations_during_load.append(
+        env.app._active_cluster_writes
+    )
     async with env.app.run_test() as pilot:
         await open_delete_dialog(env, pilot, "deploy", expect="web")
         assert env.lister.calls != []
+        assert reservations_during_load == [0]
         assert env.app._active_cluster_writes == 0
         assert env.ops.calls == []
         assert not audit_path.exists()
@@ -145,7 +156,12 @@ async def test_graph_failure_does_not_block_a_legitimate_confirmation(tmp_path: 
     env.lister.errors["deployments"] = RuntimeError("parser exploded")
     async with env.app.run_test() as pilot:
         await open_delete_dialog(env, pilot, "deploy", expect="web")
-        assert "impact unavailable; approval remains available" in impact_text(env.app)
+        text = impact_text(env.app)
+        assert "impact unavailable; approval remains available" in text
+        # The lister's exception message must never reach the dialog: it can
+        # embed cluster-controlled or sensitive text (issue #283's fail-open
+        # path renders only the static IMPACT_UNAVAILABLE_LINES).
+        assert "parser exploded" not in text
         await pilot.press("y")
         await until(
             pilot,
@@ -218,10 +234,20 @@ async def test_rollout_restart_declined_with_an_impact_section_runs_no_operation
         assert not audit_path.exists()
 
 
-def test_the_catalog_aliases_cover_every_supported_write_kind() -> None:
-    """A guard on the harness itself: the flows under test address real
-    discovered kinds, not synthetic views."""
-    deployment = CATALOG_ALIASES["deployments"]
-    assert isinstance(deployment, ResourceMeta)
-    assert deployment.group == "apps"
-    assert deployment.synthetic is False
+def test_the_catalog_aliases_resolve_every_kind_the_integrated_flows_exercise() -> None:
+    """A guard on the harness itself: every write-flow view name this module
+    and `test_impact_flow` drive through `open_delete_dialog`/`to_view`
+    (`deploy`, `pods`, `secrets`, `nodes`) resolves to a real discovered
+    kind, not a synthetic view."""
+    exercised = {
+        "deployments": ("Deployment", "apps"),
+        "pods": ("Pod", ""),
+        "secrets": ("Secret", ""),
+        "nodes": ("Node", ""),
+    }
+    for plural, (kind, group) in exercised.items():
+        meta = CATALOG_ALIASES[plural]
+        assert isinstance(meta, ResourceMeta)
+        assert meta.kind == kind
+        assert meta.group == group
+        assert meta.synthetic is False

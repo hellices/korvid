@@ -402,10 +402,19 @@ dependent are counted as `additional known paths`), bounded to 3 hops and 50
 resources, and classifies a genuine loop as a cycle rather than expanding it
 twice.
 
-The snapshot is scoped like the graph view's: the current namespace for a
-namespaced target, and cluster-wide for a cluster-scoped one such as a Node
-or PersistentVolume, so a dependent in another namespace is not silently
-omitted. The preview always states which scope it used.
+The snapshot's own scope is the pane's namespace for a namespaced target, and
+every namespace for a cluster-scoped one such as a Node or PersistentVolume
+(or when the pane is already showing all namespaces) — so a dependent in
+another namespace is never silently omitted from the preview. This is
+*not* simply "the same scope the graph view uses": the graph view (`g`)
+always LISTs namespaced sources in the pane's current namespace, regardless
+of whether the selected row itself is namespaced or cluster-scoped (see
+[What this view does not do](#what-this-view-does-not-do)) — so inspecting
+a cluster-scoped row from a namespaced pane with `g` only sees dependents in
+that one namespace unless you press `0` first. The write preview computes
+its scope from the *target's* own namespaced-ness instead, so a cluster-scoped
+delete or rollout restart is never under-scoped by the pane you happen to be
+in. The preview always states which scope it used.
 
 Everything the answer does not know is stated: a target that was not in the
 snapshot at all (an object recreated under the same name has a new UID),
