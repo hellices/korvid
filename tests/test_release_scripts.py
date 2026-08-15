@@ -1329,8 +1329,11 @@ def test_release_notes_exist_for_the_version_being_shipped() -> None:
     assert f"# korvid v{version}" in notes
     assert "## Install" in notes
     assert f"korvid[all]=={version}" in notes
+    assert f"pipx install --force 'korvid[all]=={version}'" in notes
     assert "## Verify" in notes
     assert "gh attestation verify" in notes
+    verify = notes[notes.index("## Verify") : notes.index("## Known limits")]
+    assert "```sh\nset -eu" in verify
 
 
 def test_release_notes_state_the_security_posture_the_project_claims() -> None:
@@ -1529,6 +1532,12 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     ) in runbook
     assert (f"gh attestation verify dist/v{version}/SHA256SUMS --repo hellices/korvid") in runbook
     assert (f"cd dist/v{version} && shasum --algorithm 256 --check SHA256SUMS") in runbook
+    verify = runbook[
+        runbook.index("## Verify the published artifacts") : runbook.index(
+            "## Publish and verify the Homebrew tap"
+        )
+    ]
+    assert "```sh\nset -eu" in verify
     assert "PyPI publication is irreversible" in runbook
     assert "annotated tag publication is irreversible" in runbook
 
@@ -1972,6 +1981,8 @@ def test_release_docs_require_homebrew_tap_merge_and_version_verification() -> N
     assert "tag-revalidated `uv.lock`" in normalized
     assert "not separately attested or listed in `SHA256SUMS`" in normalized
     assert "attested release asset" not in runbook
+    verify = runbook[runbook.index("Finally verify the tap") : runbook.index("## Install")]
+    assert "```sh\nset -eu" in verify
 
 
 # --- metadata ---------------------------------------------------------------

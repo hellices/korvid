@@ -207,6 +207,7 @@ After the workflow succeeds, download the release artifacts and verify the wheel
 attestation from GitHub:
 
 ```sh
+set -eu
 gh release download v0.2.0 --dir dist/v0.2.0
 gh attestation verify dist/v0.2.0/korvid-0.2.0-py3-none-any.whl --repo hellices/korvid
 gh attestation verify dist/v0.2.0/SHA256SUMS --repo hellices/korvid
@@ -275,6 +276,7 @@ gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash
 Finally verify the tap, not merely the formula attached to the source release:
 
 ```sh
+set -eu
 brew update
 brew upgrade hellices/korvid/korvid || brew install hellices/korvid/korvid
 korvid --version | grep -Fx 'korvid 0.2.0'
