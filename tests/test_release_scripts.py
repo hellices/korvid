@@ -1221,7 +1221,15 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
     pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
     build_requirements = pyproject["build-system"]["requires"]
     assert build_requirements
-    assert all("==" in requirement for requirement in build_requirements)
+    requirement_specs = [
+        requirement.partition(";")[0].strip() for requirement in build_requirements
+    ]
+    assert all(
+        spec.count("==") == 1
+        and not any(operator in spec.replace("==", "") for operator in "<>!~")
+        and all(part.strip() for part in spec.split("=="))
+        for spec in requirement_specs
+    )
     constraints_input = (
         Path(__file__).parents[1] / "scripts" / "release" / "build-constraints.in"
     ).read_text()
