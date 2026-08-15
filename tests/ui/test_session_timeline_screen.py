@@ -9,6 +9,7 @@ screen with a fresh `current_epoch`/`resource_toggle` on every `T` press.
 
 from __future__ import annotations
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Static
 
@@ -25,10 +26,6 @@ class HostApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Static("host")
-
-
-def _all_cells(table: DataTable[object]) -> list[str]:
-    return [str(cell) for index in range(table.row_count) for cell in table.get_row_at(index)]
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +345,14 @@ async def test_cluster_controlled_fields_render_literally() -> None:
     async with app.run_test():
         await app.push_screen(screen)
         table = app.screen.query_one(DataTable)
-        cells = _all_cells(table)
-        assert "[red]BackOff[/]" in "\n".join(cells)
-        assert "[green]default[/]/[cyan]api[/]" in "\n".join(cells) or any(
-            "[green]default[/]" in cell and "[cyan]api[/]" in cell for cell in cells
-        )
-        assert "[blue]2026-01-01T00:00:00Z[/]" in cells
+        row = table.get_row_at(0)
+        expected_cells = {
+            1: "[blue]2026-01-01T00:00:00Z[/]",
+            4: "pods/[green]default[/]/[cyan]api[/]",
+            5: "[red]BackOff[/] x1: [bold]pull failed[/bold]",
+        }
+        for index, expected in expected_cells.items():
+            cell = row[index]
+            assert isinstance(cell, Text)
+            assert cell.plain == expected
+            assert cell.spans == []
