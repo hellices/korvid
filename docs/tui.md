@@ -198,3 +198,66 @@ timeline:
   max_entries: 500      # default
   max_bytes: 262144     # default (256 KiB of encoded content)
 ```
+
+## Write impact preview
+
+Destructive writes that have tested relationship semantics — delete
+(`Ctrl-D`) and rollout restart (`r`) — show a graph-derived impact section
+above the server dry-run preview in the approval dialog. It answers one
+bounded question: which resources korvid has already observed depend on this
+one?
+
+    graph-derived impact (advisory):
+      delete apps/Deployment/prod/web
+      known direct dependents (may be affected): 1
+        - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]
+      known transitive dependents (may be affected): 1
+        - Pod/prod/web-abc-1 via owned_by (declared) at metadata.ownerReferences[0] -> owned_by (declared) at metadata.ownerReferences[0]
+      additional known paths: 1 (already-listed dependents reached again)
+      scope: prod
+      graph coverage: incomplete - a missing dependent here does not prove none exists
+        - gateway.networking.k8s.io/*: unavailable
+      advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
+
+The section is **advisory**. It never predicts failure, never replaces the
+server dry-run, and never blocks approval: the y/typed-name gate, the UID
+precondition, the RBAC pre-check, and the fail-closed audit log are exactly
+what they were. Scale, edit, resize, cordon/uncordon, drain, Helm, and
+operator flows do not show it — they have no tested per-relation semantics
+yet, and korvid would rather show nothing than a plausible guess.
+
+Reading it:
+
+- **direct** dependents are one hop from the target, **transitive** are two
+  or more; each line names the relation, how the fact was derived, and the
+  manifest field it came from.
+- `additional known paths` counts relationships that reach a dependent
+  already listed above (a second route, a second mount). They are counted
+  rather than repeated, so a count of dependents is never inflated.
+- `[inferred]` marks a hop derived by a heuristic rather than read from a
+  manifest. It is labelled, never a blocker.
+- `unresolved references in the affected set` lists dangling references
+  held by the target or by something it takes down — a mounted ConfigMap
+  that no longer exists, say — whatever relation they use.
+- `scope` is the namespace the snapshot covered. `all namespaces` appears
+  for a cluster-scoped target (a Node, a PersistentVolume) or an
+  all-namespaces view; otherwise the coverage below it is only ever
+  complete *within that namespace*.
+- `target not found in this snapshot - dependents unknown` means the exact
+  object (UID included) was not in the snapshot — usually deleted and
+  recreated under the same name. The counts below it then describe the
+  snapshot, not your object.
+- `graph coverage: incomplete` means some source could not be listed
+  (RBAC, an absent API, a cap): a missing dependent is then *unknown*, not
+  *absent*.
+- `traversal capped` / `snapshot truncated` mean the answer was bounded on
+  purpose (3 hops, 50 resources) rather than complete.
+
+The snapshot is the same bounded, read-only LIST fan-out the relationship
+view (`g`) performs — scoped to the current namespace for a namespaced
+target, and cluster-wide for a cluster-scoped one so a dependent in another
+namespace cannot be quietly missed — with a 5-second deadline. If it times
+out or fails, the dialog says `impact unavailable; approval remains
+available` and the approval proceeds normally. If the context switches or
+the selection moves while it loads, the write is cancelled before any
+dialog opens.

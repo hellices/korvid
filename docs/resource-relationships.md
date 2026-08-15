@@ -374,3 +374,47 @@ all.
   not sweep every namespace looking for other relationships — press `0` to
   switch to the all-namespaces view before opening the graph if you need
   dependencies/dependents outside the current namespace considered.
+
+## Blast radius in write previews
+
+The same snapshot feeds the approval dialogs for `Ctrl-D` (delete) and `r`
+(rollout restart). Only relationships with explicitly tested action
+semantics participate:
+
+| Action | Relations followed (target → its dependents) |
+|---|---|
+| delete | `owned_by`, `managed_by`, `routes_to`, `uses_volume`, `uses_config`, `protected_by`, `scheduled_on`, `bound_to` |
+| rollout restart | `owned_by`, `managed_by` |
+
+`selects` is deliberately excluded from both. A Service selecting many Pods
+does not fail because one selected Pod is deleted, so korvid never claims it
+does — the same reasoning that keeps `missing` from meaning "absent".
+
+Only **resolved** edges are traversed; an unresolved reference is reported
+as a warning instead. That warning is bounded by *the affected set*, not by
+the relations above: any dangling reference held by the target or by a
+resource it takes down is reported — a restarted workload whose Pod mounts a
+deleted ConfigMap is exactly the case worth seeing — while an unrelated
+dangling reference elsewhere in the cluster never lands in your approval
+dialog. The walk is breadth-first and deterministic (each dependent is
+listed once, with the first path that reached it; further paths to the same
+dependent are counted as `additional known paths`), bounded to 3 hops and 50
+resources, and classifies a genuine loop as a cycle rather than expanding it
+twice.
+
+The snapshot is scoped like the graph view's: the current namespace for a
+namespaced target, and cluster-wide for a cluster-scoped one such as a Node
+or PersistentVolume, so a dependent in another namespace is not silently
+omitted. The preview always states which scope it used.
+
+Everything the answer does not know is stated: a target that was not in the
+snapshot at all (an object recreated under the same name has a new UID),
+coverage that is not `complete`, a truncated snapshot, and either traversal
+cap. The summary is advisory — see [Write impact
+preview](tui.md#write-impact-preview) for how it appears and what it never
+does.
+
+Only `Ctrl-D` and `r` show this section today. The remaining write types
+(scale, edit, resize, cordon/uncordon, drain, Helm, operator) have no tested
+per-relation semantics yet and deliberately show nothing rather than a
+plausible guess.
