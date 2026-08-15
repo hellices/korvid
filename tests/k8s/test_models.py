@@ -1,8 +1,10 @@
-from datetime import UTC, datetime
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
+from korvid.k8s import models
 from korvid.k8s.models import (
     CSVSummary,
     EndpointSliceSummary,
@@ -12,9 +14,22 @@ from korvid.k8s.models import (
     PodSummary,
     ReplicaSetSummary,
     StorageClassSummary,
+    format_age,
     summary_for,
 )
 from korvid.k8s.relationship_facts import RelationKind, RelationshipFacts
+
+
+@pytest.fixture(autouse=True)
+def _isolate_age_memo() -> Iterator[None]:
+    """`format_age` memoises into module state, so every test in this file
+    starts and ends with an empty memo. Without this the cap and eviction
+    tests would pass or fail depending on what ran before them, which
+    pytest-randomly reorders on every run."""
+    models.reset_age_memo()
+    yield
+    models.reset_age_memo()
+
 
 POD: dict[str, Any] = {
     "metadata": {"name": "checkout-7d9f", "namespace": "prod"},
@@ -1698,3 +1713,248 @@ def test_endpoint_slice_summary_carries_relationship_facts_via_authoritative_gro
     # ROUTES_TO is gated on the resolved group == "discovery.k8s.io"; this only
     # succeeds when `group` is threaded through instead of the (missing) apiVersion.
     assert (RelationKind.ROUTES_TO, "Pod", "api-0") in pairs
+
+
+class _CountingDatetime(datetime):
+    """`datetime` that records how often a timestamp string is parsed."""
+
+    parses = 0
+
+    @classmethod
+    def fromisoformat(cls, date_string: str) -> datetime:  # type: ignore[override]  # counting shim over the stdlib classmethod
+        _CountingDatetime.parses += 1
+        return datetime.fromisoformat(date_string)
+
+
+def test_age_is_not_reparsed_within_the_same_displayed_minute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every repaint asks all rows for their age, but "5m" is the answer for a
+    whole minute. Re-parsing the same creation timestamp inside one displayed
+    minute is work the answer's own validity window already settled."""
+    created = "2031-03-04T00:00:00Z"
+    base = datetime(2031, 3, 4, 0, 5, 0, tzinfo=UTC)
+    assert format_age(created, base) == "5m"
+
+    monkeypatch.setattr(models, "datetime", _CountingDatetime)
+    _CountingDatetime.parses = 0
+
+    assert format_age(created, base + timedelta(seconds=30)) == "5m"
+
+    assert _CountingDatetime.parses == 0
+
+
+def test_age_advances_when_the_displayed_minute_rolls_over() -> None:
+    created = "2031-03-05T00:00:00Z"
+    base = datetime(2031, 3, 5, 0, 5, 0, tzinfo=UTC)
+    assert format_age(created, base) == "5m"
+
+    assert format_age(created, base + timedelta(seconds=60)) == "6m"
+
+
+def test_age_is_correct_when_asked_about_an_earlier_instant() -> None:
+    """Panes repaint independently, so a later call can carry an earlier clock
+    reading; a remembered answer must not outrun its own window backwards."""
+    created = "2031-03-06T00:00:00Z"
+    base = datetime(2031, 3, 6, 0, 5, 0, tzinfo=UTC)
+    assert format_age(created, base) == "5m"
+
+    assert format_age(created, base - timedelta(minutes=3)) == "2m"
+
+
+def test_age_advances_across_the_hour_and_day_boundaries() -> None:
+    created = "2031-03-07T00:00:00Z"
+    assert format_age(created, datetime(2031, 3, 7, 0, 59, 59, tzinfo=UTC)) == "59m"
+    assert format_age(created, datetime(2031, 3, 7, 1, 0, 0, tzinfo=UTC)) == "1h"
+    assert format_age(created, datetime(2031, 3, 7, 23, 59, 59, tzinfo=UTC)) == "23h"
+    assert format_age(created, datetime(2031, 3, 8, 0, 0, 0, tzinfo=UTC)) == "1d"
+    assert format_age(created, datetime(2031, 3, 9, 0, 0, 0, tzinfo=UTC)) == "2d"
+
+
+def test_distinct_creation_timestamps_keep_distinct_ages() -> None:
+    older = "2031-03-10T00:00:00Z"
+    newer = "2031-03-10T00:04:00Z"
+    now = datetime(2031, 3, 10, 0, 5, 0, tzinfo=UTC)
+
+    assert format_age(older, now) == "5m"
+    assert format_age(newer, now) == "1m"
+
+
+def test_age_rejects_empty_unparsable_and_future_timestamps() -> None:
+    now = datetime(2031, 3, 11, 0, 5, 0, tzinfo=UTC)
+
+    assert format_age("", now) == "-"
+    assert format_age("not-a-timestamp", now) == "-"
+    assert format_age("2031-03-11T00:06:00Z", now) == "-"
+
+
+def test_age_reads_a_naive_clock_reading_as_utc() -> None:
+    """A timezone-less `created` is documented as UTC, so a timezone-less
+    `now` must be read the same way. Passing it to `datetime.timestamp()`
+    instead resolves it against the host's local zone, which silently returns
+    a different age — or "-" — depending on where the process runs."""
+    created = "2031-04-01T00:00:00Z"
+    aware = datetime(2031, 4, 1, 1, 0, 0, tzinfo=UTC)
+
+    assert format_age(created, aware) == "1h"
+    assert format_age(created, aware.replace(tzinfo=None)) == "1h"
+
+
+def test_a_naive_clock_reading_stays_consistent_across_buckets() -> None:
+    created = "2031-04-02T00:00:00Z"
+
+    assert format_age(created, datetime(2031, 4, 2, 0, 5, 0)) == "5m"
+    assert format_age(created, datetime(2031, 4, 3, 0, 0, 0)) == "1d"
+    assert format_age(created, datetime(2031, 4, 1, 23, 0, 0)) == "-"
+
+
+def test_an_oversized_creation_timestamp_is_not_remembered() -> None:
+    """`created` is unvalidated API-server input and becomes a memo key.
+    `datetime.fromisoformat` accepts an arbitrarily long fractional-second
+    field, so capping entry *count* alone bounds nothing: 20,000 such keys
+    would retain gigabytes. The answer is still correct, just not kept."""
+    oversized = "2031-08-01T00:00:00." + "0" * 5000 + "+00:00"
+    now = datetime(2031, 8, 1, 0, 5, 0, tzinfo=UTC)
+
+    assert format_age(oversized, now) == "5m"
+
+    assert oversized not in models._AGE_WINDOWS
+
+
+def test_the_age_memo_stays_correct_when_it_reaches_its_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discarding remembered answers must cost accuracy nothing."""
+    monkeypatch.setattr(models, "_MAX_AGE_WINDOWS", 2)
+    now = datetime(2031, 8, 2, 0, 10, 0, tzinfo=UTC)
+    stamps = [f"2031-08-02T00:0{minute}:00Z" for minute in range(5)]
+
+    ages = [format_age(stamp, now) for stamp in stamps]
+
+    assert ages == ["10m", "9m", "8m", "7m", "6m"]
+    assert len(models._AGE_WINDOWS) <= 2
+
+
+def test_reaching_the_age_memo_cap_evicts_one_entry_not_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flushing the whole memo would drop every row's answer at once, so the
+    next repaint re-parses the entire screen — the exact cost this memo
+    exists to remove, concentrated into one frame. Evict the oldest instead."""
+    monkeypatch.setattr(models, "_MAX_AGE_WINDOWS", 3)
+    now = datetime(2031, 9, 2, 0, 10, 0, tzinfo=UTC)
+    for minute in range(3):
+        assert format_age(f"2031-09-02T00:0{minute}:00Z", now) != "-"
+    assert len(models._AGE_WINDOWS) == 3
+
+    format_age("2031-09-02T00:03:00Z", now)
+
+    assert len(models._AGE_WINDOWS) == 3
+    assert "2031-09-02T00:00:00Z" not in models._AGE_WINDOWS
+    assert "2031-09-02T00:02:00Z" in models._AGE_WINDOWS
+
+
+def test_the_age_memo_can_be_reset() -> None:
+    now = datetime(2031, 9, 3, 0, 5, 0, tzinfo=UTC)
+    assert format_age("2031-09-03T00:00:00Z", now) == "5m"
+    assert models._AGE_WINDOWS
+
+    models.reset_age_memo()
+
+    assert models._AGE_WINDOWS == {}
+
+
+def test_rewriting_a_remembered_age_forgets_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollover of an entry the memo already holds adds nothing, so it must
+    cost nothing. Evicting first and assigning second looks safe but is not:
+    re-assigning an existing `dict` key does not grow the dict, so the memo
+    drops to one below the ceiling and the entry it threw away is an unrelated
+    timestamp that may well still be on screen. Only a key the memo does not
+    have may push another one out."""
+    monkeypatch.setattr(models, "_MAX_AGE_WINDOWS", 3)
+    base = datetime(2031, 10, 1, 0, 10, 0, tzinfo=UTC)
+    stamps = [f"2031-10-01T00:0{minute}:00Z" for minute in range(3)]
+    for stamp in stamps:
+        format_age(stamp, base)
+    assert len(models._AGE_WINDOWS) == 3  # the memo is full
+
+    # The *middle* entry rolls over to a new minute and is rewritten.
+    format_age(stamps[1], base + timedelta(minutes=1))
+
+    assert set(models._AGE_WINDOWS) == set(stamps)
+    # ...and it moved to the back, so it is not the next one evicted.
+    assert list(models._AGE_WINDOWS)[-1] == stamps[1]
+
+
+def test_the_age_memo_evicts_the_least_recently_written_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-assigning a `dict` key keeps its original position, so a row that
+    refreshes its answer every minute would still look like the oldest entry
+    and be evicted while it is on screen. Writing a remembered answer has to
+    move it to the back."""
+    monkeypatch.setattr(models, "_MAX_AGE_WINDOWS", 3)
+    base = datetime(2031, 10, 1, 0, 10, 0, tzinfo=UTC)
+    for minute in range(3):
+        format_age(f"2031-10-01T00:0{minute}:00Z", base)
+
+    # The oldest entry rolls over to a new minute, so it is rewritten.
+    format_age("2031-10-01T00:00:00Z", base + timedelta(minutes=1))
+    format_age("2031-10-01T00:05:00Z", base + timedelta(minutes=1))
+
+    assert "2031-10-01T00:00:00Z" in models._AGE_WINDOWS
+    assert "2031-10-01T00:01:00Z" not in models._AGE_WINDOWS
+
+
+def test_an_unreadable_timestamp_is_parsed_once_not_every_repaint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value the parser rejects returns "-" whatever the clock says, so it is
+    the cheapest thing in the table to remember — and the most expensive to
+    forget, because every repaint pays the failed parse again for every row
+    carrying it."""
+    parses = 0
+    real = models._created_epoch
+
+    def counting(created: str) -> float | None:
+        nonlocal parses
+        parses += 1
+        return real(created)
+
+    monkeypatch.setattr(models, "_created_epoch", counting)
+    base = datetime(2031, 10, 1, tzinfo=UTC)
+
+    for offset in range(5):
+        assert format_age("not-a-timestamp", base + timedelta(minutes=offset)) == "-"
+
+    assert parses == 1
+
+
+def test_a_future_timestamp_is_parsed_once_and_expires_when_it_arrives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clock skew between a node and the API server routinely makes a
+    just-created object look a little way into the future, and a bulk creation
+    puts that on many rows at once — precisely the case this memo exists for.
+    The answer is only good until the timestamp stops being future, so it is
+    remembered with a window that ends exactly there."""
+    parses = 0
+    real = models._created_epoch
+
+    def counting(created: str) -> float | None:
+        nonlocal parses
+        parses += 1
+        return real(created)
+
+    monkeypatch.setattr(models, "_created_epoch", counting)
+    created = "2031-10-01T00:10:00Z"
+    base = datetime(2031, 10, 1, 0, 0, 0, tzinfo=UTC)
+
+    for offset in range(5):
+        assert format_age(created, base + timedelta(minutes=offset)) == "-"
+    assert parses == 1
+
+    # Once the clock passes it, the remembered "-" must not survive.
+    assert format_age(created, datetime(2031, 10, 1, 0, 15, 0, tzinfo=UTC)) == "5m"

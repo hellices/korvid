@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 from korvid.k8s.olm import channel_names, package_description
 from korvid.k8s.relationship_facts import RelationshipFacts, extract_relationship_facts
@@ -74,6 +74,96 @@ def format_memory(size: int) -> str:
     return f"{round(size / 2**20)}Mi"
 
 
+#: Age strings remembered with the window they are correct for:
+#: `{created: (valid_from_epoch, valid_until_epoch, text)}`. A repaint asks
+#: every row for its age, but "5m" is the answer for a whole minute, so the
+#: parse and the arithmetic are done once per displayed bucket rather than
+#: once per row per repaint. Only read and written from the single render
+#: path, and every entry is self-validating against the caller's own clock
+#: reading, so the worst outcome of a race is a redundant recompute.
+_AGE_WINDOWS: dict[str, tuple[float, float, str]] = {}
+#: Entry ceiling: a long session walks through many creation timestamps.
+_MAX_AGE_WINDOWS: Final = 20_000
+#: Key ceiling. `created` is unvalidated API-server input and
+#: `datetime.fromisoformat` accepts an arbitrarily long fractional-second
+#: field, so capping the entry count alone bounds nothing. An RFC 3339
+#: timestamp with nanoseconds and an offset is under 40 characters; anything
+#: longer is still formatted, just never remembered.
+_MAX_TIMESTAMP_LENGTH: Final = 64
+
+
+def _age_window(total_seconds: int, created_ts: float) -> tuple[float, float, str]:
+    """The age text for `total_seconds`, and the instants it stays correct for."""
+    days = total_seconds // 86400
+    if days >= 1:
+        return created_ts + days * 86400, created_ts + (days + 1) * 86400, f"{days}d"
+    hours = total_seconds // 3600
+    if hours >= 1:
+        return created_ts + hours * 3600, created_ts + (hours + 1) * 3600, f"{hours}h"
+    minutes = total_seconds // 60
+    return created_ts + minutes * 60, created_ts + (minutes + 1) * 60, f"{minutes}m"
+
+
+def _created_epoch(created: str) -> float | None:
+    """Epoch seconds for an RFC 3339 timestamp; None when it cannot be read.
+
+    A timezone-less timestamp is read as UTC, which is what the API server
+    sends for `metadata.creationTimestamp`.
+    """
+    try:
+        ts = created[:-1] + "+00:00" if created.endswith("Z") else created
+        created_dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    if created_dt.tzinfo is None:
+        created_dt = created_dt.replace(tzinfo=UTC)
+    return created_dt.timestamp()
+
+
+def _remember_age(created: str, window: tuple[float, float, str]) -> None:
+    """Keep `window` for `created`, within both of the memo's ceilings.
+
+    At the entry ceiling the first-written answer is evicted rather than the
+    whole memo flushed: every row asks for its age on every repaint, so
+    discarding all of them would drop the entire screen back onto the parse
+    path in a single frame — the cost this memo exists to remove, concentrated
+    into one spike.
+
+    Eviction is first-in-first-out, not least-recently-used: a memo *hit*
+    returns without touching the dict, so a key that is only ever read keeps
+    its original position and can be evicted while it is on screen. That is
+    deliberate. Tracking use would mean one dict mutation per row per repaint
+    — measured at 0.027 ms → 0.050 ms per 1,000-row repaint — to save the
+    single re-parse an evicted visible row costs (~0.015 ms), and only once a
+    session has seen more than `_MAX_AGE_WINDOWS` distinct timestamps.
+
+    A key the memo already holds is dropped before the ceiling is consulted,
+    for two reasons. Re-assigning it would not grow the dict, so evicting for
+    it would push out an unrelated timestamp — quite possibly one still on
+    screen — to make room that was never needed. And re-assignment alone
+    leaves a `dict` key where it was, so a row rewriting its answer every
+    minute would keep the position of the oldest entry and be evicted while
+    it is visible; deleting first is what actually moves it to the back.
+    """
+    if len(created) > _MAX_TIMESTAMP_LENGTH:
+        return
+    _AGE_WINDOWS.pop(created, None)
+    while len(_AGE_WINDOWS) >= _MAX_AGE_WINDOWS:
+        del _AGE_WINDOWS[next(iter(_AGE_WINDOWS))]
+    _AGE_WINDOWS[created] = window
+
+
+def reset_age_memo() -> None:
+    """Forget every remembered age.
+
+    Called when the objects those timestamps belong to are purged wholesale
+    (a context switch): the next cluster's creation timestamps cannot collide
+    with the previous one's, so the entries have no reuse value and would
+    otherwise sit at the ceiling until evicted one at a time.
+    """
+    _AGE_WINDOWS.clear()
+
+
 def format_age(created: str, now: datetime | None = None) -> str:
     """Compact age string ("5m", "3h", "2d") from an RFC 3339 timestamp.
 
@@ -83,25 +173,34 @@ def format_age(created: str, now: datetime | None = None) -> str:
         return "-"
     if now is None:
         now = datetime.now(UTC)
-    try:
-        ts = created
-        if ts.endswith("Z"):
-            ts = ts[:-1] + "+00:00"
-        created_dt = datetime.fromisoformat(ts)
-        if created_dt.tzinfo is None:
-            created_dt = created_dt.replace(tzinfo=UTC)
-    except ValueError:
+    elif now.tzinfo is None:
+        # A timezone-less `created` is read as UTC, so a timezone-less clock
+        # reading is too. `datetime.timestamp()` would instead resolve it
+        # against the host's local zone and return a different age — or "-" —
+        # for the same instant depending on where the process runs.
+        now = now.replace(tzinfo=UTC)
+    now_ts = now.timestamp()
+    remembered = _AGE_WINDOWS.get(created)
+    if remembered is not None and remembered[0] <= now_ts < remembered[1]:
+        return remembered[2]
+    created_ts = _created_epoch(created)
+    if created_ts is None:
+        # Remembered for good: no clock reading makes an unreadable timestamp
+        # readable, and without this every repaint pays the failed parse again
+        # for every row carrying it.
+        _remember_age(created, (float("-inf"), float("inf"), "-"))
         return "-"
-    total_seconds = int((now - created_dt).total_seconds())
+    total_seconds = int(now_ts - created_ts)
     if total_seconds < 0:
+        # Skew between a node and the API server routinely puts a fresh object
+        # a little way into the future. The answer holds only until the
+        # timestamp arrives, so the window ends exactly there and the real age
+        # is computed from then on.
+        _remember_age(created, (now_ts, created_ts, "-"))
         return "-"
-    days = total_seconds // 86400
-    if days >= 1:
-        return f"{days}d"
-    hours = total_seconds // 3600
-    if hours >= 1:
-        return f"{hours}h"
-    return f"{total_seconds // 60}m"
+    window = _age_window(total_seconds, created_ts)
+    _remember_age(created, window)
+    return window[2]
 
 
 def _quantities(containers: list[dict[str, Any]], bucket: str, key: str) -> list[str]:

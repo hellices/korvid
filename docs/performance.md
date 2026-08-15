@@ -136,6 +136,76 @@ intersects the painted viewport. Off-screen rows still update their data
 immediately — `get_row`, sorting, filtering and the final digest see the new
 value — and the row repaints as soon as it scrolls into view.
 
+## Update-path CPU and memory, before and after
+
+Latency percentiles cannot resolve a change of this size on an unpinned
+machine — identical saturated runs varied between 5 ms and 40 ms p95 here. The
+same fixed workload always performs the same amount of work, so CPU time is
+what these numbers are taken from. Even then, running all the "before" samples
+and then all the "after" samples is not enough: a first attempt that way put a
+13% swing on one arm and reversed the sign of the smaller result. The figures
+below alternate the two arms run by run, five rounds each. Workload: 1,000 Pods
+across 20 namespaces at 120 events/s for 20 s.
+
+| Workload | Metric | Before | After | |
+|---|---|---:|---:|---|
+| Committed replay profile | CPU time (median) | 13.93 s | 12.90 s | −7.4% |
+| Plus Pod creation timestamps | CPU time (median) | 18.80 s | 16.53 s | **−12.1%** |
+| Plus Pod creation timestamps | CPU time (best) | 18.42 s | 16.18 s | **−12.2%** |
+| Plus Pod creation timestamps | Peak RSS | 127.8 MiB | 127.1 MiB | −0.7 MiB |
+| Plus Pod creation timestamps | `tracemalloc` peak | 28.47 MiB | 28.58 MiB | +0.11 MiB |
+
+Every run kept `dropped updates: 0` and a matching final digest. On the
+timestamp-bearing workload the two arms' samples do not overlap at all
+(18.42–18.91 s against 16.18–16.88 s). On the committed profile they do
+overlap, so −7.4% is the weaker claim of the two. Absolute CPU time drifts
+between sessions on this machine — an earlier round measured the same change
+at −16.5% with both arms roughly 0.5–1.5 s faster — which is why only
+same-session, interleaved pairs are quoted.
+
+The figures above were re-taken after review hardening added work to the
+per-cell path, and held: −12.3% median against −12.1% as published. Measured
+the same way at the merged state, the update path and the render path compose
+almost exactly. On the timestamp-bearing workload the render-path change is
+worth −11.5% on its own and this change −14.7% on its own; both together are
+−24.7% against `main`, where multiplying the two predicts −24.5%. Neither
+change is absorbing the other's win.
+
+Those three came from one session; the table above came from an earlier one,
+which is why the same change reads −12.3% there and −14.7% here. Only the
+paired arms within a session are comparable — see the drift note above — so
+the table keeps its own measurement rather than borrowing this one.
+
+Two redundancies were removed, both of which repeated per-object work that
+nothing had invalidated:
+
+- `ResourceStore.get()` re-ordered the whole bucket on every read, although a
+  repaint re-reads it constantly and a `MODIFIED` event replaces a value under
+  an unchanged key — which cannot reorder anything. The order is now settled
+  once per key-set change; objects are still re-read from the bucket, so a
+  replaced value is never stale.
+- `format_age` re-parsed every creation timestamp on every repaint, although
+  "5m" is the correct answer for a whole minute. Each answer is now remembered
+  with the window it is valid for, checked against both ends so a pane
+  repainting with an earlier clock reading still gets the right string.
+
+The age memo dominates the new retained allocation: 1,000 rows cost ~197 KiB.
+It is capped both by entry count (20,000) and by key length, because `created`
+is unvalidated API-server input and `datetime.fromisoformat` accepts an
+arbitrarily long fractional-second field — a count-only cap would bound
+nothing. The settled order adds one pointer list per bucket (~8 KiB at 1,000
+objects; the key strings are shared with the bucket itself). Peak RSS moved
+less than the ±1 MiB run-to-run spread at 128 MiB, so it is not a measurable
+trade.
+
+**The committed replay profile understates the render path.** Its synthetic
+Pods carry no `created`, so `format_age` short-circuits and the AGE cell costs
+nothing — which is why the same change is worth 7.4% against that profile and
+12.1% once the timestamps a real cluster always sends are present. The
+timestamps also account for the workload's own cost: adding them raised
+baseline CPU from 13.93 s to 18.80 s. Benchmark numbers taken against the
+committed profile are therefore a floor for anything AGE-dependent.
+
 ## Corrected live 1,000-pod smoke result
 
 Run `i279-20260813-1620` exercised the same checked-in
@@ -218,6 +288,14 @@ metadata-only and changes no rendered cell, so the 250 ms budget has no live
 result behind it — only the deterministic replay exercises rendered-cell
 updates. A live churn driver that mutates a rendered field is required before
 that budget can be called passed or missed against a real API server.
+
+**The replay workload has no creation timestamps.** `initial_pods` builds
+`PodSummary` without `created`, so every AGE cell renders "-" and the whole
+age path is skipped. Measured above, that alone accounts for 26% of the
+update-path CPU on this workload, so any AGE-dependent figure taken from the
+committed profile is a floor rather than a result. Populating `created` would
+change every published baseline, so it is deliberately left as follow-up work
+rather than folded into an unrelated change.
 
 **UI-at-scale interaction timings are not yet trustworthy.** Filter, split-pane
 and multi-log key sequences still use `Pilot.press()`-style keystroke timing,
