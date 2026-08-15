@@ -1178,6 +1178,30 @@ def _security_policy() -> str:
     return (Path(__file__).parents[1] / "SECURITY.md").read_text()
 
 
+def _agent_instructions() -> str:
+    path = Path(__file__).parents[1] / "AGENTS.md"
+    assert path.is_file(), "AGENTS.md is missing"
+    return path.read_text()
+
+
+def test_agent_instructions_forbid_merging_and_merge_automation() -> None:
+    """A pull request once merged here before the maintainer saw it.
+
+    No repository setting can prevent that - an agent runs with the
+    maintainer's own credentials, and GitHub cannot tell the two apart. The
+    rule lives in `AGENTS.md`, so this test is the only thing standing
+    between a careless edit and a repeat.
+    """
+    instructions = " ".join(_agent_instructions().split())
+    assert "The maintainer merges. You never do." in instructions
+    assert "No merge automation, in any form." in instructions
+    assert "Do not run `gh pr merge`, do not enable auto-merge" in instructions
+    assert "do not add a workflow, action, script or scheduled job that merges" in instructions
+    # The review loop is where the original incident came from: its last step
+    # used to be `gh pr merge N --squash`.
+    assert "This loop ends in a report, never in a merge" in instructions
+
+
 def _project_version() -> str:
     """The version the release workflow will demand the tag match.
 
@@ -1965,7 +1989,7 @@ def test_release_docs_describe_fresh_installs_and_extra_expansion_separately() -
     assert "separate base-to-extra expansion check" in runbook
 
 
-def test_release_docs_require_homebrew_tap_merge_and_version_verification() -> None:
+def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
     version = _project_version()
     runbook = _release_runbook()
     normalized = " ".join(runbook.split())
@@ -1980,7 +2004,11 @@ def test_release_docs_require_homebrew_tap_merge_and_version_verification() -> N
         runbook.count('gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1')
         == 2
     )
-    assert runbook.count('gh pr merge "$TAP_PR" --repo hellices/homebrew-korvid --squash') == 2
+    # The formula every `brew install korvid` resolves is not merged by a
+    # script. Both paths stop at green and hand the merge back by name.
+    assert "gh pr merge" not in runbook
+    assert runbook.count("now merge PR #$TAP_PR yourself") == 2
+    assert 'gh pr diff "$TAP_PR" --repo hellices/homebrew-korvid' in runbook
     assert "--json number,title,baseRefName,headRefName,headRepositoryOwner" in runbook
     assert '.baseRefName == "main"' in runbook
     assert '.headRefName == "bump-korvid-0.2.0"' in runbook
