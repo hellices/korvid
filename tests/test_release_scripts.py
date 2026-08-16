@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.release_contracts import markdown_section, run_scripts
+
 SCRIPTS = Path(__file__).parents[1] / "scripts" / "release"
 sys.path.insert(0, str(SCRIPTS))
 
@@ -1119,6 +1121,16 @@ def test_offline_verifier_extracts_the_published_archive(tmp_path: Path) -> None
 
 def _release_workflow() -> str:
     return (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text()
+
+
+def test_markdown_section_stops_at_the_next_peer_heading() -> None:
+    text = "# Title\n## Release\nkeep\n### Child\nkeep child\n## Cleanup\ndrop\n"
+    assert markdown_section(text, "Release") == "keep\n### Child\nkeep child"
+
+
+def test_run_scripts_returns_only_shell_steps() -> None:
+    job = {"steps": [{"uses": "actions/checkout@sha"}, {"run": "uv build"}, {"run": "uv publish"}]}
+    assert run_scripts(job) == ("uv build", "uv publish")
 
 
 def _bash_executable() -> str:

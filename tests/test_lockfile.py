@@ -25,6 +25,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from tests.release_contracts import workflow_jobs
+
 #: The only hosts the lockfile may name.
 _ALLOWED_LOCK_HOSTS = frozenset({"files.pythonhosted.org", "pypi.org"})
 
@@ -36,6 +38,11 @@ _ROOT = Path(__file__).parents[1]
 
 def _uv_lock() -> str:
     return (_ROOT / "uv.lock").read_text()
+
+
+def test_workflow_jobs_returns_jobs_mapping_for_relock_workflow() -> None:
+    jobs = workflow_jobs(_ROOT / ".github" / "workflows" / "relock.yml")
+    assert {"relock", "propose"} <= jobs.keys()
 
 
 def _lock_hosts(lock: str) -> set[str]:
