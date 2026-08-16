@@ -419,6 +419,6 @@ approval — is identical to delete and rollout restart's, described above.
 The one difference is what "fail-open" leaves on screen: none of the three
 limitation lines above is read from the cluster, so a scale-down whose
 snapshot timed out or failed still states them under `impact unavailable;
-approval remains available` (the StatefulSet one still only for a
-StatefulSet). Delete and rollout restart, which have no such static
+approval remains available` (the PVC-retention one still only for an
+`apps/StatefulSet`). Delete and rollout restart, which have no such static
 limitation, show that line alone.

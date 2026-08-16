@@ -5007,6 +5007,10 @@ class KorvidApp(App[None]):
         value like any other: a row that gained a readable count mid-flow
         drifted exactly as much as one whose number moved, and comparing
         equality keeps both directions closed.
+
+        Identity is checked first because `_current_replicas` reads
+        `current_kind` and `current_scope` from the focused pane; only a
+        current `origin` makes that count belong to this write flow.
         """
         if not self._write_identity_intact(
             "scale", meta, ns, name, uid, phase=phase, epoch=epoch, origin=origin
