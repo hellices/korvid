@@ -961,8 +961,10 @@ async def test_scale_down_of_a_replicaset_follows_the_same_routing_chain(
 
     This pins that the flow hands `ImpactAction.SCALE_DOWN` to the
     summarizer for every scalable kind, not just the one the first fixture
-    is written for, and that a `routes_to` dependent - which neither delete
-    nor rollout restart follows - is listed either way.
+    is written for, and that the full `managed_by -> selects -> routes_to`
+    scale path is listed either way. `routes_to` alone is not what sets
+    scale-down apart - delete already follows it - it is `selects` that
+    is scale-down-specific, since delete deliberately omits it.
     """
     env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
     async with env.app.run_test() as pilot:

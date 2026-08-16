@@ -96,18 +96,21 @@ _ROLLOUT_RESTART_RELATIONS: frozenset[RelationKind] = frozenset(
 
 #: Scaling a workload down replaces or removes some of its Pods, so the
 #: ownership/management chain below it is affected the same way a rollout
-#: restart's is. `SELECTS` and `ROUTES_TO` are additionally followed here -
-#: unlike delete and rollout-restart, which never claim a Service or a
-#: routing backend fails - because scaling down is the one action where a
-#: selector or route pointing at a shrinking replica set is a conservative,
-#: known dependent worth listing for the reader to check. This still never
-#: asserts that the Service loses an endpoint or that traffic actually
-#: fails; it only says the relationship exists and was observed. PDB, volume,
-#: config, node, and binding relations are excluded because scaling down
-#: does not detach a mounted volume or ConfigMap, evict a Pod past its PDB,
-#: move a Pod off its node, or unbind a claim - those relations describe
-#: what a *remaining* Pod still holds, not something the scale-down itself
-#: changes.
+#: restart's is. `ROUTES_TO` is also followed here, same as for delete
+#: (see `_DELETE_RELATIONS` above), so a routing backend still shows up in
+#: the impact path. `SELECTS` is the scale-down-specific addition - unlike
+#: delete, which deliberately omits it (a Service selecting many Pods should
+#: not read as catastrophic just because one selected Pod is deleted),
+#: scaling down is the one action where a selector pointing at a shrinking
+#: replica set is a conservative, known dependent worth listing for the
+#: reader to check. Together `SELECTS` and `ROUTES_TO` compose the full
+#: managed_by -> selects -> routes_to scale path. This still never asserts
+#: that the Service loses an endpoint or that traffic actually fails; it
+#: only says the relationship exists and was observed. PDB, volume, config,
+#: node, and binding relations are excluded because scaling down does not
+#: detach a mounted volume or ConfigMap, evict a Pod past its PDB, move a
+#: Pod off its node, or unbind a claim - those relations describe what a
+#: *remaining* Pod still holds, not something the scale-down itself changes.
 _SCALE_DOWN_RELATIONS: frozenset[RelationKind] = frozenset(
     {
         RelationKind.OWNED_BY,
