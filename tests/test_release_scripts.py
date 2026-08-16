@@ -1128,6 +1128,23 @@ def test_markdown_section_stops_at_the_next_peer_heading() -> None:
     assert markdown_section(text, "Release") == "keep\n### Child\nkeep child"
 
 
+def test_markdown_section_ignores_level_two_like_lines_inside_fenced_code_blocks() -> None:
+    text = (
+        "# Title\n"
+        "## Release\n"
+        "keep\n"
+        "```yaml\n"
+        "## not a real heading\n"
+        "```\n"
+        "still keep\n"
+        "## Cleanup\n"
+        "drop\n"
+    )
+    assert markdown_section(text, "Release") == (
+        "keep\n```yaml\n## not a real heading\n```\nstill keep"
+    )
+
+
 def test_run_scripts_returns_only_shell_steps() -> None:
     job = {"steps": [{"uses": "actions/checkout@sha"}, {"run": "uv build"}, {"run": "uv publish"}]}
     assert run_scripts(job) == ("uv build", "uv publish")

@@ -23,6 +23,7 @@ import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import pytest
 import yaml
 
 from tests.release_contracts import workflow_jobs
@@ -43,6 +44,17 @@ def _uv_lock() -> str:
 def test_workflow_jobs_returns_jobs_mapping_for_relock_workflow() -> None:
     jobs = workflow_jobs(_ROOT / ".github" / "workflows" / "relock.yml")
     assert {"relock", "propose"} <= jobs.keys()
+
+
+@pytest.mark.parametrize("contents", ["", "[]\n"])
+def test_workflow_jobs_rejects_empty_or_non_mapping_yaml_root(
+    tmp_path: Path, contents: str
+) -> None:
+    workflow = tmp_path / "workflow.yml"
+    workflow.write_text(contents)
+
+    with pytest.raises(AssertionError, match="YAML mapping at the document root"):
+        workflow_jobs(workflow)
 
 
 def _lock_hosts(lock: str) -> set[str]:
