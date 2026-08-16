@@ -154,3 +154,13 @@
 - Kept only genuine absence/ordering/timing windows where elapsed time is part of the behaviour under test, including the two restored delayed no-write windows requested in review.
 - Preserved approval-gate invariants explicitly: no write before confirmation, no write after cancel, and no write if audit intent persistence fails.
 - Left product code unchanged.
+
+## Follow-up: hierarchy worker lifecycle contract
+
+- `test_tree_does_not_open_when_view_changed_during_fetch` now snapshots the pre-Enter worker identities, waits for a newly observed hierarchy fetch worker while `slow_components` is parked, captures that worker tuple, navigates away, releases the gate, and waits for the captured worker(s) to finish before asserting the tree stayed closed and `current_kind` remained `pods`.
+- Added mutation evidence in `test_tree_fetch_worker_start_wait_rejects_vacuous_empty_capture`: `run_worker` is patched to discard the coroutine without launching the fetch, the new start wait times out, and the empty-capture `all([])` shape still returns `True`.
+- Validation rerun in the worktree:
+  - focused hierarchy test: passed twice
+  - full `tests/ui/test_hierarchy_nav.py`: passed
+  - seven-file UI suite: passed
+  - `ruff check` and `ruff format --check` on `tests/ui/test_hierarchy_nav.py`: passed
