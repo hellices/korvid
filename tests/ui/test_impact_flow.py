@@ -83,10 +83,39 @@ def _owner(kind: str, name: str, uid: str, *, group: str) -> ReferenceFact:
     )
 
 
-def _deployment(name: str, uid: str, *, desired: int | None = 3) -> GenericSummary:
+def _workload_selector(*, app: str = "web") -> SelectorFact:
+    """The `spec.selector -> Pod` fact every real workload summary carries.
+
+    Built exactly the way `korvid.k8s.relationship_facts._workload_selector`
+    builds it for a Deployment/ReplicaSet/StatefulSet: relation `managed_by`,
+    `match_is_subject=True`, so the resulting edge runs *Pod -> workload* and
+    the reverse impact walk reaches the Pod from the workload in one hop,
+    beside (not through) the ReplicaSet the ownerReferences chain gives it.
+    """
+    return SelectorFact(
+        relation=RelationKind.MANAGED_BY,
+        target_group="",
+        target_kind="Pod",
+        selector=LabelSelector(match_labels=(("app", app),), present=True),
+        confidence=FactConfidence.DECLARED,
+        field="spec.selector",
+        match_is_subject=True,
+    )
+
+
+def _deployment(
+    name: str, uid: str, *, desired: int | None = 3, selects_pods: bool = False
+) -> GenericSummary:
     """A Deployment row. `desired` is what the scale flow reads to decide
     whether a requested count is a decrease; `None` is a summary that does
-    not carry one at all."""
+    not carry one at all.
+
+    `selects_pods` attaches the workload selector a real Deployment always
+    has. It is opt-in only so the delete/rollout-restart fixtures keep the
+    exact dependent sets their own assertions were written against; every
+    row a scale-down walks carries it, because the hop counts a scale-down
+    reports depend on it.
+    """
     return GenericSummary(
         name=name,
         namespace="prod",
@@ -94,6 +123,14 @@ def _deployment(name: str, uid: str, *, desired: int | None = 3) -> GenericSumma
         created="",
         desired=desired,
         uid=uid,
+        relationships=(
+            RelationshipFacts(api_group="apps", selectors=(_workload_selector(),))
+            if selects_pods
+            # Byte-identical to the pre-#295 fixture when the selector is
+            # not asked for: the delete/rollout-restart assertions below are
+            # written against exactly that row.
+            else RelationshipFacts()
+        ),
     )
 
 
@@ -109,6 +146,41 @@ def _replicaset(*, desired: int | None = 3) -> GenericSummary:
             api_group="apps",
             references=(_owner("Deployment", "web", "deploy-1", group="apps"),),
         ),
+    )
+
+
+def _statefulset() -> GenericSummary:
+    """A StatefulSet with the workload selector a real one carries.
+
+    The one target kind whose advisory also states that PVC retention
+    policy is not evaluated; `db` keeps it clear of the `web` fixtures, so
+    its selector can never match their Pods.
+    """
+    return GenericSummary(
+        name="db",
+        namespace="prod",
+        kind="StatefulSet",
+        created="",
+        desired=3,
+        uid="sts-1",
+        relationships=RelationshipFacts(
+            api_group="apps",
+            selectors=(_workload_selector(app="db"),),
+        ),
+    )
+
+
+def _statefulset_pod() -> PodSummary:
+    """The Pod that StatefulSet's selector matches."""
+    return PodSummary(
+        name="db-0",
+        namespace="prod",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node=None,
+        uid="pod-db-0",
+        labels=(("app", "db"),),
     )
 
 
@@ -306,8 +378,13 @@ class RecordingOps(WriteOps):
         self.calls: list[tuple[object, ...]] = []
         self._order = order
         #: Fired once, inside the first dry-run preview: how a test
-        #: simulates a focus or scope change landing in the awaited gap
-        #: *before* the impact snapshot chooses its scope.
+        #: simulates a focus, scope or context change landing in the awaited
+        #: gap between the dry run and the impact snapshot. What the two
+        #: flows then do with that drift differs, and both are asserted
+        #: below: a delete/rollout restart still loads its snapshot (scoped
+        #: to the *captured* origin, never the drifted-into pane) and is
+        #: refused afterwards by the impact-summary gate, while a scale-down
+        #: is refused by its own pre-snapshot gate and issues no LIST at all.
         self.on_first_preview: Callable[[], None] | None = None
 
     def _preview_hook(self) -> None:
@@ -421,6 +498,12 @@ class ImpactEnv:
         #: between the watch and the snapshot carries a new uid).
         self.list_rows = self.rows if list_rows is None else list_rows
         self.lister = RecordingLister(self.list_rows, self.order)
+        #: Fired once, inside the SubjectAccessReview: how a test simulates
+        #: drift landing while the permission round trip is in flight, which
+        #: is the flow's *first* awaited gap and the only one no LIST or
+        #: dry-run hook can reach. Unset by default, so every other test
+        #: sees the permission check it always saw.
+        self.on_permission_check: Callable[[], None] | None = None
         store = ResourceStore()
         watched = self.rows
 
@@ -434,6 +517,9 @@ class ImpactEnv:
             verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
         ) -> bool:
             self.order.append("rbac")
+            hook, self.on_permission_check = self.on_permission_check, None
+            if hook is not None:
+                hook()
             # `False` is a denied SubjectAccessReview, which must end the
             # flow before the prompt, the snapshot fan-out and the dialog.
             return permission
@@ -742,15 +828,18 @@ async def test_a_namespaced_target_in_an_all_namespaces_pane_covers_every_namesp
 
 #: The rows a scale-down walk is exercised over: the controller chain
 #: (Deployment -> ReplicaSet -> Pod), the Service selecting that Pod, and
-#: the Ingress routing to that Service. The Pod's ConfigMap is included so
-#: the walk has no *unrelated* dangling reference: without it the summary
-#: also reports `unresolved references in the affected set`, which is the
-#: subject of its own test and would otherwise contaminate every assertion
-#: about what a scale-down lists.
+#: the Ingress routing to that Service. The Deployment carries the workload
+#: selector a real one always has, so the walk sees the hop counts
+#: production would produce (`Deployment -> Pod` is one hop through
+#: `managed_by`, not two through the ReplicaSet). The Pod's ConfigMap is
+#: included so the walk has no *unrelated* dangling reference: without it
+#: the summary also reports `unresolved references in the affected set`,
+#: which is the subject of its own test and would otherwise contaminate
+#: every assertion about what a scale-down lists.
 def _scale_down_rows() -> dict[str, list[Any]]:
     return {
         "pods": [_pod()],
-        "deployments": [_deployment("web", "deploy-1")],
+        "deployments": [_deployment("web", "deploy-1", selects_pods=True)],
         "replicasets": [_replicaset()],
         "configmaps": [_configmap()],
         "services": [_service()],
@@ -770,50 +859,134 @@ async def _scale_to_one(env: ImpactEnv, pilot: Any, view: str, *, expect: str) -
     )
 
 
+#: The exact machine-defined limitation lines a scale-down advisory always
+#: carries (`korvid.ui.impact_preview`), asserted here end to end so the
+#: renderer's own unit pins cannot be the only place they are checked.
+_PDB_LIMITATION = (
+    "controller scale-down is not an Eviction API request; PodDisruptionBudgets do not gate it"
+)
+_HPA_LIMITATION = "HorizontalPodAutoscaler targeting and reconciliation are not evaluated"
+_STS_PVC_LIMITATION = "StatefulSet PVC retention policy is not evaluated"
+
+
 async def test_scale_down_dialog_shows_controller_and_routing_dependents(
     tmp_path: Path,
 ) -> None:
     """A scale-down follows the ownership chain *and* the relations that
-    point at a shrinking workload - here the Service selecting its Pods.
-    Nothing is claimed to fail.
+    point at a shrinking workload - the Service selecting its Pods and the
+    Ingress routing to that Service. Nothing is claimed to fail.
 
-    The Ingress routing to that Service is a fourth hop from the Deployment
-    (ReplicaSet -> Pod -> Service -> Ingress) and so falls outside
-    `ImpactLimits.max_depth`; it is disclosed by the traversal-cap line
-    instead, and the test below scales the ReplicaSet to pin that a
-    `routes_to` dependent inside the cap does reach the dialog.
+    A real Deployment carries its own `spec.selector`, so its Pods are one
+    `managed_by` hop away rather than two through the ReplicaSet: the
+    routing chain is `Deployment -> Pod (managed_by) -> Service (selects) ->
+    Ingress (routes_to)`, three hops, inside `ImpactLimits.max_depth`. The
+    Ingress is therefore named, and nothing is withheld behind the
+    traversal cap. The ReplicaSet is a direct dependent in its own right
+    (through its ownerReference), and the ReplicaSet -> Pod edge is folded
+    into `additional known paths` because the Pod was already reached.
+
+    The two unconditional limitation lines are asserted here, not only in
+    the renderer's unit tests: they are the part of the advisory that no
+    cluster state can produce, so nothing else would notice if the flow
+    stopped delivering them to the dialog.
     """
     env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
     async with env.app.run_test() as pilot:
         await _scale_to_one(env, pilot, "deploy", expect="web")
         text = impact_text(env.app)
         assert "scale down apps/Deployment/prod/web" in text
-        assert "apps/ReplicaSet/prod/web-abc" in text
-        assert "Pod/prod/web-abc-1" in text
-        assert "Service/prod/web" in text
+        assert _PDB_LIMITATION in text
+        assert _HPA_LIMITATION in text
+        # Kind-conditional: a Deployment has no PVC retention policy.
+        assert _STS_PVC_LIMITATION not in text
+        assert "known direct dependents (may be affected): 2 or more" in text
+        assert (
+            "Pod/prod/web-abc-1 via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector" in text
+        )
+        assert (
+            "apps/ReplicaSet/prod/web-abc via owned_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]" in text
+        )
+        assert "known transitive dependents (may be affected): 2 or more" in text
+        assert (
+            "Service/prod/web via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector -> selects (declared) at"
+            " Service/prod/web: spec.selector" in text
+        )
+        assert (
+            "networking.k8s.io/Ingress/prod/web via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector -> selects (declared) at"
+            " Service/prod/web: spec.selector -> routes_to (declared)" in text
+        )
+        assert "additional known paths: 1 or more" in text
+        assert "traversal capped" not in text
         assert "may be affected" in text
         assert "will fail" not in text
-        assert "networking.k8s.io/Ingress/prod/web" not in text
-        assert "traversal capped" in text
         assert env.ops.calls == []
 
 
-async def test_scale_down_lists_a_routing_dependent_inside_the_traversal_cap(
+async def test_scale_down_of_a_replicaset_follows_the_same_routing_chain(
     tmp_path: Path,
 ) -> None:
-    """Scaling the ReplicaSet down puts the whole routing chain inside the
-    cap (Pod -> Service -> Ingress): the flow really does hand
-    `ImpactAction.SCALE_DOWN` to the summarizer, so a `routes_to` dependent
-    - which neither delete nor rollout restart follows - is listed."""
+    """The same routing chain reached from the ReplicaSet instead.
+
+    Its Pods hang off `metadata.ownerReferences`, not off a selector the
+    target itself declares, so the first hop's evidence is the Pod's owner
+    reference where the Deployment's was the Deployment's `spec.selector` -
+    and `Pod -> Service (selects) -> Ingress (routes_to)` follows exactly as
+    before. This pins that the flow hands `ImpactAction.SCALE_DOWN` to the
+    summarizer for every scalable kind, not just the one the fixture's
+    selector is written for, and that a `routes_to` dependent - which
+    neither delete nor rollout restart follows - is listed either way.
+    """
     env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
     async with env.app.run_test() as pilot:
         await _scale_to_one(env, pilot, "rs", expect="web-abc")
         text = impact_text(env.app)
         assert "scale down apps/ReplicaSet/prod/web-abc" in text
-        assert "Pod/prod/web-abc-1" in text
-        assert "Service/prod/web" in text
-        assert "networking.k8s.io/Ingress/prod/web" in text
+        assert "known direct dependents (may be affected): 1 or more" in text
+        assert (
+            "Pod/prod/web-abc-1 via owned_by (declared) at"
+            " Pod/prod/web-abc-1: metadata.ownerReferences[0]" in text
+        )
+        assert "known transitive dependents (may be affected): 2 or more" in text
+        assert (
+            "Service/prod/web via owned_by (declared) at"
+            " Pod/prod/web-abc-1: metadata.ownerReferences[0] -> selects (declared) at"
+            " Service/prod/web: spec.selector" in text
+        )
+        assert "networking.k8s.io/Ingress/prod/web via owned_by (declared)" in text
+        assert "traversal capped" not in text
         assert "may be affected" in text
+        assert "will fail" not in text
+        assert env.ops.calls == []
+
+
+async def test_scale_down_of_a_statefulset_states_the_pvc_limitation(
+    tmp_path: Path,
+) -> None:
+    """The one limitation line that depends on the target's kind.
+
+    A StatefulSet's `persistentVolumeClaimRetentionPolicy` - not this walk -
+    decides whether the removed replicas' claims survive, so the advisory
+    says so for a StatefulSet and only for one. Driven through the real `S`
+    flow rather than the renderer alone: the kind reaching the summary is
+    what selects the line, and that identity travels the whole flow.
+    """
+    rows: dict[str, list[Any]] = {"statefulsets": [_statefulset()], "pods": [_statefulset_pod()]}
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
+    async with env.app.run_test() as pilot:
+        await _scale_to_one(env, pilot, "sts", expect="db")
+        text = impact_text(env.app)
+        assert "scale down apps/StatefulSet/prod/db" in text
+        assert _PDB_LIMITATION in text
+        assert _HPA_LIMITATION in text
+        assert _STS_PVC_LIMITATION in text
+        assert (
+            "Pod/prod/db-0 via managed_by (declared) at apps/StatefulSet/prod/db: spec.selector"
+            in text
+        )
         assert "will fail" not in text
         assert env.ops.calls == []
 
@@ -1356,6 +1529,73 @@ async def test_scale_down_focus_move_while_the_prompt_is_open_aborts_before_any_
         # The snapshot never widened past the captured `prod` origin - here
         # it never ran, because the gate below refuses first.
         assert env.lister.calls == []
+
+
+#: How a test drifts the identity a scale flow captured, while the flow is
+#: awaiting something. Each returns the callable a hook fires; each is
+#: invisible to the checks `_precheck_keybinding_write` already makes (kind,
+#: namespace, name and the context epoch all still match afterwards), so
+#: only the scale flow's own post-permission gate can see it.
+def _uid_replacement_drift(app: KorvidApp) -> Callable[[], None]:
+    """The selected row is replaced by a same-named object with a new uid."""
+    return lambda: _replace_selected_row_with_a_new_incarnation(app)
+
+
+def _focus_drift(app: KorvidApp) -> Callable[[], None]:
+    """Focus lands in the second pane, whose cursor is on the same object."""
+    return app._focus_other_pane
+
+
+def _scope_drift(app: KorvidApp) -> Callable[[], None]:
+    """The pane the write was raised from widens to every namespace."""
+    origin = app._pane
+
+    def widen() -> None:
+        origin.scope = ALL_NAMESPACES
+
+    return widen
+
+
+@pytest.mark.parametrize(
+    "make_drift",
+    [_uid_replacement_drift, _focus_drift, _scope_drift],
+    ids=["uid", "pane", "scope"],
+)
+async def test_scale_identity_drift_during_the_permission_check_never_prompts(
+    tmp_path: Path,
+    make_drift: Callable[[KorvidApp], Callable[[], None]],
+) -> None:
+    """The scale flow's *first* awaited gap: the SubjectAccessReview.
+
+    `_precheck_keybinding_write` re-validates kind, namespace, name and the
+    context epoch after that round trip, and all four still match in each
+    case here - a same-named replacement keeps them, and so does a second
+    pane sitting on the very same row or the origin pane widening its scope.
+    Only the uid, the pane identity and that pane's scope betray the drift,
+    which is exactly what the gate added after the permission check compares.
+
+    Without it the flow would run on and push the replica prompt: a modal
+    the user never asked for, over an object they no longer selected, whose
+    count would then be dry-run, summarized and offered for approval. So the
+    assertion is that *nothing* happens after the refusal - no prompt, no
+    dry-run preview, no snapshot LIST, no write, no audit record.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        env.on_permission_check = make_drift(app)
+        await pilot.press("S")
+        await _refusal_during(app, pilot, "the permission check", "scale permission-gap refusal")
+        assert not isinstance(app.screen, ReplicasPrompt)
+        assert len(app.screen_stack) == 1
+        # The permission check is the only thing that ran: no dry-run
+        # preview and no relationship LIST followed it.
+        assert env.order == ["rbac"]
+        assert env.lister.calls == []
+        assert env.ops.calls == []
+        assert not audit_path.exists()
 
 
 async def test_scale_down_focus_move_during_the_dry_run_never_loads_relationships(
