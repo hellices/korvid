@@ -516,6 +516,11 @@ def _recording_workers(app: KorvidApp, started: list[Worker[Any]]) -> Iterator[N
     callback, so the only handle on that coroutine is the `Worker` object
     the app itself created; a test cannot cancel it without capturing it
     here.
+
+    Kept open only until that one worker has been recorded: everything the
+    app does afterwards (a refresh, a notification timer) then runs through
+    its real `run_worker`, so nothing outside the flow under test can end up
+    in `started`.
     """
     original_run_worker = app.run_worker
 
@@ -528,6 +533,21 @@ def _recording_workers(app: KorvidApp, started: list[Worker[Any]]) -> Iterator[N
         yield
 
 
+async def _scale_worker(pilot: Any, app: KorvidApp) -> Worker[Any]:
+    """Drive `S` to the replica count and return the worker it started.
+
+    The patch is released as soon as the confirmation worker exists, which
+    is well before anything the tests below await on it - the wait for the
+    first LIST, the cancellation, the worker's final state - so narrowing it
+    costs no determinism.
+    """
+    started: list[Worker[Any]] = []
+    with _recording_workers(app, started):
+        await _open_scale_down(pilot)
+        await until(pilot, lambda: len(started) == 1, label="scale confirmation worker started")
+    return started[0]
+
+
 async def test_declined_scale_down_with_impact_runs_no_operation(tmp_path: Path) -> None:
     """Declining is still a decline: the impact section is text on the
     dialog, never a second path to the operation factory."""
@@ -538,7 +558,10 @@ async def test_declined_scale_down_with_impact_runs_no_operation(tmp_path: Path)
         await until(
             pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="scale-down confirm"
         )
-        assert env.app.screen.query(".confirm-impact")
+        # The scale-down summary itself, not merely "some impact section":
+        # a dialog carrying a delete's or another row's summary would
+        # satisfy the selector and prove nothing about this flow.
+        assert "scale down apps/Deployment/prod/web" in impact_text(env.app)
         await pilot.press("n")
         await until(pilot, lambda: len(env.app.screen_stack) == 1, label="dialog dismissed")
         assert env.ops.calls == []
@@ -566,7 +589,7 @@ async def test_scale_down_audit_failure_blocks_operation_factory(
         await until(
             pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="scale-down confirm"
         )
-        assert env.app.screen.query(".confirm-impact")
+        assert "scale down apps/Deployment/prod/web" in impact_text(env.app)
         await pilot.press("y")
         await until(
             pilot,
@@ -611,19 +634,16 @@ async def test_cancelling_scale_down_during_impact_load_writes_nothing(
     env.lister.on_first_call = lambda: reservations_during_load.append(
         env.app._active_cluster_writes
     )
-    started: list[Worker[Any]] = []
     async with env.app.run_test() as pilot:
-        with _recording_workers(env.app, started):
-            await _open_scale_down(pilot)
-            await until(pilot, lambda: env.lister.calls != [], label="scale impact listing")
-        assert len(started) == 1
-        started[0].cancel()
+        worker = await _scale_worker(pilot, env.app)
+        await until(pilot, lambda: env.lister.calls != [], label="scale impact listing")
+        worker.cancel()
         await until(
             pilot,
-            lambda: started[0].is_cancelled and started[0].is_finished,
+            lambda: worker.is_cancelled and worker.is_finished,
             label="scale worker cancelled",
         )
-        assert started[0].state is WorkerState.CANCELLED
+        assert worker.state is WorkerState.CANCELLED
         assert not isinstance(env.app.screen, ConfirmScreen)
         assert len(env.app.screen_stack) == 1
         assert reservations_during_load == [0]
@@ -648,15 +668,13 @@ async def test_cancelled_scale_snapshot_is_not_an_unavailable_confirmation(
     audit_path = tmp_path / "audit.jsonl"
     env = ImpactEnv(audit_path)
     env.lister.errors["deployments"] = asyncio.CancelledError()
-    started: list[Worker[Any]] = []
     async with env.app.run_test() as pilot:
-        with _recording_workers(env.app, started):
-            await _open_scale_down(pilot)
-            await until(
-                pilot,
-                lambda: len(started) == 1 and started[0].state is WorkerState.CANCELLED,
-                label="scale worker observed loader cancellation",
-            )
+        worker = await _scale_worker(pilot, env.app)
+        await until(
+            pilot,
+            lambda: worker.state is WorkerState.CANCELLED,
+            label="scale worker observed loader cancellation",
+        )
         assert env.lister.calls != []
         assert not isinstance(env.app.screen, ConfirmScreen)
         assert len(env.app.screen_stack) == 1
@@ -693,13 +711,15 @@ async def test_scale_down_rbac_denial_never_loads_or_confirms(tmp_path: Path) ->
 def test_the_catalog_aliases_resolve_every_kind_the_integrated_flows_exercise() -> None:
     """A guard on the harness itself: every write-flow view name this module
     and `test_impact_flow` drive through `open_delete_dialog`/`to_view`
-    (`deploy`, `pods`, `secrets`, `nodes`) resolves to a real discovered
-    kind, not a synthetic view."""
+    (`deploy`, `pods`, `secrets`, `nodes`, and the scalable `rs`/`sts`)
+    resolves to a real discovered kind, not a synthetic view."""
     exercised = {
         "deployments": ("Deployment", "apps"),
         "pods": ("Pod", ""),
         "secrets": ("Secret", ""),
         "nodes": ("Node", ""),
+        "replicasets": ("ReplicaSet", "apps"),
+        "statefulsets": ("StatefulSet", "apps"),
     }
     for plural, (kind, group) in exercised.items():
         meta = CATALOG_ALIASES[plural]
