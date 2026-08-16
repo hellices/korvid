@@ -5686,6 +5686,16 @@ class KorvidApp(App[None]):
                 return None if desired is None else int(desired)
         return None
 
+    @staticmethod
+    def _is_scale_down(current: int | None, replicas: int) -> bool:
+        """Whether this scale is a *known* decrease.
+
+        A summary that carries no desired count (`None`) is not a decrease:
+        korvid cannot tell one from a scale-up, and an impact summary is
+        only ever attached to an action whose semantics are known.
+        """
+        return current is not None and replicas < current
+
     async def action_scale_resource(self) -> None:
         """S: scale the selected deployment/replicaset/statefulset (prompt, then confirm)."""
         ops = self._write_ops
@@ -5699,12 +5709,31 @@ class KorvidApp(App[None]):
         if (meta.group, meta.plural) not in self._SCALABLE:
             self.notify(f"scale does not apply to {self._gvr_label(meta)}", severity="warning")
             return
+        # Captured with the target — see action_delete_resource. The pane
+        # and its scope are pinned here, before the permission round trip
+        # and before the count prompt: everything after this reads
+        # "whichever pane is focused now", and the scale-down snapshot below
+        # must cover the pane the user actually raised the write from.
+        origin = self._write_origin()
         epoch = self._ctx_epoch
-        # Captured with the target — see action_delete_resource.
         kind_alias = self._canonical_kind(self.current_kind)
+        # Read before the RBAC await, from the row the target was taken
+        # from: the decrease decision must be about that incarnation, not
+        # about whatever the store holds once the prompt closes.
+        current = self._current_replicas(ns, name)
         if not await self._precheck_keybinding_write("scale", meta, ns, name):
             return
-        current = self._current_replicas(ns, name)
+        if not self._write_identity_intact(
+            "scale",
+            meta,
+            ns,
+            name,
+            uid,
+            phase="the permission check",
+            epoch=epoch,
+            origin=origin,
+        ):
+            return
 
         def _on_replicas(replicas: int | None) -> None:
             if replicas is None:
@@ -5712,7 +5741,17 @@ class KorvidApp(App[None]):
             # The dry-run round trip must not run inside a screen callback:
             # a worker fetches the preview, revalidates, then confirms.
             self.run_worker(
-                self._confirm_scale(meta, ns, name, uid, current, replicas, epoch, kind_alias)
+                self._confirm_scale(
+                    meta,
+                    ns,
+                    name,
+                    uid,
+                    current,
+                    replicas,
+                    epoch,
+                    kind_alias,
+                    origin,
+                )
             )
 
         await self.push_screen(
@@ -5729,19 +5768,49 @@ class KorvidApp(App[None]):
         replicas: int,
         epoch: int,
         kind_alias: str,
+        origin: _WriteOrigin,
     ) -> None:
         """Dry-run preview + approval dialog for a scale, after the replica
         count is known. Revalidates the selection after the preview round
         trip: keystrokes during the await must never land on a confirmation
         for a different row. `kind_alias` was captured with the target — the
-        banner must describe the row the user acted on, not the current view."""
+        banner must describe the row the user acted on, not the current view.
+
+        A *known decrease* additionally loads the advisory blast radius
+        (issue #295); a scale-up, a no-op, or a row with no readable desired
+        count has no tested scale-down semantics and gets no section, no
+        LIST fan-out, and the flow it had before."""
         ops = self._write_ops
         if ops is None:
             return
         preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
         note = await self._managed_note(kind_alias, ns, name)
-        if not self._write_context_intact(
-            "scale", meta, ns, name, phase="the dry-run preview", epoch=epoch
+        is_scale_down = self._is_scale_down(current, replicas)
+        # The snapshot is another awaited gap — see action_delete_resource.
+        impact = (
+            await self._impact_preview(
+                ImpactAction.SCALE_DOWN,
+                meta,
+                ns,
+                name,
+                uid,
+                origin=origin,
+            )
+            if is_scale_down
+            else None
+        )
+        # One gate for both shapes, naming the last thing that was awaited:
+        # a second check after the dry-run would only repeat this one.
+        phase = "the impact summary" if is_scale_down else "the dry-run preview"
+        if not self._write_identity_intact(
+            "scale",
+            meta,
+            ns,
+            name,
+            uid,
+            phase=phase,
+            epoch=epoch,
+            origin=origin,
         ):
             return
 
@@ -5758,6 +5827,7 @@ class KorvidApp(App[None]):
             detail=f"replicas -> {replicas}",
             preview=preview,
             managed_note=note,
+            impact_lines=impact,
         )
 
     async def action_resize_pod(self) -> None:

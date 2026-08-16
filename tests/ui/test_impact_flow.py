@@ -78,18 +78,27 @@ def _owner(kind: str, name: str, uid: str, *, group: str) -> ReferenceFact:
     )
 
 
-def _deployment(name: str, uid: str) -> GenericSummary:
+def _deployment(name: str, uid: str, *, desired: int | None = 3) -> GenericSummary:
+    """A Deployment row. `desired` is what the scale flow reads to decide
+    whether a requested count is a decrease; `None` is a summary that does
+    not carry one at all."""
     return GenericSummary(
-        name=name, namespace="prod", kind="Deployment", created="", desired=3, uid=uid
+        name=name,
+        namespace="prod",
+        kind="Deployment",
+        created="",
+        desired=desired,
+        uid=uid,
     )
 
 
-def _replicaset() -> GenericSummary:
+def _replicaset(*, desired: int | None = 3) -> GenericSummary:
     return GenericSummary(
         name="web-abc",
         namespace="prod",
         kind="ReplicaSet",
         created="",
+        desired=desired,
         uid="rs-1",
         relationships=RelationshipFacts(
             api_group="apps",
@@ -185,6 +194,35 @@ def _service() -> GenericSummary:
                     field="spec.selector",
                 ),
             )
+        ),
+    )
+
+
+def _ingress() -> GenericSummary:
+    """An Ingress routing to the Service above: a declared `routes_to`
+    dependent that only a scale-down follows."""
+    return GenericSummary(
+        name="web",
+        namespace="prod",
+        kind="Ingress",
+        created="",
+        uid="ing-1",
+        relationships=RelationshipFacts(
+            api_group="networking.k8s.io",
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.ROUTES_TO,
+                    target=TargetReference(
+                        group="",
+                        kind="Service",
+                        namespace="prod",
+                        name="web",
+                        uid="svc-1",
+                    ),
+                    confidence=FactConfidence.DECLARED,
+                    field="spec.rules[0].http.paths[0].backend.service",
+                ),
+            ),
         ),
     )
 
@@ -310,6 +348,19 @@ class RecordingOps(WriteOps):
         self._order.append("preview")
         self._preview_hook()
         return [f"- {meta.plural} prod/{name}"]
+
+    async def preview_scale(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        replicas: int,
+        *,
+        uid: str | None = None,
+    ) -> list[str] | None:
+        self._order.append("preview")
+        self._preview_hook()
+        return [f"~ spec.replicas: {replicas}"]
 
     async def preview_rollout_restart(
         self,
@@ -676,16 +727,101 @@ async def test_a_namespaced_target_in_an_all_namespaces_pane_covers_every_namesp
         assert env.ops.calls == []
 
 
-async def test_scale_dialog_has_no_impact_section(tmp_path: Path) -> None:
-    """Only delete and rollout restart have tested action semantics."""
-    env = ImpactEnv(tmp_path / "audit.jsonl")
+#: The rows a scale-down walk is exercised over: the controller chain
+#: (Deployment -> ReplicaSet -> Pod), the Service selecting that Pod, and
+#: the Ingress routing to that Service.
+def _scale_down_rows() -> dict[str, list[Any]]:
+    return {
+        "pods": [_pod()],
+        "deployments": [_deployment("web", "deploy-1")],
+        "replicasets": [_replicaset()],
+        "services": [_service()],
+        "ingresses": [_ingress()],
+    }
+
+
+async def _scale_to_one(env: ImpactEnv, pilot: Any, view: str, *, expect: str) -> None:
+    """Open the scale prompt on `view`'s first row and request one replica."""
+    await to_view(pilot, view, expect=expect)
+    await pilot.press("S")
+    await until(pilot, lambda: isinstance(env.app.screen, ReplicasPrompt), label="replicas prompt")
+    await pilot.press("1")
+    await pilot.press("enter")
+    await until(
+        pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="scale-down confirm"
+    )
+
+
+async def test_scale_down_dialog_shows_controller_and_routing_dependents(
+    tmp_path: Path,
+) -> None:
+    """A scale-down follows the ownership chain *and* the relations that
+    point at a shrinking workload - here the Service selecting its Pods.
+    Nothing is claimed to fail.
+
+    The Ingress routing to that Service is a fourth hop from the Deployment
+    (ReplicaSet -> Pod -> Service -> Ingress) and so falls outside
+    `ImpactLimits.max_depth`; it is disclosed by the traversal-cap line
+    instead, and the test below scales the ReplicaSet to pin that a
+    `routes_to` dependent inside the cap does reach the dialog.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
+    async with env.app.run_test() as pilot:
+        await _scale_to_one(env, pilot, "deploy", expect="web")
+        text = impact_text(env.app)
+        assert "scale down apps/Deployment/prod/web" in text
+        assert "apps/ReplicaSet/prod/web-abc" in text
+        assert "Pod/prod/web-abc-1" in text
+        assert "Service/prod/web" in text
+        assert "may be affected" in text
+        assert "will fail" not in text
+        assert "networking.k8s.io/Ingress/prod/web" not in text
+        assert "traversal capped" in text
+        assert env.ops.calls == []
+
+
+async def test_scale_down_lists_a_routing_dependent_inside_the_traversal_cap(
+    tmp_path: Path,
+) -> None:
+    """Scaling the ReplicaSet down puts the whole routing chain inside the
+    cap (Pod -> Service -> Ingress): the flow really does hand
+    `ImpactAction.SCALE_DOWN` to the summarizer, so a `routes_to` dependent
+    - which neither delete nor rollout restart follows - is listed."""
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
+    async with env.app.run_test() as pilot:
+        await _scale_to_one(env, pilot, "rs", expect="web-abc")
+        text = impact_text(env.app)
+        assert "scale down apps/ReplicaSet/prod/web-abc" in text
+        assert "Pod/prod/web-abc-1" in text
+        assert "Service/prod/web" in text
+        assert "networking.k8s.io/Ingress/prod/web" in text
+        assert "may be affected" in text
+        assert "will fail" not in text
+        assert env.ops.calls == []
+
+
+@pytest.mark.parametrize(
+    ("desired", "requested"),
+    [(3, 5), (3, 3), (None, 1)],
+)
+async def test_non_decreasing_or_unknown_scale_never_loads_relationships(
+    tmp_path: Path,
+    desired: int | None,
+    requested: int,
+) -> None:
+    """Only a *known decrease* has scale-down semantics: scaling up, scaling
+    to the same count, and a row whose desired count korvid cannot read all
+    keep the pre-#295 flow exactly, snapshot fan-out included."""
+    rows: dict[str, list[Any]] = {"deployments": [_deployment("web", "deploy-1", desired=desired)]}
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
     async with env.app.run_test() as pilot:
         await to_view(pilot, "deploy", expect="web")
         await pilot.press("S")
         await until(
             pilot, lambda: isinstance(env.app.screen, ReplicasPrompt), label="replicas prompt"
         )
-        await pilot.press("5")
+        for char in str(requested):
+            await pilot.press(char)
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="scale confirm")
         assert not env.app.screen.query(".confirm-impact")
@@ -694,8 +830,9 @@ async def test_scale_dialog_has_no_impact_section(tmp_path: Path) -> None:
 
 async def test_cordon_dialog_has_no_impact_section(tmp_path: Path) -> None:
     """A second unsupported flow, on a cluster-scoped kind: the delivery
-    boundary is delete/rollout restart, and everything else stays exactly
-    as it was (see the roadmap deviation in Global Constraints)."""
+    boundary is delete, rollout restart and scale-down, and everything else
+    stays exactly as it was (see the roadmap deviation in Global
+    Constraints)."""
     rows: dict[str, list[Any]] = {"nodes": [_node()]}
     env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
     async with env.app.run_test() as pilot:
@@ -859,6 +996,35 @@ async def test_a_row_that_loses_its_uid_during_the_impact_load_aborts_the_delete
             ),
             label="impact-summary uid refusal",
         )
+
+
+async def test_scale_down_uid_loss_during_impact_load_aborts_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    """Same fail-closed uid gate on the `S` flow - see the delete case above.
+
+    The scale-down's own gap is the widest of the three: the count prompt
+    sits between the RBAC check and the snapshot, so the approved
+    incarnation has had a whole modal's lifetime to be replaced.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+
+    def drop_the_uid() -> None:
+        app.store.apply_event(
+            app.current_kind, app.current_scope, "MODIFIED", _deployment("web", "")
+        )
+
+    env.lister.on_first_call = drop_the_uid
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal(app, pilot, "scale-down uid refusal")
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
 
 
 async def test_a_row_without_a_uid_opens_the_dialog_with_no_impact_section(
@@ -1062,3 +1228,57 @@ async def test_a_scope_change_on_the_origin_pane_during_the_impact_load_aborts_t
         assert env.ops.calls == []
         assert _namespaced_list_scopes(env) == {"prod"}
         await _refusal(app, pilot, "impact-summary scope refusal")
+
+
+async def test_scale_down_focus_move_to_same_object_aborts_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    """The `S` flow's pane gate - see the delete case above.
+
+    Focus lands in the all-namespaces pane, whose cursor is on the very same
+    object with the same uid, while the scale-down snapshot loads. The
+    snapshot still covered the pane the count was entered in, and the
+    approval never appears.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+        env.lister.on_first_call = app._focus_other_pane
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal(app, pilot, "scale-down pane refusal")
+        assert app._pane is not origin
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        assert _namespaced_list_scopes(env) == {"prod"}
+
+
+async def test_scale_down_scope_change_on_origin_aborts_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    """The `S` flow's scope gate - see the delete case above. Focus never
+    moves: the pane the count was entered in widens to every namespace while
+    the scale-down snapshot loads."""
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+
+        def widen_the_origin_pane() -> None:
+            origin.scope = ALL_NAMESPACES
+
+        env.lister.on_first_call = widen_the_origin_pane
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal(app, pilot, "scale-down scope refusal")
+        assert app._pane is origin
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        assert _namespaced_list_scopes(env) == {"prod"}
