@@ -1,0 +1,985 @@
+# Workload Scale-Down Impact Preview Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Add a bounded graph-derived impact advisory to workload scale-down confirmations without changing scale-up, no-op, or unknown-current-count behavior.
+
+**Architecture:** Extend the pure `ImpactAction` relation mapping with a closed `SCALE_DOWN` action, then reuse the existing renderer and `_impact_preview` loader. The scale UI captures the originating pane and exact target before `ReplicasPrompt`, requests an impact snapshot only for a known decrease, and revalidates origin/context/UID before mounting `ConfirmScreen`.
+
+**Tech Stack:** Python 3.11+, asyncio, Textual, immutable relationship graph values, pytest/pytest-asyncio, Ruff, mypy strict, tach.
+
+## Global Constraints
+
+- `ImpactAction.SCALE_DOWN` activates only when `current is not None and replicas < current`.
+- Scale-up, no-op, and unknown-current-count confirmations perform no relationship snapshot LISTs.
+- The closed scale-down relation set is exactly `OWNED_BY`, `MANAGED_BY`, `SELECTS`, and `ROUTES_TO`.
+- `PROTECTED_BY`, `USES_VOLUME`, `USES_CONFIG`, `SCHEDULED_ON`, and `BOUND_TO` never produce a scale-down impact claim.
+- Routing resources are only known dependents that **may be affected**; never claim zero endpoints, exclusive ownership, outage, or guaranteed failure.
+- Every scale-down advisory states that controller scale-down is not an Eviction API request and PodDisruptionBudgets do not gate it.
+- Every scale-down advisory states that HorizontalPodAutoscaler targeting/reconciliation is not evaluated.
+- A StatefulSet scale-down advisory additionally states that PVC retention policy is not evaluated.
+- Capture pane identity, pane scope, target identity, UID, context epoch, kind alias, and current replicas before the first await and before `ReplicasPrompt`.
+- After dry-run, ownership lookup, and impact loading, require the same pane identity/scope, context epoch, resource identity, and captured UID before `ConfirmScreen`.
+- Cancellation or identity/origin drift creates no confirmation, write reservation, write operation, or audit entry.
+- Preserve RBAC, server dry-run, fresh-keystroke approval, UID precondition, fail-closed audit, timeout, cancellation propagation, Unicode/Rich safety, deterministic ordering, and all existing bounds.
+- Add no constructor parameter, Kubernetes client interface, per-node GET fan-out, dependency, or `uv.lock` change.
+- Use `UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync ...` for repository commands; never run `uv lock`.
+
+---
+
+## File Structure
+
+- `src/korvid/core/impact.py`: owns `ImpactAction.SCALE_DOWN` and its exact relation set.
+- `src/korvid/ui/impact_preview.py`: owns the scale-down action label and machine-defined limitation lines.
+- `src/korvid/ui/app.py`: owns activation, origin capture, awaited work, identity revalidation, and confirmation wiring.
+- `tests/core/test_impact.py`: pins included and excluded scale-down relation semantics.
+- `tests/ui/test_impact_preview.py`: pins exact scale-down wording, order, bounds, and conditional StatefulSet note.
+- `tests/ui/test_impact_flow.py`: owns the end-to-end scale harness, activation boundary, routing traversal, and pane/scope/UID races.
+- `tests/ui/test_impact_security.py`: pins approval, audit, RBAC, timeout, and cancellation invariants for scale-down.
+- `docs/tui.md`: explains when scale-down impact appears and what it does not evaluate.
+- `docs/dev/plans/2026-08-16-scale-down-impact-preview.md`: remains the authoritative executable plan and is updated if implementation details legitimately diverge.
+
+---
+
+### Task 1: Close the scale-down action semantics
+
+**Files:**
+- Modify: `src/korvid/core/impact.py:59-99`
+- Modify: `tests/core/test_impact.py:188-260`
+
+**Interfaces:**
+- Consumes: `RelationKind`, `ImpactAction`, `ACTION_RELATIONS`, and `summarize_impact`.
+- Produces: `ImpactAction.SCALE_DOWN` with the exact value `"scale_down"` and an immutable four-relation mapping used by the renderer and app.
+
+- [ ] **Step 1: Write the failing enum and mapping test**
+
+Replace the closed-set test and add explicit scale-down relation tests:
+
+```python
+def test_only_supported_writes_carry_action_semantics() -> None:
+    assert [action.value for action in ImpactAction] == [
+        "delete",
+        "rollout_restart",
+        "scale_down",
+    ]
+    assert set(ACTION_RELATIONS) == set(ImpactAction)
+    assert ACTION_RELATIONS[ImpactAction.SCALE_DOWN] == frozenset(
+        {
+            RelationKind.OWNED_BY,
+            RelationKind.MANAGED_BY,
+            RelationKind.SELECTS,
+            RelationKind.ROUTES_TO,
+        }
+    )
+    assert RelationKind.SELECTS not in ACTION_RELATIONS[ImpactAction.DELETE]
+    assert RelationKind.SELECTS not in ACTION_RELATIONS[ImpactAction.ROLLOUT_RESTART]
+    assert {
+        cast(RelationshipEdge, edge).relation for param in _DELETE_CASES for edge in param.values
+    } == ACTION_RELATIONS[ImpactAction.DELETE]
+
+
+@pytest.mark.parametrize(
+    "relation",
+    [
+        RelationKind.OWNED_BY,
+        RelationKind.MANAGED_BY,
+        RelationKind.SELECTS,
+        RelationKind.ROUTES_TO,
+    ],
+)
+def test_scale_down_follows_every_relation_in_its_closed_set(relation: RelationKind) -> None:
+    workload = _res("Deployment", "web", group="apps", uid="deploy-1")
+    dependent = _res("Pod", "web-abc-1", uid="pod-1")
+    summary = summarize_impact(
+        _graph(_edge(dependent, workload, relation, field="spec.selector")),
+        ImpactAction.SCALE_DOWN,
+        workload,
+    )
+    assert [item.resource for item in summary.direct] == [dependent]
+
+
+@pytest.mark.parametrize(
+    "relation",
+    [
+        RelationKind.USES_VOLUME,
+        RelationKind.USES_CONFIG,
+        RelationKind.PROTECTED_BY,
+        RelationKind.SCHEDULED_ON,
+        RelationKind.BOUND_TO,
+    ],
+)
+def test_scale_down_ignores_every_relation_outside_its_closed_set(
+    relation: RelationKind,
+) -> None:
+    workload = _res("Deployment", "web", group="apps", uid="deploy-1")
+    other = _res("PodDisruptionBudget", "web", group="policy", uid="other-1")
+    summary = summarize_impact(
+        _graph(_edge(other, workload, relation, field="spec.selector")),
+        ImpactAction.SCALE_DOWN,
+        workload,
+    )
+    assert summary.direct == ()
+    assert summary.transitive == ()
+```
+
+- [ ] **Step 2: Run the tests to verify RED**
+
+Run:
+
+```bash
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync pytest -p no:tach -q \
+  tests/core/test_impact.py::test_only_supported_writes_carry_action_semantics \
+  tests/core/test_impact.py::test_scale_down_follows_every_relation_in_its_closed_set \
+  tests/core/test_impact.py::test_scale_down_ignores_every_relation_outside_its_closed_set
+```
+
+Expected: collection or assertion failure because `ImpactAction.SCALE_DOWN` does not exist.
+
+- [ ] **Step 3: Implement the closed action mapping**
+
+Add the enum member and mapping:
+
+```python
+class ImpactAction(StrEnum):
+    DELETE = "delete"
+    ROLLOUT_RESTART = "rollout_restart"
+    SCALE_DOWN = "scale_down"
+
+
+_SCALE_DOWN_RELATIONS: frozenset[RelationKind] = frozenset(
+    {
+        RelationKind.OWNED_BY,
+        RelationKind.MANAGED_BY,
+        RelationKind.SELECTS,
+        RelationKind.ROUTES_TO,
+    }
+)
+
+
+ACTION_RELATIONS: Mapping[ImpactAction, frozenset[RelationKind]] = {
+    ImpactAction.DELETE: _DELETE_RELATIONS,
+    ImpactAction.ROLLOUT_RESTART: _ROLLOUT_RESTART_RELATIONS,
+    ImpactAction.SCALE_DOWN: _SCALE_DOWN_RELATIONS,
+}
+```
+
+Document beside `_SCALE_DOWN_RELATIONS` that selectors and routes are followed
+only to list conservative known dependents; this mapping does not assert
+endpoint loss or failure. Document why PDB, volume, config, node, and binding
+relations are excluded.
+
+- [ ] **Step 4: Verify GREEN and regression coverage**
+
+Run:
+
+```bash
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync pytest -p no:tach -q \
+  tests/core/test_impact.py
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync ruff check \
+  src/korvid/core/impact.py tests/core/test_impact.py
+```
+
+Expected: all `test_impact.py` tests pass and Ruff reports no errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/korvid/core/impact.py tests/core/test_impact.py
+git commit -m "feat(core): define scale-down impact semantics" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+```
+
+---
+
+### Task 2: Render scale-down limitations
+
+**Files:**
+- Modify: `src/korvid/ui/impact_preview.py:46-156`
+- Modify: `tests/ui/test_impact_preview.py`
+
+**Interfaces:**
+- Consumes: `ImpactSummary.action`, `ImpactSummary.target.kind`, and `ImpactAction.SCALE_DOWN`.
+- Produces: `_action_note_lines(summary: ImpactSummary) -> list[str]`, called by `render_impact_lines` after `ADVISORY_LINE` and before dependent sections.
+
+- [ ] **Step 1: Write exact failing renderer tests**
+
+Add constants to the import list and tests:
+
+```python
+def test_scale_down_names_the_action_and_static_limitations() -> None:
+    lines = render_impact_lines(
+        _summary(action=ImpactAction.SCALE_DOWN, target=_DEPLOY)
+    )
+    assert lines[:6] == (
+        IMPACT_TITLE,
+        "  scale down apps/Deployment/prod/web",
+        ADVISORY_LINE,
+        _SCALE_DOWN_PDB_LINE,
+        _SCALE_DOWN_HPA_LINE,
+        "  known direct dependents (may be affected): none in this snapshot",
+    )
+    assert _SCALE_DOWN_STS_PVC_LINE not in lines
+
+
+def test_statefulset_scale_down_names_the_unchecked_pvc_policy() -> None:
+    statefulset = GraphResource(
+        group="apps",
+        kind="StatefulSet",
+        namespace="prod",
+        name="db",
+        uid="sts-1",
+    )
+    lines = render_impact_lines(
+        _summary(action=ImpactAction.SCALE_DOWN, target=statefulset)
+    )
+    assert lines.index(_SCALE_DOWN_STS_PVC_LINE) == lines.index(_SCALE_DOWN_HPA_LINE) + 1
+
+
+@pytest.mark.parametrize("action", [ImpactAction.DELETE, ImpactAction.ROLLOUT_RESTART])
+def test_non_scale_actions_never_render_scale_down_limitations(action: ImpactAction) -> None:
+    lines = render_impact_lines(_summary(action=action))
+    assert _SCALE_DOWN_PDB_LINE not in lines
+    assert _SCALE_DOWN_HPA_LINE not in lines
+    assert _SCALE_DOWN_STS_PVC_LINE not in lines
+```
+
+- [ ] **Step 2: Run the tests to verify RED**
+
+Run:
+
+```bash
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync pytest -p no:tach -q \
+  tests/ui/test_impact_preview.py -k "scale_down or non_scale_actions"
+```
+
+Expected: import/attribute failure because the scale-down constants and action
+label do not exist.
+
+- [ ] **Step 3: Implement bounded machine-defined notes**
+
+Add:
+
+```python
+_SCALE_DOWN_PDB_LINE = (
+    "  controller scale-down is not an Eviction API request;"
+    " PodDisruptionBudgets do not gate it"
+)
+_SCALE_DOWN_HPA_LINE = (
+    "  HorizontalPodAutoscaler targeting and reconciliation are not evaluated"
+)
+_SCALE_DOWN_STS_PVC_LINE = "  StatefulSet PVC retention policy is not evaluated"
+
+_ACTION_LABEL = {
+    ImpactAction.DELETE: "delete",
+    ImpactAction.ROLLOUT_RESTART: "rollout restart",
+    ImpactAction.SCALE_DOWN: "scale down",
+}
+
+
+def _action_note_lines(summary: ImpactSummary) -> list[str]:
+    if summary.action is not ImpactAction.SCALE_DOWN:
+        return []
+    lines = [_SCALE_DOWN_PDB_LINE, _SCALE_DOWN_HPA_LINE]
+    if summary.target.kind == "StatefulSet":
+        lines.append(_SCALE_DOWN_STS_PVC_LINE)
+    return lines
+```
+
+Wire it after the advisory:
+
+```python
+lines.append(ADVISORY_LINE)
+lines.extend(_action_note_lines(summary))
+lines.extend(_section(_DIRECT_TITLE, summary.direct, capped=capped))
+```
+
+All three lines are machine-defined ASCII and still pass through the final
+`_bounded` call.
+
+- [ ] **Step 4: Verify GREEN and renderer invariants**
+
+Run:
+
+```bash
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync pytest -p no:tach -q \
+  tests/ui/test_impact_preview.py tests/ui/test_confirm_screen.py
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync ruff check \
+  src/korvid/ui/impact_preview.py tests/ui/test_impact_preview.py
+```
+
+Expected: all renderer and confirmation tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/korvid/ui/impact_preview.py tests/ui/test_impact_preview.py
+git commit -m "feat(ui): explain scale-down preview limits" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+```
+
+---
+
+### Task 3: Wire scale-down into the scale flow
+
+**Files:**
+- Modify: `src/korvid/ui/app.py:5680-5761`
+- Modify: `tests/ui/test_impact_flow.py:81-386`
+- Modify: `tests/ui/test_impact_flow.py:650-730`
+
+**Interfaces:**
+- Consumes: `_WriteOrigin`, `_impact_preview`, `_write_identity_intact`, `ImpactAction.SCALE_DOWN`, `ReplicasPrompt`, and the existing `_push_write_confirmation`.
+- Produces: `_is_scale_down(current: int | None, replicas: int) -> bool` and an `_confirm_scale(..., origin: _WriteOrigin)` flow that passes optional `impact_lines`.
+
+- [ ] **Step 1: Extend the flow harness before writing production code**
+
+Make `_deployment` accept a desired count:
+
+```python
+def _deployment(name: str, uid: str, *, desired: int | None = 3) -> GenericSummary:
+    return GenericSummary(
+        name=name,
+        namespace="prod",
+        kind="Deployment",
+        created="",
+        desired=desired,
+        uid=uid,
+    )
+```
+
+Add a scale preview fake so dry-run hooks and order assertions are real:
+
+```python
+async def preview_scale(
+    self,
+    meta: ResourceMeta,
+    namespace: str | None,
+    name: str,
+    replicas: int,
+    *,
+    uid: str | None = None,
+) -> list[str] | None:
+    self._order.append("preview")
+    self._preview_hook()
+    return [f"~ spec.replicas: {replicas}"]
+```
+
+Add an Ingress helper whose declared `ROUTES_TO` reference targets the Service:
+
+```python
+def _ingress() -> GenericSummary:
+    return GenericSummary(
+        name="web",
+        namespace="prod",
+        kind="Ingress",
+        created="",
+        uid="ing-1",
+        relationships=RelationshipFacts(
+            api_group="networking.k8s.io",
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.ROUTES_TO,
+                    target=TargetReference(
+                        group="",
+                        kind="Service",
+                        namespace="prod",
+                        name="web",
+                        uid="svc-1",
+                    ),
+                    confidence=FactConfidence.DECLARED,
+                    field="spec.rules[0].http.paths[0].backend.service",
+                ),
+            ),
+        ),
+    )
+```
+
+- [ ] **Step 2: Write failing activation and traversal tests**
+
+Replace the old unsupported-scale test with:
+
+```python
+async def test_scale_down_dialog_shows_controller_and_routing_dependents(
+    tmp_path: Path,
+) -> None:
+    rows = {
+        "pods": [_pod()],
+        "deployments": [_deployment("web", "deploy-1")],
+        "replicasets": [_replicaset()],
+        "services": [_service()],
+        "ingresses": [_ingress()],
+    }
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(
+            pilot,
+            lambda: isinstance(env.app.screen, ReplicasPrompt),
+            label="replicas prompt",
+        )
+        await pilot.press("1")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: isinstance(env.app.screen, ConfirmScreen),
+            label="scale-down confirm",
+        )
+        text = impact_text(env.app)
+        assert "scale down apps/Deployment/prod/web" in text
+        assert "apps/ReplicaSet/prod/web-abc" in text
+        assert "Pod/prod/web-abc-1" in text
+        assert "Service/prod/web" in text
+        assert "networking.k8s.io/Ingress/prod/web" in text
+        assert "may be affected" in text
+        assert "will fail" not in text
+        assert env.ops.calls == []
+
+
+@pytest.mark.parametrize(
+    ("desired", "requested"),
+    [(3, 5), (3, 3), (None, 1)],
+)
+async def test_non_decreasing_or_unknown_scale_never_loads_relationships(
+    tmp_path: Path,
+    desired: int | None,
+    requested: int,
+) -> None:
+    rows = {"deployments": [_deployment("web", "deploy-1", desired=desired)]}
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(env.app.screen, ReplicasPrompt))
+        for char in str(requested):
+            await pilot.press(char)
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(env.app.screen, ConfirmScreen))
+        assert not env.app.screen.query(".confirm-impact")
+        assert env.lister.calls == []
+```
+
+Run RED:
+
+```bash
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync pytest -p no:tach -q \
+  tests/ui/test_impact_flow.py -k "scale_down_dialog or non_decreasing_or_unknown"
+```
+
+Expected: scale-down has no impact section; the negative cases remain green.
+
+- [ ] **Step 3: Write failing origin and scope race tests**
+
+Follow the existing delete/restart split-pane helpers. Add one test that moves
+focus to a second pane selecting the same UID during `preview_scale`, and one
+that changes the originating pane scope during the impact LIST:
+
+```python
+async def test_scale_down_focus_move_to_same_object_aborts_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+        env.lister.on_first_call = app._focus_other_pane
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal(app, pilot, "scale-down pane refusal")
+        assert app._pane is not origin
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        assert _namespaced_list_scopes(env) == {"prod"}
+
+
+async def test_scale_down_scope_change_on_origin_aborts_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+
+        def widen_the_origin_pane() -> None:
+            origin.scope = ALL_NAMESPACES
+
+        env.lister.on_first_call = widen_the_origin_pane
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal(app, pilot, "scale-down scope refusal")
+        assert app._pane is origin
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        assert _namespaced_list_scopes(env) == {"prod"}
+```
+
+Add a UID-loss case beside the existing delete/restart cases:
+
+```python
+async def test_scale_down_uid_loss_during_impact_load_aborts_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+
+    def drop_the_uid() -> None:
+        app.store.apply_event(
+            app.current_kind,
+            app.current_scope,
+            "MODIFIED",
+            _deployment("web", ""),
+        )
+
+    env.lister.on_first_call = drop_the_uid
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal(app, pilot, "scale-down uid refusal")
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+```
+
+- [ ] **Step 4: Implement activation, capture, and final identity gate**
+
+Add:
+
+```python
+@staticmethod
+def _is_scale_down(current: int | None, replicas: int) -> bool:
+    return current is not None and replicas < current
+```
+
+Capture values before the permission await:
+
+```python
+meta, ns, name, uid = target
+if (meta.group, meta.plural) not in self._SCALABLE:
+    ...
+origin = self._write_origin()
+epoch = self._ctx_epoch
+kind_alias = self._canonical_kind(self.current_kind)
+current = self._current_replicas(ns, name)
+if not await self._precheck_keybinding_write("scale", meta, ns, name):
+    return
+if not self._write_identity_intact(
+    "scale",
+    meta,
+    ns,
+    name,
+    uid,
+    phase="the permission check",
+    epoch=epoch,
+    origin=origin,
+):
+    return
+```
+
+Pass `origin` through the callback:
+
+```python
+self.run_worker(
+    self._confirm_scale(
+        meta,
+        ns,
+        name,
+        uid,
+        current,
+        replicas,
+        epoch,
+        kind_alias,
+        origin,
+    )
+)
+```
+
+Extend the method signature:
+
+```python
+async def _confirm_scale(
+    self,
+    meta: ResourceMeta,
+    ns: str | None,
+    name: str,
+    uid: str | None,
+    current: int | None,
+    replicas: int,
+    epoch: int,
+    kind_alias: str,
+    origin: _WriteOrigin,
+) -> None:
+```
+
+Load impact only for a known decrease and perform one exact final gate:
+
+```python
+preview = await self._dry_run_preview(
+    ops.preview_scale(meta, ns, name, replicas, uid=uid)
+)
+note = await self._managed_note(kind_alias, ns, name)
+is_scale_down = self._is_scale_down(current, replicas)
+impact = (
+    await self._impact_preview(
+        ImpactAction.SCALE_DOWN,
+        meta,
+        ns,
+        name,
+        uid,
+        origin=origin,
+    )
+    if is_scale_down
+    else None
+)
+phase = "the impact summary" if is_scale_down else "the dry-run preview"
+if not self._write_identity_intact(
+    "scale",
+    meta,
+    ns,
+    name,
+    uid,
+    phase=phase,
+    epoch=epoch,
+    origin=origin,
+):
+    return
+```
+
+Pass `impact_lines=impact` to `_push_write_confirmation`. Do not add a new
+loader, bridge, or composition-root parameter.
+
+- [ ] **Step 5: Verify flow GREEN**
+
+Run:
+
+```bash
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync pytest -p no:tach -q \
+  tests/ui/test_impact_flow.py tests/ui/test_split_pane.py
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync ruff check \
+  src/korvid/ui/app.py tests/ui/test_impact_flow.py
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync mypy src/korvid/ui/app.py
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync tach check
+```
+
+Expected: all selected tests pass; Ruff, mypy, and tach are clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/korvid/ui/app.py tests/ui/test_impact_flow.py
+git commit -m "feat(ui): preview workload scale-down impact" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+```
+
+---
+
+### Task 4: Pin scale-down security and cancellation
+
+**Files:**
+- Modify: `tests/ui/test_impact_security.py`
+
+**Interfaces:**
+- Consumes: `ImpactEnv`, `RecordingLister`, `RecordingOps`, `ConfirmScreen`, `ReplicasPrompt`, and the final scale flow from Task 3.
+- Produces: regression coverage proving the scale-down integration cannot weaken approval, RBAC, audit, UID, or cancellation behavior.
+
+- [ ] **Step 1: Add a reusable real-flow helper**
+
+In `test_impact_security.py`, add:
+
+```python
+from unittest import mock
+
+from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
+
+
+async def _open_scale_down(pilot: Any, replicas: int = 1) -> None:
+    await to_view(pilot, "deploy", expect="web")
+    await pilot.press("S")
+    await until(
+        pilot,
+        lambda: isinstance(pilot.app.screen, ReplicasPrompt),
+        label="replicas prompt",
+    )
+    for char in str(replicas):
+        await pilot.press(char)
+    await pilot.press("enter")
+```
+
+Use the real keybinding and modal callback; do not call `_confirm_scale`
+directly.
+
+- [ ] **Step 2: Write failing decline and audit tests**
+
+```python
+async def test_declined_scale_down_with_impact_runs_no_operation(tmp_path: Path) -> None:
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    async with env.app.run_test() as pilot:
+        await _open_scale_down(pilot)
+        await until(pilot, lambda: isinstance(env.app.screen, ConfirmScreen))
+        assert env.app.screen.query(".confirm-impact")
+        await pilot.press("n")
+        await until(pilot, lambda: len(env.app.screen_stack) == 1)
+        assert env.ops.calls == []
+
+
+async def test_scale_down_audit_failure_blocks_operation_factory(
+    tmp_path: Path,
+) -> None:
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.mkdir()
+    env = ImpactEnv(audit_path)
+    blocked = "scale deployments/web blocked: audit log unavailable"
+    async with env.app.run_test() as pilot:
+        await _open_scale_down(pilot)
+        await until(pilot, lambda: isinstance(env.app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any(str(note.message) == blocked for note in env.app._notifications),
+            label="scale-down audit refusal",
+        )
+        await until(
+            pilot,
+            lambda: env.app._active_cluster_writes == 0,
+            label="scale-down write worker finished",
+        )
+        assert env.ops.calls == []
+        assert list(audit_path.iterdir()) == []
+```
+
+Run RED and confirm failures occur because scale-down has no impact section or
+the test harness needs the Task 3 wiring, not because the helper fails to open
+the prompt.
+
+- [ ] **Step 3: Add cancellation tests**
+
+Cancel the Textual worker created by the real prompt callback:
+
+```python
+async def test_cancelling_scale_down_during_impact_load_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    env.lister.delay = 60.0
+    reservations_during_load: list[int] = []
+    env.lister.on_first_call = lambda: reservations_during_load.append(
+        env.app._active_cluster_writes
+    )
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(env.app.screen, ReplicasPrompt))
+        original_run_worker = env.app.run_worker
+        started: list[Any] = []
+
+        def record_worker(awaitable: Any, *args: Any, **kwargs: Any) -> Any:
+            worker = original_run_worker(awaitable, *args, **kwargs)
+            started.append(worker)
+            return worker
+
+        with mock.patch.object(env.app, "run_worker", side_effect=record_worker):
+            await pilot.press("1")
+            await pilot.press("enter")
+        await until(pilot, lambda: env.lister.calls != [], label="scale impact listing")
+        assert len(started) == 1
+        started[0].cancel()
+        await until(pilot, lambda: started[0].is_cancelled, label="scale worker cancelled")
+        assert not isinstance(env.app.screen, ConfirmScreen)
+        assert len(env.app.screen_stack) == 1
+        assert reservations_during_load == [0]
+        assert env.app._active_cluster_writes == 0
+        assert env.ops.calls == []
+        assert not audit_path.exists()
+
+
+async def test_cancelled_scale_snapshot_is_not_an_unavailable_confirmation(
+    tmp_path: Path,
+) -> None:
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    env.lister.errors["deployments"] = asyncio.CancelledError()
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(env.app.screen, ReplicasPrompt))
+        original_run_worker = env.app.run_worker
+        started: list[Any] = []
+
+        def record_worker(awaitable: Any, *args: Any, **kwargs: Any) -> Any:
+            worker = original_run_worker(awaitable, *args, **kwargs)
+            started.append(worker)
+            return worker
+
+        with mock.patch.object(env.app, "run_worker", side_effect=record_worker):
+            await pilot.press("1")
+            await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: len(started) == 1 and started[0].is_cancelled,
+            label="scale worker observed loader cancellation",
+        )
+        assert env.lister.calls != []
+        assert not isinstance(env.app.screen, ConfirmScreen)
+        assert len(env.app.screen_stack) == 1
+        assert not env.app.screen.query(".confirm-impact")
+        assert env.app._active_cluster_writes == 0
+        assert env.ops.calls == []
+        assert not audit_path.exists()
+```
+
+- [ ] **Step 4: Add RBAC and UID refusal tests**
+
+Make `ImpactEnv` accept a `permission: bool = True` constructor argument and
+have its `check_permission` fake return that value. Add:
+
+```python
+async def test_scale_down_rbac_denial_never_loads_or_confirms(tmp_path: Path) -> None:
+    env = ImpactEnv(tmp_path / "audit.jsonl", permission=False)
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(
+            pilot,
+            lambda: any("not permitted" in note.message for note in env.app._notifications),
+            label="scale RBAC denial",
+        )
+        assert env.lister.calls == []
+        assert env.ops.calls == []
+        assert len(env.app.screen_stack) == 1
+```
+
+The UID-loss integration case is owned by Task 3 beside the other
+origin/identity flow tests. Do not duplicate it here and do not weaken
+`_write_identity_intact`.
+
+- [ ] **Step 5: Verify security GREEN**
+
+Run:
+
+```bash
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync pytest -p no:tach -q \
+  tests/ui/test_impact_security.py tests/ui/test_impact_flow.py \
+  tests/ui/test_write_ops.py tests/ui/test_write_confirm_characterization.py
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync ruff check \
+  tests/ui/test_impact_security.py tests/ui/test_impact_flow.py
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync ruff format --check \
+  tests/ui/test_impact_security.py tests/ui/test_impact_flow.py
+```
+
+Expected: all selected tests pass with no warnings.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add tests/ui/test_impact_security.py tests/ui/test_impact_flow.py
+git commit -m "test(ui): secure scale-down impact previews" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+```
+
+---
+
+### Task 5: Document, review, and validate the complete slice
+
+**Files:**
+- Modify: `docs/tui.md`
+- Modify: `docs/dev/plans/2026-08-16-scale-down-impact-preview.md` only for verified implementation deviations
+- Verify unchanged: `pyproject.toml`
+- Verify unchanged: `uv.lock`
+
+**Interfaces:**
+- Consumes: the final UI wording and activation behavior from Tasks 1-4.
+- Produces: user documentation, a synchronized authoritative plan, and complete local verification evidence.
+
+- [ ] **Step 1: Update user documentation**
+
+In the write-preview section of `docs/tui.md`, state:
+
+- impact advisories cover delete, rollout restart, and known workload
+  scale-down;
+- scale-up, no-op, and unknown-current-count confirmations intentionally omit
+  the graph section and make no snapshot reads;
+- scale-down follows owner/manager, Service selector, EndpointSlice, and
+  Ingress/Gateway routing relationships conservatively;
+- PDBs do not gate controller scale-down;
+- HPA targeting/reconciliation is not evaluated;
+- StatefulSet PVC retention is not evaluated;
+- the advisory never predicts zero endpoints or failure and never replaces
+  dry-run or approval.
+
+- [ ] **Step 2: Verify documentation and plan consistency**
+
+Run:
+
+```bash
+rg -n "scale.down|PodDisruptionBudget|HorizontalPodAutoscaler|PVC retention|SELECTS|ROUTES_TO" \
+  docs/tui.md docs/dev/specs/2026-08-16-scale-down-impact-preview-design.md \
+  docs/dev/plans/2026-08-16-scale-down-impact-preview.md \
+  src/korvid/core/impact.py src/korvid/ui/impact_preview.py
+```
+
+Expected: the action name, activation boundary, relation set, and limitation
+wording agree. No unfinished marker or stale statement that only
+delete/restart are supported remains in the touched feature docs/tests.
+
+- [ ] **Step 3: Run targeted formatting and static checks**
+
+Run:
+
+```bash
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync ruff check \
+  src/korvid/core/impact.py src/korvid/ui/impact_preview.py src/korvid/ui/app.py \
+  tests/core/test_impact.py tests/ui/test_impact_preview.py \
+  tests/ui/test_impact_flow.py tests/ui/test_impact_security.py
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync ruff format --check \
+  src/korvid/core/impact.py src/korvid/ui/impact_preview.py src/korvid/ui/app.py \
+  tests/core/test_impact.py tests/ui/test_impact_preview.py \
+  tests/ui/test_impact_flow.py tests/ui/test_impact_security.py
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync mypy
+UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync tach check
+```
+
+Expected: every command exits zero.
+
+- [ ] **Step 4: Run the full gate**
+
+Run:
+
+```bash
+UV_NO_SYNC=1 UV_FROZEN=1 make check
+```
+
+Expected: Ruff, mypy, pytest, and tach all pass. Record the exact pass/skip
+count in the SDD progress ledger.
+
+- [ ] **Step 5: Verify repository hygiene**
+
+Run:
+
+```bash
+git diff --exit-code origin/main...HEAD -- pyproject.toml uv.lock
+git status --short
+```
+
+Expected: no dependency or lock-file diff and no unstaged changes.
+
+- [ ] **Step 6: Commit documentation**
+
+```bash
+git add docs/tui.md docs/dev/plans/2026-08-16-scale-down-impact-preview.md
+git commit -m "docs: explain workload scale-down impact previews" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+```
+
+- [ ] **Step 7: Request final review**
+
+Generate a review package from `git merge-base origin/main HEAD` through
+`HEAD`, dispatch the `requesting-code-review` reviewer on the most capable
+available model, fix every Critical/Important finding with TDD, and re-review
+until both spec compliance and code quality pass.
