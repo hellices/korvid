@@ -744,12 +744,12 @@ Pass `impact_lines=impact` to `_push_write_confirmation`. Do not add a new
 loader, bridge, or composition-root parameter.
 
 > **Verified implementation deviation (recorded in the final re-review
-> round, extended by the PR #296 review): the shipped flow performs four
+> round, extended by the PR #296 review): the shipped flow performs five
 > gates, not two, and each compares the captured replica count as well as
 > the identity.** The snippet above places a single gate in
 > `_confirm_scale`, *after* the impact load, whose `phase` label switches
 > between `"the impact summary"` and `"the dry-run preview"`.
-> `src/korvid/ui/app.py` instead calls `_scale_context_intact` four times.
+> `src/korvid/ui/app.py` instead calls `_scale_context_intact` five times.
 > That helper composes `_write_identity_intact` (context epoch, focused
 > pane identity and scope, selected resource identity, exact UID) with
 > equality of the latest `_current_replicas(ns, name)` and the `current`
@@ -768,7 +768,20 @@ loader, bridge, or composition-root parameter.
 > 4. `_confirm_scale`, after the impact summary and **before**
 >    `ConfirmScreen` is mounted (`phase="the impact summary"`), guarded by
 >    `is_scale_down` because the snapshot load is the only awaited gap it
->    covers.
+>    covers;
+> 5. on approval, as the `approval_guard` `_confirm_scale` hands
+>    `_push_write_confirmation` (`phase="the confirmation dialog"`) — the
+>    dialog is the flow's longest awaited gap, since it stays open until the
+>    user answers, and gate 5 runs after it is dismissed and **before** the
+>    `_run_write` worker exists, so before the write reservation, the intent
+>    audit record and the operation factory. It fires only on a fresh
+>    keystroke approval, so it can only refuse an approval the user gave and
+>    never becomes a second path to the write, and it is deferred by one
+>    event-loop iteration because Textual invokes a screen's result callback
+>    before it pops the dismissed screen (run inline, the selection check
+>    would see the confirmation itself still on the screen stack).
+>    `approval_guard` defaults to `None`, so every other write flow keeps
+>    the callback it had.
 >
 > The count is gated because a scale is the one write whose *meaning* is
 > not fixed by its identity: the same requested number is a decrease or an
@@ -782,15 +795,20 @@ loader, bridge, or composition-root parameter.
 > equality and cancels with its own banner (`the desired replica count
 > changed during <phase>`).
 >
-> A scale that is not a known decrease therefore has gates 1–3 and no
-> impact LIST at all. This is strictly stronger than the snippet — the
-> pre-prompt gate, the post-prompt gate, the pre-LIST gate and the count
+> A scale that is not a known decrease therefore has gates 1–3 and 5, and
+> no impact LIST at all; only gate 4 is conditional on the classification.
+> This is strictly stronger than the snippet — the pre-prompt gate, the
+> post-prompt gate, the pre-LIST gate, the post-approval gate and the count
 > comparison are all new awaited-gap coverage — and it changes no cap,
 > relation set, activation boundary, or write path.
 > `tests/ui/test_impact_flow.py` and `tests/ui/test_impact_security.py` pin
 > each gate (identity *and* count drift during the permission round trip,
-> during the count prompt, during the dry-run preview, and during the
-> impact load), and
+> during the count prompt, during the dry-run preview, during the impact
+> load, and while the confirmation dialog is open),
+> `test_scale_replica_drift_during_the_prompt_never_previews_or_lists` and
+> `test_scale_replica_drift_during_the_dry_run_never_loads_relationships`
+> are parametrized over a requested decrease *and* a requested increase so
+> that moving either unconditional gate under `is_scale_down` fails, and
 > `test_non_decreasing_or_unknown_scale_never_loads_relationships` pins that
 > the non-decrease shapes issue no LIST.
 

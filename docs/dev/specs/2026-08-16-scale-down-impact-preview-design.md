@@ -164,7 +164,7 @@ The action captures `_WriteOrigin`, target metadata, namespace, name, UID,
 context epoch, kind alias, and current replica count before opening
 `ReplicasPrompt`.
 
-The flow performs **four** scale-context gates. Every gate re-checks the
+The flow performs **five** scale-context gates. Every gate re-checks the
 context epoch, focused pane identity and scope, selected resource identity,
 exact UID, and the desired replica count captured with the target:
 
@@ -175,7 +175,15 @@ exact UID, and the desired replica count captured with the target:
 3. after the server-side dry-run preview and the managed-resource note, and
    **before** any impact LIST, so a doomed scale never spends the snapshot
    fan-out nor scopes it to a pane the user has left;
-4. after the impact summary and **before** `ConfirmScreen` is mounted.
+4. after the impact summary and **before** `ConfirmScreen` is mounted;
+5. after the user approves at `ConfirmScreen` and **before** the write worker
+   exists — so before the write reservation, the intent audit record, and the
+   operation factory. `ConfirmScreen` is the flow's longest awaited gap: it
+   stays open until the user answers, and everything gate 4 compared can move
+   while it does. The gate runs only on a fresh keystroke approval, so it can
+   only refuse an approval the user gave and never becomes a second path to
+   the write, and it is deferred by one event-loop iteration because Textual
+   invokes a screen's result callback before it pops the dismissed screen.
 
 A same-UID change to `spec.replicas` is drift too: it can turn the requested
 count from a decrease into an increase or make the displayed `old -> new`
@@ -193,16 +201,20 @@ So the worker, after the user chooses a replica count:
 6. runs gate 4, which is performed only for a known decrease — the one
    awaited gap it guards is the snapshot load;
 7. opens `ConfirmScreen` with the dry-run, managed note, and optional impact
-   lines.
+   lines;
+8. on approval, runs gate 5 and only then launches the write.
 
-A scale that is not a known decrease therefore has gates 1, 2, and 3 and no
-impact LIST at all: it keeps the pre-#295 absence of a snapshot fan-out
+A scale that is not a known decrease therefore has gates 1, 2, 3, and 5 and
+no impact LIST at all: it keeps the pre-#295 absence of a snapshot fan-out
 while gaining the stronger gates, which previously re-checked only
-kind, namespace, name and the context epoch.
+kind, namespace, name and the context epoch. Only gate 4 is conditional on
+the decrease classification, because the snapshot load is the only awaited
+gap it guards.
 
 No await occurs between the final identity/origin gate and mounting the
-confirmation screen. The write still runs only through the existing approval,
-reservation, UID-precondition, audit, and operation path.
+confirmation screen, nor between gate 5 and the write. The write still runs
+only through the existing approval, reservation, UID-precondition, audit, and
+operation path.
 
 ## Failure and cancellation behavior
 
@@ -212,9 +224,13 @@ The impact section remains advisory:
   static unavailable advisory and does not bypass approval;
 - `asyncio.CancelledError` propagates rather than becoming an unavailable
   preview;
-- origin, context, selection, or UID drift cancels before confirmation;
+- origin, context, selection, or UID drift cancels before confirmation, and
+  drift that only lands while the confirmation is open cancels at gate 5,
+  after the dialog is dismissed and before anything is reserved or written;
 - cancellation or drift creates no confirmation, write reservation, write
-  operation, or audit entry;
+  operation, or audit entry — gate 5's refusal comes after a confirmation
+  the user already saw and answered, so it leaves the same nothing behind
+  except that dialog;
 - RBAC denial and dry-run failure retain their existing behavior;
 - audit failure remains fail-closed.
 
@@ -251,11 +267,17 @@ Textual flow and security tests cover:
 - scale-up, no-op, and unknown-current-count paths make no snapshot calls;
 - origin-pane focus and scope changes across the prompt and impact load;
 - context change, selection change, UID replacement, and UID loss;
+- identity, pane, scope, and replica-count drift landing while
+  `ConfirmScreen` is open, refused at gate 5 on approval;
+- the replica-count gates before the dry run and before the impact LIST
+  refusing an increase as well as a decrease, since neither is conditional
+  on the decrease classification;
 - timeout and loader/render failure;
 - external and loader-raised cancellation;
 - approval decline, RBAC denial, dry-run failure, and audit failure;
 - no confirmation, reservation, operation, or audit entry after cancellation
-  or identity drift.
+  or identity drift — and no reservation, operation, or audit entry when the
+  drift is only caught at gate 5.
 
 ## Documentation
 

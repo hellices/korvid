@@ -353,13 +353,18 @@ loads the snapshot and summarizes it.
 Whether the request is a decrease is decided from the desired count read
 off the row *before* the permission check, and that number is re-checked at
 every awaited step of the flow — after the permission check, after the
-replica prompt closes, after the dry run, and after the snapshot. If a
+replica prompt closes, after the dry run, after the snapshot, and once more
+after you approve, before anything is reserved, audited or written. If a
 controller, an autoscaler or another operator moves `spec.replicas`
 meanwhile, the scale is cancelled with `the desired replica count changed
 during …` and no dialog opens: the same request could otherwise be offered
 as a decrease that is now an increase, under an approval line reading
 `replicas <old> -> <new>` for a count the object no longer has. A row that
-had no readable count and gains one mid-flow is the same case.
+had no readable count and gains one mid-flow is the same case. The last
+check is what covers the longest gap of all — the confirmation dialog stays
+open until you answer it — so drift that lands while you are reading the
+dialog cancels the write instead of executing it; that one is reported
+after the dialog closes, since the dialog was already shown.
 
 A scale-down follows a different, still closed relation set than delete and
 rollout restart: `owned_by` and `managed_by` (the same controller/selector
