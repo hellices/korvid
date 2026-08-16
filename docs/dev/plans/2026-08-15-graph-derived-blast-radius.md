@@ -2830,7 +2830,8 @@ _IMPACT_LINES = (
     "graph-derived impact (advisory):",
     "  delete apps/Deployment/prod/web",
     "  known direct dependents (may be affected): 1",
-    "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]",
+    "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at"
+    " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]",
     "  graph coverage: complete",
 )
 
@@ -3470,8 +3471,8 @@ async def test_delete_dialog_shows_direct_and_transitive_dependents(tmp_path: Pa
         assert "delete apps/Deployment/prod/web" in text
         assert "known direct dependents (may be affected): 1" in text
         assert (
-            "apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]"
-            in text
+            "apps/ReplicaSet/prod/web-abc via owned_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]" in text
         )
         assert "known transitive dependents (may be affected): 1" in text
         assert "Pod/prod/web-abc-1 via owned_by (declared)" in text
@@ -3524,7 +3525,7 @@ async def test_rollout_restart_warns_about_an_unresolved_config_reference(tmp_pa
         assert "unresolved references in the affected set: 1" in text
         assert (
             "Pod/prod/web-abc-1 uses_config (declared) -> ConfigMap/prod/app-config (missing)"
-            " at spec.volumes[0].configMap" in text
+            " at Pod/prod/web-abc-1: spec.volumes[0].configMap" in text
         )
         assert env.ops.calls == []
 
@@ -3547,8 +3548,11 @@ async def test_deleting_a_cluster_scoped_node_covers_every_namespace(tmp_path: P
         text = impact_text(env.app)
         assert "delete Node/worker-1" in text
         assert "known direct dependents (may be affected): 2" in text
-        assert "Pod/prod/web-1 via scheduled_on (observed) at spec.nodeName" in text
-        assert "Pod/staging/api-1 via scheduled_on (observed) at spec.nodeName" in text
+        assert "Pod/prod/web-1 via scheduled_on (observed) at Pod/prod/web-1: spec.nodeName" in text
+        assert (
+            "Pod/staging/api-1 via scheduled_on (observed) at Pod/staging/api-1: spec.nodeName"
+            in text
+        )
         assert "scope: all namespaces" in text
         assert "scope: prod" not in text
         assert ("pods", None) in env.lister.calls
@@ -4296,8 +4300,8 @@ async def test_no_secret_value_or_manifest_content_reaches_the_dialog(tmp_path: 
         text = impact_text(env.app)
         assert "delete Secret/prod/db" in text
         assert (
-            "Pod/prod/web-abc-1 via uses_config (declared) at spec.volumes[0].secret.secretName"
-            in text
+            "Pod/prod/web-abc-1 via uses_config (declared) at"
+            " Pod/prod/web-abc-1: spec.volumes[0].secret.secretName" in text
         )
         for leak in ("stringData", "data:", "apiVersion", "kind: Secret"):
             assert leak not in text
@@ -4391,9 +4395,9 @@ one?
       delete apps/Deployment/prod/web
       advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
       known direct dependents (may be affected): 1 or more
-        - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]
+        - apps/ReplicaSet/prod/web-abc via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]
       known transitive dependents (may be affected): 1 or more
-        - Pod/prod/web-abc-1 via owned_by (declared) at metadata.ownerReferences[0] -> owned_by (declared) at metadata.ownerReferences[0]
+        - Pod/prod/web-abc-1 via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0] -> owned_by (declared) at Pod/prod/web-abc-1: metadata.ownerReferences[0]
       additional known paths: 1 or more (already-listed dependents reached again)
       scope: prod
       graph coverage: incomplete - a missing dependent here does not prove none exists
@@ -4419,7 +4423,17 @@ Reading it:
 
 - **direct** dependents are one hop from the target, **transitive** are two
   or more; each line names the relation, how the fact was derived, and the
-  manifest field it came from.
+  resource and manifest field the evidence came from — for a
+  selector-derived `managed_by`/`protected_by` hop that resource is the
+  Deployment/PDB that declared `spec.selector`, not the Pod it matched.
+- Each hop's evidence resource and field are individually bounded, but the
+  whole composed line is still capped at 240 characters, because a path
+  line concatenates up to three rendered hops onto it. On a long enough
+  path, a later hop can therefore be visibly cut with `...` even though
+  neither of its own fragments was near its own bound. This is a deliberate
+  trade-off to keep an approval line readable in a 70-column modal rather
+  than one that silently wraps or scrolls; `[inferred]` has room reserved
+  ahead of that cap, so it always survives it.
 - `additional known paths` counts relationships that reach a dependent
   already listed above (a second route, a second mount). They are counted
   rather than repeated, so a count of dependents is never inflated.
@@ -4526,6 +4540,18 @@ listed once, with the first path that reached it; further paths to the same
 dependent are counted as `additional known paths`), bounded to 3 hops and 50
 resources, and classifies a genuine loop as a cycle rather than expanding it
 twice.
+
+Each rendered hop names both halves of its evidence — the resource an edge's
+evidence came from and the field path on it — and each is individually
+length-bounded before the line is composed. The composed line is then capped
+again at 240 characters, because a path line concatenates up to three
+rendered hops onto it: a hop late in a long path can still be the part
+visibly cut with `...` even though neither of its own fragments approached
+its own bound. This is an accepted trade-off, not a defect — an approval
+dialog is a 70-column modal, so a line that stays reviewable at a glance
+matters more than showing every hop of a deep path in full — and the
+`[inferred]` marker's width is reserved ahead of that cap, so it survives
+the cut whichever hop it fell on.
 
 The snapshot's own scope is the pane's namespace for a namespaced target, and
 every namespace for a cluster-scoped one such as a Node or PersistentVolume

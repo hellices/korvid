@@ -402,6 +402,18 @@ dependent are counted as `additional known paths`), bounded to 3 hops and 50
 resources, and classifies a genuine loop as a cycle rather than expanding it
 twice.
 
+Each rendered hop names both halves of its evidence — the resource an edge's
+evidence came from and the field path on it — and each is individually
+length-bounded before the line is composed. The composed line is then capped
+again at 240 characters, because a path line concatenates up to three
+rendered hops onto it: a hop late in a long path can still be the part
+visibly cut with `...` even though neither of its own fragments approached
+its own bound. This is an accepted trade-off, not a defect — an approval
+dialog is a 70-column modal, so a line that stays reviewable at a glance
+matters more than showing every hop of a deep path in full — and the
+`[inferred]` marker's width is reserved ahead of that cap, so it survives
+the cut whichever hop it fell on.
+
 The snapshot's own scope is the pane's namespace for a namespaced target, and
 every namespace for a cluster-scoped one such as a Node or PersistentVolume
 (or when the pane is already showing all namespaces) — so a dependent in

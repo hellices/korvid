@@ -242,6 +242,14 @@ Reading it:
   resource and manifest field the evidence came from — for a
   selector-derived `managed_by`/`protected_by` hop that resource is the
   Deployment/PDB that declared `spec.selector`, not the Pod it matched.
+- Each hop's evidence resource and field are individually bounded, but the
+  whole composed line is still capped at 240 characters, because a path
+  line concatenates up to three rendered hops onto it. On a long enough
+  path, a later hop can therefore be visibly cut with `...` even though
+  neither of its own fragments was near its own bound. This is a deliberate
+  trade-off to keep an approval line readable in a 70-column modal rather
+  than one that silently wraps or scrolls; `[inferred]` has room reserved
+  ahead of that cap, so it always survives it.
 - `additional known paths` counts relationships that reach a dependent
   already listed above (a second route, a second mount). They are counted
   rather than repeated, so a count of dependents is never inflated.

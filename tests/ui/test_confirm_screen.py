@@ -502,7 +502,8 @@ _IMPACT_LINES = (
     "graph-derived impact (advisory):",
     "  delete apps/Deployment/prod/web",
     "  known direct dependents (may be affected): 1",
-    "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]",
+    "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at"
+    " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]",
     "  graph coverage: complete",
 )
 

@@ -15,6 +15,19 @@ length-capped, with the composed line capped again at `_MAX_LINE` because
 one line concatenates several of them - reserving room for the ` [inferred]`
 marker and marking every cut, so neither a capped fragment nor a capped line
 ever reads as a complete claim.
+
+Each hop's evidence resource and field are bounded on their own before the
+line is composed - the per-fragment cap alone does not bound a path line,
+because up to three rendered hops are concatenated onto it. A hop deep in a
+long path can therefore still be the part visibly cut by the `_MAX_LINE`
+cap even though neither of its fragments was near its own bound on its own.
+This is an accepted trade-off, not a gap: the dialog is a 70-column modal,
+so a line an approver cannot read at a glance is worse than one that
+visibly says it was shortened, and the `... ` truncation mark makes that
+plain wherever the cut fell. The ` [inferred]` marker's width is reserved
+ahead of the line cap for the same reason, so it always survives - the one
+piece of the line that must never be the part silently dropped.
+
 Nothing is formatted as Rich markup: `ConfirmScreen` appends these lines to
 a `rich.text.Text`, so a resource named `[bold red]web[/]` renders
 literally.
