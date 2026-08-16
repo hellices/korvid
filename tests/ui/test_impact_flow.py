@@ -1872,21 +1872,28 @@ async def test_scale_down_context_switch_during_the_dry_run_never_loads_relation
         assert env.lister.calls == []
 
 
-async def test_scale_down_replica_drift_during_the_prompt_never_previews_or_lists(
-    tmp_path: Path,
+@pytest.mark.parametrize("requested", [1, 5], ids=["decrease", "increase"])
+async def test_scale_replica_drift_during_the_prompt_never_previews_or_lists(
+    tmp_path: Path, requested: int
 ) -> None:
-    """The count the scale-down was classified against moves while the
-    replica prompt is open.
+    """The count the scale was classified against moves while the replica
+    prompt is open.
 
     The row keeps its kind, namespace, name and uid - a controller or an
     autoscaler simply changed `spec.replicas` - so every identity check
-    still passes. The flow captured 3 replicas before the permission check
-    and the user asks for 2, which was a decrease *then*; by the time the
-    count comes back the object sits at 1 and the very same request is an
-    increase. Continuing would run a scale-down's blast-radius fan-out for
-    a scale-up and offer an approval reading `replicas 3 -> 2` for an
-    object at 1. The gate at the top of the confirm step refuses first, so
-    the drift costs no dry run and no LIST.
+    still passes. The flow captured 3 replicas before the permission check;
+    by the time the count comes back the object sits at 2, so the number the
+    approval line would read `replicas 3 -> <requested>` from is stale.
+
+    Both directions are exercised because this gate is *unconditional*.
+    Asking for 1 was a decrease against the captured count; asking for 5 was
+    an increase and never had a scale-down's semantics at all, so it loads
+    no snapshot and gets no impact section either way. If this gate were
+    moved under the flow's `is_scale_down` branch - the natural place, next
+    to the impact load - the increase would sail past it into a dry run and
+    an approval dialog stating a count the object no longer has. It refuses
+    for both, before the dry-run round trip, so the drift costs no API call
+    and no LIST.
     """
     env = ImpactEnv(tmp_path / "audit.jsonl")
     app = env.app
@@ -1894,8 +1901,8 @@ async def test_scale_down_replica_drift_during_the_prompt_never_previews_or_list
         await to_view(pilot, "deploy", expect="web")
         await pilot.press("S")
         await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
-        _rescale_the_selected_row(app, 1)
-        await pilot.press("2")
+        _rescale_the_selected_row(app, 2)
+        await pilot.press(str(requested))
         await pilot.press("enter")
         await _count_refusal(app, pilot, "the replica count prompt", "prompt-gap replica refusal")
         assert len(app.screen_stack) == 1
@@ -1905,8 +1912,9 @@ async def test_scale_down_replica_drift_during_the_prompt_never_previews_or_list
         assert env.ops.calls == []
 
 
-async def test_scale_down_replica_drift_during_the_dry_run_never_loads_relationships(
-    tmp_path: Path,
+@pytest.mark.parametrize("requested", [1, 5], ids=["decrease", "increase"])
+async def test_scale_replica_drift_during_the_dry_run_never_loads_relationships(
+    tmp_path: Path, requested: int
 ) -> None:
     """The same drift inside the dry-run round trip.
 
@@ -1915,15 +1923,22 @@ async def test_scale_down_replica_drift_during_the_dry_run_never_loads_relations
     decided from is stale there is nothing to spend it on, so the gate
     between the dry run and the snapshot refuses and no relationship LIST
     is issued at all.
+
+    This is the gate most easily mistaken for part of the scale-down path -
+    it sits immediately before the impact load - so an increase is pinned
+    here too. A scale-up loads no snapshot and shows no impact section (it
+    never had scale-down semantics), yet its approval dialog would still
+    read `replicas 3 -> 5` off the captured count, so it must be refused
+    exactly as the decrease is.
     """
     env = ImpactEnv(tmp_path / "audit.jsonl")
     app = env.app
-    env.ops.on_first_preview = lambda: _rescale_the_selected_row(app, 1)
+    env.ops.on_first_preview = lambda: _rescale_the_selected_row(app, 2)
     async with app.run_test() as pilot:
         await to_view(pilot, "deploy", expect="web")
         await pilot.press("S")
         await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
-        await pilot.press("2")
+        await pilot.press(str(requested))
         await pilot.press("enter")
         await _count_refusal(app, pilot, "the dry-run preview", "dry-run replica refusal")
         assert len(app.screen_stack) == 1
