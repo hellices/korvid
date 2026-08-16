@@ -270,6 +270,16 @@ async def test_shell_kubectl_missing_error_notify() -> None:
         patch("korvid.ui.app.subprocess.call") as mock_call,
     ):
         async with app.run_test() as pilot:
+            await until(
+                pilot,
+                lambda: app.query_one(ResourceTable).row_count == 1,
+                label="pod row visible",
+            )
+            await until(
+                pilot,
+                lambda: app._cursor_row_key() == "default/api-1",
+                label="pod row selected",
+            )
             await pilot.press("s")
             await until(
                 pilot,
@@ -306,6 +316,7 @@ async def test_shell_non_pods_kind_is_inert() -> None:
             )
             assert app.current_kind == "deployments"
             await pilot.press("s")
+            await pilot.pause(0.1)
             assert not any("Shell is available" in n.message for n in app._notifications)
             mock_call.assert_not_called()
             # A direct invocation (bypassing the key gate) still explains itself.
@@ -563,6 +574,7 @@ async def test_shell_nonzero_exit_with_working_shell_no_fallback() -> None:
                 lambda: mock_call.call_count == 1,
                 label="shell exec attempted",
             )
+            await pilot.pause(0.2)
             assert not isinstance(app.screen, ConfirmScreen)
 
 
@@ -663,6 +675,7 @@ async def test_debug_fallback_not_offered_in_readonly(tmp_path: Path) -> None:
                 lambda: mock_call.call_count == 1,
                 label="shell exec attempted",
             )
+            await pilot.pause(0.3)
             assert not isinstance(app.screen, ConfirmScreen)
             mock_call.assert_called_once()  # only the failed exec; no debug
 
@@ -688,6 +701,7 @@ async def test_debug_fallback_not_offered_without_audit() -> None:
                 lambda: mock_call.call_count == 1,
                 label="shell exec attempted",
             )
+            await pilot.pause(0.3)
             assert not isinstance(app.screen, ConfirmScreen)
             mock_call.assert_called_once()
 
