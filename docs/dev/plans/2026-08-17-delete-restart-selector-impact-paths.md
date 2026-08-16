@@ -264,7 +264,7 @@ Expected: Ruff exits 0.
 - [ ] **Step 7: Commit the tested fixture correction**
 
 ```bash
-git add tests/core/test_impact.py tests/ui/test_impact_flow.py
+git add tests/core/test_impact.py tests/ui/test_impact_flow.py tests/ui/test_impact_security.py
 git commit \
   -m "test: align impact fixtures with workload selectors (#297)" \
   -m "Exercise the selector and owner-reference paths that production already builds for delete and rollout restart." \
