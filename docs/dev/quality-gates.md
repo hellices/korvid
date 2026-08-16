@@ -153,6 +153,69 @@ make a broken artifact.
 The GitHub release is **staged as a draft**, published to PyPI, and only
 then finalized — so a failed publish leaves no release claiming artifacts
 that do not exist.
+## 5. Merging — who decides a change lands
+
+The layers above establish that a change is *correct*. They do not decide that
+it should land. That decision is the maintainer's, and a branch ruleset is what
+makes it stick.
+
+A `Protect default branch` ruleset covers `~DEFAULT_BRANCH` in both
+`hellices/korvid` and the `hellices/homebrew-korvid` tap:
+
+| rule | effect |
+|---|---|
+| pull request required | nothing reaches `main` outside a pull request |
+| all review threads resolved | no open objection is merged over |
+| required status checks | `pre-commit`, `test (3.11)`, `test (3.12)`, `test (3.13)`; the tap requires `test (ubuntu-latest)` and `test (macos-latest)` |
+| Copilot code review | requested automatically, including on drafts |
+| no deletion, no force push | `main`'s history is append-only |
+| **no bypass actors** | the rules above hold for everyone, administrators included |
+
+Check names are matched exactly, and a matrix job reports one check per leg -
+there is no plain `test` context, and requiring one would block every merge
+forever. The required few are the ones that carry the rest: `test` is where
+ruff, the format check, mypy, `tach`, `deptry` and the 80% coverage floor run
+(layer 3), and `pre-commit` is the layer-1 hooks over every file. The remaining
+CI jobs report but do not block.
+
+Write access is the outer wall - only the maintainer has it, so no one else can
+merge whatever the ruleset says. The ruleset's job is the maintainer's own
+accidents: a stray push to `main`, a force push, a merge over a red check or an
+unanswered review thread.
+
+### Why zero approving reviews are required
+
+This looks like the opposite of a maintainer gate. It is not, and the reason is
+worth recording, because the obvious alternative is worse than it looks. Two
+GitHub behaviours cancel each other out:
+
+- an author cannot approve their own pull request, so requiring one approval
+  permanently deadlocks a maintainer who writes their own changes;
+- the administrator bypass that lifts that deadlock lifts *every* other rule
+  with it. A bypassing merge is not "approval waived" - it sails past required
+  checks and unresolved threads too, and the REST merge endpoint takes it
+  silently. Confirmed on the tap: a pull request reporting
+  `BLOCKED / REVIEW_REQUIRED` merged on the first `gh api -X PUT .../merge`.
+
+So "required review plus admin bypass" is not a weaker gate than no bypass; for
+anyone holding the maintainer's credentials it is no gate at all. Zero required
+reviews with **no bypass actors** keeps every other rule genuinely enforced,
+which is the part with teeth. Add the approval rule the day a second person
+gets write access - then it costs nothing and buys real review.
+
+There is deliberately no `CODEOWNERS` file either. It narrows *which* of the
+accounts with write access may approve; with one maintainer that set already
+has one member, so the rule would constrain nothing while implying a review
+structure the project does not have.
+
+### The limit, stated plainly
+
+No repository setting stops an agent holding the maintainer's credentials -
+GitHub cannot tell the two apart. That boundary is drawn in `AGENTS.md`
+instead: **agents never merge and never open a pull request unless asked.**
+Their job ends at "the pull request is ready". Making it a technical wall would
+mean giving the agent a different token (a fine-grained PAT with pull requests
+scoped to read), which is a credential decision, not a repository one.
 
 ## Outside the four layers
 
