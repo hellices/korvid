@@ -47,6 +47,9 @@ ConfirmScreen .confirm-managed {
     color: $warning;
     text-style: bold;
 }
+ConfirmScreen .confirm-impact {
+    color: $text-muted;
+}
 """
 
 
@@ -89,6 +92,13 @@ class ConfirmScreen(ModalScreen[bool | None]):
     helm release X / operator Y, the right lever is Z" — above the preview.
     Purely informational: the approval gate is unchanged, direct writes stay
     legitimate (emergencies, debugging).
+
+    ``impact_lines`` (issue #283) renders a graph-derived blast-radius
+    section above the dry-run preview: which observed resources depend on
+    this one, how completely korvid could see the cluster, and where the
+    traversal stopped. Advisory only - it is already-rendered text, carries
+    no decision, and changes no gate. The dialog never parses it as Rich
+    markup, so a resource name containing markup stays literal.
     """
 
     CSS = _DIALOG_CSS
@@ -111,6 +121,7 @@ class ConfirmScreen(ModalScreen[bool | None]):
         preview_title: str = "server dry-run preview:",
         protected_context: str | None = None,
         managed_note: str | None = None,
+        impact_lines: tuple[str, ...] | None = None,
     ) -> None:
         super().__init__()
         self._title = title
@@ -120,6 +131,7 @@ class ConfirmScreen(ModalScreen[bool | None]):
         self._preview_title = preview_title
         self._protected_context = protected_context
         self._managed_note = managed_note
+        self._impact_lines = impact_lines
         # The value the confirm input must match: the resource name when the
         # caller demanded one, otherwise the protected context name.
         self._typed_gate = require_name or protected_context
@@ -146,6 +158,8 @@ class ConfirmScreen(ModalScreen[bool | None]):
             yield Static(self._operation, classes="confirm-operation", markup=False)
             if self._managed_note is not None:
                 yield Static(f"⚠ {self._managed_note}", classes="confirm-managed", markup=False)
+            if self._impact_lines:
+                yield Static(self._impact_text(), classes="confirm-impact", markup=False)
             if self._preview is not None:
                 yield Static(self._preview_text(), classes="confirm-preview")
             if self._typed_gate is None:
@@ -183,6 +197,26 @@ class ConfirmScreen(ModalScreen[bool | None]):
         for line in self._preview:
             text.append("\n  ")
             text.append(line, style=styles.get(line[:1], "dim"))
+        return text
+
+    def _impact_text(self) -> Text:
+        """Graph-derived blast radius (issue #283), one line per fact.
+
+        Built by appending to a `Text` rather than parsing markup: the lines
+        embed cluster-controlled names and evidence paths, and a resource
+        called `[bold red]web[/]` must render literally instead of styling
+        (or silently disappearing from) an approval dialog.
+        """
+        lines = self._impact_lines or ()
+        if not lines:
+            return Text()
+        # Appended, not a base style: a `Text` style applies to every span
+        # added later, so `Text(title, style="bold")` would bold the whole
+        # section and make an advisory note shout louder than the operation.
+        text = Text()
+        text.append(lines[0], style="bold")
+        for line in lines[1:]:
+            text.append(f"\n{line}")
         return text
 
     def on_key(self, event: events.Key) -> None:

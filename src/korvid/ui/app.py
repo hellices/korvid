@@ -63,6 +63,7 @@ from korvid.core.debugimage import (
 )
 from korvid.core.errors import explain_api_error
 from korvid.core.filters import ResourceFilter, parse_filter
+from korvid.core.impact import ImpactAction, summarize_impact
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
@@ -121,6 +122,7 @@ from korvid.ui.drain import DrainController
 from korvid.ui.forward_controller import ForwardController
 from korvid.ui.helm_controller import HelmController
 from korvid.ui.hints import EventsFetcher, HintController, pod_needs_hint
+from korvid.ui.impact_preview import IMPACT_UNAVAILABLE_LINES, render_impact_lines
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -264,6 +266,13 @@ _UID_LOOKUP_TIMEOUT = 10.0
 #: after which it opens without a preview - a preview must never block the
 #: approval flow.
 _PREVIEW_TIMEOUT = 3.0
+
+#: Upper bound on the advisory blast-radius snapshot (issue #283). The
+#: section is display support, so it gets its own hard deadline: a slow or
+#: hung snapshot must never wedge an approval the user already asked for.
+#: Larger than `_PREVIEW_TIMEOUT` because the snapshot is a bounded LIST
+#: fan-out, not a single dry-run round trip.
+_IMPACT_TIMEOUT = 5.0
 
 #: Upper bound on a helm preview (issue #31): `helm ... --dry-run` shells out
 #: and may pull the chart from a repo, so it gets more budget than an API
@@ -524,6 +533,52 @@ class PaneState:
         pane.drill = self.drill.copy()
         pane.sorts = dict(self.sorts)
         return pane
+
+
+@dataclasses.dataclass(frozen=True)
+class _WriteOrigin:
+    """The pane a write flow was raised from, and the scope it was showing.
+
+    Every awaited gap in a write flow (the RBAC round-trip, the dry-run, the
+    managed-by lookup, the impact snapshot) is a gap in which the workspace
+    can be split, focused across, or re-scoped. `current_kind`,
+    `current_scope` and the selected row all delegate to *whichever* pane is
+    focused right now, so a flow that re-reads them after an await is
+    answering a different question than the one the user asked.
+
+    Captured before the first await, this pins both halves of "where the
+    user acted": the pane object itself (identity, not equality - a second
+    pane can hold the very same kind, scope and cursor row) and the scope
+    that pane was showing (the same pane can widen to every namespace under
+    the flow). The impact snapshot is scoped from the capture, and the
+    post-snapshot gate refuses unless the capture is still current.
+    """
+
+    pane: PaneState
+    scope: str
+
+    def is_current(self, pane: PaneState) -> bool:
+        """Whether `pane` is still the pane this flow was raised from, on the
+        scope it was raised in."""
+        return pane is self.pane and pane.scope == self.scope
+
+    def impact_scope(self, meta: ResourceMeta) -> str | None:
+        """The namespace an impact snapshot must cover for this target.
+
+        The captured scope for a namespaced target, and *every* namespace
+        for a cluster-scoped one (or a captured all-namespaces pane). A Node
+        or PersistentVolume is reachable from every namespace: scoping its
+        snapshot to the pane the user happens to be in would both hide the
+        Pods it runs elsewhere and let the dialog report complete coverage
+        of a namespace that was never the whole question. The same value is
+        handed to the loader and to `summarize_impact`, so the scope the
+        text states is always the scope that was listed - and it is the
+        captured one, so a focus change mid-flow cannot silently re-aim the
+        snapshot at another pane's view.
+        """
+        if not meta.namespaced or self.scope == ALL_NAMESPACES:
+            return None
+        return self.scope
 
 
 class KorvidApp(App[None]):
@@ -4828,6 +4883,7 @@ class KorvidApp(App[None]):
         *,
         phase: str = "the permission check",
         epoch: int,
+        origin: _WriteOrigin | None = None,
     ) -> bool:
         """Re-validate after an awaited gap (the RBAC round-trip, a dry-run
         preview, or an editor session - named by ``phase`` so cancellation
@@ -4837,8 +4893,13 @@ class KorvidApp(App[None]):
         they did not see. ``epoch`` (captured when the write flow began) also
         aborts on a context switch that started - or fully completed - during
         the gap: a same-named row on the new cluster would otherwise satisfy
-        the selection checks. Abort (with a notification) unless everything
-        still matches."""
+        the selection checks. ``origin`` (a `_WriteOrigin` captured with the
+        target) additionally pins *which pane* the flow was raised from and
+        the scope it showed: the selection checks below all read the focused
+        pane, so without it a focus change to a second pane whose cursor sits
+        on the same object - or a re-scope of the pane itself - passes every
+        one of them. Abort (with a notification) unless everything still
+        matches."""
         if self._ctx_switching or epoch != self._ctx_epoch:
             self.notify(
                 f"{action} {self._gvr_label(meta)}/{name} cancelled -"
@@ -4856,11 +4917,12 @@ class KorvidApp(App[None]):
         kind = self._canonical_kind(self.current_kind)
         current_ns, current_name = self._selected_ns_name()
         if (
+            (origin is not None and not origin.is_current(self._pane))
             # Value comparison, not identity: background discovery replaces
             # alias values with freshly constructed (equal) ResourceMeta
             # instances, which must not cancel a write on the same row -
             # the editor round-trip in particular is arbitrarily long.
-            self.aliases.get(kind) != meta
+            or self.aliases.get(kind) != meta
             or current_name != name
             or (meta.namespaced and (current_ns or None) != ns)
         ):
@@ -4871,6 +4933,47 @@ class KorvidApp(App[None]):
             )
             return False
         return True
+
+    def _write_identity_intact(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        *,
+        phase: str,
+        epoch: int,
+        origin: _WriteOrigin | None = None,
+    ) -> bool:
+        """`_write_context_intact` plus the captured UID.
+
+        Kind, namespace and name all survive a delete-and-recreate under the
+        same name, so the context check alone cannot see one: the dialog
+        would describe (and the impact summary would explain) an object that
+        no longer exists, while the write pins the uid the user saw and can
+        only 409. The uid is the one part of the identity that changes, so
+        an awaited gap that could span a replacement rechecks it here.
+
+        A row whose summary type carries no uid (``uid is None``) keeps the
+        pre-existing behaviour exactly: nothing to compare, no new refusal.
+        A captured uid that no longer resolves is *not* the same case: the
+        comparison below fails closed, because "korvid can no longer see the
+        incarnation the user approved" is exactly what a replacement looks
+        like from here.
+        """
+        if not self._write_context_intact(
+            action, meta, ns, name, phase=phase, epoch=epoch, origin=origin
+        ):
+            return False
+        if uid is None or self._selected_uid(ns, name) == uid:
+            return True
+        self.notify(
+            f"{action} {self._gvr_label(meta)}/{name} cancelled -"
+            f" the selection changed during {phase}",
+            severity="warning",
+        )
+        return False
 
     async def _precheck_keybinding_write(
         self, action: str, meta: ResourceMeta, ns: str | None, name: str
@@ -5066,6 +5169,82 @@ class KorvidApp(App[None]):
             logger.debug("dry-run preview failed; dialog opens without it", exc_info=True)
             return None
 
+    def _write_origin(self) -> _WriteOrigin:
+        """Pin the pane a write flow is being raised from, and its scope.
+
+        Called before the flow's first await, next to the target capture:
+        everything after that reads "the focused pane", which is a moving
+        target across a split workspace.
+        """
+        pane = self._pane
+        return _WriteOrigin(pane, pane.scope)
+
+    async def _impact_preview(
+        self,
+        action: ImpactAction,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        *,
+        origin: _WriteOrigin,
+    ) -> tuple[str, ...] | None:
+        """Advisory blast-radius lines for a write dialog (issue #283).
+
+        Reuses the relationship snapshot loader `g` already owns - no new
+        LIST/GET interface and no per-node fan-out - with the exact
+        group/kind/namespace/name/uid identity the write will target, so a
+        recreated same-named object is reported as absent from the snapshot
+        rather than summarized as the one on screen. Display support only,
+        and fail-open in four distinct ways:
+
+        - no loader wired (no cluster connection) -> None, no section at all;
+        - no uid for the selected row -> None, no section and no LIST. The
+          summary is keyed on the exact incarnation, so a uid-less identity
+          matches no snapshot node and would render `target not found in
+          this snapshot` for a row that is plainly on screen - a claim about
+          the object rather than about korvid's missing uid. Resolving the
+          target by name instead is worse: it would silently reconnect the
+          preview to whatever object currently holds that name, exactly the
+          reconnection `GraphResource` refuses for an unresolved reference.
+          Nothing else changes - the approval gate, the uid-less write, and
+          the audit record are what they were;
+        - a timeout or unexpected failure *anywhere* in load, summarize, or
+          render -> the static "impact unavailable" advisory, because an API
+          error message can embed a response body (for a Secret, its data)
+          and must never reach the dialog, and because a summarizer or
+          renderer bug must cost the user the section, not the approval;
+        - cancellation (a `:ctx` switch tearing the client down) propagates
+          untouched, exactly like every other awaited read here.
+
+        The summary itself can never approve, execute, or reserve a write:
+        it returns text.
+
+        `origin` is the pane the flow was raised from: its captured scope
+        decides what the snapshot covers, so a focus change during an
+        earlier await cannot silently re-aim the snapshot (and the
+        `scope:`/`graph coverage:` lines derived from it) at another pane's
+        view of the cluster.
+        """
+        loader = self._relationship_loader
+        if loader is None or uid is None:
+            return None
+        root = GraphResource(
+            group=meta.group, kind=meta.kind, namespace=ns or "", name=name, uid=uid
+        )
+        scope = origin.impact_scope(meta)
+        try:
+            async with asyncio.timeout(_IMPACT_TIMEOUT):
+                graph = await loader.load(root, scope, self.aliases)
+                return render_impact_lines(summarize_impact(graph, action, root, scope=scope))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Type only: never the message (CodeQL py/clear-text-logging-
+            # sensitive-data), and never anything derived from a manifest.
+            logger.debug("impact summary unavailable for %s: %s", action, type(exc).__name__)
+            return IMPACT_UNAVAILABLE_LINES
+
     async def _push_write_confirmation(
         self,
         title: str,
@@ -5081,6 +5260,7 @@ class KorvidApp(App[None]):
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
         managed_note: str | None = None,
+        impact_lines: tuple[str, ...] | None = None,
     ) -> None:
         """The standard write-approval flow (issue #91 U1): push a confirm
         dialog and, on approval, launch `_run_write` on an app-owned worker.
@@ -5106,6 +5286,7 @@ class KorvidApp(App[None]):
                 preview=preview,
                 preview_title=preview_title,
                 managed_note=managed_note,
+                impact_lines=impact_lines,
             ),
             _done,
         )
@@ -5196,12 +5377,25 @@ class KorvidApp(App[None]):
         # Captured with the target: view state is mutable across the awaits
         # below, and the banner must describe the row the user acted on.
         kind_alias = self._canonical_kind(self.current_kind)
+        # Which pane raised this, and on which scope: the snapshot below is
+        # scoped from here, and the gate after it refuses if focus moved to
+        # another pane - even one whose cursor is on the same object.
+        origin = self._write_origin()
         if not await self._precheck_keybinding_write("delete", meta, ns, name):
             return
         preview = await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
         note = await self._managed_note(kind_alias, ns, name)
         if not self._write_context_intact(
             "delete", meta, ns, name, phase="the dry-run preview", epoch=epoch
+        ):
+            return
+        # The snapshot is another awaited gap: a `:ctx` switch, a moved
+        # selection, a re-focused or re-scoped pane, or a same-named
+        # replacement during it must abort before a dialog describes the row
+        # the user is no longer on (issue #283).
+        impact = await self._impact_preview(ImpactAction.DELETE, meta, ns, name, uid, origin=origin)
+        if not self._write_identity_intact(
+            "delete", meta, ns, name, uid, phase="the impact summary", epoch=epoch, origin=origin
         ):
             return
         operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
@@ -5217,6 +5411,7 @@ class KorvidApp(App[None]):
             require_name=require,
             preview=preview,
             managed_note=note,
+            impact_lines=impact,
         )
 
     async def action_rollout_restart(self) -> None:
@@ -5237,6 +5432,7 @@ class KorvidApp(App[None]):
         epoch = self._ctx_epoch
         # Captured with the target — see action_delete_resource.
         kind_alias = self._canonical_kind(self.current_kind)
+        origin = self._write_origin()
         if not await self._precheck_keybinding_write("rollout_restart", meta, ns, name):
             return
         # One stamp per approval: the previewed request and the executed
@@ -5248,6 +5444,21 @@ class KorvidApp(App[None]):
         note = await self._managed_note(kind_alias, ns, name)
         if not self._write_context_intact(
             "rollout_restart", meta, ns, name, phase="the dry-run preview", epoch=epoch
+        ):
+            return
+        # Same awaited-gap revalidation as delete - see action_delete_resource.
+        impact = await self._impact_preview(
+            ImpactAction.ROLLOUT_RESTART, meta, ns, name, uid, origin=origin
+        )
+        if not self._write_identity_intact(
+            "rollout_restart",
+            meta,
+            ns,
+            name,
+            uid,
+            phase="the impact summary",
+            epoch=epoch,
+            origin=origin,
         ):
             return
 
@@ -5264,6 +5475,7 @@ class KorvidApp(App[None]):
             ),
             preview=preview,
             managed_note=note,
+            impact_lines=impact,
         )
 
     async def _fetch_manifest_for_edit(
@@ -6378,6 +6590,7 @@ class KorvidApp(App[None]):
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
         managed_note: str | None = None,
+        impact_lines: tuple[str, ...] | None = None,
     ) -> ConfirmScreen:
         """Build every write-approval dialog through one place so the
         protected-context layer (issue #83) can never be forgotten: while a
@@ -6391,6 +6604,7 @@ class KorvidApp(App[None]):
             preview_title=preview_title,
             protected_context=self._protected_context,
             managed_note=managed_note,
+            impact_lines=impact_lines,
         )
 
     # ------------------------------------------------------------------

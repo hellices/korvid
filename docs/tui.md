@@ -198,3 +198,133 @@ timeline:
   max_entries: 500      # default
   max_bytes: 262144     # default (256 KiB of encoded content)
 ```
+
+## Write impact preview
+
+Destructive writes that have tested relationship semantics — delete
+(`Ctrl-D`) and rollout restart (`r`) — show a graph-derived impact section
+above the server dry-run preview in the approval dialog. It answers one
+bounded question: which resources korvid has already observed depend on this
+one?
+
+    graph-derived impact (advisory):
+      delete apps/Deployment/prod/web
+      advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
+      known direct dependents (may be affected): 1 or more
+        - apps/ReplicaSet/prod/web-abc via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]
+      known transitive dependents (may be affected): 1 or more
+        - Pod/prod/web-abc-1 via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0] -> owned_by (declared) at Pod/prod/web-abc-1: metadata.ownerReferences[0]
+      additional known paths: 1 or more (already-listed dependents reached again)
+      scope: prod
+      graph coverage: incomplete - a missing dependent here does not prove none exists
+        - gateway.networking.k8s.io/*: unavailable
+
+Every count reads `1 or more` above because the Gateway API group could not
+be listed: that one incomplete coverage record is enough to make the whole
+answer a floor rather than a total (see the `N or more` bullet below). With
+every source `complete` and neither bound hit, the same summary renders
+exact counts.
+
+The section is **advisory**, and says so on its second body line — directly
+under the action, before the first count, because that is where the hedge is
+still on screen with the target rather than below a body that can run to the
+preview's caps. It never predicts failure, never replaces the
+server dry-run, and never blocks approval: the y/typed-name gate, the UID
+precondition, the RBAC pre-check, and the fail-closed audit log are exactly
+what they were. Scale, edit, resize, cordon/uncordon, drain, Helm, and
+operator flows do not show it — they have no tested per-relation semantics
+yet, and korvid would rather show nothing than a plausible guess.
+
+Reading it:
+
+- **direct** dependents are one hop from the target, **transitive** are two
+  or more; each line names the relation, how the fact was derived, and the
+  resource and manifest field the evidence came from — for a
+  selector-derived `managed_by`/`protected_by` hop that resource is the
+  Deployment/PDB that declared `spec.selector`, not the Pod it matched.
+- Each hop's evidence resource and field are individually bounded, but the
+  whole composed line is still capped at 240 characters, because a path
+  line concatenates up to three rendered hops onto it. Once the composed
+  line reaches that cap, the remaining tail is replaced by a visible `...`,
+  which can fall within the first hop's own field — even though it was
+  never near its own bound — and can omit later hops entirely. This is a
+  deliberate trade-off to keep an approval line readable in a 70-column
+  modal rather than one that silently wraps or scrolls; `[inferred]` has
+  room reserved ahead of that cap, so it always survives it.
+- `additional known paths` counts relationships that reach a dependent
+  already listed above (a second route, a second mount). They are counted
+  rather than repeated, so a count of dependents is never inflated.
+- `relationship cycles` and `additional known paths` count edges the walk
+  folded away rather than expanding them.
+- Every cluster-derived count — both dependent sections, `relationship
+  cycles`, `additional known paths`, and `unresolved references in the
+  affected set` — renders as `N or more` instead of an exact `N` whenever
+  the answer as a whole could not be exhaustive: `traversal capped`,
+  `snapshot truncated`, `graph coverage: incomplete`, or `target not found
+  in this snapshot`. A capped walk stops before it reaches every dependent,
+  a truncated snapshot was already missing resources or relationships
+  before the walk began, and a source that could not be listed was never
+  joined at all — so in each case `N` is a floor and an exact number would
+  read as exhaustive (and would contradict the coverage line right below
+  it). `none in this snapshot` is left as-is: it is already a statement
+  about the snapshot, not a count — which is also why a missing target,
+  whose sections are all empty, hedges nothing. The `... N more dependents
+  not shown (preview capped)`, `... N more unresolved references not shown
+  (preview capped)` and `... N more coverage records not shown (preview
+  capped)` lines also stay exact — they count what the preview cut from
+  rows it holds, not what was never found — and each names the section it
+  cut, since all three overflow at the same indent.
+- `[inferred]` marks a hop derived by a heuristic rather than read from a
+  manifest. It is labelled, never a blocker.
+- `unresolved references in the affected set` lists dangling references
+  held by the target or by something it takes down — a mounted ConfigMap
+  that no longer exists, say — whatever relation they use. Each line names
+  its own confidence (`declared`, `observed`, or `inferred`) next to the
+  relation, the same way a dependent path does, so a heuristically-derived
+  dangling reference is identifiable on its own line, not only through the
+  `[inferred]`/aggregate note above.
+- `scope` is the namespace the snapshot covered. `all namespaces` appears
+  for a cluster-scoped target (a Node, a PersistentVolume) or an
+  all-namespaces view; otherwise the coverage below it is only ever
+  complete *within that namespace*.
+- `target not found in this snapshot - dependents unknown` means the exact
+  object (UID included) was not in the snapshot — usually deleted and
+  recreated under the same name. The counts below it then describe the
+  snapshot, not your object.
+- `graph coverage: incomplete` means some source could not be listed
+  (RBAC, an absent API, a cap): a missing dependent is then *unknown*, not
+  *absent*.
+- `traversal capped` and `snapshot truncated` are two different bounds, not
+  one:
+  - `traversal capped` means the *impact* walk itself — the dependent search
+    for this one action — hit its own limit: 3 hops, 50 dependents.
+  - `snapshot truncated` means the underlying relationship snapshot (the
+    same one the graph view `g` builds) hit one of its own, much larger
+    input caps while gathering raw objects and candidate edges before the
+    impact walk ever started: either the resource cap (input objects were
+    dropped, so some resources were never joined) or the edge cap
+    (candidate relationships were dropped, so some edges between resources
+    that *are* present were never kept). Both are coarser, earlier limits
+    than the 50-dependent traversal cap above (see
+    [Limits](resource-relationships.md#limits) for the exact numbers).
+
+The snapshot is the same bounded, read-only LIST fan-out the relationship
+view (`g`) performs — scoped to the namespace of the pane the write was
+raised from for a namespaced target, and cluster-wide for a cluster-scoped
+one so a dependent in another namespace cannot be quietly missed — with a
+5-second deadline. If it times out or fails, the dialog says `impact
+unavailable; approval remains available` and the approval proceeds normally.
+If the context switches, the selection moves, focus lands in the other pane
+of a split workspace, or that pane changes its namespace while the snapshot
+loads, the write is cancelled before any dialog opens — even when the newly
+focused pane happens to sit on the same object.
+
+The summary is matched to the target by **exact identity, UID included**.
+When the selected row carries no UID (a summary type that does not expose
+one), the section is omitted entirely: the dialog opens with the dry-run
+preview only, and no snapshot is loaded at all. korvid does not fall back to
+matching by name — that would silently reconnect the preview to whatever
+object currently holds the name — and it does not show `target not found in
+this snapshot` either, which would read as "the object is gone" when the
+truth is only that korvid has no UID to match on. Approval, the typed-name
+gate, the write, and the audit record are unaffected.
