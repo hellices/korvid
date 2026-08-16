@@ -17,6 +17,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.resource_table import ResourceTable
 
 from .test_app import _DEFAULT_TEST_ALIASES, _pod
+from .waits import until
 
 
 def _source(pods: list[PodSummary]):  # type: ignore[no-untyped-def]  # returns a local async generator fn; annotating it adds noise, not safety
@@ -77,14 +78,6 @@ def _pod_with_requests(name: str) -> PodSummary:
     )
 
 
-async def _until(pilot, predicate, tries: int = 100) -> None:  # type: ignore[no-untyped-def]  # deterministic wait: poll an observable condition instead of a fixed sleep
-    for _ in range(tries):
-        if predicate():
-            return
-        await pilot.pause(0.05)
-    raise AssertionError("condition never became true")
-
-
 def _row_for(table: ResourceTable, name: str) -> list[object]:
     for row_index in range(table.row_count):
         row = table.get_row_at(row_index)
@@ -114,7 +107,7 @@ async def test_metrics_join_renders_usage_and_percent() -> None:
         def _joined() -> bool:
             return table.row_count > 0 and str(_row_for(table, "api-1")[4]) == "100m"
 
-        await _until(pilot, _joined)
+        await until(pilot, _joined, label="metrics join renders usage")
         row = _row_for(table, "api-1")
         assert str(row[5]) == "50"  # 100m of 200m request
         assert str(row[6]) == "128Mi"
@@ -129,7 +122,7 @@ async def test_no_metrics_server_renders_dashes() -> None:
     )
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await _until(pilot, lambda: len(calls) >= 1)
+        await until(pilot, lambda: len(calls) >= 1, label="metrics poll records initial call")
         await pilot.pause(0.1)
         table = app.query_one(ResourceTable)
         row = _row_for(table, "api-1")
@@ -140,7 +133,9 @@ async def test_poller_scoped_to_current_namespace() -> None:
     app, calls = make_app_with_metrics([_pod_with_requests("api-1")], [[_WEB_METRICS]])
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await _until(pilot, lambda: len(calls) >= 1)
+        await until(
+            pilot, lambda: len(calls) >= 1, label="metrics poll records initial namespace call"
+        )
         assert calls[0] == "default"
 
 
@@ -149,7 +144,7 @@ async def test_all_namespaces_polls_cluster_scope() -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("0")  # toggle all-namespaces
-        await _until(pilot, lambda: None in calls)
+        await until(pilot, lambda: None in calls, label="metrics poll records cluster scope")
         assert None in calls
         # ALL_NAMESPACES pod view still renders (with the NAMESPACE column).
         assert app.current_scope == ALL_NAMESPACES
@@ -159,7 +154,7 @@ async def test_leaving_pods_view_stops_polling() -> None:
     app, calls = make_app_with_metrics([_pod_with_requests("api-1")], [[_WEB_METRICS]])
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await _until(pilot, lambda: len(calls) >= 1)
+        await until(pilot, lambda: len(calls) >= 1, label="metrics poll starts before navigation")
         await pilot.press("colon")
         for ch in "deploy":
             await pilot.press(ch)
@@ -184,7 +179,9 @@ async def test_returning_to_pods_view_resumes_polling() -> None:
         for ch in "pods":
             await pilot.press(ch)
         await pilot.press("enter")
-        await _until(pilot, lambda: len(calls) > count)
+        await until(
+            pilot, lambda: len(calls) > count, label="metrics poll resumes after returning to pods"
+        )
         assert len(calls) > count
 
 
