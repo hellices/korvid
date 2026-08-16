@@ -211,9 +211,9 @@ one?
       delete apps/Deployment/prod/web
       advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
       known direct dependents (may be affected): 1 or more
-        - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]
+        - apps/ReplicaSet/prod/web-abc via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]
       known transitive dependents (may be affected): 1 or more
-        - Pod/prod/web-abc-1 via owned_by (declared) at metadata.ownerReferences[0] -> owned_by (declared) at metadata.ownerReferences[0]
+        - Pod/prod/web-abc-1 via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0] -> owned_by (declared) at Pod/prod/web-abc-1: metadata.ownerReferences[0]
       additional known paths: 1 or more (already-listed dependents reached again)
       scope: prod
       graph coverage: incomplete - a missing dependent here does not prove none exists
@@ -239,7 +239,9 @@ Reading it:
 
 - **direct** dependents are one hop from the target, **transitive** are two
   or more; each line names the relation, how the fact was derived, and the
-  manifest field it came from.
+  resource and manifest field the evidence came from — for a
+  selector-derived `managed_by`/`protected_by` hop that resource is the
+  Deployment/PDB that declared `spec.selector`, not the Pod it matched.
 - `additional known paths` counts relationships that reach a dependent
   already listed above (a second route, a second mount). They are counted
   rather than repeated, so a count of dependents is never inflated.

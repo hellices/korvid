@@ -108,8 +108,8 @@ def _summary(
 
 def test_render_produces_the_exact_deterministic_line_sequence() -> None:
     """Exact-match on purpose: nothing beyond identity, relation, confidence,
-    evidence field, scope, and coverage state may ever reach an approval
-    dialog.
+    evidence pointer (resource and field), scope, and coverage state may
+    ever reach an approval dialog.
 
     The forbidden coverage record here is the reason both counts read as
     lower bounds: a source that could not be listed may hold dependents the
@@ -125,10 +125,12 @@ def test_render_produces_the_exact_deterministic_line_sequence() -> None:
         "  delete apps/Deployment/prod/web",
         ADVISORY_LINE,
         "  known direct dependents (may be affected): 1 or more",
-        "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]",
+        "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at"
+        " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]",
         "  known transitive dependents (may be affected): 1 or more",
-        "    - Pod/prod/web-abc-1 via owned_by (declared) at metadata.ownerReferences[0]"
-        " -> owned_by (declared) at metadata.ownerReferences[0]",
+        "    - Pod/prod/web-abc-1 via owned_by (declared) at"
+        " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]"
+        " -> owned_by (declared) at Pod/prod/web-abc-1: metadata.ownerReferences[0]",
         "  scope: prod",
         "  graph coverage: incomplete - a missing dependent here does not prove none exists",
         "    - core/secrets @prod: forbidden",
@@ -487,7 +489,7 @@ def test_unresolved_references_are_listed_and_bounded() -> None:
     assert "  unresolved references in the affected set: 7" in lines
     assert (
         "    - Pod/prod/web-abc-1 uses_config (declared) -> ConfigMap/prod/gone-0 (missing)"
-        " at spec.volumes[0].configMap" in lines
+        " at Pod/prod/web-abc-1: spec.volumes[0].configMap" in lines
     )
     assert "    ... 2 more unresolved references not shown (preview capped)" in lines
     assert sum(1 for line in lines if line.startswith("    - Pod/prod/web-abc-1 uses_config")) == 5
@@ -551,19 +553,77 @@ def test_every_overflow_line_names_what_it_counted() -> None:
 
 
 def test_inferred_items_are_labelled_and_declared_never_blocks() -> None:
+    """`evidence.resource` here is `_DEPLOY`, matching what
+    `_build_selector_edge` actually records for a `managed_by` edge (the
+    matched Pod is the subject, but the selector-declaring Deployment is
+    the evidence resource) - so this pins the realistic case, not the
+    subject-as-evidence shortcut most other fixtures use.
+    """
     inferred_edge = RelationshipEdge(
         subject=_POD,
         target=_DEPLOY,
         relation=RelationKind.MANAGED_BY,
         confidence=FactConfidence.INFERRED,
-        evidence=EvidencePointer(resource=_POD, field="spec.selector"),
+        evidence=EvidencePointer(resource=_DEPLOY, field="spec.selector"),
         resolution=EdgeResolution.RESOLVED,
     )
     lines = render_impact_lines(
         _summary(direct=(ImpactItem(resource=_POD, path=(inferred_edge,)),))
     )
-    assert "    - Pod/prod/web-abc-1 via managed_by (inferred) at spec.selector [inferred]" in lines
+    assert (
+        "    - Pod/prod/web-abc-1 via managed_by (inferred) at"
+        " apps/Deployment/prod/web: spec.selector [inferred]" in lines
+    )
     assert "  inferred relationships are labelled and never block this write" in lines
+
+
+def test_a_managed_by_hop_names_the_selector_declaring_resource_not_the_pod() -> None:
+    """`EvidencePointer` identifies both a resource and a field. For a
+    selector-derived `managed_by`/`protected_by` edge the matched Pod is the
+    edge subject (and the item being reported), but the evidence *resource*
+    is the Deployment/PDB whose `spec.selector` was actually read - so the
+    rendered hop must name the Deployment, not silently re-attribute
+    `spec.selector` to the Pod it matched.
+    """
+    managed_by_edge = RelationshipEdge(
+        subject=_POD,
+        target=_DEPLOY,
+        relation=RelationKind.MANAGED_BY,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=_DEPLOY, field="spec.selector"),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    lines = render_impact_lines(
+        _summary(direct=(ImpactItem(resource=_POD, path=(managed_by_edge,)),))
+    )
+    item = next(line for line in lines if line.startswith("    - Pod/prod/web-abc-1 via"))
+    # The evidence names the Deployment that declares the selector...
+    assert "apps/Deployment/prod/web" in item
+    # ...right alongside the field it was read from, not standing alone.
+    assert "apps/Deployment/prod/web: spec.selector" in item
+    # The item is still reported as the Pod being affected, not the Deployment.
+    assert item.startswith("    - Pod/prod/web-abc-1")
+
+
+def test_an_unresolved_edges_evidence_names_its_own_resource_not_only_the_subject() -> None:
+    """The same `EvidencePointer` split applies to unresolved references:
+    the resource the field was read from must be named even when it differs
+    from both `edge.subject` and `edge.target`.
+    """
+    pdb = GraphResource(
+        group="policy", kind="PodDisruptionBudget", namespace="prod", name="web-pdb"
+    )
+    unresolved_edge = RelationshipEdge(
+        subject=_POD,
+        target=GraphResource(group="", kind="ConfigMap", namespace="prod", name="gone"),
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=pdb, field="spec.selector"),
+        resolution=EdgeResolution.MISSING,
+    )
+    lines = render_impact_lines(_summary(unresolved=(unresolved_edge,)))
+    line = next(line for line in lines if line.startswith("    - Pod/prod/web-abc-1"))
+    assert "policy/PodDisruptionBudget/prod/web-pdb: spec.selector" in line
 
 
 def test_an_inferred_cycle_edge_still_triggers_the_inferred_note_with_no_inferred_items() -> None:
@@ -637,7 +697,7 @@ def test_an_inferred_unresolved_edge_is_individually_identifiable_by_its_confide
     assert not any("[inferred]" in line for line in lines if line.startswith("    - "))
     assert (
         "    - Pod/prod/web-abc-1 uses_config (inferred) -> ConfigMap/prod/gone (missing)"
-        " at spec.volumes[0].configMap" in lines
+        " at Pod/prod/web-abc-1: spec.volumes[0].configMap" in lines
     )
     assert "  inferred relationships are labelled and never block this write" in lines
     assert max(len(line) for line in lines) <= _MAX_LINE
@@ -646,12 +706,13 @@ def test_an_inferred_unresolved_edge_is_individually_identifiable_by_its_confide
 def test_a_long_three_hop_path_keeps_its_inferred_marker_within_the_line_bound() -> None:
     """Nothing pathological here: real names and real field paths.
 
-    A Pod reached through three hops of ordinary Kubernetes field paths
-    already composes past `_MAX_LINE`, and the ` [inferred]` marker is the
-    *last* thing on the line. Capping the composed line last would drop
-    exactly the label that says one hop was guessed, turning a heuristic
-    chain into what reads like a declared one. The marker's width is
-    reserved instead, and the cut is shown.
+    A Pod reached through three hops of ordinary Kubernetes field paths -
+    each hop now also naming the resource its evidence was read from -
+    already composes past `_MAX_LINE` inside the *first* hop, and the
+    ` [inferred]` marker is the *last* thing on the line. Capping the
+    composed line last would drop exactly the label that says one hop was
+    guessed, turning a heuristic chain into what reads like a declared one.
+    The marker's width is reserved instead, and the cut is shown.
     """
     pod = GraphResource(
         group="",
@@ -700,8 +761,8 @@ def test_a_long_three_hop_path_keeps_its_inferred_marker_within_the_line_bound()
     assert item.startswith(
         "    - Pod/payments-production-eu-west-1/checkout-api-canary-7f9c8b5d64-2xk9p"
         " via uses_config (declared) at"
-        " spec.template.spec.volumes[0].projected.sources[1].configMap.name"
-        " -> managed_by (inferred) at"
+        " Pod/payments-production-eu-west-1/checkout-api-canary-7f9c8b5d64-2xk9p:"
+        " spec.template.spec.volumes[0].projected.sources"
     )
     assert "  inferred relationships are labelled and never block this write" in lines
     assert max(len(line) for line in lines) <= _MAX_LINE
@@ -906,7 +967,9 @@ def test_a_long_evidence_path_is_truncated_visibly_below_the_line_bound() -> Non
     )
     item = next(line for line in lines if line.startswith("    - Pod/prod/web-abc-1 via"))
     assert len(item) < _MAX_LINE
-    rendered = item.split(" at ", 1)[1]
+    resource_and_field = item.split(" at ", 1)[1]
+    assert resource_and_field.startswith("Pod/prod/web-abc-1: ")
+    rendered = resource_and_field[len("Pod/prod/web-abc-1: ") :]
     assert len(rendered) <= _MAX_TEXT
     assert rendered.endswith(_TRUNCATION_SUFFIX)
     assert not rendered.endswith(_TRUNCATION_SUFFIX * 2)
@@ -1049,7 +1112,7 @@ def test_secret_identity_is_rendered_without_any_value_field() -> None:
     assert lines[1] == "  delete Secret/prod/db"
     assert (
         "    - Pod/prod/web-abc-1 via uses_config (declared) at"
-        " spec.volumes[0].secret.secretName" in lines
+        " Pod/prod/web-abc-1: spec.volumes[0].secret.secretName" in lines
     )
     assert not any("data" in line and "=" in line for line in lines)
 

@@ -372,8 +372,8 @@ async def test_no_secret_value_or_manifest_content_reaches_the_dialog(tmp_path: 
         text = impact_text(env.app)
         assert "delete Secret/prod/db" in text
         assert (
-            "Pod/prod/web-abc-1 via uses_config (declared) at spec.volumes[0].secret.secretName"
-            in text
+            "Pod/prod/web-abc-1 via uses_config (declared) at"
+            " Pod/prod/web-abc-1: spec.volumes[0].secret.secretName" in text
         )
         for leak in ("stringData", "data:", "apiVersion", "kind: Secret"):
             assert leak not in text

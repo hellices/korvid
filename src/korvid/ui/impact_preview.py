@@ -6,11 +6,15 @@ cannot drift between the dialog and the tests.
 
 Every heading is machine-defined here; the only cluster-derived text that
 reaches a line is a resource identity, a relation/confidence/resolution enum
-value, an evidence field path, and a namespace/coverage scope - each
-flattened of control characters and length-capped, with the composed line
-capped again at `_MAX_LINE` because one line concatenates several of them -
-reserving room for the ` [inferred]` marker and marking every cut, so
-neither a capped fragment nor a capped line ever reads as a complete claim.
+value, an evidence pointer (the resource an edge's evidence was read from,
+together with its field path - an `EvidencePointer` names both, and a
+selector-derived `managed_by`/`protected_by` edge's evidence resource is the
+Deployment/PDB that declared the selector, not the Pod it matched), and a
+namespace/coverage scope - each flattened of control characters and
+length-capped, with the composed line capped again at `_MAX_LINE` because
+one line concatenates several of them - reserving room for the ` [inferred]`
+marker and marking every cut, so neither a capped fragment nor a capped line
+ever reads as a complete claim.
 Nothing is formatted as Rich markup: `ConfirmScreen` appends these lines to
 a `rich.text.Text`, so a resource named `[bold red]web[/]` renders
 literally.
@@ -198,7 +202,19 @@ def _item_line(item: ImpactItem) -> str:
 
 
 def _hop(edge: RelationshipEdge) -> str:
-    return f"{edge.relation.value} ({edge.confidence.value}) at {_safe(edge.evidence.field)}"
+    """One traversal step: relation, confidence, and *where the evidence
+    came from* - `EvidencePointer.resource: EvidencePointer.field`.
+
+    A selector-derived `managed_by`/`protected_by` edge's evidence resource
+    is the Deployment/PDB that declared `spec.selector`, not the Pod that
+    matched it (`subject`, rendered separately by the caller); naming only
+    the field left that identity out and made every selector-matched hop
+    read as if the Pod's own `spec.selector` had been read.
+    """
+    return (
+        f"{edge.relation.value} ({edge.confidence.value}) at "
+        f"{_resource_label(edge.evidence.resource)}: {_safe(edge.evidence.field)}"
+    )
 
 
 def _inferred_lines(summary: ImpactSummary) -> list[str]:
@@ -312,14 +328,17 @@ def _unresolved_line(edge: RelationshipEdge) -> str:
     A cycle or a revisit only ever gets the aggregate `_INFERRED_NOTE_LINE`
     because those are counted, never individually listed; an unresolved
     reference *is* individually listed, so its confidence goes right after
-    the relation - matching `_hop`'s `relation (confidence) at field`
-    grammar - rather than folding an inferred one into that same generic
-    note with no way to tell which listed reference was heuristic.
+    the relation - matching `_hop`'s `relation (confidence) at resource:
+    field` grammar - rather than folding an inferred one into that same
+    generic note with no way to tell which listed reference was heuristic.
+    The evidence resource is named for the same reason `_hop` names it: it
+    can differ from both `subject` and `target`.
     """
     return (
         f"    - {_resource_label(edge.subject)} {edge.relation.value}"
         f" ({edge.confidence.value}) -> {_resource_label(edge.target)}"
-        f" ({edge.resolution.value}) at {_safe(edge.evidence.field)}"
+        f" ({edge.resolution.value}) at {_resource_label(edge.evidence.resource)}:"
+        f" {_safe(edge.evidence.field)}"
     )
 
 

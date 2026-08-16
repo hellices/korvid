@@ -30,7 +30,7 @@
 - The impact summary cannot approve, execute, reserve, or bypass a write; the impact load is not a cluster write and takes no write reservation.
 - Existing fresh-keystroke, typed-name, context-epoch, UID precondition, RBAC, server dry-run, and fail-closed audit behavior stays unchanged. Audit failure still prevents the operation factory from running.
 - No Secret value and no full manifest may reach a summary, a rendered line, or the dialog.
-- Cluster-controlled text (resource identity, evidence field, coverage scope) is rendered literally: control characters flattened, every fragment length-bounded, every composed line capped at `_MAX_LINE = 240` characters so a pathological cluster cannot flood the 70-column modal, and never parsed as Rich markup.
+- Cluster-controlled text (resource identity, evidence pointer resource and field, coverage scope) is rendered literally: control characters flattened, every fragment length-bounded, every composed line capped at `_MAX_LINE = 240` characters so a pathological cluster cannot flood the 70-column modal, and never parsed as Rich markup.
 - Only `action_delete_resource` and `action_rollout_restart` gain a summary. Edit, scale, resize, cordon/uncordon, drain, helm, OLM, transfer, agent-write, and external-proposal flows stay byte-for-byte unchanged — Task 4 proves it for the scale and cordon dialogs.
 - The app reuses the existing `RelationshipSnapshotLoader` — no new LIST/GET interface, no per-node GET fan-out, no new constructor parameter, no composition-root change.
 - The impact load has a hard 5-second deadline (`_IMPACT_TIMEOUT = 5.0`); timeout or unexpected failure renders a static "impact unavailable; approval remains available" advisory and logs the exception *type* only. `asyncio.CancelledError` propagates untouched.
@@ -1156,17 +1156,17 @@ git commit -m "feat: add graph-derived impact summaries" \
   - `  target not found in this snapshot - dependents unknown` (only when `target_present` is False, directly under the action line: it changes how every count below reads)
   - `ADVISORY_LINE` — directly under the action line (under the target-missing line when there is one, which qualifies that identity): the hedge frames every count below it, and the body under it can run to the preview's caps, so a last-line advisory is the line most likely scrolled past. Exactly one occurrence, whatever the summary holds.
   - `  known direct dependents (may be affected): <n>` or `: none in this snapshot`
-  - `    - <resource> via <relation> (<confidence>) at <field>[ -> ...][ [inferred]]`
+  - `    - <resource> via <relation> (<confidence>) at <evidence resource>: <field>[ -> ...][ [inferred]]`
   - `  known transitive dependents (may be affected): <n>` or `: none in this snapshot`
   - `  inferred relationships are labelled and never block this write` (only when some item, cycle, revisit, or unresolved reference is inferred)
   - `  relationship cycles: <n> (loop edges classified, not expanded)` (only when non-empty)
   - `  additional known paths: <n> (already-listed dependents reached again)` (only when `revisits` is non-empty: converging or parallel edges are counted, never expanded into a second item)
-  - `  unresolved references in the affected set: <n>` plus `    - <subject> <relation> (<confidence>) -> <target> (<resolution>) at <field>`
+  - `  unresolved references in the affected set: <n>` plus `    - <subject> <relation> (<confidence>) -> <target> (<resolution>) at <evidence resource>: <field>`
   - **Every `<n>` above renders as `<n> or more` whenever the answer as a whole could not be exhaustive** (`_counts_are_lower_bounds`, which *is* `ImpactSummary.incomplete`, fed to the one `_count_label` helper): a capped walk may have stopped before reaching every dependent, cycle, revisit or affected-set unresolved reference; a truncated snapshot dropped input resources or candidate edges before the walk began; incomplete coverage means a whole source (forbidden, absent, failed, partial, capped) was never joined, so a dependent living there could not be reached either; and a target the snapshot never saw makes every count a statement about the snapshot rather than about the object. In each case the count is a floor rather than a total, and an exact `<n>` next to `graph coverage: incomplete` would contradict the line below it. `none in this snapshot` is not a count and is left alone — which is also why a missing target hedges nothing in practice, its sections all being empty; the `... <n> more ... (preview capped)` overflow lines stay exact, since they count what the preview cut from rows the summary holds.
   - `  scope: <namespace>` or `  scope: all namespaces` — **always**, including for `complete` coverage, which is only ever complete within that scope
   - `  graph coverage: complete` or `  graph coverage: incomplete - a missing dependent here does not prove none exists` plus `    - <group>/<resource>[ @<scope>]: <state>`
   - `  traversal capped: ...` and/or `  snapshot truncated: ...`
-- Bounds: at most 10 item lines per dependent section, 5 unresolved lines, 5 coverage lines, 3 rendered hops per path; every overflow adds one `    ... <n> more ... (preview capped)` line. Cluster-controlled fragments are flattened one Unicode-category-aware character at a time — `Cc` (C0/C1 controls, including NEL), `Cf` (bidi overrides, directional isolates, zero-width joiners/marks), `Cs` (lone surrogates) and `Zl`/`Zp` (line/paragraph separators) become a literal space each, length-preserving, so a hidden or reordering character shows up as a gap rather than silently reshaping what an approver reads — then truncated at `_MAX_TEXT` (120) characters: `_resource_label` cuts the *middle* of an over-long qualifier and name (reserving `_MIN_NAME_BUDGET` for the name), every other fragment (`_safe`: evidence field paths, scopes, coverage records) is cut at the end since its start identifies it. Every composed line is then capped at `_MAX_LINE` (240) characters by `_bounded`, which reserves and re-appends the trailing ` [inferred]` marker so the composed-line cap can never truncate over it — a path line concatenates several fragments, so the per-fragment bound alone does not bound the line in a 70-column modal. Every cut, whatever it fell on, is marked with `_TRUNCATION_SUFFIX` so a shortened fragment or line never reads as a complete claim.
+- Bounds: at most 10 item lines per dependent section, 5 unresolved lines, 5 coverage lines, 3 rendered hops per path; every overflow adds one `    ... <n> more ... (preview capped)` line. Cluster-controlled fragments are flattened one Unicode-category-aware character at a time — `Cc` (C0/C1 controls, including NEL), `Cf` (bidi overrides, directional isolates, zero-width joiners/marks), `Cs` (lone surrogates) and `Zl`/`Zp` (line/paragraph separators) become a literal space each, length-preserving, so a hidden or reordering character shows up as a gap rather than silently reshaping what an approver reads — then truncated at `_MAX_TEXT` (120) characters: `_resource_label` cuts the *middle* of an over-long qualifier and name (reserving `_MIN_NAME_BUDGET` for the name), every other fragment (`_safe`: evidence field paths, scopes, coverage records) is cut at the end since its start identifies it. Every rendered hop and unresolved line names both halves of its `EvidencePointer` — `_resource_label(evidence.resource)` and `_safe(evidence.field)`, each independently bounded — because the evidence resource can differ from the edge's subject: a selector-derived `managed_by`/`protected_by` edge's evidence resource is the Deployment/PDB that declared `spec.selector`, not the Pod that matched it. Every composed line is then capped at `_MAX_LINE` (240) characters by `_bounded`, which reserves and re-appends the trailing ` [inferred]` marker so the composed-line cap can never truncate over it — a path line concatenates several fragments, so the per-fragment bound alone does not bound the line in a 70-column modal. Every cut, whatever it fell on, is marked with `_TRUNCATION_SUFFIX` so a shortened fragment or line never reads as a complete claim.
 
 - [ ] **Step 1: Write the failing renderer tests**
 
@@ -1282,8 +1282,8 @@ def _summary(
 
 def test_render_produces_the_exact_deterministic_line_sequence() -> None:
     """Exact-match on purpose: nothing beyond identity, relation, confidence,
-    evidence field, scope, and coverage state may ever reach an approval
-    dialog.
+    evidence pointer (resource and field), scope, and coverage state may
+    ever reach an approval dialog.
 
     The forbidden coverage record here is the reason both counts read as
     lower bounds: a source that could not be listed may hold dependents the
@@ -1299,10 +1299,12 @@ def test_render_produces_the_exact_deterministic_line_sequence() -> None:
         "  delete apps/Deployment/prod/web",
         ADVISORY_LINE,
         "  known direct dependents (may be affected): 1 or more",
-        "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]",
+        "    - apps/ReplicaSet/prod/web-abc via owned_by (declared) at"
+        " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]",
         "  known transitive dependents (may be affected): 1 or more",
-        "    - Pod/prod/web-abc-1 via owned_by (declared) at metadata.ownerReferences[0]"
-        " -> owned_by (declared) at metadata.ownerReferences[0]",
+        "    - Pod/prod/web-abc-1 via owned_by (declared) at"
+        " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]"
+        " -> owned_by (declared) at Pod/prod/web-abc-1: metadata.ownerReferences[0]",
         "  scope: prod",
         "  graph coverage: incomplete - a missing dependent here does not prove none exists",
         "    - core/secrets @prod: forbidden",
@@ -1661,7 +1663,7 @@ def test_unresolved_references_are_listed_and_bounded() -> None:
     assert "  unresolved references in the affected set: 7" in lines
     assert (
         "    - Pod/prod/web-abc-1 uses_config (declared) -> ConfigMap/prod/gone-0 (missing)"
-        " at spec.volumes[0].configMap" in lines
+        " at Pod/prod/web-abc-1: spec.volumes[0].configMap" in lines
     )
     assert "    ... 2 more unresolved references not shown (preview capped)" in lines
     assert sum(1 for line in lines if line.startswith("    - Pod/prod/web-abc-1 uses_config")) == 5
@@ -1681,20 +1683,121 @@ def test_dependent_lists_are_bounded_with_an_explicit_more_line() -> None:
     assert "    ... 2 more dependents not shown (preview capped)" in lines
 
 
+def test_every_overflow_line_names_what_it_counted() -> None:
+    """Three sections can overflow in one summary, all at the same indent and
+    all reading `... N more ... not shown (preview capped)`. Each names its
+    own subject, so a reader scanning the body can tell which section was
+    cut without counting rows back up to the nearest heading."""
+    items = tuple(
+        ImpactItem(
+            resource=GraphResource(group="", kind="Pod", namespace="prod", name=f"web-{index}"),
+            path=(_OWNS_DEPLOY,),
+        )
+        for index in range(12)
+    )
+    unresolved = tuple(
+        RelationshipEdge(
+            subject=_POD,
+            target=GraphResource(
+                group="", kind="ConfigMap", namespace="prod", name=f"gone-{index}"
+            ),
+            relation=RelationKind.USES_CONFIG,
+            confidence=FactConfidence.DECLARED,
+            evidence=EvidencePointer(resource=_POD, field=f"spec.volumes[{index}].configMap"),
+            resolution=EdgeResolution.MISSING,
+        )
+        for index in range(8)
+    )
+    coverage = tuple(
+        CoverageRecord(
+            group="",
+            resource=f"secrets-{index}",
+            scope="prod",
+            state=CoverageState.FORBIDDEN,
+            detail="forbidden",
+        )
+        for index in range(7)
+    )
+    lines = render_impact_lines(_summary(direct=items, unresolved=unresolved, coverage=coverage))
+    assert "    ... 2 more dependents not shown (preview capped)" in lines
+    assert "    ... 3 more unresolved references not shown (preview capped)" in lines
+    assert "    ... 2 more coverage records not shown (preview capped)" in lines
+    # No overflow line leaves its subject to the reader's guess.
+    assert not any(line.startswith("    ... ") and "more not shown" in line for line in lines)
+
+
 def test_inferred_items_are_labelled_and_declared_never_blocks() -> None:
+    """`evidence.resource` here is `_DEPLOY`, matching what
+    `_build_selector_edge` actually records for a `managed_by` edge (the
+    matched Pod is the subject, but the selector-declaring Deployment is
+    the evidence resource) - so this pins the realistic case, not the
+    subject-as-evidence shortcut most other fixtures use.
+    """
     inferred_edge = RelationshipEdge(
         subject=_POD,
         target=_DEPLOY,
         relation=RelationKind.MANAGED_BY,
         confidence=FactConfidence.INFERRED,
-        evidence=EvidencePointer(resource=_POD, field="spec.selector"),
+        evidence=EvidencePointer(resource=_DEPLOY, field="spec.selector"),
         resolution=EdgeResolution.RESOLVED,
     )
     lines = render_impact_lines(
         _summary(direct=(ImpactItem(resource=_POD, path=(inferred_edge,)),))
     )
-    assert "    - Pod/prod/web-abc-1 via managed_by (inferred) at spec.selector [inferred]" in lines
+    assert (
+        "    - Pod/prod/web-abc-1 via managed_by (inferred) at"
+        " apps/Deployment/prod/web: spec.selector [inferred]" in lines
+    )
     assert "  inferred relationships are labelled and never block this write" in lines
+
+
+def test_a_managed_by_hop_names_the_selector_declaring_resource_not_the_pod() -> None:
+    """`EvidencePointer` identifies both a resource and a field. For a
+    selector-derived `managed_by`/`protected_by` edge the matched Pod is the
+    edge subject (and the item being reported), but the evidence *resource*
+    is the Deployment/PDB whose `spec.selector` was actually read - so the
+    rendered hop must name the Deployment, not silently re-attribute
+    `spec.selector` to the Pod it matched.
+    """
+    managed_by_edge = RelationshipEdge(
+        subject=_POD,
+        target=_DEPLOY,
+        relation=RelationKind.MANAGED_BY,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=_DEPLOY, field="spec.selector"),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    lines = render_impact_lines(
+        _summary(direct=(ImpactItem(resource=_POD, path=(managed_by_edge,)),))
+    )
+    item = next(line for line in lines if line.startswith("    - Pod/prod/web-abc-1 via"))
+    # The evidence names the Deployment that declares the selector...
+    assert "apps/Deployment/prod/web" in item
+    # ...right alongside the field it was read from, not standing alone.
+    assert "apps/Deployment/prod/web: spec.selector" in item
+    # The item is still reported as the Pod being affected, not the Deployment.
+    assert item.startswith("    - Pod/prod/web-abc-1")
+
+
+def test_an_unresolved_edges_evidence_names_its_own_resource_not_only_the_subject() -> None:
+    """The same `EvidencePointer` split applies to unresolved references:
+    the resource the field was read from must be named even when it differs
+    from both `edge.subject` and `edge.target`.
+    """
+    pdb = GraphResource(
+        group="policy", kind="PodDisruptionBudget", namespace="prod", name="web-pdb"
+    )
+    unresolved_edge = RelationshipEdge(
+        subject=_POD,
+        target=GraphResource(group="", kind="ConfigMap", namespace="prod", name="gone"),
+        relation=RelationKind.USES_CONFIG,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=pdb, field="spec.selector"),
+        resolution=EdgeResolution.MISSING,
+    )
+    lines = render_impact_lines(_summary(unresolved=(unresolved_edge,)))
+    line = next(line for line in lines if line.startswith("    - Pod/prod/web-abc-1"))
+    assert "policy/PodDisruptionBudget/prod/web-pdb: spec.selector" in line
 
 
 def test_an_inferred_cycle_edge_still_triggers_the_inferred_note_with_no_inferred_items() -> None:
@@ -1768,7 +1871,7 @@ def test_an_inferred_unresolved_edge_is_individually_identifiable_by_its_confide
     assert not any("[inferred]" in line for line in lines if line.startswith("    - "))
     assert (
         "    - Pod/prod/web-abc-1 uses_config (inferred) -> ConfigMap/prod/gone (missing)"
-        " at spec.volumes[0].configMap" in lines
+        " at Pod/prod/web-abc-1: spec.volumes[0].configMap" in lines
     )
     assert "  inferred relationships are labelled and never block this write" in lines
     assert max(len(line) for line in lines) <= _MAX_LINE
@@ -1777,12 +1880,13 @@ def test_an_inferred_unresolved_edge_is_individually_identifiable_by_its_confide
 def test_a_long_three_hop_path_keeps_its_inferred_marker_within_the_line_bound() -> None:
     """Nothing pathological here: real names and real field paths.
 
-    A Pod reached through three hops of ordinary Kubernetes field paths
-    already composes past `_MAX_LINE`, and the ` [inferred]` marker is the
-    *last* thing on the line. Capping the composed line last would drop
-    exactly the label that says one hop was guessed, turning a heuristic
-    chain into what reads like a declared one. The marker's width is
-    reserved instead, and the cut is shown.
+    A Pod reached through three hops of ordinary Kubernetes field paths -
+    each hop now also naming the resource its evidence was read from -
+    already composes past `_MAX_LINE` inside the *first* hop, and the
+    ` [inferred]` marker is the *last* thing on the line. Capping the
+    composed line last would drop exactly the label that says one hop was
+    guessed, turning a heuristic chain into what reads like a declared one.
+    The marker's width is reserved instead, and the cut is shown.
     """
     pod = GraphResource(
         group="",
@@ -1831,8 +1935,8 @@ def test_a_long_three_hop_path_keeps_its_inferred_marker_within_the_line_bound()
     assert item.startswith(
         "    - Pod/payments-production-eu-west-1/checkout-api-canary-7f9c8b5d64-2xk9p"
         " via uses_config (declared) at"
-        " spec.template.spec.volumes[0].projected.sources[1].configMap.name"
-        " -> managed_by (inferred) at"
+        " Pod/payments-production-eu-west-1/checkout-api-canary-7f9c8b5d64-2xk9p:"
+        " spec.template.spec.volumes[0].projected.sources"
     )
     assert "  inferred relationships are labelled and never block this write" in lines
     assert max(len(line) for line in lines) <= _MAX_LINE
@@ -2037,7 +2141,9 @@ def test_a_long_evidence_path_is_truncated_visibly_below_the_line_bound() -> Non
     )
     item = next(line for line in lines if line.startswith("    - Pod/prod/web-abc-1 via"))
     assert len(item) < _MAX_LINE
-    rendered = item.split(" at ", 1)[1]
+    resource_and_field = item.split(" at ", 1)[1]
+    assert resource_and_field.startswith("Pod/prod/web-abc-1: ")
+    rendered = resource_and_field[len("Pod/prod/web-abc-1: ") :]
     assert len(rendered) <= _MAX_TEXT
     assert rendered.endswith(_TRUNCATION_SUFFIX)
     assert not rendered.endswith(_TRUNCATION_SUFFIX * 2)
@@ -2180,7 +2286,7 @@ def test_secret_identity_is_rendered_without_any_value_field() -> None:
     assert lines[1] == "  delete Secret/prod/db"
     assert (
         "    - Pod/prod/web-abc-1 via uses_config (declared) at"
-        " spec.volumes[0].secret.secretName" in lines
+        " Pod/prod/web-abc-1: spec.volumes[0].secret.secretName" in lines
     )
     assert not any("data" in line and "=" in line for line in lines)
 
@@ -2215,11 +2321,15 @@ cannot drift between the dialog and the tests.
 
 Every heading is machine-defined here; the only cluster-derived text that
 reaches a line is a resource identity, a relation/confidence/resolution enum
-value, an evidence field path, and a namespace/coverage scope - each
-flattened of control characters and length-capped, with the composed line
-capped again at `_MAX_LINE` because one line concatenates several of them -
-reserving room for the ` [inferred]` marker and marking every cut, so
-neither a capped fragment nor a capped line ever reads as a complete claim.
+value, an evidence pointer (the resource an edge's evidence was read from,
+together with its field path - an `EvidencePointer` names both, and a
+selector-derived `managed_by`/`protected_by` edge's evidence resource is the
+Deployment/PDB that declared the selector, not the Pod it matched), and a
+namespace/coverage scope - each flattened of control characters and
+length-capped, with the composed line capped again at `_MAX_LINE` because
+one line concatenates several of them - reserving room for the ` [inferred]`
+marker and marking every cut, so neither a capped fragment nor a capped line
+ever reads as a complete claim.
 Nothing is formatted as Rich markup: `ConfirmScreen` appends these lines to
 a `rich.text.Text`, so a resource named `[bold red]web[/]` renders
 literally.
@@ -2383,7 +2493,10 @@ def _section(title: str, items: Sequence[ImpactItem], *, capped: bool) -> list[s
     The header count is a lower bound whenever the answer could not be
     exhaustive; the overflow note stays exact, because it counts what *this
     preview* cut from items the summary actually holds, not what the walk
-    never found.
+    never found. It also names what it counted: unresolved references and
+    coverage records overflow at the same indent with the same phrasing, and
+    an unqualified `... N more not shown` between them would belong to
+    whichever section the reader guesses.
     """
     if not items:
         return [f"  {title}: none in this snapshot"]
@@ -2404,7 +2517,19 @@ def _item_line(item: ImpactItem) -> str:
 
 
 def _hop(edge: RelationshipEdge) -> str:
-    return f"{edge.relation.value} ({edge.confidence.value}) at {_safe(edge.evidence.field)}"
+    """One traversal step: relation, confidence, and *where the evidence
+    came from* - `EvidencePointer.resource: EvidencePointer.field`.
+
+    A selector-derived `managed_by`/`protected_by` edge's evidence resource
+    is the Deployment/PDB that declared `spec.selector`, not the Pod that
+    matched it (`subject`, rendered separately by the caller); naming only
+    the field left that identity out and made every selector-matched hop
+    read as if the Pod's own `spec.selector` had been read.
+    """
+    return (
+        f"{edge.relation.value} ({edge.confidence.value}) at "
+        f"{_resource_label(edge.evidence.resource)}: {_safe(edge.evidence.field)}"
+    )
 
 
 def _inferred_lines(summary: ImpactSummary) -> list[str]:
@@ -2518,14 +2643,17 @@ def _unresolved_line(edge: RelationshipEdge) -> str:
     A cycle or a revisit only ever gets the aggregate `_INFERRED_NOTE_LINE`
     because those are counted, never individually listed; an unresolved
     reference *is* individually listed, so its confidence goes right after
-    the relation - matching `_hop`'s `relation (confidence) at field`
-    grammar - rather than folding an inferred one into that same generic
-    note with no way to tell which listed reference was heuristic.
+    the relation - matching `_hop`'s `relation (confidence) at resource:
+    field` grammar - rather than folding an inferred one into that same
+    generic note with no way to tell which listed reference was heuristic.
+    The evidence resource is named for the same reason `_hop` names it: it
+    can differ from both `subject` and `target`.
     """
     return (
         f"    - {_resource_label(edge.subject)} {edge.relation.value}"
         f" ({edge.confidence.value}) -> {_resource_label(edge.target)}"
-        f" ({edge.resolution.value}) at {_safe(edge.evidence.field)}"
+        f" ({edge.resolution.value}) at {_resource_label(edge.evidence.resource)}:"
+        f" {_safe(edge.evidence.field)}"
     )
 
 

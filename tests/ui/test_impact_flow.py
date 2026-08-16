@@ -433,8 +433,8 @@ async def test_delete_dialog_shows_direct_and_transitive_dependents(tmp_path: Pa
         assert "delete apps/Deployment/prod/web" in text
         assert "known direct dependents (may be affected): 1" in text
         assert (
-            "apps/ReplicaSet/prod/web-abc via owned_by (declared) at metadata.ownerReferences[0]"
-            in text
+            "apps/ReplicaSet/prod/web-abc via owned_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]" in text
         )
         assert "known transitive dependents (may be affected): 1" in text
         assert "Pod/prod/web-abc-1 via owned_by (declared)" in text
@@ -487,7 +487,7 @@ async def test_rollout_restart_warns_about_an_unresolved_config_reference(tmp_pa
         assert "unresolved references in the affected set: 1" in text
         assert (
             "Pod/prod/web-abc-1 uses_config (declared) -> ConfigMap/prod/app-config (missing)"
-            " at spec.volumes[0].configMap" in text
+            " at Pod/prod/web-abc-1: spec.volumes[0].configMap" in text
         )
         assert env.ops.calls == []
 
@@ -510,8 +510,11 @@ async def test_deleting_a_cluster_scoped_node_covers_every_namespace(tmp_path: P
         text = impact_text(env.app)
         assert "delete Node/worker-1" in text
         assert "known direct dependents (may be affected): 2" in text
-        assert "Pod/prod/web-1 via scheduled_on (observed) at spec.nodeName" in text
-        assert "Pod/staging/api-1 via scheduled_on (observed) at spec.nodeName" in text
+        assert "Pod/prod/web-1 via scheduled_on (observed) at Pod/prod/web-1: spec.nodeName" in text
+        assert (
+            "Pod/staging/api-1 via scheduled_on (observed) at Pod/staging/api-1: spec.nodeName"
+            in text
+        )
         assert "scope: all namespaces" in text
         assert "scope: prod" not in text
         assert ("pods", None) in env.lister.calls
