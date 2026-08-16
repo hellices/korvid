@@ -488,16 +488,37 @@ Expected: scale-down has no impact section; the negative cases remain green.
 > takes an opt-in `selects_pods` flag that attaches exactly that fact, and
 > `_scale_down_rows()` uses it; the Deployment test now asserts the Ingress
 > **is** named, that no `traversal capped` line appears, that the ReplicaSet
-> is a direct dependent beside the Pod, and that the ReplicaSet's own edge to
-> that Pod is counted under `additional known paths`. The second test that
+> is a direct dependent beside the Pod, and that the further routes to that
+> Pod are counted under `additional known paths`. The second test that
 > scales the ReplicaSet is kept (renamed
 > `test_scale_down_of_a_replicaset_follows_the_same_routing_chain`) because
-> it still pins a real, distinct thing: the same routing chain reached from a
-> different scalable kind, through owner references rather than through the
-> target's own selector. The four-hop/`traversal capped` claims this note
-> previously authorized have been removed from `docs/tui.md`,
+> it still pins a real, distinct thing: the same routing chain reached from
+> a different scalable kind. The four-hop/`traversal capped` claims this
+> note previously authorized have been removed from `docs/tui.md`,
 > `docs/resource-relationships.md` and the design doc. Neither the cap nor
 > any production behavior changed in either round.
+>
+> **Follow-up correction (final re-review round).** The paragraph above, and
+> the ReplicaSet test as first written, still said that a ReplicaSet's Pods
+> hang off `metadata.ownerReferences` rather than off a selector the target
+> declares itself. That is wrong for the same reason the Deployment fixture
+> was: `_workload_selector` gives a **ReplicaSet** the same
+> `SelectorFact(relation=MANAGED_BY, target Pod, match_is_subject=True)` it
+> gives a Deployment or a StatefulSet, so a real ReplicaSet summary carries
+> `spec.selector` too. `_replicaset()` therefore grew the same opt-in
+> `selects_pods` flag (used only by `_scale_down_rows()`, so the #294
+> delete/rollout-restart fixtures are untouched), and the ReplicaSet test now
+> asserts the first path the walk actually reports — `Pod/prod/web-abc-1 via
+> managed_by (declared) at apps/ReplicaSet/prod/web-abc: spec.selector`, with
+> `Service` and `Ingress` hanging off that same first hop. Hop count (three)
+> and the Ingress being named with no `traversal capped` line are unchanged.
+> The Pods' owner references are now a *second* known route to an
+> already-listed dependent, so the Deployment case folds two of them into
+> `additional known paths` (`2 or more`) and the ReplicaSet case one
+> (`1 or more`); every count stays a lower bound because that snapshot's
+> Gateway API coverage is `unavailable`, not because anything was capped.
+> Again: fixture shape only — no cap, relation set, or production semantic
+> changed.
 
 - [ ] **Step 3: Write failing origin and scope race tests**
 
@@ -685,6 +706,35 @@ if not self._write_identity_intact(
 
 Pass `impact_lines=impact` to `_push_write_confirmation`. Do not add a new
 loader, bridge, or composition-root parameter.
+
+> **Verified implementation deviation (recorded in the final re-review
+> round): the shipped flow performs three gates, not two.** The snippet
+> above places a single gate in `_confirm_scale`, *after* the impact load,
+> whose `phase` label switches between `"the impact summary"` and `"the
+> dry-run preview"`. `src/korvid/ui/app.py` instead gates three times, and
+> every one of them re-checks the context epoch, the focused pane identity
+> and its scope, the selected resource identity, and the exact UID:
+>
+> 1. `action_scale_resource`, after `_precheck_keybinding_write` and
+>    **before** `ReplicasPrompt` is pushed (`phase="the permission check"`);
+> 2. `_confirm_scale`, after the dry-run preview and the managed-resource
+>    note and **before** any impact LIST (`phase="the dry-run preview"`) —
+>    unconditional, so a doomed scale never spends the snapshot fan-out nor
+>    scopes it to a pane the user has left;
+> 3. `_confirm_scale`, after the impact summary and **before**
+>    `ConfirmScreen` is mounted (`phase="the impact summary"`), guarded by
+>    `is_scale_down` because the snapshot load is the only awaited gap it
+>    covers.
+>
+> A scale that is not a known decrease therefore has gates 1 and 2 and no
+> impact LIST at all. This is strictly stronger than the snippet — the
+> pre-prompt gate and the pre-LIST gate are both new awaited-gap coverage —
+> and it changes no cap, relation set, activation boundary, or write path.
+> `tests/ui/test_impact_flow.py` and `tests/ui/test_impact_security.py` pin
+> each gate (drift during the permission round trip, during the dry-run
+> preview, and during the impact load), and
+> `test_non_decreasing_or_unknown_scale_never_loads_relationships` pins that
+> the non-decrease shapes issue no LIST.
 
 - [ ] **Step 5: Verify flow GREEN**
 

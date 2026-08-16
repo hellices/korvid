@@ -379,8 +379,10 @@ Pods' `metadata.ownerReferences` give. So the routing chain from a
 Deployment is `Deployment -> Pod (managed_by) -> Service (selects) ->
 Ingress/Gateway route (routes_to)` — three hops, inside the walk's bound —
 and the dialog names the Ingress. The ReplicaSet in between is itself a
-direct dependent, and the second way to the same Pod (through it) is
-counted under `additional known paths` rather than listed twice. The
+direct dependent, and the further ways to the same Pod (through it) are
+counted under `additional known paths` rather than listed twice. Scaling
+that ReplicaSet down reaches the same chain through the `spec.selector` it
+declares itself, also three hops. The
 ordinary 3-hop, 50-dependent bound still applies to everything past that:
 a longer chain is disclosed by `traversal capped` (see [Reading
 it](#reading-it)), which never means "not affected", only "not reached".

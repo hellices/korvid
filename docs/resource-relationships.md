@@ -435,11 +435,14 @@ So a Deployment's routing chain to its Ingress is `Deployment -> Pod
 (managed_by) -> Service (selects) -> Ingress (routes_to)` — three hops,
 inside the bound — and scaling it down names the Ingress. The ReplicaSet in
 between is a direct dependent of the Deployment in its own right, and the
-second route to the same Pod (through that ReplicaSet) is folded into
-`additional known paths` rather than listed twice. Scaling that ReplicaSet
-down instead reaches the same chain through its Pods' owner references
-(`ReplicaSet -> Pod (owned_by) -> Service (selects) -> Ingress
-(routes_to)`), also three hops. The bound is still a bound: anything past
+further routes to the same Pod — that Pod's owner reference up to the
+ReplicaSet, and the ReplicaSet's own selector back down to it — are folded
+into `additional known paths` rather than listed twice. Scaling that
+ReplicaSet down instead reaches the same chain through the selector it
+declares itself (`ReplicaSet -> Pod (managed_by) -> Service (selects) ->
+Ingress (routes_to)`), also three hops, with its Pods' owner references
+folded into `additional known paths` the same way. The bound is still a
+bound: anything past
 3 hops or 50 resources is disclosed by `traversal capped` on the dialog and
 never silently dropped (see [Limits](#limits) for the graph view's own, much
 larger caps, which this bound is independent of).

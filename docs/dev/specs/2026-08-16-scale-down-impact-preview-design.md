@@ -125,19 +125,20 @@ through) the ReplicaSet the ownerReferences chain gives it. A Deployment's
 routing chain to its Ingress is therefore `Deployment -> Pod (managed_by) ->
 Service (selects) -> Ingress (routes_to)` — three hops, inside the cap, and
 the Ingress is named. The ReplicaSet is a direct dependent in its own right,
-and its own edge to the same Pod is folded into `additional known paths`
-rather than expanded a second time. Scaling that ReplicaSet reaches the same
-chain through its Pods' owner references (`ReplicaSet -> Pod (owned_by) ->
-Service (selects) -> Ingress (routes_to)`), also three hops.
+and the further routes to that same Pod — the Pod's owner reference and the
+ReplicaSet's own selector — are folded into `additional known paths` rather
+than expanded a second time. Scaling that ReplicaSet reaches the same chain
+through the selector it declares itself (`ReplicaSet -> Pod (managed_by) ->
+Service (selects) -> Ingress (routes_to)`), also three hops, with its Pods'
+owner references folded into `additional known paths` the same way.
 
-Scale-down is still the first action whose closed relation set can reach a
-routing resource *through* the workload's Pods (`managed_by`/`owned_by` to a
-Pod, then `selects` and `routes_to` onward) rather than only directly off
-the target the way delete's own `routes_to` edge does, so it is the first
-action for which the cap can bite on a routing chain at all: a longer chain
-(an extra owner level, a route reached through a further hop) is reported by
-`traversal capped`, never silently dropped. The cap itself
-(`ImpactLimits.max_depth = 3`) is not changed by this slice.
+A scale-down composes `managed_by`/`selects`/`routes_to` into one chain, so
+where the target sits along that chain decides whether the chain still fits
+inside `ImpactLimits.max_depth`: a workload reaches a route through its own
+Pods and the Service in front of them, and a longer chain (an extra owner
+level, a route reached through a further hop) is reported by `traversal
+capped`, never silently dropped. The cap itself (`ImpactLimits.max_depth =
+3`) is not changed by this slice.
 
 ## Action-specific limitations
 
@@ -159,16 +160,33 @@ The action captures `_WriteOrigin`, target metadata, namespace, name, UID,
 context epoch, kind alias, and current replica count before opening
 `ReplicasPrompt`.
 
-After the user chooses a replica count, the worker:
+The flow performs **three** identity/origin gates, each re-checking the
+context epoch, the focused pane identity and its scope, the selected
+resource identity, and the exact UID:
+
+1. after the permission check and **before** `ReplicasPrompt` opens, so a
+   prompt is never raised for a row the user has already left;
+2. after the server-side dry-run preview and the managed-resource note, and
+   **before** any impact LIST, so a doomed scale never spends the snapshot
+   fan-out nor scopes it to a pane the user has left;
+3. after the impact summary and **before** `ConfirmScreen` is mounted.
+
+So the worker, after the user chooses a replica count:
 
 1. obtains the existing server-side dry-run preview;
 2. obtains the existing managed-resource note;
-3. when the activation boundary is met, loads the relationship snapshot using
-   the captured origin scope and summarizes `SCALE_DOWN`;
-4. revalidates context epoch, focused pane identity and scope, selected
-   resource identity, and exact UID;
-5. opens `ConfirmScreen` with the dry-run, managed note, and optional impact
+3. runs gate 2;
+4. when the activation boundary is met, loads the relationship snapshot
+   using the captured origin scope and summarizes `SCALE_DOWN`;
+5. runs gate 3, which is performed only for a known decrease — the one
+   awaited gap it guards is the snapshot load;
+6. opens `ConfirmScreen` with the dry-run, managed note, and optional impact
    lines.
+
+A scale that is not a known decrease therefore has gates 1 and 2 and no
+impact LIST at all: it keeps the pre-#295 absence of a snapshot fan-out
+while gaining both of the stronger gates, which previously re-checked only
+kind, namespace, name and the context epoch.
 
 No await occurs between the final identity/origin gate and mounting the
 confirmation screen. The write still runs only through the existing approval,
