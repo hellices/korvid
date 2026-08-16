@@ -128,9 +128,12 @@ owns starts one hop closer to the routing chain: `ReplicaSet -> Pod
 hops, inside the cap, and the Ingress is named. This is not a defect
 specific to scale-down — it is the same fixed traversal cap every action
 uses — but it is worth stating here because scale-down is the first action
-whose closed relation set can reach a routing resource at all, so it is the
-first place the cap's effect on *which target* you act on becomes visible in
-practice. The cap itself (`ImpactLimits.max_depth = 3`) is not changed by
+whose closed relation set can reach a routing resource *through the
+ownership chain* (`selects` from owner to Pod, then `routes_to` onward)
+rather than only directly off the target the way delete's own `routes_to`
+edge does. That is what makes the cap's depth depend on *which* target in
+the chain you scale, which is not visible for delete's single-hop routing
+edge. The cap itself (`ImpactLimits.max_depth = 3`) is not changed by
 this slice.
 
 ## Action-specific limitations
