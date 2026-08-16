@@ -207,27 +207,20 @@ def _replicaset(*, desired: int | None = 3) -> GenericSummary:
     )
 ```
 
-In `_scale_down_rows`, replace:
-
-```python
-"deployments": [_deployment("web", "deploy-1", selects_pods=True)],
-"replicasets": [_replicaset(selects_pods=True)],
-```
-
-with:
+In `_scale_down_rows`, the fixtures already use the shared helpers:
 
 ```python
 "deployments": [_deployment("web", "deploy-1")],
 "replicasets": [_replicaset()],
 ```
 
-Verify no compatibility switch remains:
+Verify the shared selector helper is present:
 
 ```bash
-rg "selects_pods" tests/ui/test_impact_flow.py
+rg "_workload_selector" tests/ui/test_impact_flow.py
 ```
 
-Expected: no matches.
+Expected: matches in the fixture helper definitions.
 
 - [ ] **Step 5: Run the GREEN evidence and affected suites**
 
@@ -348,7 +341,7 @@ rg -n \
   docs/tui.md docs/resource-relationships.md \
   docs/dev/plans/2026-08-15-graph-derived-blast-radius.md
 rg -n \
-  "test_delete_dialog_shows_direct_and_transitive_dependents|test_rollout_restart_dialog_shows_the_owner_chain_only|selects_pods" \
+  "test_delete_dialog_shows_realistic_workload_selector_paths|test_rollout_restart_dialog_shows_realistic_workload_selector_paths|workload_selector" \
   docs tests
 ```
 
@@ -356,7 +349,8 @@ Expected:
 
 - current examples show direct `2 or more`, transitive none, and additional
   paths `2 or more`;
-- superseded test names and `selects_pods` have no matches.
+- the superseded test names have no matches, and the current workload-selector
+  test names do.
 
 - [ ] **Step 5: Commit the documentation synchronization**
 

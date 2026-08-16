@@ -435,6 +435,15 @@ dependent are counted as `additional known paths`), bounded to 3 hops and 50
 resources, and classifies a genuine loop as a cycle rather than expanding it
 twice.
 
+This shortest-path rule also applies to delete and rollout restart. Because
+both actions include `managed_by`, a production-shaped Deployment reaches a
+matching Pod directly through its own `spec.selector`; its ReplicaSet is a
+second direct dependent, while the ReplicaSet selector and the Pod's
+ownerReference are two additional known paths to the already-listed Pod.
+Selector and owner evidence are kept distinct: a selector identifies a Pod a
+controller can manage or acquire, while an ownerReference records current
+ownership.
+
 A workload reaches its own Pods in a single hop, because it declares the
 selector that binds them: a Deployment's, StatefulSet's or ReplicaSet's
 `spec.selector` is a `managed_by` relationship to every Pod it matches,
