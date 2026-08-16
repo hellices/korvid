@@ -382,6 +382,44 @@ def test_direct_and_transitive_dependents_stay_separate_with_their_paths() -> No
     assert summary.transitive[0].path[-1].subject == pod
 
 
+@pytest.mark.parametrize("action", [ImpactAction.DELETE, ImpactAction.ROLLOUT_RESTART])
+def test_workload_selector_and_owner_paths_remain_distinct(
+    action: ImpactAction,
+) -> None:
+    deployment = _res("Deployment", "web", group="apps", uid="deploy-1")
+    replicaset = _res("ReplicaSet", "web-abc", group="apps", uid="rs-1")
+    pod = _res("Pod", "web-abc-1", uid="pod-1")
+    deployment_selector = _edge(
+        pod,
+        deployment,
+        RelationKind.MANAGED_BY,
+        field="spec.selector",
+        evidence_resource=deployment,
+    )
+    replicaset_selector = _edge(
+        pod,
+        replicaset,
+        RelationKind.MANAGED_BY,
+        field="spec.selector",
+        evidence_resource=replicaset,
+    )
+    pod_owner = _edge(pod, replicaset, RelationKind.OWNED_BY)
+    replicaset_owner = _edge(replicaset, deployment, RelationKind.OWNED_BY)
+    graph = _graph(
+        deployment_selector,
+        replicaset_selector,
+        pod_owner,
+        replicaset_owner,
+    )
+
+    summary = summarize_impact(graph, action, deployment)
+
+    assert [item.resource for item in summary.direct] == [pod, replicaset]
+    assert summary.transitive == ()
+    assert summary.cycles == ()
+    assert summary.revisits == (replicaset_selector, pod_owner)
+
+
 def test_unresolved_edges_are_never_traversed_as_dependents() -> None:
     configmap = _res("ConfigMap", "app-config")
     pod = _res("Pod", "web-1")
