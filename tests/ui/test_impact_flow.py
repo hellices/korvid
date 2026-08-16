@@ -24,7 +24,7 @@ from textual.widgets import Static
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
-from korvid.core.store import ResourceStore, Summary
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta, build_alias_map
 from korvid.k8s.errors import ApiStatusError
@@ -262,6 +262,15 @@ class RecordingOps(WriteOps):
     def __init__(self, order: list[str]) -> None:
         self.calls: list[tuple[object, ...]] = []
         self._order = order
+        #: Fired once, inside the first dry-run preview: how a test
+        #: simulates a focus or scope change landing in the awaited gap
+        #: *before* the impact snapshot chooses its scope.
+        self.on_first_preview: Callable[[], None] | None = None
+
+    def _preview_hook(self) -> None:
+        hook, self.on_first_preview = self.on_first_preview, None
+        if hook is not None:
+            hook()
 
     async def delete_object(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
@@ -299,6 +308,7 @@ class RecordingOps(WriteOps):
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> list[str] | None:
         self._order.append("preview")
+        self._preview_hook()
         return [f"- {meta.plural} prod/{name}"]
 
     async def preview_rollout_restart(
@@ -311,6 +321,7 @@ class RecordingOps(WriteOps):
         restarted_at: str | None = None,
     ) -> list[str] | None:
         self._order.append("preview")
+        self._preview_hook()
         return ["~ spec.template.metadata.annotations.kubectl.kubernetes.io/restartedAt"]
 
 
@@ -811,6 +822,42 @@ async def test_same_name_replacement_during_the_impact_load_aborts_the_restart(
         )
 
 
+async def test_a_row_that_loses_its_uid_during_the_impact_load_aborts_the_delete(
+    tmp_path: Path,
+) -> None:
+    """The approved incarnation stops being verifiable mid-flow.
+
+    The row keeps its kind, namespace and name but the store's copy no
+    longer carries a uid - korvid can no longer prove the object on screen
+    is the one the user pressed Ctrl-D on. That is indistinguishable from a
+    replacement from here, so the check fails *closed*: treating "no current
+    uid" as "nothing to compare" would turn the exact-incarnation guarantee
+    into a guarantee only for rows that happen to still resolve.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+
+    def drop_the_uid() -> None:
+        app.store.apply_event(
+            app.current_kind, app.current_scope, "MODIFIED", _deployment("web", "")
+        )
+
+    env.lister.on_first_call = drop_the_uid
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await app.action_delete_resource()
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        await until(
+            pilot,
+            lambda: any(
+                "the selection changed during the impact summary" in n.message
+                for n in app._notifications
+            ),
+            label="impact-summary uid refusal",
+        )
+
+
 async def test_a_row_without_a_uid_opens_the_dialog_with_no_impact_section(
     tmp_path: Path,
 ) -> None:
@@ -850,3 +897,165 @@ async def test_impact_loads_after_the_permission_check_and_the_dry_run_preview(
     async with env.app.run_test() as pilot:
         await open_delete_dialog(env, pilot, "deploy", expect="web")
         assert env.order[:3] == ["rbac", "preview", "list"]
+
+
+async def _split_workspace(app: KorvidApp, pilot: Any) -> None:
+    """`ctrl+w v`: clone the focused view into a second pane (issue #48)."""
+    await pilot.press("ctrl+w", "v")
+    await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="second pane mounted")
+
+
+async def _pane_to_view(pilot: Any, view: str, table_id: str, *, expect: str) -> None:
+    """`to_view` for a split workspace: waits on one named pane's table.
+
+    `to_view` queries *the* `ResourceTable`, which is ambiguous once a
+    second pane is mounted.
+    """
+    await pilot.press("colon")
+    for ch in view:
+        await pilot.press("space" if ch == " " else ch)
+    await pilot.press("enter")
+
+    def ready() -> bool:
+        table = pilot.app.query_one(f"#{table_id}", ResourceTable)
+        return table.row_count > 0 and str(table.get_row_at(0)[0]) == expect
+
+    await until(pilot, ready, label=f"{view} rows visible in {table_id}")
+
+
+async def _prod_origin_beside_an_all_namespaces_pane(app: KorvidApp, pilot: Any) -> None:
+    """Two panes on the same Deployment: pane 0 (focused) scoped to `prod`,
+    pane 1 scoped to every namespace with its cursor on the same `prod/web`
+    row - same object, same uid, different scope.
+
+    The configuration a pane-blind guard cannot tell apart: every check that
+    reads "the focused pane" (kind, namespace, name, uid) still passes after
+    focus moves across, while the snapshot's scope - and therefore what
+    `graph coverage: complete` claims - is not the one the user acted in.
+    """
+    await to_view(pilot, "deploy", expect="web")
+    await _split_workspace(app, pilot)
+    await _pane_to_view(pilot, "deploy all", "pane-1", expect="prod")
+    assert str(app.query_one("#pane-1", ResourceTable).get_row_at(0)[1]) == "web"
+    await pilot.press("ctrl+w", "w")
+    await until(pilot, lambda: app._focused_pane == 0, label="focus back on the prod pane")
+    assert app.current_scope == "prod"
+
+
+#: Every namespaced source in the snapshot catalog. A cluster-scoped source
+#: (Node, PersistentVolume) is always LISTed cluster-wide, so its `None`
+#: namespace says nothing about the snapshot's scope.
+_NAMESPACED_PLURALS = frozenset(meta.plural for meta in CATALOG_METAS if meta.namespaced)
+
+
+def _namespaced_list_scopes(env: ImpactEnv) -> set[str | None]:
+    """The namespaces the snapshot LISTed its namespaced sources in."""
+    return {namespace for plural, namespace in env.lister.calls if plural in _NAMESPACED_PLURALS}
+
+
+async def _refusal(app: KorvidApp, pilot: Any, label: str) -> None:
+    await until(
+        pilot,
+        lambda: any(
+            "the selection changed during the impact summary" in n.message
+            for n in app._notifications
+        ),
+        label=label,
+    )
+
+
+async def test_focus_moving_to_another_pane_during_the_impact_load_aborts_the_delete(
+    tmp_path: Path,
+) -> None:
+    """The user pressed Ctrl-D in the `prod` pane; focus lands in the
+    all-namespaces pane while the snapshot loads.
+
+    The other pane's cursor is on the *same* object with the same uid, so
+    kind, namespace, name and uid all still match - yet the dialog would now
+    be an approval raised from one pane and answered in another, hedged by a
+    summary whose scope was chosen for the pane the user left. Refuse before
+    the dialog exists.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+        env.lister.on_first_call = app._focus_other_pane
+        await app.action_delete_resource()
+        assert app._pane is not origin
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        # The snapshot still covered the pane the write was raised from.
+        assert _namespaced_list_scopes(env) == {"prod"}
+        await _refusal(app, pilot, "impact-summary pane refusal")
+
+
+async def test_focus_moving_to_another_pane_during_the_impact_load_aborts_the_restart(
+    tmp_path: Path,
+) -> None:
+    """Same guard on the `r` flow - see the delete case above."""
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+        env.lister.on_first_call = app._focus_other_pane
+        await app.action_rollout_restart()
+        assert app._pane is not origin
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        assert _namespaced_list_scopes(env) == {"prod"}
+        await _refusal(app, pilot, "impact-summary pane refusal")
+
+
+async def test_the_snapshot_scope_follows_the_pane_the_write_was_raised_from(
+    tmp_path: Path,
+) -> None:
+    """Focus moves to the all-namespaces pane during the *dry-run*, i.e.
+    before the snapshot is loaded at all.
+
+    Reading the scope off whichever pane is focused by then would list every
+    namespace and then state `scope: all namespaces` for a write the user
+    raised in `prod`. The captured pane decides, and the moved focus still
+    cancels the flow afterwards.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        env.ops.on_first_preview = app._focus_other_pane
+        await app.action_delete_resource()
+        assert env.lister.calls != []
+        assert _namespaced_list_scopes(env) == {"prod"}
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        await _refusal(app, pilot, "impact-summary pane refusal")
+
+
+async def test_a_scope_change_on_the_origin_pane_during_the_impact_load_aborts_the_delete(
+    tmp_path: Path,
+) -> None:
+    """Focus never moves: the pane the user acted in re-scopes itself to
+    every namespace while the snapshot loads.
+
+    The row, its uid and the pane object are all unchanged, so only the
+    scope betrays it - and a `prod` snapshot's `graph coverage: complete`
+    would then hedge a dialog raised over a cluster-wide view.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+
+        def widen_the_origin_pane() -> None:
+            origin.scope = ALL_NAMESPACES
+
+        env.lister.on_first_call = widen_the_origin_pane
+        await app.action_delete_resource()
+        assert app._pane is origin
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        assert _namespaced_list_scopes(env) == {"prod"}
+        await _refusal(app, pilot, "impact-summary scope refusal")

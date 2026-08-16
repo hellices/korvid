@@ -257,9 +257,12 @@ Reading it:
   read as exhaustive (and would contradict the coverage line right below
   it). `none in this snapshot` is left as-is: it is already a statement
   about the snapshot, not a count — which is also why a missing target,
-  whose sections are all empty, hedges nothing. The `... N more not shown
-  (preview capped)` lines also stay exact — they count what the preview cut
-  from rows it holds, not what was never found.
+  whose sections are all empty, hedges nothing. The `... N more dependents
+  not shown (preview capped)`, `... N more unresolved references not shown
+  (preview capped)` and `... N more coverage records not shown (preview
+  capped)` lines also stay exact — they count what the preview cut from
+  rows it holds, not what was never found — and each names the section it
+  cut, since all three overflow at the same indent.
 - `[inferred]` marks a hop derived by a heuristic rather than read from a
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references
@@ -295,13 +298,15 @@ Reading it:
     [Limits](resource-relationships.md#limits) for the exact numbers).
 
 The snapshot is the same bounded, read-only LIST fan-out the relationship
-view (`g`) performs — scoped to the current namespace for a namespaced
-target, and cluster-wide for a cluster-scoped one so a dependent in another
-namespace cannot be quietly missed — with a 5-second deadline. If it times
-out or fails, the dialog says `impact unavailable; approval remains
-available` and the approval proceeds normally. If the context switches or
-the selection moves while it loads, the write is cancelled before any
-dialog opens.
+view (`g`) performs — scoped to the namespace of the pane the write was
+raised from for a namespaced target, and cluster-wide for a cluster-scoped
+one so a dependent in another namespace cannot be quietly missed — with a
+5-second deadline. If it times out or fails, the dialog says `impact
+unavailable; approval remains available` and the approval proceeds normally.
+If the context switches, the selection moves, focus lands in the other pane
+of a split workspace, or that pane changes its namespace while the snapshot
+loads, the write is cancelled before any dialog opens — even when the newly
+focused pane happens to sit on the same object.
 
 The summary is matched to the target by **exact identity, UID included**.
 When the selected row carries no UID (a summary type that does not expose

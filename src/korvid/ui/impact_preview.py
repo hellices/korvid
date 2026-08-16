@@ -174,14 +174,18 @@ def _section(title: str, items: Sequence[ImpactItem], *, capped: bool) -> list[s
     The header count is a lower bound whenever the answer could not be
     exhaustive; the overflow note stays exact, because it counts what *this
     preview* cut from items the summary actually holds, not what the walk
-    never found.
+    never found. It also names what it counted: unresolved references and
+    coverage records overflow at the same indent with the same phrasing, and
+    an unqualified `... N more not shown` between them would belong to
+    whichever section the reader guesses.
     """
     if not items:
         return [f"  {title}: none in this snapshot"]
     lines = [f"  {title}: {_count_label(len(items), capped=capped)}"]
     lines.extend(_item_line(item) for item in items[:_MAX_ITEM_LINES])
     if len(items) > _MAX_ITEM_LINES:
-        lines.append(f"    ... {len(items) - _MAX_ITEM_LINES} more not shown (preview capped)")
+        omitted = len(items) - _MAX_ITEM_LINES
+        lines.append(f"    ... {omitted} more dependents not shown (preview capped)")
     return lines
 
 
@@ -298,7 +302,7 @@ def _unresolved_lines(summary: ImpactSummary, *, capped: bool) -> list[str]:
     lines.extend(_unresolved_line(edge) for edge in summary.unresolved[:_MAX_UNRESOLVED_LINES])
     if len(summary.unresolved) > _MAX_UNRESOLVED_LINES:
         omitted = len(summary.unresolved) - _MAX_UNRESOLVED_LINES
-        lines.append(f"    ... {omitted} more not shown (preview capped)")
+        lines.append(f"    ... {omitted} more unresolved references not shown (preview capped)")
     return lines
 
 

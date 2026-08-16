@@ -320,9 +320,12 @@ def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
 
 def test_a_capped_section_still_reports_its_preview_overflow_exactly() -> None:
     """The header count hedges what the *traversal* may have missed; the
-    `more not shown` line counts what *this preview* cut from items it
-    actually holds, which is exact - hedging it would suggest the renderer
-    dropped an unknown number of rows it had in hand."""
+    `more dependents not shown` line counts what *this preview* cut from the
+    items it actually holds, which is exact - hedging it would suggest the
+    renderer dropped an unknown number of rows it had in hand. It also names
+    what it counted: dependents, unresolved references and coverage records
+    all overflow at the same indent, so a bare `... 2 more not shown` would
+    belong to whichever section the reader guesses."""
     items = tuple(
         ImpactItem(
             resource=GraphResource(group="", kind="Pod", namespace="prod", name=f"web-{index}"),
@@ -332,7 +335,7 @@ def test_a_capped_section_still_reports_its_preview_overflow_exactly() -> None:
     )
     lines = render_impact_lines(_summary(direct=items, traversal_capped=True))
     assert "  known direct dependents (may be affected): 12 or more" in lines
-    assert "    ... 2 more not shown (preview capped)" in lines
+    assert "    ... 2 more dependents not shown (preview capped)" in lines
 
 
 def test_empty_sections_stay_none_in_this_snapshot_even_when_capped() -> None:
@@ -486,7 +489,7 @@ def test_unresolved_references_are_listed_and_bounded() -> None:
         "    - Pod/prod/web-abc-1 uses_config (declared) -> ConfigMap/prod/gone-0 (missing)"
         " at spec.volumes[0].configMap" in lines
     )
-    assert "    ... 2 more not shown (preview capped)" in lines
+    assert "    ... 2 more unresolved references not shown (preview capped)" in lines
     assert sum(1 for line in lines if line.startswith("    - Pod/prod/web-abc-1 uses_config")) == 5
 
 
@@ -501,7 +504,50 @@ def test_dependent_lists_are_bounded_with_an_explicit_more_line() -> None:
     lines = render_impact_lines(_summary(direct=items))
     assert "  known direct dependents (may be affected): 12" in lines
     assert sum(1 for line in lines if line.startswith("    - Pod/prod/web-")) == 10
-    assert "    ... 2 more not shown (preview capped)" in lines
+    assert "    ... 2 more dependents not shown (preview capped)" in lines
+
+
+def test_every_overflow_line_names_what_it_counted() -> None:
+    """Three sections can overflow in one summary, all at the same indent and
+    all reading `... N more ... not shown (preview capped)`. Each names its
+    own subject, so a reader scanning the body can tell which section was
+    cut without counting rows back up to the nearest heading."""
+    items = tuple(
+        ImpactItem(
+            resource=GraphResource(group="", kind="Pod", namespace="prod", name=f"web-{index}"),
+            path=(_OWNS_DEPLOY,),
+        )
+        for index in range(12)
+    )
+    unresolved = tuple(
+        RelationshipEdge(
+            subject=_POD,
+            target=GraphResource(
+                group="", kind="ConfigMap", namespace="prod", name=f"gone-{index}"
+            ),
+            relation=RelationKind.USES_CONFIG,
+            confidence=FactConfidence.DECLARED,
+            evidence=EvidencePointer(resource=_POD, field=f"spec.volumes[{index}].configMap"),
+            resolution=EdgeResolution.MISSING,
+        )
+        for index in range(8)
+    )
+    coverage = tuple(
+        CoverageRecord(
+            group="",
+            resource=f"secrets-{index}",
+            scope="prod",
+            state=CoverageState.FORBIDDEN,
+            detail="forbidden",
+        )
+        for index in range(7)
+    )
+    lines = render_impact_lines(_summary(direct=items, unresolved=unresolved, coverage=coverage))
+    assert "    ... 2 more dependents not shown (preview capped)" in lines
+    assert "    ... 3 more unresolved references not shown (preview capped)" in lines
+    assert "    ... 2 more coverage records not shown (preview capped)" in lines
+    # No overflow line leaves its subject to the reader's guess.
+    assert not any(line.startswith("    ... ") and "more not shown" in line for line in lines)
 
 
 def test_inferred_items_are_labelled_and_declared_never_blocks() -> None:

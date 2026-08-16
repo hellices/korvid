@@ -52,13 +52,13 @@
 - `src/korvid/ui/impact_preview.py` — pure, Textual-free renderer: `render_impact_lines(summary) -> tuple[str, ...]`, plus the static `IMPACT_UNAVAILABLE_LINES` advisory.
 - `tests/core/test_impact.py` — action semantics on realistic resource pairs, traversal, cycles/revisits (including parity with `RelationshipGraph.walk_dependents`), caps, unresolved relevance, a target absent from the snapshot, the recorded scope, immutability, and the no-Textual import probe.
 - `tests/ui/test_impact_preview.py` — exact line sequence, bounding (per fragment and per composed line), literal text, scope/target-missing/revisit/coverage/cap/unresolved sections, advisory wording.
-- `tests/ui/test_impact_flow.py` — app integration for `Ctrl-D` and `r`: section rendering, cluster-scoped targets covering every namespace, a target replaced since the watch, an unresolved reference outside the action's relations, missing loader, incomplete graph, timeout, loader failure, unsupported flows (scale, cordon), and post-await revalidation. Owns the shared `ImpactEnv` harness.
+- `tests/ui/test_impact_flow.py` — app integration for `Ctrl-D` and `r`: section rendering, cluster-scoped targets covering every namespace, a target replaced since the watch, an unresolved reference outside the action's relations, missing loader, incomplete graph, timeout, loader failure, unsupported flows (scale, cordon), and post-await revalidation (context switch, moved selection, same-name replacement, a row that loses its uid, and - in a split workspace - focus moving to the other pane or the origin pane re-scoping itself). Owns the shared `ImpactEnv` harness.
 - `tests/ui/test_impact_security.py` — the security invariants pinned against the integrated flow (imports the harness from `tests/ui/test_impact_flow.py`).
 
 ### Modified files
 
 - `src/korvid/ui/widgets/confirm_screen.py` — `ConfirmScreen(..., impact_lines: tuple[str, ...] | None = None)`, the `.confirm-impact` section above the dry-run preview, and its CSS rule.
-- `src/korvid/ui/app.py` — `_IMPACT_TIMEOUT`, `KorvidApp._impact_scope(...)`, `KorvidApp._impact_preview(...)`, `impact_lines` pass-through on `_confirm_screen` and `_push_write_confirmation`, and the two call sites in `action_delete_resource` / `action_rollout_restart`.
+- `src/korvid/ui/app.py` — `_IMPACT_TIMEOUT`, `_WriteOrigin` (with `is_current(...)` and `impact_scope(...)`), `KorvidApp._write_origin(...)`, `KorvidApp._impact_preview(...)`, `impact_lines` pass-through on `_confirm_screen` and `_push_write_confirmation`, and the two call sites in `action_delete_resource` / `action_rollout_restart`.
 - `tests/ui/test_confirm_screen.py` — impact-section rendering, ordering, literal markup, and gate-unchanged tests.
 - `docs/tui.md` — a "Write impact preview" section.
 - `docs/resource-relationships.md` — a "Blast radius in write previews" section.
@@ -72,7 +72,7 @@ Every new parameter is keyword-only **with a default**, so no existing caller, c
 - `KorvidApp._push_write_confirmation` (`src/korvid/ui/app.py:5069`) callers: `:5209` (delete — **passes** `impact_lines`), `:5254` (rollout restart — **passes** `impact_lines`), `:5340` (scale), `:5537` (edit), `:5669` (resize), `:5824` (cordon/uncordon), and `AppWriteGate.confirm` (`:8553`).
 - `WriteGate.confirm` (`src/korvid/ui/write_gate.py:29`) is **deliberately not changed**: helm, operator, forward, and shell controllers never build an impact section, so the checked ABC signature and `AppWriteGate` stay as they are.
 - `KorvidApp.__init__` is **not** changed: `list_relationship_objects` (`src/korvid/ui/app.py:710`) is already injected by the composition root (`src/korvid/__main__.py:1336`) and already builds `self._relationship_loader` (`src/korvid/ui/app.py:776`). `tests/test_main_wiring.py::_FakeApp` therefore needs no edit.
-- `KorvidApp._impact_preview` (two call sites: `action_delete_resource`, `action_rollout_restart`) and `KorvidApp._impact_scope` (one call site: `_impact_preview`) are **new private methods**: no existing code calls them, so they add no blast radius of their own.
+- `KorvidApp._impact_preview` (two call sites: `action_delete_resource`, `action_rollout_restart`), `KorvidApp._write_origin` (the same two call sites) and `_WriteOrigin.impact_scope` (one call site: `_impact_preview`) are **new private code**: no existing code calls them, so they add no blast radius of their own. The one pre-existing signature that changes is `_write_context_intact` / `_write_identity_intact`, which gain an optional `origin` keyword that defaults to `None` — every other write flow keeps its exact behaviour.
 - Test modules that construct `ConfirmScreen` or drive a confirm dialog and must keep passing untouched: `tests/ui/test_confirm_screen.py` (extended by Task 3), `tests/ui/test_write_ops.py`, `tests/ui/test_dryrun_preview.py`, `tests/ui/test_write_confirm_characterization.py`, `tests/ui/test_protected_contexts.py`, `tests/ui/test_node_ops.py`, `tests/ui/test_node_shell.py`, `tests/ui/test_shell.py`, `tests/ui/test_helm_actions.py`, `tests/ui/test_olm_view.py`, `tests/ui/test_operator_uninstall.py`, `tests/ui/test_agent_write.py`, `tests/ui/test_agent_interrupt.py`, `tests/ui/test_proposals_ui.py`, `tests/ui/test_mcp_follow.py`, `tests/ui/test_resize_flow.py`, `tests/ui/test_transfer.py`, `tests/ui/test_ctx_switch.py`, `tests/ui/test_helm_view.py`.
 - No `WriteOps`, `UIBridge`, or `WriteGate` fake gains a method or parameter in this plan.
 
@@ -1494,9 +1494,12 @@ def test_every_count_is_exact_when_nothing_was_capped_or_truncated() -> None:
 
 def test_a_capped_section_still_reports_its_preview_overflow_exactly() -> None:
     """The header count hedges what the *traversal* may have missed; the
-    `more not shown` line counts what *this preview* cut from items it
-    actually holds, which is exact - hedging it would suggest the renderer
-    dropped an unknown number of rows it had in hand."""
+    `more dependents not shown` line counts what *this preview* cut from the
+    items it actually holds, which is exact - hedging it would suggest the
+    renderer dropped an unknown number of rows it had in hand. It also names
+    what it counted: dependents, unresolved references and coverage records
+    all overflow at the same indent, so a bare `... 2 more not shown` would
+    belong to whichever section the reader guesses."""
     items = tuple(
         ImpactItem(
             resource=GraphResource(group="", kind="Pod", namespace="prod", name=f"web-{index}"),
@@ -1506,7 +1509,7 @@ def test_a_capped_section_still_reports_its_preview_overflow_exactly() -> None:
     )
     lines = render_impact_lines(_summary(direct=items, traversal_capped=True))
     assert "  known direct dependents (may be affected): 12 or more" in lines
-    assert "    ... 2 more not shown (preview capped)" in lines
+    assert "    ... 2 more dependents not shown (preview capped)" in lines
 
 
 def test_empty_sections_stay_none_in_this_snapshot_even_when_capped() -> None:
@@ -1660,7 +1663,7 @@ def test_unresolved_references_are_listed_and_bounded() -> None:
         "    - Pod/prod/web-abc-1 uses_config (declared) -> ConfigMap/prod/gone-0 (missing)"
         " at spec.volumes[0].configMap" in lines
     )
-    assert "    ... 2 more not shown (preview capped)" in lines
+    assert "    ... 2 more unresolved references not shown (preview capped)" in lines
     assert sum(1 for line in lines if line.startswith("    - Pod/prod/web-abc-1 uses_config")) == 5
 
 
@@ -1675,7 +1678,7 @@ def test_dependent_lists_are_bounded_with_an_explicit_more_line() -> None:
     lines = render_impact_lines(_summary(direct=items))
     assert "  known direct dependents (may be affected): 12" in lines
     assert sum(1 for line in lines if line.startswith("    - Pod/prod/web-")) == 10
-    assert "    ... 2 more not shown (preview capped)" in lines
+    assert "    ... 2 more dependents not shown (preview capped)" in lines
 
 
 def test_inferred_items_are_labelled_and_declared_never_blocks() -> None:
@@ -2387,7 +2390,8 @@ def _section(title: str, items: Sequence[ImpactItem], *, capped: bool) -> list[s
     lines = [f"  {title}: {_count_label(len(items), capped=capped)}"]
     lines.extend(_item_line(item) for item in items[:_MAX_ITEM_LINES])
     if len(items) > _MAX_ITEM_LINES:
-        lines.append(f"    ... {len(items) - _MAX_ITEM_LINES} more not shown (preview capped)")
+        omitted = len(items) - _MAX_ITEM_LINES
+        lines.append(f"    ... {omitted} more dependents not shown (preview capped)")
     return lines
 
 
@@ -2504,7 +2508,7 @@ def _unresolved_lines(summary: ImpactSummary, *, capped: bool) -> list[str]:
     lines.extend(_unresolved_line(edge) for edge in summary.unresolved[:_MAX_UNRESOLVED_LINES])
     if len(summary.unresolved) > _MAX_UNRESOLVED_LINES:
         omitted = len(summary.unresolved) - _MAX_UNRESOLVED_LINES
-        lines.append(f"    ... {omitted} more not shown (preview capped)")
+        lines.append(f"    ... {omitted} more unresolved references not shown (preview capped)")
     return lines
 
 
@@ -2929,7 +2933,7 @@ git commit -m "feat: show a graph-derived impact section in write confirmations"
 ### Task 4: App integration for delete and rollout restart
 
 **Files:**
-- Modify: `src/korvid/ui/app.py` (constant beside `_PREVIEW_TIMEOUT` at `:266`; new `_impact_scope` + `_impact_preview` after `_dry_run_preview` at `:5059-5067`; `_push_write_confirmation` at `:5069-5111`; `action_delete_resource` at `:5157-5220`; `action_rollout_restart` at `:5222-5267`; `_confirm_screen` at `:6372-6394`)
+- Modify: `src/korvid/ui/app.py` (constant beside `_PREVIEW_TIMEOUT` at `:266`; new `_WriteOrigin` beside `PaneState`, new `_write_origin` + `_impact_preview` after `_dry_run_preview` at `:5059-5067`; `origin` keyword on `_write_context_intact` / `_write_identity_intact`; `_push_write_confirmation` at `:5069-5111`; `action_delete_resource` at `:5157-5220`; `action_rollout_restart` at `:5222-5267`; `_confirm_screen` at `:6372-6394`)
 - Create: `tests/ui/test_impact_flow.py`
 
 **Interfaces:**
@@ -2940,12 +2944,12 @@ git commit -m "feat: show a graph-derived impact section in write confirmations"
   - Existing, unchanged: `KorvidApp._relationship_loader` (`RelationshipSnapshotLoader`, built at `src/korvid/ui/app.py:776`), `RelationshipSnapshotLoader.load(root, namespace, aliases)` (which already lists cluster-scoped kinds cluster-wide and namespaced kinds in `namespace`, or everywhere when it is `None`), `korvid.core.relationships.GraphResource`, `korvid.core.store.ALL_NAMESPACES`, `KorvidApp._pane.scope`, `KorvidApp._write_context_intact`, `KorvidApp._write_target`, `KorvidApp._precheck_keybinding_write`, `KorvidApp._managed_note`, `KorvidApp._dry_run_preview`.
 - Produces:
   - `_IMPACT_TIMEOUT: float = 5.0` module constant in `src/korvid/ui/app.py`.
-  - `KorvidApp._impact_scope(self, meta: ResourceMeta) -> str | None` — the one place that decides the snapshot's namespace: the pane's scope for a namespaced target, `None` (every namespace) for a cluster-scoped one or an all-namespaces pane. Its return value is passed to **both** `loader.load(...)` and `summarize_impact(..., scope=...)`, so the rendered scope can never disagree with what was listed.
-  - `KorvidApp._impact_preview(self, action: ImpactAction, meta: ResourceMeta, ns: str | None, name: str, uid: str | None) -> tuple[str, ...] | None`. Returns `None` — no section at all, and no snapshot load — when no loader is wired **or** when the row carries no `uid`: the summary is matched to a snapshot node by exact identity, so a uid-less target would either read as `target not found in this snapshot` (a claim about the object, when the truth is that korvid has no uid for it) or, if resolved by name instead, silently reconnect the preview to whatever object holds that name now. Pinned by `tests/ui/test_impact_flow.py::test_a_row_without_a_uid_opens_the_dialog_with_no_impact_section` (dialog opens, no `.confirm-impact`, no LIST) and `tests/ui/test_impact_security.py::test_a_uid_less_row_still_confirms_and_writes_with_no_snapshot_read` (approval, write, and audit unchanged).
+  - `_WriteOrigin.impact_scope(self, meta: ResourceMeta) -> str | None` — the one place that decides the snapshot's namespace: the *captured* pane's scope for a namespaced target, `None` (every namespace) for a cluster-scoped one or a captured all-namespaces pane. Its return value is passed to **both** `loader.load(...)` and `summarize_impact(..., scope=...)`, so the rendered scope can never disagree with what was listed - and because it reads the capture rather than `self._pane`, a focus change across a split workspace during an earlier await cannot re-aim it.
+  - `KorvidApp._impact_preview(self, action: ImpactAction, meta: ResourceMeta, ns: str | None, name: str, uid: str | None, *, origin: _WriteOrigin) -> tuple[str, ...] | None`. Returns `None` — no section at all, and no snapshot load — when no loader is wired **or** when the row carries no `uid`: the summary is matched to a snapshot node by exact identity, so a uid-less target would either read as `target not found in this snapshot` (a claim about the object, when the truth is that korvid has no uid for it) or, if resolved by name instead, silently reconnect the preview to whatever object holds that name now. Pinned by `tests/ui/test_impact_flow.py::test_a_row_without_a_uid_opens_the_dialog_with_no_impact_section` (dialog opens, no `.confirm-impact`, no LIST) and `tests/ui/test_impact_security.py::test_a_uid_less_row_still_confirms_and_writes_with_no_snapshot_read` (approval, write, and audit unchanged).
   - `KorvidApp._push_write_confirmation(..., impact_lines: tuple[str, ...] | None = None)`.
   - `KorvidApp._confirm_screen(..., impact_lines: tuple[str, ...] | None = None)`.
-  - `tests/ui/test_impact_flow.py::ImpactEnv`, `::RecordingLister`, `::RecordingOps`, `::to_view`, `::open_delete_dialog`, `::impact_text`, `::CATALOG_ALIASES` — the shared harness Task 5 imports by name.
-- Ordering contract inside both actions: RBAC pre-check → dry-run preview → managed note → existing `_write_context_intact(phase="the dry-run preview")` → impact load → **new** `_write_context_intact(phase="the impact summary")` → dialog.
+  - `tests/ui/test_impact_flow.py::ImpactEnv`, `::RecordingLister` (`on_first_call`), `::RecordingOps` (`on_first_preview`), `::to_view`, `::open_delete_dialog`, `::impact_text`, `::CATALOG_ALIASES` — the shared harness Task 5 imports by name.
+- Ordering contract inside both actions: origin capture (`_write_origin()`, before the first await) → RBAC pre-check → dry-run preview → managed note → existing `_write_context_intact(phase="the dry-run preview")` → impact load (scoped from the capture) → **new** `_write_identity_intact(phase="the impact summary", origin=origin)` → dialog. The final gate is the identity one, and it takes the origin: kind, namespace, name and uid can all still match in a *different* pane of a split workspace whose cursor happens to sit on the same object, and the same pane can have widened to every namespace under the flow.
 
 - [ ] **Step 1: Write the failing app-integration tests**
 
@@ -3610,25 +3614,45 @@ Add the deadline constant next to `_PREVIEW_TIMEOUT` (`src/korvid/ui/app.py:266`
 _IMPACT_TIMEOUT = 5.0
 ```
 
-Add the scope helper and the loader wrapper immediately after `_dry_run_preview` (`src/korvid/ui/app.py:5059-5067`):
+Add the origin capture and the loader wrapper immediately after `_dry_run_preview` (`src/korvid/ui/app.py:5059-5067`). The scope helper lives on `_WriteOrigin` (a module-level frozen dataclass beside `PaneState`), not on the app: every awaited gap in a write flow is a gap in which the workspace can be split, focused across or re-scoped, and `self._pane` answers "whichever pane is focused *now*" rather than "the pane this write was raised from":
 
 ```python
-    def _impact_scope(self, meta: ResourceMeta) -> str | None:
+@dataclasses.dataclass(frozen=True)
+class _WriteOrigin:
+    """The pane a write flow was raised from, and the scope it was showing."""
+
+    pane: PaneState
+    scope: str
+
+    def is_current(self, pane: PaneState) -> bool:
+        """Whether `pane` is still the pane this flow was raised from, on the
+        scope it was raised in."""
+        return pane is self.pane and pane.scope == self.scope
+
+    def impact_scope(self, meta: ResourceMeta) -> str | None:
         """The namespace an impact snapshot must cover for this target.
 
-        The pane's namespace for a namespaced target, and *every* namespace
-        for a cluster-scoped one (or an all-namespaces pane). A Node or
-        PersistentVolume is reachable from every namespace: scoping its
+        The captured scope for a namespaced target, and *every* namespace
+        for a cluster-scoped one (or a captured all-namespaces pane). A Node
+        or PersistentVolume is reachable from every namespace: scoping its
         snapshot to the pane the user happens to be in would both hide the
         Pods it runs elsewhere and let the dialog report complete coverage
         of a namespace that was never the whole question. The same value is
         handed to the loader and to `summarize_impact`, so the scope the
-        text states is always the scope that was listed.
+        text states is always the scope that was listed - and it is the
+        captured one, so a focus change mid-flow cannot silently re-aim the
+        snapshot at another pane's view.
         """
-        scope = self._pane.scope
-        if not meta.namespaced or scope == ALL_NAMESPACES:
+        if not meta.namespaced or self.scope == ALL_NAMESPACES:
             return None
-        return scope
+        return self.scope
+```
+
+```python
+    def _write_origin(self) -> _WriteOrigin:
+        """Pin the pane a write flow is being raised from, and its scope."""
+        pane = self._pane
+        return _WriteOrigin(pane, pane.scope)
 
     async def _impact_preview(
         self,
@@ -3637,6 +3661,8 @@ Add the scope helper and the loader wrapper immediately after `_dry_run_preview`
         ns: str | None,
         name: str,
         uid: str | None,
+        *,
+        origin: _WriteOrigin,
     ) -> tuple[str, ...] | None:
         """Advisory blast-radius lines for a write dialog (issue #283).
 
@@ -3662,6 +3688,12 @@ Add the scope helper and the loader wrapper immediately after `_dry_run_preview`
 
         The summary itself can never approve, execute, or reserve a write:
         it returns text.
+
+        `origin` is the pane the flow was raised from: its captured scope
+        decides what the snapshot covers, so a focus change during an
+        earlier await cannot silently re-aim the snapshot (and the
+        `scope:`/`graph coverage:` lines derived from it) at another pane's
+        view of the cluster.
         """
         loader = self._relationship_loader
         if loader is None or uid is None:
@@ -3669,7 +3701,7 @@ Add the scope helper and the loader wrapper immediately after `_dry_run_preview`
         root = GraphResource(
             group=meta.group, kind=meta.kind, namespace=ns or "", name=name, uid=uid
         )
-        scope = self._impact_scope(meta)
+        scope = origin.impact_scope(meta)
         try:
             async with asyncio.timeout(_IMPACT_TIMEOUT):
                 graph = await loader.load(root, scope, self.aliases)
@@ -3749,21 +3781,28 @@ Extend `_confirm_screen` (`src/korvid/ui/app.py:6372-6394`) the same way:
         )
 ```
 
-In `action_delete_resource` (`src/korvid/ui/app.py:5201-5220`), load the summary after the existing dry-run revalidation and revalidate again before the dialog:
+In `action_delete_resource` (`src/korvid/ui/app.py:5201-5220`), capture the origin pane beside the target, load the summary after the existing dry-run revalidation, and re-check the full identity (UID *and* origin pane) before the dialog:
 
 ```python
+        # Which pane raised this, and on which scope: the snapshot below is
+        # scoped from here, and the gate after it refuses if focus moved to
+        # another pane - even one whose cursor is on the same object.
+        origin = self._write_origin()
         preview = await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
         note = await self._managed_note(kind_alias, ns, name)
         if not self._write_context_intact(
             "delete", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
             return
-        # The snapshot is another awaited gap: a `:ctx` switch or a moved
-        # selection during it must abort before a dialog describes the row
+        # The snapshot is another awaited gap: a `:ctx` switch, a moved
+        # selection, a re-focused or re-scoped pane, or a same-named
+        # replacement during it must abort before a dialog describes the row
         # the user is no longer on (issue #283).
-        impact = await self._impact_preview(ImpactAction.DELETE, meta, ns, name, uid)
-        if not self._write_context_intact(
-            "delete", meta, ns, name, phase="the impact summary", epoch=epoch
+        impact = await self._impact_preview(
+            ImpactAction.DELETE, meta, ns, name, uid, origin=origin
+        )
+        if not self._write_identity_intact(
+            "delete", meta, ns, name, uid, phase="the impact summary", epoch=epoch, origin=origin
         ):
             return
         operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
@@ -3792,9 +3831,18 @@ In `action_rollout_restart` (`src/korvid/ui/app.py:5245-5267`), do the same with
         ):
             return
         # Same awaited-gap revalidation as delete - see action_delete_resource.
-        impact = await self._impact_preview(ImpactAction.ROLLOUT_RESTART, meta, ns, name, uid)
-        if not self._write_context_intact(
-            "rollout_restart", meta, ns, name, phase="the impact summary", epoch=epoch
+        impact = await self._impact_preview(
+            ImpactAction.ROLLOUT_RESTART, meta, ns, name, uid, origin=origin
+        )
+        if not self._write_identity_intact(
+            "rollout_restart",
+            meta,
+            ns,
+            name,
+            uid,
+            phase="the impact summary",
+            epoch=epoch,
+            origin=origin,
         ):
             return
 
@@ -4168,9 +4216,11 @@ Expected:
 Now prove the revalidation pin is real. Temporarily delete the second revalidation in `action_delete_resource` (the block added in Task 4):
 
 ```python
-        impact = await self._impact_preview(ImpactAction.DELETE, meta, ns, name, uid)
-        if not self._write_context_intact(
-            "delete", meta, ns, name, phase="the impact summary", epoch=epoch
+        impact = await self._impact_preview(
+            ImpactAction.DELETE, meta, ns, name, uid, origin=origin
+        )
+        if not self._write_identity_intact(
+            "delete", meta, ns, name, uid, phase="the impact summary", epoch=epoch, origin=origin
         ):
             return
 ```
@@ -4259,9 +4309,12 @@ Reading it:
   read as exhaustive (and would contradict the coverage line right below
   it). `none in this snapshot` is left as-is: it is already a statement
   about the snapshot, not a count — which is also why a missing target,
-  whose sections are all empty, hedges nothing. The `... N more not shown
-  (preview capped)` lines also stay exact — they count what the preview cut
-  from rows it holds, not what was never found.
+  whose sections are all empty, hedges nothing. The `... N more dependents
+  not shown (preview capped)`, `... N more unresolved references not shown
+  (preview capped)` and `... N more coverage records not shown (preview
+  capped)` lines also stay exact — they count what the preview cut from rows
+  it holds, not what was never found — and each names the section it cut,
+  since all three overflow at the same indent.
 - `[inferred]` marks a hop derived by a heuristic rather than read from a
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references
@@ -4451,7 +4504,7 @@ Expected:
 | Inferred edges labelled, never blocking | Task 1 (`ImpactItem.inferred`) + Task 2 (`[inferred]`, note line) |
 | Unresolved targets explicit and relevant | Task 1 (affected-set filter, *not* relation-filtered: `test_unresolved_references_are_reported_whatever_their_relation`) + Task 2 (`_unresolved_lines`) + Task 4 (`test_rollout_restart_warns_about_an_unresolved_config_reference`) |
 | A target the snapshot never saw is reported, never answered | Task 1 (`target_present`, feeds `incomplete`) + Task 2 (`target not found in this snapshot - dependents unknown`) + Task 4 (`test_a_target_replaced_since_the_watch_is_reported_as_unknown`) |
-| The snapshot's namespace scope is chosen by the target and always stated | Task 4 (`_impact_scope`, one value for both the load and the summary; `test_deleting_a_cluster_scoped_node_covers_every_namespace`) + Task 1 (`scope` recorded) + Task 2 (`scope:` line, stated even for `complete` coverage) |
+| The snapshot's namespace scope is chosen by the target and the originating pane, and always stated | Task 4 (`_WriteOrigin.impact_scope`, one value for both the load and the summary; `test_deleting_a_cluster_scoped_node_covers_every_namespace`, `test_the_snapshot_scope_follows_the_pane_the_write_was_raised_from`) + Task 1 (`scope` recorded) + Task 2 (`scope:` line, stated even for `complete` coverage) |
 | Graph completeness reported | Task 1 (`coverage`, `incomplete`) + Task 2 (`_coverage_lines`) |
 | Caps reported, never silent | Task 1 (`traversal_capped`, `graph_truncated`) + Task 2 (`_cap_lines`) |
 | Rendered beside the existing server dry-run preview | Task 3 (`.confirm-impact` above `.confirm-preview`) |
@@ -4475,7 +4528,7 @@ Expected:
 - `ImpactSummary`'s twelve fields appear in one order (Task 1) and every construction — Task 1's code, Task 2's `_summary` helper — passes them by keyword, so the added `target_present`, `scope`, and `revisits` cannot silently shift a positional argument.
 - `render_impact_lines(summary) -> tuple[str, ...]`, `IMPACT_TITLE`, `ADVISORY_LINE`, `IMPACT_UNAVAILABLE_LINES`, and `_MAX_LINE` are defined once in Task 2 and consumed unchanged in Tasks 3-5 (`_MAX_LINE` only by Task 2's own bound test).
 - `impact_lines: tuple[str, ...] | None = None` is the same keyword-only parameter with the same type on `ConfirmScreen.__init__` (Task 3), `KorvidApp._confirm_screen`, and `KorvidApp._push_write_confirmation` (Task 4); `KorvidApp._impact_preview` returns exactly that type.
-- `KorvidApp._impact_scope(meta) -> str | None` returns the single value passed to both `RelationshipSnapshotLoader.load(root, namespace, aliases)` and `summarize_impact(..., scope=...)`, so the loaded scope and the rendered scope are the same object by construction.
+- `_WriteOrigin.impact_scope(meta) -> str | None` returns the single value passed to both `RelationshipSnapshotLoader.load(root, namespace, aliases)` and `summarize_impact(..., scope=...)`, so the loaded scope and the rendered scope are the same object by construction - and it is derived from the pane captured before the first await, not from whichever pane is focused when the snapshot starts.
 - The harness names `ImpactEnv`, `RecordingLister`, `RecordingOps`, `CATALOG_ALIASES`, `to_view`, `open_delete_dialog`, and `impact_text` are defined once in Task 4 and imported by name in Task 5; `to_view`/`open_delete_dialog` take the same optional `expect` keyword in both.
 - `ImpactSummary.incomplete` (Task 1) and the renderer's separate target/coverage/cap lines (Task 2) are deliberately different views of completeness: `incomplete` is the single boolean, the lines say *which* reason applies.
 - The impact traversal deliberately duplicates `RelationshipGraph.walk_dependents` rather than extending it (rationale in Task 1's Interfaces and the module docstring); the parity test keeps the one shared invariant honest.

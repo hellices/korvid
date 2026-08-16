@@ -535,6 +535,52 @@ class PaneState:
         return pane
 
 
+@dataclasses.dataclass(frozen=True)
+class _WriteOrigin:
+    """The pane a write flow was raised from, and the scope it was showing.
+
+    Every awaited gap in a write flow (the RBAC round-trip, the dry-run, the
+    managed-by lookup, the impact snapshot) is a gap in which the workspace
+    can be split, focused across, or re-scoped. `current_kind`,
+    `current_scope` and the selected row all delegate to *whichever* pane is
+    focused right now, so a flow that re-reads them after an await is
+    answering a different question than the one the user asked.
+
+    Captured before the first await, this pins both halves of "where the
+    user acted": the pane object itself (identity, not equality - a second
+    pane can hold the very same kind, scope and cursor row) and the scope
+    that pane was showing (the same pane can widen to every namespace under
+    the flow). The impact snapshot is scoped from the capture, and the
+    post-snapshot gate refuses unless the capture is still current.
+    """
+
+    pane: PaneState
+    scope: str
+
+    def is_current(self, pane: PaneState) -> bool:
+        """Whether `pane` is still the pane this flow was raised from, on the
+        scope it was raised in."""
+        return pane is self.pane and pane.scope == self.scope
+
+    def impact_scope(self, meta: ResourceMeta) -> str | None:
+        """The namespace an impact snapshot must cover for this target.
+
+        The captured scope for a namespaced target, and *every* namespace
+        for a cluster-scoped one (or a captured all-namespaces pane). A Node
+        or PersistentVolume is reachable from every namespace: scoping its
+        snapshot to the pane the user happens to be in would both hide the
+        Pods it runs elsewhere and let the dialog report complete coverage
+        of a namespace that was never the whole question. The same value is
+        handed to the loader and to `summarize_impact`, so the scope the
+        text states is always the scope that was listed - and it is the
+        captured one, so a focus change mid-flow cannot silently re-aim the
+        snapshot at another pane's view.
+        """
+        if not meta.namespaced or self.scope == ALL_NAMESPACES:
+            return None
+        return self.scope
+
+
 class KorvidApp(App[None]):
     # Every binding carries an ``id`` so the `keybindings:` config section
     # can remap it via Textual's keymap (issue #35); uppercase duplicates
@@ -4837,6 +4883,7 @@ class KorvidApp(App[None]):
         *,
         phase: str = "the permission check",
         epoch: int,
+        origin: _WriteOrigin | None = None,
     ) -> bool:
         """Re-validate after an awaited gap (the RBAC round-trip, a dry-run
         preview, or an editor session - named by ``phase`` so cancellation
@@ -4846,8 +4893,13 @@ class KorvidApp(App[None]):
         they did not see. ``epoch`` (captured when the write flow began) also
         aborts on a context switch that started - or fully completed - during
         the gap: a same-named row on the new cluster would otherwise satisfy
-        the selection checks. Abort (with a notification) unless everything
-        still matches."""
+        the selection checks. ``origin`` (a `_WriteOrigin` captured with the
+        target) additionally pins *which pane* the flow was raised from and
+        the scope it showed: the selection checks below all read the focused
+        pane, so without it a focus change to a second pane whose cursor sits
+        on the same object - or a re-scope of the pane itself - passes every
+        one of them. Abort (with a notification) unless everything still
+        matches."""
         if self._ctx_switching or epoch != self._ctx_epoch:
             self.notify(
                 f"{action} {self._gvr_label(meta)}/{name} cancelled -"
@@ -4865,11 +4917,12 @@ class KorvidApp(App[None]):
         kind = self._canonical_kind(self.current_kind)
         current_ns, current_name = self._selected_ns_name()
         if (
+            (origin is not None and not origin.is_current(self._pane))
             # Value comparison, not identity: background discovery replaces
             # alias values with freshly constructed (equal) ResourceMeta
             # instances, which must not cancel a write on the same row -
             # the editor round-trip in particular is arbitrarily long.
-            self.aliases.get(kind) != meta
+            or self.aliases.get(kind) != meta
             or current_name != name
             or (meta.namespaced and (current_ns or None) != ns)
         ):
@@ -4891,6 +4944,7 @@ class KorvidApp(App[None]):
         *,
         phase: str,
         epoch: int,
+        origin: _WriteOrigin | None = None,
     ) -> bool:
         """`_write_context_intact` plus the captured UID.
 
@@ -4903,8 +4957,14 @@ class KorvidApp(App[None]):
 
         A row whose summary type carries no uid (``uid is None``) keeps the
         pre-existing behaviour exactly: nothing to compare, no new refusal.
+        A captured uid that no longer resolves is *not* the same case: the
+        comparison below fails closed, because "korvid can no longer see the
+        incarnation the user approved" is exactly what a replacement looks
+        like from here.
         """
-        if not self._write_context_intact(action, meta, ns, name, phase=phase, epoch=epoch):
+        if not self._write_context_intact(
+            action, meta, ns, name, phase=phase, epoch=epoch, origin=origin
+        ):
             return False
         if uid is None or self._selected_uid(ns, name) == uid:
             return True
@@ -5109,22 +5169,15 @@ class KorvidApp(App[None]):
             logger.debug("dry-run preview failed; dialog opens without it", exc_info=True)
             return None
 
-    def _impact_scope(self, meta: ResourceMeta) -> str | None:
-        """The namespace an impact snapshot must cover for this target.
+    def _write_origin(self) -> _WriteOrigin:
+        """Pin the pane a write flow is being raised from, and its scope.
 
-        The pane's namespace for a namespaced target, and *every* namespace
-        for a cluster-scoped one (or an all-namespaces pane). A Node or
-        PersistentVolume is reachable from every namespace: scoping its
-        snapshot to the pane the user happens to be in would both hide the
-        Pods it runs elsewhere and let the dialog report complete coverage
-        of a namespace that was never the whole question. The same value is
-        handed to the loader and to `summarize_impact`, so the scope the
-        text states is always the scope that was listed.
+        Called before the flow's first await, next to the target capture:
+        everything after that reads "the focused pane", which is a moving
+        target across a split workspace.
         """
-        scope = self._pane.scope
-        if not meta.namespaced or scope == ALL_NAMESPACES:
-            return None
-        return scope
+        pane = self._pane
+        return _WriteOrigin(pane, pane.scope)
 
     async def _impact_preview(
         self,
@@ -5133,6 +5186,8 @@ class KorvidApp(App[None]):
         ns: str | None,
         name: str,
         uid: str | None,
+        *,
+        origin: _WriteOrigin,
     ) -> tuple[str, ...] | None:
         """Advisory blast-radius lines for a write dialog (issue #283).
 
@@ -5164,6 +5219,12 @@ class KorvidApp(App[None]):
 
         The summary itself can never approve, execute, or reserve a write:
         it returns text.
+
+        `origin` is the pane the flow was raised from: its captured scope
+        decides what the snapshot covers, so a focus change during an
+        earlier await cannot silently re-aim the snapshot (and the
+        `scope:`/`graph coverage:` lines derived from it) at another pane's
+        view of the cluster.
         """
         loader = self._relationship_loader
         if loader is None or uid is None:
@@ -5171,7 +5232,7 @@ class KorvidApp(App[None]):
         root = GraphResource(
             group=meta.group, kind=meta.kind, namespace=ns or "", name=name, uid=uid
         )
-        scope = self._impact_scope(meta)
+        scope = origin.impact_scope(meta)
         try:
             async with asyncio.timeout(_IMPACT_TIMEOUT):
                 graph = await loader.load(root, scope, self.aliases)
@@ -5316,6 +5377,10 @@ class KorvidApp(App[None]):
         # Captured with the target: view state is mutable across the awaits
         # below, and the banner must describe the row the user acted on.
         kind_alias = self._canonical_kind(self.current_kind)
+        # Which pane raised this, and on which scope: the snapshot below is
+        # scoped from here, and the gate after it refuses if focus moved to
+        # another pane - even one whose cursor is on the same object.
+        origin = self._write_origin()
         if not await self._precheck_keybinding_write("delete", meta, ns, name):
             return
         preview = await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
@@ -5325,11 +5390,12 @@ class KorvidApp(App[None]):
         ):
             return
         # The snapshot is another awaited gap: a `:ctx` switch, a moved
-        # selection, or a same-named replacement during it must abort before
-        # a dialog describes the row the user is no longer on (issue #283).
-        impact = await self._impact_preview(ImpactAction.DELETE, meta, ns, name, uid)
+        # selection, a re-focused or re-scoped pane, or a same-named
+        # replacement during it must abort before a dialog describes the row
+        # the user is no longer on (issue #283).
+        impact = await self._impact_preview(ImpactAction.DELETE, meta, ns, name, uid, origin=origin)
         if not self._write_identity_intact(
-            "delete", meta, ns, name, uid, phase="the impact summary", epoch=epoch
+            "delete", meta, ns, name, uid, phase="the impact summary", epoch=epoch, origin=origin
         ):
             return
         operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
@@ -5366,6 +5432,7 @@ class KorvidApp(App[None]):
         epoch = self._ctx_epoch
         # Captured with the target — see action_delete_resource.
         kind_alias = self._canonical_kind(self.current_kind)
+        origin = self._write_origin()
         if not await self._precheck_keybinding_write("rollout_restart", meta, ns, name):
             return
         # One stamp per approval: the previewed request and the executed
@@ -5380,9 +5447,18 @@ class KorvidApp(App[None]):
         ):
             return
         # Same awaited-gap revalidation as delete - see action_delete_resource.
-        impact = await self._impact_preview(ImpactAction.ROLLOUT_RESTART, meta, ns, name, uid)
+        impact = await self._impact_preview(
+            ImpactAction.ROLLOUT_RESTART, meta, ns, name, uid, origin=origin
+        )
         if not self._write_identity_intact(
-            "rollout_restart", meta, ns, name, uid, phase="the impact summary", epoch=epoch
+            "rollout_restart",
+            meta,
+            ns,
+            name,
+            uid,
+            phase="the impact summary",
+            epoch=epoch,
+            origin=origin,
         ):
             return
 
