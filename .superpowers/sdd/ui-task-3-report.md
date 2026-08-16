@@ -134,7 +134,7 @@
 
 ## Commit
 
-- Commit: `<pending>` — `test: preserve delayed no-write assertions`
+- Functional commit: `7f32c3d` — `test: preserve delayed no-write assertions`
 - Co-authored-by trailer included as required.
 
 ## Self-review
