@@ -20,7 +20,7 @@
 
 ## Commit
 
-- Pending
+- `37df6ee` — `test: reuse deterministic UI wait helper`
 
 ## Self-review
 
