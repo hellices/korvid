@@ -63,6 +63,14 @@ def _pod(name: str, owner: str) -> PodSummary:
     )
 
 
+def _row_names(table: ResourceTable) -> list[str]:
+    return [str(table.get_row_at(i)[0]) for i in range(table.row_count)]
+
+
+def _status_text(app: KorvidApp) -> str:
+    return str(app.query_one(StatusBar).content)
+
+
 def make_app(data: dict[str, list[Summary]]) -> KorvidApp:
     store = ResourceStore()
 
@@ -165,20 +173,47 @@ async def test_enter_on_deployment_drills_into_owned_replicasets() -> None:
 async def test_drill_to_pods_and_breadcrumb() -> None:
     app = make_app(_default_data())
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: (
+                app.current_kind == "deployments"
+                and _row_names(table) == ["api", "web"]
+                and app._cursor_row_key() == "default/api"
+            ),
+            label="deployments rendered",
+        )
         await pilot.press("down")
         await pilot.press("enter")  # web -> replicasets
-        await until(pilot, lambda: app.current_kind == "replicasets", label="replicasets drilled")
-        await pilot.press("enter")  # first rs (web-5c4e77? sorted) -> pods
-        await until(pilot, lambda: app.current_kind == "pods", label="pods drilled")
+        await until(
+            pilot,
+            lambda: (
+                app.current_kind == "replicasets"
+                and _row_names(table) == ["web-6d9f88", "web-5c4e77"]
+                and app._cursor_row_key() == "default/web-6d9f88"
+            ),
+            label="replicasets drilled",
+        )
+        await pilot.press("enter")  # first rs (web-6d9f88) -> pods
+        await until(
+            pilot,
+            lambda: (
+                app.current_kind == "pods"
+                and _row_names(table) == ["web-6d9f88-aaa"]
+                and app._cursor_row_key() == "default/web-6d9f88-aaa"
+                and "deployments/web" in _status_text(app)
+                and "replicasets/web-6d9f88" in _status_text(app)
+            ),
+            label="pod breadcrumb rendered",
+        )
         assert app.current_kind == "pods"
-        status = str(app.query_one(StatusBar).content)
+        status = _status_text(app)
         assert "deployments/web" in status
         assert "replicasets/" in status
 
@@ -230,12 +265,19 @@ async def test_escape_pops_one_drill_level() -> None:
         )
         await pilot.press("down")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "replicasets", label="replicasets drilled")
+        await until(
+            pilot,
+            lambda: (
+                app.current_kind == "replicasets"
+                and _row_names(table) == ["web-6d9f88", "web-5c4e77"]
+            ),
+            label="replicasets drilled",
+        )
         assert app.current_kind == "replicasets"
         await pilot.press("escape")
         await until(
             pilot,
-            lambda: app.current_kind == "deployments" and table.row_count == 2,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
             label="deployments restored",
         )
         assert app.current_kind == "deployments"
@@ -249,17 +291,27 @@ async def test_escape_that_closes_a_modal_does_not_pop_a_drill_level() -> None:
 
     app = make_app(_default_data())
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         await pilot.press("down")
         await pilot.press("enter")
         await until(
-            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+            pilot,
+            lambda: (
+                app.current_kind == "replicasets"
+                and _row_names(table) == ["web-6d9f88", "web-5c4e77"]
+            ),
+            label="replicaset drill active",
         )
         await pilot.press("question_mark")  # help modal over the drill
         await until(pilot, lambda: len(app.screen_stack) > 1, label="help open")
@@ -268,7 +320,9 @@ async def test_escape_that_closes_a_modal_does_not_pop_a_drill_level() -> None:
         assert app.current_kind == "replicasets"
         await pilot.press("escape")  # now Escape pops the drill as usual
         await until(
-            pilot, lambda: app.current_kind == "deployments", label="deployment drill restored"
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployment drill restored",
         )
 
 
@@ -286,7 +340,12 @@ async def test_command_navigation_clears_drill_state() -> None:
         await pilot.press("down")
         await pilot.press("enter")
         await until(
-            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+            pilot,
+            lambda: (
+                app.current_kind == "replicasets"
+                and _row_names(table) == ["web-6d9f88", "web-5c4e77"]
+            ),
+            label="replicaset drill active",
         )
         assert app.current_kind == "replicasets"
         await _navigate(pilot, "pods")
@@ -326,13 +385,18 @@ async def test_agent_drill_down_from_deployments_view() -> None:
 async def test_agent_drill_down_unknown_name_is_error() -> None:
     app = make_app(_default_data())
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         out = await app.agent_drill_down("nope")
         assert out.startswith("ERROR:")
         assert app.current_kind == "deployments"
@@ -435,13 +499,18 @@ async def test_agent_drill_down_rejected_while_describe_screen_open() -> None:
 
     app = make_app(_default_data())
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         await app.push_screen(DescribeScreen("deployments/default/web", {"kind": "Deployment"}, []))
         await until(
             pilot,
@@ -463,7 +532,11 @@ async def test_concurrent_drill_and_navigate_stay_consistent() -> None:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="pod rows visible")
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         gate = asyncio.Event()
         entered = asyncio.Event()
         orig_stop = app.watch_manager.stop
@@ -563,14 +636,18 @@ async def test_drill_push_never_renders_an_empty_child_view() -> None:
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        table = app.query_one(ResourceTable)
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         _spy_renders(app, renders)
         await pilot.press("down")  # api -> web
         await pilot.press("enter")
         await until(
             pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
         )
-        table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="owned rows visible")
         assert ("replicasets", 0) not in renders
 
@@ -582,17 +659,27 @@ async def test_drill_pop_never_renders_an_empty_parent_view() -> None:
     renders: list[tuple[str, int]] = []
     app = _make_slow_app(_default_data(), delay_kinds=delays)
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         await pilot.press("down")
         await pilot.press("enter")
         await until(
-            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+            pilot,
+            lambda: (
+                app.current_kind == "replicasets"
+                and _row_names(table) == ["web-6d9f88", "web-5c4e77"]
+            ),
+            label="replicaset drill active",
         )
         delays["deployments"] = 0.15  # the re-LIST on the way back is slow
         _spy_renders(app, renders)
@@ -600,7 +687,6 @@ async def test_drill_pop_never_renders_an_empty_parent_view() -> None:
         await until(
             pilot, lambda: app.current_kind == "deployments", label="deployment drill restored"
         )
-        table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="parents visible")
         assert ("deployments", 0) not in renders
 
@@ -610,13 +696,18 @@ async def test_drill_prewarm_shows_a_progress_label_while_waiting() -> None:
     carries a loading label (which the corvid busy indicator animates)."""
     app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 0.3})
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         # Drive the drill as a task: pilot.press would await the whole
         # transition, leaving no window to observe the in-flight label.
         drill = asyncio.create_task(app._drill_into("default", "web"))
@@ -639,17 +730,25 @@ async def test_drill_prewarm_times_out_and_still_switches() -> None:
     app = _make_slow_app(data, delay_kinds={})
     app.DRILL_PREWARM_TIMEOUT = 0.1
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         await pilot.press("down")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "replicasets", label="switched anyway")
-        table = app.query_one(ResourceTable)
+        await until(
+            pilot,
+            lambda: app.current_kind == "replicasets" and table.row_count == 0,
+            label="empty replicasets view rendered",
+        )
         assert table.row_count == 0  # genuinely empty child view is correct
 
 
@@ -659,28 +758,45 @@ async def test_drill_prewarm_skips_the_wait_when_the_watch_is_live() -> None:
     starts: list[str] = []
     app = _make_slow_app(_default_data(), delay_kinds={}, starts=starts)
     async with app.run_test() as pilot:
+        first = app.query_one("#pane-0", ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: first.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(first) == ["api", "web"],
+            label="deployments rendered",
+        )
         await pilot.press("ctrl+w")
         await pilot.press("v")  # split: both panes on deployments
         await until(pilot, lambda: len(app._panes) == 2, label="split pane opened")
+        second = app.query_one("#pane-1", ResourceTable)
         await _navigate(pilot, "replicasets")  # focused pane -> rs watch live
         await until(
-            pilot, lambda: app.current_kind == "replicasets", label="replicasets pane active"
+            pilot,
+            lambda: app.current_kind == "replicasets" and second.row_count == 3,
+            label="replicasets pane active",
         )
         await pilot.press("ctrl+w")
         await pilot.press("w")  # focus back to the deployments pane
-        await until(pilot, lambda: app.current_kind == "deployments", label="focus returned")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(first) == ["api", "web"],
+            label="focus returned",
+        )
         starts.clear()
         await pilot.press("down")
         await pilot.press("enter")
         await until(
-            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+            pilot,
+            lambda: (
+                app.current_kind == "replicasets"
+                and _row_names(first) == ["web-6d9f88", "web-5c4e77"]
+            ),
+            label="replicaset drill active",
         )
         assert "replicasets" not in starts  # live watch reused, not restarted
 
@@ -694,7 +810,11 @@ async def test_drill_abandons_when_a_newer_navigation_lands_during_prewarm() -> 
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="pod rows visible")
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         drill = asyncio.create_task(app._drill_into("default", "web"))
         await until(
             pilot,
@@ -721,13 +841,18 @@ async def test_drill_abandons_across_a_context_epoch_change() -> None:
     (it names an object in the old cluster): the drill must abandon."""
     app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 0.3})
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         drill = asyncio.create_task(app._drill_into("default", "web"))
         await until(
             pilot,
@@ -751,11 +876,20 @@ async def test_pop_abandons_when_the_view_changed_during_prewarm() -> None:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="pod rows visible")
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         await pilot.press("down")
         await pilot.press("enter")
         await until(
-            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+            pilot,
+            lambda: (
+                app.current_kind == "replicasets"
+                and _row_names(table) == ["web-6d9f88", "web-5c4e77"]
+            ),
+            label="replicaset drill active",
         )
         delays["deployments"] = 0.3  # slow re-LIST on the way back
         pop = asyncio.create_task(app._pop_drill())
@@ -780,13 +914,18 @@ async def test_drill_abandons_when_a_same_target_navigation_lands_during_prewarm
     cannot see it - the per-pane navigation generation must."""
     app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 0.3})
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         drill = asyncio.create_task(app._drill_into("default", "web"))
         await until(
             pilot,
@@ -842,13 +981,18 @@ async def test_overlapping_drills_do_not_skip_each_others_prewarm() -> None:
     renders: list[tuple[str, int]] = []
     app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 0.25})
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         _spy_renders(app, renders)
         first = asyncio.create_task(app._drill_into("default", "web"))
         await until(
@@ -872,13 +1016,18 @@ async def test_cancelled_prewarm_releases_its_lease_and_watch() -> None:
     later drill on the same (kind, scope) - nor leak the started watch."""
     app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 5.0})
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
+            label="deployments rendered",
+        )
         drill = asyncio.create_task(app._drill_into("default", "web"))
         await until(
             pilot,
@@ -927,20 +1076,43 @@ async def test_two_level_pop_waits_for_rows_the_drill_filter_will_show() -> None
     )
     renders: list[tuple[str, int]] = []
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "deployments")
-        await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
+        await until(
+            pilot,
+            lambda: (
+                app.current_kind == "deployments"
+                and _row_names(table) == ["api", "web"]
+                and app._cursor_row_key() == "default/api"
+            ),
+            label="deployments rendered",
+        )
         await pilot.press("down")
         await pilot.press("enter")  # web -> replicasets
         await until(
-            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+            pilot,
+            lambda: (
+                app.current_kind == "replicasets"
+                and _row_names(table) == ["web-6d9f88", "web-5c4e77"]
+                and app._cursor_row_key() == "default/web-6d9f88"
+            ),
+            label="replicaset drill active",
         )
         await pilot.press("enter")  # -> pods
-        await until(pilot, lambda: app.current_kind == "pods", label="pod drill active")
+        await until(
+            pilot,
+            lambda: (
+                app.current_kind == "pods"
+                and _row_names(table) == ["web-6d9f88-aaa"]
+                and app._cursor_row_key() == "default/web-6d9f88-aaa"
+            ),
+            label="pod drill active",
+        )
         _spy_renders(app, renders)
         await pilot.press("escape")
         await until(
@@ -956,13 +1128,18 @@ async def test_prewarm_restarts_a_dead_watch_even_when_pane_backed() -> None:
     teardown racing the check must not skip the start and the wait."""
     app = make_app(_default_data())
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "replicasets")
-        await until(pilot, lambda: app.current_kind == "replicasets", label="replicasets rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "replicasets" and table.row_count == 3,
+            label="replicasets rendered",
+        )
         await app.watch_manager.stop("replicasets", "default")  # teardown race stand-in
         await app._prewarm_view("replicasets", "default", lambda rows: bool(rows))
         assert ("replicasets", "default") in app.watch_manager.active  # restarted
@@ -977,16 +1154,28 @@ async def test_navigation_teardown_honors_outstanding_prewarm_leases() -> None:
     own navigate to re-LIST into the empty flash."""
     app = make_app(_default_data())
     async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
         await until(
             pilot,
-            lambda: app.query_one(ResourceTable).row_count == 2,
+            lambda: table.row_count == 2,
             label="pod rows visible",
         )
         await _navigate(pilot, "replicasets")
-        await until(pilot, lambda: app.current_kind == "replicasets", label="replicasets rendered")
+        await until(
+            pilot,
+            lambda: app.current_kind == "replicasets" and table.row_count == 3,
+            label="replicasets rendered",
+        )
         app._prewarm_leases[("replicasets", "default")] = 1  # an in-flight drill's lease
         await app.on_navigate_command(NavigateCommand("pods", None))
-        await until(pilot, lambda: app.current_kind == "pods", label="pods view active")
+        await until(
+            pilot,
+            lambda: (
+                app.current_kind == "pods"
+                and _row_names(table) == ["api-777-bbb", "web-6d9f88-aaa"]
+            ),
+            label="pods view active",
+        )
         assert app.current_kind == "pods"
         assert ("replicasets", "default") in app.watch_manager.active  # lease honored
         await app._stop_watch_if_unused("replicasets", "default")  # last release
