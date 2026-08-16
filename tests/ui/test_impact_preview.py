@@ -1364,8 +1364,12 @@ def test_every_unavailable_line_is_titled_bounded_and_cluster_free(action: Impac
     """The same bound the available rendering applies, and no fragment of
     the caller's identity: a group and kind select a line, they never
     become one."""
-    lines = render_unavailable_lines(action, "apps", "StatefulSet")
-    assert lines[0] == IMPACT_TITLE
-    assert all(len(line) <= _MAX_LINE for line in lines)
-    assert not any("StatefulSet/" in line for line in lines)
-    assert not any("apps" in line for line in lines)
+    real = render_unavailable_lines(action, "apps", "StatefulSet")
+    sentinel_group, sentinel_kind = "zzz.example.com", "Zzzleak"
+    sentinel = render_unavailable_lines(action, sentinel_group, sentinel_kind)
+    for lines in (real, sentinel):
+        assert lines[0] == IMPACT_TITLE
+        assert all(len(line) <= _MAX_LINE for line in lines)
+    rendered_sentinel = "\n".join(sentinel)
+    assert sentinel_group not in rendered_sentinel
+    assert sentinel_kind not in rendered_sentinel

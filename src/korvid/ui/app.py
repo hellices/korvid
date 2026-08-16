@@ -5349,7 +5349,10 @@ class KorvidApp(App[None]):
 
         Omitting it (the default) keeps every other write flow on exactly
         the callback it had: approval launches the worker in the same
-        iteration, unguarded.
+        iteration, unguarded. Scale needs this safeguard because the captured
+        replica count defines the action as a decrease or increase. Applying
+        the same dialog-gap identity guard to delete/restart is tracked
+        separately in issue #297.
         """
 
         def _launch() -> None:
