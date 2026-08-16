@@ -258,14 +258,18 @@ async def test_escape_that_closes_a_modal_does_not_pop_a_drill_level() -> None:
         await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
         await pilot.press("down")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
+        await until(
+            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+        )
         await pilot.press("question_mark")  # help modal over the drill
         await until(pilot, lambda: len(app.screen_stack) > 1, label="help open")
         await pilot.press("escape")  # closes help - the drill must survive
         await until(pilot, lambda: len(app.screen_stack) == 1, label="help closed")
         assert app.current_kind == "replicasets"
         await pilot.press("escape")  # now Escape pops the drill as usual
-        await until(pilot, lambda: app.current_kind == "deployments", label="popped")
+        await until(
+            pilot, lambda: app.current_kind == "deployments", label="deployment drill restored"
+        )
 
 
 async def test_command_navigation_clears_drill_state() -> None:
@@ -281,7 +285,9 @@ async def test_command_navigation_clears_drill_state() -> None:
         )
         await pilot.press("down")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
+        await until(
+            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+        )
         assert app.current_kind == "replicasets"
         await _navigate(pilot, "pods")
         await until(
@@ -561,7 +567,9 @@ async def test_drill_push_never_renders_an_empty_child_view() -> None:
         _spy_renders(app, renders)
         await pilot.press("down")  # api -> web
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
+        await until(
+            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+        )
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="owned rows visible")
         assert ("replicasets", 0) not in renders
@@ -583,11 +591,15 @@ async def test_drill_pop_never_renders_an_empty_parent_view() -> None:
         await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
         await pilot.press("down")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
+        await until(
+            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+        )
         delays["deployments"] = 0.15  # the re-LIST on the way back is slow
         _spy_renders(app, renders)
         await pilot.press("escape")
-        await until(pilot, lambda: app.current_kind == "deployments", label="popped")
+        await until(
+            pilot, lambda: app.current_kind == "deployments", label="deployment drill restored"
+        )
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="parents visible")
         assert ("deployments", 0) not in renders
@@ -667,7 +679,9 @@ async def test_drill_prewarm_skips_the_wait_when_the_watch_is_live() -> None:
         starts.clear()
         await pilot.press("down")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
+        await until(
+            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+        )
         assert "replicasets" not in starts  # live watch reused, not restarted
 
 
@@ -740,7 +754,9 @@ async def test_pop_abandons_when_the_view_changed_during_prewarm() -> None:
         await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
         await pilot.press("down")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
+        await until(
+            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+        )
         delays["deployments"] = 0.3  # slow re-LIST on the way back
         pop = asyncio.create_task(app._pop_drill())
         await until(
@@ -920,12 +936,16 @@ async def test_two_level_pop_waits_for_rows_the_drill_filter_will_show() -> None
         await until(pilot, lambda: app.current_kind == "deployments", label="deployments rendered")
         await pilot.press("down")
         await pilot.press("enter")  # web -> replicasets
-        await until(pilot, lambda: app.current_kind == "replicasets", label="rs level")
+        await until(
+            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill active"
+        )
         await pilot.press("enter")  # -> pods
-        await until(pilot, lambda: app.current_kind == "pods", label="pods level")
+        await until(pilot, lambda: app.current_kind == "pods", label="pod drill active")
         _spy_renders(app, renders)
         await pilot.press("escape")
-        await until(pilot, lambda: app.current_kind == "replicasets", label="popped to rs")
+        await until(
+            pilot, lambda: app.current_kind == "replicasets", label="replicaset drill restored"
+        )
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="owned rows visible")
         assert ("replicasets", 0) not in renders

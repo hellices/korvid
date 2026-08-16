@@ -1229,9 +1229,8 @@ async def test_favorite_namespace_403_keeps_a_usable_ui() -> None:
             return sum("no permission" in n.message.lower() for n in app._notifications)
 
         await until(pilot, lambda: _denials() > 0, label="denial surfaced")
-        # One report, no retry loop: give a would-be retry time to fire.
-        await pilot.pause()
-        await pilot.pause()
+        # One report, no retry loop: keep a short absence window for retry_delay=0.
+        await pilot.pause(0.04)
         assert _denials() == 1
         # The UI stays usable: navigating away still works.
         await pilot.press("0")  # all-namespaces toggle

@@ -199,9 +199,6 @@ async def test_l_on_non_pods_kind_is_inert() -> None:
         await _pod_row_ready(app, pilot)
         # Switch to a non-pods kind via current_kind hack (simplest)
         app.current_kind = "deployments"
-        await until(
-            pilot, lambda: app.current_kind == "deployments", label="deployment view active"
-        )
         await pilot.press("l")
         await pilot.pause(0.05)
         assert not any("pod" in n.message.lower() for n in app._notifications)
@@ -542,9 +539,6 @@ async def test_L_on_non_pods_kind_is_inert_no_tasks() -> None:
     async with app.run_test() as pilot:
         await _pod_row_ready(app, pilot)
         app.current_kind = "deployments"
-        await until(
-            pilot, lambda: app.current_kind == "deployments", label="deployment view active"
-        )
         await pilot.press("shift+l")
         await pilot.pause(0.05)
         assert not any("pod" in n.message.lower() for n in app._notifications)
