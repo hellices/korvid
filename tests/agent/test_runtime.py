@@ -32,7 +32,7 @@ from korvid.tools.executor import (
     as_recorded,
 )
 from korvid.tools.registry import CustomToolResult
-from tests.tools.test_executor import (
+from tests.tools.executor_fakes import (
     _LOG_SECRET,
     LONG_NAME_ENV_SENTINEL,
     NESTED_SECRET_SENTINEL,
@@ -2623,8 +2623,7 @@ async def test_a_producer_verdict_is_dropped_with_the_message_it_belongs_to() ->
 
 def _credential_report_executor() -> Any:
     """A real ToolExecutor whose rollout logs carry a credential."""
-    from tests.tools.executor_fakes import _diagnose_executor
-    from tests.tools.test_executor import _credential_log_kube
+    from tests.tools.executor_fakes import _credential_log_kube, _diagnose_executor
 
     return _diagnose_executor(_credential_log_kube(f"api_key={_LOG_SECRET}"))
 
@@ -2677,8 +2676,7 @@ def _workload_provider() -> ScriptedProvider:
 
 def _parent_credential_executor(**kwargs: str) -> Any:
     """A real ToolExecutor whose *parent* report sections carry a credential."""
-    from tests.tools.executor_fakes import _diagnose_executor
-    from tests.tools.test_executor import ParentCredentialKube
+    from tests.tools.executor_fakes import ParentCredentialKube, _diagnose_executor
 
     return _diagnose_executor(ParentCredentialKube(**kwargs))
 
@@ -2689,7 +2687,7 @@ async def test_a_parent_report_section_reaches_the_provider_already_redacted() -
     producer redacted the parent too, the only pass that masked them for
     the model was the boundary's — and an MCP client, which has no
     boundary, got them raw (PR #197 final review)."""
-    from tests.tools.test_executor import PARENT_SECRET
+    from tests.tools.executor_fakes import PARENT_SECRET
 
     provider = _workload_provider()
     runtime = AgentRuntime(
@@ -2717,7 +2715,7 @@ async def test_the_model_and_an_mcp_client_see_the_same_masked_report() -> None:
     against both surfaces at once rather than asserted."""
     from korvid.mcp.server import KorvidMCPServer
     from korvid.tools.executor import READ_TOOLS, UI_TOOLS
-    from tests.tools.test_executor import PARENT_SECRET
+    from tests.tools.executor_fakes import PARENT_SECRET
 
     messages = {
         "condition_message": f"probe rejected api_key={PARENT_SECRET}",
@@ -2742,7 +2740,7 @@ async def test_a_parent_report_redaction_is_not_counted_twice() -> None:
     """Three passes now see this mask — the producer's, history ingress,
     and the boundary's — and the inventory still lists one, at the path
     the payload spells."""
-    from tests.tools.test_executor import PARENT_SECRET
+    from tests.tools.executor_fakes import PARENT_SECRET
 
     runtime = AgentRuntime(
         _workload_provider(),

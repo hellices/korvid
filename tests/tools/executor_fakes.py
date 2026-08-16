@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from korvid.k8s.discovery import PODS_META
@@ -308,3 +309,211 @@ class FakeDiagnoseKube:
 
 def _diagnose_executor(kube: Any) -> ToolExecutor:
     return ToolExecutor(kube, _diagnose_aliases())
+
+
+#: Marker values that must never reach any consumer of a tool result.
+NESTED_SECRET_SENTINEL = "bmVzdGVkLWNyZWQ="
+LONG_NAME_ENV_SENTINEL = "primary-db-admin-pw"
+
+
+def oversized_crd_with_nested_credentials() -> dict[str, Any]:
+    """A CRD too large for the result budget that buries two classifiers.
+
+    The embedded Secret's `kind` and the env entry's long `name` are what
+    tell a redactor that `data.kubeconfig` and `value` are credentials.
+    Both are removed by *size* reduction (mapping elision, scalar
+    clamping), so anything that bounds before it redacts can no longer
+    recognize the values it is about to ship.
+    """
+    return {
+        "apiVersion": "apps.example.com/v1",
+        "kind": "CompositeApp",
+        "metadata": {"name": "composite-0", "namespace": "prod"},
+        "spec": {
+            "secretTemplate": {
+                "data": {"kubeconfig": NESTED_SECRET_SENTINEL},
+                **{f"annotationTemplate{index}": "x" * 200 for index in range(240)},
+                "kind": "Secret",
+                "apiVersion": "v1",
+            },
+            "podTemplate": {
+                "containers": [
+                    {
+                        "name": "api",
+                        "env": [
+                            {
+                                "name": "PRIMARY_DATABASE_CONNECTION_STRING_ADMIN_PASSWORD",
+                                "value": LONG_NAME_ENV_SENTINEL,
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
+    }
+
+
+_LOG_SECRET = "9f3c1a7e42b85d06c7e1f0a2b3d4e5f60718293a4b5c6d7e8f90"
+
+
+def _credential_log_kube(assignment: str) -> FakeDiagnoseKube:
+    """A rollout failure whose log excerpts carry a credential assignment."""
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 2},
+        "status": {"replicas": 2, "readyReplicas": 1, "conditions": []},
+    }
+    replicaset = kube.objects[("replicasets", "api-6f")]
+    replicaset["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [
+                {"kind": "Deployment", "name": "api", "uid": "deploy-uid", "controller": True}
+            ],
+        }
+    )
+    replicaset["spec"] = {"replicas": 1}
+    replicaset["status"] = {"replicas": 1, "readyReplicas": 0}
+    base = kube.objects[("pods", "api-1")]
+    for index in range(2, 4):
+        clone = copy.deepcopy(base)
+        clone["metadata"]["name"] = f"api-{index}"
+        kube.objects[("pods", f"api-{index}")] = clone
+    for key, obj in list(kube.objects.items()):
+        if key[0] != "pods":
+            continue
+        obj["metadata"]["ownerReferences"] = [
+            {"kind": "ReplicaSet", "name": "api-6f", "uid": "rs-uid", "controller": True}
+        ]
+        obj["metadata"].setdefault("namespace", "default")
+        obj["status"]["phase"] = "Pending"
+    # Long enough that each pod block still exceeds its share after
+    # masking, so the head+tail cut genuinely fires on this fixture.
+    kube.log_lines = [
+        "." * (index % 11) + f"level=error {assignment} retry " + "z" * 520 for index in range(200)
+    ]
+    return kube
+
+
+PARENT_SECRET = "4d2e6b8a1c0f73951e8a0d2c4b6e8f01"
+
+
+class ParentCredentialKube(FakeDiagnoseKube):
+    """A rollout failure whose *parent* sections carry the credential.
+
+    The pod blocks are clean on purpose: they have been redacted since
+    round 9, so only an assignment in a workload condition, a workload
+    Warning event, or a failed child LIST can show whether the assembled
+    parent report is covered too.
+    """
+
+    def __init__(
+        self,
+        *,
+        condition_message: str = "replicas are unavailable",
+        event_message: str = "failed to create pods",
+        list_error: str = "",
+        pod_log_line: str = "connection refused",
+    ) -> None:
+        super().__init__()
+        self.list_error = list_error
+        self.objects[("deployments", "api")] = {
+            "kind": "Deployment",
+            "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+            "spec": {"replicas": 2},
+            "status": {
+                "replicas": 2,
+                "readyReplicas": 1,
+                "conditions": [
+                    {
+                        "type": "Available",
+                        "status": "False",
+                        "reason": "MinimumReplicasUnavailable",
+                        "message": condition_message,
+                    }
+                ],
+            },
+        }
+        replicaset = self.objects[("replicasets", "api-6f")]
+        replicaset["metadata"].update(
+            {
+                "namespace": "default",
+                "uid": "rs-uid",
+                "ownerReferences": [
+                    {"kind": "Deployment", "name": "api", "uid": "deploy-uid", "controller": True}
+                ],
+            }
+        )
+        replicaset["spec"] = {"replicas": 1}
+        replicaset["status"] = {"replicas": 1, "readyReplicas": 0}
+        for key, obj in list(self.objects.items()):
+            if key[0] != "pods":
+                continue
+            obj["metadata"]["ownerReferences"] = [
+                {"kind": "ReplicaSet", "name": "api-6f", "uid": "rs-uid", "controller": True}
+            ]
+            obj["metadata"].setdefault("namespace", "default")
+            obj["status"]["phase"] = "Pending"
+        self.log_lines = [pod_log_line]
+        self.workload_events: list[dict[str, Any]] = [
+            {
+                "type": "Warning",
+                "reason": "FailedCreate",
+                "message": event_message,
+                "count": 3,
+                "lastTimestamp": "2026-07-27T06:30:00Z",
+            }
+        ]
+
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+        if self.list_error and meta.kind == "Pod":
+            raise ApiStatusError(500, self.list_error)
+        return await super().list_objects(meta, namespace)
+
+    async def list_events_for(
+        self, namespace: str, name: str, *, kind: str | None = None, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        # The workload's own events, not the pod's: this fixture has to be
+        # able to plant a credential in exactly one of the two.
+        return self.workload_events if kind == "Deployment" else self.events
+
+
+def identity_last_crd() -> dict[str, Any]:
+    """An oversized CRD whose identity keys are last in insertion order."""
+    document: dict[str, Any] = {f"extensionField{index:02d}": "y" * 400 for index in range(60)}
+    document["apiVersion"] = "example.com/v1"
+    document["kind"] = "CompositeApp"
+    document["metadata"] = {
+        "labels": {f"team-{index}": "z" * 60 for index in range(40)},
+        "name": "composite-0",
+        "namespace": "prod",
+    }
+    return document
+
+
+def _ambiguous_key_manifest() -> dict[str, Any]:
+    """Annotation keys that YAML would resolve to bools, nulls and numbers.
+
+    Serialized carelessly they collapse into one another; the boundary
+    refuses a document whose keys collapse, so the producer has to emit
+    them as the distinct strings they are.
+    """
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": "flags",
+            "annotations": {
+                "true": "a",
+                "yes": "b",
+                "null": "c",
+                "~": "d",
+                "1": "e",
+                "1.0": "f",
+                "on": "g",
+            },
+        },
+    }
