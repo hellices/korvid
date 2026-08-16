@@ -122,7 +122,7 @@ from korvid.ui.drain import DrainController
 from korvid.ui.forward_controller import ForwardController
 from korvid.ui.helm_controller import HelmController
 from korvid.ui.hints import EventsFetcher, HintController, pod_needs_hint
-from korvid.ui.impact_preview import IMPACT_UNAVAILABLE_LINES, render_impact_lines
+from korvid.ui.impact_preview import render_impact_lines, render_unavailable_lines
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -5213,7 +5213,13 @@ class KorvidApp(App[None]):
           render -> the static "impact unavailable" advisory, because an API
           error message can embed a response body (for a Secret, its data)
           and must never reach the dialog, and because a summarizer or
-          renderer bug must cost the user the section, not the approval;
+          renderer bug must cost the user the section, not the approval.
+          It is rendered for the action and target kind in hand, so a
+          scale-down still states the machine-defined limitations it always
+          states (PodDisruptionBudgets do not gate a controller scale-down,
+          an HPA's own loop is not evaluated, and a StatefulSet's PVC
+          retention policy is not either) - none of those depends on the
+          snapshot that failed to arrive;
         - cancellation (a `:ctx` switch tearing the client down) propagates
           untouched, exactly like every other awaited read here.
 
@@ -5243,7 +5249,7 @@ class KorvidApp(App[None]):
             # Type only: never the message (CodeQL py/clear-text-logging-
             # sensitive-data), and never anything derived from a manifest.
             logger.debug("impact summary unavailable for %s: %s", action, type(exc).__name__)
-            return IMPACT_UNAVAILABLE_LINES
+            return render_unavailable_lines(action, meta.kind)
 
     async def _push_write_confirmation(
         self,

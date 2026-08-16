@@ -18,6 +18,7 @@
 - Every scale-down advisory states that controller scale-down is not an Eviction API request and PodDisruptionBudgets do not gate it.
 - Every scale-down advisory states that HorizontalPodAutoscaler targeting/reconciliation is not evaluated.
 - A StatefulSet scale-down advisory additionally states that PVC retention policy is not evaluated.
+- These three statements are machine-defined, not graph-derived: a scale-down whose snapshot timed out or failed still states them beneath the static `impact unavailable; approval remains available` line, rendered by the same action/kind-aware helper the available path uses. Delete and rollout restart keep the generic unavailable advisory verbatim.
 - Capture pane identity, pane scope, target identity, UID, context epoch, kind alias, and current replicas before the first await and before `ReplicasPrompt`.
 - After dry-run, ownership lookup, and impact loading, require the same pane identity/scope, context epoch, resource identity, and captured UID before `ConfirmScreen`.
 - Cancellation or identity/origin drift creates no confirmation, write reservation, write operation, or audit entry.

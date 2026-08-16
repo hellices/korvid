@@ -1022,6 +1022,80 @@ async def test_scale_down_of_a_statefulset_states_the_pvc_limitation(
         assert env.ops.calls == []
 
 
+async def test_scale_down_impact_timeout_still_states_the_static_limitations(
+    tmp_path: Path,
+) -> None:
+    """A snapshot that never arrived costs the user the cluster-derived
+    part of the advisory and nothing else.
+
+    The PDB and HPA lines are not findings about this cluster - they say
+    what a controller scale-down does not route through and what this walk
+    would not have evaluated anyway - so a timeout that dropped them would
+    take away a true statement precisely when korvid has least to offer.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
+    env.lister.delay = 5.0
+    with mock.patch("korvid.ui.app._IMPACT_TIMEOUT", 0.01):
+        async with env.app.run_test() as pilot:
+            await _scale_to_one(env, pilot, "deploy", expect="web")
+            text = impact_text(env.app)
+            assert "impact unavailable; approval remains available" in text
+            assert _PDB_LIMITATION in text
+            assert _HPA_LIMITATION in text
+            # Still kind-conditional when nothing was read: a Deployment
+            # has no PVC retention policy either way.
+            assert _STS_PVC_LIMITATION not in text
+            assert "known direct dependents" not in text
+            assert env.app.screen.query(".confirm-preview")
+            assert env.ops.calls == []
+
+
+async def test_scale_down_loader_failure_keeps_the_statefulset_limitations(
+    tmp_path: Path,
+) -> None:
+    """The same for an unexpected loader failure, on the one kind that adds
+    a third line - and the exception's message still never reaches the
+    dialog, because it can carry cluster-derived text."""
+    rows: dict[str, list[Any]] = {"statefulsets": [_statefulset()], "pods": [_statefulset_pod()]}
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
+    env.lister.errors["statefulsets"] = RuntimeError("lister exploded on AKIAEXAMPLEPAYLOAD")
+    async with env.app.run_test() as pilot:
+        await _scale_to_one(env, pilot, "sts", expect="db")
+        text = impact_text(env.app)
+        assert "impact unavailable; approval remains available" in text
+        assert _PDB_LIMITATION in text
+        assert _HPA_LIMITATION in text
+        assert _STS_PVC_LIMITATION in text
+        assert "AKIAEXAMPLEPAYLOAD" not in text
+        assert "known direct dependents" not in text
+        assert env.app.screen.query(".confirm-preview")
+        assert env.ops.calls == []
+
+
+@pytest.mark.parametrize("key", ["ctrl+d", "r"])
+async def test_delete_and_restart_keep_the_generic_unavailable_advisory_verbatim(
+    tmp_path: Path, key: str
+) -> None:
+    """The other actions' unavailable advisory is unchanged by #295's
+    kind-aware fallback: the generic line and nothing else, with no
+    scale-down limitation attached to a delete or a rollout restart."""
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
+    env.lister.errors["deployments"] = RuntimeError("parser exploded")
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press(key)
+        await until(
+            pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="confirm dialog opened"
+        )
+        text = impact_text(env.app)
+        assert "impact unavailable; approval remains available" in text
+        assert "parser exploded" not in text
+        assert _PDB_LIMITATION not in text
+        assert _HPA_LIMITATION not in text
+        assert _STS_PVC_LIMITATION not in text
+        assert env.ops.calls == []
+
+
 @pytest.mark.parametrize(
     ("desired", "requested"),
     [(3, 5), (3, 3), (None, 1)],

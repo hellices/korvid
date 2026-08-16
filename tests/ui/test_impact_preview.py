@@ -38,6 +38,7 @@ from korvid.ui.impact_preview import (
     IMPACT_TITLE,
     IMPACT_UNAVAILABLE_LINES,
     render_impact_lines,
+    render_unavailable_lines,
 )
 
 _DEPLOY = GraphResource(group="apps", kind="Deployment", namespace="prod", name="web", uid="d-1")
@@ -1158,3 +1159,61 @@ def test_unavailable_lines_are_static_and_keep_approval_available() -> None:
         IMPACT_TITLE,
         "  impact unavailable; approval remains available",
     )
+
+
+def test_unavailable_scale_down_still_states_the_pdb_and_hpa_limitations() -> None:
+    """Losing the snapshot must not silently drop what the snapshot never
+    said. Both limitation lines are machine-defined facts about what a
+    controller scale-down does *not* go through - true whether or not any
+    graph data was read - so an unavailable advisory that omitted them
+    would leave the approver with strictly less than the static truth."""
+    assert render_unavailable_lines(ImpactAction.SCALE_DOWN, "Deployment") == (
+        *IMPACT_UNAVAILABLE_LINES,
+        _SCALE_DOWN_PDB_LINE,
+        _SCALE_DOWN_HPA_LINE,
+    )
+
+
+def test_unavailable_scale_down_of_a_statefulset_keeps_the_pvc_limitation() -> None:
+    """The kind-conditional line is selected the same way it is when the
+    snapshot loaded: by the target's kind, which the caller still has."""
+    assert render_unavailable_lines(ImpactAction.SCALE_DOWN, "StatefulSet") == (
+        *IMPACT_UNAVAILABLE_LINES,
+        _SCALE_DOWN_PDB_LINE,
+        _SCALE_DOWN_HPA_LINE,
+        _SCALE_DOWN_STS_PVC_LINE,
+    )
+
+
+@pytest.mark.parametrize("kind", ["Deployment", "StatefulSet"])
+def test_unavailable_scale_down_notes_are_the_available_ones_in_the_same_order(
+    kind: str,
+) -> None:
+    """One source for the limitation text, not two: whatever a rendered
+    scale-down summary states unconditionally is exactly what the
+    unavailable advisory states, in the order it states it."""
+    target = GraphResource(group="apps", kind=kind, namespace="prod", name="web", uid="uid-1")
+    available = render_impact_lines(_summary(action=ImpactAction.SCALE_DOWN, target=target))
+    notes = render_unavailable_lines(ImpactAction.SCALE_DOWN, kind)[len(IMPACT_UNAVAILABLE_LINES) :]
+    assert notes
+    assert [line for line in available if line in notes] == list(notes)
+
+
+@pytest.mark.parametrize("action", [ImpactAction.DELETE, ImpactAction.ROLLOUT_RESTART])
+@pytest.mark.parametrize("kind", ["Deployment", "StatefulSet"])
+def test_unavailable_delete_and_restart_stay_exactly_the_generic_advisory(
+    action: ImpactAction, kind: str
+) -> None:
+    """Nothing scale-specific leaks into the other two actions - a delete
+    of a StatefulSet has no scale-down limitation to state."""
+    assert render_unavailable_lines(action, kind) == IMPACT_UNAVAILABLE_LINES
+
+
+@pytest.mark.parametrize("action", list(ImpactAction))
+def test_every_unavailable_line_is_titled_bounded_and_cluster_free(action: ImpactAction) -> None:
+    """The same bound the available rendering applies, and no fragment of
+    the caller's identity: a kind selects a line, it never becomes one."""
+    lines = render_unavailable_lines(action, "StatefulSet")
+    assert lines[0] == IMPACT_TITLE
+    assert all(len(line) <= _MAX_LINE for line in lines)
+    assert not any("StatefulSet/" in line for line in lines)

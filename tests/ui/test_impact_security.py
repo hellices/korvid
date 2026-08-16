@@ -40,7 +40,16 @@ from korvid.k8s.relationship_facts import (
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 
-from .test_impact_flow import CATALOG_ALIASES, ImpactEnv, impact_text, open_delete_dialog, to_view
+from .test_impact_flow import (
+    _HPA_LIMITATION,
+    _PDB_LIMITATION,
+    _STS_PVC_LIMITATION,
+    CATALOG_ALIASES,
+    ImpactEnv,
+    impact_text,
+    open_delete_dialog,
+    to_view,
+)
 from .waits import until
 
 
@@ -566,6 +575,45 @@ async def test_declined_scale_down_with_impact_runs_no_operation(tmp_path: Path)
         await until(pilot, lambda: len(env.app.screen_stack) == 1, label="dialog dismissed")
         assert env.ops.calls == []
         assert not audit_path.exists()
+
+
+async def test_scale_down_graph_failure_keeps_the_limitations_and_still_confirms(
+    tmp_path: Path,
+) -> None:
+    """A failed snapshot must cost the scale-down advisory only what the
+    snapshot would have said.
+
+    The PDB and HPA lines are machine-defined statements about what a
+    controller scale-down never routes through and what this walk never
+    evaluates; they are as true with no graph data as with a complete one.
+    Dropping them here would silently downgrade the advisory exactly when
+    the user has least information, and the loader's message still must not
+    reach the dialog. Approval itself is unchanged: the user confirms, the
+    write runs, and the audit record is written.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    env.lister.errors["deployments"] = RuntimeError("parser exploded")
+    async with env.app.run_test() as pilot:
+        await _open_scale_down(pilot)
+        await until(
+            pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="scale-down confirm"
+        )
+        text = impact_text(env.app)
+        assert "impact unavailable; approval remains available" in text
+        assert _PDB_LIMITATION in text
+        assert _HPA_LIMITATION in text
+        # A Deployment, so the kind-conditional line stays absent, and the
+        # exception's message never reaches an approval dialog.
+        assert _STS_PVC_LIMITATION not in text
+        assert "parser exploded" not in text
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="scale-down written and audited",
+        )
+        assert env.ops.calls == [("scale", "deployments", "prod", "web", 1)]
 
 
 async def test_scale_down_audit_failure_blocks_operation_factory(

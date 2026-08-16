@@ -160,7 +160,7 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     # below it, and the body between here and the end can run to the
     # preview's caps.
     lines.append(ADVISORY_LINE)
-    lines.extend(_action_note_lines(summary))
+    lines.extend(_action_note_lines(summary.action, summary.target.kind))
     lines.extend(_section(_DIRECT_TITLE, summary.direct, capped=capped))
     lines.extend(_section(_TRANSITIVE_TITLE, summary.transitive, capped=capped))
     lines.extend(_inferred_lines(summary))
@@ -170,6 +170,35 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     lines.append(_scope_line(summary))
     lines.extend(_coverage_lines(summary))
     lines.extend(_cap_lines(summary))
+    return tuple(_bounded(line) for line in lines)
+
+
+def render_unavailable_lines(action: ImpactAction, kind: str) -> tuple[str, ...]:
+    """Render the advisory for a snapshot that could not be produced.
+
+    The generic advisory says only that the graph-derived part is missing
+    and that approval is unaffected; a scale-down's limitation lines are
+    not graph-derived at all. `_action_note_lines` states what a controller
+    scale-down never routes through (the Eviction API, and so a
+    PodDisruptionBudget), what this walk never evaluates (an HPA's own
+    targeting and reconciliation), and - for a StatefulSet only - the PVC
+    retention policy that decides what happens to the removed replicas'
+    claims. Every one of those is true whether or not a single object was
+    read, so dropping them on a timeout or a loader failure would take
+    correct information away from the approver exactly where korvid has
+    least to offer.
+
+    `kind` is the target's kind and is only ever *compared*, never
+    rendered, so the output stays entirely machine-defined - the reason the
+    fail-open path exists is that cluster-derived text (an exception
+    message carrying a response body) must not reach the dialog. The lines
+    are capped exactly as the available rendering caps them, so both paths
+    share one bound as well as one wording.
+
+    Delete and rollout restart have no such static limitation, so for them
+    this is `IMPACT_UNAVAILABLE_LINES` unchanged.
+    """
+    lines = [*IMPACT_UNAVAILABLE_LINES, *_action_note_lines(action, kind)]
     return tuple(_bounded(line) for line in lines)
 
 
@@ -199,17 +228,20 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - len(_TRUNCATION_SUFFIX)].rstrip(".") + _TRUNCATION_SUFFIX
 
 
-def _action_note_lines(summary: ImpactSummary) -> list[str]:
+def _action_note_lines(action: ImpactAction, kind: str) -> list[str]:
     """Static limitations that only a scale-down leaves unchecked.
 
     Machine-defined, not cluster-derived: nothing here depends on what the
-    snapshot found, only on `summary.action` and `summary.target.kind`, so
-    it renders identically for every scale-down of a given kind.
+    snapshot found, only on the action and the target's kind, so it renders
+    identically for every scale-down of a given kind - including the one
+    whose snapshot never arrived (`render_unavailable_lines`). The kind
+    *selects* a line, it never becomes one, so nothing cluster-controlled
+    reaches the output.
     """
-    if summary.action is not ImpactAction.SCALE_DOWN:
+    if action is not ImpactAction.SCALE_DOWN:
         return []
     lines = [_SCALE_DOWN_PDB_LINE, _SCALE_DOWN_HPA_LINE]
-    if summary.target.kind == "StatefulSet":
+    if kind == "StatefulSet":
         lines.append(_SCALE_DOWN_STS_PVC_LINE)
     return lines
 
