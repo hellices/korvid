@@ -116,6 +116,23 @@ a known dependent that **may be affected**. The preview never states that a
 Service will have zero endpoints, that every selected Pod belongs exclusively
 to this workload, or that availability will fail.
 
+`ImpactLimits.max_depth` (3, shared with delete and rollout restart) bounds
+this walk the same way it bounds theirs, and it is reached differently
+depending on which resource in the ownership chain is the scale target. A
+Deployment's own routing chain to its Ingress is `Deployment -> ReplicaSet
+(owned_by) -> Pod (owned_by) -> Service (selects) -> Ingress (routes_to)` —
+four hops, one past the cap — so scaling a Deployment down reports
+`traversal capped` instead of naming that Ingress. Scaling the ReplicaSet it
+owns starts one hop closer to the routing chain: `ReplicaSet -> Pod
+(owned_by) -> Service (selects) -> Ingress (routes_to)` is exactly three
+hops, inside the cap, and the Ingress is named. This is not a defect
+specific to scale-down — it is the same fixed traversal cap every action
+uses — but it is worth stating here because scale-down is the first action
+whose closed relation set can reach a routing resource at all, so it is the
+first place the cap's effect on *which target* you act on becomes visible in
+practice. The cap itself (`ImpactLimits.max_depth = 3`) is not changed by
+this slice.
+
 ## Action-specific limitations
 
 The scale-down advisory includes machine-defined text, before the dependent

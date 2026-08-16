@@ -202,10 +202,10 @@ timeline:
 ## Write impact preview
 
 Destructive writes that have tested relationship semantics — delete
-(`Ctrl-D`) and rollout restart (`r`) — show a graph-derived impact section
-above the server dry-run preview in the approval dialog. It answers one
-bounded question: which resources korvid has already observed depend on this
-one?
+(`Ctrl-D`), rollout restart (`r`), and a *known* workload scale-down (`S`,
+covered below) — show a graph-derived impact section above the server
+dry-run preview in the approval dialog. It answers one bounded question:
+which resources korvid has already observed depend on this one?
 
     graph-derived impact (advisory):
       delete apps/Deployment/prod/web
@@ -231,9 +231,67 @@ still on screen with the target rather than below a body that can run to the
 preview's caps. It never predicts failure, never replaces the
 server dry-run, and never blocks approval: the y/typed-name gate, the UID
 precondition, the RBAC pre-check, and the fail-closed audit log are exactly
-what they were. Scale, edit, resize, cordon/uncordon, drain, Helm, and
-operator flows do not show it — they have no tested per-relation semantics
-yet, and korvid would rather show nothing than a plausible guess.
+what they were. Edit, resize, cordon/uncordon, drain, Helm, and operator
+flows never show it — they have no tested per-relation semantics yet, and
+korvid would rather show nothing than a plausible guess.
+
+### Scale-down
+
+Scale (`S`) shows the same section, but only when korvid can tell the
+requested count is a *known decrease*: the row's current desired replica
+count was readable and the requested count is lower than it. A scale-up, a
+no-op (requested count equal to current), or a row whose desired count
+korvid cannot read gets the ordinary confirmation with the `old -> new`
+replica line and **no graph section at all** — not the "impact unavailable"
+line, and no relationship snapshot is loaded for it. Only a known decrease
+loads the snapshot and summarizes it.
+
+A scale-down follows a different, still closed relation set than delete and
+rollout restart: `owned_by` and `managed_by` (the same controller/selector
+ownership chain to the shrinking workload's Pods), plus `selects` and
+`routes_to` — a Service selecting those Pods, an EndpointSlice observed
+targeting one of them, and a declared Ingress or Gateway route reaching that
+Service in turn. Delete and rollout restart never follow `selects` (a
+Service whose Pods are deleted one at a time is not itself failing), but a
+scale-down does, conservatively: a Service, EndpointSlice, Ingress, or
+Gateway route is listed as a known dependent that **may be affected**, never
+as one that will lose an endpoint or stop routing. `protected_by`,
+`uses_volume`, `uses_config`, `scheduled_on`, and `bound_to` are excluded —
+none of them is something a scale-down itself changes for a Pod that
+remains.
+
+Every scale-down advisory also states, as machine-defined lines rather than
+anything read from the cluster:
+
+    controller scale-down is not an Eviction API request; PodDisruptionBudgets do not gate it
+    HorizontalPodAutoscaler targeting and reconciliation are not evaluated
+
+and, only when the target itself is a StatefulSet:
+
+    StatefulSet PVC retention policy is not evaluated
+
+A controller deletes surplus Pods directly rather than through the Eviction
+API, so a PodDisruptionBudget never sees or gates it; an HPA can independently
+overwrite a manual replica count on its own reconciliation loop; and a
+StatefulSet's `persistentVolumeClaimRetentionPolicy` decides whether scaling
+down also deletes PVCs — none of that is evaluated here.
+
+Because the routing chain (owner → Pod → Service → Ingress/Gateway) can be
+four hops from a Deployment but the walk is capped at 3, the same Ingress can
+appear or not depending on which resource you scale: scaling a Deployment
+down puts its Ingress one hop past the cap, so the dialog shows `traversal
+capped` there instead of naming it, while scaling the ReplicaSet it owns
+puts the same Ingress inside the cap (ReplicaSet → Pod → Service → Ingress is
+exactly 3 hops) and the dialog names it. Neither case is a bug: the cap is
+the same 3-hop, 50-resource bound every impact preview uses (see `traversal
+capped` under "Reading it" below), and the dialog always says so when it is
+reached — it is a reminder that "not named" never means "not affected" for a
+capped or incomplete answer.
+
+Everything else about the section — its advisory framing, the origin-pane
+and UID gates on context/selection/focus/scope drift, the fail-open handling
+of a timeout or a loader failure, and the fact that it never blocks
+approval — is identical to delete and rollout restart's, described below.
 
 Reading it:
 

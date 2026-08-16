@@ -377,18 +377,43 @@ all.
 
 ## Blast radius in write previews
 
-The same snapshot feeds the approval dialogs for `Ctrl-D` (delete) and `r`
-(rollout restart). Only relationships with explicitly tested action
-semantics participate:
+The same snapshot feeds the approval dialogs for `Ctrl-D` (delete), `r`
+(rollout restart), and `S` (scale) when the scale is a *known decrease* —
+the row's current desired replica count was readable and the requested count
+is lower than it; a scale-up, a no-op, or a row with no readable desired
+count gets the ordinary confirmation with no graph section and no snapshot
+LIST at all. Only relationships with explicitly tested action semantics
+participate, and the set differs by action:
 
 | Action | Relations followed (target → its dependents) |
 |---|---|
 | delete | `owned_by`, `managed_by`, `routes_to`, `uses_volume`, `uses_config`, `protected_by`, `scheduled_on`, `bound_to` |
 | rollout restart | `owned_by`, `managed_by` |
+| scale down (known decrease only) | `owned_by`, `managed_by`, `selects`, `routes_to` |
 
-`selects` is deliberately excluded from both. A Service selecting many Pods
-does not fail because one selected Pod is deleted, so korvid never claims it
-does — the same reasoning that keeps `missing` from meaning "absent".
+`selects` is deliberately excluded from delete and rollout restart. A Service
+selecting many Pods does not fail because one selected Pod is deleted, so
+korvid never claims it does — the same reasoning that keeps `missing` from
+meaning "absent". A known scale-down is the one action where `selects` is
+followed: a Service (or, through `routes_to`, an EndpointSlice or an
+Ingress/Gateway route reaching it) whose selector matches the shrinking
+workload's Pods is listed as a known dependent that **may be affected** —
+never as one that loses an endpoint or stops routing. Nothing about *which*
+Pod a controller removes, whether a Service still has ready endpoints
+afterward, or whether traffic actually fails is evaluated or claimed.
+
+A scale-down advisory additionally states, unconditionally, that
+PodDisruptionBudgets do not gate it — a controller deletes surplus Pods
+directly rather than through the Eviction API that PDBs constrain — and that
+HorizontalPodAutoscaler targeting and reconciliation are not evaluated: an
+HPA can independently overwrite the very replica count you just set. When
+the target itself is a StatefulSet, it also states that PVC retention policy
+is not evaluated, since `persistentVolumeClaimRetentionPolicy` — not this
+walk — decides whether the removed replicas' claims are kept or deleted.
+`protected_by` (PDB), `uses_volume`, `uses_config`, `scheduled_on`, and
+`bound_to` are excluded from the scale-down relation set for the same
+reason: none of them is something a scale-down itself changes for a Pod that
+remains.
 
 Only **resolved** edges are traversed; an unresolved reference is reported
 as a warning instead. That warning is bounded by *the affected set*, not by
@@ -401,6 +426,20 @@ listed once, with the first path that reached it; further paths to the same
 dependent are counted as `additional known paths`), bounded to 3 hops and 50
 resources, and classifies a genuine loop as a cycle rather than expanding it
 twice.
+
+The 3-hop bound is conservative and routes through the target's own owner
+chain first, so how many hops a routing resource sits at depends on *which*
+resource you scale, not just what the cluster contains. A Deployment's
+routing chain to its Ingress is `Deployment -> ReplicaSet (owned_by) -> Pod
+(owned_by) -> Service (selects) -> Ingress (routes_to)` — four hops, one past
+the cap — so scaling the Deployment down reports `traversal capped` instead
+of naming the Ingress. Scaling the ReplicaSet it owns down starts one hop
+closer: `ReplicaSet -> Pod (owned_by) -> Service (selects) -> Ingress
+(routes_to)` is exactly 3 hops, inside the cap, and the dialog names the
+Ingress as a known dependent. Neither is a defect in either direction — the
+same fixed 3-hop, 50-resource bound is applied every time, and the dialog
+always says so when it is reached (see [Limits](#limits) for the graph
+view's own, much larger caps, which this bound is independent of).
 
 Each rendered hop names both halves of its evidence — the resource an edge's
 evidence came from and the field path on it — and each is individually
@@ -441,7 +480,8 @@ that name now. The summary is advisory — see [Write impact
 preview](tui.md#write-impact-preview) for how it appears and what it never
 does.
 
-Only `Ctrl-D` and `r` show this section today. The remaining write types
-(scale, edit, resize, cordon/uncordon, drain, Helm, operator) have no tested
+Delete, rollout restart, and a known scale-down decrease show this section
+today. The remaining write types (scale-up, a scale with no readable current
+count, edit, resize, cordon/uncordon, drain, Helm, operator) have no tested
 per-relation semantics yet and deliberately show nothing rather than a
 plausible guess.

@@ -467,6 +467,26 @@ UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync pytest -p no:tach -q \
 
 Expected: scale-down has no impact section; the negative cases remain green.
 
+> **Verified implementation deviation (recorded in Task 5).** The snippet
+> above asserts `"networking.k8s.io/Ingress/prod/web" in text` for a
+> Deployment scale-down. With `ImpactLimits.max_depth = 3` (Task 1, a
+> shared, unchanged constant) that assertion cannot hold: the routing chain
+> from a Deployment is `Deployment -> ReplicaSet (owned_by) -> Pod (owned_by)
+> -> Service (selects) -> Ingress (routes_to)`, four hops, one past the cap.
+> Task 3 implemented `test_scale_down_dialog_shows_controller_and_routing_dependents`
+> with the plan's fixtures and every other assertion unchanged, but replaced
+> the Ingress assertion with `"networking.k8s.io/Ingress/prod/web" not in
+> text` and `"traversal capped" in text` — the honest outcome for that
+> target — and added a second test,
+> `test_scale_down_lists_a_routing_dependent_inside_the_traversal_cap`, that
+> scales the ReplicaSet instead (`ReplicaSet -> Pod (owned_by) -> Service
+> (selects) -> Ingress (routes_to)`, exactly three hops) to pin the stated
+> behavior that a scale-down really does follow `selects` and `routes_to`
+> into the dialog when the target is within the cap. Neither the cap nor any
+> other behavior changed; only which fixture target proves the routing claim
+> did. See `tests/ui/test_impact_flow.py` and
+> `.superpowers/sdd/task-3-report.md` §4 for the full account.
+
 - [ ] **Step 3: Write failing origin and scope race tests**
 
 Follow the existing delete/restart split-pane helpers. Add one test that moves
@@ -834,6 +854,32 @@ async def test_cancelled_scale_snapshot_is_not_an_unavailable_confirmation(
         assert not audit_path.exists()
 ```
 
+> **Verified implementation deviation (recorded in Task 5): worker-state
+> mechanics.** In the installed Textual (8.2.8), `Worker.cancel()` sets
+> `is_cancelled` synchronously and eagerly, before the cancellation has
+> actually propagated through the running coroutine; a `CancelledError`
+> raised *inside* the work only moves `Worker.state` to
+> `WorkerState.CANCELLED` once `Worker._run` has actually caught it. Task 4
+> implemented both tests against `Worker.state` rather than `is_cancelled`:
+>
+> - `test_cancelling_scale_down_during_impact_load_writes_nothing` waits on
+>   `started[0].is_cancelled and started[0].is_finished` (not `is_cancelled`
+>   alone, which `cancel()` flips before the flow has actually stopped) and
+>   then asserts `started[0].state is WorkerState.CANCELLED` before
+>   proceeding — strictly stronger than the snippet's bare `is_cancelled`
+>   wait;
+> - `test_cancelled_scale_snapshot_is_not_an_unavailable_confirmation` waits
+>   on `started[0].state is WorkerState.CANCELLED` directly, because the
+>   snippet's `is_cancelled` would have stayed permanently `False` there (the
+>   cancellation originates inside the loader, not from an external
+>   `.cancel()` call) and the test could never have gone green for the right
+>   reason.
+>
+> No behavior, cap, or invariant changed; only the Textual-version-correct
+> observable the assertions wait on and check. See
+> `.superpowers/sdd/task-4-report.md` §"Deviations from the brief" item 1 for
+> the full account.
+
 - [ ] **Step 4: Add RBAC and UID refusal tests**
 
 Make `ImpactEnv` accept a `permission: bool = True` constructor argument and
@@ -854,6 +900,20 @@ async def test_scale_down_rbac_denial_never_loads_or_confirms(tmp_path: Path) ->
         assert env.ops.calls == []
         assert len(env.app.screen_stack) == 1
 ```
+
+> **Verified implementation deviation (recorded in Task 5): RBAC denial
+> text.** The snippet above expects a notification containing `"not
+> permitted"`. The app's actual denial message, produced by
+> `KorvidApp._permitted` / `_write_perm_target`, is
+> `missing permission: {verb} {resource}/{subresource}`. Task 4 implemented
+> `test_scale_down_rbac_denial_never_loads_or_confirms` asserting the exact
+> real string `missing permission: patch deployments/scale`
+> (`str(note.message) == denied`) instead of a substring match against text
+> the app never emits, and added `assert not audit_path.exists()` alongside
+> it. Asserting the plan's wording would have failed against correct,
+> unchanged production behavior; nothing in `_permitted`/`_write_perm_target`
+> changed. See `.superpowers/sdd/task-4-report.md` §"Deviations from the
+> brief" item 3.
 
 The UID-loss integration case is owned by Task 3 beside the other
 origin/identity flow tests. Do not duplicate it here and do not weaken
@@ -890,6 +950,13 @@ git commit -m "test(ui): secure scale-down impact previews" \
 **Files:**
 - Modify: `docs/tui.md`
 - Modify: `docs/dev/plans/2026-08-16-scale-down-impact-preview.md` only for verified implementation deviations
+- Modify: `docs/resource-relationships.md` — a correctness fix identified in
+  Task 5's own review, not an implementation deviation: its "Blast radius in
+  write previews" section still said only `Ctrl-D`/`r` show the impact
+  section and that scale has no tested semantics, which issue #295 made
+  false. Brought in line with the same activation boundary, relation set,
+  PDB/HPA/PVC limitations, conservative routing, and 3-hop cap behavior as
+  `docs/tui.md` and this plan.
 - Verify unchanged: `pyproject.toml`
 - Verify unchanged: `uv.lock`
 
@@ -919,7 +986,8 @@ Run:
 
 ```bash
 rg -n "scale.down|PodDisruptionBudget|HorizontalPodAutoscaler|PVC retention|SELECTS|ROUTES_TO" \
-  docs/tui.md docs/dev/specs/2026-08-16-scale-down-impact-preview-design.md \
+  docs/tui.md docs/resource-relationships.md \
+  docs/dev/specs/2026-08-16-scale-down-impact-preview-design.md \
   docs/dev/plans/2026-08-16-scale-down-impact-preview.md \
   src/korvid/core/impact.py src/korvid/ui/impact_preview.py
 ```
@@ -972,7 +1040,9 @@ Expected: no dependency or lock-file diff and no unstaged changes.
 - [ ] **Step 6: Commit documentation**
 
 ```bash
-git add docs/tui.md docs/dev/plans/2026-08-16-scale-down-impact-preview.md
+git add docs/tui.md docs/resource-relationships.md \
+  docs/dev/plans/2026-08-16-scale-down-impact-preview.md \
+  docs/dev/specs/2026-08-16-scale-down-impact-preview-design.md
 git commit -m "docs: explain workload scale-down impact previews" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
