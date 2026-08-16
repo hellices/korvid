@@ -84,7 +84,23 @@ _ALL_NAMESPACES_LABEL = "all namespaces"
 _ACTION_LABEL = {
     ImpactAction.DELETE: "delete",
     ImpactAction.ROLLOUT_RESTART: "rollout restart",
+    ImpactAction.SCALE_DOWN: "scale down",
 }
+
+#: Machine-defined limitation notes shown only for `ImpactAction.SCALE_DOWN`.
+#: A controller-driven scale-down is not routed through the Eviction API, so
+#: PodDisruptionBudgets never see it and cannot gate it - and an
+#: autoscaler's own targeting/reconciliation loop is likewise outside what
+#: this snapshot evaluates. Both are static facts about what the walk does
+#: not check, not something derived from the cluster, so they render
+#: unconditionally whenever the action is a scale-down.
+_SCALE_DOWN_PDB_LINE = (
+    "  controller scale-down is not an Eviction API request; PodDisruptionBudgets do not gate it"
+)
+_SCALE_DOWN_HPA_LINE = "  HorizontalPodAutoscaler targeting and reconciliation are not evaluated"
+#: Only relevant when the target itself is a StatefulSet: a Deployment scale
+#: down has no PVC retention policy to leave unchecked.
+_SCALE_DOWN_STS_PVC_LINE = "  StatefulSet PVC retention policy is not evaluated"
 
 #: Hard output bounds: an approval dialog must stay reviewable, and a
 #: pathological cluster must not be able to grow it.
@@ -144,6 +160,7 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     # below it, and the body between here and the end can run to the
     # preview's caps.
     lines.append(ADVISORY_LINE)
+    lines.extend(_action_note_lines(summary))
     lines.extend(_section(_DIRECT_TITLE, summary.direct, capped=capped))
     lines.extend(_section(_TRANSITIVE_TITLE, summary.transitive, capped=capped))
     lines.extend(_inferred_lines(summary))
@@ -180,6 +197,21 @@ def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - len(_TRUNCATION_SUFFIX)].rstrip(".") + _TRUNCATION_SUFFIX
+
+
+def _action_note_lines(summary: ImpactSummary) -> list[str]:
+    """Static limitations that only a scale-down leaves unchecked.
+
+    Machine-defined, not cluster-derived: nothing here depends on what the
+    snapshot found, only on `summary.action` and `summary.target.kind`, so
+    it renders identically for every scale-down of a given kind.
+    """
+    if summary.action is not ImpactAction.SCALE_DOWN:
+        return []
+    lines = [_SCALE_DOWN_PDB_LINE, _SCALE_DOWN_HPA_LINE]
+    if summary.target.kind == "StatefulSet":
+        lines.append(_SCALE_DOWN_STS_PVC_LINE)
+    return lines
 
 
 def _section(title: str, items: Sequence[ImpactItem], *, capped: bool) -> list[str]:

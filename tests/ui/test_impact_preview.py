@@ -30,6 +30,9 @@ from korvid.ui.impact_preview import (
     _MAX_LINE,
     _MAX_TEXT,
     _MIN_NAME_BUDGET,
+    _SCALE_DOWN_HPA_LINE,
+    _SCALE_DOWN_PDB_LINE,
+    _SCALE_DOWN_STS_PVC_LINE,
     _TRUNCATION_SUFFIX,
     ADVISORY_LINE,
     IMPACT_TITLE,
@@ -154,6 +157,39 @@ def test_empty_sections_and_complete_coverage_are_stated_explicitly() -> None:
     assert "  known transitive dependents (may be affected): none in this snapshot" in lines
     assert "  graph coverage: complete" in lines
     assert lines[2] == ADVISORY_LINE
+
+
+def test_scale_down_names_the_action_and_static_limitations() -> None:
+    lines = render_impact_lines(_summary(action=ImpactAction.SCALE_DOWN, target=_DEPLOY))
+    assert lines[:6] == (
+        IMPACT_TITLE,
+        "  scale down apps/Deployment/prod/web",
+        ADVISORY_LINE,
+        _SCALE_DOWN_PDB_LINE,
+        _SCALE_DOWN_HPA_LINE,
+        "  known direct dependents (may be affected): none in this snapshot",
+    )
+    assert _SCALE_DOWN_STS_PVC_LINE not in lines
+
+
+def test_statefulset_scale_down_names_the_unchecked_pvc_policy() -> None:
+    statefulset = GraphResource(
+        group="apps",
+        kind="StatefulSet",
+        namespace="prod",
+        name="db",
+        uid="sts-1",
+    )
+    lines = render_impact_lines(_summary(action=ImpactAction.SCALE_DOWN, target=statefulset))
+    assert lines.index(_SCALE_DOWN_STS_PVC_LINE) == lines.index(_SCALE_DOWN_HPA_LINE) + 1
+
+
+@pytest.mark.parametrize("action", [ImpactAction.DELETE, ImpactAction.ROLLOUT_RESTART])
+def test_non_scale_actions_never_render_scale_down_limitations(action: ImpactAction) -> None:
+    lines = render_impact_lines(_summary(action=action))
+    assert _SCALE_DOWN_PDB_LINE not in lines
+    assert _SCALE_DOWN_HPA_LINE not in lines
+    assert _SCALE_DOWN_STS_PVC_LINE not in lines
 
 
 def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
