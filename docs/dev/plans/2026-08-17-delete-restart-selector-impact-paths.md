@@ -145,6 +145,16 @@ async def test_rollout_restart_dialog_shows_realistic_workload_selector_paths(
         assert env.ops.calls == []
 ```
 
+Also update `tests/ui/test_impact_security.py::test_impact_preview_works_with_the_agent_disabled`
+to assert the new 2-direct count — the shared `_deployment` fixture now always carries the
+workload selector, so this test too sees 2 direct dependents:
+
+```python
+        assert "known direct dependents (may be affected): 2 or more" in impact_text(env.app)
+```
+
+Replace the previous assertion `"known direct dependents (may be affected): 1"`.
+
 - [ ] **Step 3: Run the RED evidence**
 
 Run:

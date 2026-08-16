@@ -4345,7 +4345,7 @@ async def test_impact_preview_works_with_the_agent_disabled(tmp_path: Path) -> N
     async with env.app.run_test() as pilot:
         assert env.app.config.agent_enabled is False
         await open_delete_dialog(env, pilot, "deploy", expect="web")
-        assert "known direct dependents (may be affected): 1" in impact_text(env.app)
+        assert "known direct dependents (may be affected): 2 or more" in impact_text(env.app)
 
 
 async def test_no_secret_value_or_manifest_content_reaches_the_dialog(tmp_path: Path) -> None:
@@ -4453,11 +4453,11 @@ one?
     graph-derived impact (advisory):
       delete apps/Deployment/prod/web
       advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
-      known direct dependents (may be affected): 1 or more
+      known direct dependents (may be affected): 2 or more
+        - Pod/prod/web-abc-1 via managed_by (declared) at apps/Deployment/prod/web: spec.selector
         - apps/ReplicaSet/prod/web-abc via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]
-      known transitive dependents (may be affected): 1 or more
-        - Pod/prod/web-abc-1 via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0] -> owned_by (declared) at Pod/prod/web-abc-1: metadata.ownerReferences[0]
-      additional known paths: 1 or more (already-listed dependents reached again)
+      known transitive dependents (may be affected): none in this snapshot
+      additional known paths: 2 or more (already-listed dependents reached again)
       scope: prod
       graph coverage: incomplete - a missing dependent here does not prove none exists
         - gateway.networking.k8s.io/*: unavailable
