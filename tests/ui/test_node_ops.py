@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from textual.css.query import NoMatches
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -149,6 +149,13 @@ def make_app(
     )
 
 
+def _resource_row_count(app: KorvidApp) -> int:
+    try:
+        return app.query_one(ResourceTable).row_count
+    except NoMatches:
+        return -1
+
+
 async def _to_nodes(pilot) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed
     await pilot.press("colon")
     for ch in "nodes":
@@ -176,7 +183,7 @@ async def test_c_cordons_node_after_approval(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("c")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="cordon dialog")
@@ -202,7 +209,7 @@ async def test_u_uncordons_node_after_approval(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("u")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="uncordon dialog")
@@ -217,7 +224,7 @@ async def test_cordon_does_not_apply_to_pods(tmp_path: Path) -> None:
     rec = NodeRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await pilot.press("c")
         await pilot.pause(0.2)
         assert not isinstance(app.screen, ConfirmScreen)
@@ -228,11 +235,20 @@ async def test_readonly_blocks_node_ops(tmp_path: Path) -> None:
     rec = NodeRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl", readonly=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         for key in ("c", "u", "D"):
+            notice_count = len(app._notifications)
             await pilot.press(key)
-            await pilot.pause(0.1)
+
+            def _notification_added(start: int = notice_count) -> bool:
+                return len(app._notifications) > start
+
+            await until(
+                pilot,
+                _notification_added,
+                label=f"{key} readonly warning shown",
+            )
             assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
 
@@ -242,7 +258,7 @@ async def test_cordon_permission_precheck_patches_nodes(tmp_path: Path) -> None:
     rec = NodeRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl", check_calls=checks)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("c")
         await until(pilot, lambda: checks, label="SSAR pre-check ran")
@@ -259,7 +275,7 @@ async def test_drain_requires_typed_name_and_shows_impact_plan(tmp_path: Path) -
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -271,14 +287,18 @@ async def test_drain_requires_typed_name_and_shows_impact_plan(tmp_path: Path) -
         assert "drain impact" in preview
         # y alone must not confirm: the node name has to be typed.
         await pilot.press("y")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#confirm-name", Input).value == "y",
+            label="typed drain input updated",
+        )
         assert not any(call[0] == "cordon" for call in rec.calls)
         await pilot.press("backspace")
         await _confirm_typed(pilot, "worker-1")
         await until(
             pilot,
             lambda: audit_path.exists() and "success" in audit_path.read_text(),
-            label="drain finished",
+            label="drain success audited",
         )
         assert ("cordon", "worker-1", True, "node-uid-1") in rec.calls
         evictions = [call for call in rec.calls if call[0] == "evict"]
@@ -309,7 +329,7 @@ async def test_drain_pdb_blocked_eviction_warns_and_continues(tmp_path: Path) ->
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -317,7 +337,7 @@ async def test_drain_pdb_blocked_eviction_warns_and_continues(tmp_path: Path) ->
         await until(
             pilot,
             lambda: audit_path.exists() and "evicted 1" in audit_path.read_text(),
-            label="drain finished",
+            label="single-eviction drain audited",
         )
         # The blocked eviction did not stop the drain: web-1 was still evicted.
         assert ("evict", "default", "web-1", "uid-web-1") in rec.calls
@@ -337,7 +357,7 @@ async def test_drain_cancel_mid_drain_leaves_node_cordoned(tmp_path: Path) -> No
     app = make_app(rec, audit_path)
     app._drain.settle_timeout = 0.1  # the held eviction never settles
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -347,7 +367,7 @@ async def test_drain_cancel_mid_drain_leaves_node_cordoned(tmp_path: Path) -> No
         await until(
             pilot,
             lambda: audit_path.exists() and "cancelled" in audit_path.read_text(),
-            label="drain cancelled",
+            label="drain cancellation audited",
         )
         # The node was cordoned and stays cordoned; no eviction completed.
         assert ("cordon", "worker-1", True, "node-uid-1") in rec.calls
@@ -359,7 +379,7 @@ async def test_drain_with_nothing_to_evict_still_cordons(tmp_path: Path) -> None
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -369,7 +389,7 @@ async def test_drain_with_nothing_to_evict_still_cordons(tmp_path: Path) -> None
         await until(
             pilot,
             lambda: audit_path.exists() and "success" in audit_path.read_text(),
-            label="drain finished",
+            label="drain success audited",
         )
         assert ("cordon", "worker-1", True, "node-uid-1") in rec.calls
 
@@ -382,10 +402,16 @@ async def test_drain_plan_failure_aborts_before_dialog(tmp_path: Path) -> None:
     rec = FailingRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: any(
+                "could not compute the impact plan" in n.message for n in app._notifications
+            ),
+            label="drain plan failure shown",
+        )
         assert not isinstance(app.screen, ConfirmScreen)
         assert not any(call[0] == "cordon" for call in rec.calls)
 
@@ -401,7 +427,7 @@ async def test_unsupported_transport_reports_unavailable(tmp_path: Path) -> None
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("c")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="cordon dialog")
@@ -409,7 +435,7 @@ async def test_unsupported_transport_reports_unavailable(tmp_path: Path) -> None
         await until(
             pilot,
             lambda: audit_path.exists() and "error" in audit_path.read_text(),
-            label="failure audited",
+            label="cordon failure audited",
         )
         entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert "error" in entries[-1]["outcome"]
@@ -423,7 +449,7 @@ async def test_drain_while_drain_in_progress_cancels_instead_of_stacking(tmp_pat
     app = make_app(rec, audit_path)
     app._drain.settle_timeout = 0.1  # the held eviction never settles
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -434,7 +460,7 @@ async def test_drain_while_drain_in_progress_cancels_instead_of_stacking(tmp_pat
         await until(
             pilot,
             lambda: audit_path.exists() and "cancelled" in audit_path.read_text(),
-            label="drain cancelled",
+            label="drain cancellation audited",
         )
         assert not isinstance(app.screen, ConfirmScreen)
         assert len([call for call in rec.calls if call[0] == "plan"]) == plans_before
@@ -462,7 +488,7 @@ async def test_drain_aborts_when_plan_gains_unapproved_pods_after_cordon(tmp_pat
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -470,7 +496,7 @@ async def test_drain_aborts_when_plan_gains_unapproved_pods_after_cordon(tmp_pat
         await until(
             pilot,
             lambda: audit_path.exists() and "plan changed after cordon" in audit_path.read_text(),
-            label="drain aborted on plan change",
+            label="plan-change drain audited",
         )
         # Cordoned, then aborted: nothing was evicted.
         assert ("cordon", "worker-1", True, "node-uid-1") in rec.calls
@@ -490,7 +516,7 @@ async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: P
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path, extra_nodes=("worker-2",))
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -498,7 +524,13 @@ async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: P
         await until(pilot, lambda: rec.evict_started.is_set(), label="first eviction in flight")
         await pilot.press("down")  # select worker-2
         await pilot.press("D")  # must NOT cancel worker-1's drain
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: any(
+                "press the drain key on it to cancel" in n.message for n in app._notifications
+            ),
+            label="wrong-node cancel warning shown",
+        )
         assert "cancelled" not in (audit_path.read_text() if audit_path.exists() else "")
         assert app._drain_worker is not None
         assert app._drain_worker.is_running
@@ -506,7 +538,7 @@ async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: P
         await until(
             pilot,
             lambda: audit_path.exists() and "evicted 1" in audit_path.read_text(),
-            label="drain finished",
+            label="single-eviction drain audited",
         )
 
 
@@ -522,7 +554,7 @@ async def test_drain_publishes_progress_on_status_bar(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -535,13 +567,13 @@ async def test_drain_publishes_progress_on_status_bar(tmp_path: Path) -> None:
         await until(
             pilot,
             lambda: "drain worker-1: 0/2" in _status_text(),
-            label="progress on status bar",
+            label="drain progress shown",
         )
         rec.release_evictions.set()
         await until(
             pilot,
             lambda: audit_path.exists() and "evicted 2" in audit_path.read_text(),
-            label="drain finished",
+            label="two-eviction drain audited",
         )
         # Progress indicator is cleared once the drain completes.
         assert "drain worker-1" not in _status_text()
@@ -563,7 +595,7 @@ async def test_drain_reports_pods_that_never_finish_terminating(tmp_path: Path) 
     app._drain.wait_timeout = 0.3
     app._drain.wait_poll = 0.05
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -571,7 +603,7 @@ async def test_drain_reports_pods_that_never_finish_terminating(tmp_path: Path) 
         await until(
             pilot,
             lambda: audit_path.exists() and "not yet terminated" in audit_path.read_text(),
-            label="drain finished with lingering pod",
+            label="lingering-pod drain audited",
         )
         assert ("evict", "default", "web-1", "uid-web-1") in rec.calls
         entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
@@ -591,7 +623,7 @@ async def test_drain_waits_for_evicted_pods_to_disappear(tmp_path: Path) -> None
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -599,7 +631,7 @@ async def test_drain_waits_for_evicted_pods_to_disappear(tmp_path: Path) -> None
         await until(
             pilot,
             lambda: audit_path.exists() and "success" in audit_path.read_text(),
-            label="drain finished",
+            label="drain success audited",
         )
         # The verification poll ran after the evictions: initial preview,
         # post-cordon recheck, then at least one termination-wait poll.
@@ -619,14 +651,20 @@ async def test_uncordon_is_refused_while_node_is_being_drained(tmp_path: Path) -
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
         await _confirm_typed(pilot, "worker-1")
         await until(pilot, lambda: rec.evict_started.is_set(), label="eviction in flight")
         await pilot.press("u")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: any(
+                "is being drained - cancel the drain first" in n.message for n in app._notifications
+            ),
+            label="uncordon refusal shown",
+        )
         # No uncordon dialog opened and no schedulable write was issued.
         assert not isinstance(app.screen, ConfirmScreen)
         assert not any(call[:3] == ("cordon", "worker-1", False) for call in rec.calls)
@@ -634,7 +672,7 @@ async def test_uncordon_is_refused_while_node_is_being_drained(tmp_path: Path) -
         await until(
             pilot,
             lambda: audit_path.exists() and "evicted 1" in audit_path.read_text(),
-            label="drain finished",
+            label="single-eviction drain audited",
         )
 
 
@@ -662,7 +700,7 @@ async def test_throttled_429_eviction_is_retried_not_reported_pdb_blocked(
     app = make_app(rec, audit_path)
     app._drain.throttle_backoff = 0.01
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -670,7 +708,7 @@ async def test_throttled_429_eviction_is_retried_not_reported_pdb_blocked(
         await until(
             pilot,
             lambda: audit_path.exists() and "evicted 1" in audit_path.read_text(),
-            label="drain finished",
+            label="single-eviction drain audited",
         )
         assert ("evict", "default", "web-1", "uid-web-1") in rec.calls
         entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
@@ -689,7 +727,7 @@ async def test_persistently_throttled_eviction_counts_as_failed(tmp_path: Path) 
     app._drain.throttle_retries = 1
     app._drain.throttle_backoff = 0.01
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -697,7 +735,7 @@ async def test_persistently_throttled_eviction_counts_as_failed(tmp_path: Path) 
         await until(
             pilot,
             lambda: audit_path.exists() and "failed 1" in audit_path.read_text(),
-            label="drain finished",
+            label="failed-eviction drain audited",
         )
         entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert entries[-1]["outcome"].startswith("partial")
@@ -718,7 +756,7 @@ async def test_cancelled_in_flight_eviction_that_lands_is_counted(tmp_path: Path
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
@@ -730,7 +768,7 @@ async def test_cancelled_in_flight_eviction_that_lands_is_counted(tmp_path: Path
         await until(
             pilot,
             lambda: audit_path.exists() and "cancelled" in audit_path.read_text(),
-            label="drain cancelled",
+            label="drain cancellation audited",
         )
         # The eviction that was in flight when cancel arrived is counted.
         assert ("evict", "default", "web-1", "uid-web-1") in rec.calls
