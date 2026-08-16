@@ -219,11 +219,14 @@ which resources korvid has already observed depend on this one?
       graph coverage: incomplete - a missing dependent here does not prove none exists
         - gateway.networking.k8s.io/*: unavailable
 
-Every non-zero count reads `2 or more` above because the Gateway API group
-could not be listed: that one incomplete coverage record is enough to make
-both counts lower bounds, not totals (see the `N or more` bullet below).
-With every source `complete` and neither bound hit, the same summary renders exact
-counts.
+The two non-zero counts are `2` because this snapshot reached two direct
+dependents and folded two additional paths. They read `2 or more`, rather
+than exact `2`, because the Gateway API group could not be listed: that one
+incomplete coverage record makes them lower bounds, not totals (see the `N
+or more` bullet below). The transitive line remains `none in this snapshot`;
+with incomplete coverage that means none was observed here, not that none
+exists. With every source `complete` and neither bound hit, the same summary
+renders exact counts.
 
 The section is **advisory**, and says so on its second body line — directly
 under the action, before the first count, because that is where the hedge is

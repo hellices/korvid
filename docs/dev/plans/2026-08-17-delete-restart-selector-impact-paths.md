@@ -23,6 +23,7 @@
 
 - `tests/core/test_impact.py` — characterize realistic selector/owner path ordering and revisit classification for delete and rollout restart.
 - `tests/ui/test_impact_flow.py` — make workload fixtures production-shaped and pin the rendered end-to-end result.
+- `tests/ui/test_impact_security.py` — update the shared-fixture direct-dependent count without weakening the agent-disabled security assertion.
 - `docs/tui.md` — update the user-facing example and reading guidance.
 - `docs/resource-relationships.md` — state that the selector/owner path rule applies to delete and restart as well as scale-down.
 - `docs/dev/plans/2026-08-15-graph-derived-blast-radius.md` — synchronize the authoritative #283 fixture and assertion snippets.
@@ -36,6 +37,7 @@
 - Modify: `tests/ui/test_impact_flow.py:90-162`
 - Modify: `tests/ui/test_impact_flow.py:645-684`
 - Modify: `tests/ui/test_impact_flow.py:910-917`
+- Modify: `tests/ui/test_impact_security.py:376-386`
 
 **Interfaces:**
 - Consumes: `summarize_impact(graph, action, target, *, scope=None, limits=ImpactLimits()) -> ImpactSummary`.
