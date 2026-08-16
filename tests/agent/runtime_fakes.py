@@ -56,6 +56,30 @@ class RaisingExecutor(RecordedExecution):
         raise RuntimeError("boom")
 
 
+_CUSTOM_SECRET = """kind: Secret
+apiVersion: v1
+metadata:
+  name: tls
+data:
+  ca.crt: Y2EtY2VydGlmaWNhdGUtYm9keQ==
+"""
+
+
+_ERROR_SHAPED_SECRET = (
+    "ERROR: could not fully read the object\n"
+    "kind: Secret\n"
+    "metadata:\n"
+    "  name: db\n"
+    "data:\n"
+    "  config.json: cmF3LXNlY3JldA==\n"
+)
+
+
+class _CustomExecutor(RecordedExecution):
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        return _CUSTOM_SECRET
+
+
 def _bulk_pod_manifest(*, labels: int) -> dict[str, Any]:
     """A benign but bulky Pod manifest — no Secret object, just size.
 
@@ -108,6 +132,30 @@ class _ManifestKube:
 
     async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
         return copy.deepcopy(self.manifest)
+
+
+def _deep_secret_manifest(depth: int = 1500) -> dict[str, Any]:
+    document: Any = {
+        "kind": "Secret",
+        "metadata": {"name": "db"},
+        "data": {"password": "cmF3LXNlY3JldA=="},
+    }
+    for _ in range(depth):
+        document = {"spec": {"nested": document}}
+    return {"apiVersion": "v1", "kind": "CompositeApp", "metadata": {"name": "app"}, **document}
+
+
+class _NoCopyKube(_ManifestKube):
+    """`_ManifestKube` copies each result to mimic a fresh read; at this
+    depth the copy itself would exhaust the stack before the executor ran,
+    which is the cluster client's business, not the boundary's."""
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        return self.manifest
+
+
+def _deep_manifest_executor() -> Any:
+    return ToolExecutor(_NoCopyKube(_deep_secret_manifest()), {"pods": PODS_META, "pod": PODS_META})  # type: ignore[arg-type]  # test double for ReadOps
 
 
 def _manifest_executor(manifest: dict[str, Any]) -> Any:
