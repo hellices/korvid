@@ -214,7 +214,15 @@ shipped by issue #283.
 Core tests pin the exact action mapping:
 
 - the four included relations are traversed for `SCALE_DOWN`;
-- excluded PDB, config, volume, binding, and node edges produce no claim;
+- excluded PDB, config, volume, binding, and node edges produce no claim,
+  resolved or dangling: a scale-down's `unresolved references in the
+  affected set` warning is filtered by the same closed set its walk is, so
+  an excluded relation cannot re-enter the advisory as a warning;
+- a dangling reference of an *included* relation (a stale EndpointSlice
+  `targetRef`, say) is still warned about for a scale-down;
+- delete and rollout restart keep the relation-blind warning: the delete
+  removes what those references resolved against, and the restart recreates
+  the Pod that has to satisfy them again;
 - existing delete and restart semantics remain unchanged.
 
 Renderer tests pin:

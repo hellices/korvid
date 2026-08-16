@@ -418,6 +418,130 @@ def test_unresolved_references_are_reported_whatever_their_relation() -> None:
     ]
 
 
+#: The five relations a scale-down deliberately excludes from its closed
+#: set, each on the resource pair `korvid.k8s.relationship_facts` really
+#: produces it between (see `_SCALE_DOWN_RELATIONS`). A dangling reference
+#: of one of these describes what a *remaining* Pod still holds, not
+#: something the scale-down itself changes.
+_SCALE_DOWN_EXCLUDED_UNRESOLVED = [
+    pytest.param(
+        RelationKind.USES_VOLUME,
+        _res("PersistentVolumeClaim", "data", uid="pvc-gone"),
+        "spec.volumes[0].persistentVolumeClaim",
+        id="uses_volume-pod-mounts-a-missing-claim",
+    ),
+    pytest.param(
+        RelationKind.USES_CONFIG,
+        _res("ConfigMap", "app-config"),
+        "spec.volumes[1].configMap",
+        id="uses_config-pod-mounts-a-missing-configmap",
+    ),
+    pytest.param(
+        RelationKind.PROTECTED_BY,
+        _res("PodDisruptionBudget", "web", group="policy"),
+        "spec.selector",
+        id="protected_by-pod-names-a-missing-pdb",
+    ),
+    pytest.param(
+        RelationKind.SCHEDULED_ON,
+        _res("Node", "worker-1", namespace=""),
+        "spec.nodeName",
+        id="scheduled_on-pod-names-a-missing-node",
+    ),
+    pytest.param(
+        RelationKind.BOUND_TO,
+        _res("PersistentVolume", "pv-data", namespace=""),
+        "spec.volumeName",
+        id="bound_to-pod-names-a-missing-volume",
+    ),
+]
+
+
+@pytest.mark.parametrize(("relation", "missing", "field"), _SCALE_DOWN_EXCLUDED_UNRESOLVED)
+def test_scale_down_never_warns_about_an_unresolved_relation_it_excludes(
+    relation: RelationKind, missing: GraphResource, field: str
+) -> None:
+    """A scale-down's unresolved warning obeys the same closed set its walk
+    does.
+
+    Scaling a workload down does not detach a mounted volume or ConfigMap,
+    evict a Pod past its PDB, move a Pod off its node, or unbind a claim -
+    which is exactly why those relations are absent from
+    `ACTION_RELATIONS[ImpactAction.SCALE_DOWN]`. A *dangling* reference of
+    one of them says nothing more about the scale-down than a resolved one
+    would, so warning about it would smuggle back in, as a warning, the
+    claim the closed set refuses to make.
+    """
+    deployment = _res("Deployment", "web", group="apps", uid="deploy-1")
+    pod = _res("Pod", "web-abc-1", uid="pod-1")
+    graph = _graph(
+        _edge(pod, deployment, RelationKind.MANAGED_BY, field="spec.selector"),
+        _edge(pod, missing, relation, resolution=EdgeResolution.MISSING, field=field),
+    )
+    summary = summarize_impact(graph, ImpactAction.SCALE_DOWN, deployment)
+    assert [item.resource for item in summary.direct] == [pod]
+    assert summary.unresolved == ()
+
+
+@pytest.mark.parametrize("action", [ImpactAction.DELETE, ImpactAction.ROLLOUT_RESTART])
+@pytest.mark.parametrize(("relation", "missing", "field"), _SCALE_DOWN_EXCLUDED_UNRESOLVED)
+def test_delete_and_restart_still_warn_about_every_unresolved_relation(
+    action: ImpactAction, relation: RelationKind, missing: GraphResource, field: str
+) -> None:
+    """The relation-blind warning is scale-down-specific narrowing only.
+
+    A delete removes the object those references were resolved against, and
+    a rollout restart recreates the Pod that has to satisfy them again, so
+    for both a dangling reference of *any* relation inside the affected set
+    is a real reason the action may not land the way the reader expects.
+    """
+    deployment = _res("Deployment", "web", group="apps", uid="deploy-1")
+    pod = _res("Pod", "web-abc-1", uid="pod-1")
+    graph = _graph(
+        _edge(pod, deployment, RelationKind.MANAGED_BY, field="spec.selector"),
+        _edge(pod, missing, relation, resolution=EdgeResolution.MISSING, field=field),
+    )
+    summary = summarize_impact(graph, action, deployment)
+    assert [item.resource for item in summary.direct] == [pod]
+    assert [(edge.relation, edge.target) for edge in summary.unresolved] == [(relation, missing)]
+
+
+def test_scale_down_warns_about_an_unresolved_relation_inside_its_closed_set() -> None:
+    """The narrowing is by relation, not a blanket silence.
+
+    An EndpointSlice whose `targetRef` names a Pod the snapshot never saw is
+    a dangling `routes_to` - a relation a scale-down *does* follow - held by
+    a resource the scale-down affects, so it is still reported.
+    """
+    deployment = _res("Deployment", "web", group="apps", uid="deploy-1")
+    pod = _res("Pod", "web-abc-1", uid="pod-1")
+    slice_ = _res("EndpointSlice", "web-xyz", group="discovery.k8s.io", uid="eps-1")
+    missing_pod = _res("Pod", "web-abc-2")
+    graph = _graph(
+        _edge(pod, deployment, RelationKind.MANAGED_BY, field="spec.selector"),
+        _edge(
+            slice_,
+            pod,
+            RelationKind.ROUTES_TO,
+            confidence=FactConfidence.OBSERVED,
+            field="endpoints[0].targetRef",
+        ),
+        _edge(
+            slice_,
+            missing_pod,
+            RelationKind.ROUTES_TO,
+            resolution=EdgeResolution.MISSING,
+            confidence=FactConfidence.OBSERVED,
+            field="endpoints[1].targetRef",
+        ),
+    )
+    summary = summarize_impact(graph, ImpactAction.SCALE_DOWN, deployment)
+    assert [item.resource for item in summary.transitive] == [slice_]
+    assert [(edge.relation, edge.target) for edge in summary.unresolved] == [
+        (RelationKind.ROUTES_TO, missing_pod)
+    ]
+
+
 def test_a_genuine_loop_is_classified_as_a_cycle_and_walked_once() -> None:
     deployment = _res("Deployment", "web", group="apps", uid="deploy-1")
     replicaset = _res("ReplicaSet", "web-abc", group="apps", uid="rs-1")

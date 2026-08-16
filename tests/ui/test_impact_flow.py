@@ -313,6 +313,44 @@ def _ingress() -> GenericSummary:
     )
 
 
+def _endpoint_slice() -> GenericSummary:
+    """The EndpointSlice the Service's controller writes for the Pod.
+
+    Shaped like the real object: a `discovery.k8s.io/v1` slice whose
+    `endpoints[0].targetRef` names the backing Pod by kind, namespace, name
+    *and* uid, which `korvid.k8s.relationship_facts._endpoint_targets`
+    turns into an *observed* `routes_to` fact (the control plane wrote it
+    after the Pod was ready; it is not a declaration in anyone's spec).
+    Direction is EndpointSlice -> Pod, so a scale-down of the workload
+    reaches the slice one hop past the Pod: the object that stops naming a
+    replica when the replica goes away.
+    """
+    return GenericSummary(
+        name="web-xyz",
+        namespace="prod",
+        kind="EndpointSlice",
+        created="",
+        uid="eps-1",
+        relationships=RelationshipFacts(
+            api_group="discovery.k8s.io",
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.ROUTES_TO,
+                    target=TargetReference(
+                        group="",
+                        kind="Pod",
+                        namespace="prod",
+                        name="web-abc-1",
+                        uid="pod-1",
+                    ),
+                    confidence=FactConfidence.OBSERVED,
+                    field="endpoints[0].targetRef",
+                ),
+            ),
+        ),
+    )
+
+
 def _node() -> GenericSummary:
     """A cluster-scoped Node: `namespace` is always empty for these."""
     return GenericSummary(name="worker-1", namespace="", kind="Node", created="", uid="node-1")
@@ -836,16 +874,20 @@ async def test_a_namespaced_target_in_an_all_namespaces_pane_covers_every_namesp
 
 
 #: The rows a scale-down walk is exercised over: the controller chain
-#: (Deployment -> ReplicaSet -> Pod), the Service selecting that Pod, and
-#: the Ingress routing to that Service. Both workloads carry the
+#: (Deployment -> ReplicaSet -> Pod), the Service selecting that Pod, the
+#: EndpointSlice whose `targetRef` names that Pod, and the Ingress routing
+#: to that Service. Both workloads carry the
 #: `spec.selector` fact a real summary of their kind always has, so the walk
 #: sees the hop counts production would produce (`Deployment -> Pod` and
 #: `ReplicaSet -> Pod` are each one hop through `managed_by`, beside - not
-#: through - the ownership chain). The Pod's ConfigMap is included so the
-#: walk has no *unrelated* dangling reference: without it the summary also
-#: reports `unresolved references in the affected set`, which is the subject
-#: of its own test and would otherwise contaminate every assertion about
-#: what a scale-down lists.
+#: through - the ownership chain). The EndpointSlice is what makes the
+#: *observed* `routes_to` shape production really has - a control-plane
+#: object pointing straight at the replica - part of the fixture, beside
+#: the Ingress's declared `routes_to` to the Service. The Pod's ConfigMap is
+#: included so the walk has no *unrelated* dangling reference: without it
+#: the summary also reports `unresolved references in the affected set`,
+#: which is the subject of its own test and would otherwise contaminate
+#: every assertion about what a scale-down lists.
 def _scale_down_rows() -> dict[str, list[Any]]:
     return {
         "pods": [_pod()],
@@ -853,6 +895,7 @@ def _scale_down_rows() -> dict[str, list[Any]]:
         "replicasets": [_replicaset(selects_pods=True)],
         "configmaps": [_configmap()],
         "services": [_service()],
+        "endpointslices": [_endpoint_slice()],
         "ingresses": [_ingress()],
     }
 
@@ -891,13 +934,17 @@ async def test_scale_down_dialog_shows_controller_and_routing_dependents(
     routing chain is `Deployment -> Pod (managed_by) -> Service (selects) ->
     Ingress (routes_to)`, three hops, inside `ImpactLimits.max_depth`. The
     Ingress is therefore named, and nothing is withheld behind the
-    traversal cap. The ReplicaSet is a direct dependent in its own right
-    (through its ownerReference), and *both* further routes from it to the
-    same Pod - the Pod's own `metadata.ownerReferences` and the ReplicaSet's
-    own `spec.selector`, which a real ReplicaSet summary carries too - are
-    folded into `additional known paths` because the Pod was already
-    reached. That count is rendered `2 or more` rather than `2`: the
-    snapshot's coverage is incomplete (the Gateway API group is never
+    traversal cap. The EndpointSlice the Service's controller wrote reaches
+    the same Pod one hop earlier and through the *observed* `routes_to`
+    shape production really has - `endpoints[0].targetRef` naming the
+    replica directly - so both `routes_to` origins a scale-down can meet
+    are named in one dialog. The ReplicaSet is a direct dependent in its own
+    right (through its ownerReference), and *both* further routes from it to
+    the same Pod - the Pod's own `metadata.ownerReferences` and the
+    ReplicaSet's own `spec.selector`, which a real ReplicaSet summary
+    carries too - are folded into `additional known paths` because the Pod
+    was already reached. That count is rendered `2 or more` rather than `2`:
+    the snapshot's coverage is incomplete (the Gateway API group is never
     listed here), so every cluster-derived count in this advisory is a
     lower bound, not a tally.
 
@@ -924,11 +971,16 @@ async def test_scale_down_dialog_shows_controller_and_routing_dependents(
             "apps/ReplicaSet/prod/web-abc via owned_by (declared) at"
             " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]" in text
         )
-        assert "known transitive dependents (may be affected): 2 or more" in text
+        assert "known transitive dependents (may be affected): 3 or more" in text
         assert (
             "Service/prod/web via managed_by (declared) at"
             " apps/Deployment/prod/web: spec.selector -> selects (declared) at"
             " Service/prod/web: spec.selector" in text
+        )
+        assert (
+            "discovery.k8s.io/EndpointSlice/prod/web-xyz via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector -> routes_to (observed) at"
+            " discovery.k8s.io/EndpointSlice/prod/web-xyz: endpoints[0].targetRef" in text
         )
         assert (
             "networking.k8s.io/Ingress/prod/web via managed_by (declared) at"
@@ -955,9 +1007,11 @@ async def test_scale_down_of_a_replicaset_follows_the_same_routing_chain(
     paths` rather than listed twice. `Pod -> Service (selects) -> Ingress
     (routes_to)` follows exactly as it does from the Deployment: three hops,
     inside `ImpactLimits.max_depth`, so the Ingress is named and nothing is
-    withheld behind the traversal cap. Every count here is a lower bound
-    (`N or more`) because the snapshot's coverage is incomplete, not because
-    anything was capped.
+    withheld behind the traversal cap. The EndpointSlice pointing at that
+    same Pod through its observed `endpoints[0].targetRef` is the third
+    transitive dependent, reached one hop earlier than the Ingress. Every
+    count here is a lower bound (`N or more`) because the snapshot's
+    coverage is incomplete, not because anything was capped.
 
     This pins that the flow hands `ImpactAction.SCALE_DOWN` to the
     summarizer for every scalable kind, not just the one the first fixture
@@ -976,11 +1030,16 @@ async def test_scale_down_of_a_replicaset_follows_the_same_routing_chain(
             "Pod/prod/web-abc-1 via managed_by (declared) at"
             " apps/ReplicaSet/prod/web-abc: spec.selector" in text
         )
-        assert "known transitive dependents (may be affected): 2 or more" in text
+        assert "known transitive dependents (may be affected): 3 or more" in text
         assert (
             "Service/prod/web via managed_by (declared) at"
             " apps/ReplicaSet/prod/web-abc: spec.selector -> selects (declared) at"
             " Service/prod/web: spec.selector" in text
+        )
+        assert (
+            "discovery.k8s.io/EndpointSlice/prod/web-xyz via managed_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: spec.selector -> routes_to (observed) at"
+            " discovery.k8s.io/EndpointSlice/prod/web-xyz: endpoints[0].targetRef" in text
         )
         assert (
             "networking.k8s.io/Ingress/prod/web via managed_by (declared) at"

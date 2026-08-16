@@ -278,7 +278,15 @@ korvid would rather show nothing than a plausible guess.
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references
   held by the target or by something it takes down — a mounted ConfigMap
-  that no longer exists, say — whatever relation they use. Each line names
+  that no longer exists, say. For a delete or a rollout restart that is
+  *whatever relation they use*: the delete removes what they resolved
+  against, and the restart recreates the Pod that has to satisfy them
+  again. A scale-down narrows it to the same closed set its own walk
+  follows (`owned_by`, `managed_by`, `selects`, `routes_to`) — scaling down
+  does not detach a mounted volume or ConfigMap, evict a Pod past its PDB,
+  move a Pod off its node, or unbind a claim, so a dangling reference of
+  one of those relations would say nothing about the scale-down while
+  reading like a warning about it. Each line names
   its own confidence (`declared`, `observed`, or `inferred`) next to the
   relation, the same way a dependent path does, so a heuristically-derived
   dangling reference is identifiable on its own line, not only through the
@@ -354,7 +362,10 @@ Gateway route is listed as a known dependent that **may be affected**, never
 as one that will lose an endpoint or stop routing. `protected_by`,
 `uses_volume`, `uses_config`, `scheduled_on`, and `bound_to` are excluded —
 none of them is something a scale-down itself changes for a Pod that
-remains.
+remains. That exclusion covers the `unresolved references in the affected
+set` warning too: a scale-down never warns about a dangling reference of a
+relation it does not follow, which would otherwise reintroduce as a warning
+the claim the closed set deliberately refuses to make.
 
 Every scale-down advisory also states, as machine-defined lines rather than
 anything read from the cluster:

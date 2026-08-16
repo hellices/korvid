@@ -13,7 +13,7 @@ import unicodedata
 
 import pytest
 
-from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary
+from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary, summarize_impact
 from korvid.core.relationships import (
     CoverageRecord,
     CoverageState,
@@ -21,6 +21,7 @@ from korvid.core.relationships import (
     EvidencePointer,
     GraphResource,
     RelationshipEdge,
+    RelationshipGraph,
 )
 from korvid.k8s.relationship_facts import FactConfidence, RelationKind
 from korvid.ui.impact_preview import (
@@ -191,6 +192,113 @@ def test_non_scale_actions_never_render_scale_down_limitations(action: ImpactAct
     assert _SCALE_DOWN_PDB_LINE not in lines
     assert _SCALE_DOWN_HPA_LINE not in lines
     assert _SCALE_DOWN_STS_PVC_LINE not in lines
+
+
+#: A Pod managed by the target workload that holds one dangling reference of
+#: every relation a scale-down excludes from its closed set. Rendered
+#: through the real summarizer rather than a hand-built `ImpactSummary`, so
+#: the two halves of the policy - what the summary carries and what the
+#: dialog prints - are pinned together and neither can reintroduce the
+#: warning on its own.
+def _pod_with_excluded_dangling_references() -> RelationshipGraph:
+    missing = [
+        (
+            RelationKind.USES_VOLUME,
+            GraphResource(group="", kind="PersistentVolumeClaim", namespace="prod", name="data"),
+            "spec.volumes[0].persistentVolumeClaim",
+        ),
+        (
+            RelationKind.USES_CONFIG,
+            GraphResource(group="", kind="ConfigMap", namespace="prod", name="gone"),
+            "spec.volumes[1].configMap",
+        ),
+        (
+            RelationKind.PROTECTED_BY,
+            GraphResource(group="policy", kind="PodDisruptionBudget", namespace="prod", name="web"),
+            "spec.selector",
+        ),
+        (
+            RelationKind.SCHEDULED_ON,
+            GraphResource(group="", kind="Node", namespace="", name="worker-1"),
+            "spec.nodeName",
+        ),
+        (
+            RelationKind.BOUND_TO,
+            GraphResource(group="", kind="PersistentVolume", namespace="", name="pv-data"),
+            "spec.volumeName",
+        ),
+    ]
+    managed_by = RelationshipEdge(
+        subject=_POD,
+        target=_DEPLOY,
+        relation=RelationKind.MANAGED_BY,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=_DEPLOY, field="spec.selector"),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    dangling = tuple(
+        RelationshipEdge(
+            subject=_POD,
+            target=target,
+            relation=relation,
+            confidence=FactConfidence.DECLARED,
+            evidence=EvidencePointer(resource=_POD, field=field),
+            resolution=EdgeResolution.MISSING,
+        )
+        for relation, target, field in missing
+    )
+    return RelationshipGraph(
+        nodes=(_DEPLOY, _POD),
+        edges=(managed_by, *dangling),
+        coverage=(
+            CoverageRecord(group="", resource="pods", scope="prod", state=CoverageState.COMPLETE),
+        ),
+        truncated=False,
+    )
+
+
+def test_a_rendered_scale_down_never_warns_about_an_excluded_relation() -> None:
+    """The dialog a scale-down produces states nothing about the relations
+    its closed set excludes - not as a dependent, and not as a warning.
+
+    A mounted volume, a mounted ConfigMap, a PDB, a node binding and a
+    bound volume are all things a *remaining* Pod still holds; a
+    scale-down neither detaches nor evaluates them, so a dangling one of
+    each must reach the approver's dialog as nothing at all.
+    """
+    summary = summarize_impact(
+        _pod_with_excluded_dangling_references(),
+        ImpactAction.SCALE_DOWN,
+        _DEPLOY,
+        scope="prod",
+    )
+    lines = render_impact_lines(summary)
+    assert "  known direct dependents (may be affected): 1" in lines
+    assert not [line for line in lines if "unresolved references" in line]
+    body = "\n".join(lines)
+    for excluded in ("uses_volume", "uses_config", "protected_by", "scheduled_on", "bound_to"):
+        assert excluded not in body
+
+
+def test_a_rendered_rollout_restart_still_warns_about_the_same_references() -> None:
+    """The same graph, restarted instead: every dangling reference is listed.
+
+    The restart recreates the Pod that has to satisfy them again, so this
+    is the contrast that keeps the scale-down assertion above a statement
+    about the *action*, not about a renderer that stopped printing the
+    section.
+    """
+    summary = summarize_impact(
+        _pod_with_excluded_dangling_references(),
+        ImpactAction.ROLLOUT_RESTART,
+        _DEPLOY,
+        scope="prod",
+    )
+    lines = render_impact_lines(summary)
+    assert "  unresolved references in the affected set: 5" in lines
+    body = "\n".join(lines)
+    for excluded in ("uses_volume", "uses_config", "protected_by", "scheduled_on", "bound_to"):
+        assert excluded in body
 
 
 def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:

@@ -169,6 +169,15 @@ only to list conservative known dependents; this mapping does not assert
 endpoint loss or failure. Document why PDB, volume, config, node, and binding
 relations are excluded.
 
+Post-review divergence (PR #296 review): the closed set also filters the
+`unresolved` warning for a scale-down. `summarize_impact` previously reported
+every dangling edge whose subject was in the affected set, whatever its
+relation, which let an excluded relation re-enter a scale-down advisory as a
+warning. `_unresolved_edges` now applies the relation filter for the actions
+listed in `_RELATION_FILTERED_UNRESOLVED` (`SCALE_DOWN` only); delete and
+rollout restart keep the relation-blind warning, since a restarted Pod that
+mounts a deleted ConfigMap will not come back.
+
 - [ ] **Step 4: Verify GREEN and regression coverage**
 
 Run:
