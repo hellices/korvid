@@ -6,7 +6,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
-from textual.widgets import Input
+from textual.css.query import NoMatches
+from textual.widgets import Input, OptionList
 
 from korvid.agent.events import AgentEvent, TextDelta, TurnComplete
 from korvid.agent.outbound import OutboundSnapshot
@@ -96,6 +97,23 @@ def _notification_text(app: KorvidApp) -> str:
 
 def _base_screen_ready(app: KorvidApp) -> bool:
     return len(app.screen_stack) == 1 and app.current_kind == "pods"
+
+
+def _agent_setup_screen_initialized(app: KorvidApp) -> bool:
+    from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
+
+    if not isinstance(app.screen, AgentSetupScreen):
+        return False
+    try:
+        provider_list = app.screen.query_one("#setup-provider", OptionList)
+        auth_list = app.screen.query_one("#setup-auth", OptionList)
+    except NoMatches:
+        return False
+    return (
+        provider_list.highlighted == 0
+        and auth_list.display is False
+        and app.focused is provider_list
+    )
 
 
 async def test_ctrl_a_toggles_panel_display() -> None:
@@ -248,7 +266,6 @@ async def test_setup_hint_not_duplicated_on_retoggle() -> None:
 
 async def test_ai_command_pushes_setup_screen() -> None:
     from korvid.ui.messages import UnknownCommand
-    from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 
     class NoopConfigurator:
         async def begin_device_login(self) -> Any:
@@ -272,10 +289,10 @@ async def test_ai_command_pushes_setup_screen() -> None:
         app.on_unknown_command(UnknownCommand("ai"))
         await until(
             pilot,
-            lambda: isinstance(app.screen, AgentSetupScreen),
-            label="agent setup screen opened",
+            lambda: _agent_setup_screen_initialized(app),
+            label="agent setup provider list initialized",
         )
-        assert isinstance(app.screen, AgentSetupScreen)
+        assert _agent_setup_screen_initialized(app)
 
 
 async def test_ai_command_without_configurator_notifies() -> None:
