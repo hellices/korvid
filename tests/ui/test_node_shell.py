@@ -170,10 +170,6 @@ def _kubectl_run(create_result: Any = None, wait_rc: int = 0, get_result: Any = 
     return run, calls
 
 
-def _base_screen_ready(app: KorvidApp) -> bool:
-    return len(app.screen_stack) == 1
-
-
 @contextmanager
 def _noop_cm() -> Any:
     yield
@@ -226,7 +222,6 @@ async def test_s_on_nodes_view_opens_privileged_approval_dialog(tmp_path: Path) 
     run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -258,7 +253,6 @@ async def test_confirmed_node_shell_creates_waits_attaches_and_audits(tmp_path: 
     run_fake, run_calls = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -296,7 +290,6 @@ async def test_node_shell_deletes_exactly_its_own_pod(tmp_path: Path) -> None:
     run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as _calls:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -316,7 +309,6 @@ async def test_node_shell_cleanup_failure_warns_and_audits(tmp_path: Path) -> No
     run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as _calls:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -339,7 +331,6 @@ async def test_node_shell_refused_in_readonly(tmp_path: Path) -> None:
     run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -357,7 +348,6 @@ async def test_node_shell_refused_without_audit(tmp_path: Path) -> None:
     run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -375,7 +365,6 @@ async def test_node_shell_rbac_denied_not_offered(tmp_path: Path) -> None:
     run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -405,7 +394,6 @@ async def test_node_shell_create_failure_warns_about_policy(tmp_path: Path) -> N
     )
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -436,7 +424,6 @@ async def test_node_shell_unidentifiable_create_output_aborts(tmp_path: Path) ->
     )
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -464,7 +451,6 @@ async def test_node_shell_wait_failure_warns_but_still_cleans_up(tmp_path: Path)
     run_fake, _ = _kubectl_run(wait_rc=1)
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -490,7 +476,6 @@ async def test_node_shell_custom_image_and_namespace_from_config(tmp_path: Path)
     run_fake, run_calls = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -526,7 +511,6 @@ async def test_node_shell_aborts_when_node_replaced_after_prompt(tmp_path: Path)
     run_fake, run_calls = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -560,7 +544,6 @@ async def test_node_shell_blocked_when_audit_append_fails(tmp_path: Path) -> Non
     run_fake, run_calls = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -598,7 +581,6 @@ async def test_node_shell_cancelled_when_selection_moves_during_rbac_check(
     run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(pilot, started.is_set, label="flow parked on the gated SSAR")
@@ -622,7 +604,6 @@ async def test_node_shell_nonzero_attach_exit_has_no_policy_hint(tmp_path: Path)
     run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake, call_exit=1) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -694,7 +675,6 @@ async def test_node_shell_create_without_uid_aborts(tmp_path: Path) -> None:
     )
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -810,7 +790,6 @@ async def test_attach_launch_failure_still_deletes_pod_and_audits(tmp_path: Path
     run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake, call_error=OSError("kubectl vanished")):
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(
@@ -907,7 +886,6 @@ async def test_suspend_not_supported_refuses_gracefully_and_cleans_up(
         patch.object(KorvidApp, "suspend", side_effect=raising_suspend),
     ):
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
             await until(

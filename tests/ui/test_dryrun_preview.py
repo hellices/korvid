@@ -151,10 +151,6 @@ def make_app(ops: WriteOps, audit_path: Path) -> KorvidApp:
     )
 
 
-def _base_screen_ready(app: KorvidApp) -> bool:
-    return len(app.screen_stack) == 1 and app.current_kind == "pods"
-
-
 def _deployments_row_ready(app: KorvidApp) -> bool:
     return app.current_kind == "deployments" and app.query_one(ResourceTable).row_count == 1
 
@@ -180,7 +176,6 @@ async def test_delete_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
     ops = PreviewOps(lines=["- deployments/web (uid u1, created t1)"])
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
         await _to_deployments(app, pilot)
         await pilot.press("ctrl+d")
         await until(
@@ -196,7 +191,6 @@ async def test_restart_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
     ops = PreviewOps(lines=['+ spec.template.metadata.annotations.restartedAt: "t"'])
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
         await _to_deployments(app, pilot)
         await pilot.press("r")
         await until(
@@ -219,7 +213,6 @@ async def test_scale_dialog_previews_requested_replicas(tmp_path: Path) -> None:
     ops = PreviewOps(lines=["~ spec.replicas: 3 -> 5"])
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
         await _to_deployments(app, pilot)
         await pilot.press("S")
         await until(
@@ -245,7 +238,6 @@ async def test_failed_preview_still_opens_dialog(tmp_path: Path) -> None:
     ops = PreviewOps(fail=True)
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
         await _to_deployments(app, pilot)
         await pilot.press("ctrl+d")
         await until(
@@ -264,7 +256,6 @@ async def test_slow_preview_times_out_and_opens_dialog(tmp_path: Path) -> None:
     app = make_app(ops, tmp_path / "audit.jsonl")
     with mock.patch("korvid.ui.app._PREVIEW_TIMEOUT", 0.05):
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
             await _to_deployments(app, pilot)
             await pilot.press("ctrl+d")
             await until(
@@ -288,7 +279,6 @@ async def test_no_preview_support_falls_back(tmp_path: Path) -> None:
     ops = Plain()
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
         await _to_deployments(app, pilot)
         await pilot.press("ctrl+d")
         await until(
@@ -303,7 +293,6 @@ async def test_agent_write_dialog_shows_preview(tmp_path: Path) -> None:
     ops = PreviewOps(lines=["~ spec.replicas: 3 -> 4"])
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
         app.query_one(AgentPanel).display = True
         task = asyncio.ensure_future(
             app.agent_request_write("scale", "deployments", "web", namespace="default", replicas=4)

@@ -95,10 +95,6 @@ def _notification_text(app: KorvidApp) -> str:
     return " ".join(str(notification.message) for notification in app._notifications)
 
 
-def _base_screen_ready(app: KorvidApp) -> bool:
-    return len(app.screen_stack) == 1 and app.current_kind == "pods"
-
-
 def _agent_setup_screen_initialized(app: KorvidApp) -> bool:
     from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 
@@ -285,7 +281,6 @@ async def test_ai_command_pushes_setup_screen() -> None:
 
     app = make_app(runtime=None, model=None, agent_configurator=NoopConfigurator())
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         app.on_unknown_command(UnknownCommand("ai"))
         await until(
             pilot,
@@ -300,7 +295,6 @@ async def test_ai_command_without_configurator_notifies() -> None:
 
     app = make_app(runtime=None, model=None)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         app.on_unknown_command(UnknownCommand("ai"))
         await until(
             pilot,
@@ -389,7 +383,6 @@ async def test_apply_agent_settings_enables_agent() -> None:
     )
     app = make_app(runtime=None, model=None, rebuild_agent=lambda s: runtime)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await pilot.press("ctrl+a")  # open panel: setup hint, input disabled
         app._apply_agent_settings(settings)
         await until(
@@ -891,8 +884,7 @@ async def test_model_query_requires_live_runtime() -> None:
     app = make_app(runtime=None, model="gpt-4o")
     notices: list[str] = []
     app.notify = lambda msg, **kw: notices.append(str(msg))  # type: ignore[method-assign]
-    async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
+    async with app.run_test():
         app.on_unknown_command(UnknownCommand("model"))
     assert notices, "expected a notification"
     assert "gpt-4o" not in notices[-1]

@@ -393,13 +393,12 @@ async def test_interrupt_while_awaiting_approval_dismisses_dialog(tmp_path: Any)
     import pytest
 
     from korvid.ui.widgets.confirm_screen import ConfirmScreen
-    from tests.ui.test_agent_write import Recorder, _base_screen_ready, _expand_panel
+    from tests.ui.test_agent_write import Recorder, _expand_panel
     from tests.ui.test_agent_write import make_app as make_write_app
 
     rec = Recorder()
     app = make_write_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         _expand_panel(app)
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
@@ -426,7 +425,7 @@ async def test_interrupt_after_approval_lets_the_write_finish(tmp_path: Any) -> 
 
     from korvid.k8s.discovery import ResourceMeta
     from korvid.ui.widgets.confirm_screen import ConfirmScreen
-    from tests.ui.test_agent_write import Recorder, _base_screen_ready, _expand_panel
+    from tests.ui.test_agent_write import Recorder, _expand_panel
     from tests.ui.test_agent_write import make_app as make_write_app
 
     class SlowRecorder(Recorder):
@@ -451,7 +450,6 @@ async def test_interrupt_after_approval_lets_the_write_finish(tmp_path: Any) -> 
     audit_path = tmp_path / "audit.jsonl"
     app = make_write_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         _expand_panel(app)
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
@@ -479,7 +477,7 @@ async def test_repeated_cancels_never_kill_an_approved_write(tmp_path: Any) -> N
 
     from korvid.k8s.discovery import ResourceMeta
     from korvid.ui.widgets.confirm_screen import ConfirmScreen
-    from tests.ui.test_agent_write import Recorder, _base_screen_ready, _expand_panel
+    from tests.ui.test_agent_write import Recorder, _expand_panel
     from tests.ui.test_agent_write import make_app as make_write_app
 
     class SlowRecorder(Recorder):
@@ -524,7 +522,6 @@ async def test_repeated_cancels_never_kill_an_approved_write(tmp_path: Any) -> N
     with patch("korvid.ui.app.asyncio.shield", new=probe.shield):
         app = make_write_app(rec, audit_path)
         async with app.run_test() as pilot:
-            await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             _expand_panel(app)
             task = asyncio.ensure_future(
                 app.agent_request_write("delete", "deployments", "web", namespace="default")
