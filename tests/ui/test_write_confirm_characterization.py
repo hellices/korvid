@@ -14,7 +14,13 @@ self.run_worker(self._run_write(...))`. The confirmed branch passes
 the operation factory to `_run_write`, which constructs the mutation
 coroutine only after the intent audit succeeds (no unawaited-coroutine
 leak on decline or audit failure — pinned here by the decline tests
-under warnings-as-errors).
+under warnings-as-errors). Scale (issue #295) additionally passes
+`_push_write_confirmation` an `approval_guard`: on approval only, the
+shared callback defers one event-loop iteration — Textual runs a result
+callback before it pops the dismissed screen — re-checks the scale's
+captured identity and replica count, and launches the worker only if it
+still holds. The decline path is untouched by it, which is what
+`test_scale_declined_at_confirm_makes_no_call` below still pins.
 
 Group (b) — launch + UID recheck (1): operator install re-checks the
 catalog incarnation inside `_done` before launching, because create has

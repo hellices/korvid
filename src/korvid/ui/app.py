@@ -4996,10 +4996,11 @@ class KorvidApp(App[None]):
         captured count decides whether korvid loads a scale-down's blast
         radius and what the approval line says it is changing from, and
         every awaited gap in the flow - the permission round trip, the count
-        prompt, the dry run, the snapshot - is long enough for a controller,
-        an autoscaler or another operator to move `spec.replicas` under an
-        otherwise unchanged incarnation. `_write_identity_intact` cannot see
-        that: kind, namespace, name, uid, pane and scope all still match.
+        prompt, the dry run, the snapshot, the approval dialog itself - is
+        long enough for a controller, an autoscaler or another operator to
+        move `spec.replicas` under an otherwise unchanged incarnation.
+        `_write_identity_intact` cannot see that: kind, namespace, name,
+        uid, pane and scope all still match.
 
         So the count is compared too, and a change ends the flow with its
         own banner rather than a stale `old -> new` line or a scale-down
@@ -5318,6 +5319,7 @@ class KorvidApp(App[None]):
         preview_title: str = "server dry-run preview:",
         managed_note: str | None = None,
         impact_lines: tuple[str, ...] | None = None,
+        approval_guard: Callable[[], bool] | None = None,
     ) -> None:
         """The standard write-approval flow (issue #91 U1): push a confirm
         dialog and, on approval, launch `_run_write` on an app-owned worker.
@@ -5327,13 +5329,45 @@ class KorvidApp(App[None]):
         unawaited, no side effects before approval). Flows with extra
         semantics — operator install's in-callback UID recheck, drain's
         dedicated worker, the agent gate's approval future — stay explicit.
+
+        `approval_guard` is an optional last re-validation for flows whose
+        dialog can go stale while it is open. The dialog is the longest
+        awaited gap a write has - it stays up until the user answers - and
+        every earlier gate has already passed by then, so a flow that
+        depends on state outside the target's identity needs one more look
+        before it commits. It is deliberately *synchronous*: it must not
+        introduce an await of its own between the approval and the write.
+
+        The guard runs only on a fresh approval, so it can never become a
+        second path *to* the write - it can only refuse one the user already
+        gave - and it runs before `_run_write` is even constructed, so a
+        refusal leaves no write reservation, no audit record, and no
+        operation. It is deferred by one loop iteration because Textual
+        invokes this result callback *before* it pops the dismissed screen:
+        run inline, any selection check would see the confirmation itself
+        still on the screen stack and read as "another dialog opened".
+
+        Omitting it (the default) keeps every other write flow on exactly
+        the callback it had: approval launches the worker in the same
+        iteration, unguarded.
         """
 
+        def _launch() -> None:
+            self.run_worker(
+                self._run_write(action, meta, namespace, name, op_factory, detail=detail)
+            )
+
+        def _launch_if(guard: Callable[[], bool]) -> None:
+            if guard():
+                _launch()
+
         def _done(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(
-                    self._run_write(action, meta, namespace, name, op_factory, detail=detail)
-                )
+            if not confirmed:
+                return
+            if approval_guard is None:
+                _launch()
+                return
+            self.call_later(_launch_if, approval_guard)
 
         await self.push_screen(
             self._confirm_screen(
@@ -5844,7 +5878,12 @@ class KorvidApp(App[None]):
         the context epoch. `current` is part of what is revalidated because
         it is what makes this request a decrease at all: it decides whether
         the blast radius is loaded and it is the number the approval line
-        reads `replicas <old> -> <new>` from."""
+        reads `replicas <old> -> <new>` from.
+
+        The dialog this pushes is itself an awaited gap, and the longest
+        one, so the same gate is handed to `_push_write_confirmation` as its
+        `approval_guard` and runs once more on approval - see there for why
+        it is deferred rather than run inside the result callback."""
         ops = self._write_ops
         if ops is None:
             return
@@ -5923,6 +5962,24 @@ class KorvidApp(App[None]):
             preview=preview,
             managed_note=note,
             impact_lines=impact,
+            # The dialog is the flow's last - and longest - awaited gap: it
+            # stays up until the user answers. Everything the gates above
+            # compared can move while it does, and `current` in particular
+            # is what the operation line the user is reading says the object
+            # is changing *from*. So the approval is re-validated against
+            # the same captured values once more, after the modal is gone
+            # and before any worker, reservation, audit record or operation
+            # exists.
+            approval_guard=lambda: self._scale_context_intact(
+                meta,
+                ns,
+                name,
+                uid,
+                current,
+                phase="the confirmation dialog",
+                epoch=epoch,
+                origin=origin,
+            ),
         )
 
     async def action_resize_pod(self) -> None:

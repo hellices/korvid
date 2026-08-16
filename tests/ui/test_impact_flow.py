@@ -10,9 +10,12 @@ the summary, unsupported write flows are untouched, and every awaited gap
 still revalidates. The scale-down flow (#295) adds a gap the other two do
 not have - the replica-count prompt - so its tests also pin *when* the
 origin pane is captured and that no snapshot is loaded once the selection,
-the pane or the pane's scope has drifted. This module owns the shared
-harness (`ImpactEnv`) that `tests/ui/test_impact_security.py` reuses for
-the security invariants.
+the pane or the pane's scope has drifted. It also owns the one gap no other
+write flow re-checks - the approval dialog itself, which stays open until
+the user answers - so its tests pin that drift landing there is refused on
+approval, before any worker, reservation, audit record or operation exists.
+This module owns the shared harness (`ImpactEnv`) that
+`tests/ui/test_impact_security.py` reuses for the security invariants.
 """
 
 from __future__ import annotations
@@ -1984,3 +1987,64 @@ async def test_a_count_appearing_mid_flow_never_turns_an_unknown_scale_into_a_de
         assert not isinstance(app.screen, ConfirmScreen)
         assert env.lister.calls == []
         assert env.ops.calls == []
+
+
+@pytest.mark.parametrize(
+    ("make_drift", "reason"),
+    [
+        (_uid_replacement_drift, "the selection changed"),
+        (_focus_drift, "the selection changed"),
+        (_scope_drift, "the selection changed"),
+        (_replica_count_drift, "the desired replica count changed"),
+    ],
+    ids=["uid", "pane", "scope", "replicas"],
+)
+async def test_scale_drift_while_the_confirmation_is_open_never_writes(
+    tmp_path: Path,
+    make_drift: Callable[[KorvidApp], Callable[[], None]],
+    reason: str,
+) -> None:
+    """The last awaited gap of all: the approval dialog itself.
+
+    `ConfirmScreen` is the longest gap in the whole flow - it stays up until
+    the user answers, which can be minutes - and until now nothing was
+    re-checked across it. Every earlier gate had already passed, so a
+    same-UID replica move, a same-named replacement, a focus change to the
+    second pane or a re-scope of the origin pane made *while the dialog was
+    on screen* was carried straight into `_run_write`: the dialog the user
+    approved would have described `replicas 3 -> 1` (or the row they were
+    looking at), and the write, the reservation and the audit record would
+    have been for what the cluster and the view hold now.
+
+    The guard runs after a *fresh* keystroke approval and after the modal is
+    gone - never as a second approval path, never on a decline - and before
+    anything else the approval triggers. So the assertion is that the
+    refusal names the dialog phase and that the flow left nothing behind:
+    no write reservation (which would block `:ctx`), no operation, and no
+    audit record at all - not even the fail-closed intent line, because the
+    write worker is never constructed.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        drift = make_drift(app)
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="scale-down confirm"
+        )
+        assert "scale down apps/Deployment/prod/web" in impact_text(app)
+        drift()
+        await pilot.press("y")
+        await _cancelled(
+            app, pilot, f"{reason} during the confirmation dialog", "confirm-gap refusal"
+        )
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert app._active_cluster_writes == 0
+        assert env.ops.calls == []
+        assert not audit_path.exists()
