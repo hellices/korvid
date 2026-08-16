@@ -1,7 +1,7 @@
 # Delete/Restart Selector Impact Paths
 
-**Issue:** [#297](https://github.com/hellices/korvid/issues/297)  
-**Status:** Approved for implementation  
+**Issue:** [#297](https://github.com/hellices/korvid/issues/297)
+**Status:** Approved for implementation
 **Date:** 2026-08-17
 
 ## Problem
@@ -151,4 +151,3 @@ Implementation uses a RED/GREEN cycle:
 3. make selectors unconditional in the fixtures;
 4. verify the targeted core and UI suites pass;
 5. run Ruff, formatting, mypy, tach, and the full test suite before the PR.
-
