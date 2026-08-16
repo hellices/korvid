@@ -427,19 +427,22 @@ dependent are counted as `additional known paths`), bounded to 3 hops and 50
 resources, and classifies a genuine loop as a cycle rather than expanding it
 twice.
 
-The 3-hop bound is conservative and routes through the target's own owner
-chain first, so how many hops a routing resource sits at depends on *which*
-resource you scale, not just what the cluster contains. A Deployment's
-routing chain to its Ingress is `Deployment -> ReplicaSet (owned_by) -> Pod
-(owned_by) -> Service (selects) -> Ingress (routes_to)` — four hops, one past
-the cap — so scaling the Deployment down reports `traversal capped` instead
-of naming the Ingress. Scaling the ReplicaSet it owns down starts one hop
-closer: `ReplicaSet -> Pod (owned_by) -> Service (selects) -> Ingress
-(routes_to)` is exactly 3 hops, inside the cap, and the dialog names the
-Ingress as a known dependent. Neither is a defect in either direction — the
-same fixed 3-hop, 50-resource bound is applied every time, and the dialog
-always says so when it is reached (see [Limits](#limits) for the graph
-view's own, much larger caps, which this bound is independent of).
+A workload reaches its own Pods in a single hop, because it declares the
+selector that binds them: a Deployment's, StatefulSet's or ReplicaSet's
+`spec.selector` is a `managed_by` relationship to every Pod it matches,
+alongside the `owned_by` chain those Pods' `metadata.ownerReferences` give.
+So a Deployment's routing chain to its Ingress is `Deployment -> Pod
+(managed_by) -> Service (selects) -> Ingress (routes_to)` — three hops,
+inside the bound — and scaling it down names the Ingress. The ReplicaSet in
+between is a direct dependent of the Deployment in its own right, and the
+second route to the same Pod (through that ReplicaSet) is folded into
+`additional known paths` rather than listed twice. Scaling that ReplicaSet
+down instead reaches the same chain through its Pods' owner references
+(`ReplicaSet -> Pod (owned_by) -> Service (selects) -> Ingress
+(routes_to)`), also three hops. The bound is still a bound: anything past
+3 hops or 50 resources is disclosed by `traversal capped` on the dialog and
+never silently dropped (see [Limits](#limits) for the graph view's own, much
+larger caps, which this bound is independent of).
 
 Each rendered hop names both halves of its evidence — the resource an edge's
 evidence came from and the field path on it — and each is individually

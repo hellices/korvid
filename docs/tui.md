@@ -235,65 +235,7 @@ what they were. Edit, resize, cordon/uncordon, drain, Helm, and operator
 flows never show it — they have no tested per-relation semantics yet, and
 korvid would rather show nothing than a plausible guess.
 
-### Scale-down
-
-Scale (`S`) shows the same section, but only when korvid can tell the
-requested count is a *known decrease*: the row's current desired replica
-count was readable and the requested count is lower than it. A scale-up, a
-no-op (requested count equal to current), or a row whose desired count
-korvid cannot read gets the ordinary confirmation with the `old -> new`
-replica line and **no graph section at all** — not the "impact unavailable"
-line, and no relationship snapshot is loaded for it. Only a known decrease
-loads the snapshot and summarizes it.
-
-A scale-down follows a different, still closed relation set than delete and
-rollout restart: `owned_by` and `managed_by` (the same controller/selector
-ownership chain to the shrinking workload's Pods), plus `selects` and
-`routes_to` — a Service selecting those Pods, an EndpointSlice observed
-targeting one of them, and a declared Ingress or Gateway route reaching that
-Service in turn. Delete and rollout restart never follow `selects` (a
-Service whose Pods are deleted one at a time is not itself failing), but a
-scale-down does, conservatively: a Service, EndpointSlice, Ingress, or
-Gateway route is listed as a known dependent that **may be affected**, never
-as one that will lose an endpoint or stop routing. `protected_by`,
-`uses_volume`, `uses_config`, `scheduled_on`, and `bound_to` are excluded —
-none of them is something a scale-down itself changes for a Pod that
-remains.
-
-Every scale-down advisory also states, as machine-defined lines rather than
-anything read from the cluster:
-
-    controller scale-down is not an Eviction API request; PodDisruptionBudgets do not gate it
-    HorizontalPodAutoscaler targeting and reconciliation are not evaluated
-
-and, only when the target itself is a StatefulSet:
-
-    StatefulSet PVC retention policy is not evaluated
-
-A controller deletes surplus Pods directly rather than through the Eviction
-API, so a PodDisruptionBudget never sees or gates it; an HPA can independently
-overwrite a manual replica count on its own reconciliation loop; and a
-StatefulSet's `persistentVolumeClaimRetentionPolicy` decides whether scaling
-down also deletes PVCs — none of that is evaluated here.
-
-Because the routing chain (owner → Pod → Service → Ingress/Gateway) can be
-four hops from a Deployment but the walk is capped at 3, the same Ingress can
-appear or not depending on which resource you scale: scaling a Deployment
-down puts its Ingress one hop past the cap, so the dialog shows `traversal
-capped` there instead of naming it, while scaling the ReplicaSet it owns
-puts the same Ingress inside the cap (ReplicaSet → Pod → Service → Ingress is
-exactly 3 hops) and the dialog names it. Neither case is a bug: the cap is
-the same 3-hop, 50-resource bound every impact preview uses (see `traversal
-capped` under "Reading it" below), and the dialog always says so when it is
-reached — it is a reminder that "not named" never means "not affected" for a
-capped or incomplete answer.
-
-Everything else about the section — its advisory framing, the origin-pane
-and UID gates on context/selection/focus/scope drift, the fail-open handling
-of a timeout or a loader failure, and the fact that it never blocks
-approval — is identical to delete and rollout restart's, described below.
-
-Reading it:
+### Reading it
 
 - **direct** dependents are one hop from the target, **transitive** are two
   or more; each line names the relation, how the fact was derived, and the
@@ -366,6 +308,8 @@ Reading it:
     than the 50-dependent traversal cap above (see
     [Limits](resource-relationships.md#limits) for the exact numbers).
 
+### The snapshot, its scope, and UID matching
+
 The snapshot is the same bounded, read-only LIST fan-out the relationship
 view (`g`) performs — scoped to the namespace of the pane the write was
 raised from for a namespaced target, and cluster-wide for a cluster-scoped
@@ -386,3 +330,62 @@ object currently holds the name — and it does not show `target not found in
 this snapshot` either, which would read as "the object is gone" when the
 truth is only that korvid has no UID to match on. Approval, the typed-name
 gate, the write, and the audit record are unaffected.
+
+### Scale-down
+
+Scale (`S`) shows the same section, but only when korvid can tell the
+requested count is a *known decrease*: the row's current desired replica
+count was readable and the requested count is lower than it. A scale-up, a
+no-op (requested count equal to current), or a row whose desired count
+korvid cannot read gets the ordinary confirmation with the `old -> new`
+replica line and **no graph section at all** — not the "impact unavailable"
+line, and no relationship snapshot is loaded for it. Only a known decrease
+loads the snapshot and summarizes it.
+
+A scale-down follows a different, still closed relation set than delete and
+rollout restart: `owned_by` and `managed_by` (the same controller/selector
+ownership chain to the shrinking workload's Pods), plus `selects` and
+`routes_to` — a Service selecting those Pods, an EndpointSlice observed
+targeting one of them, and a declared Ingress or Gateway route reaching that
+Service in turn. Delete and rollout restart never follow `selects` (a
+Service whose Pods are deleted one at a time is not itself failing), but a
+scale-down does, conservatively: a Service, EndpointSlice, Ingress, or
+Gateway route is listed as a known dependent that **may be affected**, never
+as one that will lose an endpoint or stop routing. `protected_by`,
+`uses_volume`, `uses_config`, `scheduled_on`, and `bound_to` are excluded —
+none of them is something a scale-down itself changes for a Pod that
+remains.
+
+Every scale-down advisory also states, as machine-defined lines rather than
+anything read from the cluster:
+
+    controller scale-down is not an Eviction API request; PodDisruptionBudgets do not gate it
+    HorizontalPodAutoscaler targeting and reconciliation are not evaluated
+
+and, only when the target itself is a StatefulSet:
+
+    StatefulSet PVC retention policy is not evaluated
+
+A controller deletes surplus Pods directly rather than through the Eviction
+API, so a PodDisruptionBudget never sees or gates it; an HPA can independently
+overwrite a manual replica count on its own reconciliation loop; and a
+StatefulSet's `persistentVolumeClaimRetentionPolicy` decides whether scaling
+down also deletes PVCs — none of that is evaluated here.
+
+A workload's Pods are one hop from it, not two: a Deployment,
+StatefulSet or ReplicaSet declares `spec.selector`, which is a `managed_by`
+relationship to every Pod it matches, alongside the `owned_by` chain the
+Pods' `metadata.ownerReferences` give. So the routing chain from a
+Deployment is `Deployment -> Pod (managed_by) -> Service (selects) ->
+Ingress/Gateway route (routes_to)` — three hops, inside the walk's bound —
+and the dialog names the Ingress. The ReplicaSet in between is itself a
+direct dependent, and the second way to the same Pod (through it) is
+counted under `additional known paths` rather than listed twice. The
+ordinary 3-hop, 50-dependent bound still applies to everything past that:
+a longer chain is disclosed by `traversal capped` (see [Reading
+it](#reading-it)), which never means "not affected", only "not reached".
+
+Everything else about the section — its advisory framing, the origin-pane
+and UID gates on context/selection/focus/scope drift, the fail-open handling
+of a timeout or a loader failure, and the fact that it never blocks
+approval — is identical to delete and rollout restart's, described above.

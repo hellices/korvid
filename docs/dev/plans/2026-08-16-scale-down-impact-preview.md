@@ -467,25 +467,37 @@ UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync pytest -p no:tach -q \
 
 Expected: scale-down has no impact section; the negative cases remain green.
 
-> **Verified implementation deviation (recorded in Task 5).** The snippet
+> **Correction (recorded in the final whole-branch review).** The snippet
 > above asserts `"networking.k8s.io/Ingress/prod/web" in text` for a
-> Deployment scale-down. With `ImpactLimits.max_depth = 3` (Task 1, a
-> shared, unchanged constant) that assertion cannot hold: the routing chain
-> from a Deployment is `Deployment -> ReplicaSet (owned_by) -> Pod (owned_by)
-> -> Service (selects) -> Ingress (routes_to)`, four hops, one past the cap.
-> Task 3 implemented `test_scale_down_dialog_shows_controller_and_routing_dependents`
-> with the plan's fixtures and every other assertion unchanged, but replaced
-> the Ingress assertion with `"networking.k8s.io/Ingress/prod/web" not in
-> text` and `"traversal capped" in text` — the honest outcome for that
-> target — and added a second test,
-> `test_scale_down_lists_a_routing_dependent_inside_the_traversal_cap`, that
-> scales the ReplicaSet instead (`ReplicaSet -> Pod (owned_by) -> Service
-> (selects) -> Ingress (routes_to)`, exactly three hops) to pin the stated
-> behavior that a scale-down really does follow `selects` and `routes_to`
-> into the dialog when the target is within the cap. Neither the cap nor any
-> other behavior changed; only which fixture target proves the routing claim
-> did. See `tests/ui/test_impact_flow.py` and
-> `.superpowers/sdd/task-3-report.md` §4 for the full account.
+> Deployment scale-down, and that assertion is **correct**. Task 3
+> implemented the test with a Deployment fixture that carried no
+> relationships at all, and a Deployment with no `spec.selector` reaches its
+> Pods only through the ReplicaSet — `Deployment -> ReplicaSet (owned_by) ->
+> Pod (owned_by) -> Service (selects) -> Ingress (routes_to)`, four hops,
+> one past `ImpactLimits.max_depth = 3` — so the test was changed to assert
+> `"networking.k8s.io/Ingress/prod/web" not in text` and `"traversal capped"
+> in text`, and the docs were written to match. That is not what production
+> produces: `korvid.k8s.relationship_facts._workload_selector` gives every
+> Deployment/ReplicaSet/StatefulSet a `SelectorFact(relation=MANAGED_BY,
+> target Pod, match_is_subject=True)`, whose edge runs *Pod -> workload*, so
+> the reverse walk reaches the Pod in one hop and the chain is `Deployment ->
+> Pod (managed_by) -> Service (selects) -> Ingress (routes_to)` — three hops,
+> inside the cap. The fixture, not the cap, was the deviation.
+>
+> The fix (final-review round): `tests/ui/test_impact_flow.py::_deployment`
+> takes an opt-in `selects_pods` flag that attaches exactly that fact, and
+> `_scale_down_rows()` uses it; the Deployment test now asserts the Ingress
+> **is** named, that no `traversal capped` line appears, that the ReplicaSet
+> is a direct dependent beside the Pod, and that the ReplicaSet's own edge to
+> that Pod is counted under `additional known paths`. The second test that
+> scales the ReplicaSet is kept (renamed
+> `test_scale_down_of_a_replicaset_follows_the_same_routing_chain`) because
+> it still pins a real, distinct thing: the same routing chain reached from a
+> different scalable kind, through owner references rather than through the
+> target's own selector. The four-hop/`traversal capped` claims this note
+> previously authorized have been removed from `docs/tui.md`,
+> `docs/resource-relationships.md` and the design doc. Neither the cap nor
+> any production behavior changed in either round.
 
 - [ ] **Step 3: Write failing origin and scope race tests**
 

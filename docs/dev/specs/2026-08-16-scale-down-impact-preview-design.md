@@ -117,24 +117,27 @@ Service will have zero endpoints, that every selected Pod belongs exclusively
 to this workload, or that availability will fail.
 
 `ImpactLimits.max_depth` (3, shared with delete and rollout restart) bounds
-this walk the same way it bounds theirs, and it is reached differently
-depending on which resource in the ownership chain is the scale target. A
-Deployment's own routing chain to its Ingress is `Deployment -> ReplicaSet
-(owned_by) -> Pod (owned_by) -> Service (selects) -> Ingress (routes_to)` —
-four hops, one past the cap — so scaling a Deployment down reports
-`traversal capped` instead of naming that Ingress. Scaling the ReplicaSet it
-owns starts one hop closer to the routing chain: `ReplicaSet -> Pod
-(owned_by) -> Service (selects) -> Ingress (routes_to)` is exactly three
-hops, inside the cap, and the Ingress is named. This is not a defect
-specific to scale-down — it is the same fixed traversal cap every action
-uses — but it is worth stating here because scale-down is the first action
-whose closed relation set can reach a routing resource *through the
-ownership chain* (`selects` from owner to Pod, then `routes_to` onward)
-rather than only directly off the target the way delete's own `routes_to`
-edge does. That is what makes the cap's depth depend on *which* target in
-the chain you scale, which is not visible for delete's single-hop routing
-edge. The cap itself (`ImpactLimits.max_depth = 3`) is not changed by
-this slice.
+this walk the same way it bounds theirs, and the routing chain a scale-down
+follows fits inside it. A workload declares the selector that binds its own
+Pods, so `spec.selector` yields a `managed_by` edge from every matched Pod
+to the workload: the reverse walk reaches those Pods in one hop, beside (not
+through) the ReplicaSet the ownerReferences chain gives it. A Deployment's
+routing chain to its Ingress is therefore `Deployment -> Pod (managed_by) ->
+Service (selects) -> Ingress (routes_to)` — three hops, inside the cap, and
+the Ingress is named. The ReplicaSet is a direct dependent in its own right,
+and its own edge to the same Pod is folded into `additional known paths`
+rather than expanded a second time. Scaling that ReplicaSet reaches the same
+chain through its Pods' owner references (`ReplicaSet -> Pod (owned_by) ->
+Service (selects) -> Ingress (routes_to)`), also three hops.
+
+Scale-down is still the first action whose closed relation set can reach a
+routing resource *through* the workload's Pods (`managed_by`/`owned_by` to a
+Pod, then `selects` and `routes_to` onward) rather than only directly off
+the target the way delete's own `routes_to` edge does, so it is the first
+action for which the cap can bite on a routing chain at all: a longer chain
+(an extra owner level, a route reached through a further hop) is reported by
+`traversal capped`, never silently dropped. The cap itself
+(`ImpactLimits.max_depth = 3`) is not changed by this slice.
 
 ## Action-specific limitations
 
