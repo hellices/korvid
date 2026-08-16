@@ -9,6 +9,8 @@
 ## Review findings resolved
 
 - `test_explicit_navigation_clears_the_hierarchy_return` now waits for the *rendered* empty pods target (`NAME/READY/STATUS…NODE` headers + zero rows) before Escape, so the test cannot act on a stale deployments table after `:pods`.
+- `test_escape_after_goto_reopens_the_tree_on_the_release_view` now also asserts the app is still on `helmreleases` after the final Escape + idle tick, so the retained no-arg wait is followed by a concrete view-state check.
+- `test_explicit_navigation_clears_the_hierarchy_return` now also asserts the app is still on `pods` after Escape + idle tick, so the retained no-arg wait is followed by a concrete view-state check.
 - The same empty-pods readiness now guards `test_tree_does_not_open_when_view_changed_during_fetch`, the other `_navigate(... "pods" ...)` call that immediately triggers a dependent action.
 - `test_ctrl_d_cancelled_does_nothing` now captures the original base screen object, waits for that exact screen to return after `n`, then restores the original `0.2s` delayed no-write window before asserting no recorder call or audit file.
 - `test_unwritable_audit_blocks_write` now restores the original `0.3s` delayed no-dispatch window after the audit-blocked warning before asserting no write ran.
@@ -128,9 +130,18 @@
 
 - Focused affected pytest: `uv run --no-sync pytest -p no:tach tests/ui/test_hierarchy_nav.py::test_explicit_navigation_clears_the_hierarchy_return tests/ui/test_hierarchy_nav.py::test_tree_does_not_open_when_view_changed_during_fetch tests/ui/test_write_ops.py::test_ctrl_d_cancelled_does_nothing tests/ui/test_write_ops.py::test_unwritable_audit_blocks_write tests/ui/test_node_shell.py::test_s_on_nodes_view_opens_privileged_approval_dialog -q` → `5 passed in 4.74s`
 - Baseline before edits: `uv run --no-sync pytest -p no:tach tests/ui/test_write_ops.py tests/ui/test_agent_write.py tests/ui/test_hierarchy_nav.py tests/ui/test_node_ops.py tests/ui/test_describe.py tests/ui/test_resize_flow.py tests/ui/test_node_shell.py -q` → `190 passed in 136.66s (0:02:16)`
-- Final seven-file pytest: `uv run --no-sync pytest -p no:tach tests/ui/test_write_ops.py tests/ui/test_agent_write.py tests/ui/test_hierarchy_nav.py tests/ui/test_node_ops.py tests/ui/test_describe.py tests/ui/test_resize_flow.py tests/ui/test_node_shell.py -q` → `190 passed in 108.46s (0:01:48)`
+- Final seven-file pytest: `uv run --no-sync pytest -p no:tach tests/ui/test_write_ops.py tests/ui/test_agent_write.py tests/ui/test_hierarchy_nav.py tests/ui/test_node_ops.py tests/ui/test_describe.py tests/ui/test_resize_flow.py tests/ui/test_node_shell.py -q` → `185 passed in 134.32s (0:02:14)`
 - Final lint: `uv run --no-sync ruff check tests/ui/test_write_ops.py tests/ui/test_agent_write.py tests/ui/test_hierarchy_nav.py tests/ui/test_node_ops.py tests/ui/test_describe.py tests/ui/test_resize_flow.py tests/ui/test_node_shell.py` → `All checks passed!`
 - Final format check: `uv run --no-sync ruff format --check tests/ui/test_write_ops.py tests/ui/test_agent_write.py tests/ui/test_hierarchy_nav.py tests/ui/test_node_ops.py tests/ui/test_describe.py tests/ui/test_resize_flow.py tests/ui/test_node_shell.py` → `7 files already formatted`
+
+## Final review resolution
+
+- The only remaining no-arg idle ticks in `tests/ui/test_hierarchy_nav.py` are now paired with explicit post-action state assertions:
+  - final Escape in `test_escape_after_goto_reopens_the_tree_on_the_release_view` ⇒ `app.current_kind == "helmreleases"`
+  - final Escape in `test_explicit_navigation_clears_the_hierarchy_return` ⇒ `app.current_kind == "pods"`
+  - pane-return pause in `test_hierarchy_return_is_scoped_to_the_initiating_pane` already asserted the pane stayed on `deployments`
+- No product code changed.
+- Validation reran clean on the touched hierarchy tests and the full Task 3 suite.
 
 ## Commit
 

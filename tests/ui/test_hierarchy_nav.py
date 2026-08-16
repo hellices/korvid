@@ -306,6 +306,7 @@ async def test_escape_after_goto_reopens_the_tree_on_the_release_view() -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, HierarchyScreen)
+        assert app.current_kind == "helmreleases"
 
 
 async def test_explicit_navigation_clears_the_hierarchy_return() -> None:
@@ -331,6 +332,7 @@ async def test_explicit_navigation_clears_the_hierarchy_return() -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, HierarchyScreen)
+        assert app.current_kind == "pods"
 
 
 async def test_escape_over_a_modal_keeps_the_hierarchy_return() -> None:
