@@ -31,15 +31,71 @@ def _normalized(text: str) -> str:
     return " ".join(text.split())
 
 
+def _normalized_lower(text: str) -> str:
+    return _normalized(text).lower()
+
+
 def _named_versions(text: str) -> set[str]:
     return set(re.findall(r"\b\d+\.\d+\.\d+\b", text))
+
+
+def _section_bullets(section: str) -> list[str]:
+    bullets: list[str] = []
+    current: list[str] = []
+    for raw_line in section.splitlines():
+        candidate = raw_line.lstrip()
+        if candidate.startswith("- "):
+            if current:
+                bullets.append(_normalized(" ".join(current)))
+            current = [candidate[2:]]
+            continue
+        if current and candidate:
+            current.append(candidate)
+            continue
+        if current:
+            bullets.append(_normalized(" ".join(current)))
+            current = []
+    if current:
+        bullets.append(_normalized(" ".join(current)))
+    return bullets
+
+
+def _assert_section_has_bullet(section: str, *terms: str) -> None:
+    lowered_terms = tuple(term.lower() for term in terms)
+    for bullet in _section_bullets(section):
+        lowered_bullet = bullet.lower()
+        if all(term in lowered_bullet for term in lowered_terms):
+            return
+    raise AssertionError(f"missing bullet containing terms {terms!r}")
+
+
+def _assert_irreversible_boundary_contracts(section: str) -> None:
+    _assert_section_has_bullet(section, "annotated tag", "irreversible")
+    _assert_section_has_bullet(section, "pypi", "irreversible")
+    _assert_section_has_bullet(section, "attestation", "irreversible", "sigstore", "rekor")
+
+
+def _assert_safe_recovery_contracts(section: str) -> None:
+    normalized = _normalized_lower(section)
+    plain = normalized.replace("**", "").replace("`", "")
+    _assert_section_has_bullet(
+        section, "draft release", "byte-identical", "staged assets", "resume"
+    )
+    assert "pypi" in normalized
+    assert "draft release" in normalized
+    assert "missing" in normalized
+    assert "staged assets differ" in normalized
+    assert "stop and diagnose" in normalized
+    assert "do not" in plain
+    assert "deleting or moving" in plain
+    assert "published tag/version" in plain
 
 
 def _assert_agent_policy_contracts(agents: str) -> None:
     pull_requests = markdown_section(agents, "Pull Requests")
     review_loop = markdown_section(agents, "Review Loop")
     policy = f"{pull_requests}\n{review_loop}"
-    normalized = _normalized(policy).lower()
+    normalized = _normalized_lower(policy)
     for blocked_route in ("gh pr merge", "auto-merge", "REST/GraphQL merge endpoints"):
         assert blocked_route in policy
     assert "maintainer merges" in normalized
@@ -68,6 +124,7 @@ def _assert_release_runbook_contracts(runbook: str, version: str) -> None:
     assert offsets == sorted(offsets)
 
     bindings = markdown_section(runbook, "One-time repository and publisher bindings")
+    irreversible = markdown_section(runbook, "Irreversible boundaries")
     dry_run = markdown_section(runbook, "Dry run on `main` before tagging")
     upgrade = markdown_section(runbook, "Required cross-version upgrade gate")
     publish = markdown_section(runbook, f"Publish `v{version}`")
@@ -82,6 +139,8 @@ def _assert_release_runbook_contracts(runbook: str, version: str) -> None:
         "`hellices/korvid`",
     ):
         assert binding in bindings
+
+    _assert_irreversible_boundary_contracts(irreversible)
 
     assert "```sh\nset -eu" in dry_run
     for command in (
@@ -119,7 +178,7 @@ def _assert_release_runbook_contracts(runbook: str, version: str) -> None:
     ):
         assert command in publish
 
-    assert "Do **not** attempt recovery by deleting or moving a published tag/version." in recovery
+    _assert_safe_recovery_contracts(recovery)
 
     assert "```sh\nset -eu" in verify
     for command in (
