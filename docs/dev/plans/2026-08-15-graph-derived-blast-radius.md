@@ -2330,6 +2330,19 @@ length-capped, with the composed line capped again at `_MAX_LINE` because
 one line concatenates several of them - reserving room for the ` [inferred]`
 marker and marking every cut, so neither a capped fragment nor a capped line
 ever reads as a complete claim.
+
+Each hop's evidence resource and field are bounded on their own before the
+line is composed - the per-fragment cap alone does not bound a path line,
+because up to three rendered hops are concatenated onto it. A hop deep in a
+long path can therefore still be the part visibly cut by the `_MAX_LINE`
+cap even though neither of its fragments was near its own bound on its own.
+This is an accepted trade-off, not a gap: the dialog is a 70-column modal,
+so a line an approver cannot read at a glance is worse than one that
+visibly says it was shortened, and the `... ` truncation mark makes that
+plain wherever the cut fell. The ` [inferred]` marker's width is reserved
+ahead of the line cap for the same reason, so it always survives - the one
+piece of the line that must never be the part silently dropped.
+
 Nothing is formatted as Rich markup: `ConfirmScreen` appends these lines to
 a `rich.text.Text`, so a resource named `[bold red]web[/]` renders
 literally.
@@ -4428,12 +4441,13 @@ Reading it:
   Deployment/PDB that declared `spec.selector`, not the Pod it matched.
 - Each hop's evidence resource and field are individually bounded, but the
   whole composed line is still capped at 240 characters, because a path
-  line concatenates up to three rendered hops onto it. On a long enough
-  path, a later hop can therefore be visibly cut with `...` even though
-  neither of its own fragments was near its own bound. This is a deliberate
-  trade-off to keep an approval line readable in a 70-column modal rather
-  than one that silently wraps or scrolls; `[inferred]` has room reserved
-  ahead of that cap, so it always survives it.
+  line concatenates up to three rendered hops onto it. Once the composed
+  line reaches that cap, the remaining tail is replaced by a visible `...`,
+  which can fall within the first hop's own field — even though it was
+  never near its own bound — and can omit later hops entirely. This is a
+  deliberate trade-off to keep an approval line readable in a 70-column
+  modal rather than one that silently wraps or scrolls; `[inferred]` has
+  room reserved ahead of that cap, so it always survives it.
 - `additional known paths` counts relationships that reach a dependent
   already listed above (a second route, a second mount). They are counted
   rather than repeated, so a count of dependents is never inflated.
@@ -4545,13 +4559,14 @@ Each rendered hop names both halves of its evidence — the resource an edge's
 evidence came from and the field path on it — and each is individually
 length-bounded before the line is composed. The composed line is then capped
 again at 240 characters, because a path line concatenates up to three
-rendered hops onto it: a hop late in a long path can still be the part
-visibly cut with `...` even though neither of its own fragments approached
-its own bound. This is an accepted trade-off, not a defect — an approval
-dialog is a 70-column modal, so a line that stays reviewable at a glance
-matters more than showing every hop of a deep path in full — and the
-`[inferred]` marker's width is reserved ahead of that cap, so it survives
-the cut whichever hop it fell on.
+rendered hops onto it: once that cap is reached, the remaining tail is
+replaced by a visible `...`, which can fall within the first hop's own
+field — even though neither of its fragments approached its own bound — and
+can omit later hops entirely. This is an accepted trade-off, not a defect —
+an approval dialog is a 70-column modal, so a line that stays reviewable at
+a glance matters more than showing every hop of a deep path in full — and
+the `[inferred]` marker's width is reserved ahead of that cap, so it
+survives regardless of where the cut falls.
 
 The snapshot's own scope is the pane's namespace for a namespaced target, and
 every namespace for a cluster-scoped one such as a Node or PersistentVolume

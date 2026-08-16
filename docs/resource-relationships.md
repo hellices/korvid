@@ -406,13 +406,14 @@ Each rendered hop names both halves of its evidence — the resource an edge's
 evidence came from and the field path on it — and each is individually
 length-bounded before the line is composed. The composed line is then capped
 again at 240 characters, because a path line concatenates up to three
-rendered hops onto it: a hop late in a long path can still be the part
-visibly cut with `...` even though neither of its own fragments approached
-its own bound. This is an accepted trade-off, not a defect — an approval
-dialog is a 70-column modal, so a line that stays reviewable at a glance
-matters more than showing every hop of a deep path in full — and the
-`[inferred]` marker's width is reserved ahead of that cap, so it survives
-the cut whichever hop it fell on.
+rendered hops onto it: once that cap is reached, the remaining tail is
+replaced by a visible `...`, which can fall within the first hop's own
+field — even though neither of its fragments approached its own bound — and
+can omit later hops entirely. This is an accepted trade-off, not a defect —
+an approval dialog is a 70-column modal, so a line that stays reviewable at
+a glance matters more than showing every hop of a deep path in full — and
+the `[inferred]` marker's width is reserved ahead of that cap, so it
+survives regardless of where the cut falls.
 
 The snapshot's own scope is the pane's namespace for a namespaced target, and
 every namespace for a cluster-scoped one such as a Node or PersistentVolume
