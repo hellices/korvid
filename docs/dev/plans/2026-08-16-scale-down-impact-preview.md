@@ -173,10 +173,28 @@ Post-review divergence (PR #296 review): the closed set also filters the
 `unresolved` warning for a scale-down. `summarize_impact` previously reported
 every dangling edge whose subject was in the affected set, whatever its
 relation, which let an excluded relation re-enter a scale-down advisory as a
-warning. `_unresolved_edges` now applies the relation filter for the actions
-listed in `_RELATION_FILTERED_UNRESOLVED` (`SCALE_DOWN` only); delete and
-rollout restart keep the relation-blind warning, since a restarted Pod that
-mounts a deleted ConfigMap will not come back.
+warning. The policy now lives in a second closed mapping keyed by *every*
+action:
+
+```python
+ACTION_UNRESOLVED_RELATIONS: Mapping[ImpactAction, frozenset[RelationKind] | None] = {
+    ImpactAction.DELETE: None,
+    ImpactAction.ROLLOUT_RESTART: None,
+    ImpactAction.SCALE_DOWN: _SCALE_DOWN_RELATIONS,
+}
+```
+
+`None` means "warn about a dangling reference of any relation", a frozenset
+means "warn only about these". `_unresolved_edges` indexes the mapping
+directly — no permissive default and no membership fallback — so an action
+added to `ACTION_RELATIONS` and forgotten here raises `KeyError` instead of
+silently inheriting the relation-blind policy;
+`test_every_action_chooses_its_unresolved_reference_policy` fails first.
+Delete and rollout restart keep the relation-blind warning, since a restarted
+Pod that mounts a deleted ConfigMap will not come back. The excluded-case
+parameters are pinned equal to `set(RelationKind) -
+ACTION_RELATIONS[ImpactAction.SCALE_DOWN]`, so a future `RelationKind` cannot
+escape the policy either.
 
 - [ ] **Step 4: Verify GREEN and regression coverage**
 

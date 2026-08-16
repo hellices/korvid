@@ -6,7 +6,8 @@ semantics on the resource pairs those relations really occur between, the
 direct/transitive split, deterministic paths, cycle versus revisit
 classification (including parity with `RelationshipGraph.walk_dependents`),
 both caps, a target the snapshot never saw, the recorded scope, and the
-bounded unresolved-reference warning.
+bounded unresolved-reference warning - whose policy every action has to
+choose explicitly, exhaustively keyed by `ACTION_UNRESOLVED_RELATIONS`.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import pytest
 
 from korvid.core.impact import (
     ACTION_RELATIONS,
+    ACTION_UNRESOLVED_RELATIONS,
     ImpactAction,
     ImpactLimits,
     summarize_impact,
@@ -207,6 +209,49 @@ def test_only_supported_writes_carry_action_semantics() -> None:
     } == ACTION_RELATIONS[ImpactAction.DELETE]
 
 
+def test_every_action_chooses_its_unresolved_reference_policy() -> None:
+    """The unresolved-warning policy is keyed by action, never opted into.
+
+    `ACTION_UNRESOLVED_RELATIONS` is exhaustive over `ImpactAction` on
+    purpose: `None` means "warn about a dangling reference of any relation",
+    a frozenset means "warn only about these". A future action that forgets
+    to choose is absent from the mapping, so `summarize_impact` raises
+    rather than inheriting whichever policy happened to be the default -
+    and this assertion fails before that code ever runs.
+    """
+    assert set(ACTION_UNRESOLVED_RELATIONS) == set(ImpactAction)
+    assert ACTION_UNRESOLVED_RELATIONS[ImpactAction.DELETE] is None
+    assert ACTION_UNRESOLVED_RELATIONS[ImpactAction.ROLLOUT_RESTART] is None
+    assert (
+        ACTION_UNRESOLVED_RELATIONS[ImpactAction.SCALE_DOWN]
+        == ACTION_RELATIONS[ImpactAction.SCALE_DOWN]
+    )
+
+
+@pytest.mark.parametrize("action", list(ImpactAction))
+def test_every_action_summarizes_without_a_missing_policy(action: ImpactAction) -> None:
+    """Both closed mappings are indexed for real, for every action.
+
+    An action present in `ACTION_RELATIONS` but missing from
+    `ACTION_UNRESOLVED_RELATIONS` (or the reverse) raises `KeyError` here
+    instead of silently producing an advisory nobody chose the semantics
+    for.
+    """
+    pod = _res("Pod", "web-1")
+    missing_config = _res("ConfigMap", "gone")
+    graph = _graph(
+        _edge(
+            pod,
+            missing_config,
+            RelationKind.USES_CONFIG,
+            resolution=EdgeResolution.MISSING,
+            field="spec.volumes[0].configMap",
+        )
+    )
+    summary = summarize_impact(graph, action, pod)
+    assert summary.action is action
+
+
 @pytest.mark.parametrize("edge", _DELETE_CASES)
 def test_delete_follows_every_supported_relation(edge: RelationshipEdge) -> None:
     """Deleting the dependency reports the dependent that declared it."""
@@ -392,37 +437,12 @@ def test_unresolved_reference_declared_by_the_target_itself_is_reported() -> Non
     assert [edge.target for edge in summary.unresolved] == [missing_config]
 
 
-def test_unresolved_references_are_reported_whatever_their_relation() -> None:
-    """A rolling restart follows only owner/manager edges, but the Pod it
-    replaces still has to mount its ConfigMap: a dangling `uses_config`
-    reference inside the affected set is exactly what makes the recreated
-    Pod fail to start, so it is reported even though `uses_config` is not a
-    restart relation."""
-    deployment = _res("Deployment", "web", group="apps", uid="deploy-1")
-    pod = _res("Pod", "web-abc-1", uid="pod-1")
-    missing_config = _res("ConfigMap", "app-config")
-    graph = _graph(
-        _edge(pod, deployment, RelationKind.MANAGED_BY, field="spec.selector"),
-        _edge(
-            pod,
-            missing_config,
-            RelationKind.USES_CONFIG,
-            resolution=EdgeResolution.MISSING,
-            field="spec.volumes[0].configMap",
-        ),
-    )
-    summary = summarize_impact(graph, ImpactAction.ROLLOUT_RESTART, deployment)
-    assert [item.resource for item in summary.direct] == [pod]
-    assert [(edge.relation, edge.target) for edge in summary.unresolved] == [
-        (RelationKind.USES_CONFIG, missing_config)
-    ]
-
-
-#: The five relations a scale-down deliberately excludes from its closed
-#: set, each on the resource pair `korvid.k8s.relationship_facts` really
-#: produces it between (see `_SCALE_DOWN_RELATIONS`). A dangling reference
-#: of one of these describes what a *remaining* Pod still holds, not
-#: something the scale-down itself changes.
+#: The relations a scale-down deliberately excludes from its closed set,
+#: each on the resource pair `korvid.k8s.relationship_facts` really produces
+#: it between (see `_SCALE_DOWN_RELATIONS`). A dangling reference of one of
+#: these describes what a *remaining* Pod still holds, not something the
+#: scale-down itself changes. Pinned exhaustive by
+#: `test_the_excluded_unresolved_cases_cover_every_relation_a_scale_down_omits`.
 _SCALE_DOWN_EXCLUDED_UNRESOLVED = [
     pytest.param(
         RelationKind.USES_VOLUME,
@@ -455,6 +475,20 @@ _SCALE_DOWN_EXCLUDED_UNRESOLVED = [
         id="bound_to-pod-names-a-missing-volume",
     ),
 ]
+
+
+def test_the_excluded_unresolved_cases_cover_every_relation_a_scale_down_omits() -> None:
+    """The excluded-case list is derived from the closed set, not hand-kept.
+
+    A `RelationKind` added later is either in
+    `ACTION_RELATIONS[ImpactAction.SCALE_DOWN]` - and then its unresolved
+    behaviour is pinned by the included-relation test below - or outside it,
+    and then this assertion fails until a case for it exists here. Neither
+    way can a new relation quietly escape the scale-down's warning policy.
+    """
+    assert {
+        cast(RelationKind, param.values[0]) for param in _SCALE_DOWN_EXCLUDED_UNRESOLVED
+    } == set(RelationKind) - ACTION_RELATIONS[ImpactAction.SCALE_DOWN]
 
 
 @pytest.mark.parametrize(("relation", "missing", "field"), _SCALE_DOWN_EXCLUDED_UNRESOLVED)
@@ -490,10 +524,14 @@ def test_delete_and_restart_still_warn_about_every_unresolved_relation(
 ) -> None:
     """The relation-blind warning is scale-down-specific narrowing only.
 
-    A delete removes the object those references were resolved against, and
-    a rollout restart recreates the Pod that has to satisfy them again, so
-    for both a dangling reference of *any* relation inside the affected set
-    is a real reason the action may not land the way the reader expects.
+    `ACTION_UNRESOLVED_RELATIONS` maps both of these actions to `None`, and
+    that is not an accident of the excluded relations: a delete removes the
+    object those references were resolved against, and a rollout restart
+    recreates the Pod that has to satisfy them again - a Pod that mounts a
+    ConfigMap which no longer exists will not come back - so for both, a
+    dangling reference of *any* relation inside the affected set is a real
+    reason the action may not land the way the reader expects. Narrowing
+    them to their own walk relations would drop exactly that warning.
     """
     deployment = _res("Deployment", "web", group="apps", uid="deploy-1")
     pod = _res("Pod", "web-abc-1", uid="pod-1")
@@ -539,6 +577,35 @@ def test_scale_down_warns_about_an_unresolved_relation_inside_its_closed_set() -
     assert [item.resource for item in summary.transitive] == [slice_]
     assert [(edge.relation, edge.target) for edge in summary.unresolved] == [
         (RelationKind.ROUTES_TO, missing_pod)
+    ]
+
+
+def test_scale_down_warns_about_an_unresolved_owner_reference() -> None:
+    """The included half of the policy is not only `routes_to`.
+
+    A Pod whose `metadata.ownerReferences[0]` names a ReplicaSet the
+    snapshot never saw holds a dangling `owned_by` - a relation
+    `ACTION_UNRESOLVED_RELATIONS[ImpactAction.SCALE_DOWN]` contains - and the
+    Pod is inside the affected set, so the warning clears both bounds and is
+    reported.
+    """
+    deployment = _res("Deployment", "web", group="apps", uid="deploy-1")
+    pod = _res("Pod", "web-abc-1", uid="pod-1")
+    missing_replicaset = _res("ReplicaSet", "web-abc", group="apps", uid="rs-gone")
+    graph = _graph(
+        _edge(pod, deployment, RelationKind.MANAGED_BY, field="spec.selector"),
+        _edge(
+            pod,
+            missing_replicaset,
+            RelationKind.OWNED_BY,
+            resolution=EdgeResolution.MISSING,
+            field="metadata.ownerReferences[0]",
+        ),
+    )
+    summary = summarize_impact(graph, ImpactAction.SCALE_DOWN, deployment)
+    assert [item.resource for item in summary.direct] == [pod]
+    assert [(edge.relation, edge.target) for edge in summary.unresolved] == [
+        (RelationKind.OWNED_BY, missing_replicaset)
     ]
 
 

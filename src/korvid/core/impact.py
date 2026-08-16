@@ -24,8 +24,8 @@ would distort that shared API if pushed into it:
 - every dependent carries the full edge path that reached it, not just the
   tree edge, so a dialog can show the chain it is claiming;
 - unresolved references are filtered by the affected set the walk produced,
-  and - for an action whose closed set is narrower than what the write
-  actually disturbs - by that closed set too (see `_unresolved_edges`);
+  and by whichever relation policy the action chose - every action picks one
+  explicitly, there is no default (see `ACTION_UNRESOLVED_RELATIONS`);
 - the caps (`ImpactLimits`) are an order of magnitude smaller than the
   graph view's and must stay independent of them - an approval dialog is
   not a graph screen.
@@ -115,7 +115,7 @@ _ROLLOUT_RESTART_RELATIONS: frozenset[RelationKind] = frozenset(
 #: Pod off its node, or unbind a claim - those relations describe what a
 #: *remaining* Pod still holds, not something the scale-down itself changes.
 #: For the same reason a scale-down's unresolved-reference warning is
-#: filtered by this set as well - see `_unresolved_edges`.
+#: filtered by this set as well - see `ACTION_UNRESOLVED_RELATIONS`.
 _SCALE_DOWN_RELATIONS: frozenset[RelationKind] = frozenset(
     {
         RelationKind.OWNED_BY,
@@ -131,11 +131,22 @@ ACTION_RELATIONS: Mapping[ImpactAction, frozenset[RelationKind]] = {
     ImpactAction.SCALE_DOWN: _SCALE_DOWN_RELATIONS,
 }
 
-#: Actions whose unresolved-reference warning is filtered by their own
-#: closed relation set instead of reporting every relation in the affected
-#: set. See `_unresolved_edges` for why the two policies exist and which
-#: action gets which.
-_RELATION_FILTERED_UNRESOLVED: frozenset[ImpactAction] = frozenset({ImpactAction.SCALE_DOWN})
+#: Which relations each action's unresolved-reference warning may report,
+#: always additionally bounded by the affected set the walk produced.
+#:
+#: `None` means "any relation"; a frozenset means "only these". Keyed by
+#: *every* `ImpactAction` on purpose: an action added to `ACTION_RELATIONS`
+#: and forgotten here raises `KeyError` in `_unresolved_edges` instead of
+#: inheriting a permissive default, so choosing an unresolved policy is as
+#: mandatory as choosing a relation set. `_unresolved_edges` documents why
+#: each action has the policy it has, and
+#: `tests/core/test_impact.py::test_every_action_chooses_its_unresolved_reference_policy`
+#: pins the exhaustiveness.
+ACTION_UNRESOLVED_RELATIONS: Mapping[ImpactAction, frozenset[RelationKind] | None] = {
+    ImpactAction.DELETE: None,
+    ImpactAction.ROLLOUT_RESTART: None,
+    ImpactAction.SCALE_DOWN: _SCALE_DOWN_RELATIONS,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,16 +251,16 @@ def summarize_impact(
         tested semantics for `action` are traversed; membership of `target`
         in `graph.nodes` is checked by full identity, so a same-named
         replacement is reported as a missing target rather than summarized
-        as if it were the object on screen. `unresolved` follows the
-        action-specific policy `_unresolved_edges` documents: every relation
+        as if it were the object on screen. `unresolved` follows the policy
+        `ACTION_UNRESOLVED_RELATIONS` records for `action` - every relation
         for a delete or a rollout restart, the action's own closed set for a
-        scale-down.
+        scale-down - always bounded by the affected set.
     """
     relations = ACTION_RELATIONS[action]
     index = _dependents_index(graph.edges, relations)
     items, cycles, revisits, capped = _walk(index, target, limits)
     affected = {target, *(item.resource for item in items)}
-    unresolved = _unresolved_edges(graph.edges, action, relations, affected)
+    unresolved = _unresolved_edges(graph.edges, action, affected)
     return ImpactSummary(
         action=action,
         target=target,
@@ -269,40 +280,42 @@ def summarize_impact(
 def _unresolved_edges(
     edges: Sequence[RelationshipEdge],
     action: ImpactAction,
-    relations: frozenset[RelationKind],
     affected: AbstractSet[GraphResource],
 ) -> tuple[RelationshipEdge, ...]:
     """The dangling references this action's advisory may warn about.
 
-    Two policies, chosen per action, both bounded by the affected set:
+    The policy is read from `ACTION_UNRESOLVED_RELATIONS`, which is keyed by
+    every `ImpactAction`: there is no default and no membership fallback, so
+    an action that never chose one raises `KeyError` here rather than
+    quietly inheriting the more permissive half. Both policies are
+    additionally bounded by the affected set.
 
-    - `DELETE` and `ROLLOUT_RESTART` warn about a dangling reference of
-      *any* relation. A delete removes the object those references were
-      resolved against, and a restart recreates the Pod that has to satisfy
-      them again, so a mounted ConfigMap that no longer exists is a real
-      reason the action may not land the way the reader expects (the
-      restarted Pod will not come back). Narrowing those to the walk's own
-      relations would drop exactly the warning that matters.
-    - `SCALE_DOWN` warns only about the relations in its own closed set
-      (`_SCALE_DOWN_RELATIONS`). Scaling down does not detach a mounted
-      volume or ConfigMap, evict a Pod past its PDB, move a Pod off its
-      node, or unbind a claim - which is why those relations are excluded
-      from the walk in the first place. A *dangling* one of them says
-      nothing more about the scale-down than a resolved one would, so
-      warning about it would reintroduce, as a warning, precisely the
-      claim the closed set refuses to make.
+    - `DELETE` and `ROLLOUT_RESTART` map to `None` - warn about a dangling
+      reference of *any* relation. A delete removes the object those
+      references were resolved against, and a restart recreates the Pod that
+      has to satisfy them again, so a mounted ConfigMap that no longer
+      exists is a real reason the action may not land the way the reader
+      expects (the restarted Pod will not come back). Narrowing those to the
+      walk's own relations would drop exactly the warning that matters.
+    - `SCALE_DOWN` maps to its own closed set (`_SCALE_DOWN_RELATIONS`).
+      Scaling down does not detach a mounted volume or ConfigMap, evict a
+      Pod past its PDB, move a Pod off its node, or unbind a claim - which
+      is why those relations are excluded from the walk in the first place.
+      A *dangling* one of them says nothing more about the scale-down than a
+      resolved one would, so warning about it would reintroduce, as a
+      warning, precisely the claim the closed set refuses to make.
 
-    Keeping the choice here rather than at the call site means an action
-    added to `ACTION_RELATIONS` also has to decide this, and both halves of
-    its semantics stay in one module.
+    Keeping the choice in a mapping rather than at the call site means an
+    action added to `ACTION_RELATIONS` also has to decide this, and both
+    halves of its semantics stay in one module.
     """
-    filtered = action in _RELATION_FILTERED_UNRESOLVED
+    relations = ACTION_UNRESOLVED_RELATIONS[action]
     return tuple(
         edge
         for edge in edges
         if edge.resolution is not EdgeResolution.RESOLVED
         and edge.subject in affected
-        and (not filtered or edge.relation in relations)
+        and (relations is None or edge.relation in relations)
     )
 
 

@@ -416,12 +416,17 @@ reason: none of them is something a scale-down itself changes for a Pod that
 remains.
 
 Only **resolved** edges are traversed; an unresolved reference is reported
-as a warning instead. That warning is bounded by *the affected set*, not by
-the relations above: any dangling reference held by the target or by a
-resource it takes down is reported — a restarted workload whose Pod mounts a
-deleted ConfigMap is exactly the case worth seeing — while an unrelated
-dangling reference elsewhere in the cluster never lands in your approval
-dialog. The walk is breadth-first and deterministic (each dependent is
+as a warning instead. That warning is always bounded by *the affected set* —
+an unrelated dangling reference elsewhere in the cluster never lands in your
+approval dialog — and each action additionally states which relations it may
+warn about. Delete and rollout restart warn about **any** relation: they
+remove or recreate the object those references were resolved against, so a
+restarted workload whose Pod mounts a deleted ConfigMap is exactly the case
+worth seeing. A scale-down warns only inside the relation set it follows,
+because a dangling `protected_by`, `uses_volume`, `uses_config`,
+`scheduled_on`, or `bound_to` reference describes what a *remaining* Pod
+still holds, not something the scale-down changes. The walk is breadth-first
+and deterministic (each dependent is
 listed once, with the first path that reached it; further paths to the same
 dependent are counted as `additional known paths`), bounded to 3 hops and 50
 resources, and classifies a genuine loop as a cycle rather than expanding it
