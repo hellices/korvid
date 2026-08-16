@@ -10,7 +10,7 @@ _ROOT = Path(__file__).parents[1]
 _AGENTS = _ROOT / "AGENTS.md"
 _README = _ROOT / "README.md"
 _RUNBOOK = _ROOT / "docs" / "release.md"
-_ALLOWED_README_HISTORY = {"0.1.0", "0.1.1", "0.1.2"}
+_ALLOWED_RELEASE_DOC_HISTORY = frozenset({"0.1.0", "0.1.1", "0.1.2"})
 
 
 def _project_version() -> str:
@@ -225,13 +225,29 @@ def _assert_cleanup_contracts(readme: str, runbook: str) -> None:
     assert "--force" not in cleanup
 
 
-def _assert_release_versions_contracts(version: str, readme: str, notes: str) -> None:
-    readme_versions = _named_versions(readme)
+def _assert_allowed_release_doc_versions(name: str, text: str, version: str) -> set[str]:
+    found = _named_versions(text)
+    stale = found - (_ALLOWED_RELEASE_DOC_HISTORY | {version})
+    assert not stale, (
+        f"{name} names {sorted(stale)}; the project version is {version} and the only "
+        "other versions release docs may name are the explicit historical set "
+        f"{sorted(_ALLOWED_RELEASE_DOC_HISTORY)}"
+    )
+    assert version in found, f"{name} never names the version being shipped ({version})"
+    return found
+
+
+def _assert_release_versions_contracts(version: str, readme: str, runbook: str, notes: str) -> None:
+    _assert_allowed_release_doc_versions("README.md", readme, version)
+    _assert_allowed_release_doc_versions("docs/release.md", runbook, version)
     notes_versions = _named_versions(notes)
-    assert version in readme_versions
-    assert version in notes_versions
-    assert readme_versions - (_ALLOWED_README_HISTORY | {version}) == set()
-    assert notes_versions == {version}
+    assert version in notes_versions, (
+        f"docs/release-notes must name the version being shipped ({version})"
+    )
+    assert notes_versions == {version}, (
+        "docs/release-notes may only name the version being shipped "
+        f"({version}); found {sorted(notes_versions)}"
+    )
 
     assert f"python -m pip install 'korvid[all]=={version}'" in readme
     assert "## Install or upgrade" in notes
@@ -258,4 +274,9 @@ def test_release_docs_preserve_retained_state_and_explicit_cleanup_controls() ->
 
 def test_current_release_docs_only_name_allowed_versions() -> None:
     version = _project_version()
-    _assert_release_versions_contracts(version, _README.read_text(), _release_notes(version))
+    _assert_release_versions_contracts(
+        version,
+        _README.read_text(),
+        _RUNBOOK.read_text(),
+        _release_notes(version),
+    )
