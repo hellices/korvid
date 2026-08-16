@@ -71,13 +71,17 @@ class TestResolveWindow:
             resolve_window(400, QueryLimits(max_window_minutes=360))
         assert caught.value.kind == "limit"
 
-    @pytest.mark.parametrize("value", [0, -5])
-    def test_a_non_positive_window_is_refused(self, value: int) -> None:
-        with pytest.raises(ConnectorError, match="minutes"):
-            resolve_window(value, QueryLimits())
-
-    @pytest.mark.parametrize("value", [1.5, "30", True])
-    def test_a_non_integer_window_is_refused(self, value: object) -> None:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(0, id="zero"),
+            pytest.param(-5, id="negative"),
+            pytest.param(1.5, id="float"),
+            pytest.param("30", id="string"),
+            pytest.param(True, id="boolean"),
+        ],
+    )
+    def test_an_invalid_window_is_refused(self, value: object) -> None:
         with pytest.raises(ConnectorError, match="minutes"):
             resolve_window(value, QueryLimits())
 
