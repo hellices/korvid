@@ -171,6 +171,22 @@ def _base_screen_ready(app: KorvidApp) -> bool:
     return len(app.screen_stack) == 1 and not isinstance(app.screen, HierarchyScreen)
 
 
+def _table_headers(app: KorvidApp) -> tuple[str, ...]:
+    table = app.query_one(ResourceTable)
+    return tuple(str(column.label) for column in table.columns.values())
+
+
+def _empty_pods_view_rendered(app: KorvidApp) -> bool:
+    table = app.query_one(ResourceTable)
+    headers = _table_headers(app)
+    return (
+        app.current_kind == "pods"
+        and headers[:3] == ("NAME", "READY", "STATUS")
+        and headers[-1:] == ("NODE",)
+        and table.row_count == 0
+    )
+
+
 _HELM_DATA: dict[str, list[Summary]] = {
     "helmreleases": [_release("web")],
     "helmrevisions": [_revision("web", 1), _revision("web", 2), _revision("web", 3)],
@@ -198,7 +214,11 @@ async def test_enter_on_release_opens_hierarchy_tree() -> None:
         assert any("Deployment/web-nginx" in label for label in labels)
         assert any("MyCustomThing/cr-1" in label for label in labels)
         await pilot.press("escape")
-        await until(pilot, lambda: not isinstance(app.screen, HierarchyScreen), label="closed")
+        await until(
+            pilot,
+            lambda: not isinstance(app.screen, HierarchyScreen),
+            label="hierarchy dismissed to release view",
+        )
         assert app.current_kind == "helmreleases"
 
 
@@ -213,7 +233,11 @@ async def test_h_on_release_opens_revision_history() -> None:
         await until(pilot, lambda: app.current_kind == "helmrevisions", label="history open")
         await until(pilot, lambda: table.row_count == 3, label="revisions listed")
         await pilot.press("escape")
-        await until(pilot, lambda: app.current_kind == "helmreleases", label="popped")
+        await until(
+            pilot,
+            lambda: app.current_kind == "helmreleases",
+            label="history escape returned to release view",
+        )
 
 
 async def test_goto_from_tree_jumps_to_view_with_cursor() -> None:
@@ -227,7 +251,11 @@ async def test_goto_from_tree_jumps_to_view_with_cursor() -> None:
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         await pilot.press("down")  # Deployment/web-nginx
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments",
+            label="tree jump opened deployments view",
+        )
         await until(
             pilot,
             lambda: app._cursor_row_key() == "default/web-nginx",
@@ -249,7 +277,11 @@ async def test_escape_after_goto_reopens_the_tree_on_the_release_view() -> None:
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         await pilot.press("down")  # Deployment/web-nginx
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments",
+            label="tree jump opened deployments view",
+        )
         await pilot.press("escape")
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree reopened")
         # the tree reopens over the origin view, not the jump target
@@ -264,7 +296,11 @@ async def test_escape_after_goto_reopens_the_tree_on_the_release_view() -> None:
         assert (cursor.data.kind, cursor.data.name) == ("deployments", "web-nginx")
         # closing the reopened tree lands on the release view as usual
         await pilot.press("escape")
-        await until(pilot, lambda: not isinstance(app.screen, HierarchyScreen), label="closed")
+        await until(
+            pilot,
+            lambda: not isinstance(app.screen, HierarchyScreen),
+            label="reopened hierarchy dismissed to release view",
+        )
         assert app.current_kind == "helmreleases"
         # the return is one-shot: another Escape must not resurrect the tree
         await pilot.press("escape")
@@ -285,8 +321,13 @@ async def test_explicit_navigation_clears_the_hierarchy_return() -> None:
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         await pilot.press("down")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments",
+            label="tree jump opened deployments view",
+        )
         await _navigate(pilot, "pods", "pods")
+        await until(pilot, lambda: _empty_pods_view_rendered(app), label="empty pods view rendered")
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, HierarchyScreen)
@@ -306,7 +347,11 @@ async def test_escape_over_a_modal_keeps_the_hierarchy_return() -> None:
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         await pilot.press("down")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments",
+            label="tree jump opened deployments view",
+        )
         await pilot.press("question_mark")  # help modal over the jump target
         await until(pilot, lambda: len(app.screen_stack) > 1, label="help open")
         await pilot.press("escape")  # closes help - must not eat the return
@@ -330,9 +375,17 @@ async def test_hierarchy_return_is_scoped_to_the_initiating_pane() -> None:
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         await pilot.press("down")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments",
+            label="tree jump opened deployments view",
+        )
         await pilot.press("ctrl+w", "v")  # split: clone pane, focus pane 1
-        await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="split")
+        await until(
+            pilot,
+            lambda: len(app.query(ResourceTable)) == 2,
+            label="split rendered two resource tables",
+        )
         await pilot.press("escape")  # pane 1 shows the same kind - must not hijack
         await pilot.pause()
         assert not isinstance(app.screen, HierarchyScreen)
@@ -356,9 +409,17 @@ async def test_a_jump_in_one_pane_does_not_erase_the_other_panes_return() -> Non
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         await pilot.press("down")
         await pilot.press("enter")  # pane 0 jumps; its return is pending
-        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments",
+            label="tree jump opened deployments view",
+        )
         await pilot.press("ctrl+w", "v")  # split: focus pane 1
-        await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="split")
+        await until(
+            pilot,
+            lambda: len(app.query(ResourceTable)) == 2,
+            label="split rendered two resource tables",
+        )
         await _navigate(pilot, "helm", "helmreleases")  # pane 1 to the helm view
         await pilot.press("enter")  # pane 1 opens its own tree
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree 2 open")
@@ -390,7 +451,11 @@ async def test_return_origin_is_captured_at_tree_open_not_at_dismissal() -> None
         assert result.startswith("switched")
         await pilot.press("down")
         await pilot.press("enter")  # goto Deployment/web-nginx
-        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments",
+            label="tree jump opened deployments view",
+        )
         await pilot.press("escape")
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree reopened")
         # ...over the view the tree was actually opened from
@@ -412,7 +477,11 @@ async def test_return_is_refused_when_a_ctx_switch_starts_during_the_navigate() 
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         await pilot.press("down")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments",
+            label="tree jump opened deployments view",
+        )
 
         # A switch begins the moment the reopen's navigate runs.
         original = app._navigate
@@ -639,6 +708,11 @@ async def test_tree_does_not_open_when_view_changed_during_fetch() -> None:
         await until(pilot, lambda: table.row_count == 1, label="release listed")
         await pilot.press("enter")  # fetch parked on the gate
         await _navigate(pilot, "pods", "pods")
+        await until(
+            pilot,
+            lambda: _empty_pods_view_rendered(app),
+            label="empty pods view rendered before releasing tree fetch",
+        )
         gate.set()
         await until(
             pilot,
@@ -765,7 +839,11 @@ async def test_enter_without_components_accessor_falls_back_to_revision_drill() 
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "helmrevisions", label="drilled")
+        await until(
+            pilot,
+            lambda: app.current_kind == "helmrevisions",
+            label="release enter opened helm revisions",
+        )
         assert not isinstance(app.screen, HierarchyScreen)
 
 
@@ -792,7 +870,11 @@ async def test_jump_notifies_when_object_never_appears() -> None:
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         await pilot.press("down")  # Deployment/ghost
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments",
+            label="tree jump opened deployments view",
+        )
         await until(
             pilot,
             lambda: any("ghost" in n for n in notices),

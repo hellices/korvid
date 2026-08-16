@@ -229,7 +229,11 @@ async def test_s_on_nodes_view_opens_privileged_approval_dialog(tmp_path: Path) 
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             screen = app.screen
             assert isinstance(screen, ConfirmScreen)
             body = screen._operation.lower()
@@ -257,7 +261,11 @@ async def test_confirmed_node_shell_creates_waits_attaches_and_audits(tmp_path: 
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
             await until(pilot, lambda: call_records, label="kubectl attach ran")
 
@@ -291,7 +299,11 @@ async def test_node_shell_deletes_exactly_its_own_pod(tmp_path: Path) -> None:
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
             await until(pilot, lambda: rec.deletes, label="cleanup delete")
     assert rec.deletes == [("pods", "default", DBG_POD, DBG_UID)]
@@ -307,7 +319,11 @@ async def test_node_shell_cleanup_failure_warns_and_audits(tmp_path: Path) -> No
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
 
             await _await_node_shell_outcome(pilot, audit_path)
@@ -392,7 +408,11 @@ async def test_node_shell_create_failure_warns_about_policy(tmp_path: Path) -> N
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
 
             await _await_node_shell_outcome(pilot, audit_path)
@@ -419,7 +439,11 @@ async def test_node_shell_unidentifiable_create_output_aborts(tmp_path: Path) ->
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
 
             await _await_node_shell_outcome(pilot, audit_path)
@@ -443,7 +467,11 @@ async def test_node_shell_wait_failure_warns_but_still_cleans_up(tmp_path: Path)
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
             await until(pilot, lambda: rec.deletes, label="cleanup delete")
             assert any("did not become Ready" in n.message for n in app._notifications)
@@ -465,7 +493,11 @@ async def test_node_shell_custom_image_and_namespace_from_config(tmp_path: Path)
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             screen = app.screen
             assert isinstance(screen, ConfirmScreen)
             assert "registry.local/toolkit:1" in screen._operation
@@ -497,7 +529,11 @@ async def test_node_shell_aborts_when_node_replaced_after_prompt(tmp_path: Path)
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
 
             def _cancelled() -> bool:
@@ -527,7 +563,11 @@ async def test_node_shell_blocked_when_audit_append_fails(tmp_path: Path) -> Non
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
 
             def _blocked() -> bool:
@@ -585,7 +625,11 @@ async def test_node_shell_nonzero_attach_exit_has_no_policy_hint(tmp_path: Path)
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
             await until(pilot, lambda: rec.deletes, label="debug pod cleanup")
             await _await_node_shell_outcome(pilot, audit_path)
@@ -653,7 +697,11 @@ async def test_node_shell_create_without_uid_aborts(tmp_path: Path) -> None:
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
 
             await _await_node_shell_outcome(pilot, audit_path)
@@ -765,7 +813,11 @@ async def test_attach_launch_failure_still_deletes_pod_and_audits(tmp_path: Path
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
             await until(pilot, lambda: rec.deletes, label="cleanup delete")
 
@@ -858,7 +910,11 @@ async def test_suspend_not_supported_refuses_gracefully_and_cleans_up(
             await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             await pilot.press("y")
             await until(pilot, lambda: rec.deletes, label="cleanup delete")
 
@@ -894,7 +950,11 @@ async def test_node_shell_refused_when_the_context_switches_while_the_dialog_is_
         async with app.run_test() as pilot:
             await _to_nodes(pilot)
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
             app._ctx_epoch += 1  # a switch completed while the dialog was open
             await pilot.press("y")
             await until(

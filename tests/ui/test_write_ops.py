@@ -245,6 +245,7 @@ async def test_ctrl_d_cancelled_does_nothing(tmp_path: Path) -> None:
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
         await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        base_screen = app.screen
         await pilot.press("ctrl+d")
         await until(
             pilot,
@@ -254,9 +255,10 @@ async def test_ctrl_d_cancelled_does_nothing(tmp_path: Path) -> None:
         await pilot.press("n")
         await until(
             pilot,
-            lambda: not isinstance(app.screen, ConfirmScreen),
-            label="delete confirmation closed",
+            lambda: app.screen is base_screen,
+            label="delete cancel returned to base resource screen",
         )
+        await pilot.pause(0.2)
         assert rec.calls == []
         assert not audit_path.exists()
 
@@ -419,6 +421,7 @@ async def test_unwritable_audit_blocks_write(tmp_path: Path) -> None:
             lambda: any("blocked: audit log unavailable" in n.message for n in app._notifications),
             label="audit-blocked write warning shown",
         )
+        await pilot.pause(0.3)
         assert rec.calls == []
 
 
