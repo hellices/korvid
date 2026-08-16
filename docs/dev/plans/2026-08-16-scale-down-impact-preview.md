@@ -200,7 +200,9 @@ git commit -m "feat(core): define scale-down impact semantics" \
 
 **Interfaces:**
 - Consumes: `ImpactSummary.action`, `ImpactSummary.target.kind`, and `ImpactAction.SCALE_DOWN`.
-- Produces: `_action_note_lines(summary: ImpactSummary) -> list[str]`, called by `render_impact_lines` after `ADVISORY_LINE` and before dependent sections.
+- Produces: `_action_note_lines(action: ImpactAction, kind: str) -> list[str]`,
+  shared by the available and unavailable renderers so both use identical
+  machine-defined limitations.
 
 - [ ] **Step 1: Write exact failing renderer tests**
 
@@ -277,11 +279,11 @@ _ACTION_LABEL = {
 }
 
 
-def _action_note_lines(summary: ImpactSummary) -> list[str]:
-    if summary.action is not ImpactAction.SCALE_DOWN:
+def _action_note_lines(action: ImpactAction, kind: str) -> list[str]:
+    if action is not ImpactAction.SCALE_DOWN:
         return []
     lines = [_SCALE_DOWN_PDB_LINE, _SCALE_DOWN_HPA_LINE]
-    if summary.target.kind == "StatefulSet":
+    if kind == "StatefulSet":
         lines.append(_SCALE_DOWN_STS_PVC_LINE)
     return lines
 ```
@@ -290,7 +292,7 @@ Wire it after the advisory:
 
 ```python
 lines.append(ADVISORY_LINE)
-lines.extend(_action_note_lines(summary))
+lines.extend(_action_note_lines(summary.action, summary.target.kind))
 lines.extend(_section(_DIRECT_TITLE, summary.direct, capped=capped))
 ```
 
