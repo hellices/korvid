@@ -196,14 +196,16 @@ async def test_l_on_non_pods_kind_is_inert() -> None:
     is inert. The action itself still warns when invoked directly."""
     app = make_app([])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         # Switch to a non-pods kind via filter_pattern hack (simplest)
         app.current_kind = "deployments"
         await pilot.press("l")
-        await pilot.pause(0.05)
         assert not any("pod" in n.message.lower() for n in app._notifications)
         await app.action_logs()
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: any("pod" in n.message.lower() for n in app._notifications),
+            label="direct pod warning shown",
+        )
         assert any("pod" in n.message.lower() for n in app._notifications)
 
 
@@ -212,9 +214,15 @@ async def test_l_on_empty_table_warns() -> None:
     fake = FakeStream()
     app = make_app([], stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await pilot.press("l")
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: any(
+                "select" in n.message.lower() or "no" in n.message.lower()
+                for n in app._notifications
+            ),
+            label="empty selection warned",
+        )
         msgs = [n.message for n in app._notifications]
         assert any("select" in m.lower() or "no" in m.lower() for m in msgs)
 
@@ -223,9 +231,13 @@ async def test_l_without_stream_logs_warns() -> None:
     """Pressing l when stream_logs is None shows a warning notification."""
     app = make_app([_pod("myapp")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: any("unavailable" in n.message.lower() for n in app._notifications),
+            label="unavailable warning shown",
+        )
         msgs = [n.message for n in app._notifications]
         assert any("unavailable" in m.lower() for m in msgs)
 
@@ -235,9 +247,9 @@ async def test_l_opens_pane_for_selected_pod() -> None:
     fake = FakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(LogPane).display, label="log pane opened")
         assert app.query_one(LogPane).display is True
 
 
@@ -249,9 +261,13 @@ async def test_l_multi_container_split_panels() -> None:
         stream_logs=fake,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.2)  # let both stream tasks yield their lines
+        await until(
+            pilot,
+            lambda: set(_panel_texts(app)) == {"myapp/main", "myapp/sidecar"},
+            label="container panels rendered",
+        )
         panels = _panel_texts(app)
         assert set(panels) == {"myapp/main", "myapp/sidecar"}
         assert "line0" in panels["myapp/main"]
@@ -267,9 +283,9 @@ async def test_l_single_container_no_title() -> None:
         stream_logs=fake,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: "line0" in _richlog_text(app), label="first line rendered")
         text = _richlog_text(app)
         assert "line0" in text
         assert _titles_visible(app) is False
@@ -280,13 +296,17 @@ async def test_l_again_closes_pane_and_cancels() -> None:
     fake = FakeStream(lines_per_call=1)
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(LogPane).display, label="log pane opened")
         assert app.query_one(LogPane).display is True
         # Press l again to close
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: not app.query_one(LogPane).display and fake.is_closed("myapp", "main"),
+            label="log pane closed and stream cancelled",
+        )
         assert app.query_one(LogPane).display is False
         # Stream should have been closed/cancelled
         assert fake.is_closed("myapp", "main") is True
@@ -297,12 +317,16 @@ async def test_escape_closes_pane_when_bars_closed() -> None:
     fake = FakeStream(lines_per_call=1)
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(LogPane).display, label="log pane opened")
         assert app.query_one(LogPane).display is True
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: not app.query_one(LogPane).display and fake.is_closed("myapp", "main"),
+            label="escape closed pane",
+        )
         assert app.query_one(LogPane).display is False
         assert fake.is_closed("myapp", "main") is True
 
@@ -319,17 +343,21 @@ async def test_L_streams_multiple_pods_with_prefix() -> None:
         stream_logs=fake,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 3, label="pod rows visible")
         # Filter to only "app-" pods
         await pilot.press("slash")
         for ch in "app":
             await pilot.press(ch)
-        await pilot.pause(0.1)
+        await until(pilot, lambda: table.row_count == 2, label="filtered pods visible")
         # Two pods visible: app-alpha, app-beta
-        table = app.query_one(ResourceTable)
         assert table.row_count == 2
         await pilot.press("shift+l")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: set(_panel_texts(app)) == {"app-alpha/main", "app-beta/main"},
+            label="multi-pod panels rendered",
+        )
         assert app.query_one(LogPane).display is True
         panels = _panel_texts(app)
         assert set(panels) == {"app-alpha/main", "app-beta/main"}
@@ -344,11 +372,15 @@ async def test_L_caps_at_8_pods_and_notifies() -> None:
     pods = [_pod(f"app-{i:02d}", containers=("main",)) for i in range(10)]
     app = make_app(pods, stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 10, label="pod rows visible")
         assert table.row_count == 10
         await pilot.press("shift+l")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: len(app._log_tasks) == 8 and any("8" in n.message for n in app._notifications),
+            label="multi-stream cap enforced",
+        )
         # Only 8 tasks should be running
         assert len(app._log_tasks) <= 8
         # Notification about capping
@@ -362,9 +394,16 @@ async def test_api_error_sets_error_state_and_notifies() -> None:
     fake = FakeStream(error=error)
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.3)
+        await until(
+            pilot,
+            lambda: any(
+                "RBAC" in n.message or "permission" in n.message.lower() or "403" in n.message
+                for n in app._notifications
+            ),
+            label="api error notified",
+        )
         msgs = [n.message for n in app._notifications]
         assert any("RBAC" in m or "permission" in m.lower() or "403" in m for m in msgs)
 
@@ -374,16 +413,20 @@ async def test_switching_kind_closes_pane() -> None:
     fake = FakeStream(lines_per_call=1)
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(LogPane).display, label="log pane opened")
         assert app.query_one(LogPane).display is True
         # Navigate away via colon command
         await pilot.press("colon")
         for ch in "ns kube-system":
             await pilot.press(ch if ch != " " else "space")
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: not app.query_one(LogPane).display and fake.is_closed("myapp", "main"),
+            label="namespace switch closed pane",
+        )
         assert app.query_one(LogPane).display is False
         assert fake.is_closed("myapp", "main") is True
 
@@ -394,11 +437,15 @@ async def test_stream_ended_sets_ended_state() -> None:
     # FakeStream blocks for follow=True (live) but returns for follow=False (previous).
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")  # live stream opens and stays alive
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(LogPane).display, label="live pane opened")
         await pilot.press("p")  # previous logs: yields 1 line, returns → "ended"
-        await pilot.pause(0.3)
+        await until(
+            pilot,
+            lambda: "ended" in str(app.query_one(LogPane).query_one("#log-header").render()),
+            label="previous stream ended",
+        )
         log_pane = app.query_one(LogPane)
         assert log_pane.display is True
         # Header should mention "ended"
@@ -422,16 +469,20 @@ async def test_L_single_pod_always_shows_prefix() -> None:
         stream_logs=fake,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pod rows visible")
         # Filter to exactly 1 pod
         await pilot.press("slash")
         for ch in "app-only":
             await pilot.press(ch)
-        await pilot.pause(0.1)
-        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="single filtered pod visible")
         assert table.row_count == 1
         await pilot.press("shift+l")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: set(_panel_texts(app)) == {"app-only/main"},
+            label="single-panel multi-log rendered",
+        )
         # Title must be shown even with only 1 visible pod (L path)
         panels = _panel_texts(app)
         assert set(panels) == {"app-only/main"}
@@ -454,9 +505,16 @@ async def test_error_task_discarded_state_stays_error() -> None:
     )
     app._reconnect_sleep = 0.0  # speed up reconnect cycle in test
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.4)
+        await until(
+            pilot,
+            lambda: (
+                "error" in str(app.query_one(LogPane).query_one("#log-header").render())
+                and not app._log_tasks
+            ),
+            label="error state settled",
+        )
         log_pane = app.query_one(LogPane)
         # State must remain "error" — not downgraded to "ended"
         header_text = str(log_pane.query_one("#log-header").render())
@@ -477,14 +535,17 @@ async def test_L_on_non_pods_kind_is_inert_no_tasks() -> None:
     fake = FakeStream(lines_per_call=1)
     app = make_app([_pod("myapp")], stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         app.current_kind = "deployments"
         await pilot.press("shift+l")
-        await pilot.pause(0.05)
         assert not any("pod" in n.message.lower() for n in app._notifications)
         assert len(app._log_tasks) == 0
         await app.action_logs_multi()
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: any("pod" in n.message.lower() for n in app._notifications),
+            label="direct multi-log warning shown",
+        )
         assert any("pod" in n.message.lower() for n in app._notifications)
         assert len(app._log_tasks) == 0
 
@@ -505,14 +566,30 @@ async def test_L_reopen_cancels_old_tasks_new_stream_opens() -> None:
         stream_logs=fake,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 2,
+            label="pod rows visible",
+        )
         await pilot.press("shift+l")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(LogPane).display and len(app._log_tasks) > 0,
+            label="initial multi-stream opened",
+        )
         assert app.query_one(LogPane).display is True
         first_tasks = set(app._log_tasks)
         # Press Shift+L again to re-open
         await pilot.press("shift+l")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: (
+                app.query_one(LogPane).display
+                and all(task.done() for task in first_tasks)
+                and len(app._log_tasks) > 0
+            ),
+            label="multi-stream reopened",
+        )
         assert app.query_one(LogPane).display is True
         # All old tasks should be done (cancelled)
         for t in first_tasks:
@@ -598,9 +675,9 @@ async def test_f_toggles_format_and_rerenders() -> None:
     stream = JsonFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: "greeting" in _richlog_text(app), label="formatted line visible")
 
         # Initially formatted: header shows [json], rendered shows values not keys
         header = _header_text(app)
@@ -611,7 +688,7 @@ async def test_f_toggles_format_and_rerenders() -> None:
 
         # Toggle to raw
         await pilot.press("f")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "[raw]" in _header_text(app), label="raw mode shown")
 
         header2 = _header_text(app)
         assert "[raw]" in header2
@@ -620,7 +697,7 @@ async def test_f_toggles_format_and_rerenders() -> None:
 
         # Toggle back to json
         await pilot.press("f")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "[json]" in _header_text(app), label="json mode restored")
         header3 = _header_text(app)
         assert "[json]" in header3
 
@@ -630,16 +707,27 @@ async def test_p_reopens_with_previous_true() -> None:
     recording = RecordingFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=recording)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(
+            pilot,
+            lambda: app.query_one(LogPane).display and bool(recording.calls),
+            label="live logs opened",
+        )
         assert app.query_one(LogPane).display is True
 
         # First call should be live (previous=False)
         assert recording.calls[0]["previous"] is False
 
         await pilot.press("p")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: (
+                any(c["previous"] is True for c in recording.calls)
+                and "previous" in _richlog_text(app)
+            ),
+            label="previous logs reopened",
+        )
 
         # At least one call must have previous=True
         assert any(c["previous"] is True for c in recording.calls)
@@ -653,11 +741,15 @@ async def test_p_follow_false_for_previous_stream() -> None:
     recording = RecordingFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=recording)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: bool(recording.calls), label="live log call recorded")
         await pilot.press("p")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: any(c["previous"] is True for c in recording.calls),
+            label="previous call recorded",
+        )
         previous_calls = [c for c in recording.calls if c["previous"] is True]
         assert previous_calls, "expected at least one call with previous=True"
         assert all(c["follow"] is False for c in previous_calls)
@@ -668,19 +760,18 @@ async def test_search_shows_counter_and_n_advances() -> None:
     stream = SearchFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: "findme-4" in _richlog_text(app), label="search corpus rendered")
 
         # Open inline search via slash
         await pilot.press("slash")
-        await pilot.pause(0.05)
 
         # Type pattern and submit
         for ch in "findme":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "1/3" in _header_text(app), label="search counter shown")
 
         # Counter should appear: 1/3 (3 lines contain "findme")
         header = _header_text(app)
@@ -688,13 +779,13 @@ async def test_search_shows_counter_and_n_advances() -> None:
 
         # n advances to second hit
         await pilot.press("n")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "2/3" in _header_text(app), label="second hit selected")
         header2 = _header_text(app)
         assert "2/3" in header2
 
         # n again to third hit
         await pilot.press("n")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "3/3" in _header_text(app), label="third hit selected")
         header3 = _header_text(app)
         assert "3/3" in header3
 
@@ -704,26 +795,25 @@ async def test_search_N_navigates_backwards_with_wraparound() -> None:
     stream = SearchFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: "findme-4" in _richlog_text(app), label="search corpus rendered")
 
         await pilot.press("slash")
-        await pilot.pause(0.05)
         for ch in "findme":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "1/3" in _header_text(app), label="search counter shown")
         assert "1/3" in _header_text(app)
 
         # N from the first hit wraps to the last
         await pilot.press("shift+n")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "3/3" in _header_text(app), label="wrapped to last hit")
         assert "3/3" in _header_text(app)
 
         # N again steps back to the second hit
         await pilot.press("shift+n")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "2/3" in _header_text(app), label="moved to previous hit")
         assert "2/3" in _header_text(app)
 
 
@@ -732,23 +822,21 @@ async def test_search_escape_clears_stale_counter() -> None:
     stream = SearchFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: "findme-4" in _richlog_text(app), label="search corpus rendered")
 
         await pilot.press("slash")
-        await pilot.pause(0.05)
         for ch in "findme":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "1/3" in _header_text(app), label="search counter shown")
         assert "1/3" in _header_text(app)
 
         # Re-open search and dismiss without submitting: counter must clear
         await pilot.press("slash")
-        await pilot.pause(0.05)
         await pilot.press("escape")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "1/3" not in _header_text(app), label="search counter cleared")
         assert "1/3" not in _header_text(app)
 
 
@@ -759,13 +847,13 @@ async def test_search_scroll_offsets_for_banner_lines() -> None:
     stream = SearchFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: "findme-4" in _richlog_text(app), label="search corpus rendered")
         # p re-opens as a previous stream, which prepends a banner line to RichLog
         # only (not the buffer), shifting all hit lines down by one.
         await pilot.press("p")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: "previous" in _richlog_text(app), label="previous banner shown")
 
         rich_log = app.query_one(LogPane).query_one(RichLog)
         scrolled: list[float] = []
@@ -778,11 +866,10 @@ async def test_search_scroll_offsets_for_banner_lines() -> None:
         rich_log.scroll_to = _capture  # type: ignore[method-assign]
 
         await pilot.press("slash")
-        await pilot.pause(0.05)
         for ch in "findme":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: scrolled == [1], label="search scrolled past banner")
 
         # Buffer hit index 0 ("findme-0") sits at RichLog line 1 (after banner).
         assert scrolled == [1]
@@ -792,10 +879,9 @@ async def test_f_closed_no_crash() -> None:
     """f when pane closed produces no error and no state change."""
     app = make_app([_pod("myapp")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         assert app.query_one(LogPane).display is False
         await pilot.press("f")
-        await pilot.pause(0.05)
         assert app.query_one(LogPane).display is False
 
 
@@ -803,10 +889,9 @@ async def test_p_closed_no_crash() -> None:
     """p when pane closed produces no error and no state change."""
     app = make_app([_pod("myapp")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         assert app.query_one(LogPane).display is False
         await pilot.press("p")
-        await pilot.pause(0.05)
         assert app.query_one(LogPane).display is False
 
 
@@ -814,10 +899,9 @@ async def test_n_closed_no_crash() -> None:
     """n when pane closed produces no error."""
     app = make_app([_pod("myapp")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         assert app.query_one(LogPane).display is False
         await pilot.press("n")
-        await pilot.pause(0.05)
         assert app.query_one(LogPane).display is False
 
 
@@ -843,11 +927,15 @@ async def test_p_unexpected_error_sets_error_state() -> None:
 
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=BoomPreviousStream())
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: "live-line" in _richlog_text(app), label="live line rendered")
         await pilot.press("p")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: "error" in app.query_one(LogPane)._state and not app._log_tasks,
+            label="previous-log error surfaced",
+        )
 
         log_pane = app.query_one(LogPane)
         assert "error" in log_pane._state
@@ -862,9 +950,13 @@ async def test_open_bounds_richlog_to_buffer_capacity() -> None:
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=FakeStream())
     app._log_buffer_max_lines = 10
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(
+            pilot,
+            lambda: app.query_one(LogPane).query_one(RichLog).max_lines == 18,
+            label="bounded richlog attached",
+        )
         rich_log = app.query_one(LogPane).query_one(RichLog)
         assert rich_log.max_lines == 18  # buffer cap + banner headroom
 
@@ -882,12 +974,24 @@ async def test_l_on_second_pod_adds_side_by_side() -> None:
         stream_logs=fake,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 2,
+            label="pod rows visible",
+        )
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(
+            pilot,
+            lambda: set(_panel_texts(app)) == {"app-a/main"},
+            label="first pod panel rendered",
+        )
         await pilot.press("down")
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: set(_panel_texts(app)) == {"app-a/main", "app-b/main"},
+            label="second pod panel rendered",
+        )
         panels = _panel_texts(app)
         assert set(panels) == {"app-a/main", "app-b/main"}
         assert "line0" in panels["app-a/main"]
@@ -903,15 +1007,31 @@ async def test_l_on_shown_pod_removes_it() -> None:
         stream_logs=fake,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 2,
+            label="pod rows visible",
+        )
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(
+            pilot,
+            lambda: set(_panel_texts(app)) == {"app-a/main"},
+            label="first pod panel rendered",
+        )
         await pilot.press("down")
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: set(_panel_texts(app)) == {"app-a/main", "app-b/main"},
+            label="second pod panel rendered",
+        )
         # Cursor still on app-b: pressing l again removes app-b only.
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: set(_panel_texts(app)) == {"app-a/main"},
+            label="selected pod removed",
+        )
         panels = _panel_texts(app)
         assert set(panels) == {"app-a/main"}
         assert app.query_one(LogPane).display is True
@@ -922,11 +1042,15 @@ async def test_l_removing_last_pod_closes_pane() -> None:
     fake = FakeStream(lines_per_call=1)
     app = make_app([_pod("app-a", containers=("main",))], stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: app.query_one(LogPane).display, label="log pane opened")
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: not app.query_one(LogPane).display and not app._log_tasks,
+            label="last pod removal closed pane",
+        )
         assert app.query_one(LogPane).display is False
         assert not app._log_tasks
 
@@ -937,13 +1061,27 @@ async def test_l_caps_accumulation_at_4_pods() -> None:
     pods = [_pod(f"app-{i}", containers=("main",)) for i in range(5)]
     app = make_app(pods, stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 5,
+            label="pod rows visible",
+        )
         await pilot.press("l")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: set(_panel_texts(app)) == {"app-0/main"},
+            label="first pod panel rendered",
+        )
         for _ in range(4):
             await pilot.press("down")
             await pilot.press("l")
-            await pilot.pause(0.15)
+        await until(
+            pilot,
+            lambda: (
+                len(_panel_texts(app)) == 4 and any("4" in n.message for n in app._notifications)
+            ),
+            label="four-panel cap enforced",
+        )
         panels = _panel_texts(app)
         assert len(panels) == 4
         msgs = [n.message for n in app._notifications]
@@ -958,12 +1096,16 @@ async def test_l_in_multi_stream_mode_closes_pane() -> None:
         stream_logs=fake,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 2,
+            label="pod rows visible",
+        )
         await pilot.press("shift+l")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: app.query_one(LogPane).display, label="multi-stream pane opened")
         assert app.query_one(LogPane).display is True
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: not app.query_one(LogPane).display, label="pane closed from l")
         assert app.query_one(LogPane).display is False
 
 
@@ -972,12 +1114,11 @@ async def test_straggler_line_from_removed_source_is_dropped() -> None:
     fake = FakeStream(lines_per_call=1)
     app = make_app([_pod("app-a", containers=("main",))], stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: "line0" in _richlog_text(app), label="first line rendered")
         pane = app.query_one(LogPane)
         pane.feed(LogLine(pod="ghost", container="old", text="stray-line"))
-        await pilot.pause(0.05)
         assert "stray-line" not in _richlog_text(app)
 
 
@@ -1024,9 +1165,13 @@ async def test_reconnect_drops_replayed_tail_lines() -> None:
     app = make_app([_pod("app-a", containers=("main",))], stream_logs=fake)
     app._reconnect_sleep = 0.0
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.4)
+        await until(
+            pilot,
+            lambda: fake.calls == 2 and "three" in _richlog_text(app),
+            label="reconnected line rendered",
+        )
         text = _richlog_text(app)
         assert fake.calls == 2
         assert text.count("one") == 1
@@ -1070,9 +1215,13 @@ async def test_reconnect_keeps_new_line_with_equal_timestamp() -> None:
     app = make_app([_pod("app-a", containers=("main",))], stream_logs=fake)
     app._reconnect_sleep = 0.0
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.4)
+        await until(
+            pilot,
+            lambda: fake.calls == 2 and _richlog_text(app).count("three") == 1,
+            label="equal-timestamp reconnect rendered",
+        )
         text = _richlog_text(app)
         assert fake.calls == 2
         assert text.count("one") == 1
@@ -1093,9 +1242,13 @@ async def test_open_log_pane_caps_spawned_streams_at_max_panels() -> None:
     containers = tuple(f"c{i}" for i in range(MAX_PANELS + 3))
     app = make_app([_pod("bigpod", containers=containers)], stream_logs=fake)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _pod_row_ready(app, pilot)
         await pilot.press("l")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: len(app._log_tasks) == MAX_PANELS and len(_panel_texts(app)) == MAX_PANELS,
+            label="spawned streams capped",
+        )
         assert len(app._log_tasks) == MAX_PANELS
         assert len(app._current_log_triples) == MAX_PANELS
         panels = _panel_texts(app)
@@ -1148,7 +1301,6 @@ async def test_w_closed_no_crash() -> None:
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("w")
-        await pilot.pause()
         assert app.query_one(LogPane).display is False
 
 
@@ -1218,11 +1370,10 @@ async def test_search_scroll_accounts_for_wrapped_rows() -> None:
         rich_log.scroll_to = _capture  # type: ignore[method-assign]
 
         await pilot.press("slash")
-        await pilot.pause()
         for ch in "findme":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause()
+        await until(pilot, lambda: scrolled == [long_rows], label="search scrolled to wrapped hit")
 
         # The hit is buffered line 1 but sits below the wrapped rows of line 0.
         assert scrolled == [long_rows]
@@ -1320,7 +1471,6 @@ async def test_t_closed_no_crash() -> None:
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("t")
-        await pilot.pause()
         assert app.query_one(LogPane).display is False
 
 
@@ -1381,7 +1531,6 @@ async def test_ctrl_s_closed_no_crash(monkeypatch: Any, tmp_path: Any) -> None:
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("ctrl+s")
-        await pilot.pause()
         assert not (tmp_path / "korvid" / "logs").exists()
 
 
