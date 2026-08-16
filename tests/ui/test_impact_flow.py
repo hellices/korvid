@@ -21,6 +21,7 @@ This module owns the shared harness (`ImpactEnv`) that
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -436,6 +437,15 @@ class RecordingOps(WriteOps):
         #: refused afterwards by the impact-summary gate, while a scale-down
         #: is refused by its own pre-snapshot gate and issues no LIST at all.
         self.on_first_preview: Callable[[], None] | None = None
+        #: One-shot failure injected into the *next* `preview_scale` call,
+        #: then cleared - so a test can pin that a scale-down's graph
+        #: impact section survives a failing dry-run preview without also
+        #: making every other `RecordingOps` user (or every later call in
+        #: the same test) carry that failure. `None` by default: every
+        #: existing test that never sets it keeps the plain diff line
+        #: `preview_scale` has always returned, in the same order and with
+        #: the same `on_first_preview` hook still firing first.
+        self.preview_scale_error: BaseException | None = None
 
     def _preview_hook(self) -> None:
         hook, self.on_first_preview = self.on_first_preview, None
@@ -492,6 +502,13 @@ class RecordingOps(WriteOps):
     ) -> list[str] | None:
         self._order.append("preview")
         self._preview_hook()
+        # Recorded (and the hook fired) before the raise: the call itself
+        # still happened, exactly as a real dry-run round trip that failed
+        # server-side would have, and the flow's own drift-during-the-preview
+        # tests still get their hook. Only the *return* is replaced.
+        if self.preview_scale_error is not None:
+            error, self.preview_scale_error = self.preview_scale_error, None
+            raise error
         return [f"~ spec.replicas: {replicas}"]
 
     async def preview_rollout_restart(
@@ -995,6 +1012,65 @@ async def test_scale_down_dialog_shows_controller_and_routing_dependents(
         assert "may be affected" in text
         assert "will fail" not in text
         assert env.ops.calls == []
+
+
+async def test_scale_down_dialog_survives_a_failing_dry_run_preview(
+    tmp_path: Path,
+) -> None:
+    """A scale-down's graph impact section and its dry-run preview are two
+    independent advisories, computed from two independent sources - the
+    watched-store graph walk and a `dryRun=All` server round trip - and
+    `_dry_run_preview` already folds *any* preview failure into `None`
+    rather than letting it reach the dialog or the approval gate (issue
+    #19; `test_failed_preview_still_opens_dialog` pins this for a plain
+    delete). What issue #295 adds, and what no existing test combines, is
+    a *known decrease*: the one shape whose confirmation also carries a
+    graph-derived blast radius. This pins that the two stay independent
+    for a scale-down too - the failure must not blank the impact section,
+    must not stop `ConfirmScreen` from opening, and the exception's own
+    body must never render anywhere in the dialog, matching the design
+    doc's fail-open preview invariant carried over from #19/#294.
+
+    Nothing must exist yet while the dialog is up: no write, no
+    reservation (`_active_cluster_writes`, which would block `:ctx`) and
+    no audit entry at all - not even the fail-closed intent line, because
+    a failed *preview* is not a write and must not reserve one. A fresh
+    keystroke approval afterwards must still execute and audit exactly as
+    an ordinary scale-down would; the preview failure must cost nothing
+    beyond the missing preview widget.
+    """
+    secret_body = "etcd-lease-42-should-never-render"
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
+    env.ops.preview_scale_error = ApiStatusError(500, "internal error", secret_body)
+    audit_path = tmp_path / "audit.jsonl"
+    async with env.app.run_test() as pilot:
+        await _scale_to_one(env, pilot, "deploy", expect="web")
+        screen = env.app.screen
+        assert isinstance(screen, ConfirmScreen)
+        # No widget at all — see `ConfirmScreen._preview_text`'s "no preview
+        # was available" distinction from "the server reported no changes".
+        assert not screen.query(".confirm-preview")
+        rendered = "\n".join(str(node.render()) for node in screen.query(Static))
+        assert secret_body not in rendered
+        assert "internal error" not in rendered
+        text = impact_text(env.app)
+        assert "scale down apps/Deployment/prod/web" in text
+        assert _PDB_LIMITATION in text
+        assert _HPA_LIMITATION in text
+        assert "known direct dependents (may be affected): 2 or more" in text
+        assert "known transitive dependents (may be affected): 3 or more" in text
+        assert env.ops.calls == []
+        assert env.app._active_cluster_writes == 0
+        assert not audit_path.exists()
+        await pilot.press("y")
+        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        assert env.ops.calls == [("scale", "deployments", "prod", "web", 1)]
+        entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert entries[0]["outcome"] == "intent"
+        entry = entries[-1]
+        assert entry["action"] == "scale"
+        assert entry["name"] == "web"
+        assert entry["outcome"] == "success"
 
 
 async def test_scale_down_of_a_replicaset_follows_the_same_routing_chain(
