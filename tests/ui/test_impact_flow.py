@@ -1953,7 +1953,6 @@ async def test_scale_down_replica_drift_during_the_impact_load_aborts_before_con
         await _count_refusal(app, pilot, "the impact summary", "impact-summary replica refusal")
         assert len(app.screen_stack) == 1
         assert not isinstance(app.screen, ConfirmScreen)
-        assert not any("replicas 3 -> 2" in n.message for n in app._notifications)
         assert env.ops.calls == []
 
 

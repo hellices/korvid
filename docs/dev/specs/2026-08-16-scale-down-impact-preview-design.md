@@ -164,32 +164,40 @@ The action captures `_WriteOrigin`, target metadata, namespace, name, UID,
 context epoch, kind alias, and current replica count before opening
 `ReplicasPrompt`.
 
-The flow performs **three** identity/origin gates, each re-checking the
-context epoch, the focused pane identity and its scope, the selected
-resource identity, and the exact UID:
+The flow performs **four** scale-context gates. Every gate re-checks the
+context epoch, focused pane identity and scope, selected resource identity,
+exact UID, and the desired replica count captured with the target:
 
 1. after the permission check and **before** `ReplicasPrompt` opens, so a
    prompt is never raised for a row the user has already left;
-2. after the server-side dry-run preview and the managed-resource note, and
+2. after `ReplicasPrompt` and **before** the server-side dry-run, so a count
+   change or focus move while the prompt was open costs no API round trip;
+3. after the server-side dry-run preview and the managed-resource note, and
    **before** any impact LIST, so a doomed scale never spends the snapshot
    fan-out nor scopes it to a pane the user has left;
-3. after the impact summary and **before** `ConfirmScreen` is mounted.
+4. after the impact summary and **before** `ConfirmScreen` is mounted.
+
+A same-UID change to `spec.replicas` is drift too: it can turn the requested
+count from a decrease into an increase or make the displayed `old -> new`
+statement stale. The flow cancels with a phase-specific message instead of
+silently reclassifying the action.
 
 So the worker, after the user chooses a replica count:
 
-1. obtains the existing server-side dry-run preview;
-2. obtains the existing managed-resource note;
-3. runs gate 2;
-4. when the activation boundary is met, loads the relationship snapshot
+1. runs gate 2;
+2. obtains the existing server-side dry-run preview;
+3. obtains the existing managed-resource note;
+4. runs gate 3;
+5. when the activation boundary is met, loads the relationship snapshot
    using the captured origin scope and summarizes `SCALE_DOWN`;
-5. runs gate 3, which is performed only for a known decrease — the one
+6. runs gate 4, which is performed only for a known decrease — the one
    awaited gap it guards is the snapshot load;
-6. opens `ConfirmScreen` with the dry-run, managed note, and optional impact
+7. opens `ConfirmScreen` with the dry-run, managed note, and optional impact
    lines.
 
-A scale that is not a known decrease therefore has gates 1 and 2 and no
+A scale that is not a known decrease therefore has gates 1, 2, and 3 and no
 impact LIST at all: it keeps the pre-#295 absence of a snapshot fan-out
-while gaining both of the stronger gates, which previously re-checked only
+while gaining the stronger gates, which previously re-checked only
 kind, namespace, name and the context epoch.
 
 No await occurs between the final identity/origin gate and mounting the
