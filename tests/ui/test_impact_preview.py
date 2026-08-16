@@ -186,6 +186,28 @@ def test_statefulset_scale_down_names_the_unchecked_pvc_policy() -> None:
     assert lines.index(_SCALE_DOWN_STS_PVC_LINE) == lines.index(_SCALE_DOWN_HPA_LINE) + 1
 
 
+def test_a_statefulset_kind_in_another_group_gets_no_pvc_limitation() -> None:
+    """The line is about `apps/StatefulSet`'s
+    `persistentVolumeClaimRetentionPolicy`, a field only that API defines.
+
+    A CRD is free to call its kind `StatefulSet` in its own group, and a
+    kind-only test would state a retention policy that resource has never
+    had - a claim about the cluster, machine-defined or not. Group and kind
+    together are the type, so both select the line.
+    """
+    lookalike = GraphResource(
+        group="acme.example.com",
+        kind="StatefulSet",
+        namespace="prod",
+        name="db",
+        uid="crd-1",
+    )
+    lines = render_impact_lines(_summary(action=ImpactAction.SCALE_DOWN, target=lookalike))
+    assert _SCALE_DOWN_PDB_LINE in lines
+    assert _SCALE_DOWN_HPA_LINE in lines
+    assert _SCALE_DOWN_STS_PVC_LINE not in lines
+
+
 @pytest.mark.parametrize("action", [ImpactAction.DELETE, ImpactAction.ROLLOUT_RESTART])
 def test_non_scale_actions_never_render_scale_down_limitations(action: ImpactAction) -> None:
     lines = render_impact_lines(_summary(action=action))
@@ -1275,7 +1297,7 @@ def test_unavailable_scale_down_still_states_the_pdb_and_hpa_limitations() -> No
     controller scale-down does *not* go through - true whether or not any
     graph data was read - so an unavailable advisory that omitted them
     would leave the approver with strictly less than the static truth."""
-    assert render_unavailable_lines(ImpactAction.SCALE_DOWN, "Deployment") == (
+    assert render_unavailable_lines(ImpactAction.SCALE_DOWN, "apps", "Deployment") == (
         *IMPACT_UNAVAILABLE_LINES,
         _SCALE_DOWN_PDB_LINE,
         _SCALE_DOWN_HPA_LINE,
@@ -1283,9 +1305,10 @@ def test_unavailable_scale_down_still_states_the_pdb_and_hpa_limitations() -> No
 
 
 def test_unavailable_scale_down_of_a_statefulset_keeps_the_pvc_limitation() -> None:
-    """The kind-conditional line is selected the same way it is when the
-    snapshot loaded: by the target's kind, which the caller still has."""
-    assert render_unavailable_lines(ImpactAction.SCALE_DOWN, "StatefulSet") == (
+    """The type-conditional line is selected the same way it is when the
+    snapshot loaded: by the target's group and kind, which the caller still
+    has."""
+    assert render_unavailable_lines(ImpactAction.SCALE_DOWN, "apps", "StatefulSet") == (
         *IMPACT_UNAVAILABLE_LINES,
         _SCALE_DOWN_PDB_LINE,
         _SCALE_DOWN_HPA_LINE,
@@ -1293,16 +1316,35 @@ def test_unavailable_scale_down_of_a_statefulset_keeps_the_pvc_limitation() -> N
     )
 
 
-@pytest.mark.parametrize("kind", ["Deployment", "StatefulSet"])
+def test_unavailable_scale_down_of_a_statefulset_lookalike_omits_the_pvc_line() -> None:
+    """A CRD whose kind is spelled `StatefulSet` in its own group has no
+    `persistentVolumeClaimRetentionPolicy`, so the fail-open path must not
+    invent one for it either - the two renderings select the line from the
+    same pair."""
+    assert render_unavailable_lines(ImpactAction.SCALE_DOWN, "acme.example.com", "StatefulSet") == (
+        *IMPACT_UNAVAILABLE_LINES,
+        _SCALE_DOWN_PDB_LINE,
+        _SCALE_DOWN_HPA_LINE,
+    )
+
+
+@pytest.mark.parametrize(
+    ("group", "kind"),
+    [("apps", "Deployment"), ("apps", "StatefulSet"), ("acme.example.com", "StatefulSet")],
+)
 def test_unavailable_scale_down_notes_are_the_available_ones_in_the_same_order(
+    group: str,
     kind: str,
 ) -> None:
     """One source for the limitation text, not two: whatever a rendered
     scale-down summary states unconditionally is exactly what the
-    unavailable advisory states, in the order it states it."""
-    target = GraphResource(group="apps", kind=kind, namespace="prod", name="web", uid="uid-1")
+    unavailable advisory states, in the order it states it - for the
+    lookalike group as much as for the real one."""
+    target = GraphResource(group=group, kind=kind, namespace="prod", name="web", uid="uid-1")
     available = render_impact_lines(_summary(action=ImpactAction.SCALE_DOWN, target=target))
-    notes = render_unavailable_lines(ImpactAction.SCALE_DOWN, kind)[len(IMPACT_UNAVAILABLE_LINES) :]
+    notes = render_unavailable_lines(ImpactAction.SCALE_DOWN, group, kind)[
+        len(IMPACT_UNAVAILABLE_LINES) :
+    ]
     assert notes
     assert [line for line in available if line in notes] == list(notes)
 
@@ -1314,14 +1356,16 @@ def test_unavailable_delete_and_restart_stay_exactly_the_generic_advisory(
 ) -> None:
     """Nothing scale-specific leaks into the other two actions - a delete
     of a StatefulSet has no scale-down limitation to state."""
-    assert render_unavailable_lines(action, kind) == IMPACT_UNAVAILABLE_LINES
+    assert render_unavailable_lines(action, "apps", kind) == IMPACT_UNAVAILABLE_LINES
 
 
 @pytest.mark.parametrize("action", list(ImpactAction))
 def test_every_unavailable_line_is_titled_bounded_and_cluster_free(action: ImpactAction) -> None:
     """The same bound the available rendering applies, and no fragment of
-    the caller's identity: a kind selects a line, it never becomes one."""
-    lines = render_unavailable_lines(action, "StatefulSet")
+    the caller's identity: a group and kind select a line, they never
+    become one."""
+    lines = render_unavailable_lines(action, "apps", "StatefulSet")
     assert lines[0] == IMPACT_TITLE
     assert all(len(line) <= _MAX_LINE for line in lines)
     assert not any("StatefulSet/" in line for line in lines)
+    assert not any("apps" in line for line in lines)

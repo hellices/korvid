@@ -350,6 +350,17 @@ replica line and **no graph section at all** — not the "impact unavailable"
 line, and no relationship snapshot is loaded for it. Only a known decrease
 loads the snapshot and summarizes it.
 
+Whether the request is a decrease is decided from the desired count read
+off the row *before* the permission check, and that number is re-checked at
+every awaited step of the flow — after the permission check, after the
+replica prompt closes, after the dry run, and after the snapshot. If a
+controller, an autoscaler or another operator moves `spec.replicas`
+meanwhile, the scale is cancelled with `the desired replica count changed
+during …` and no dialog opens: the same request could otherwise be offered
+as a decrease that is now an increase, under an approval line reading
+`replicas <old> -> <new>` for a count the object no longer has. A row that
+had no readable count and gains one mid-flow is the same case.
+
 A scale-down follows a different, still closed relation set than delete and
 rollout restart: `owned_by` and `managed_by` (the same controller/selector
 ownership chain to the shrinking workload's Pods), plus `selects` and
@@ -373,7 +384,7 @@ anything read from the cluster:
     controller scale-down is not an Eviction API request; PodDisruptionBudgets do not gate it
     HorizontalPodAutoscaler targeting and reconciliation are not evaluated
 
-and, only when the target itself is a StatefulSet:
+and, only when the target itself is an `apps/StatefulSet`:
 
     StatefulSet PVC retention policy is not evaluated
 
@@ -381,7 +392,10 @@ A controller deletes surplus Pods directly rather than through the Eviction
 API, so a PodDisruptionBudget never sees or gates it; an HPA can independently
 overwrite a manual replica count on its own reconciliation loop; and a
 StatefulSet's `persistentVolumeClaimRetentionPolicy` decides whether scaling
-down also deletes PVCs — none of that is evaluated here.
+down also deletes PVCs — none of that is evaluated here. That last line is
+selected by group *and* kind, so a custom resource that merely spells its
+kind `StatefulSet` in a group of its own is never told about a retention
+policy the `apps` API defines and it does not have.
 
 A workload's Pods are one hop from it, not two: a Deployment,
 StatefulSet or ReplicaSet declares `spec.selector`, which is a `managed_by`

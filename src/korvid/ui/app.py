@@ -5260,12 +5260,13 @@ class KorvidApp(App[None]):
           error message can embed a response body (for a Secret, its data)
           and must never reach the dialog, and because a summarizer or
           renderer bug must cost the user the section, not the approval.
-          It is rendered for the action and target kind in hand, so a
-          scale-down still states the machine-defined limitations it always
-          states (PodDisruptionBudgets do not gate a controller scale-down,
-          an HPA's own loop is not evaluated, and a StatefulSet's PVC
-          retention policy is not either) - none of those depends on the
-          snapshot that failed to arrive;
+          It is rendered for the action and target *type* in hand - group
+          and kind, since only `apps/StatefulSet` has the field the last
+          line names - so a scale-down still states the machine-defined
+          limitations it always states (PodDisruptionBudgets do not gate a
+          controller scale-down, an HPA's own loop is not evaluated, and an
+          `apps/StatefulSet`'s PVC retention policy is not either) - none of
+          those depends on the snapshot that failed to arrive;
         - cancellation (a `:ctx` switch tearing the client down) propagates
           untouched, exactly like every other awaited read here.
 
@@ -5295,7 +5296,7 @@ class KorvidApp(App[None]):
             # Type only: never the message (CodeQL py/clear-text-logging-
             # sensitive-data), and never anything derived from a manifest.
             logger.debug("impact summary unavailable for %s: %s", action, type(exc).__name__)
-            return render_unavailable_lines(action, meta.kind)
+            return render_unavailable_lines(action, meta.group, meta.kind)
 
     async def _push_write_confirmation(
         self,

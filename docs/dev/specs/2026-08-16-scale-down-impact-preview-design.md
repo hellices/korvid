@@ -148,7 +148,11 @@ sections:
 - controller scale-down is not an Eviction API request, so
   PodDisruptionBudgets do not gate it;
 - HorizontalPodAutoscaler targeting and reconciliation are not evaluated;
-- for a StatefulSet target only, PVC retention policy is not evaluated.
+- for an `apps/StatefulSet` target only, PVC retention policy is not
+  evaluated. The pair selects the line, not the kind alone:
+  `persistentVolumeClaimRetentionPolicy` is an `apps` API field, so a CRD
+  that names its own kind `StatefulSet` has no such policy to leave
+  unchecked and must not be told it has one.
 
 These are static boundaries, not cluster-derived claims. They are shown only
 for `ImpactAction.SCALE_DOWN`. They remain bounded and literal like every other

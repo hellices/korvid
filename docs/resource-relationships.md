@@ -407,9 +407,12 @@ PodDisruptionBudgets do not gate it — a controller deletes surplus Pods
 directly rather than through the Eviction API that PDBs constrain — and that
 HorizontalPodAutoscaler targeting and reconciliation are not evaluated: an
 HPA can independently overwrite the very replica count you just set. When
-the target itself is a StatefulSet, it also states that PVC retention policy
-is not evaluated, since `persistentVolumeClaimRetentionPolicy` — not this
-walk — decides whether the removed replicas' claims are kept or deleted.
+the target itself is an `apps/StatefulSet`, it also states that PVC retention
+policy is not evaluated, since `persistentVolumeClaimRetentionPolicy` — not
+this walk — decides whether the removed replicas' claims are kept or deleted.
+Group and kind together select that line: the field belongs to the `apps`
+API, so a custom resource whose kind is spelled the same way in another group
+does not get it.
 `protected_by` (PDB), `uses_volume`, `uses_config`, `scheduled_on`, and
 `bound_to` are excluded from the scale-down relation set for the same
 reason: none of them is something a scale-down itself changes for a Pod that

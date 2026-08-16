@@ -17,9 +17,9 @@
 - Routing resources are only known dependents that **may be affected**; never claim zero endpoints, exclusive ownership, outage, or guaranteed failure.
 - Every scale-down advisory states that controller scale-down is not an Eviction API request and PodDisruptionBudgets do not gate it.
 - Every scale-down advisory states that HorizontalPodAutoscaler targeting/reconciliation is not evaluated.
-- A StatefulSet scale-down advisory additionally states that PVC retention policy is not evaluated.
-- These three statements are machine-defined, not graph-derived: a scale-down whose snapshot timed out or failed still states them beneath the static `impact unavailable; approval remains available` line, rendered by the same action/kind-aware helper the available path uses. Delete and rollout restart keep the generic unavailable advisory verbatim.
-- Capture pane identity, pane scope, target identity, UID, context epoch, kind alias, and current replicas before the first await and before `ReplicasPrompt`.
+- An `apps/StatefulSet` scale-down advisory additionally states that PVC retention policy is not evaluated; a custom resource that merely spells its kind `StatefulSet` in another group does not, since `persistentVolumeClaimRetentionPolicy` is an `apps` API field.
+- These three statements are machine-defined, not graph-derived: a scale-down whose snapshot timed out or failed still states them beneath the static `impact unavailable; approval remains available` line, rendered by the same action/group/kind-aware helper the available path uses. Delete and rollout restart keep the generic unavailable advisory verbatim.
+- Capture pane identity, pane scope, target identity, UID, context epoch, kind alias, and current replicas before the first await and before `ReplicasPrompt`, and revalidate all of them - the captured replica count included - at every awaited gap: a count that moved under an unchanged identity reverses the scale-down classification and staled the `old -> new` line.
 - After dry-run, ownership lookup, and impact loading, require the same pane identity/scope, context epoch, resource identity, and captured UID before `ConfirmScreen`.
 - Cancellation or identity/origin drift creates no confirmation, write reservation, write operation, or audit entry.
 - Preserve RBAC, server dry-run, fresh-keystroke approval, UID precondition, fail-closed audit, timeout, cancellation propagation, Unicode/Rich safety, deterministic ordering, and all existing bounds.
@@ -34,7 +34,7 @@
 - `src/korvid/ui/impact_preview.py`: owns the scale-down action label and machine-defined limitation lines.
 - `src/korvid/ui/app.py`: owns activation, origin capture, awaited work, identity revalidation, and confirmation wiring.
 - `tests/core/test_impact.py`: pins included and excluded scale-down relation semantics.
-- `tests/ui/test_impact_preview.py`: pins exact scale-down wording, order, bounds, and conditional StatefulSet note.
+- `tests/ui/test_impact_preview.py`: pins exact scale-down wording, order, bounds, and the `apps/StatefulSet`-conditional note.
 - `tests/ui/test_impact_flow.py`: owns the end-to-end scale harness, activation boundary, routing traversal, and pane/scope/UID races.
 - `tests/ui/test_impact_security.py`: pins approval, audit, RBAC, timeout, and cancellation invariants for scale-down.
 - `docs/tui.md`: explains when scale-down impact appears and what it does not evaluate.
@@ -226,10 +226,14 @@ git commit -m "feat(core): define scale-down impact semantics" \
 - Modify: `tests/ui/test_impact_preview.py`
 
 **Interfaces:**
-- Consumes: `ImpactSummary.action`, `ImpactSummary.target.kind`, and `ImpactAction.SCALE_DOWN`.
-- Produces: `_action_note_lines(action: ImpactAction, kind: str) -> list[str]`,
+- Consumes: `ImpactSummary.action`, `ImpactSummary.target.group`,
+  `ImpactSummary.target.kind`, and `ImpactAction.SCALE_DOWN`.
+- Produces: `_action_note_lines(action: ImpactAction, group: str, kind: str) -> list[str]`,
   shared by the available and unavailable renderers so both use identical
-  machine-defined limitations.
+  machine-defined limitations. The PVC line is selected by the *pair*
+  `("apps", "StatefulSet")`: `persistentVolumeClaimRetentionPolicy` is an
+  `apps` API field, so a CRD that spells its own kind `StatefulSet` in
+  another group must not be told about a policy it does not have.
 
 - [ ] **Step 1: Write exact failing renderer tests**
 
@@ -297,6 +301,8 @@ _SCALE_DOWN_PDB_LINE = (
 _SCALE_DOWN_HPA_LINE = (
     "  HorizontalPodAutoscaler targeting and reconciliation are not evaluated"
 )
+_SCALE_DOWN_STS_PVC_GROUP = "apps"
+_SCALE_DOWN_STS_PVC_KIND = "StatefulSet"
 _SCALE_DOWN_STS_PVC_LINE = "  StatefulSet PVC retention policy is not evaluated"
 
 _ACTION_LABEL = {
@@ -306,11 +312,11 @@ _ACTION_LABEL = {
 }
 
 
-def _action_note_lines(action: ImpactAction, kind: str) -> list[str]:
+def _action_note_lines(action: ImpactAction, group: str, kind: str) -> list[str]:
     if action is not ImpactAction.SCALE_DOWN:
         return []
     lines = [_SCALE_DOWN_PDB_LINE, _SCALE_DOWN_HPA_LINE]
-    if kind == "StatefulSet":
+    if (group, kind) == (_SCALE_DOWN_STS_PVC_GROUP, _SCALE_DOWN_STS_PVC_KIND):
         lines.append(_SCALE_DOWN_STS_PVC_LINE)
     return lines
 ```
@@ -319,7 +325,7 @@ Wire it after the advisory:
 
 ```python
 lines.append(ADVISORY_LINE)
-lines.extend(_action_note_lines(summary.action, summary.target.kind))
+lines.extend(_action_note_lines(summary.action, summary.target.group, summary.target.kind))
 lines.extend(_section(_DIRECT_TITLE, summary.direct, capped=capped))
 ```
 
@@ -738,31 +744,53 @@ Pass `impact_lines=impact` to `_push_write_confirmation`. Do not add a new
 loader, bridge, or composition-root parameter.
 
 > **Verified implementation deviation (recorded in the final re-review
-> round): the shipped flow performs three gates, not two.** The snippet
-> above places a single gate in `_confirm_scale`, *after* the impact load,
-> whose `phase` label switches between `"the impact summary"` and `"the
-> dry-run preview"`. `src/korvid/ui/app.py` instead gates three times, and
-> every one of them re-checks the context epoch, the focused pane identity
-> and its scope, the selected resource identity, and the exact UID:
+> round, extended by the PR #296 review): the shipped flow performs four
+> gates, not two, and each compares the captured replica count as well as
+> the identity.** The snippet above places a single gate in
+> `_confirm_scale`, *after* the impact load, whose `phase` label switches
+> between `"the impact summary"` and `"the dry-run preview"`.
+> `src/korvid/ui/app.py` instead calls `_scale_context_intact` four times.
+> That helper composes `_write_identity_intact` (context epoch, focused
+> pane identity and scope, selected resource identity, exact UID) with
+> equality of the latest `_current_replicas(ns, name)` and the `current`
+> the flow captured:
 >
 > 1. `action_scale_resource`, after `_precheck_keybinding_write` and
 >    **before** `ReplicasPrompt` is pushed (`phase="the permission check"`);
-> 2. `_confirm_scale`, after the dry-run preview and the managed-resource
+> 2. `_confirm_scale`, at the top, **before** the dry-run round trip
+>    (`phase="the replica count prompt"`) — the prompt is the flow's own
+>    awaited gap and the one a user can hold open indefinitely, so drift
+>    there costs no API call at all;
+> 3. `_confirm_scale`, after the dry-run preview and the managed-resource
 >    note and **before** any impact LIST (`phase="the dry-run preview"`) —
 >    unconditional, so a doomed scale never spends the snapshot fan-out nor
 >    scopes it to a pane the user has left;
-> 3. `_confirm_scale`, after the impact summary and **before**
+> 4. `_confirm_scale`, after the impact summary and **before**
 >    `ConfirmScreen` is mounted (`phase="the impact summary"`), guarded by
 >    `is_scale_down` because the snapshot load is the only awaited gap it
 >    covers.
 >
-> A scale that is not a known decrease therefore has gates 1 and 2 and no
+> The count is gated because a scale is the one write whose *meaning* is
+> not fixed by its identity: the same requested number is a decrease or an
+> increase depending on where the object stands. `current` decides whether
+> the blast radius is loaded at all and is the number the approval line
+> reads `replicas <old> -> <new>` from, so a controller or an autoscaler
+> moving `spec.replicas` under an unchanged incarnation would otherwise
+> reverse the classification and stale the dialog text with nothing
+> noticing. `None` is a captured value like any other — a row that gains a
+> readable count mid-flow drifted just as much — so the comparison is plain
+> equality and cancels with its own banner (`the desired replica count
+> changed during <phase>`).
+>
+> A scale that is not a known decrease therefore has gates 1–3 and no
 > impact LIST at all. This is strictly stronger than the snippet — the
-> pre-prompt gate and the pre-LIST gate are both new awaited-gap coverage —
-> and it changes no cap, relation set, activation boundary, or write path.
+> pre-prompt gate, the post-prompt gate, the pre-LIST gate and the count
+> comparison are all new awaited-gap coverage — and it changes no cap,
+> relation set, activation boundary, or write path.
 > `tests/ui/test_impact_flow.py` and `tests/ui/test_impact_security.py` pin
-> each gate (drift during the permission round trip, during the dry-run
-> preview, and during the impact load), and
+> each gate (identity *and* count drift during the permission round trip,
+> during the count prompt, during the dry-run preview, and during the
+> impact load), and
 > `test_non_decreasing_or_unknown_scale_never_loads_relationships` pins that
 > the non-decrease shapes issue no LIST.
 
@@ -1068,7 +1096,7 @@ In the write-preview section of `docs/tui.md`, state:
   Ingress/Gateway routing relationships conservatively;
 - PDBs do not gate controller scale-down;
 - HPA targeting/reconciliation is not evaluated;
-- StatefulSet PVC retention is not evaluated;
+- `apps/StatefulSet` PVC retention is not evaluated;
 - the advisory never predicts zero endpoints or failure and never replaces
   dry-run or approval.
 
