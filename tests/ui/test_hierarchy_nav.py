@@ -6,7 +6,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 from unittest import mock
 
-import pytest
 from textual.app import ScreenStackError
 from textual.worker import Worker
 
@@ -28,7 +27,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.hierarchy_screen import HierarchyScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 
-from .waits import WaitTimeout, until
+from .waits import until
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
@@ -201,11 +200,6 @@ def _new_hierarchy_workers(app: KorvidApp, seen: set[int]) -> tuple[Worker[Any],
 
 def _workers_finished(workers: tuple[Worker[Any], ...]) -> bool:
     return bool(workers) and all(worker.is_finished for worker in workers)
-
-
-def _discard_worker(coro: object, **_: object) -> None:
-    if asyncio.iscoroutine(coro):
-        coro.close()
 
 
 _HELM_DATA: dict[str, list[Summary]] = {
@@ -753,40 +747,6 @@ async def test_tree_does_not_open_when_view_changed_during_fetch() -> None:
         )
         assert not isinstance(app.screen, HierarchyScreen)
         assert app.current_kind == "pods"
-
-
-async def test_tree_fetch_worker_start_wait_rejects_vacuous_empty_capture() -> None:
-    """Mutation evidence: if Enter never launches the hierarchy fetch worker,
-    the new start wait times out, while the empty-capture `all([])` shape still
-    returns True."""
-    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
-    gate = asyncio.Event()
-
-    async def slow_components(ns: str, name: str) -> list[ComponentRef]:
-        await gate.wait()
-        return _WEB_COMPONENTS["web"]
-
-    app._get_helm_components = slow_components
-    async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
-        await _navigate(pilot, "helm", "helmreleases")
-        table = app.query_one(ResourceTable)
-        await until(pilot, lambda: table.row_count == 1, label="release listed")
-        before_workers = _worker_ids(app)
-        with mock.patch.object(app, "run_worker", side_effect=_discard_worker):
-            await pilot.press("enter")
-        with pytest.raises(WaitTimeout, match="hierarchy fetch worker started"):
-            await until(
-                pilot,
-                lambda: _new_hierarchy_workers(app, before_workers),
-                timeout=0.1,
-                label="hierarchy fetch worker started",
-            )
-        empty_new_workers = _new_hierarchy_workers(app, before_workers)
-        assert not empty_new_workers
-        assert all(worker.is_finished for worker in empty_new_workers)
-        assert not isinstance(app.screen, HierarchyScreen)
-        assert app.current_kind == "helmreleases"
 
 
 async def test_enter_on_csv_opens_hierarchy_from_operator_labels() -> None:

@@ -196,6 +196,9 @@ Run the Task 3 pytest command and ruff check/format on the seven files.
 
 Expected: all commands pass.
 
+Note: the vacuous-capture mutation probe was temporary evidence only; it is
+not retained in the committed suite.
+
 - [ ] **Step 4: Commit**
 
 ```bash
