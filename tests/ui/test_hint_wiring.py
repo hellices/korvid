@@ -100,10 +100,21 @@ def _strip_text(app: KorvidApp) -> str:
     return str(app.query_one(HintStrip).render())
 
 
+def _selected_name(app: KorvidApp) -> str | None:
+    table = app.query_one(ResourceTable)
+    if table.row_count == 0 or table.cursor_row < 0:
+        return None
+    return str(table.get_row_at(table.cursor_row)[0])
+
+
 async def test_cursor_on_troubled_pod_shows_hint_strip() -> None:
     app, _ = make_app([_pod("web-1", (_CRASH,))])
     async with app.run_test() as pilot:
-        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="single pod row rendered",
+        )
         await until(pilot, lambda: app.query_one(HintStrip).display, label="hint strip visible")
         text = _strip_text(app)
         assert "CrashLoopBackOff" in text
@@ -113,14 +124,25 @@ async def test_cursor_on_troubled_pod_shows_hint_strip() -> None:
 async def test_cursor_on_healthy_pod_hides_hint_strip() -> None:
     app, _ = make_app([_pod("api-1"), _pod("web-1", (_CRASH,))])
     async with app.run_test() as pilot:
-        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 2)
+        await until(
+            pilot,
+            lambda: _selected_name(app) == "api-1",
+            label="healthy api-1 row selected",
+        )
         # rows sort by name: api-1 (healthy) first, cursor starts there
-        await pilot.pause(0.1)
         assert app.query_one(HintStrip).display is False
         await pilot.press("down")  # move onto web-1 (troubled)
-        await until(pilot, lambda: app.query_one(HintStrip).display, label="strip on web-1")
+        await until(
+            pilot,
+            lambda: app.query_one(HintStrip).display,
+            label="hint strip visible on web-1",
+        )
         await pilot.press("up")  # back to healthy api-1
-        await until(pilot, lambda: not app.query_one(HintStrip).display, label="strip hidden again")
+        await until(
+            pilot,
+            lambda: not app.query_one(HintStrip).display,
+            label="hint strip hidden again on api-1",
+        )
 
 
 async def test_warning_event_is_fetched_and_appended() -> None:
@@ -167,9 +189,13 @@ async def test_event_restating_the_trouble_is_not_appended() -> None:
         await until(
             pilot,
             lambda: calls == [("default", "web-1", "uid-web-1")],
-            label="event fetched",
+            label="warning event fetched",
         )
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: "CrashLoopBackOff" in _strip_text(app),
+            label="trouble hint rendered",
+        )
         text = _strip_text(app)
         assert "CrashLoopBackOff" in text
         assert "restarting failed container app" not in text
@@ -178,11 +204,20 @@ async def test_event_restating_the_trouble_is_not_appended() -> None:
 async def test_event_fetch_is_cached_per_pod() -> None:
     app, calls = make_app([_pod("api-1"), _pod("web-1", (_CRASH,))])
     async with app.run_test() as pilot:
-        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 2)
+        await until(
+            pilot,
+            lambda: _selected_name(app) == "api-1",
+            label="healthy api-1 row selected",
+        )
         await pilot.press("down")  # web-1: triggers fetch
-        await until(pilot, lambda: len(calls) == 1, label="first fetch")
+        await until(pilot, lambda: len(calls) == 1, label="web-1 events fetched once")
         await pilot.press("up")  # api-1 (healthy, no fetch)
         await pilot.press("down")  # web-1 again: cached, no second fetch
+        await until(
+            pilot,
+            lambda: _selected_name(app) == "web-1" and app.query_one(HintStrip).display,
+            label="returned to cached troubled row",
+        )
         await pilot.pause(0.2)
         assert calls == [("default", "web-1", "uid-web-1")]
 
@@ -241,8 +276,12 @@ async def test_event_older_than_status_termination_is_suppressed() -> None:
     )
     app, calls = make_app([_pod("web-1", (crash,))], events=[_OLD_EVENT])
     async with app.run_test() as pilot:
-        await until(pilot, lambda: len(calls) == 1, label="fetch done")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: len(calls) == 1, label="dated warning fetched")
+        await until(
+            pilot,
+            lambda: "CrashLoopBackOff" in _strip_text(app),
+            label="dated trouble hint rendered",
+        )
         assert "stale event" not in _strip_text(app)
         assert "CrashLoopBackOff" in _strip_text(app)
 
@@ -451,8 +490,12 @@ async def test_hint_strip_sits_above_status_bar() -> None:
     async with app.run_test() as pilot:
         strip = app.query_one(HintStrip)
         await until(pilot, lambda: strip.display, label="hint strip visible")
-        await pilot.pause()
         bar = app.query_one(StatusBar)
+        await until(
+            pilot,
+            lambda: strip.region.y < bar.region.y,
+            label="hint strip laid out above the status bar",
+        )
         assert strip.region.y < bar.region.y  # hint renders above the status bar
 
 
@@ -529,8 +572,11 @@ async def test_i_on_healthy_row_is_a_noop() -> None:
 
     app, calls = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1)
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: _selected_name(app) == "api-1",
+            label="healthy api-1 row selected",
+        )
         await pilot.press("i")
         await pilot.pause(0.1)
         assert not isinstance(app.screen, HintDetailScreen)
