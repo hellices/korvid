@@ -297,8 +297,10 @@ Expected: all commands pass.
 - [ ] **Step 4: Record final metrics in the commit body**
 
 Count numeric waits and their encoded duration using the same commands as the
-baseline review. Include the before values `531 calls` and `66.20 seconds` and
-the measured after values.
+baseline review. In the report, say the last 11 generic sleeps were removed,
+while one intentional `0.3s` absence window remains. Include the before values
+`531 calls` and `66.20 seconds`, the measured after values, and note that the
+regex-vs-AST delta is a `tests/ui/waits.py` docstring false positive.
 
 - [ ] **Step 5: Commit any final import-only cleanup**
 

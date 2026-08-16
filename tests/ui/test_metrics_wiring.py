@@ -258,7 +258,9 @@ async def test_returning_to_pods_view_resumes_polling() -> None:
             await pilot.press(ch)
         await pilot.press("enter")
         await until(
-            pilot, lambda: len(calls) > count, label="metrics poll resumes after returning to pods"
+            pilot,
+            lambda: _pods_view_ready(app, "api-1") and len(calls) > count,
+            label="pods view renders and metrics poll resumes after returning",
         )
         assert len(calls) > count
 
