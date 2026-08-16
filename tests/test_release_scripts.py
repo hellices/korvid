@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.release_contracts import markdown_section, run_scripts
+from tests.release_contracts import markdown_section, run_scripts, workflow_jobs
 
 SCRIPTS = Path(__file__).parents[1] / "scripts" / "release"
 sys.path.insert(0, str(SCRIPTS))
@@ -1119,8 +1119,11 @@ def test_offline_verifier_extracts_the_published_archive(tmp_path: Path) -> None
 # --- workflow invariants ----------------------------------------------------
 
 
+_RELEASE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "release.yml"
+
+
 def _release_workflow() -> str:
-    return (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text()
+    return _RELEASE_WORKFLOW.read_text()
 
 
 def test_markdown_section_stops_at_the_next_peer_heading() -> None:
@@ -1245,13 +1248,9 @@ def test_linux_bundle_pins_and_names_the_manylinux_2_28_baseline() -> None:
 
 
 def test_release_metadata_is_generated_in_the_build_job() -> None:
-    workflow = _release_workflow()
-    build = workflow.index("\n  build:")
-    smoke = workflow.index("\n  smoke:")
-    sbom = workflow.index("\n  sbom:")
-    offline = workflow.index("\n  offline:")
-    assert "scripts/release/metadata.py" in workflow[build:smoke]
-    assert "scripts/release/metadata.py" not in workflow[sbom:offline]
+    jobs = workflow_jobs(_RELEASE_WORKFLOW)
+    assert any("scripts/release/metadata.py" in script for script in run_scripts(jobs["build"]))
+    assert not any("scripts/release/metadata.py" in script for script in run_scripts(jobs["sbom"]))
 
 
 def test_release_build_toolchain_is_fully_pinned() -> None:
@@ -1312,16 +1311,21 @@ def test_release_audit_covers_every_shipped_extra() -> None:
 
 
 def test_draft_release_is_staged_before_irreversible_pypi_publication() -> None:
-    workflow = _release_workflow()
-    stage = workflow.index("\n  stage-github-release:")
-    publish = workflow.index("\n  publish-pypi:")
-    finalize = workflow.index("\n  finalize-github-release:")
-    assert stage < publish < finalize
-    assert "gh release create" in workflow[stage:publish]
-    assert "--draft" in workflow[stage:publish]
-    assert "scripts/release/compare_assets.py" in workflow[stage:publish]
-    assert "skip-existing: true" in workflow[publish:finalize]
-    assert "--draft=false" in workflow[finalize:]
+    jobs = workflow_jobs(_RELEASE_WORKFLOW)
+    assert set(jobs["stage-github-release"]["needs"]) == {"verify", "smoke", "attest"}
+    assert set(jobs["publish-pypi"]["needs"]) == {"verify", "stage-github-release"}
+    assert set(jobs["finalize-github-release"]["needs"]) == {"verify", "publish-pypi"}
+    stage_scripts = "\n".join(run_scripts(jobs["stage-github-release"]))
+    assert "gh release create" in stage_scripts
+    assert "--draft" in stage_scripts
+    assert "scripts/release/compare_assets.py" in stage_scripts
+    publish_step = next(
+        step
+        for step in jobs["publish-pypi"]["steps"]
+        if str(step.get("uses", "")).startswith("pypa/gh-action-pypi-publish")
+    )
+    assert publish_step.get("with", {}).get("skip-existing") is True
+    assert "--draft=false" in "\n".join(run_scripts(jobs["finalize-github-release"]))
 
 
 def test_release_docs_require_immutable_protected_tags() -> None:
@@ -1576,71 +1580,88 @@ def test_workflow_exports_source_commit_without_logging_it_from_python() -> None
 
 def test_release_workflow_has_a_main_only_non_publishing_manual_dry_run() -> None:
     workflow = _release_workflow()
-    verify = workflow.index("\n  verify:")
-    build = workflow.index("\n  build:")
-    stage = workflow.index("\n  stage-github-release:")
-    publish = workflow.index("\n  publish-pypi:")
-    finalize = workflow.index("\n  finalize-github-release:")
+    jobs = workflow_jobs(_RELEASE_WORKFLOW)
     assert "workflow_dispatch:" in workflow
-    assert "scripts/release/check_dry_run.py" in workflow
-    assert "refs/heads/main" in workflow[verify:build]
-    assert "check_dry_run.py origin/main" in workflow[verify:build]
-    assert "check_source.py" in workflow[verify:build]
-    manual_start = workflow.index('elif [ "$EVENT_NAME" = "workflow_dispatch" ]', verify, build)
-    manual_end = workflow.index("\n          else", manual_start, build)
-    assert "check_source.py" not in workflow[manual_start:manual_end]
-    assert "github.event_name == 'push'" in workflow[stage:publish]
-    assert "github.event_name == 'push'" in workflow[publish:finalize]
-    assert "github.event_name == 'push'" in workflow[finalize:]
+    version_script = _verify_step_run("id", "version")
+    source_script = _verify_step_run("id", "source")
+    assert 'if [ "$REF" != "refs/heads/main" ]' in version_script
+    assert "check_dry_run.py origin/main" in version_script
+    assert "check_source.py" in source_script
+    manual_start = version_script.index('elif [ "$EVENT_NAME" = "workflow_dispatch" ]')
+    manual_end = version_script.index("\nelse\n", manual_start)
+    assert "check_source.py" not in version_script[manual_start:manual_end]
+    for job_name in ("stage-github-release", "publish-pypi", "finalize-github-release"):
+        assert jobs[job_name]["if"] == "github.event_name == 'push'"
 
 
 def test_release_workflow_smoke_matrix_covers_every_supported_runner_and_variant() -> None:
-    workflow = _release_workflow()
-    smoke = workflow.index("\n  smoke:")
-    sbom = workflow.index("\n  sbom:")
-    smoke_job = workflow[smoke:sbom]
-    assert "fail-fast: false" in smoke_job
-    assert "os: [ubuntu-latest, macos-latest, windows-latest]" in smoke_job
-    assert 'python-version: ["3.11", "3.12", "3.13"]' in smoke_job
-    assert "variant: [base, agent, mcp, all]" in smoke_job
-    assert "runs-on: ${{ matrix.os }}" in smoke_job
+    smoke_job = workflow_jobs(_RELEASE_WORKFLOW)["smoke"]
+    matrix = smoke_job["strategy"]["matrix"]
+    assert smoke_job["strategy"]["fail-fast"] is False
+    assert matrix["os"] == ["ubuntu-latest", "macos-latest", "windows-latest"]
+    assert matrix["python-version"] == ["3.11", "3.12", "3.13"]
+    assert matrix["variant"] == ["base", "agent", "mcp", "all"]
+    assert smoke_job["runs-on"] == "${{ matrix.os }}"
 
 
 def test_release_workflow_smokes_the_downloaded_wheel_once_without_rebuilding() -> None:
-    workflow = _release_workflow()
-    smoke = workflow.index("\n  smoke:")
-    sbom = workflow.index("\n  sbom:")
-    smoke_job = workflow[smoke:sbom]
-    assert smoke_job.count("scripts/release/smoke_install.py") == 1
-    assert "name: dist" in smoke_job
-    assert "path: dist" in smoke_job
-    assert "python-version: ${{ matrix.python-version }}" in smoke_job
-    assert "${{ runner.temp }}" in smoke_job
-    assert "uv build" not in smoke_job
+    smoke_job = workflow_jobs(_RELEASE_WORKFLOW)["smoke"]
+    scripts = run_scripts(smoke_job)
+    download_step = next(
+        step
+        for step in smoke_job["steps"]
+        if str(step.get("uses", "")).startswith("actions/download-artifact")
+    )
+    setup_python_step = next(
+        step
+        for step in smoke_job["steps"]
+        if str(step.get("uses", "")).startswith("actions/setup-python")
+    )
+    smoke_step = next(
+        step
+        for step in smoke_job["steps"]
+        if "scripts/release/smoke_install.py" in str(step.get("run", ""))
+    )
+    assert sum("scripts/release/smoke_install.py" in script for script in scripts) == 1
+    assert download_step.get("with", {}).get("name") == "dist"
+    assert download_step.get("with", {}).get("path") == "dist"
+    assert setup_python_step.get("with", {}).get("python-version") == "${{ matrix.python-version }}"
+    assert "${{ runner.temp }}" in smoke_step.get("env", {}).get("WORKSPACE", "")
+    assert "uv build" not in "\n".join(scripts)
 
 
 # --- the dry-run source policy compares against the live remote -------------
 
 
 def test_release_workflow_refreshes_live_source_refs_before_source_policy() -> None:
-    workflow = _release_workflow()
-    verify = workflow.index("\n  verify:")
-    build = workflow.index("\n  build:")
-    verify_job = workflow[verify:build]
-    branch_fetch = verify_job.index('"refs/heads/main:refs/remotes/origin/main"')
-    tag_fetch = verify_job.index('git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"')
-    dry_run_check = verify_job.index("check_dry_run.py origin/main")
-    source_check = verify_job.index("check_source.py")
+    verify_job = workflow_jobs(_RELEASE_WORKFLOW)["verify"]
+    steps = verify_job["steps"]
+    fetch_index = next(
+        i
+        for i, step in enumerate(steps)
+        if step.get("name") == "Fetch the live trusted source refs"
+    )
+    version_index = next(i for i, step in enumerate(steps) if step.get("id") == "version")
+    source_index = next(i for i, step in enumerate(steps) if step.get("id") == "source")
+    fetch_step = steps[fetch_index]
+    checkout_step = next(
+        step for step in steps if str(step.get("uses", "")).startswith("actions/checkout")
+    )
+    fetch_script = str(fetch_step["run"])
 
-    assert branch_fetch < dry_run_check
-    assert tag_fetch < source_check
+    assert fetch_index < version_index < source_index
+    assert fetch_script.index('"refs/heads/main:refs/remotes/origin/main"') < fetch_script.index(
+        'git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"'
+    )
     assert (
         'if [ "$EVENT_NAME" = "push" ]; then\n'
-        '            git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"\n'
-        "          fi"
-    ) in verify_job
-    assert "TAG: ${{ github.ref_name }}" in verify_job
-    assert "fetch-depth: 0" in verify_job
+        '  git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"\n'
+        "fi"
+    ) in fetch_script
+    assert "check_dry_run.py origin/main" in _verify_step_run("id", "version")
+    assert "check_source.py" in _verify_step_run("id", "source")
+    assert fetch_step.get("env", {}).get("TAG") == "${{ github.ref_name }}"
+    assert checkout_step.get("with", {}).get("fetch-depth") == 0
 
 
 def test_release_workflow_restores_overwritten_annotated_tag_before_source_policy(
@@ -1713,68 +1734,74 @@ def test_release_workflow_rejects_restored_tag_that_differs_from_event_commit(
 
 
 def test_release_workflow_binds_restored_tag_to_event_commit_before_validation() -> None:
-    workflow = _release_workflow()
-    verify = workflow.index("\n  verify:")
-    build = workflow.index("\n  build:")
-    verify_job = workflow[verify:build]
+    source_script = _verify_step_run("id", "source")
     assert (
         'source_commit=$(git rev-list -n 1 "refs/tags/$TAG")\n'
-        '            if [ "$source_commit" != "$GITHUB_SHA" ]; then\n'
-        '              echo "release tag does not match event commit"\n'
-        "              exit 1\n"
-        "            fi\n"
-        "            uv run --no-project python scripts/release/check_source.py"
-    ) in verify_job
+        '  if [ "$source_commit" != "$GITHUB_SHA" ]; then\n'
+        '    echo "release tag does not match event commit"\n'
+        "    exit 1\n"
+        "  fi\n"
+        "  uv run --no-project python scripts/release/check_source.py"
+    ) in source_script
 
 
 # --- provenance attestation is irreversible, so tag pushes only -------------
 
 
 def test_attestation_is_gated_to_tag_pushes_and_never_runs_on_a_dry_run() -> None:
-    workflow = _release_workflow()
-    document = yaml.safe_load(workflow)
-    collect = workflow.index("\n  collect:")
-    attest = workflow.index("\n  attest:")
-    stage = workflow.index("\n  stage-github-release:")
-    assert collect < attest < stage
-    assert "github.event_name == 'push'" not in workflow[collect:attest]
-    assert document["jobs"]["attest"]["needs"] == ["verify", "collect", "smoke"]
-    assert "if: github.event_name == 'push'" in workflow[attest:stage]
-    assert "actions/attest-build-provenance" in workflow[attest:stage]
+    jobs = workflow_jobs(_RELEASE_WORKFLOW)
+    assert "if" not in jobs["collect"]
+    assert set(jobs["attest"]["needs"]) == {"verify", "collect", "smoke"}
+    assert jobs["attest"]["if"] == "github.event_name == 'push'"
+    assert "attest" in set(jobs["stage-github-release"]["needs"])
+    attest_step = next(
+        step
+        for step in jobs["attest"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/attest-build-provenance")
+    )
+    assert attest_step.get("with", {}).get("subject-path") == "release-files/*"
 
 
 def test_attestation_revalidates_live_tag_and_main_immediately_before_signing() -> None:
-    workflow = _release_workflow()
-    attest = workflow.index("\n  attest:")
-    stage = workflow.index("\n  stage-github-release:")
-    attest_job = workflow[attest:stage]
-    fetch = attest_job.index(
-        "git fetch --force origin \\\n"
-        '            "+refs/tags/$TAG:refs/tags/$TAG" \\\n'
-        '            "refs/heads/main:refs/remotes/origin/main"'
+    attest_job = workflow_jobs(_RELEASE_WORKFLOW)["attest"]
+    steps = attest_job["steps"]
+    revalidate_index = next(
+        i
+        for i, step in enumerate(steps)
+        if step.get("name") == "Revalidate the remote tag immediately before attestation"
     )
-    check = attest_job.index(
-        'python scripts/release/check_source.py "$TAG" origin/main \\\n'
-        '            --expected-commit "$EXPECTED_COMMIT"'
+    sign_index = next(
+        i
+        for i, step in enumerate(steps)
+        if str(step.get("uses", "")).startswith("actions/attest-build-provenance")
     )
-    sign = attest_job.index("actions/attest-build-provenance")
-    assert fetch < check < sign
-    assert "fetch-depth: 0" in attest_job
-    assert "TAG: ${{ github.ref_name }}" in attest_job
-    assert "EXPECTED_COMMIT: ${{ needs.verify.outputs.source_commit }}" in attest_job
+    checkout_step = next(
+        step for step in steps if str(step.get("uses", "")).startswith("actions/checkout")
+    )
+    revalidate_step = steps[revalidate_index]
+    revalidate_script = str(revalidate_step["run"])
+    fetch = revalidate_script.index("git fetch --force origin")
+    check = revalidate_script.index('python scripts/release/check_source.py "$TAG" origin/main')
+
+    assert fetch < check
+    assert revalidate_index < sign_index
+    assert checkout_step.get("with", {}).get("fetch-depth") == 0
+    assert revalidate_step.get("env", {}).get("TAG") == "${{ github.ref_name }}"
+    assert (
+        revalidate_step.get("env", {}).get("EXPECTED_COMMIT")
+        == "${{ needs.verify.outputs.source_commit }}"
+    )
 
 
 # --- no GitHub expressions inside shell bodies ------------------------------
 
 
 def _workflow_run_bodies() -> list[tuple[str, str]]:
-    document = yaml.safe_load(_release_workflow())
-    bodies: list[tuple[str, str]] = []
-    for job_name, job in document["jobs"].items():
-        for step in job.get("steps", []):
-            if "run" in step:
-                bodies.append((job_name, step["run"]))
-    return bodies
+    return [
+        (job_name, script)
+        for job_name, job in workflow_jobs(_RELEASE_WORKFLOW).items()
+        for script in run_scripts(job)
+    ]
 
 
 def test_release_workflow_keeps_github_expressions_out_of_shell_bodies() -> None:
@@ -1783,13 +1810,15 @@ def test_release_workflow_keeps_github_expressions_out_of_shell_bodies() -> None
 
 
 def test_release_workflow_smoke_step_passes_matrix_values_through_env() -> None:
-    workflow = _release_workflow()
-    smoke = workflow.index("\n  smoke:")
-    sbom = workflow.index("\n  sbom:")
-    smoke_job = workflow[smoke:sbom]
-    assert "VERSION: ${{ needs.verify.outputs.version }}" in smoke_job
-    assert "VARIANT: ${{ matrix.variant }}" in smoke_job
-    assert "shell: bash" in smoke_job
+    smoke_job = workflow_jobs(_RELEASE_WORKFLOW)["smoke"]
+    smoke_step = next(
+        step
+        for step in smoke_job["steps"]
+        if step.get("name") == "Smoke-test the downloaded wheel in a clean workspace"
+    )
+    assert smoke_step.get("env", {}).get("VERSION") == "${{ needs.verify.outputs.version }}"
+    assert smoke_step.get("env", {}).get("VARIANT") == "${{ matrix.variant }}"
+    assert smoke_step.get("shell") == "bash"
 
 
 # --- the 36-cell smoke matrix must not hang a release -----------------------
