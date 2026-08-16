@@ -65,6 +65,7 @@ class ImpactAction(StrEnum):
 
     DELETE = "delete"
     ROLLOUT_RESTART = "rollout_restart"
+    SCALE_DOWN = "scale_down"
 
 
 #: Relations a delete may follow in reverse (target -> its dependents).
@@ -93,9 +94,33 @@ _ROLLOUT_RESTART_RELATIONS: frozenset[RelationKind] = frozenset(
     {RelationKind.OWNED_BY, RelationKind.MANAGED_BY}
 )
 
+#: Scaling a workload down replaces or removes some of its Pods, so the
+#: ownership/management chain below it is affected the same way a rollout
+#: restart's is. `SELECTS` and `ROUTES_TO` are additionally followed here -
+#: unlike delete and rollout-restart, which never claim a Service or a
+#: routing backend fails - because scaling down is the one action where a
+#: selector or route pointing at a shrinking replica set is a conservative,
+#: known dependent worth listing for the reader to check. This still never
+#: asserts that the Service loses an endpoint or that traffic actually
+#: fails; it only says the relationship exists and was observed. PDB, volume,
+#: config, node, and binding relations are excluded because scaling down
+#: does not detach a mounted volume or ConfigMap, evict a Pod past its PDB,
+#: move a Pod off its node, or unbind a claim - those relations describe
+#: what a *remaining* Pod still holds, not something the scale-down itself
+#: changes.
+_SCALE_DOWN_RELATIONS: frozenset[RelationKind] = frozenset(
+    {
+        RelationKind.OWNED_BY,
+        RelationKind.MANAGED_BY,
+        RelationKind.SELECTS,
+        RelationKind.ROUTES_TO,
+    }
+)
+
 ACTION_RELATIONS: Mapping[ImpactAction, frozenset[RelationKind]] = {
     ImpactAction.DELETE: _DELETE_RELATIONS,
     ImpactAction.ROLLOUT_RESTART: _ROLLOUT_RESTART_RELATIONS,
+    ImpactAction.SCALE_DOWN: _SCALE_DOWN_RELATIONS,
 }
 
 

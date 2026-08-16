@@ -185,14 +185,26 @@ _DELETE_CASES = [
 ]
 
 
-def test_only_delete_and_rollout_restart_carry_action_semantics() -> None:
-    assert [action.value for action in ImpactAction] == ["delete", "rollout_restart"]
+def test_only_supported_writes_carry_action_semantics() -> None:
+    assert [action.value for action in ImpactAction] == [
+        "delete",
+        "rollout_restart",
+        "scale_down",
+    ]
     assert set(ACTION_RELATIONS) == set(ImpactAction)
+    assert ACTION_RELATIONS[ImpactAction.SCALE_DOWN] == frozenset(
+        {
+            RelationKind.OWNED_BY,
+            RelationKind.MANAGED_BY,
+            RelationKind.SELECTS,
+            RelationKind.ROUTES_TO,
+        }
+    )
     assert RelationKind.SELECTS not in ACTION_RELATIONS[ImpactAction.DELETE]
     assert RelationKind.SELECTS not in ACTION_RELATIONS[ImpactAction.ROLLOUT_RESTART]
     assert {
         cast(RelationshipEdge, edge).relation for param in _DELETE_CASES for edge in param.values
-    } == (ACTION_RELATIONS[ImpactAction.DELETE])
+    } == ACTION_RELATIONS[ImpactAction.DELETE]
 
 
 @pytest.mark.parametrize("edge", _DELETE_CASES)
@@ -254,6 +266,50 @@ def test_rollout_restart_ignores_every_relation_outside_its_closed_set(
         _graph(_edge(other, deployment, relation, field="spec.selector")),
         ImpactAction.ROLLOUT_RESTART,
         deployment,
+    )
+    assert summary.direct == ()
+    assert summary.transitive == ()
+
+
+@pytest.mark.parametrize(
+    "relation",
+    [
+        RelationKind.OWNED_BY,
+        RelationKind.MANAGED_BY,
+        RelationKind.SELECTS,
+        RelationKind.ROUTES_TO,
+    ],
+)
+def test_scale_down_follows_every_relation_in_its_closed_set(relation: RelationKind) -> None:
+    workload = _res("Deployment", "web", group="apps", uid="deploy-1")
+    dependent = _res("Pod", "web-abc-1", uid="pod-1")
+    summary = summarize_impact(
+        _graph(_edge(dependent, workload, relation, field="spec.selector")),
+        ImpactAction.SCALE_DOWN,
+        workload,
+    )
+    assert [item.resource for item in summary.direct] == [dependent]
+
+
+@pytest.mark.parametrize(
+    "relation",
+    [
+        RelationKind.USES_VOLUME,
+        RelationKind.USES_CONFIG,
+        RelationKind.PROTECTED_BY,
+        RelationKind.SCHEDULED_ON,
+        RelationKind.BOUND_TO,
+    ],
+)
+def test_scale_down_ignores_every_relation_outside_its_closed_set(
+    relation: RelationKind,
+) -> None:
+    workload = _res("Deployment", "web", group="apps", uid="deploy-1")
+    other = _res("PodDisruptionBudget", "web", group="policy", uid="other-1")
+    summary = summarize_impact(
+        _graph(_edge(other, workload, relation, field="spec.selector")),
+        ImpactAction.SCALE_DOWN,
+        workload,
     )
     assert summary.direct == ()
     assert summary.transitive == ()
