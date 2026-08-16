@@ -18,7 +18,7 @@ from korvid.agent.events import TurnComplete, TurnInterrupted
 from korvid.agent.runtime import AgentRuntime
 from korvid.tools.executor import RecordedExecution
 
-from .test_runtime import EchoExecutor, ScriptedProvider
+from .runtime_fakes import EchoExecutor, ScriptedProvider
 
 
 class StalledProvider:
