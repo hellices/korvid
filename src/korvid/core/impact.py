@@ -25,7 +25,9 @@ would distort that shared API if pushed into it:
   tree edge, so a dialog can show the chain it is claiming;
 - unresolved references are filtered by the affected set the walk produced,
   and by whichever relation policy the action chose - every action picks one
-  explicitly, there is no default (see `ACTION_UNRESOLVED_RELATIONS`);
+  explicitly, there is no default, and the pick is only ever
+  "relation-blind" or "the very set this action walks" (see
+  `ACTION_UNRESOLVED_RELATIONS`);
 - the caps (`ImpactLimits`) are an order of magnitude smaller than the
   graph view's and must stay independent of them - an approval dialog is
   not a graph screen.
@@ -115,7 +117,16 @@ _ROLLOUT_RESTART_RELATIONS: frozenset[RelationKind] = frozenset(
 #: Pod off its node, or unbind a claim - those relations describe what a
 #: *remaining* Pod still holds, not something the scale-down itself changes.
 #: For the same reason a scale-down's unresolved-reference warning is
-#: filtered by this set as well - see `ACTION_UNRESOLVED_RELATIONS`.
+#: filtered by this set as well - `ACTION_UNRESOLVED_RELATIONS` maps
+#: `SCALE_DOWN` to *this very frozenset*, deliberately and by reference. The
+#: two policies are not independently authored sets that happen to agree
+#: today: a relation this action refuses to walk is a relation it refuses to
+#: claim anything about, warning included, so the walk's closed set and the
+#: warning's closed set must be the same object. Editing this set therefore
+#: moves both halves of the action's semantics at once, which is the point -
+#: adding a relation here that the warning kept out (or dropping one the
+#: warning kept in) is exactly the divergence the coupling makes
+#: unexpressible.
 _SCALE_DOWN_RELATIONS: frozenset[RelationKind] = frozenset(
     {
         RelationKind.OWNED_BY,
@@ -142,6 +153,15 @@ ACTION_RELATIONS: Mapping[ImpactAction, frozenset[RelationKind]] = {
 #: each action has the policy it has, and
 #: `tests/core/test_impact.py::test_every_action_chooses_its_unresolved_reference_policy`
 #: pins the exhaustiveness.
+#:
+#: The choice this mapping exists to record is *relation-blind `None` versus
+#: the action's own walked set* - not "which relations shall the warning
+#: list". So `SCALE_DOWN` reuses `_SCALE_DOWN_RELATIONS` by reference rather
+#: than restating its four members: a second literal would be a second place
+#: to edit and would let the walk and the warning drift into claiming
+#: different things about the same action. Delete and rollout restart pick
+#: the other option, `None`, which is a real decision and not an omission -
+#: see `_unresolved_edges`.
 ACTION_UNRESOLVED_RELATIONS: Mapping[ImpactAction, frozenset[RelationKind] | None] = {
     ImpactAction.DELETE: None,
     ImpactAction.ROLLOUT_RESTART: None,
@@ -287,8 +307,11 @@ def _unresolved_edges(
     The policy is read from `ACTION_UNRESOLVED_RELATIONS`, which is keyed by
     every `ImpactAction`: there is no default and no membership fallback, so
     an action that never chose one raises `KeyError` here rather than
-    quietly inheriting the more permissive half. Both policies are
-    additionally bounded by the affected set.
+    quietly inheriting the more permissive half. The choice is binary -
+    relation-blind `None`, or the action's *own* closed set, the same
+    frozenset its walk is filtered by - and never a third, separately
+    authored list of relations. Both policies are additionally bounded by
+    the affected set.
 
     - `DELETE` and `ROLLOUT_RESTART` map to `None` - warn about a dangling
       reference of *any* relation. A delete removes the object those
@@ -297,13 +320,16 @@ def _unresolved_edges(
       exists is a real reason the action may not land the way the reader
       expects (the restarted Pod will not come back). Narrowing those to the
       walk's own relations would drop exactly the warning that matters.
-    - `SCALE_DOWN` maps to its own closed set (`_SCALE_DOWN_RELATIONS`).
-      Scaling down does not detach a mounted volume or ConfigMap, evict a
-      Pod past its PDB, move a Pod off its node, or unbind a claim - which
-      is why those relations are excluded from the walk in the first place.
-      A *dangling* one of them says nothing more about the scale-down than a
-      resolved one would, so warning about it would reintroduce, as a
-      warning, precisely the claim the closed set refuses to make.
+    - `SCALE_DOWN` maps to its own closed set (`_SCALE_DOWN_RELATIONS`, by
+      reference - not a copy of its members). Scaling down does not detach a
+      mounted volume or ConfigMap, evict a Pod past its PDB, move a Pod off
+      its node, or unbind a claim - which is why those relations are
+      excluded from the walk in the first place. A *dangling* one of them
+      says nothing more about the scale-down than a resolved one would, so
+      warning about it would reintroduce, as a warning, precisely the claim
+      the closed set refuses to make. Sharing the frozenset is what makes
+      that guarantee structural: the set an action may walk and the set it
+      may warn about cannot be edited apart.
 
     Keeping the choice in a mapping rather than at the call site means an
     action added to `ACTION_RELATIONS` also has to decide this, and both

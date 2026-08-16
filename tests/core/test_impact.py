@@ -218,13 +218,19 @@ def test_every_action_chooses_its_unresolved_reference_policy() -> None:
     to choose is absent from the mapping, so `summarize_impact` raises
     rather than inheriting whichever policy happened to be the default -
     and this assertion fails before that code ever runs.
+
+    The scale-down half is asserted with `is`, not `==`: the policy is
+    "reuse the action's own walked set", so the two mappings must hold the
+    *same* frozenset. An equal-but-separate literal would satisfy `==` while
+    reopening exactly the drift the shared object rules out - a relation
+    added to the walk but not to the warning, or the reverse.
     """
     assert set(ACTION_UNRESOLVED_RELATIONS) == set(ImpactAction)
     assert ACTION_UNRESOLVED_RELATIONS[ImpactAction.DELETE] is None
     assert ACTION_UNRESOLVED_RELATIONS[ImpactAction.ROLLOUT_RESTART] is None
     assert (
         ACTION_UNRESOLVED_RELATIONS[ImpactAction.SCALE_DOWN]
-        == ACTION_RELATIONS[ImpactAction.SCALE_DOWN]
+        is ACTION_RELATIONS[ImpactAction.SCALE_DOWN]
     )
 
 
