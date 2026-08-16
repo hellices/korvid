@@ -13,7 +13,7 @@ import unicodedata
 
 import pytest
 
-from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary
+from korvid.core.impact import ImpactAction, ImpactItem, ImpactSummary, summarize_impact
 from korvid.core.relationships import (
     CoverageRecord,
     CoverageState,
@@ -21,6 +21,7 @@ from korvid.core.relationships import (
     EvidencePointer,
     GraphResource,
     RelationshipEdge,
+    RelationshipGraph,
 )
 from korvid.k8s.relationship_facts import FactConfidence, RelationKind
 from korvid.ui.impact_preview import (
@@ -30,11 +31,15 @@ from korvid.ui.impact_preview import (
     _MAX_LINE,
     _MAX_TEXT,
     _MIN_NAME_BUDGET,
+    _SCALE_DOWN_HPA_LINE,
+    _SCALE_DOWN_PDB_LINE,
+    _SCALE_DOWN_STS_PVC_LINE,
     _TRUNCATION_SUFFIX,
     ADVISORY_LINE,
     IMPACT_TITLE,
     IMPACT_UNAVAILABLE_LINES,
     render_impact_lines,
+    render_unavailable_lines,
 )
 
 _DEPLOY = GraphResource(group="apps", kind="Deployment", namespace="prod", name="web", uid="d-1")
@@ -154,6 +159,168 @@ def test_empty_sections_and_complete_coverage_are_stated_explicitly() -> None:
     assert "  known transitive dependents (may be affected): none in this snapshot" in lines
     assert "  graph coverage: complete" in lines
     assert lines[2] == ADVISORY_LINE
+
+
+def test_scale_down_names_the_action_and_static_limitations() -> None:
+    lines = render_impact_lines(_summary(action=ImpactAction.SCALE_DOWN, target=_DEPLOY))
+    assert lines[:6] == (
+        IMPACT_TITLE,
+        "  scale down apps/Deployment/prod/web",
+        ADVISORY_LINE,
+        _SCALE_DOWN_PDB_LINE,
+        _SCALE_DOWN_HPA_LINE,
+        "  known direct dependents (may be affected): none in this snapshot",
+    )
+    assert _SCALE_DOWN_STS_PVC_LINE not in lines
+
+
+def test_statefulset_scale_down_names_the_unchecked_pvc_policy() -> None:
+    statefulset = GraphResource(
+        group="apps",
+        kind="StatefulSet",
+        namespace="prod",
+        name="db",
+        uid="sts-1",
+    )
+    lines = render_impact_lines(_summary(action=ImpactAction.SCALE_DOWN, target=statefulset))
+    assert lines.index(_SCALE_DOWN_STS_PVC_LINE) == lines.index(_SCALE_DOWN_HPA_LINE) + 1
+
+
+def test_a_statefulset_kind_in_another_group_gets_no_pvc_limitation() -> None:
+    """The line is about `apps/StatefulSet`'s
+    `persistentVolumeClaimRetentionPolicy`, a field only that API defines.
+
+    A CRD is free to call its kind `StatefulSet` in its own group, and a
+    kind-only test would state a retention policy that resource has never
+    had - a claim about the cluster, machine-defined or not. Group and kind
+    together are the type, so both select the line.
+    """
+    lookalike = GraphResource(
+        group="acme.example.com",
+        kind="StatefulSet",
+        namespace="prod",
+        name="db",
+        uid="crd-1",
+    )
+    lines = render_impact_lines(_summary(action=ImpactAction.SCALE_DOWN, target=lookalike))
+    assert _SCALE_DOWN_PDB_LINE in lines
+    assert _SCALE_DOWN_HPA_LINE in lines
+    assert _SCALE_DOWN_STS_PVC_LINE not in lines
+
+
+@pytest.mark.parametrize("action", [ImpactAction.DELETE, ImpactAction.ROLLOUT_RESTART])
+def test_non_scale_actions_never_render_scale_down_limitations(action: ImpactAction) -> None:
+    lines = render_impact_lines(_summary(action=action))
+    assert _SCALE_DOWN_PDB_LINE not in lines
+    assert _SCALE_DOWN_HPA_LINE not in lines
+    assert _SCALE_DOWN_STS_PVC_LINE not in lines
+
+
+#: A Pod managed by the target workload that holds one dangling reference of
+#: every relation a scale-down excludes from its closed set. Rendered
+#: through the real summarizer rather than a hand-built `ImpactSummary`, so
+#: the two halves of the policy - what the summary carries and what the
+#: dialog prints - are pinned together and neither can reintroduce the
+#: warning on its own.
+def _pod_with_excluded_dangling_references() -> RelationshipGraph:
+    missing = [
+        (
+            RelationKind.USES_VOLUME,
+            GraphResource(group="", kind="PersistentVolumeClaim", namespace="prod", name="data"),
+            "spec.volumes[0].persistentVolumeClaim",
+        ),
+        (
+            RelationKind.USES_CONFIG,
+            GraphResource(group="", kind="ConfigMap", namespace="prod", name="gone"),
+            "spec.volumes[1].configMap",
+        ),
+        (
+            RelationKind.PROTECTED_BY,
+            GraphResource(group="policy", kind="PodDisruptionBudget", namespace="prod", name="web"),
+            "spec.selector",
+        ),
+        (
+            RelationKind.SCHEDULED_ON,
+            GraphResource(group="", kind="Node", namespace="", name="worker-1"),
+            "spec.nodeName",
+        ),
+        (
+            RelationKind.BOUND_TO,
+            GraphResource(group="", kind="PersistentVolume", namespace="", name="pv-data"),
+            "spec.volumeName",
+        ),
+    ]
+    managed_by = RelationshipEdge(
+        subject=_POD,
+        target=_DEPLOY,
+        relation=RelationKind.MANAGED_BY,
+        confidence=FactConfidence.DECLARED,
+        evidence=EvidencePointer(resource=_DEPLOY, field="spec.selector"),
+        resolution=EdgeResolution.RESOLVED,
+    )
+    dangling = tuple(
+        RelationshipEdge(
+            subject=_POD,
+            target=target,
+            relation=relation,
+            confidence=FactConfidence.DECLARED,
+            evidence=EvidencePointer(resource=_POD, field=field),
+            resolution=EdgeResolution.MISSING,
+        )
+        for relation, target, field in missing
+    )
+    return RelationshipGraph(
+        nodes=(_DEPLOY, _POD),
+        edges=(managed_by, *dangling),
+        coverage=(
+            CoverageRecord(group="", resource="pods", scope="prod", state=CoverageState.COMPLETE),
+        ),
+        truncated=False,
+    )
+
+
+def test_a_rendered_scale_down_never_warns_about_an_excluded_relation() -> None:
+    """The dialog a scale-down produces states nothing about the relations
+    its closed set excludes - not as a dependent, and not as a warning.
+
+    A mounted volume, a mounted ConfigMap, a PDB, a node binding and a
+    bound volume are all things a *remaining* Pod still holds; a
+    scale-down neither detaches nor evaluates them, so a dangling one of
+    each must reach the approver's dialog as nothing at all.
+    """
+    summary = summarize_impact(
+        _pod_with_excluded_dangling_references(),
+        ImpactAction.SCALE_DOWN,
+        _DEPLOY,
+        scope="prod",
+    )
+    lines = render_impact_lines(summary)
+    assert "  known direct dependents (may be affected): 1" in lines
+    assert not [line for line in lines if "unresolved references" in line]
+    body = "\n".join(lines)
+    for excluded in ("uses_volume", "uses_config", "protected_by", "scheduled_on", "bound_to"):
+        assert excluded not in body
+
+
+def test_a_rendered_rollout_restart_still_warns_about_the_same_references() -> None:
+    """The same graph, restarted instead: every dangling reference is listed.
+
+    The restart recreates the Pod that has to satisfy them again, so this
+    is the contrast that keeps the scale-down assertion above a statement
+    about the *action*, not about a renderer that stopped printing the
+    section.
+    """
+    summary = summarize_impact(
+        _pod_with_excluded_dangling_references(),
+        ImpactAction.ROLLOUT_RESTART,
+        _DEPLOY,
+        scope="prod",
+    )
+    lines = render_impact_lines(summary)
+    assert "  unresolved references in the affected set: 5" in lines
+    body = "\n".join(lines)
+    for excluded in ("uses_volume", "uses_config", "protected_by", "scheduled_on", "bound_to"):
+        assert excluded in body
 
 
 def test_caps_and_cycles_are_reported_as_their_own_lines() -> None:
@@ -1122,3 +1289,87 @@ def test_unavailable_lines_are_static_and_keep_approval_available() -> None:
         IMPACT_TITLE,
         "  impact unavailable; approval remains available",
     )
+
+
+def test_unavailable_scale_down_still_states_the_pdb_and_hpa_limitations() -> None:
+    """Losing the snapshot must not silently drop what the snapshot never
+    said. Both limitation lines are machine-defined facts about what a
+    controller scale-down does *not* go through - true whether or not any
+    graph data was read - so an unavailable advisory that omitted them
+    would leave the approver with strictly less than the static truth."""
+    assert render_unavailable_lines(ImpactAction.SCALE_DOWN, "apps", "Deployment") == (
+        *IMPACT_UNAVAILABLE_LINES,
+        _SCALE_DOWN_PDB_LINE,
+        _SCALE_DOWN_HPA_LINE,
+    )
+
+
+def test_unavailable_scale_down_of_a_statefulset_keeps_the_pvc_limitation() -> None:
+    """The type-conditional line is selected the same way it is when the
+    snapshot loaded: by the target's group and kind, which the caller still
+    has."""
+    assert render_unavailable_lines(ImpactAction.SCALE_DOWN, "apps", "StatefulSet") == (
+        *IMPACT_UNAVAILABLE_LINES,
+        _SCALE_DOWN_PDB_LINE,
+        _SCALE_DOWN_HPA_LINE,
+        _SCALE_DOWN_STS_PVC_LINE,
+    )
+
+
+def test_unavailable_scale_down_of_a_statefulset_lookalike_omits_the_pvc_line() -> None:
+    """A CRD whose kind is spelled `StatefulSet` in its own group has no
+    `persistentVolumeClaimRetentionPolicy`, so the fail-open path must not
+    invent one for it either - the two renderings select the line from the
+    same pair."""
+    assert render_unavailable_lines(ImpactAction.SCALE_DOWN, "acme.example.com", "StatefulSet") == (
+        *IMPACT_UNAVAILABLE_LINES,
+        _SCALE_DOWN_PDB_LINE,
+        _SCALE_DOWN_HPA_LINE,
+    )
+
+
+@pytest.mark.parametrize(
+    ("group", "kind"),
+    [("apps", "Deployment"), ("apps", "StatefulSet"), ("acme.example.com", "StatefulSet")],
+)
+def test_unavailable_scale_down_notes_are_the_available_ones_in_the_same_order(
+    group: str,
+    kind: str,
+) -> None:
+    """One source for the limitation text, not two: whatever a rendered
+    scale-down summary states unconditionally is exactly what the
+    unavailable advisory states, in the order it states it - for the
+    lookalike group as much as for the real one."""
+    target = GraphResource(group=group, kind=kind, namespace="prod", name="web", uid="uid-1")
+    available = render_impact_lines(_summary(action=ImpactAction.SCALE_DOWN, target=target))
+    notes = render_unavailable_lines(ImpactAction.SCALE_DOWN, group, kind)[
+        len(IMPACT_UNAVAILABLE_LINES) :
+    ]
+    assert notes
+    assert [line for line in available if line in notes] == list(notes)
+
+
+@pytest.mark.parametrize("action", [ImpactAction.DELETE, ImpactAction.ROLLOUT_RESTART])
+@pytest.mark.parametrize("kind", ["Deployment", "StatefulSet"])
+def test_unavailable_delete_and_restart_stay_exactly_the_generic_advisory(
+    action: ImpactAction, kind: str
+) -> None:
+    """Nothing scale-specific leaks into the other two actions - a delete
+    of a StatefulSet has no scale-down limitation to state."""
+    assert render_unavailable_lines(action, "apps", kind) == IMPACT_UNAVAILABLE_LINES
+
+
+@pytest.mark.parametrize("action", list(ImpactAction))
+def test_every_unavailable_line_is_titled_bounded_and_cluster_free(action: ImpactAction) -> None:
+    """The same bound the available rendering applies, and no fragment of
+    the caller's identity: a group and kind select a line, they never
+    become one."""
+    real = render_unavailable_lines(action, "apps", "StatefulSet")
+    sentinel_group, sentinel_kind = "zzz.example.com", "Zzzleak"
+    sentinel = render_unavailable_lines(action, sentinel_group, sentinel_kind)
+    for lines in (real, sentinel):
+        assert lines[0] == IMPACT_TITLE
+        assert all(len(line) <= _MAX_LINE for line in lines)
+    rendered_sentinel = "\n".join(sentinel)
+    assert sentinel_group not in rendered_sentinel
+    assert sentinel_kind not in rendered_sentinel

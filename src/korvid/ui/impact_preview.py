@@ -84,7 +84,28 @@ _ALL_NAMESPACES_LABEL = "all namespaces"
 _ACTION_LABEL = {
     ImpactAction.DELETE: "delete",
     ImpactAction.ROLLOUT_RESTART: "rollout restart",
+    ImpactAction.SCALE_DOWN: "scale down",
 }
+
+#: Machine-defined limitation notes shown only for `ImpactAction.SCALE_DOWN`.
+#: A controller-driven scale-down is not routed through the Eviction API, so
+#: PodDisruptionBudgets never see it and cannot gate it - and an
+#: autoscaler's own targeting/reconciliation loop is likewise outside what
+#: this snapshot evaluates. Both are static facts about what the walk does
+#: not check, not something derived from the cluster, so they render
+#: unconditionally whenever the action is a scale-down.
+_SCALE_DOWN_PDB_LINE = (
+    "  controller scale-down is not an Eviction API request; PodDisruptionBudgets do not gate it"
+)
+_SCALE_DOWN_HPA_LINE = "  HorizontalPodAutoscaler targeting and reconciliation are not evaluated"
+#: Only relevant when the target itself is an `apps/StatefulSet`: a
+#: Deployment scale down has no PVC retention policy to leave unchecked,
+#: and neither has a custom resource that merely spells its kind the same
+#: way in a group of its own - `persistentVolumeClaimRetentionPolicy` is a
+#: field of the `apps` API, so the group is part of what selects the line.
+_SCALE_DOWN_STS_PVC_GROUP = "apps"
+_SCALE_DOWN_STS_PVC_KIND = "StatefulSet"
+_SCALE_DOWN_STS_PVC_LINE = "  StatefulSet PVC retention policy is not evaluated"
 
 #: Hard output bounds: an approval dialog must stay reviewable, and a
 #: pathological cluster must not be able to grow it.
@@ -144,6 +165,7 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     # below it, and the body between here and the end can run to the
     # preview's caps.
     lines.append(ADVISORY_LINE)
+    lines.extend(_action_note_lines(summary.action, summary.target.group, summary.target.kind))
     lines.extend(_section(_DIRECT_TITLE, summary.direct, capped=capped))
     lines.extend(_section(_TRANSITIVE_TITLE, summary.transitive, capped=capped))
     lines.extend(_inferred_lines(summary))
@@ -153,6 +175,35 @@ def render_impact_lines(summary: ImpactSummary) -> tuple[str, ...]:
     lines.append(_scope_line(summary))
     lines.extend(_coverage_lines(summary))
     lines.extend(_cap_lines(summary))
+    return tuple(_bounded(line) for line in lines)
+
+
+def render_unavailable_lines(action: ImpactAction, group: str, kind: str) -> tuple[str, ...]:
+    """Render the advisory for a snapshot that could not be produced.
+
+    The generic advisory says only that the graph-derived part is missing
+    and that approval is unaffected; a scale-down's limitation lines are
+    not graph-derived at all. `_action_note_lines` states what a controller
+    scale-down never routes through (the Eviction API, and so a
+    PodDisruptionBudget), what this walk never evaluates (an HPA's own
+    targeting and reconciliation), and - for an `apps/StatefulSet` only -
+    the PVC retention policy that decides what happens to the removed
+    replicas' claims. Every one of those is true whether or not a single object was
+    read, so dropping them on a timeout or a loader failure would take
+    correct information away from the approver exactly where korvid has
+    least to offer.
+
+    `group` and `kind` are the target's type and are only ever *compared*,
+    never rendered, so the output stays entirely machine-defined - the
+    reason the fail-open path exists is that cluster-derived text (an
+    exception message carrying a response body) must not reach the dialog.
+    The lines are capped exactly as the available rendering caps them, so
+    both paths share one bound as well as one wording.
+
+    Delete and rollout restart have no such static limitation, so for them
+    this is `IMPACT_UNAVAILABLE_LINES` unchanged.
+    """
+    lines = [*IMPACT_UNAVAILABLE_LINES, *_action_note_lines(action, group, kind)]
     return tuple(_bounded(line) for line in lines)
 
 
@@ -180,6 +231,30 @@ def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - len(_TRUNCATION_SUFFIX)].rstrip(".") + _TRUNCATION_SUFFIX
+
+
+def _action_note_lines(action: ImpactAction, group: str, kind: str) -> list[str]:
+    """Static limitations that only a scale-down leaves unchecked.
+
+    Machine-defined, not cluster-derived: nothing here depends on what the
+    snapshot found, only on the action and the target's type, so it renders
+    identically for every scale-down of a given type - including the one
+    whose snapshot never arrived (`render_unavailable_lines`).
+
+    The type is the *pair*, never the kind alone: a kind is unique only
+    within its group, and a CRD may name its own kind `StatefulSet`. Only
+    `apps/StatefulSet` has a `persistentVolumeClaimRetentionPolicy`, so
+    matching on the kind alone would state a policy the lookalike has never
+    had - a claim about the cluster rather than a fact about the walk.
+    Group and kind *select* a line, they never become one, so nothing
+    cluster-controlled reaches the output.
+    """
+    if action is not ImpactAction.SCALE_DOWN:
+        return []
+    lines = [_SCALE_DOWN_PDB_LINE, _SCALE_DOWN_HPA_LINE]
+    if (group, kind) == (_SCALE_DOWN_STS_PVC_GROUP, _SCALE_DOWN_STS_PVC_KIND):
+        lines.append(_SCALE_DOWN_STS_PVC_LINE)
+    return lines
 
 
 def _section(title: str, items: Sequence[ImpactItem], *, capped: bool) -> list[str]:

@@ -202,10 +202,10 @@ timeline:
 ## Write impact preview
 
 Destructive writes that have tested relationship semantics — delete
-(`Ctrl-D`) and rollout restart (`r`) — show a graph-derived impact section
-above the server dry-run preview in the approval dialog. It answers one
-bounded question: which resources korvid has already observed depend on this
-one?
+(`Ctrl-D`), rollout restart (`r`), and a *known* workload scale-down (`S`,
+covered below) — show a graph-derived impact section above the server
+dry-run preview in the approval dialog. It answers one bounded question:
+which resources korvid has already observed depend on this one?
 
     graph-derived impact (advisory):
       delete apps/Deployment/prod/web
@@ -231,11 +231,11 @@ still on screen with the target rather than below a body that can run to the
 preview's caps. It never predicts failure, never replaces the
 server dry-run, and never blocks approval: the y/typed-name gate, the UID
 precondition, the RBAC pre-check, and the fail-closed audit log are exactly
-what they were. Scale, edit, resize, cordon/uncordon, drain, Helm, and
-operator flows do not show it — they have no tested per-relation semantics
-yet, and korvid would rather show nothing than a plausible guess.
+what they were. Edit, resize, cordon/uncordon, drain, Helm, and operator
+flows never show it — they have no tested per-relation semantics yet, and
+korvid would rather show nothing than a plausible guess.
 
-Reading it:
+### Reading it
 
 - **direct** dependents are one hop from the target, **transitive** are two
   or more; each line names the relation, how the fact was derived, and the
@@ -278,7 +278,15 @@ Reading it:
   manifest. It is labelled, never a blocker.
 - `unresolved references in the affected set` lists dangling references
   held by the target or by something it takes down — a mounted ConfigMap
-  that no longer exists, say — whatever relation they use. Each line names
+  that no longer exists, say. For a delete or a rollout restart that is
+  *whatever relation they use*: the delete removes what they resolved
+  against, and the restart recreates the Pod that has to satisfy them
+  again. A scale-down narrows it to the same closed set its own walk
+  follows (`owned_by`, `managed_by`, `selects`, `routes_to`) — scaling down
+  does not detach a mounted volume or ConfigMap, evict a Pod past its PDB,
+  move a Pod off its node, or unbind a claim, so a dangling reference of
+  one of those relations would say nothing about the scale-down while
+  reading like a warning about it. Each line names
   its own confidence (`declared`, `observed`, or `inferred`) next to the
   relation, the same way a dependent path does, so a heuristically-derived
   dangling reference is identifiable on its own line, not only through the
@@ -308,6 +316,8 @@ Reading it:
     than the 50-dependent traversal cap above (see
     [Limits](resource-relationships.md#limits) for the exact numbers).
 
+### The snapshot, its scope, and UID matching
+
 The snapshot is the same bounded, read-only LIST fan-out the relationship
 view (`g`) performs — scoped to the namespace of the pane the write was
 raised from for a namespaced target, and cluster-wide for a cluster-scoped
@@ -328,3 +338,92 @@ object currently holds the name — and it does not show `target not found in
 this snapshot` either, which would read as "the object is gone" when the
 truth is only that korvid has no UID to match on. Approval, the typed-name
 gate, the write, and the audit record are unaffected.
+
+### Scale-down
+
+Scale (`S`) shows the same section, but only when korvid can tell the
+requested count is a *known decrease*: the row's current desired replica
+count was readable and the requested count is lower than it. A scale-up, a
+no-op (requested count equal to current), or a row whose desired count
+korvid cannot read gets the ordinary confirmation with the `old -> new`
+replica line and **no graph section at all** — not the "impact unavailable"
+line, and no relationship snapshot is loaded for it. Only a known decrease
+loads the snapshot and summarizes it.
+
+Whether the request is a decrease is decided from the desired count read
+off the row *before* the permission check, and that number is re-checked at
+every awaited step of the flow — after the permission check, after the
+replica prompt closes, after the dry run, after the snapshot, and once more
+after you approve, before anything is reserved, audited or written. If a
+controller, an autoscaler or another operator moves `spec.replicas`
+meanwhile, the scale is cancelled with `the desired replica count changed
+during …` and no dialog opens: the same request could otherwise be offered
+as a decrease that is now an increase, under an approval line reading
+`replicas <old> -> <new>` for a count the object no longer has. A row that
+had no readable count and gains one mid-flow is the same case. The last
+check is what covers the longest gap of all — the confirmation dialog stays
+open until you answer it — so drift that lands while you are reading the
+dialog cancels the write instead of executing it; that one is reported
+after the dialog closes, since the dialog was already shown.
+
+A scale-down follows a different, still closed relation set than delete and
+rollout restart: `owned_by` and `managed_by` (the same controller/selector
+ownership chain to the shrinking workload's Pods), plus `selects` and
+`routes_to` — a Service selecting those Pods, an EndpointSlice observed
+targeting one of them, and a declared Ingress or Gateway route reaching that
+Service in turn. Delete and rollout restart never follow `selects` (a
+Service whose Pods are deleted one at a time is not itself failing), but a
+scale-down does, conservatively: a Service, EndpointSlice, Ingress, or
+Gateway route is listed as a known dependent that **may be affected**, never
+as one that will lose an endpoint or stop routing. `protected_by`,
+`uses_volume`, `uses_config`, `scheduled_on`, and `bound_to` are excluded —
+none of them is something a scale-down itself changes for a Pod that
+remains. That exclusion covers the `unresolved references in the affected
+set` warning too: a scale-down never warns about a dangling reference of a
+relation it does not follow, which would otherwise reintroduce as a warning
+the claim the closed set deliberately refuses to make.
+
+Every scale-down advisory also states, as machine-defined lines rather than
+anything read from the cluster:
+
+    controller scale-down is not an Eviction API request; PodDisruptionBudgets do not gate it
+    HorizontalPodAutoscaler targeting and reconciliation are not evaluated
+
+and, only when the target itself is an `apps/StatefulSet`:
+
+    StatefulSet PVC retention policy is not evaluated
+
+A controller deletes surplus Pods directly rather than through the Eviction
+API, so a PodDisruptionBudget never sees or gates it; an HPA can independently
+overwrite a manual replica count on its own reconciliation loop; and a
+StatefulSet's `persistentVolumeClaimRetentionPolicy` decides whether scaling
+down also deletes PVCs — none of that is evaluated here. That last line is
+selected by group *and* kind, so a custom resource that merely spells its
+kind `StatefulSet` in a group of its own is never told about a retention
+policy the `apps` API defines and it does not have.
+
+A workload's Pods are one hop from it, not two: a Deployment,
+StatefulSet or ReplicaSet declares `spec.selector`, which is a `managed_by`
+relationship to every Pod it matches, alongside the `owned_by` chain the
+Pods' `metadata.ownerReferences` give. So the routing chain from a
+Deployment is `Deployment -> Pod (managed_by) -> Service (selects) ->
+Ingress/Gateway route (routes_to)` — three hops, inside the walk's bound —
+and the dialog names the Ingress. The ReplicaSet in between is itself a
+direct dependent, and the further ways to the same Pod (through it) are
+counted under `additional known paths` rather than listed twice. Scaling
+that ReplicaSet down reaches the same chain through the `spec.selector` it
+declares itself, also three hops. The
+ordinary 3-hop, 50-dependent bound still applies to everything past that:
+a longer chain is disclosed by `traversal capped` (see [Reading
+it](#reading-it)), which never means "not affected", only "not reached".
+
+Everything else about the section — its advisory framing, the origin-pane
+and UID gates on context/selection/focus/scope drift, the fail-open handling
+of a timeout or a loader failure, and the fact that it never blocks
+approval — is identical to delete and rollout restart's, described above.
+The one difference is what "fail-open" leaves on screen: none of the three
+limitation lines above is read from the cluster, so a scale-down whose
+snapshot timed out or failed still states them under `impact unavailable;
+approval remains available` (the PVC-retention one still only for an
+`apps/StatefulSet`). Delete and rollout restart, which have no such static
+limitation, show that line alone.

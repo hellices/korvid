@@ -377,30 +377,83 @@ all.
 
 ## Blast radius in write previews
 
-The same snapshot feeds the approval dialogs for `Ctrl-D` (delete) and `r`
-(rollout restart). Only relationships with explicitly tested action
-semantics participate:
+The same snapshot feeds the approval dialogs for `Ctrl-D` (delete), `r`
+(rollout restart), and `S` (scale) when the scale is a *known decrease* —
+the row's current desired replica count was readable and the requested count
+is lower than it; a scale-up, a no-op, or a row with no readable desired
+count gets the ordinary confirmation with no graph section and no snapshot
+LIST at all. Only relationships with explicitly tested action semantics
+participate, and the set differs by action:
 
 | Action | Relations followed (target → its dependents) |
 |---|---|
 | delete | `owned_by`, `managed_by`, `routes_to`, `uses_volume`, `uses_config`, `protected_by`, `scheduled_on`, `bound_to` |
 | rollout restart | `owned_by`, `managed_by` |
+| scale down (known decrease only) | `owned_by`, `managed_by`, `selects`, `routes_to` |
 
-`selects` is deliberately excluded from both. A Service selecting many Pods
-does not fail because one selected Pod is deleted, so korvid never claims it
-does — the same reasoning that keeps `missing` from meaning "absent".
+`selects` is deliberately excluded from delete and rollout restart. A Service
+selecting many Pods does not fail because one selected Pod is deleted, so
+korvid never claims it does — the same reasoning that keeps `missing` from
+meaning "absent". A known scale-down is the one action where `selects` is
+followed: a Service (or, through `routes_to`, an EndpointSlice or an
+Ingress/Gateway route reaching it) whose selector matches the shrinking
+workload's Pods is listed as a known dependent that **may be affected** —
+never as one that loses an endpoint or stops routing. Nothing about *which*
+Pod a controller removes, whether a Service still has ready endpoints
+afterward, or whether traffic actually fails is evaluated or claimed.
+
+A scale-down advisory additionally states, unconditionally, that
+PodDisruptionBudgets do not gate it — a controller deletes surplus Pods
+directly rather than through the Eviction API that PDBs constrain — and that
+HorizontalPodAutoscaler targeting and reconciliation are not evaluated: an
+HPA can independently overwrite the very replica count you just set. When
+the target itself is an `apps/StatefulSet`, it also states that PVC retention
+policy is not evaluated, since `persistentVolumeClaimRetentionPolicy` — not
+this walk — decides whether the removed replicas' claims are kept or deleted.
+Group and kind together select that line: the field belongs to the `apps`
+API, so a custom resource whose kind is spelled the same way in another group
+does not get it.
+`protected_by` (PDB), `uses_volume`, `uses_config`, `scheduled_on`, and
+`bound_to` are excluded from the scale-down relation set for the same
+reason: none of them is something a scale-down itself changes for a Pod that
+remains.
 
 Only **resolved** edges are traversed; an unresolved reference is reported
-as a warning instead. That warning is bounded by *the affected set*, not by
-the relations above: any dangling reference held by the target or by a
-resource it takes down is reported — a restarted workload whose Pod mounts a
-deleted ConfigMap is exactly the case worth seeing — while an unrelated
-dangling reference elsewhere in the cluster never lands in your approval
-dialog. The walk is breadth-first and deterministic (each dependent is
+as a warning instead. That warning is always bounded by *the affected set* —
+an unrelated dangling reference elsewhere in the cluster never lands in your
+approval dialog — and each action additionally states which relations it may
+warn about. Delete and rollout restart warn about **any** relation: they
+remove or recreate the object those references were resolved against, so a
+restarted workload whose Pod mounts a deleted ConfigMap is exactly the case
+worth seeing. A scale-down warns only inside the relation set it follows,
+because a dangling `protected_by`, `uses_volume`, `uses_config`,
+`scheduled_on`, or `bound_to` reference describes what a *remaining* Pod
+still holds, not something the scale-down changes. The walk is breadth-first
+and deterministic (each dependent is
 listed once, with the first path that reached it; further paths to the same
 dependent are counted as `additional known paths`), bounded to 3 hops and 50
 resources, and classifies a genuine loop as a cycle rather than expanding it
 twice.
+
+A workload reaches its own Pods in a single hop, because it declares the
+selector that binds them: a Deployment's, StatefulSet's or ReplicaSet's
+`spec.selector` is a `managed_by` relationship to every Pod it matches,
+alongside the `owned_by` chain those Pods' `metadata.ownerReferences` give.
+So a Deployment's routing chain to its Ingress is `Deployment -> Pod
+(managed_by) -> Service (selects) -> Ingress (routes_to)` — three hops,
+inside the bound — and scaling it down names the Ingress. The ReplicaSet in
+between is a direct dependent of the Deployment in its own right, and the
+further routes to the same Pod — that Pod's owner reference up to the
+ReplicaSet, and the ReplicaSet's own selector back down to it — are folded
+into `additional known paths` rather than listed twice. Scaling that
+ReplicaSet down instead reaches the same chain through the selector it
+declares itself (`ReplicaSet -> Pod (managed_by) -> Service (selects) ->
+Ingress (routes_to)`), also three hops, with its Pods' owner references
+folded into `additional known paths` the same way. The bound is still a
+bound: anything past
+3 hops or 50 resources is disclosed by `traversal capped` on the dialog and
+never silently dropped (see [Limits](#limits) for the graph view's own, much
+larger caps, which this bound is independent of).
 
 Each rendered hop names both halves of its evidence — the resource an edge's
 evidence came from and the field path on it — and each is individually
@@ -441,7 +494,8 @@ that name now. The summary is advisory — see [Write impact
 preview](tui.md#write-impact-preview) for how it appears and what it never
 does.
 
-Only `Ctrl-D` and `r` show this section today. The remaining write types
-(scale, edit, resize, cordon/uncordon, drain, Helm, operator) have no tested
+Delete, rollout restart, and a known scale-down decrease show this section
+today. The remaining write types (scale-up, a scale with no readable current
+count, edit, resize, cordon/uncordon, drain, Helm, operator) have no tested
 per-relation semantics yet and deliberately show nothing rather than a
 plausible guess.

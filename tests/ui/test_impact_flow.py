@@ -1,18 +1,27 @@
-"""Graph-derived impact previews in the delete/rollout-restart flows (#283).
+"""Graph-derived impact previews in the delete/rollout-restart flows (#283)
+and in the workload scale-down flow (#295).
 
 The app reuses the relationship snapshot loader it already owns for `g`: no
 new LIST/GET interface, no new constructor parameter, no composition-root
 change. What this module pins beyond "the section renders" is the wiring
 that only shows up end to end: the snapshot's scope is chosen by the target
 (cluster-scoped kinds cover every namespace), the row's exact UID reaches
-the summary, unsupported write flows are untouched, and both awaited gaps
-still revalidate. This module owns the shared harness (`ImpactEnv`) that
+the summary, unsupported write flows are untouched, and every awaited gap
+still revalidates. The scale-down flow (#295) adds a gap the other two do
+not have - the replica-count prompt - so its tests also pin *when* the
+origin pane is captured and that no snapshot is loaded once the selection,
+the pane or the pane's scope has drifted. It also owns the one gap no other
+write flow re-checks - the approval dialog itself, which stays open until
+the user answers - so its tests pin that drift landing there is refused on
+approval, before any worker, reservation, audit record or operation exists.
+This module owns the shared harness (`ImpactEnv`) that
 `tests/ui/test_impact_security.py` reuses for the security invariants.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -78,23 +87,113 @@ def _owner(kind: str, name: str, uid: str, *, group: str) -> ReferenceFact:
     )
 
 
-def _deployment(name: str, uid: str) -> GenericSummary:
-    return GenericSummary(
-        name=name, namespace="prod", kind="Deployment", created="", desired=3, uid=uid
+def _workload_selector(*, app: str = "web") -> SelectorFact:
+    """The `spec.selector -> Pod` fact every real workload summary carries.
+
+    Built exactly the way `korvid.k8s.relationship_facts._workload_selector`
+    builds it for a Deployment/ReplicaSet/StatefulSet: relation `managed_by`,
+    `match_is_subject=True`, so the resulting edge runs *Pod -> workload* and
+    the reverse impact walk reaches the Pod from the workload in one hop,
+    beside (not through) the ReplicaSet the ownerReferences chain gives it.
+    """
+    return SelectorFact(
+        relation=RelationKind.MANAGED_BY,
+        target_group="",
+        target_kind="Pod",
+        selector=LabelSelector(match_labels=(("app", app),), present=True),
+        confidence=FactConfidence.DECLARED,
+        field="spec.selector",
+        match_is_subject=True,
     )
 
 
-def _replicaset() -> GenericSummary:
+def _deployment(
+    name: str, uid: str, *, desired: int | None = 3, selects_pods: bool = False
+) -> GenericSummary:
+    """A Deployment row. `desired` is what the scale flow reads to decide
+    whether a requested count is a decrease; `None` is a summary that does
+    not carry one at all.
+
+    `selects_pods` attaches the workload selector a real Deployment always
+    has. It is opt-in only so the delete/rollout-restart fixtures keep the
+    exact dependent sets their own assertions were written against; every
+    row a scale-down walks carries it, because the hop counts a scale-down
+    reports depend on it.
+    """
+    return GenericSummary(
+        name=name,
+        namespace="prod",
+        kind="Deployment",
+        created="",
+        desired=desired,
+        uid=uid,
+        relationships=(
+            RelationshipFacts(api_group="apps", selectors=(_workload_selector(),))
+            if selects_pods
+            # Byte-identical to the pre-#295 fixture when the selector is
+            # not asked for: the delete/rollout-restart assertions below are
+            # written against exactly that row.
+            else RelationshipFacts()
+        ),
+    )
+
+
+def _replicaset(*, desired: int | None = 3, selects_pods: bool = False) -> GenericSummary:
+    """A ReplicaSet row owned by the `web` Deployment.
+
+    `selects_pods` attaches the `spec.selector -> Pod` fact a real
+    ReplicaSet summary always carries, exactly as `_deployment` does and for
+    the same reason: it is opt-in only so the delete/rollout-restart
+    fixtures keep the dependent sets their own assertions were written
+    against, while every row a scale-down walks carries it.
+    """
     return GenericSummary(
         name="web-abc",
         namespace="prod",
         kind="ReplicaSet",
         created="",
+        desired=desired,
         uid="rs-1",
         relationships=RelationshipFacts(
             api_group="apps",
             references=(_owner("Deployment", "web", "deploy-1", group="apps"),),
+            selectors=(_workload_selector(),) if selects_pods else (),
         ),
+    )
+
+
+def _statefulset() -> GenericSummary:
+    """A StatefulSet with the workload selector a real one carries.
+
+    The one target kind whose advisory also states that PVC retention
+    policy is not evaluated; `db` keeps it clear of the `web` fixtures, so
+    its selector can never match their Pods.
+    """
+    return GenericSummary(
+        name="db",
+        namespace="prod",
+        kind="StatefulSet",
+        created="",
+        desired=3,
+        uid="sts-1",
+        relationships=RelationshipFacts(
+            api_group="apps",
+            selectors=(_workload_selector(app="db"),),
+        ),
+    )
+
+
+def _statefulset_pod() -> PodSummary:
+    """The Pod that StatefulSet's selector matches."""
+    return PodSummary(
+        name="db-0",
+        namespace="prod",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node=None,
+        uid="pod-db-0",
+        labels=(("app", "db"),),
     )
 
 
@@ -189,6 +288,73 @@ def _service() -> GenericSummary:
     )
 
 
+def _ingress() -> GenericSummary:
+    """An Ingress routing to the Service above: a declared `routes_to`
+    dependent that only a scale-down follows."""
+    return GenericSummary(
+        name="web",
+        namespace="prod",
+        kind="Ingress",
+        created="",
+        uid="ing-1",
+        relationships=RelationshipFacts(
+            api_group="networking.k8s.io",
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.ROUTES_TO,
+                    target=TargetReference(
+                        group="",
+                        kind="Service",
+                        namespace="prod",
+                        name="web",
+                        uid="svc-1",
+                    ),
+                    confidence=FactConfidence.DECLARED,
+                    field="spec.rules[0].http.paths[0].backend.service",
+                ),
+            ),
+        ),
+    )
+
+
+def _endpoint_slice() -> GenericSummary:
+    """The EndpointSlice the Service's controller writes for the Pod.
+
+    Shaped like the real object: a `discovery.k8s.io/v1` slice whose
+    `endpoints[0].targetRef` names the backing Pod by kind, namespace, name
+    *and* uid, which `korvid.k8s.relationship_facts._endpoint_targets`
+    turns into an *observed* `routes_to` fact (the control plane wrote it
+    after the Pod was ready; it is not a declaration in anyone's spec).
+    Direction is EndpointSlice -> Pod, so a scale-down of the workload
+    reaches the slice one hop past the Pod: the object that stops naming a
+    replica when the replica goes away.
+    """
+    return GenericSummary(
+        name="web-xyz",
+        namespace="prod",
+        kind="EndpointSlice",
+        created="",
+        uid="eps-1",
+        relationships=RelationshipFacts(
+            api_group="discovery.k8s.io",
+            references=(
+                ReferenceFact(
+                    relation=RelationKind.ROUTES_TO,
+                    target=TargetReference(
+                        group="",
+                        kind="Pod",
+                        namespace="prod",
+                        name="web-abc-1",
+                        uid="pod-1",
+                    ),
+                    confidence=FactConfidence.OBSERVED,
+                    field="endpoints[0].targetRef",
+                ),
+            ),
+        ),
+    )
+
+
 def _node() -> GenericSummary:
     """A cluster-scoped Node: `namespace` is always empty for these."""
     return GenericSummary(name="worker-1", namespace="", kind="Node", created="", uid="node-1")
@@ -263,9 +429,23 @@ class RecordingOps(WriteOps):
         self.calls: list[tuple[object, ...]] = []
         self._order = order
         #: Fired once, inside the first dry-run preview: how a test
-        #: simulates a focus or scope change landing in the awaited gap
-        #: *before* the impact snapshot chooses its scope.
+        #: simulates a focus, scope or context change landing in the awaited
+        #: gap between the dry run and the impact snapshot. What the two
+        #: flows then do with that drift differs, and both are asserted
+        #: below: a delete/rollout restart still loads its snapshot (scoped
+        #: to the *captured* origin, never the drifted-into pane) and is
+        #: refused afterwards by the impact-summary gate, while a scale-down
+        #: is refused by its own pre-snapshot gate and issues no LIST at all.
         self.on_first_preview: Callable[[], None] | None = None
+        #: One-shot failure injected into the *next* `preview_scale` call,
+        #: then cleared - so a test can pin that a scale-down's graph
+        #: impact section survives a failing dry-run preview without also
+        #: making every other `RecordingOps` user (or every later call in
+        #: the same test) carry that failure. `None` by default: every
+        #: existing test that never sets it keeps the plain diff line
+        #: `preview_scale` has always returned, in the same order and with
+        #: the same `on_first_preview` hook still firing first.
+        self.preview_scale_error: BaseException | None = None
 
     def _preview_hook(self) -> None:
         hook, self.on_first_preview = self.on_first_preview, None
@@ -311,6 +491,26 @@ class RecordingOps(WriteOps):
         self._preview_hook()
         return [f"- {meta.plural} prod/{name}"]
 
+    async def preview_scale(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        replicas: int,
+        *,
+        uid: str | None = None,
+    ) -> list[str] | None:
+        self._order.append("preview")
+        self._preview_hook()
+        # Recorded (and the hook fired) before the raise: the call itself
+        # still happened, exactly as a real dry-run round trip that failed
+        # server-side would have, and the flow's own drift-during-the-preview
+        # tests still get their hook. Only the *return* is replaced.
+        if self.preview_scale_error is not None:
+            error, self.preview_scale_error = self.preview_scale_error, None
+            raise error
+        return [f"~ spec.replicas: {replicas}"]
+
     async def preview_rollout_restart(
         self,
         meta: ResourceMeta,
@@ -326,7 +526,12 @@ class RecordingOps(WriteOps):
 
 
 class ImpactEnv:
-    """App plus recording fakes for the impact-preview integration path."""
+    """App plus recording fakes for the impact-preview integration path.
+
+    `permission` is what the injected SubjectAccessReview fake answers:
+    `False` denies every write, which the security tests use to pin that a
+    refused write never reaches the snapshot or a dialog.
+    """
 
     def __init__(
         self,
@@ -335,6 +540,7 @@ class ImpactEnv:
         with_lister: bool = True,
         rows: dict[str, list[Any]] | None = None,
         list_rows: dict[str, list[Any]] | None = None,
+        permission: bool = True,
     ) -> None:
         self.order: list[str] = []
         self.ops = RecordingOps(self.order)
@@ -359,6 +565,12 @@ class ImpactEnv:
         #: between the watch and the snapshot carries a new uid).
         self.list_rows = self.rows if list_rows is None else list_rows
         self.lister = RecordingLister(self.list_rows, self.order)
+        #: Fired once, inside the SubjectAccessReview: how a test simulates
+        #: drift landing while the permission round trip is in flight, which
+        #: is the flow's *first* awaited gap and the only one no LIST or
+        #: dry-run hook can reach. Unset by default, so every other test
+        #: sees the permission check it always saw.
+        self.on_permission_check: Callable[[], None] | None = None
         store = ResourceStore()
         watched = self.rows
 
@@ -372,7 +584,12 @@ class ImpactEnv:
             verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
         ) -> bool:
             self.order.append("rbac")
-            return True
+            hook, self.on_permission_check = self.on_permission_check, None
+            if hook is not None:
+                hook()
+            # `False` is a denied SubjectAccessReview, which must end the
+            # flow before the prompt, the snapshot fan-out and the dialog.
+            return permission
 
         self.app = KorvidApp(
             config=KorvidConfig(namespace="prod"),
@@ -676,16 +893,376 @@ async def test_a_namespaced_target_in_an_all_namespaces_pane_covers_every_namesp
         assert env.ops.calls == []
 
 
-async def test_scale_dialog_has_no_impact_section(tmp_path: Path) -> None:
-    """Only delete and rollout restart have tested action semantics."""
-    env = ImpactEnv(tmp_path / "audit.jsonl")
+#: The rows a scale-down walk is exercised over: the controller chain
+#: (Deployment -> ReplicaSet -> Pod), the Service selecting that Pod, the
+#: EndpointSlice whose `targetRef` names that Pod, and the Ingress routing
+#: to that Service. Both workloads carry the
+#: `spec.selector` fact a real summary of their kind always has, so the walk
+#: sees the hop counts production would produce (`Deployment -> Pod` and
+#: `ReplicaSet -> Pod` are each one hop through `managed_by`, beside - not
+#: through - the ownership chain). The EndpointSlice is what makes the
+#: *observed* `routes_to` shape production really has - a control-plane
+#: object pointing straight at the replica - part of the fixture, beside
+#: the Ingress's declared `routes_to` to the Service. The Pod's ConfigMap is
+#: included so the walk has no *unrelated* dangling reference: without it
+#: the summary also reports `unresolved references in the affected set`,
+#: which is the subject of its own test and would otherwise contaminate
+#: every assertion about what a scale-down lists.
+def _scale_down_rows() -> dict[str, list[Any]]:
+    return {
+        "pods": [_pod()],
+        "deployments": [_deployment("web", "deploy-1", selects_pods=True)],
+        "replicasets": [_replicaset(selects_pods=True)],
+        "configmaps": [_configmap()],
+        "services": [_service()],
+        "endpointslices": [_endpoint_slice()],
+        "ingresses": [_ingress()],
+    }
+
+
+async def _scale_to_one(env: ImpactEnv, pilot: Any, view: str, *, expect: str) -> None:
+    """Open the scale prompt on `view`'s first row and request one replica."""
+    await to_view(pilot, view, expect=expect)
+    await pilot.press("S")
+    await until(pilot, lambda: isinstance(env.app.screen, ReplicasPrompt), label="replicas prompt")
+    await pilot.press("1")
+    await pilot.press("enter")
+    await until(
+        pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="scale-down confirm"
+    )
+
+
+#: The exact machine-defined limitation lines a scale-down advisory always
+#: carries (`korvid.ui.impact_preview`), asserted here end to end so the
+#: renderer's own unit pins cannot be the only place they are checked.
+_PDB_LIMITATION = (
+    "controller scale-down is not an Eviction API request; PodDisruptionBudgets do not gate it"
+)
+_HPA_LIMITATION = "HorizontalPodAutoscaler targeting and reconciliation are not evaluated"
+_STS_PVC_LIMITATION = "StatefulSet PVC retention policy is not evaluated"
+
+
+async def test_scale_down_dialog_shows_controller_and_routing_dependents(
+    tmp_path: Path,
+) -> None:
+    """A scale-down follows the ownership chain *and* the relations that
+    point at a shrinking workload - the Service selecting its Pods and the
+    Ingress routing to that Service. Nothing is claimed to fail.
+
+    A real Deployment carries its own `spec.selector`, so its Pods are one
+    `managed_by` hop away rather than two through the ReplicaSet: the
+    routing chain is `Deployment -> Pod (managed_by) -> Service (selects) ->
+    Ingress (routes_to)`, three hops, inside `ImpactLimits.max_depth`. The
+    Ingress is therefore named, and nothing is withheld behind the
+    traversal cap. The EndpointSlice the Service's controller wrote reaches
+    the same Pod one hop earlier and through the *observed* `routes_to`
+    shape production really has - `endpoints[0].targetRef` naming the
+    replica directly - so both `routes_to` origins a scale-down can meet
+    are named in one dialog. The ReplicaSet is a direct dependent in its own
+    right (through its ownerReference), and *both* further routes from it to
+    the same Pod - the Pod's own `metadata.ownerReferences` and the
+    ReplicaSet's own `spec.selector`, which a real ReplicaSet summary
+    carries too - are folded into `additional known paths` because the Pod
+    was already reached. That count is rendered `2 or more` rather than `2`:
+    the snapshot's coverage is incomplete (the Gateway API group is never
+    listed here), so every cluster-derived count in this advisory is a
+    lower bound, not a tally.
+
+    The two unconditional limitation lines are asserted here, not only in
+    the renderer's unit tests: they are the part of the advisory that no
+    cluster state can produce, so nothing else would notice if the flow
+    stopped delivering them to the dialog.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
+    async with env.app.run_test() as pilot:
+        await _scale_to_one(env, pilot, "deploy", expect="web")
+        text = impact_text(env.app)
+        assert "scale down apps/Deployment/prod/web" in text
+        assert _PDB_LIMITATION in text
+        assert _HPA_LIMITATION in text
+        # Kind-conditional: a Deployment has no PVC retention policy.
+        assert _STS_PVC_LIMITATION not in text
+        assert "known direct dependents (may be affected): 2 or more" in text
+        assert (
+            "Pod/prod/web-abc-1 via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector" in text
+        )
+        assert (
+            "apps/ReplicaSet/prod/web-abc via owned_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]" in text
+        )
+        assert "known transitive dependents (may be affected): 3 or more" in text
+        assert (
+            "Service/prod/web via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector -> selects (declared) at"
+            " Service/prod/web: spec.selector" in text
+        )
+        assert (
+            "discovery.k8s.io/EndpointSlice/prod/web-xyz via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector -> routes_to (observed) at"
+            " discovery.k8s.io/EndpointSlice/prod/web-xyz: endpoints[0].targetRef" in text
+        )
+        assert (
+            "networking.k8s.io/Ingress/prod/web via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector -> selects (declared) at"
+            " Service/prod/web: spec.selector -> routes_to (declared)" in text
+        )
+        assert "additional known paths: 2 or more" in text
+        assert "traversal capped" not in text
+        assert "may be affected" in text
+        assert "will fail" not in text
+        assert env.ops.calls == []
+
+
+async def test_scale_down_dialog_survives_a_failing_dry_run_preview(
+    tmp_path: Path,
+) -> None:
+    """A scale-down's graph impact section and its dry-run preview are two
+    independent advisories, computed from two independent sources - the
+    watched-store graph walk and a `dryRun=All` server round trip - and
+    `_dry_run_preview` already folds *any* preview failure into `None`
+    rather than letting it reach the dialog or the approval gate (issue
+    #19; `test_failed_preview_still_opens_dialog` pins this for a plain
+    delete). What issue #295 adds, and what no existing test combines, is
+    a *known decrease*: the one shape whose confirmation also carries a
+    graph-derived blast radius. This pins that the two stay independent
+    for a scale-down too - the failure must not blank the impact section,
+    must not stop `ConfirmScreen` from opening, and the exception's own
+    body must never render anywhere in the dialog, matching the design
+    doc's fail-open preview invariant carried over from #19/#294.
+
+    Nothing must exist yet while the dialog is up: no write, no
+    reservation (`_active_cluster_writes`, which would block `:ctx`) and
+    no audit entry at all - not even the fail-closed intent line, because
+    a failed *preview* is not a write and must not reserve one. A fresh
+    keystroke approval afterwards must still execute and audit exactly as
+    an ordinary scale-down would; the preview failure must cost nothing
+    beyond the missing preview widget.
+    """
+    secret_body = "etcd-lease-42-should-never-render"
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
+    env.ops.preview_scale_error = ApiStatusError(500, "internal error", secret_body)
+    audit_path = tmp_path / "audit.jsonl"
+    async with env.app.run_test() as pilot:
+        await _scale_to_one(env, pilot, "deploy", expect="web")
+        screen = env.app.screen
+        assert isinstance(screen, ConfirmScreen)
+        # No widget at all — see `ConfirmScreen._preview_text`'s "no preview
+        # was available" distinction from "the server reported no changes".
+        assert not screen.query(".confirm-preview")
+        rendered = "\n".join(str(node.render()) for node in screen.query(Static))
+        assert secret_body not in rendered
+        assert "internal error" not in rendered
+        text = impact_text(env.app)
+        assert "scale down apps/Deployment/prod/web" in text
+        assert _PDB_LIMITATION in text
+        assert _HPA_LIMITATION in text
+        assert "known direct dependents (may be affected): 2 or more" in text
+        assert "known transitive dependents (may be affected): 3 or more" in text
+        assert env.ops.calls == []
+        assert env.app._active_cluster_writes == 0
+        assert not audit_path.exists()
+        await pilot.press("y")
+        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        assert env.ops.calls == [("scale", "deployments", "prod", "web", 1)]
+        entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert entries[0]["outcome"] == "intent"
+        entry = entries[-1]
+        assert entry["action"] == "scale"
+        assert entry["name"] == "web"
+        assert entry["outcome"] == "success"
+
+
+async def test_scale_down_of_a_replicaset_follows_the_same_routing_chain(
+    tmp_path: Path,
+) -> None:
+    """The same routing chain reached from the ReplicaSet instead.
+
+    A real ReplicaSet declares its own `spec.selector` exactly as a
+    Deployment does, so its Pods are one `managed_by` hop away and the first
+    path breadth-first offers is that selector's - evidence
+    `apps/ReplicaSet/prod/web-abc: spec.selector` - with the same Pod's
+    `metadata.ownerReferences` route to it folded into `additional known
+    paths` rather than listed twice. `Pod -> Service (selects) -> Ingress
+    (routes_to)` follows exactly as it does from the Deployment: three hops,
+    inside `ImpactLimits.max_depth`, so the Ingress is named and nothing is
+    withheld behind the traversal cap. The EndpointSlice pointing at that
+    same Pod through its observed `endpoints[0].targetRef` is the third
+    transitive dependent, reached one hop earlier than the Ingress. Every
+    count here is a lower bound (`N or more`) because the snapshot's
+    coverage is incomplete, not because anything was capped.
+
+    This pins that the flow hands `ImpactAction.SCALE_DOWN` to the
+    summarizer for every scalable kind, not just the one the first fixture
+    is written for, and that the full `managed_by -> selects -> routes_to`
+    scale path is listed either way. `routes_to` alone is not what sets
+    scale-down apart - delete already follows it - it is `selects` that
+    is scale-down-specific, since delete deliberately omits it.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
+    async with env.app.run_test() as pilot:
+        await _scale_to_one(env, pilot, "rs", expect="web-abc")
+        text = impact_text(env.app)
+        assert "scale down apps/ReplicaSet/prod/web-abc" in text
+        assert "known direct dependents (may be affected): 1 or more" in text
+        assert (
+            "Pod/prod/web-abc-1 via managed_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: spec.selector" in text
+        )
+        assert "known transitive dependents (may be affected): 3 or more" in text
+        assert (
+            "Service/prod/web via managed_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: spec.selector -> selects (declared) at"
+            " Service/prod/web: spec.selector" in text
+        )
+        assert (
+            "discovery.k8s.io/EndpointSlice/prod/web-xyz via managed_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: spec.selector -> routes_to (observed) at"
+            " discovery.k8s.io/EndpointSlice/prod/web-xyz: endpoints[0].targetRef" in text
+        )
+        assert (
+            "networking.k8s.io/Ingress/prod/web via managed_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: spec.selector -> selects (declared) at"
+            " Service/prod/web: spec.selector -> routes_to (declared)" in text
+        )
+        assert "additional known paths: 1 or more" in text
+        assert "traversal capped" not in text
+        assert "may be affected" in text
+        assert "will fail" not in text
+        assert env.ops.calls == []
+
+
+async def test_scale_down_of_a_statefulset_states_the_pvc_limitation(
+    tmp_path: Path,
+) -> None:
+    """The one limitation line that depends on the target's kind.
+
+    A StatefulSet's `persistentVolumeClaimRetentionPolicy` - not this walk -
+    decides whether the removed replicas' claims survive, so the advisory
+    says so for a StatefulSet and only for one. Driven through the real `S`
+    flow rather than the renderer alone: the kind reaching the summary is
+    what selects the line, and that identity travels the whole flow.
+    """
+    rows: dict[str, list[Any]] = {"statefulsets": [_statefulset()], "pods": [_statefulset_pod()]}
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
+    async with env.app.run_test() as pilot:
+        await _scale_to_one(env, pilot, "sts", expect="db")
+        text = impact_text(env.app)
+        assert "scale down apps/StatefulSet/prod/db" in text
+        assert _PDB_LIMITATION in text
+        assert _HPA_LIMITATION in text
+        assert _STS_PVC_LIMITATION in text
+        assert (
+            "Pod/prod/db-0 via managed_by (declared) at apps/StatefulSet/prod/db: spec.selector"
+            in text
+        )
+        assert "will fail" not in text
+        assert env.ops.calls == []
+
+
+async def test_scale_down_impact_timeout_still_states_the_static_limitations(
+    tmp_path: Path,
+) -> None:
+    """A snapshot that never arrived costs the user the cluster-derived
+    part of the advisory and nothing else.
+
+    The PDB and HPA lines are not findings about this cluster - they say
+    what a controller scale-down does not route through and what this walk
+    would not have evaluated anyway - so a timeout that dropped them would
+    take away a true statement precisely when korvid has least to offer.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
+    env.lister.delay = 5.0
+    with mock.patch("korvid.ui.app._IMPACT_TIMEOUT", 0.01):
+        async with env.app.run_test() as pilot:
+            await _scale_to_one(env, pilot, "deploy", expect="web")
+            text = impact_text(env.app)
+            assert "impact unavailable; approval remains available" in text
+            assert _PDB_LIMITATION in text
+            assert _HPA_LIMITATION in text
+            # Still kind-conditional when nothing was read: a Deployment
+            # has no PVC retention policy either way.
+            assert _STS_PVC_LIMITATION not in text
+            assert "known direct dependents" not in text
+            assert env.app.screen.query(".confirm-preview")
+            assert env.ops.calls == []
+
+
+async def test_scale_down_loader_failure_keeps_the_statefulset_limitations(
+    tmp_path: Path,
+) -> None:
+    """The same for an unexpected loader failure, on the one kind that adds
+    a third line - and the exception's message still never reaches the
+    dialog, because it can carry cluster-derived text."""
+    rows: dict[str, list[Any]] = {"statefulsets": [_statefulset()], "pods": [_statefulset_pod()]}
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
+    env.lister.errors["statefulsets"] = RuntimeError("lister exploded on AKIAEXAMPLEPAYLOAD")
+    async with env.app.run_test() as pilot:
+        await _scale_to_one(env, pilot, "sts", expect="db")
+        text = impact_text(env.app)
+        assert "impact unavailable; approval remains available" in text
+        assert _PDB_LIMITATION in text
+        assert _HPA_LIMITATION in text
+        assert _STS_PVC_LIMITATION in text
+        assert "AKIAEXAMPLEPAYLOAD" not in text
+        assert "known direct dependents" not in text
+        assert env.app.screen.query(".confirm-preview")
+        assert env.ops.calls == []
+
+
+@pytest.mark.parametrize("key", ["ctrl+d", "r"])
+async def test_delete_and_restart_keep_the_generic_unavailable_advisory_verbatim(
+    tmp_path: Path, key: str
+) -> None:
+    """The other actions' unavailable advisory is unchanged by #295's
+    kind-aware fallback: the generic line and nothing else, with no
+    scale-down limitation attached to a delete or a rollout restart."""
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
+    env.lister.errors["deployments"] = RuntimeError("parser exploded")
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press(key)
+        await until(
+            pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="confirm dialog opened"
+        )
+        text = impact_text(env.app)
+        assert "impact unavailable; approval remains available" in text
+        assert "parser exploded" not in text
+        assert _PDB_LIMITATION not in text
+        assert _HPA_LIMITATION not in text
+        assert _STS_PVC_LIMITATION not in text
+        assert env.ops.calls == []
+
+
+@pytest.mark.parametrize(
+    ("desired", "requested"),
+    [(3, 5), (3, 3), (None, 1)],
+)
+async def test_non_decreasing_or_unknown_scale_never_loads_relationships(
+    tmp_path: Path,
+    desired: int | None,
+    requested: int,
+) -> None:
+    """Only a *known decrease* has scale-down semantics: scaling up, scaling
+    to the same count, and a row whose desired count korvid cannot read get
+    no impact section and no snapshot fan-out at all.
+
+    That fan-out is the only thing #295 leaves untouched for them. The
+    identity gating around every scale is *strengthened*: the captured uid,
+    the origin pane and that pane's scope are revalidated after the
+    permission check and again after the dry-run preview, where the flow
+    previously rechecked only kind, namespace, name and the context epoch.
+    """
+    rows: dict[str, list[Any]] = {"deployments": [_deployment("web", "deploy-1", desired=desired)]}
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
     async with env.app.run_test() as pilot:
         await to_view(pilot, "deploy", expect="web")
         await pilot.press("S")
         await until(
             pilot, lambda: isinstance(env.app.screen, ReplicasPrompt), label="replicas prompt"
         )
-        await pilot.press("5")
+        for char in str(requested):
+            await pilot.press(char)
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="scale confirm")
         assert not env.app.screen.query(".confirm-impact")
@@ -694,8 +1271,9 @@ async def test_scale_dialog_has_no_impact_section(tmp_path: Path) -> None:
 
 async def test_cordon_dialog_has_no_impact_section(tmp_path: Path) -> None:
     """A second unsupported flow, on a cluster-scoped kind: the delivery
-    boundary is delete/rollout restart, and everything else stays exactly
-    as it was (see the roadmap deviation in Global Constraints)."""
+    boundary is delete, rollout restart and scale-down, and everything else
+    stays exactly as it was (see the roadmap deviation in Global
+    Constraints)."""
     rows: dict[str, list[Any]] = {"nodes": [_node()]}
     env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
     async with env.app.run_test() as pilot:
@@ -775,6 +1353,27 @@ def _replace_selected_row_with_a_new_incarnation(app: KorvidApp) -> None:
     app.store.apply_event(
         app.current_kind, app.current_scope, "MODIFIED", _deployment("web", "deploy-9")
     )
+
+
+def _rescale_the_selected_row(app: KorvidApp, desired: int | None) -> None:
+    """Change the selected `web` row's desired count, keeping its identity.
+
+    What a controller, an autoscaler or another operator does between two
+    awaits: the object is the same incarnation - same kind, namespace, name
+    and uid - so every identity check still passes, while the number the
+    scale flow captured (and classified the request against) is stale.
+    """
+    app.store.apply_event(
+        app.current_kind,
+        app.current_scope,
+        "MODIFIED",
+        _deployment("web", "deploy-1", desired=desired),
+    )
+
+
+async def _count_refusal(app: KorvidApp, pilot: Any, phase: str, label: str) -> None:
+    """Wait for the replica-count drift refusal a scale gate raises after `phase`."""
+    await _cancelled(app, pilot, f"the desired replica count changed during {phase}", label)
 
 
 async def test_same_name_replacement_during_the_impact_load_aborts_the_delete(
@@ -859,6 +1458,35 @@ async def test_a_row_that_loses_its_uid_during_the_impact_load_aborts_the_delete
             ),
             label="impact-summary uid refusal",
         )
+
+
+async def test_scale_down_uid_loss_during_impact_load_aborts_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    """Same fail-closed uid gate on the `S` flow - see the delete case above.
+
+    The scale-down's own gap is the widest of the three: the count prompt
+    sits between the RBAC check and the snapshot, so the approved
+    incarnation has had a whole modal's lifetime to be replaced.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+
+    def drop_the_uid() -> None:
+        app.store.apply_event(
+            app.current_kind, app.current_scope, "MODIFIED", _deployment("web", "")
+        )
+
+    env.lister.on_first_call = drop_the_uid
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal(app, pilot, "scale-down uid refusal")
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
 
 
 async def test_a_row_without_a_uid_opens_the_dialog_with_no_impact_section(
@@ -956,15 +1584,27 @@ def _namespaced_list_scopes(env: ImpactEnv) -> set[str | None]:
     return {namespace for plural, namespace in env.lister.calls if plural in _NAMESPACED_PLURALS}
 
 
-async def _refusal(app: KorvidApp, pilot: Any, label: str) -> None:
+async def _cancelled(app: KorvidApp, pilot: Any, message: str, label: str) -> None:
+    """Wait for a gate's cancellation banner.
+
+    `notify` reaches `_notifications` through the message loop, so the
+    banner is polled for rather than read straight after the await (the
+    repo-wide pattern for notification assertions).
+    """
     await until(
         pilot,
-        lambda: any(
-            "the selection changed during the impact summary" in n.message
-            for n in app._notifications
-        ),
+        lambda: any(message in n.message for n in app._notifications),
         label=label,
     )
+
+
+async def _refusal_during(app: KorvidApp, pilot: Any, phase: str, label: str) -> None:
+    """Wait for the selection-changed refusal a gate raises after `phase`."""
+    await _cancelled(app, pilot, f"the selection changed during {phase}", label)
+
+
+async def _refusal(app: KorvidApp, pilot: Any, label: str) -> None:
+    await _refusal_during(app, pilot, "the impact summary", label)
 
 
 async def test_focus_moving_to_another_pane_during_the_impact_load_aborts_the_delete(
@@ -1062,3 +1702,440 @@ async def test_a_scope_change_on_the_origin_pane_during_the_impact_load_aborts_t
         assert env.ops.calls == []
         assert _namespaced_list_scopes(env) == {"prod"}
         await _refusal(app, pilot, "impact-summary scope refusal")
+
+
+async def test_scale_down_focus_move_to_same_object_aborts_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    """The `S` flow's pane gate - see the delete case above.
+
+    Focus lands in the all-namespaces pane, whose cursor is on the very same
+    object with the same uid, while the scale-down snapshot loads. The
+    snapshot still covered the pane the count was entered in, and the
+    approval never appears.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+        env.lister.on_first_call = app._focus_other_pane
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal(app, pilot, "scale-down pane refusal")
+        assert app._pane is not origin
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        assert _namespaced_list_scopes(env) == {"prod"}
+
+
+async def test_scale_down_scope_change_on_origin_aborts_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    """The `S` flow's scope gate - see the delete case above. Focus never
+    moves: the pane the count was entered in widens to every namespace while
+    the scale-down snapshot loads."""
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+
+        def widen_the_origin_pane() -> None:
+            origin.scope = ALL_NAMESPACES
+
+        env.lister.on_first_call = widen_the_origin_pane
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal(app, pilot, "scale-down scope refusal")
+        assert app._pane is origin
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        assert _namespaced_list_scopes(env) == {"prod"}
+
+
+async def test_scale_down_focus_move_while_the_prompt_is_open_aborts_before_any_list(
+    tmp_path: Path,
+) -> None:
+    """Focus crosses to the all-namespaces pane while the replica-count
+    prompt is still up, i.e. *before* the count is even submitted.
+
+    The count prompt is the scale flow's own awaited gap, and it is the one
+    a user can hold open indefinitely. The pane the write was raised from is
+    captured before that prompt is pushed, so the approval that follows is
+    still judged against `prod`: the gate refuses, no dialog appears, and no
+    snapshot is loaded at all - in particular never the cluster-wide one the
+    now-focused pane would ask for. Capturing the origin when the count comes
+    back instead would silently adopt the pane the user drifted into and let
+    the write through.
+
+    The refusal names the prompt, not the dry run: the gate that sees this
+    drift is the one at the top of the confirm step, before the dry-run
+    round trip is even issued, so the drift costs no API call either.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        app._focus_other_pane()
+        await until(pilot, lambda: app._pane is not origin, label="focus on the other pane")
+        assert isinstance(app.screen, ReplicasPrompt)
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal_during(
+            app, pilot, "the replica count prompt", "scale-down prompt-gap refusal"
+        )
+        assert app._pane is not origin
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert env.ops.calls == []
+        # Neither the dry run nor the snapshot ran: the permission check is
+        # the only round trip a doomed flow pays for.
+        assert env.order == ["rbac"]
+        # The snapshot never widened past the captured `prod` origin - here
+        # it never ran, because the gate below refuses first.
+        assert env.lister.calls == []
+
+
+#: How a test drifts the identity a scale flow captured, while the flow is
+#: awaiting something. Each returns the callable a hook fires; each is
+#: invisible to the checks `_precheck_keybinding_write` already makes (kind,
+#: namespace, name and the context epoch all still match afterwards), so
+#: only the scale flow's own post-permission gate can see it.
+def _uid_replacement_drift(app: KorvidApp) -> Callable[[], None]:
+    """The selected row is replaced by a same-named object with a new uid."""
+    return lambda: _replace_selected_row_with_a_new_incarnation(app)
+
+
+def _focus_drift(app: KorvidApp) -> Callable[[], None]:
+    """Focus lands in the second pane, whose cursor is on the same object."""
+    return app._focus_other_pane
+
+
+def _scope_drift(app: KorvidApp) -> Callable[[], None]:
+    """The pane the write was raised from widens to every namespace."""
+    origin = app._pane
+
+    def widen() -> None:
+        origin.scope = ALL_NAMESPACES
+
+    return widen
+
+
+def _replica_count_drift(app: KorvidApp) -> Callable[[], None]:
+    """The row's desired count changes under the same incarnation."""
+    return lambda: _rescale_the_selected_row(app, 1)
+
+
+@pytest.mark.parametrize(
+    ("make_drift", "reason"),
+    [
+        (_uid_replacement_drift, "the selection changed"),
+        (_focus_drift, "the selection changed"),
+        (_scope_drift, "the selection changed"),
+        (_replica_count_drift, "the desired replica count changed"),
+    ],
+    ids=["uid", "pane", "scope", "replicas"],
+)
+async def test_scale_identity_drift_during_the_permission_check_never_prompts(
+    tmp_path: Path,
+    make_drift: Callable[[KorvidApp], Callable[[], None]],
+    reason: str,
+) -> None:
+    """The scale flow's *first* awaited gap: the SubjectAccessReview.
+
+    `_precheck_keybinding_write` re-validates kind, namespace, name and the
+    context epoch after that round trip, and all four still match in each
+    case here - a same-named replacement keeps them, and so does a second
+    pane sitting on the very same row, the origin pane widening its scope,
+    or the row's desired count moving under an unchanged identity. Only the
+    uid, the pane identity, that pane's scope and the captured replica count
+    betray the drift, which is exactly what the gate added after the
+    permission check compares.
+
+    Without it the flow would run on and push the replica prompt: a modal
+    the user never asked for, over an object they no longer selected (or a
+    count they no longer saw), whose value would then be dry-run,
+    summarized and offered for approval. So the assertion is that *nothing*
+    happens after the refusal - no prompt, no dry-run preview, no snapshot
+    LIST, no write, no audit record.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        env.on_permission_check = make_drift(app)
+        await pilot.press("S")
+        await _cancelled(
+            app, pilot, f"{reason} during the permission check", "scale permission-gap refusal"
+        )
+        assert not isinstance(app.screen, ReplicasPrompt)
+        assert len(app.screen_stack) == 1
+        # The permission check is the only thing that ran: no dry-run
+        # preview and no relationship LIST followed it.
+        assert env.order == ["rbac"]
+        assert env.lister.calls == []
+        assert env.ops.calls == []
+        assert not audit_path.exists()
+
+
+async def test_scale_down_focus_move_during_the_dry_run_never_loads_relationships(
+    tmp_path: Path,
+) -> None:
+    """Focus crosses panes inside the dry-run round trip, after the count
+    was submitted from the `prod` pane.
+
+    The impact snapshot is a LIST fan-out across every source in the
+    catalog; once the flow is already doomed there is no reason to ask the
+    API server for it. The gate sits between the dry run and the snapshot,
+    so the drift costs zero relationship LISTs, and the approval still never
+    appears.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+        env.ops.on_first_preview = app._focus_other_pane
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal_during(app, pilot, "the dry-run preview", "scale-down dry-run refusal")
+        assert app._pane is not origin
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert env.ops.calls == []
+        assert env.lister.calls == []
+
+
+async def test_scale_down_context_switch_during_the_dry_run_never_loads_relationships(
+    tmp_path: Path,
+) -> None:
+    """The same gate on the context axis: the cluster context changes while
+    the dry run is in flight. The captured epoch no longer matches, so the
+    snapshot - which would be loaded against the *new* context's client -
+    is never requested."""
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+
+    def bump_epoch() -> None:
+        app._ctx_epoch += 1
+
+    env.ops.on_first_preview = bump_epoch
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _cancelled(
+            app,
+            pilot,
+            "the kube context changed during the dry-run preview",
+            "scale-down epoch refusal",
+        )
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        assert env.lister.calls == []
+
+
+@pytest.mark.parametrize("requested", [1, 5], ids=["decrease", "increase"])
+async def test_scale_replica_drift_during_the_prompt_never_previews_or_lists(
+    tmp_path: Path, requested: int
+) -> None:
+    """The count the scale was classified against moves while the replica
+    prompt is open.
+
+    The row keeps its kind, namespace, name and uid - a controller or an
+    autoscaler simply changed `spec.replicas` - so every identity check
+    still passes. The flow captured 3 replicas before the permission check;
+    by the time the count comes back the object sits at 2, so the number the
+    approval line would read `replicas 3 -> <requested>` from is stale.
+
+    Both directions are exercised because this gate is *unconditional*.
+    Asking for 1 was a decrease against the captured count; asking for 5 was
+    an increase and never had a scale-down's semantics at all, so it loads
+    no snapshot and gets no impact section either way. If this gate were
+    moved under the flow's `is_scale_down` branch - the natural place, next
+    to the impact load - the increase would sail past it into a dry run and
+    an approval dialog stating a count the object no longer has. It refuses
+    for both, before the dry-run round trip, so the drift costs no API call
+    and no LIST.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        _rescale_the_selected_row(app, 2)
+        await pilot.press(str(requested))
+        await pilot.press("enter")
+        await _count_refusal(app, pilot, "the replica count prompt", "prompt-gap replica refusal")
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert env.order == ["rbac"]
+        assert env.lister.calls == []
+        assert env.ops.calls == []
+
+
+@pytest.mark.parametrize("requested", [1, 5], ids=["decrease", "increase"])
+async def test_scale_replica_drift_during_the_dry_run_never_loads_relationships(
+    tmp_path: Path, requested: int
+) -> None:
+    """The same drift inside the dry-run round trip.
+
+    The snapshot is a LIST fan-out across every source in the catalog and
+    it is only ever loaded for a *known decrease*; once the count it was
+    decided from is stale there is nothing to spend it on, so the gate
+    between the dry run and the snapshot refuses and no relationship LIST
+    is issued at all.
+
+    This is the gate most easily mistaken for part of the scale-down path -
+    it sits immediately before the impact load - so an increase is pinned
+    here too. A scale-up loads no snapshot and shows no impact section (it
+    never had scale-down semantics), yet its approval dialog would still
+    read `replicas 3 -> 5` off the captured count, so it must be refused
+    exactly as the decrease is.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    env.ops.on_first_preview = lambda: _rescale_the_selected_row(app, 2)
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press(str(requested))
+        await pilot.press("enter")
+        await _count_refusal(app, pilot, "the dry-run preview", "dry-run replica refusal")
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert env.lister.calls == []
+        assert env.ops.calls == []
+
+
+async def test_scale_down_replica_drift_during_the_impact_load_aborts_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    """The widest window of all: the drift lands inside the snapshot load.
+
+    The summary was already scoped, walked and rendered as a *scale-down*
+    of a workload at 3 replicas. Pushing the dialog now would state
+    `replicas 3 -> 2` and hang a scale-down's dependent set off a request
+    that is an increase against the object as it stands. The classification
+    must never flip silently behind an approval, so the last gate before
+    the dialog refuses and no confirmation is ever shown.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    env.lister.on_first_call = lambda: _rescale_the_selected_row(app, 1)
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("2")
+        await pilot.press("enter")
+        await _count_refusal(app, pilot, "the impact summary", "impact-summary replica refusal")
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert env.ops.calls == []
+
+
+async def test_a_count_appearing_mid_flow_never_turns_an_unknown_scale_into_a_decrease(
+    tmp_path: Path,
+) -> None:
+    """The `None` end of the same invariant.
+
+    A summary that carries no desired count is not a decrease: korvid
+    cannot tell one from an increase, so the flow loads no snapshot and the
+    dialog says `replicas ? -> 2`. If a count appears during the dry run,
+    that captured `None` is exactly as stale as a captured number would be
+    - the request is now a known decrease with no blast-radius section and
+    a `?` where the approver would read 5. `None` is a captured value, not
+    a licence to skip the comparison, so the same gate refuses.
+    """
+    rows: dict[str, list[Any]] = {"deployments": [_deployment("web", "deploy-1", desired=None)]}
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
+    app = env.app
+    env.ops.on_first_preview = lambda: _rescale_the_selected_row(app, 5)
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("2")
+        await pilot.press("enter")
+        await _count_refusal(app, pilot, "the dry-run preview", "unknown-count drift refusal")
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert env.lister.calls == []
+        assert env.ops.calls == []
+
+
+@pytest.mark.parametrize(
+    ("make_drift", "reason"),
+    [
+        (_uid_replacement_drift, "the selection changed"),
+        (_focus_drift, "the selection changed"),
+        (_scope_drift, "the selection changed"),
+        (_replica_count_drift, "the desired replica count changed"),
+    ],
+    ids=["uid", "pane", "scope", "replicas"],
+)
+async def test_scale_drift_while_the_confirmation_is_open_never_writes(
+    tmp_path: Path,
+    make_drift: Callable[[KorvidApp], Callable[[], None]],
+    reason: str,
+) -> None:
+    """The last awaited gap of all: the approval dialog itself.
+
+    `ConfirmScreen` is the longest gap in the whole flow - it stays up until
+    the user answers, which can be minutes - and until now nothing was
+    re-checked across it. Every earlier gate had already passed, so a
+    same-UID replica move, a same-named replacement, a focus change to the
+    second pane or a re-scope of the origin pane made *while the dialog was
+    on screen* was carried straight into `_run_write`: the dialog the user
+    approved would have described `replicas 3 -> 1` (or the row they were
+    looking at), and the write, the reservation and the audit record would
+    have been for what the cluster and the view hold now.
+
+    The guard runs after a *fresh* keystroke approval and after the modal is
+    gone - never as a second approval path, never on a decline - and before
+    anything else the approval triggers. So the assertion is that the
+    refusal names the dialog phase and that the flow left nothing behind:
+    no write reservation (which would block `:ctx`), no operation, and no
+    audit record at all - not even the fail-closed intent line, because the
+    write worker is never constructed.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        drift = make_drift(app)
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="scale-down confirm"
+        )
+        assert "scale down apps/Deployment/prod/web" in impact_text(app)
+        drift()
+        await pilot.press("y")
+        await _cancelled(
+            app, pilot, f"{reason} during the confirmation dialog", "confirm-gap refusal"
+        )
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert app._active_cluster_writes == 0
+        assert env.ops.calls == []
+        assert not audit_path.exists()

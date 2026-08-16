@@ -122,7 +122,7 @@ from korvid.ui.drain import DrainController
 from korvid.ui.forward_controller import ForwardController
 from korvid.ui.helm_controller import HelmController
 from korvid.ui.hints import EventsFetcher, HintController, pod_needs_hint
-from korvid.ui.impact_preview import IMPACT_UNAVAILABLE_LINES, render_impact_lines
+from korvid.ui.impact_preview import render_impact_lines, render_unavailable_lines
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -4975,6 +4975,57 @@ class KorvidApp(App[None]):
         )
         return False
 
+    def _scale_context_intact(
+        self,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        current: int | None,
+        *,
+        phase: str,
+        epoch: int,
+        origin: _WriteOrigin,
+    ) -> bool:
+        """`_write_identity_intact` plus the desired replica count the scale
+        flow captured.
+
+        A scale is the one write whose *meaning* is not fixed by its
+        identity: the same requested count is a decrease or an increase
+        depending on where the object stands when it is requested. The
+        captured count decides whether korvid loads a scale-down's blast
+        radius and what the approval line says it is changing from, and
+        every awaited gap in the flow - the permission round trip, the count
+        prompt, the dry run, the snapshot, the approval dialog itself - is
+        long enough for a controller, an autoscaler or another operator to
+        move `spec.replicas` under an otherwise unchanged incarnation.
+        `_write_identity_intact` cannot see that: kind, namespace, name,
+        uid, pane and scope all still match.
+
+        So the count is compared too, and a change ends the flow with its
+        own banner rather than a stale `old -> new` line or a scale-down
+        section attached to what is now an increase. `None` is a captured
+        value like any other: a row that gained a readable count mid-flow
+        drifted exactly as much as one whose number moved, and comparing
+        equality keeps both directions closed.
+
+        Identity is checked first because `_current_replicas` reads
+        `current_kind` and `current_scope` from the focused pane; only a
+        current `origin` makes that count belong to this write flow.
+        """
+        if not self._write_identity_intact(
+            "scale", meta, ns, name, uid, phase=phase, epoch=epoch, origin=origin
+        ):
+            return False
+        if self._current_replicas(ns, name) == current:
+            return True
+        self.notify(
+            f"scale {self._gvr_label(meta)}/{name} cancelled -"
+            f" the desired replica count changed during {phase}",
+            severity="warning",
+        )
+        return False
+
     async def _precheck_keybinding_write(
         self, action: str, meta: ResourceMeta, ns: str | None, name: str
     ) -> bool:
@@ -5213,7 +5264,14 @@ class KorvidApp(App[None]):
           render -> the static "impact unavailable" advisory, because an API
           error message can embed a response body (for a Secret, its data)
           and must never reach the dialog, and because a summarizer or
-          renderer bug must cost the user the section, not the approval;
+          renderer bug must cost the user the section, not the approval.
+          It is rendered for the action and target *type* in hand - group
+          and kind, since only `apps/StatefulSet` has the field the last
+          line names - so a scale-down still states the machine-defined
+          limitations it always states (PodDisruptionBudgets do not gate a
+          controller scale-down, an HPA's own loop is not evaluated, and an
+          `apps/StatefulSet`'s PVC retention policy is not either) - none of
+          those depends on the snapshot that failed to arrive;
         - cancellation (a `:ctx` switch tearing the client down) propagates
           untouched, exactly like every other awaited read here.
 
@@ -5243,7 +5301,7 @@ class KorvidApp(App[None]):
             # Type only: never the message (CodeQL py/clear-text-logging-
             # sensitive-data), and never anything derived from a manifest.
             logger.debug("impact summary unavailable for %s: %s", action, type(exc).__name__)
-            return IMPACT_UNAVAILABLE_LINES
+            return render_unavailable_lines(action, meta.group, meta.kind)
 
     async def _push_write_confirmation(
         self,
@@ -5261,6 +5319,7 @@ class KorvidApp(App[None]):
         preview_title: str = "server dry-run preview:",
         managed_note: str | None = None,
         impact_lines: tuple[str, ...] | None = None,
+        approval_guard: Callable[[], bool] | None = None,
     ) -> None:
         """The standard write-approval flow (issue #91 U1): push a confirm
         dialog and, on approval, launch `_run_write` on an app-owned worker.
@@ -5270,13 +5329,48 @@ class KorvidApp(App[None]):
         unawaited, no side effects before approval). Flows with extra
         semantics — operator install's in-callback UID recheck, drain's
         dedicated worker, the agent gate's approval future — stay explicit.
+
+        `approval_guard` is an optional last re-validation for flows whose
+        dialog can go stale while it is open. The dialog is the longest
+        awaited gap a write has - it stays up until the user answers - and
+        every earlier gate has already passed by then, so a flow that
+        depends on state outside the target's identity needs one more look
+        before it commits. It is deliberately *synchronous*: it must not
+        introduce an await of its own between the approval and the write.
+
+        The guard runs only on a fresh approval, so it can never become a
+        second path *to* the write - it can only refuse one the user already
+        gave - and it runs before `_run_write` is even constructed, so a
+        refusal leaves no write reservation, no audit record, and no
+        operation. It is deferred by one loop iteration because Textual
+        invokes this result callback *before* it pops the dismissed screen:
+        run inline, any selection check would see the confirmation itself
+        still on the screen stack and read as "another dialog opened".
+
+        Omitting it (the default) keeps every other write flow on exactly
+        the callback it had: approval launches the worker in the same
+        iteration, unguarded. Scale needs this safeguard because the captured
+        replica count defines the action as a decrease or increase. Applying
+        the same dialog-gap identity guard to delete/restart is tracked
+        separately in issue #297.
         """
 
+        def _launch() -> None:
+            self.run_worker(
+                self._run_write(action, meta, namespace, name, op_factory, detail=detail)
+            )
+
+        def _launch_if(guard: Callable[[], bool]) -> None:
+            if guard():
+                _launch()
+
         def _done(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(
-                    self._run_write(action, meta, namespace, name, op_factory, detail=detail)
-                )
+            if not confirmed:
+                return
+            if approval_guard is None:
+                _launch()
+                return
+            self.call_later(_launch_if, approval_guard)
 
         await self.push_screen(
             self._confirm_screen(
@@ -5686,6 +5780,16 @@ class KorvidApp(App[None]):
                 return None if desired is None else int(desired)
         return None
 
+    @staticmethod
+    def _is_scale_down(current: int | None, replicas: int) -> bool:
+        """Whether this scale is a *known* decrease.
+
+        A summary that carries no desired count (`None`) is not a decrease:
+        korvid cannot tell one from a scale-up, and an impact summary is
+        only ever attached to an action whose semantics are known.
+        """
+        return current is not None and replicas < current
+
     async def action_scale_resource(self) -> None:
         """S: scale the selected deployment/replicaset/statefulset (prompt, then confirm)."""
         ops = self._write_ops
@@ -5699,12 +5803,31 @@ class KorvidApp(App[None]):
         if (meta.group, meta.plural) not in self._SCALABLE:
             self.notify(f"scale does not apply to {self._gvr_label(meta)}", severity="warning")
             return
+        # Captured with the target — see action_delete_resource. The pane
+        # and its scope are pinned here, before the permission round trip
+        # and before the count prompt: everything after this reads
+        # "whichever pane is focused now", and the scale-down snapshot below
+        # must cover the pane the user actually raised the write from.
+        origin = self._write_origin()
         epoch = self._ctx_epoch
-        # Captured with the target — see action_delete_resource.
         kind_alias = self._canonical_kind(self.current_kind)
+        # Read before the RBAC await, from the row the target was taken
+        # from: the decrease decision must be about that incarnation, not
+        # about whatever the store holds once the prompt closes.
+        current = self._current_replicas(ns, name)
         if not await self._precheck_keybinding_write("scale", meta, ns, name):
             return
-        current = self._current_replicas(ns, name)
+        if not self._scale_context_intact(
+            meta,
+            ns,
+            name,
+            uid,
+            current,
+            phase="the permission check",
+            epoch=epoch,
+            origin=origin,
+        ):
+            return
 
         def _on_replicas(replicas: int | None) -> None:
             if replicas is None:
@@ -5712,7 +5835,17 @@ class KorvidApp(App[None]):
             # The dry-run round trip must not run inside a screen callback:
             # a worker fetches the preview, revalidates, then confirms.
             self.run_worker(
-                self._confirm_scale(meta, ns, name, uid, current, replicas, epoch, kind_alias)
+                self._confirm_scale(
+                    meta,
+                    ns,
+                    name,
+                    uid,
+                    current,
+                    replicas,
+                    epoch,
+                    kind_alias,
+                    origin,
+                )
             )
 
         await self.push_screen(
@@ -5729,19 +5862,92 @@ class KorvidApp(App[None]):
         replicas: int,
         epoch: int,
         kind_alias: str,
+        origin: _WriteOrigin,
     ) -> None:
         """Dry-run preview + approval dialog for a scale, after the replica
         count is known. Revalidates the selection after the preview round
         trip: keystrokes during the await must never land on a confirmation
         for a different row. `kind_alias` was captured with the target — the
-        banner must describe the row the user acted on, not the current view."""
+        banner must describe the row the user acted on, not the current view.
+
+        A *known decrease* additionally loads the advisory blast radius
+        (issue #295); a scale-up, a no-op, or a row with no readable desired
+        count has no tested scale-down semantics and gets no section and no
+        LIST fan-out. That fan-out is the *only* part of the pre-#295 flow
+        those shapes keep: the identity gating below is stronger for every
+        scale, decrease or not, because it now revalidates the captured uid,
+        the origin pane, that pane's scope and the captured replica count
+        where the flow previously rechecked only kind, namespace, name and
+        the context epoch. `current` is part of what is revalidated because
+        it is what makes this request a decrease at all: it decides whether
+        the blast radius is loaded and it is the number the approval line
+        reads `replicas <old> -> <new>` from.
+
+        The dialog this pushes is itself an awaited gap, and the longest
+        one, so the same gate is handed to `_push_write_confirmation` as its
+        `approval_guard` and runs once more on approval - see there for why
+        it is deferred rather than run inside the result callback."""
         ops = self._write_ops
         if ops is None:
             return
+        # The count prompt is the flow's own awaited gap, and the one a user
+        # can hold open indefinitely: gate before the dry-run round trip, so
+        # a selection, pane, scope, context or replica-count change made
+        # while the modal was up costs no API call at all.
+        if not self._scale_context_intact(
+            meta,
+            ns,
+            name,
+            uid,
+            current,
+            phase="the replica count prompt",
+            epoch=epoch,
+            origin=origin,
+        ):
+            return
         preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
         note = await self._managed_note(kind_alias, ns, name)
-        if not self._write_context_intact(
-            "scale", meta, ns, name, phase="the dry-run preview", epoch=epoch
+        # Gate before the snapshot, not only after it. The count prompt and
+        # this dry-run round trip are two awaited gaps of their own, and the
+        # snapshot is a LIST fan-out across every source in the catalog:
+        # once the selection, the pane, its scope, the context or the count
+        # the request was classified against has drifted the flow is already
+        # doomed, so korvid must not spend that fan-out (nor scope it to a
+        # pane the user has left).
+        if not self._scale_context_intact(
+            meta,
+            ns,
+            name,
+            uid,
+            current,
+            phase="the dry-run preview",
+            epoch=epoch,
+            origin=origin,
+        ):
+            return
+        is_scale_down = self._is_scale_down(current, replicas)
+        # The snapshot is another awaited gap — see action_delete_resource.
+        impact = (
+            await self._impact_preview(
+                ImpactAction.SCALE_DOWN,
+                meta,
+                ns,
+                name,
+                uid,
+                origin=origin,
+            )
+            if is_scale_down
+            else None
+        )
+        if is_scale_down and not self._scale_context_intact(
+            meta,
+            ns,
+            name,
+            uid,
+            current,
+            phase="the impact summary",
+            epoch=epoch,
+            origin=origin,
         ):
             return
 
@@ -5758,6 +5964,25 @@ class KorvidApp(App[None]):
             detail=f"replicas -> {replicas}",
             preview=preview,
             managed_note=note,
+            impact_lines=impact,
+            # The dialog is the flow's last - and longest - awaited gap: it
+            # stays up until the user answers. Everything the gates above
+            # compared can move while it does, and `current` in particular
+            # is what the operation line the user is reading says the object
+            # is changing *from*. So the approval is re-validated against
+            # the same captured values once more, after the modal is gone
+            # and before any worker, reservation, audit record or operation
+            # exists.
+            approval_guard=lambda: self._scale_context_intact(
+                meta,
+                ns,
+                name,
+                uid,
+                current,
+                phase="the confirmation dialog",
+                epoch=epoch,
+                origin=origin,
+            ),
         )
 
     async def action_resize_pod(self) -> None:
