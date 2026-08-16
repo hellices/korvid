@@ -544,8 +544,9 @@ Expected: scale-down has no impact section; the negative cases remain green.
 > `spec.selector` too. `_replicaset()` therefore uses the same shared
 > selector helper (used only by `_scale_down_rows()` at the time of #296, so the
 > delete/rollout-restart fixtures were initially untouched — #297 later made the
-> workload selector unconditional in all three helpers: `_deployment`,
-> `_replicaset`, and the delete/restart fixtures directly), and the ReplicaSet test now
+> workload selector unconditional in both helpers: `_deployment` and
+> `_replicaset`, which then propagated to the delete/restart fixtures that use
+> them), and the ReplicaSet test now
 > asserts the first path the walk actually reports — `Pod/prod/web-abc-1 via
 > managed_by (declared) at apps/ReplicaSet/prod/web-abc: spec.selector`, with
 > `Service` and `Ingress` hanging off that same first hop. Hop count (three)
