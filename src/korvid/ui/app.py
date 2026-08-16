@@ -5778,13 +5778,34 @@ class KorvidApp(App[None]):
 
         A *known decrease* additionally loads the advisory blast radius
         (issue #295); a scale-up, a no-op, or a row with no readable desired
-        count has no tested scale-down semantics and gets no section, no
-        LIST fan-out, and the flow it had before."""
+        count has no tested scale-down semantics and gets no section and no
+        LIST fan-out. That fan-out is the *only* part of the pre-#295 flow
+        those shapes keep: the identity gating below is stronger for every
+        scale, decrease or not, because it now revalidates the captured uid,
+        the origin pane and that pane's scope where the flow previously
+        rechecked only kind, namespace, name and the context epoch."""
         ops = self._write_ops
         if ops is None:
             return
         preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
         note = await self._managed_note(kind_alias, ns, name)
+        # Gate before the snapshot, not only after it. The count prompt and
+        # this dry-run round trip are two awaited gaps of their own, and the
+        # snapshot is a LIST fan-out across every source in the catalog:
+        # once the selection, the pane, its scope or the context has drifted
+        # the flow is already doomed, so korvid must not spend that fan-out
+        # (nor scope it to a pane the user has left).
+        if not self._write_identity_intact(
+            "scale",
+            meta,
+            ns,
+            name,
+            uid,
+            phase="the dry-run preview",
+            epoch=epoch,
+            origin=origin,
+        ):
+            return
         is_scale_down = self._is_scale_down(current, replicas)
         # The snapshot is another awaited gap — see action_delete_resource.
         impact = (
@@ -5799,16 +5820,13 @@ class KorvidApp(App[None]):
             if is_scale_down
             else None
         )
-        # One gate for both shapes, naming the last thing that was awaited:
-        # a second check after the dry-run would only repeat this one.
-        phase = "the impact summary" if is_scale_down else "the dry-run preview"
-        if not self._write_identity_intact(
+        if is_scale_down and not self._write_identity_intact(
             "scale",
             meta,
             ns,
             name,
             uid,
-            phase=phase,
+            phase="the impact summary",
             epoch=epoch,
             origin=origin,
         ):

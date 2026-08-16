@@ -1,13 +1,18 @@
-"""Graph-derived impact previews in the delete/rollout-restart flows (#283).
+"""Graph-derived impact previews in the delete/rollout-restart flows (#283)
+and in the workload scale-down flow (#295).
 
 The app reuses the relationship snapshot loader it already owns for `g`: no
 new LIST/GET interface, no new constructor parameter, no composition-root
 change. What this module pins beyond "the section renders" is the wiring
 that only shows up end to end: the snapshot's scope is chosen by the target
 (cluster-scoped kinds cover every namespace), the row's exact UID reaches
-the summary, unsupported write flows are untouched, and both awaited gaps
-still revalidate. This module owns the shared harness (`ImpactEnv`) that
-`tests/ui/test_impact_security.py` reuses for the security invariants.
+the summary, unsupported write flows are untouched, and every awaited gap
+still revalidates. The scale-down flow (#295) adds a gap the other two do
+not have - the replica-count prompt - so its tests also pin *when* the
+origin pane is captured and that no snapshot is loaded once the selection,
+the pane or the pane's scope has drifted. This module owns the shared
+harness (`ImpactEnv`) that `tests/ui/test_impact_security.py` reuses for
+the security invariants.
 """
 
 from __future__ import annotations
@@ -729,12 +734,17 @@ async def test_a_namespaced_target_in_an_all_namespaces_pane_covers_every_namesp
 
 #: The rows a scale-down walk is exercised over: the controller chain
 #: (Deployment -> ReplicaSet -> Pod), the Service selecting that Pod, and
-#: the Ingress routing to that Service.
+#: the Ingress routing to that Service. The Pod's ConfigMap is included so
+#: the walk has no *unrelated* dangling reference: without it the summary
+#: also reports `unresolved references in the affected set`, which is the
+#: subject of its own test and would otherwise contaminate every assertion
+#: about what a scale-down lists.
 def _scale_down_rows() -> dict[str, list[Any]]:
     return {
         "pods": [_pod()],
         "deployments": [_deployment("web", "deploy-1")],
         "replicasets": [_replicaset()],
+        "configmaps": [_configmap()],
         "services": [_service()],
         "ingresses": [_ingress()],
     }
@@ -810,8 +820,15 @@ async def test_non_decreasing_or_unknown_scale_never_loads_relationships(
     requested: int,
 ) -> None:
     """Only a *known decrease* has scale-down semantics: scaling up, scaling
-    to the same count, and a row whose desired count korvid cannot read all
-    keep the pre-#295 flow exactly, snapshot fan-out included."""
+    to the same count, and a row whose desired count korvid cannot read get
+    no impact section and no snapshot fan-out at all.
+
+    That fan-out is the only thing #295 leaves untouched for them. The
+    identity gating around every scale is *strengthened*: the captured uid,
+    the origin pane and that pane's scope are revalidated after the
+    permission check and again after the dry-run preview, where the flow
+    previously rechecked only kind, namespace, name and the context epoch.
+    """
     rows: dict[str, list[Any]] = {"deployments": [_deployment("web", "deploy-1", desired=desired)]}
     env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
     async with env.app.run_test() as pilot:
@@ -1122,15 +1139,27 @@ def _namespaced_list_scopes(env: ImpactEnv) -> set[str | None]:
     return {namespace for plural, namespace in env.lister.calls if plural in _NAMESPACED_PLURALS}
 
 
-async def _refusal(app: KorvidApp, pilot: Any, label: str) -> None:
+async def _cancelled(app: KorvidApp, pilot: Any, message: str, label: str) -> None:
+    """Wait for a gate's cancellation banner.
+
+    `notify` reaches `_notifications` through the message loop, so the
+    banner is polled for rather than read straight after the await (the
+    repo-wide pattern for notification assertions).
+    """
     await until(
         pilot,
-        lambda: any(
-            "the selection changed during the impact summary" in n.message
-            for n in app._notifications
-        ),
+        lambda: any(message in n.message for n in app._notifications),
         label=label,
     )
+
+
+async def _refusal_during(app: KorvidApp, pilot: Any, phase: str, label: str) -> None:
+    """Wait for the selection-changed refusal a gate raises after `phase`."""
+    await _cancelled(app, pilot, f"the selection changed during {phase}", label)
+
+
+async def _refusal(app: KorvidApp, pilot: Any, label: str) -> None:
+    await _refusal_during(app, pilot, "the impact summary", label)
 
 
 async def test_focus_moving_to_another_pane_during_the_impact_load_aborts_the_delete(
@@ -1282,3 +1311,101 @@ async def test_scale_down_scope_change_on_origin_aborts_before_confirmation(
         assert len(app.screen_stack) == 1
         assert env.ops.calls == []
         assert _namespaced_list_scopes(env) == {"prod"}
+
+
+async def test_scale_down_focus_move_while_the_prompt_is_open_aborts_before_any_list(
+    tmp_path: Path,
+) -> None:
+    """Focus crosses to the all-namespaces pane while the replica-count
+    prompt is still up, i.e. *before* the count is even submitted.
+
+    The count prompt is the scale flow's own awaited gap, and it is the one
+    a user can hold open indefinitely. The pane the write was raised from is
+    captured before that prompt is pushed, so the approval that follows is
+    still judged against `prod`: the gate refuses, no dialog appears, and no
+    snapshot is loaded at all - in particular never the cluster-wide one the
+    now-focused pane would ask for. Capturing the origin when the count comes
+    back instead would silently adopt the pane the user drifted into and let
+    the write through.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        app._focus_other_pane()
+        await until(pilot, lambda: app._pane is not origin, label="focus on the other pane")
+        assert isinstance(app.screen, ReplicasPrompt)
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal_during(app, pilot, "the dry-run preview", "scale-down prompt-gap refusal")
+        assert app._pane is not origin
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert env.ops.calls == []
+        # The snapshot never widened past the captured `prod` origin - here
+        # it never ran, because the gate below refuses first.
+        assert env.lister.calls == []
+
+
+async def test_scale_down_focus_move_during_the_dry_run_never_loads_relationships(
+    tmp_path: Path,
+) -> None:
+    """Focus crosses panes inside the dry-run round trip, after the count
+    was submitted from the `prod` pane.
+
+    The impact snapshot is a LIST fan-out across every source in the
+    catalog; once the flow is already doomed there is no reason to ask the
+    API server for it. The gate sits between the dry run and the snapshot,
+    so the drift costs zero relationship LISTs, and the approval still never
+    appears.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
+        origin = app._pane
+        env.ops.on_first_preview = app._focus_other_pane
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _refusal_during(app, pilot, "the dry-run preview", "scale-down dry-run refusal")
+        assert app._pane is not origin
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert env.ops.calls == []
+        assert env.lister.calls == []
+
+
+async def test_scale_down_context_switch_during_the_dry_run_never_loads_relationships(
+    tmp_path: Path,
+) -> None:
+    """The same gate on the context axis: the cluster context changes while
+    the dry run is in flight. The captured epoch no longer matches, so the
+    snapshot - which would be loaded against the *new* context's client -
+    is never requested."""
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+
+    def bump_epoch() -> None:
+        app._ctx_epoch += 1
+
+    env.ops.on_first_preview = bump_epoch
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("1")
+        await pilot.press("enter")
+        await _cancelled(
+            app,
+            pilot,
+            "the kube context changed during the dry-run preview",
+            "scale-down epoch refusal",
+        )
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        assert env.lister.calls == []
