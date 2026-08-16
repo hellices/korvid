@@ -16,6 +16,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
@@ -136,17 +137,25 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             yield Static(id="setup-status")
 
     def on_mount(self) -> None:
-        for widget_id in (
-            "#setup-auth",
-            "#setup-base-url",
-            "#setup-api-key-env",
-            "#setup-model-filter",
-            "#setup-model-list",
-            "#setup-model",
-            "#setup-device-code",
-        ):
-            self.query_one(widget_id).display = False
-        provider_list = self.query_one("#setup-provider", OptionList)
+        self._initialize_controls()
+
+    def _initialize_controls(self, *, retry: bool = True) -> None:
+        try:
+            for widget_id in (
+                "#setup-auth",
+                "#setup-base-url",
+                "#setup-api-key-env",
+                "#setup-model-filter",
+                "#setup-model-list",
+                "#setup-model",
+                "#setup-device-code",
+            ):
+                self.query_one(widget_id).display = False
+            provider_list = self.query_one("#setup-provider", OptionList)
+        except NoMatches:
+            if retry:
+                self.call_after_refresh(self._initialize_controls, retry=False)
+            return
         provider_list.highlighted = 0
         if self._current_canonical is not None:
             provider_list.highlighted = list(_DEFAULTS).index(self._current_canonical)

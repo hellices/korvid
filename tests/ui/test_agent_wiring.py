@@ -270,7 +270,11 @@ async def test_ai_command_pushes_setup_screen() -> None:
     async with app.run_test() as pilot:
         await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         app.on_unknown_command(UnknownCommand("ai"))
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, AgentSetupScreen),
+            label="agent setup screen opened",
+        )
         assert isinstance(app.screen, AgentSetupScreen)
 
 
