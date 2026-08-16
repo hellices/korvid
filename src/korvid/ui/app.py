@@ -4975,6 +4975,52 @@ class KorvidApp(App[None]):
         )
         return False
 
+    def _scale_context_intact(
+        self,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        current: int | None,
+        *,
+        phase: str,
+        epoch: int,
+        origin: _WriteOrigin,
+    ) -> bool:
+        """`_write_identity_intact` plus the desired replica count the scale
+        flow captured.
+
+        A scale is the one write whose *meaning* is not fixed by its
+        identity: the same requested count is a decrease or an increase
+        depending on where the object stands when it is requested. The
+        captured count decides whether korvid loads a scale-down's blast
+        radius and what the approval line says it is changing from, and
+        every awaited gap in the flow - the permission round trip, the count
+        prompt, the dry run, the snapshot - is long enough for a controller,
+        an autoscaler or another operator to move `spec.replicas` under an
+        otherwise unchanged incarnation. `_write_identity_intact` cannot see
+        that: kind, namespace, name, uid, pane and scope all still match.
+
+        So the count is compared too, and a change ends the flow with its
+        own banner rather than a stale `old -> new` line or a scale-down
+        section attached to what is now an increase. `None` is a captured
+        value like any other: a row that gained a readable count mid-flow
+        drifted exactly as much as one whose number moved, and comparing
+        equality keeps both directions closed.
+        """
+        if not self._write_identity_intact(
+            "scale", meta, ns, name, uid, phase=phase, epoch=epoch, origin=origin
+        ):
+            return False
+        if self._current_replicas(ns, name) == current:
+            return True
+        self.notify(
+            f"scale {self._gvr_label(meta)}/{name} cancelled -"
+            f" the desired replica count changed during {phase}",
+            severity="warning",
+        )
+        return False
+
     async def _precheck_keybinding_write(
         self, action: str, meta: ResourceMeta, ns: str | None, name: str
     ) -> bool:
@@ -5729,12 +5775,12 @@ class KorvidApp(App[None]):
         current = self._current_replicas(ns, name)
         if not await self._precheck_keybinding_write("scale", meta, ns, name):
             return
-        if not self._write_identity_intact(
-            "scale",
+        if not self._scale_context_intact(
             meta,
             ns,
             name,
             uid,
+            current,
             phase="the permission check",
             epoch=epoch,
             origin=origin,
@@ -5788,25 +5834,45 @@ class KorvidApp(App[None]):
         LIST fan-out. That fan-out is the *only* part of the pre-#295 flow
         those shapes keep: the identity gating below is stronger for every
         scale, decrease or not, because it now revalidates the captured uid,
-        the origin pane and that pane's scope where the flow previously
-        rechecked only kind, namespace, name and the context epoch."""
+        the origin pane, that pane's scope and the captured replica count
+        where the flow previously rechecked only kind, namespace, name and
+        the context epoch. `current` is part of what is revalidated because
+        it is what makes this request a decrease at all: it decides whether
+        the blast radius is loaded and it is the number the approval line
+        reads `replicas <old> -> <new>` from."""
         ops = self._write_ops
         if ops is None:
+            return
+        # The count prompt is the flow's own awaited gap, and the one a user
+        # can hold open indefinitely: gate before the dry-run round trip, so
+        # a selection, pane, scope, context or replica-count change made
+        # while the modal was up costs no API call at all.
+        if not self._scale_context_intact(
+            meta,
+            ns,
+            name,
+            uid,
+            current,
+            phase="the replica count prompt",
+            epoch=epoch,
+            origin=origin,
+        ):
             return
         preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
         note = await self._managed_note(kind_alias, ns, name)
         # Gate before the snapshot, not only after it. The count prompt and
         # this dry-run round trip are two awaited gaps of their own, and the
         # snapshot is a LIST fan-out across every source in the catalog:
-        # once the selection, the pane, its scope or the context has drifted
-        # the flow is already doomed, so korvid must not spend that fan-out
-        # (nor scope it to a pane the user has left).
-        if not self._write_identity_intact(
-            "scale",
+        # once the selection, the pane, its scope, the context or the count
+        # the request was classified against has drifted the flow is already
+        # doomed, so korvid must not spend that fan-out (nor scope it to a
+        # pane the user has left).
+        if not self._scale_context_intact(
             meta,
             ns,
             name,
             uid,
+            current,
             phase="the dry-run preview",
             epoch=epoch,
             origin=origin,
@@ -5826,12 +5892,12 @@ class KorvidApp(App[None]):
             if is_scale_down
             else None
         )
-        if is_scale_down and not self._write_identity_intact(
-            "scale",
+        if is_scale_down and not self._scale_context_intact(
             meta,
             ns,
             name,
             uid,
+            current,
             phase="the impact summary",
             epoch=epoch,
             origin=origin,

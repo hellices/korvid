@@ -1276,6 +1276,27 @@ def _replace_selected_row_with_a_new_incarnation(app: KorvidApp) -> None:
     )
 
 
+def _rescale_the_selected_row(app: KorvidApp, desired: int | None) -> None:
+    """Change the selected `web` row's desired count, keeping its identity.
+
+    What a controller, an autoscaler or another operator does between two
+    awaits: the object is the same incarnation - same kind, namespace, name
+    and uid - so every identity check still passes, while the number the
+    scale flow captured (and classified the request against) is stale.
+    """
+    app.store.apply_event(
+        app.current_kind,
+        app.current_scope,
+        "MODIFIED",
+        _deployment("web", "deploy-1", desired=desired),
+    )
+
+
+async def _count_refusal(app: KorvidApp, pilot: Any, phase: str, label: str) -> None:
+    """Wait for the replica-count drift refusal a scale gate raises after `phase`."""
+    await _cancelled(app, pilot, f"the desired replica count changed during {phase}", label)
+
+
 async def test_same_name_replacement_during_the_impact_load_aborts_the_delete(
     tmp_path: Path,
 ) -> None:
@@ -1672,6 +1693,10 @@ async def test_scale_down_focus_move_while_the_prompt_is_open_aborts_before_any_
     now-focused pane would ask for. Capturing the origin when the count comes
     back instead would silently adopt the pane the user drifted into and let
     the write through.
+
+    The refusal names the prompt, not the dry run: the gate that sees this
+    drift is the one at the top of the confirm step, before the dry-run
+    round trip is even issued, so the drift costs no API call either.
     """
     env = ImpactEnv(tmp_path / "audit.jsonl")
     app = env.app
@@ -1685,11 +1710,16 @@ async def test_scale_down_focus_move_while_the_prompt_is_open_aborts_before_any_
         assert isinstance(app.screen, ReplicasPrompt)
         await pilot.press("1")
         await pilot.press("enter")
-        await _refusal_during(app, pilot, "the dry-run preview", "scale-down prompt-gap refusal")
+        await _refusal_during(
+            app, pilot, "the replica count prompt", "scale-down prompt-gap refusal"
+        )
         assert app._pane is not origin
         assert len(app.screen_stack) == 1
         assert not isinstance(app.screen, ConfirmScreen)
         assert env.ops.calls == []
+        # Neither the dry run nor the snapshot ran: the permission check is
+        # the only round trip a doomed flow pays for.
+        assert env.order == ["rbac"]
         # The snapshot never widened past the captured `prod` origin - here
         # it never ran, because the gate below refuses first.
         assert env.lister.calls == []
@@ -1720,29 +1750,43 @@ def _scope_drift(app: KorvidApp) -> Callable[[], None]:
     return widen
 
 
+def _replica_count_drift(app: KorvidApp) -> Callable[[], None]:
+    """The row's desired count changes under the same incarnation."""
+    return lambda: _rescale_the_selected_row(app, 1)
+
+
 @pytest.mark.parametrize(
-    "make_drift",
-    [_uid_replacement_drift, _focus_drift, _scope_drift],
-    ids=["uid", "pane", "scope"],
+    ("make_drift", "reason"),
+    [
+        (_uid_replacement_drift, "the selection changed"),
+        (_focus_drift, "the selection changed"),
+        (_scope_drift, "the selection changed"),
+        (_replica_count_drift, "the desired replica count changed"),
+    ],
+    ids=["uid", "pane", "scope", "replicas"],
 )
 async def test_scale_identity_drift_during_the_permission_check_never_prompts(
     tmp_path: Path,
     make_drift: Callable[[KorvidApp], Callable[[], None]],
+    reason: str,
 ) -> None:
     """The scale flow's *first* awaited gap: the SubjectAccessReview.
 
     `_precheck_keybinding_write` re-validates kind, namespace, name and the
     context epoch after that round trip, and all four still match in each
     case here - a same-named replacement keeps them, and so does a second
-    pane sitting on the very same row or the origin pane widening its scope.
-    Only the uid, the pane identity and that pane's scope betray the drift,
-    which is exactly what the gate added after the permission check compares.
+    pane sitting on the very same row, the origin pane widening its scope,
+    or the row's desired count moving under an unchanged identity. Only the
+    uid, the pane identity, that pane's scope and the captured replica count
+    betray the drift, which is exactly what the gate added after the
+    permission check compares.
 
     Without it the flow would run on and push the replica prompt: a modal
-    the user never asked for, over an object they no longer selected, whose
-    count would then be dry-run, summarized and offered for approval. So the
-    assertion is that *nothing* happens after the refusal - no prompt, no
-    dry-run preview, no snapshot LIST, no write, no audit record.
+    the user never asked for, over an object they no longer selected (or a
+    count they no longer saw), whose value would then be dry-run,
+    summarized and offered for approval. So the assertion is that *nothing*
+    happens after the refusal - no prompt, no dry-run preview, no snapshot
+    LIST, no write, no audit record.
     """
     audit_path = tmp_path / "audit.jsonl"
     env = ImpactEnv(audit_path)
@@ -1751,7 +1795,9 @@ async def test_scale_identity_drift_during_the_permission_check_never_prompts(
         await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
         env.on_permission_check = make_drift(app)
         await pilot.press("S")
-        await _refusal_during(app, pilot, "the permission check", "scale permission-gap refusal")
+        await _cancelled(
+            app, pilot, f"{reason} during the permission check", "scale permission-gap refusal"
+        )
         assert not isinstance(app.screen, ReplicasPrompt)
         assert len(app.screen_stack) == 1
         # The permission check is the only thing that ran: no dry-run
@@ -1821,3 +1867,121 @@ async def test_scale_down_context_switch_during_the_dry_run_never_loads_relation
         assert len(app.screen_stack) == 1
         assert env.ops.calls == []
         assert env.lister.calls == []
+
+
+async def test_scale_down_replica_drift_during_the_prompt_never_previews_or_lists(
+    tmp_path: Path,
+) -> None:
+    """The count the scale-down was classified against moves while the
+    replica prompt is open.
+
+    The row keeps its kind, namespace, name and uid - a controller or an
+    autoscaler simply changed `spec.replicas` - so every identity check
+    still passes. The flow captured 3 replicas before the permission check
+    and the user asks for 2, which was a decrease *then*; by the time the
+    count comes back the object sits at 1 and the very same request is an
+    increase. Continuing would run a scale-down's blast-radius fan-out for
+    a scale-up and offer an approval reading `replicas 3 -> 2` for an
+    object at 1. The gate at the top of the confirm step refuses first, so
+    the drift costs no dry run and no LIST.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        _rescale_the_selected_row(app, 1)
+        await pilot.press("2")
+        await pilot.press("enter")
+        await _count_refusal(app, pilot, "the replica count prompt", "prompt-gap replica refusal")
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert env.order == ["rbac"]
+        assert env.lister.calls == []
+        assert env.ops.calls == []
+
+
+async def test_scale_down_replica_drift_during_the_dry_run_never_loads_relationships(
+    tmp_path: Path,
+) -> None:
+    """The same drift inside the dry-run round trip.
+
+    The snapshot is a LIST fan-out across every source in the catalog and
+    it is only ever loaded for a *known decrease*; once the count it was
+    decided from is stale there is nothing to spend it on, so the gate
+    between the dry run and the snapshot refuses and no relationship LIST
+    is issued at all.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    env.ops.on_first_preview = lambda: _rescale_the_selected_row(app, 1)
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("2")
+        await pilot.press("enter")
+        await _count_refusal(app, pilot, "the dry-run preview", "dry-run replica refusal")
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert env.lister.calls == []
+        assert env.ops.calls == []
+
+
+async def test_scale_down_replica_drift_during_the_impact_load_aborts_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    """The widest window of all: the drift lands inside the snapshot load.
+
+    The summary was already scoped, walked and rendered as a *scale-down*
+    of a workload at 3 replicas. Pushing the dialog now would state
+    `replicas 3 -> 2` and hang a scale-down's dependent set off a request
+    that is an increase against the object as it stands. The classification
+    must never flip silently behind an approval, so the last gate before
+    the dialog refuses and no confirmation is ever shown.
+    """
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    env.lister.on_first_call = lambda: _rescale_the_selected_row(app, 1)
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("2")
+        await pilot.press("enter")
+        await _count_refusal(app, pilot, "the impact summary", "impact-summary replica refusal")
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert not any("replicas 3 -> 2" in n.message for n in app._notifications)
+        assert env.ops.calls == []
+
+
+async def test_a_count_appearing_mid_flow_never_turns_an_unknown_scale_into_a_decrease(
+    tmp_path: Path,
+) -> None:
+    """The `None` end of the same invariant.
+
+    A summary that carries no desired count is not a decrease: korvid
+    cannot tell one from an increase, so the flow loads no snapshot and the
+    dialog says `replicas ? -> 2`. If a count appears during the dry run,
+    that captured `None` is exactly as stale as a captured number would be
+    - the request is now a known decrease with no blast-radius section and
+    a `?` where the approver would read 5. `None` is a captured value, not
+    a licence to skip the comparison, so the same gate refuses.
+    """
+    rows: dict[str, list[Any]] = {"deployments": [_deployment("web", "deploy-1", desired=None)]}
+    env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
+    app = env.app
+    env.ops.on_first_preview = lambda: _rescale_the_selected_row(app, 5)
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
+        await pilot.press("2")
+        await pilot.press("enter")
+        await _count_refusal(app, pilot, "the dry-run preview", "unknown-count drift refusal")
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert env.lister.calls == []
+        assert env.ops.calls == []
