@@ -34,14 +34,13 @@ from korvid.tools.executor import (
 from korvid.tools.registry import mcp_tool_schemas
 from korvid.tools.structured import load_structured_document
 from tests.platforms import POSIX
+from tests.tools.executor_fakes import FakeBridge, _diagnose_executor
 from tests.tools.test_executor import (
     LONG_NAME_ENV_SENTINEL,
     NESTED_SECRET_SENTINEL,
     PARENT_SECRET,
-    FakeBridge,
     ParentCredentialKube,
     _ambiguous_key_manifest,
-    _diagnose_executor,
     identity_last_crd,
     oversized_crd_with_nested_credentials,
 )

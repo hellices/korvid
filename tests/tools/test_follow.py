@@ -8,7 +8,7 @@ import pytest
 
 from korvid.tools.follow import FOLLOWABLE_TOOLS, mirror_read, read_summary
 
-from .test_executor import FakeBridge
+from .executor_fakes import FakeBridge
 
 
 async def test_list_resources_mirrors_as_navigation() -> None:

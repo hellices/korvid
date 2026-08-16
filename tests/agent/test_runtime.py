@@ -2623,7 +2623,8 @@ async def test_a_producer_verdict_is_dropped_with_the_message_it_belongs_to() ->
 
 def _credential_report_executor() -> Any:
     """A real ToolExecutor whose rollout logs carry a credential."""
-    from tests.tools.test_executor import _credential_log_kube, _diagnose_executor
+    from tests.tools.executor_fakes import _diagnose_executor
+    from tests.tools.test_executor import _credential_log_kube
 
     return _diagnose_executor(_credential_log_kube(f"api_key={_LOG_SECRET}"))
 
@@ -2676,7 +2677,8 @@ def _workload_provider() -> ScriptedProvider:
 
 def _parent_credential_executor(**kwargs: str) -> Any:
     """A real ToolExecutor whose *parent* report sections carry a credential."""
-    from tests.tools.test_executor import ParentCredentialKube, _diagnose_executor
+    from tests.tools.executor_fakes import _diagnose_executor
+    from tests.tools.test_executor import ParentCredentialKube
 
     return _diagnose_executor(ParentCredentialKube(**kwargs))
 
