@@ -134,7 +134,15 @@ def _deployment(
     )
 
 
-def _replicaset(*, desired: int | None = 3) -> GenericSummary:
+def _replicaset(*, desired: int | None = 3, selects_pods: bool = False) -> GenericSummary:
+    """A ReplicaSet row owned by the `web` Deployment.
+
+    `selects_pods` attaches the `spec.selector -> Pod` fact a real
+    ReplicaSet summary always carries, exactly as `_deployment` does and for
+    the same reason: it is opt-in only so the delete/rollout-restart
+    fixtures keep the dependent sets their own assertions were written
+    against, while every row a scale-down walks carries it.
+    """
     return GenericSummary(
         name="web-abc",
         namespace="prod",
@@ -145,6 +153,7 @@ def _replicaset(*, desired: int | None = 3) -> GenericSummary:
         relationships=RelationshipFacts(
             api_group="apps",
             references=(_owner("Deployment", "web", "deploy-1", group="apps"),),
+            selectors=(_workload_selector(),) if selects_pods else (),
         ),
     )
 
@@ -828,19 +837,20 @@ async def test_a_namespaced_target_in_an_all_namespaces_pane_covers_every_namesp
 
 #: The rows a scale-down walk is exercised over: the controller chain
 #: (Deployment -> ReplicaSet -> Pod), the Service selecting that Pod, and
-#: the Ingress routing to that Service. The Deployment carries the workload
-#: selector a real one always has, so the walk sees the hop counts
-#: production would produce (`Deployment -> Pod` is one hop through
-#: `managed_by`, not two through the ReplicaSet). The Pod's ConfigMap is
-#: included so the walk has no *unrelated* dangling reference: without it
-#: the summary also reports `unresolved references in the affected set`,
-#: which is the subject of its own test and would otherwise contaminate
-#: every assertion about what a scale-down lists.
+#: the Ingress routing to that Service. Both workloads carry the
+#: `spec.selector` fact a real summary of their kind always has, so the walk
+#: sees the hop counts production would produce (`Deployment -> Pod` and
+#: `ReplicaSet -> Pod` are each one hop through `managed_by`, beside - not
+#: through - the ownership chain). The Pod's ConfigMap is included so the
+#: walk has no *unrelated* dangling reference: without it the summary also
+#: reports `unresolved references in the affected set`, which is the subject
+#: of its own test and would otherwise contaminate every assertion about
+#: what a scale-down lists.
 def _scale_down_rows() -> dict[str, list[Any]]:
     return {
         "pods": [_pod()],
         "deployments": [_deployment("web", "deploy-1", selects_pods=True)],
-        "replicasets": [_replicaset()],
+        "replicasets": [_replicaset(selects_pods=True)],
         "configmaps": [_configmap()],
         "services": [_service()],
         "ingresses": [_ingress()],
@@ -882,8 +892,14 @@ async def test_scale_down_dialog_shows_controller_and_routing_dependents(
     Ingress (routes_to)`, three hops, inside `ImpactLimits.max_depth`. The
     Ingress is therefore named, and nothing is withheld behind the
     traversal cap. The ReplicaSet is a direct dependent in its own right
-    (through its ownerReference), and the ReplicaSet -> Pod edge is folded
-    into `additional known paths` because the Pod was already reached.
+    (through its ownerReference), and *both* further routes from it to the
+    same Pod - the Pod's own `metadata.ownerReferences` and the ReplicaSet's
+    own `spec.selector`, which a real ReplicaSet summary carries too - are
+    folded into `additional known paths` because the Pod was already
+    reached. That count is rendered `2 or more` rather than `2`: the
+    snapshot's coverage is incomplete (the Gateway API group is never
+    listed here), so every cluster-derived count in this advisory is a
+    lower bound, not a tally.
 
     The two unconditional limitation lines are asserted here, not only in
     the renderer's unit tests: they are the part of the advisory that no
@@ -919,7 +935,7 @@ async def test_scale_down_dialog_shows_controller_and_routing_dependents(
             " apps/Deployment/prod/web: spec.selector -> selects (declared) at"
             " Service/prod/web: spec.selector -> routes_to (declared)" in text
         )
-        assert "additional known paths: 1 or more" in text
+        assert "additional known paths: 2 or more" in text
         assert "traversal capped" not in text
         assert "may be affected" in text
         assert "will fail" not in text
@@ -931,14 +947,22 @@ async def test_scale_down_of_a_replicaset_follows_the_same_routing_chain(
 ) -> None:
     """The same routing chain reached from the ReplicaSet instead.
 
-    Its Pods hang off `metadata.ownerReferences`, not off a selector the
-    target itself declares, so the first hop's evidence is the Pod's owner
-    reference where the Deployment's was the Deployment's `spec.selector` -
-    and `Pod -> Service (selects) -> Ingress (routes_to)` follows exactly as
-    before. This pins that the flow hands `ImpactAction.SCALE_DOWN` to the
-    summarizer for every scalable kind, not just the one the fixture's
-    selector is written for, and that a `routes_to` dependent - which
-    neither delete nor rollout restart follows - is listed either way.
+    A real ReplicaSet declares its own `spec.selector` exactly as a
+    Deployment does, so its Pods are one `managed_by` hop away and the first
+    path breadth-first offers is that selector's - evidence
+    `apps/ReplicaSet/prod/web-abc: spec.selector` - with the same Pod's
+    `metadata.ownerReferences` route to it folded into `additional known
+    paths` rather than listed twice. `Pod -> Service (selects) -> Ingress
+    (routes_to)` follows exactly as it does from the Deployment: three hops,
+    inside `ImpactLimits.max_depth`, so the Ingress is named and nothing is
+    withheld behind the traversal cap. Every count here is a lower bound
+    (`N or more`) because the snapshot's coverage is incomplete, not because
+    anything was capped.
+
+    This pins that the flow hands `ImpactAction.SCALE_DOWN` to the
+    summarizer for every scalable kind, not just the one the first fixture
+    is written for, and that a `routes_to` dependent - which neither delete
+    nor rollout restart follows - is listed either way.
     """
     env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
     async with env.app.run_test() as pilot:
@@ -947,16 +971,21 @@ async def test_scale_down_of_a_replicaset_follows_the_same_routing_chain(
         assert "scale down apps/ReplicaSet/prod/web-abc" in text
         assert "known direct dependents (may be affected): 1 or more" in text
         assert (
-            "Pod/prod/web-abc-1 via owned_by (declared) at"
-            " Pod/prod/web-abc-1: metadata.ownerReferences[0]" in text
+            "Pod/prod/web-abc-1 via managed_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: spec.selector" in text
         )
         assert "known transitive dependents (may be affected): 2 or more" in text
         assert (
-            "Service/prod/web via owned_by (declared) at"
-            " Pod/prod/web-abc-1: metadata.ownerReferences[0] -> selects (declared) at"
+            "Service/prod/web via managed_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: spec.selector -> selects (declared) at"
             " Service/prod/web: spec.selector" in text
         )
-        assert "networking.k8s.io/Ingress/prod/web via owned_by (declared)" in text
+        assert (
+            "networking.k8s.io/Ingress/prod/web via managed_by (declared) at"
+            " apps/ReplicaSet/prod/web-abc: spec.selector -> selects (declared) at"
+            " Service/prod/web: spec.selector -> routes_to (declared)" in text
+        )
+        assert "additional known paths: 1 or more" in text
         assert "traversal capped" not in text
         assert "may be affected" in text
         assert "will fail" not in text
