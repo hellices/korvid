@@ -1,21 +1,32 @@
-"""Security invariants around the advisory impact preview (issue #283).
+"""Security invariants around the advisory impact preview (issues #283, #295).
 
 The preview adds text to an existing dialog. It must not become a new way to
 approve, execute, reserve, or unblock a cluster write, and a graph failure
 must not take a legitimate confirmation away from the user. Every test here
-drives the real `Ctrl-D` / `r` flow through the Task 4 harness.
+drives the real `Ctrl-D` / `r` / `S` flow through the Task 4 harness.
+
+The scale-down flow (#295) is the one that reaches the snapshot from a
+*modal callback* rather than from the binding coroutine: `S` opens the
+replica prompt and the confirmation runs on an app-owned worker started by
+that prompt's result callback. So its security tests cancel the worker the
+real callback created instead of a task a test made up - a cancellation
+path the delete tests cannot exercise.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import unicodedata
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 from textual import events
+from textual.worker import Worker, WorkerState
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary
@@ -26,7 +37,8 @@ from korvid.k8s.relationship_facts import (
     RelationshipFacts,
     TargetReference,
 )
-from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.app import KorvidApp
+from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 
 from .test_impact_flow import CATALOG_ALIASES, ImpactEnv, impact_text, open_delete_dialog, to_view
 from .waits import until
@@ -471,6 +483,210 @@ async def test_a_cancelled_snapshot_read_is_not_downgraded_to_the_unavailable_ad
         assert not env.app.screen.query(".confirm-impact")
         assert env.app._active_cluster_writes == 0
         assert env.ops.calls == []
+        assert not audit_path.exists()
+
+
+async def _open_scale_down(pilot: Any, replicas: int = 1) -> None:
+    """Drive the real `S` keybinding down to the replica count.
+
+    Deliberately not a `_confirm_scale` call: the scale flow's approval path
+    runs on a worker started from the replica prompt's *result callback*, and
+    a test that invoked the coroutine directly would bypass exactly the hop
+    these tests are here to constrain. The default row (`prod/web`, three
+    desired replicas) makes one replica a known decrease, so the snapshot is
+    loaded and the impact section is attached.
+    """
+    await to_view(pilot, "deploy", expect="web")
+    await pilot.press("S")
+    await until(
+        pilot,
+        lambda: isinstance(pilot.app.screen, ReplicasPrompt),
+        label="replicas prompt",
+    )
+    for char in str(replicas):
+        await pilot.press(char)
+    await pilot.press("enter")
+
+
+@contextlib.contextmanager
+def _recording_workers(app: KorvidApp, started: list[Worker[Any]]) -> Iterator[None]:
+    """Record every worker the app starts while the block is open.
+
+    The scale flow hands `_confirm_scale` to `run_worker` from a screen
+    callback, so the only handle on that coroutine is the `Worker` object
+    the app itself created; a test cannot cancel it without capturing it
+    here.
+    """
+    original_run_worker = app.run_worker
+
+    def record_worker(work: Any, *args: Any, **kwargs: Any) -> Worker[Any]:
+        worker: Worker[Any] = original_run_worker(work, *args, **kwargs)
+        started.append(worker)
+        return worker
+
+    with mock.patch.object(app, "run_worker", side_effect=record_worker):
+        yield
+
+
+async def test_declined_scale_down_with_impact_runs_no_operation(tmp_path: Path) -> None:
+    """Declining is still a decline: the impact section is text on the
+    dialog, never a second path to the operation factory."""
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    async with env.app.run_test() as pilot:
+        await _open_scale_down(pilot)
+        await until(
+            pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="scale-down confirm"
+        )
+        assert env.app.screen.query(".confirm-impact")
+        await pilot.press("n")
+        await until(pilot, lambda: len(env.app.screen_stack) == 1, label="dialog dismissed")
+        assert env.ops.calls == []
+        assert not audit_path.exists()
+
+
+async def test_scale_down_audit_failure_blocks_operation_factory(
+    tmp_path: Path,
+) -> None:
+    """Fail-closed auditing is unchanged by the new section: an unwritable
+    audit log blocks the scale even though the dialog showed an impact
+    summary and the user approved it.
+
+    Anchored to the app's own blocked notification and to the released write
+    reservation rather than to a fixed pause: an empty `calls` after an
+    arbitrary sleep is also what a write that had not started yet looks
+    like. The toast text is emitted on the audit-failure branch only.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.mkdir()  # a directory at the log path makes appends fail
+    env = ImpactEnv(audit_path)
+    blocked = "scale deployments/web blocked: audit log unavailable"
+    async with env.app.run_test() as pilot:
+        await _open_scale_down(pilot)
+        await until(
+            pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="scale-down confirm"
+        )
+        assert env.app.screen.query(".confirm-impact")
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any(str(note.message) == blocked for note in env.app._notifications),
+            label="scale-down audit refusal",
+        )
+        await until(
+            pilot,
+            lambda: env.app._active_cluster_writes == 0,
+            label="scale-down write worker finished",
+        )
+        assert [
+            note.severity for note in env.app._notifications if str(note.message) == blocked
+        ] == ["error"]
+        assert env.ops.calls == []
+        assert list(audit_path.iterdir()) == []  # still the empty directory
+
+
+async def test_cancelling_scale_down_during_impact_load_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """Cancelling the worker mid-snapshot cancels the *approval flow*.
+
+    `:ctx` tears the API client down under whatever is awaiting it, and the
+    scale-down snapshot is an awaited read inside a worker the app owns. The
+    cancellation must reach the caller, so the flow never runs on to push a
+    confirmation describing a snapshot it never got: no dialog, no keystroke
+    gate to answer, no operation, no write reservation (which would block
+    `:ctx` itself), no audit record.
+
+    The reservation is sampled *during* the first LIST, not only afterwards:
+    one taken and released before the dialog would pass a post-hoc check
+    while still blocking `:ctx` for the moment it mattered.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    #: Blocks every LIST until the worker is cancelled; far beyond
+    #: `_IMPACT_TIMEOUT`, so a timeout could not reach the dialog first and
+    #: quietly turn this into the already-covered fail-open case.
+    env.lister.delay = 60.0
+    reservations_during_load: list[int] = []
+    env.lister.on_first_call = lambda: reservations_during_load.append(
+        env.app._active_cluster_writes
+    )
+    started: list[Worker[Any]] = []
+    async with env.app.run_test() as pilot:
+        with _recording_workers(env.app, started):
+            await _open_scale_down(pilot)
+            await until(pilot, lambda: env.lister.calls != [], label="scale impact listing")
+        assert len(started) == 1
+        started[0].cancel()
+        await until(
+            pilot,
+            lambda: started[0].is_cancelled and started[0].is_finished,
+            label="scale worker cancelled",
+        )
+        assert started[0].state is WorkerState.CANCELLED
+        assert not isinstance(env.app.screen, ConfirmScreen)
+        assert len(env.app.screen_stack) == 1
+        assert reservations_during_load == [0]
+        assert env.app._active_cluster_writes == 0
+        assert env.ops.calls == []
+        assert not audit_path.exists()
+
+
+async def test_cancelled_scale_snapshot_is_not_an_unavailable_confirmation(
+    tmp_path: Path,
+) -> None:
+    """The same invariant from the other side: the LIST itself is cancelled.
+
+    A client closed mid-read raises `asyncio.CancelledError` out of the
+    lister rather than an API error. The fail-open branch must not treat it
+    as one: converting it to the static "impact unavailable" advisory would
+    resurrect a scale whose cluster connection is already gone, and would
+    open an approval dialog for a target nothing re-validated. The worker
+    ends in `CANCELLED`, which is how a coroutine that let the cancellation
+    propagate is distinguishable from one that swallowed it and returned.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path)
+    env.lister.errors["deployments"] = asyncio.CancelledError()
+    started: list[Worker[Any]] = []
+    async with env.app.run_test() as pilot:
+        with _recording_workers(env.app, started):
+            await _open_scale_down(pilot)
+            await until(
+                pilot,
+                lambda: len(started) == 1 and started[0].state is WorkerState.CANCELLED,
+                label="scale worker observed loader cancellation",
+            )
+        assert env.lister.calls != []
+        assert not isinstance(env.app.screen, ConfirmScreen)
+        assert len(env.app.screen_stack) == 1
+        assert not env.app.screen.query(".confirm-impact")
+        assert env.app._active_cluster_writes == 0
+        assert env.ops.calls == []
+        assert not audit_path.exists()
+
+
+async def test_scale_down_rbac_denial_never_loads_or_confirms(tmp_path: Path) -> None:
+    """A denied SubjectAccessReview ends the flow before the replica prompt.
+
+    The snapshot fan-out is a read the user was just told they may not make
+    this write with; it must not run anyway, and no dialog may appear that a
+    stray keystroke could approve.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    env = ImpactEnv(audit_path, permission=False)
+    denied = "missing permission: patch deployments/scale"
+    async with env.app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await pilot.press("S")
+        await until(
+            pilot,
+            lambda: any(str(note.message) == denied for note in env.app._notifications),
+            label="scale RBAC denial",
+        )
+        assert env.lister.calls == []
+        assert env.ops.calls == []
+        assert len(env.app.screen_stack) == 1
         assert not audit_path.exists()
 
 

@@ -382,7 +382,12 @@ class RecordingOps(WriteOps):
 
 
 class ImpactEnv:
-    """App plus recording fakes for the impact-preview integration path."""
+    """App plus recording fakes for the impact-preview integration path.
+
+    `permission` is what the injected SubjectAccessReview fake answers:
+    `False` denies every write, which the security tests use to pin that a
+    refused write never reaches the snapshot or a dialog.
+    """
 
     def __init__(
         self,
@@ -391,6 +396,7 @@ class ImpactEnv:
         with_lister: bool = True,
         rows: dict[str, list[Any]] | None = None,
         list_rows: dict[str, list[Any]] | None = None,
+        permission: bool = True,
     ) -> None:
         self.order: list[str] = []
         self.ops = RecordingOps(self.order)
@@ -428,7 +434,9 @@ class ImpactEnv:
             verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
         ) -> bool:
             self.order.append("rbac")
-            return True
+            # `False` is a denied SubjectAccessReview, which must end the
+            # flow before the prompt, the snapshot fan-out and the dialog.
+            return permission
 
         self.app = KorvidApp(
             config=KorvidConfig(namespace="prod"),
