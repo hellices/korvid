@@ -192,6 +192,7 @@ def test_only_supported_writes_carry_action_semantics() -> None:
         "delete",
         "rollout_restart",
         "scale_down",
+        "pod_resize",
     ]
     assert set(ACTION_RELATIONS) == set(ImpactAction)
     assert ACTION_RELATIONS[ImpactAction.SCALE_DOWN] == frozenset(
@@ -207,6 +208,39 @@ def test_only_supported_writes_carry_action_semantics() -> None:
     assert {
         cast(RelationshipEdge, edge).relation for param in _DELETE_CASES for edge in param.values
     } == ACTION_RELATIONS[ImpactAction.DELETE]
+
+
+@pytest.mark.parametrize("relation", list(RelationKind))
+def test_pod_resize_ignores_every_relationship(relation: RelationKind) -> None:
+    pod = _res("Pod", "web-1", uid="pod-1")
+    related = _res("Service", "web", uid="related-1")
+    summary = summarize_impact(
+        _graph(_edge(related, pod, relation, field="spec.example")),
+        ImpactAction.POD_RESIZE,
+        pod,
+    )
+    assert summary.direct == ()
+    assert summary.transitive == ()
+
+
+@pytest.mark.parametrize("relation", list(RelationKind))
+def test_pod_resize_ignores_every_unresolved_relationship(relation: RelationKind) -> None:
+    pod = _res("Pod", "web-1", uid="pod-1")
+    missing = _res("ConfigMap", "gone")
+    summary = summarize_impact(
+        _graph(
+            _edge(
+                pod,
+                missing,
+                relation,
+                resolution=EdgeResolution.MISSING,
+                field="spec.example",
+            )
+        ),
+        ImpactAction.POD_RESIZE,
+        pod,
+    )
+    assert summary.unresolved == ()
 
 
 def test_every_action_chooses_its_unresolved_reference_policy() -> None:
@@ -231,6 +265,10 @@ def test_every_action_chooses_its_unresolved_reference_policy() -> None:
     assert (
         ACTION_UNRESOLVED_RELATIONS[ImpactAction.SCALE_DOWN]
         is ACTION_RELATIONS[ImpactAction.SCALE_DOWN]
+    )
+    assert (
+        ACTION_UNRESOLVED_RELATIONS[ImpactAction.POD_RESIZE]
+        is ACTION_RELATIONS[ImpactAction.POD_RESIZE]
     )
 
 
