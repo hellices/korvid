@@ -113,6 +113,7 @@ def make_app(
     permitted: bool | None = None,
     check_calls: list[tuple[str, str, str, str | None, str, str]] | None = None,
     get_manifest: object = None,
+    pod_uid: str | None = "pod-uid-1",
     relationship_calls: list[tuple[str, str | None]] | None = None,
     relationship_lister: (
         Callable[[ResourceMeta, str | None], Awaitable[list[GenericSummary]]] | None
@@ -128,7 +129,7 @@ def make_app(
                 ready="1/1",
                 restarts=0,
                 node=None,
-                uid="pod-uid-1",
+                uid=pod_uid or "",
             )
         ],
         "deployments": [
@@ -323,6 +324,24 @@ async def test_resize_keeps_local_notes_without_relationship_loader(tmp_path: Pa
         text = str(app.screen.query_one(".confirm-impact", Static).render())
         assert "Pod-local resize impact (advisory):" in text
         assert "graph-derived impact" not in text
+        assert recorder.calls == []
+
+
+async def test_resize_without_uid_skips_graph_and_keeps_local_notes(tmp_path: Path) -> None:
+    calls: list[tuple[str, str | None]] = []
+    recorder = ResizeRecorder()
+    app = make_app(
+        recorder,
+        tmp_path / "audit.jsonl",
+        pod_uid=None,
+        relationship_calls=calls,
+    )
+    async with app.run_test() as pilot:
+        await _open_resize_confirmation(app, pilot)
+        text = str(app.screen.query_one(".confirm-impact", Static).render())
+        assert "Pod-local resize impact (advisory):" in text
+        assert "graph-derived impact" not in text
+        assert calls == []
         assert recorder.calls == []
 
 

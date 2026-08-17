@@ -106,6 +106,45 @@ def test_adding_memory_limit_to_unbounded_container_is_a_decrease() -> None:
     assert context.memory_limit_assessment_unknown is False
 
 
+def test_applied_status_without_memory_limit_stays_unbounded() -> None:
+    manifest = _manifest(memory_limit="1Gi")
+    manifest["status"] = {
+        "containerStatuses": [
+            {
+                "name": "app",
+                "resources": {"requests": {"memory": "128Mi"}},
+            }
+        ]
+    }
+    context = classify_pod_resize(
+        manifest,
+        {"app": {"limits": {"memory": "2Gi"}}},
+    )
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is True
+    assert context.memory_limit_assessment_unknown is False
+
+
+def test_invalid_requested_limit_for_unbounded_container_is_unknown() -> None:
+    manifest = {
+        "spec": {
+            "containers": [
+                {
+                    "name": "app",
+                    "resources": {"requests": {"memory": "128Mi"}},
+                }
+            ]
+        }
+    }
+    context = classify_pod_resize(
+        manifest,
+        {"app": {"limits": {"memory": "not-a-quantity"}}},
+    )
+    assert context.memory_limit_decreased is False
+    assert context.memory_limit_decrease_not_required is False
+    assert context.memory_limit_assessment_unknown is True
+
+
 def test_equivalent_memory_quantities_are_not_a_decrease() -> None:
     context = classify_pod_resize(
         _manifest(memory_limit="1Gi"),

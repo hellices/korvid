@@ -87,8 +87,8 @@ def _memory_limit_impact(
         if desired is None:
             continue
         container = containers.get(name)
-        current_known, current = _limit_state(applied_containers.get(name), "memory")
-        if not current_known or current is None:
+        current_known, current = _applied_limit_state(applied_containers.get(name), "memory")
+        if not current_known:
             spec_known, spec_current = _limit_state(container, "memory")
             if spec_known:
                 current_known, current = spec_known, spec_current
@@ -97,7 +97,8 @@ def _memory_limit_impact(
             unknown = True
             continue
         try:
-            decreased = current is None or parse_quantity(desired) < parse_quantity(current)
+            desired_value = parse_quantity(desired)
+            decreased = current is None or desired_value < parse_quantity(current)
         except (DecimalException, ValueError):
             unknown = True
             continue
@@ -184,3 +185,14 @@ def _limit_state(container: Mapping[str, Any] | None, resource: str) -> tuple[bo
     if value is None:
         return True, None
     return (True, value) if isinstance(value, str) else (False, None)
+
+
+def _applied_limit_state(
+    container: Mapping[str, Any] | None, resource: str
+) -> tuple[bool, str | None]:
+    if container is None:
+        return False, None
+    resources = container.get("resources")
+    if not isinstance(resources, Mapping) or not resources:
+        return False, None
+    return _limit_state(container, resource)
