@@ -11,6 +11,8 @@ def _context(**changes: bool) -> ResizeImpactContext:
         "memory_request_changed": False,
         "memory_limit_changed": False,
         "restart_required": False,
+        "cpu_restart_required": False,
+        "memory_restart_required": False,
         "restart_policy_unknown": False,
         "all_changed_resources_not_required": True,
         "memory_limit_decreased": False,
@@ -36,12 +38,27 @@ def test_restart_and_memory_decrease_warnings_are_conditional() -> None:
         _context(
             memory_limit_changed=True,
             restart_required=True,
+            memory_restart_required=True,
             all_changed_resources_not_required=False,
             memory_limit_decrease_not_required=True,
         )
     )
-    assert "  one or more changed resources require a container restart under resizePolicy" in lines
+    assert "  changed memory resources require a container restart under resizePolicy" in lines
     assert "  a memory-limit decrease using NotRequired has only best-effort OOM avoidance" in lines
+
+
+def test_restart_warning_names_every_triggering_resource() -> None:
+    lines = render_resize_impact_lines(
+        _context(
+            restart_required=True,
+            cpu_restart_required=True,
+            memory_restart_required=True,
+            all_changed_resources_not_required=False,
+        )
+    )
+    assert (
+        "  changed CPU and memory resources require a container restart under resizePolicy" in lines
+    )
 
 
 def test_unknown_input_never_becomes_a_no_restart_claim() -> None:

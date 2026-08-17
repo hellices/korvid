@@ -256,8 +256,9 @@ requested resources:
       node feasibility, Deferred/Infeasible status, actuation, and completion are not predicted
 
 The restart and memory-limit-decrease lines are conditional: a
-`RestartContainer` policy adds a restart-required line, a proven memory-limit
-decrease with `NotRequired` adds the best-effort OOM-avoidance line, and
+`RestartContainer` policy adds a CPU- and/or memory-specific restart-required
+line, a proven memory-limit decrease (including adding a finite limit to an
+unbounded container) with `NotRequired` adds the best-effort OOM-avoidance line, and
 malformed or incomplete input produces bounded "could not be determined"
 text instead of optimistic claims. If graph loading fails or is unavailable,
 those safe Pod-local notes remain visible; graph failure never removes them

@@ -16,6 +16,8 @@ class ResizeImpactContext:
     memory_request_changed: bool
     memory_limit_changed: bool
     restart_required: bool
+    cpu_restart_required: bool
+    memory_restart_required: bool
     restart_policy_unknown: bool
     all_changed_resources_not_required: bool
     memory_limit_decreased: bool
@@ -38,35 +40,19 @@ def classify_pod_resize(
     policies = [
         _restart_policy(containers.get(name), resource) for name, resource in changed_resources
     ]
-    memory_decreased = False
-    memory_decrease_not_required = False
-    memory_unknown = False
-    for name, sections in changes.items():
-        desired = sections.get("limits", {}).get("memory")
-        if desired is None:
-            continue
-        container = containers.get(name)
-        applied_container = applied_containers.get(name)
-        current = _current_limit(applied_container, "memory")
-        if current is None:
-            current = _current_limit(container, "memory")
-        policy = _restart_policy(container, "memory")
-        if current is None:
-            memory_unknown = True
-            continue
-        try:
-            decreased = parse_quantity(desired) < parse_quantity(current)
-        except (DecimalException, ValueError):
-            memory_unknown = True
-            continue
-        if decreased:
-            memory_decreased = True
-        if decreased and policy == "NotRequired":
-            memory_decrease_not_required = True
-        elif decreased and policy is None:
-            memory_unknown = True
+    memory_decreased, memory_decrease_not_required, memory_unknown = _memory_limit_impact(
+        containers, applied_containers, changes
+    )
     policy_unknown = any(policy is None for policy in policies)
     restart_required = any(policy == "RestartContainer" for policy in policies)
+    cpu_restart_required = any(
+        resource == "cpu" and policy == "RestartContainer"
+        for (_, resource), policy in zip(changed_resources, policies, strict=True)
+    )
+    memory_restart_required = any(
+        resource == "memory" and policy == "RestartContainer"
+        for (_, resource), policy in zip(changed_resources, policies, strict=True)
+    )
     return ResizeImpactContext(
         cpu_changed=any(resource == "cpu" for _, resource in changed_resources),
         memory_request_changed=any(
@@ -76,6 +62,8 @@ def classify_pod_resize(
             "memory" in sections.get("limits", {}) for sections in changes.values()
         ),
         restart_required=restart_required,
+        cpu_restart_required=cpu_restart_required,
+        memory_restart_required=memory_restart_required,
         restart_policy_unknown=policy_unknown,
         all_changed_resources_not_required=bool(policies)
         and not restart_required
@@ -84,6 +72,39 @@ def classify_pod_resize(
         memory_limit_decrease_not_required=memory_decrease_not_required,
         memory_limit_assessment_unknown=memory_unknown,
     )
+
+
+def _memory_limit_impact(
+    containers: Mapping[str, Mapping[str, Any]],
+    applied_containers: Mapping[str, Mapping[str, Any]],
+    changes: ResizeResourceChanges,
+) -> tuple[bool, bool, bool]:
+    decreased_any = False
+    decrease_not_required = False
+    unknown = False
+    for name, sections in changes.items():
+        desired = sections.get("limits", {}).get("memory")
+        if desired is None:
+            continue
+        container = containers.get(name)
+        current_known, current = _limit_state(applied_containers.get(name), "memory")
+        if not current_known or current is None:
+            spec_known, spec_current = _limit_state(container, "memory")
+            if spec_known:
+                current_known, current = spec_known, spec_current
+        policy = _restart_policy(container, "memory")
+        if not current_known:
+            unknown = True
+            continue
+        try:
+            decreased = current is None or parse_quantity(desired) < parse_quantity(current)
+        except (DecimalException, ValueError):
+            unknown = True
+            continue
+        decreased_any = decreased_any or decreased
+        decrease_not_required = decrease_not_required or (decreased and policy == "NotRequired")
+        unknown = unknown or (decreased and policy is None)
+    return decreased_any, decrease_not_required, unknown
 
 
 def _containers_by_name(manifest: Mapping[str, object]) -> dict[str, Mapping[str, Any]]:
@@ -146,14 +167,20 @@ def _restart_policy(container: Mapping[str, Any] | None, resource: str) -> str |
     return "NotRequired"
 
 
-def _current_limit(container: Mapping[str, Any] | None, resource: str) -> str | None:
+def _limit_state(container: Mapping[str, Any] | None, resource: str) -> tuple[bool, str | None]:
     if container is None:
-        return None
+        return False, None
     resources = container.get("resources")
+    if resources is None:
+        return True, None
     if not isinstance(resources, Mapping):
-        return None
+        return False, None
     limits = resources.get("limits")
+    if limits is None:
+        return True, None
     if not isinstance(limits, Mapping):
-        return None
+        return False, None
     value = limits.get(resource)
-    return value if isinstance(value, str) else None
+    if value is None:
+        return True, None
+    return (True, value) if isinstance(value, str) else (False, None)

@@ -15,8 +15,15 @@ _RUNTIME_LIMIT = (
 def render_resize_impact_lines(context: ResizeImpactContext) -> tuple[str, ...]:
     lines = [_TITLE, _RELATION_BOUNDARY]
     if context.restart_required:
+        resources = (
+            "CPU and memory"
+            if context.cpu_restart_required and context.memory_restart_required
+            else "CPU"
+            if context.cpu_restart_required
+            else "memory"
+        )
         lines.append(
-            "  one or more changed resources require a container restart under resizePolicy"
+            f"  changed {resources} resources require a container restart under resizePolicy"
         )
     if context.restart_policy_unknown:
         lines.append("  restart requirements could not be determined for every changed resource")

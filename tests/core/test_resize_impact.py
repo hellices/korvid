@@ -43,6 +43,8 @@ def test_cpu_change_uses_default_not_required_policy() -> None:
         memory_request_changed=False,
         memory_limit_changed=False,
         restart_required=False,
+        cpu_restart_required=False,
+        memory_restart_required=False,
         restart_policy_unknown=False,
         all_changed_resources_not_required=True,
         memory_limit_decreased=False,
@@ -84,6 +86,26 @@ def test_memory_limit_decrease_falls_back_when_applied_value_is_absent() -> None
     assert context.memory_limit_assessment_unknown is False
 
 
+def test_adding_memory_limit_to_unbounded_container_is_a_decrease() -> None:
+    manifest = {
+        "spec": {
+            "containers": [
+                {
+                    "name": "app",
+                    "resources": {"requests": {"memory": "128Mi"}},
+                }
+            ]
+        }
+    }
+    context = classify_pod_resize(
+        manifest,
+        {"app": {"limits": {"memory": "256Mi"}}},
+    )
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is True
+    assert context.memory_limit_assessment_unknown is False
+
+
 def test_equivalent_memory_quantities_are_not_a_decrease() -> None:
     context = classify_pod_resize(
         _manifest(memory_limit="1Gi"),
@@ -115,6 +137,8 @@ def test_restart_container_policy_is_scoped_to_the_changed_resource() -> None:
         {"app": {"limits": {"memory": "768Mi"}}},
     )
     assert context.restart_required is True
+    assert context.cpu_restart_required is False
+    assert context.memory_restart_required is True
     assert context.all_changed_resources_not_required is False
 
 
@@ -143,6 +167,8 @@ def test_mixed_container_changes_aggregate_restart_and_memory_warnings() -> None
         },
     )
     assert context.restart_required is True
+    assert context.cpu_restart_required is True
+    assert context.memory_restart_required is False
     assert context.memory_limit_decreased is True
     assert context.memory_limit_decrease_not_required is True
     assert context.restart_policy_unknown is False
