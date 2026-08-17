@@ -5,7 +5,12 @@ import pytest
 from korvid.core.resize_impact import ResizeImpactContext, classify_pod_resize
 
 
-def _manifest(*, policy: object = None, memory_limit: str = "512Mi") -> dict[str, object]:
+def _manifest(
+    *,
+    policy: object = None,
+    memory_limit: str = "512Mi",
+    applied_memory_limit: str | None = None,
+) -> dict[str, object]:
     container: dict[str, object] = {
         "name": "app",
         "resources": {
@@ -15,7 +20,17 @@ def _manifest(*, policy: object = None, memory_limit: str = "512Mi") -> dict[str
     }
     if policy is not None:
         container["resizePolicy"] = policy
-    return {"spec": {"containers": [container]}}
+    manifest: dict[str, object] = {"spec": {"containers": [container]}}
+    if applied_memory_limit is not None:
+        manifest["status"] = {
+            "containerStatuses": [
+                {
+                    "name": "app",
+                    "resources": {"limits": {"memory": applied_memory_limit}},
+                }
+            ]
+        }
+    return manifest
 
 
 def test_cpu_change_uses_default_not_required_policy() -> None:
@@ -42,6 +57,16 @@ def test_memory_limit_decrease_with_not_required_is_identified_numerically() -> 
         {"app": {"limits": {"memory": "900Mi"}}},
     )
     assert context.memory_limit_changed is True
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is True
+    assert context.memory_limit_assessment_unknown is False
+
+
+def test_memory_limit_decrease_compares_against_applied_status() -> None:
+    context = classify_pod_resize(
+        _manifest(memory_limit="512Mi", applied_memory_limit="1Gi"),
+        {"app": {"limits": {"memory": "768Mi"}}},
+    )
     assert context.memory_limit_decreased is True
     assert context.memory_limit_decrease_not_required is True
     assert context.memory_limit_assessment_unknown is False
@@ -103,6 +128,24 @@ def test_restart_policy_is_unknown_when_malformed_structure_leaves_resource_unre
                 {"resourceName": "memory", "restartPolicy": "NotRequired"},
             ]
         ),
+        {"app": {"requests": {"cpu": "200m"}}},
+    )
+    assert context.restart_policy_unknown is True
+    assert context.all_changed_resources_not_required is False
+
+
+@pytest.mark.parametrize(
+    "malformed_policy",
+    [
+        {"restartPolicy": "RestartContainer"},
+        {"resourceName": "memory"},
+    ],
+)
+def test_incomplete_unrelated_policy_prevents_optimistic_default(
+    malformed_policy: dict[str, str],
+) -> None:
+    context = classify_pod_resize(
+        _manifest(policy=[malformed_policy]),
         {"app": {"requests": {"cpu": "200m"}}},
     )
     assert context.restart_policy_unknown is True

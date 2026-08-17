@@ -27,6 +27,7 @@ def classify_pod_resize(
     manifest: Mapping[str, object], changes: ResizeResourceChanges
 ) -> ResizeImpactContext:
     containers = _containers_by_name(manifest)
+    applied_containers = _applied_containers_by_name(manifest)
     changed_resources = [
         (name, resource)
         for name, sections in changes.items()
@@ -45,7 +46,8 @@ def classify_pod_resize(
         if desired is None:
             continue
         container = containers.get(name)
-        current = _current_limit(container, "memory")
+        applied_container = applied_containers.get(name)
+        current = _current_limit(applied_container or container, "memory")
         policy = _restart_policy(container, "memory")
         if current is None:
             memory_unknown = True
@@ -86,7 +88,19 @@ def _containers_by_name(manifest: Mapping[str, object]) -> dict[str, Mapping[str
     spec = manifest.get("spec")
     if not isinstance(spec, Mapping):
         return {}
-    raw = spec.get("containers")
+    return _named_mappings(spec.get("containers"))
+
+
+def _applied_containers_by_name(
+    manifest: Mapping[str, object],
+) -> dict[str, Mapping[str, Any]]:
+    status = manifest.get("status")
+    if not isinstance(status, Mapping):
+        return {}
+    return _named_mappings(status.get("containerStatuses"))
+
+
+def _named_mappings(raw: object) -> dict[str, Mapping[str, Any]]:
     if not isinstance(raw, list):
         return {}
     result: dict[str, Mapping[str, Any]] = {}
@@ -112,12 +126,18 @@ def _restart_policy(container: Mapping[str, Any] | None, resource: str) -> str |
         if not isinstance(item, Mapping):
             malformed = True
             continue
-        if item.get("resourceName") != resource:
-            continue
+        resource_name = item.get("resourceName")
         policy = item.get("restartPolicy")
-        if isinstance(policy, str) and policy in {"NotRequired", "RestartContainer"}:
-            return policy
-        malformed = True
+        if (
+            not isinstance(resource_name, str)
+            or not isinstance(policy, str)
+            or policy not in {"NotRequired", "RestartContainer"}
+        ):
+            malformed = True
+            continue
+        if resource_name != resource:
+            continue
+        return policy
     if malformed:
         return None
     # Kubernetes falls through to NotRequired when no per-resource policy exists.
