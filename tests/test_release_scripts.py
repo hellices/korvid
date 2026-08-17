@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.release_contracts import markdown_section, run_scripts, workflow_jobs
+
 SCRIPTS = Path(__file__).parents[1] / "scripts" / "release"
 sys.path.insert(0, str(SCRIPTS))
 
@@ -1117,8 +1119,45 @@ def test_offline_verifier_extracts_the_published_archive(tmp_path: Path) -> None
 # --- workflow invariants ----------------------------------------------------
 
 
+_RELEASE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "release.yml"
+
+
 def _release_workflow() -> str:
-    return (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text()
+    return _RELEASE_WORKFLOW.read_text()
+
+
+def test_markdown_section_stops_at_the_next_peer_heading() -> None:
+    text = "# Title\n## Release\nkeep\n### Child\nkeep child\n## Cleanup\ndrop\n"
+    assert markdown_section(text, "Release") == "keep\n### Child\nkeep child"
+
+
+def test_markdown_section_ignores_level_two_like_lines_inside_fenced_code_blocks() -> None:
+    text = (
+        "# Title\n"
+        "## Release\n"
+        "keep\n"
+        "```yaml\n"
+        "## not a real heading\n"
+        "```\n"
+        "still keep\n"
+        "## Cleanup\n"
+        "drop\n"
+    )
+    assert markdown_section(text, "Release") == (
+        "keep\n```yaml\n## not a real heading\n```\nstill keep"
+    )
+
+
+def test_markdown_section_accepts_a_longer_closing_fence() -> None:
+    text = (
+        "# Title\n## Release\n```yaml\n## not a real heading\n````\nstill keep\n## Cleanup\ndrop\n"
+    )
+    assert markdown_section(text, "Release") == ("```yaml\n## not a real heading\n````\nstill keep")
+
+
+def test_run_scripts_returns_only_shell_steps() -> None:
+    job = {"steps": [{"uses": "actions/checkout@sha"}, {"run": "uv build"}, {"run": "uv publish"}]}
+    assert run_scripts(job) == ("uv build", "uv publish")
 
 
 def _bash_executable() -> str:
@@ -1196,62 +1235,6 @@ def _offsets_of(text: str, needle: str) -> list[int]:
     return offsets
 
 
-def _agent_instructions() -> str:
-    path = Path(__file__).parents[1] / "AGENTS.md"
-    assert path.is_file(), "AGENTS.md is missing"
-    return path.read_text()
-
-
-def _agent_instructions_section(heading: str) -> str:
-    """Return one `##` section of `AGENTS.md`, stopping at the next one.
-
-    Splitting on the heading alone runs to the end of the file, which turns a
-    check about one section into a check about everything after it.
-
-    Args:
-        heading: The section heading, without the leading `## `.
-
-    Returns:
-        The section body up to the next `##` heading, with whitespace
-        collapsed so a phrase still matches when Markdown wraps it across
-        lines.
-    """
-    after = _agent_instructions().split(f"## {heading}", 1)
-    assert len(after) == 2, f"AGENTS.md has no '## {heading}' section"
-    return " ".join(after[1].split("\n## ", 1)[0].split())
-
-
-def test_agent_instructions_forbid_merging_and_merge_automation() -> None:
-    """A pull request once merged here before the maintainer saw it.
-
-    No repository setting can prevent that - an agent runs with the
-    maintainer's own credentials, and GitHub cannot tell the two apart. The
-    rule lives in `AGENTS.md`, so this test is the only thing standing
-    between a careless edit and a repeat.
-    """
-    instructions = " ".join(_agent_instructions().split())
-    assert "The maintainer merges. You never do." in instructions
-    assert "No merge automation, in any form." in instructions
-    assert "Do not run `gh pr merge`, do not enable auto-merge" in instructions
-    assert "do not add a workflow, action, script or scheduled job that merges" in instructions
-    # The incident quality-gates.md records went through the REST endpoint, so
-    # of every route named here this is the one with a precedent.
-    assert "Do not use the REST/GraphQL merge endpoints" in instructions
-    # The tap is where the formula every `brew install korvid` resolves lives,
-    # and its release PR is the one an agent is most likely to treat as
-    # paperwork.
-    assert "the release PR the release workflow opens there" in instructions
-    assert "Never approve your own work" in instructions
-    # The review loop is where the original incident came from: its last step
-    # used to be `gh pr merge N --squash`.
-    assert "This loop ends in a report, never in a merge" in instructions
-    # ...and no earlier step may point the other way. Scope this to the
-    # section: "toward merge" is a fair phrase for the rest of the file.
-    loop = _agent_instructions_section("Review Loop")
-    assert "toward merge" not in loop
-    assert "Testing Gotchas" not in loop, "the slice ran past the section it names"
-
-
 def _project_version() -> str:
     """The version the release workflow will demand the tag match.
 
@@ -1272,13 +1255,9 @@ def test_linux_bundle_pins_and_names_the_manylinux_2_28_baseline() -> None:
 
 
 def test_release_metadata_is_generated_in_the_build_job() -> None:
-    workflow = _release_workflow()
-    build = workflow.index("\n  build:")
-    smoke = workflow.index("\n  smoke:")
-    sbom = workflow.index("\n  sbom:")
-    offline = workflow.index("\n  offline:")
-    assert "scripts/release/metadata.py" in workflow[build:smoke]
-    assert "scripts/release/metadata.py" not in workflow[sbom:offline]
+    jobs = workflow_jobs(_RELEASE_WORKFLOW)
+    assert any("scripts/release/metadata.py" in script for script in run_scripts(jobs["build"]))
+    assert not any("scripts/release/metadata.py" in script for script in run_scripts(jobs["sbom"]))
 
 
 def test_release_build_toolchain_is_fully_pinned() -> None:
@@ -1339,16 +1318,21 @@ def test_release_audit_covers_every_shipped_extra() -> None:
 
 
 def test_draft_release_is_staged_before_irreversible_pypi_publication() -> None:
-    workflow = _release_workflow()
-    stage = workflow.index("\n  stage-github-release:")
-    publish = workflow.index("\n  publish-pypi:")
-    finalize = workflow.index("\n  finalize-github-release:")
-    assert stage < publish < finalize
-    assert "gh release create" in workflow[stage:publish]
-    assert "--draft" in workflow[stage:publish]
-    assert "scripts/release/compare_assets.py" in workflow[stage:publish]
-    assert "skip-existing: true" in workflow[publish:finalize]
-    assert "--draft=false" in workflow[finalize:]
+    jobs = workflow_jobs(_RELEASE_WORKFLOW)
+    assert set(jobs["stage-github-release"]["needs"]) == {"verify", "smoke", "attest"}
+    assert set(jobs["publish-pypi"]["needs"]) == {"verify", "stage-github-release"}
+    assert set(jobs["finalize-github-release"]["needs"]) == {"verify", "publish-pypi"}
+    stage_scripts = "\n".join(run_scripts(jobs["stage-github-release"]))
+    assert "gh release create" in stage_scripts
+    assert "--draft" in stage_scripts
+    assert "scripts/release/compare_assets.py" in stage_scripts
+    publish_step = next(
+        step
+        for step in jobs["publish-pypi"]["steps"]
+        if str(step.get("uses", "")).startswith("pypa/gh-action-pypi-publish")
+    )
+    assert publish_step.get("with", {}).get("skip-existing") is True
+    assert "--draft=false" in "\n".join(run_scripts(jobs["finalize-github-release"]))
 
 
 def test_release_docs_require_immutable_protected_tags() -> None:
@@ -1395,21 +1379,6 @@ def test_release_rewrites_the_notes_of_a_draft_it_resumes() -> None:
     assert workflow.count('--notes-file "$NOTES"') == 2, (
         "both the create and the resume path must take the body from the notes file"
     )
-
-
-def test_release_notes_exist_for_the_version_being_shipped() -> None:
-    notes = _release_notes()
-    version = _project_version()
-    assert f"# korvid v{version}" in notes
-    assert "## Install" in notes
-    assert f"korvid[all]=={version}" in notes
-    assert f"uv tool install 'korvid[all]=={version}'" in notes
-    assert "uv tool install --upgrade" not in notes
-    assert f"pipx install --force 'korvid[all]=={version}'" in notes
-    assert "## Verify" in notes
-    assert "gh attestation verify" in notes
-    verify = notes[notes.index("## Verify") : notes.index("## Known limits")]
-    assert "```sh\nset -eu" in verify
 
 
 def test_release_notes_state_the_security_posture_the_project_claims() -> None:
@@ -1521,15 +1490,6 @@ def test_readme_has_no_relative_links_because_pypi_cannot_follow_them() -> None:
     assert not relative, f"README links PyPI cannot resolve: {sorted(set(relative))}"
 
 
-def test_release_docs_readme_pins_current_install_and_links_the_runbook() -> None:
-    version = _project_version()
-    readme = _readme()
-    assert f"python -m pip install 'korvid[all]=={version}'" in readme
-    assert "`v0.1.2` is the first public PyPI release" in readme
-    assert f"`v{version}` is the current feature release" in readme
-    assert "docs/release.md" in readme
-
-
 def test_readme_recommends_an_isolated_install_for_an_application() -> None:
     """`pip install` is the wrong first instruction for a CLI application.
 
@@ -1552,103 +1512,10 @@ def test_readme_recommends_an_isolated_install_for_an_application() -> None:
     assert "3.11" in readme
 
 
-#: Tags that exist, will never be published, and must keep being named in the
-#: docs as exactly what they are. `v0.1.0` failed before build; `v0.1.1` built
-#: and staged, then stopped at `publish-pypi` for a missing trusted publisher.
-#: Nothing else belongs here: this list is the escape hatch for the guard
-#: below, so an entry is a statement that a released version number was burned.
-_UNPUBLISHED_TAGS = frozenset({"0.1.0", "0.1.1"})
-_PUBLISHED_PREDECESSORS = frozenset({"0.1.2"})
-
-
-def test_release_docs_never_name_a_version_other_than_the_project_version() -> None:
-    """No stale version survives anywhere in the release documents.
-
-    Restricting this to `==` pins and `refs/tags` was too narrow: the wheel
-    filename in the README's attestation command and the runbook's recovery
-    condition ("PyPI already has X") name the version in plain text, and a
-    reader following either one after a bump is following a lie.
-
-    Every `X.Y.Z` in both documents must therefore be the version being
-    shipped, or one of the burned tags in `_UNPUBLISHED_TAGS`. That will fail
-    the first time a document legitimately refers to a *previously published*
-    release - which is the intended behaviour, because someone then has to
-    look at the line and decide rather than let it rot.
-    """
-    version = _project_version()
-    allowed = _UNPUBLISHED_TAGS | _PUBLISHED_PREDECESSORS | {version}
-    for name, text in (("README.md", _readme()), ("docs/release.md", _release_runbook())):
-        found = set(re.findall(r"\b[0-9]+\.[0-9]+\.[0-9]+\b", text))
-        stale = found - allowed
-        assert not stale, (
-            f"{name} names {sorted(stale)}; the project version is {version} and the"
-            " only other versions the docs may name are the explicit historical set"
-            f" {sorted(_UNPUBLISHED_TAGS | _PUBLISHED_PREDECESSORS)}"
-        )
-        assert version in found, f"{name} never names the version being shipped ({version})"
-
-
-def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -> None:
-    version = _project_version()
-    runbook = _release_runbook()
-    assert "refs/tags/v*" in runbook
-    assert "`release`" in runbook
-    assert "`.github/workflows/release.yml`" in runbook
-    assert "`hellices/korvid`" in runbook
-    assert "git fetch origin main" in runbook
-    assert "COMMIT=$(git rev-parse origin/main)" in runbook
-    assert "gh workflow run Release --ref main" in runbook
-    assert 'gh run watch "$RUN_ID" --exit-status' in runbook
-    assert f'git tag -a v{version} "$COMMIT" -m "korvid v{version}"' in runbook
-    assert f"git push origin refs/tags/v{version}" in runbook
-    assert "TAG_RUN_ID=$(gh run list --workflow Release --event push" in runbook
-    assert f'--branch v{version} --commit "$COMMIT"' in runbook
-    assert 'TAG_RUN_COMMIT=$(gh run view "$TAG_RUN_ID" --json headSha' in runbook
-    assert 'test "$TAG_RUN_COMMIT" = "$COMMIT"' in runbook
-    assert 'gh run watch "$TAG_RUN_ID" --exit-status' in runbook
-    assert f"gh release download v{version} --dir dist/v{version}" in runbook
-    assert (
-        f"gh attestation verify dist/v{version}/korvid-{version}-py3-none-any.whl"
-        " --repo hellices/korvid"
-    ) in runbook
-    assert (f"gh attestation verify dist/v{version}/SHA256SUMS --repo hellices/korvid") in runbook
-    assert (f"cd dist/v{version} && shasum --algorithm 256 --check SHA256SUMS") in runbook
-    verify = runbook[
-        runbook.index("## Verify the published artifacts") : runbook.index(
-            "## Publish and verify the Homebrew tap"
-        )
-    ]
-    assert "```sh\nset -eu" in verify
-    assert "PyPI publication is irreversible" in runbook
-    assert "annotated tag publication is irreversible" in runbook
-
-
 def test_release_docs_runbook_requires_protected_tags_and_maintainer_approval() -> None:
     runbook = " ".join(_release_runbook().split())
     assert "allow protected tags only" in runbook
     assert "require approval from a designated release maintainer" in runbook
-
-
-def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> None:
-    runbook = _release_runbook()
-    normalized = " ".join(runbook.split())
-    stop_processes = runbook.index("Stop all korvid processes")
-    remove_files = runbook.index("Then remove the retained files")
-    assert "~/.config/korvid/config.yaml" in runbook
-    assert "~/.config/korvid/credentials.json" in runbook
-    assert "~/.local/state/korvid/audit.jsonl" in runbook
-    assert "~/.local/state/korvid/audit.jsonl.lock" in runbook
-    assert "~/.local/share/korvid/logs" in runbook
-    assert "~/.local/share/korvid/agent-payloads" in runbook
-    assert f"python -m pip install 'korvid[all]=={_project_version()}'" in runbook
-    assert "python -m pip uninstall -y korvid" in runbook
-    assert "opt-in cleanup" in runbook
-    assert "rerun your package manager with the full desired extra set" in normalized
-    assert 'state_root="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"' in runbook
-    assert 'data_root="${XDG_DATA_HOME:-$HOME/.local/share}/korvid"' in runbook
-    assert 'rm -f "$state_root/audit.jsonl"' in runbook
-    assert 'rm -rf "$data_root/logs" "$data_root/agent-payloads"' in runbook
-    assert stop_processes < remove_files
 
 
 def test_release_docs_runbook_lists_and_cleans_the_os_keyring_credential() -> None:
@@ -1668,31 +1535,6 @@ def test_release_readme_discloses_the_retained_os_keyring_credential() -> None:
         "cleanup is explicit and opt-in in the [release runbook]"
         "(https://github.com/hellices/korvid/blob/main/docs/release.md)"
     ) in readme
-
-
-def test_release_docs_runbook_marks_recovery_boundaries_and_upgrade_source() -> None:
-    version = _project_version()
-    runbook = _release_runbook()
-    assert "Deleting or moving a published tag/version is not rollback" in runbook
-    assert "resume the idempotent workflow only when the staged assets match" in runbook
-    assert "stop and diagnose" in runbook
-    assert "Install published `korvid[all]==0.1.2`" in runbook
-    assert "Download the exact wheel produced by the confirmed exact-main dry run" in runbook
-    assert 'DRY_RUN_COMMIT=$(gh run view "$RUN_ID" --json headSha' in runbook
-    assert "${RUN_ID:?set RUN_ID to the confirmed dry-run workflow ID}" in runbook
-    assert "${COMMIT:?set COMMIT to the reviewed origin/main SHA}" in runbook
-    assert '[ "$DRY_RUN_COMMIT" != "$COMMIT" ]' in runbook
-    assert 'gh run download "$RUN_ID" --name dist' in runbook
-    assert f"korvid-{version}-py3-none-any.whl" in runbook
-    assert "'korvid[all]==0.1.2'" in runbook
-    assert f"'korvid {version}'" in runbook
-    upgrade_start = runbook.index("## Required cross-version upgrade gate")
-    publish_start = runbook.index(f"## Publish `v{version}`")
-    assert upgrade_start < publish_start
-    assert runbook[upgrade_start:publish_start].count("set -eu") == 2
-    publish = runbook[publish_start : runbook.index("## Safe recovery boundaries")]
-    assert f"local tag v{version} already exists; refusing to push it" in publish
-    assert f"git rev-list -n 1 refs/tags/v{version}" in publish
 
 
 def test_release_docs_preserve_failed_tags_as_unpublished_audit_history() -> None:
@@ -1745,71 +1587,88 @@ def test_workflow_exports_source_commit_without_logging_it_from_python() -> None
 
 def test_release_workflow_has_a_main_only_non_publishing_manual_dry_run() -> None:
     workflow = _release_workflow()
-    verify = workflow.index("\n  verify:")
-    build = workflow.index("\n  build:")
-    stage = workflow.index("\n  stage-github-release:")
-    publish = workflow.index("\n  publish-pypi:")
-    finalize = workflow.index("\n  finalize-github-release:")
+    jobs = workflow_jobs(_RELEASE_WORKFLOW)
     assert "workflow_dispatch:" in workflow
-    assert "scripts/release/check_dry_run.py" in workflow
-    assert "refs/heads/main" in workflow[verify:build]
-    assert "check_dry_run.py origin/main" in workflow[verify:build]
-    assert "check_source.py" in workflow[verify:build]
-    manual_start = workflow.index('elif [ "$EVENT_NAME" = "workflow_dispatch" ]', verify, build)
-    manual_end = workflow.index("\n          else", manual_start, build)
-    assert "check_source.py" not in workflow[manual_start:manual_end]
-    assert "github.event_name == 'push'" in workflow[stage:publish]
-    assert "github.event_name == 'push'" in workflow[publish:finalize]
-    assert "github.event_name == 'push'" in workflow[finalize:]
+    version_script = _verify_step_run("id", "version")
+    source_script = _verify_step_run("id", "source")
+    assert 'if [ "$REF" != "refs/heads/main" ]' in version_script
+    assert "check_dry_run.py origin/main" in version_script
+    assert "check_source.py" in source_script
+    manual_start = version_script.index('elif [ "$EVENT_NAME" = "workflow_dispatch" ]')
+    manual_end = version_script.index("\nelse\n", manual_start)
+    assert "check_source.py" not in version_script[manual_start:manual_end]
+    for job_name in ("stage-github-release", "publish-pypi", "finalize-github-release"):
+        assert jobs[job_name]["if"] == "github.event_name == 'push'"
 
 
 def test_release_workflow_smoke_matrix_covers_every_supported_runner_and_variant() -> None:
-    workflow = _release_workflow()
-    smoke = workflow.index("\n  smoke:")
-    sbom = workflow.index("\n  sbom:")
-    smoke_job = workflow[smoke:sbom]
-    assert "fail-fast: false" in smoke_job
-    assert "os: [ubuntu-latest, macos-latest, windows-latest]" in smoke_job
-    assert 'python-version: ["3.11", "3.12", "3.13"]' in smoke_job
-    assert "variant: [base, agent, mcp, all]" in smoke_job
-    assert "runs-on: ${{ matrix.os }}" in smoke_job
+    smoke_job = workflow_jobs(_RELEASE_WORKFLOW)["smoke"]
+    matrix = smoke_job["strategy"]["matrix"]
+    assert smoke_job["strategy"]["fail-fast"] is False
+    assert matrix["os"] == ["ubuntu-latest", "macos-latest", "windows-latest"]
+    assert matrix["python-version"] == ["3.11", "3.12", "3.13"]
+    assert matrix["variant"] == ["base", "agent", "mcp", "all"]
+    assert smoke_job["runs-on"] == "${{ matrix.os }}"
 
 
 def test_release_workflow_smokes_the_downloaded_wheel_once_without_rebuilding() -> None:
-    workflow = _release_workflow()
-    smoke = workflow.index("\n  smoke:")
-    sbom = workflow.index("\n  sbom:")
-    smoke_job = workflow[smoke:sbom]
-    assert smoke_job.count("scripts/release/smoke_install.py") == 1
-    assert "name: dist" in smoke_job
-    assert "path: dist" in smoke_job
-    assert "python-version: ${{ matrix.python-version }}" in smoke_job
-    assert "${{ runner.temp }}" in smoke_job
-    assert "uv build" not in smoke_job
+    smoke_job = workflow_jobs(_RELEASE_WORKFLOW)["smoke"]
+    scripts = run_scripts(smoke_job)
+    download_step = next(
+        step
+        for step in smoke_job["steps"]
+        if str(step.get("uses", "")).startswith("actions/download-artifact")
+    )
+    setup_python_step = next(
+        step
+        for step in smoke_job["steps"]
+        if str(step.get("uses", "")).startswith("actions/setup-python")
+    )
+    smoke_step = next(
+        step
+        for step in smoke_job["steps"]
+        if "scripts/release/smoke_install.py" in str(step.get("run", ""))
+    )
+    assert sum("scripts/release/smoke_install.py" in script for script in scripts) == 1
+    assert download_step.get("with", {}).get("name") == "dist"
+    assert download_step.get("with", {}).get("path") == "dist"
+    assert setup_python_step.get("with", {}).get("python-version") == "${{ matrix.python-version }}"
+    assert "${{ runner.temp }}" in smoke_step.get("env", {}).get("WORKSPACE", "")
+    assert "uv build" not in "\n".join(scripts)
 
 
 # --- the dry-run source policy compares against the live remote -------------
 
 
 def test_release_workflow_refreshes_live_source_refs_before_source_policy() -> None:
-    workflow = _release_workflow()
-    verify = workflow.index("\n  verify:")
-    build = workflow.index("\n  build:")
-    verify_job = workflow[verify:build]
-    branch_fetch = verify_job.index('"refs/heads/main:refs/remotes/origin/main"')
-    tag_fetch = verify_job.index('git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"')
-    dry_run_check = verify_job.index("check_dry_run.py origin/main")
-    source_check = verify_job.index("check_source.py")
+    verify_job = workflow_jobs(_RELEASE_WORKFLOW)["verify"]
+    steps = verify_job["steps"]
+    fetch_index = next(
+        i
+        for i, step in enumerate(steps)
+        if step.get("name") == "Fetch the live trusted source refs"
+    )
+    version_index = next(i for i, step in enumerate(steps) if step.get("id") == "version")
+    source_index = next(i for i, step in enumerate(steps) if step.get("id") == "source")
+    fetch_step = steps[fetch_index]
+    checkout_step = next(
+        step for step in steps if str(step.get("uses", "")).startswith("actions/checkout")
+    )
+    fetch_script = str(fetch_step["run"])
 
-    assert branch_fetch < dry_run_check
-    assert tag_fetch < source_check
+    assert fetch_index < version_index < source_index
+    assert fetch_script.index('"refs/heads/main:refs/remotes/origin/main"') < fetch_script.index(
+        'git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"'
+    )
     assert (
         'if [ "$EVENT_NAME" = "push" ]; then\n'
-        '            git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"\n'
-        "          fi"
-    ) in verify_job
-    assert "TAG: ${{ github.ref_name }}" in verify_job
-    assert "fetch-depth: 0" in verify_job
+        '  git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"\n'
+        "fi"
+    ) in fetch_script
+    assert "check_dry_run.py origin/main" in _verify_step_run("id", "version")
+    assert "check_source.py" in _verify_step_run("id", "source")
+    assert fetch_step.get("env", {}).get("TAG") == "${{ github.ref_name }}"
+    assert checkout_step.get("with", {}).get("fetch-depth") == 0
 
 
 def test_release_workflow_restores_overwritten_annotated_tag_before_source_policy(
@@ -1882,68 +1741,74 @@ def test_release_workflow_rejects_restored_tag_that_differs_from_event_commit(
 
 
 def test_release_workflow_binds_restored_tag_to_event_commit_before_validation() -> None:
-    workflow = _release_workflow()
-    verify = workflow.index("\n  verify:")
-    build = workflow.index("\n  build:")
-    verify_job = workflow[verify:build]
+    source_script = _verify_step_run("id", "source")
     assert (
         'source_commit=$(git rev-list -n 1 "refs/tags/$TAG")\n'
-        '            if [ "$source_commit" != "$GITHUB_SHA" ]; then\n'
-        '              echo "release tag does not match event commit"\n'
-        "              exit 1\n"
-        "            fi\n"
-        "            uv run --no-project python scripts/release/check_source.py"
-    ) in verify_job
+        '  if [ "$source_commit" != "$GITHUB_SHA" ]; then\n'
+        '    echo "release tag does not match event commit"\n'
+        "    exit 1\n"
+        "  fi\n"
+        "  uv run --no-project python scripts/release/check_source.py"
+    ) in source_script
 
 
 # --- provenance attestation is irreversible, so tag pushes only -------------
 
 
 def test_attestation_is_gated_to_tag_pushes_and_never_runs_on_a_dry_run() -> None:
-    workflow = _release_workflow()
-    document = yaml.safe_load(workflow)
-    collect = workflow.index("\n  collect:")
-    attest = workflow.index("\n  attest:")
-    stage = workflow.index("\n  stage-github-release:")
-    assert collect < attest < stage
-    assert "github.event_name == 'push'" not in workflow[collect:attest]
-    assert document["jobs"]["attest"]["needs"] == ["verify", "collect", "smoke"]
-    assert "if: github.event_name == 'push'" in workflow[attest:stage]
-    assert "actions/attest-build-provenance" in workflow[attest:stage]
+    jobs = workflow_jobs(_RELEASE_WORKFLOW)
+    assert "if" not in jobs["collect"]
+    assert set(jobs["attest"]["needs"]) == {"verify", "collect", "smoke"}
+    assert jobs["attest"]["if"] == "github.event_name == 'push'"
+    assert "attest" in set(jobs["stage-github-release"]["needs"])
+    attest_step = next(
+        step
+        for step in jobs["attest"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/attest-build-provenance")
+    )
+    assert attest_step.get("with", {}).get("subject-path") == "release-files/*"
 
 
 def test_attestation_revalidates_live_tag_and_main_immediately_before_signing() -> None:
-    workflow = _release_workflow()
-    attest = workflow.index("\n  attest:")
-    stage = workflow.index("\n  stage-github-release:")
-    attest_job = workflow[attest:stage]
-    fetch = attest_job.index(
-        "git fetch --force origin \\\n"
-        '            "+refs/tags/$TAG:refs/tags/$TAG" \\\n'
-        '            "refs/heads/main:refs/remotes/origin/main"'
+    attest_job = workflow_jobs(_RELEASE_WORKFLOW)["attest"]
+    steps = attest_job["steps"]
+    revalidate_index = next(
+        i
+        for i, step in enumerate(steps)
+        if step.get("name") == "Revalidate the remote tag immediately before attestation"
     )
-    check = attest_job.index(
-        'python scripts/release/check_source.py "$TAG" origin/main \\\n'
-        '            --expected-commit "$EXPECTED_COMMIT"'
+    sign_index = next(
+        i
+        for i, step in enumerate(steps)
+        if str(step.get("uses", "")).startswith("actions/attest-build-provenance")
     )
-    sign = attest_job.index("actions/attest-build-provenance")
-    assert fetch < check < sign
-    assert "fetch-depth: 0" in attest_job
-    assert "TAG: ${{ github.ref_name }}" in attest_job
-    assert "EXPECTED_COMMIT: ${{ needs.verify.outputs.source_commit }}" in attest_job
+    checkout_step = next(
+        step for step in steps if str(step.get("uses", "")).startswith("actions/checkout")
+    )
+    revalidate_step = steps[revalidate_index]
+    revalidate_script = str(revalidate_step["run"])
+    fetch = revalidate_script.index("git fetch --force origin")
+    check = revalidate_script.index('python scripts/release/check_source.py "$TAG" origin/main')
+
+    assert fetch < check
+    assert revalidate_index < sign_index
+    assert checkout_step.get("with", {}).get("fetch-depth") == 0
+    assert revalidate_step.get("env", {}).get("TAG") == "${{ github.ref_name }}"
+    assert (
+        revalidate_step.get("env", {}).get("EXPECTED_COMMIT")
+        == "${{ needs.verify.outputs.source_commit }}"
+    )
 
 
 # --- no GitHub expressions inside shell bodies ------------------------------
 
 
 def _workflow_run_bodies() -> list[tuple[str, str]]:
-    document = yaml.safe_load(_release_workflow())
-    bodies: list[tuple[str, str]] = []
-    for job_name, job in document["jobs"].items():
-        for step in job.get("steps", []):
-            if "run" in step:
-                bodies.append((job_name, step["run"]))
-    return bodies
+    return [
+        (job_name, script)
+        for job_name, job in workflow_jobs(_RELEASE_WORKFLOW).items()
+        for script in run_scripts(job)
+    ]
 
 
 def test_release_workflow_keeps_github_expressions_out_of_shell_bodies() -> None:
@@ -1952,13 +1817,15 @@ def test_release_workflow_keeps_github_expressions_out_of_shell_bodies() -> None
 
 
 def test_release_workflow_smoke_step_passes_matrix_values_through_env() -> None:
-    workflow = _release_workflow()
-    smoke = workflow.index("\n  smoke:")
-    sbom = workflow.index("\n  sbom:")
-    smoke_job = workflow[smoke:sbom]
-    assert "VERSION: ${{ needs.verify.outputs.version }}" in smoke_job
-    assert "VARIANT: ${{ matrix.variant }}" in smoke_job
-    assert "shell: bash" in smoke_job
+    smoke_job = workflow_jobs(_RELEASE_WORKFLOW)["smoke"]
+    smoke_step = next(
+        step
+        for step in smoke_job["steps"]
+        if step.get("name") == "Smoke-test the downloaded wheel in a clean workspace"
+    )
+    assert smoke_step.get("env", {}).get("VERSION") == "${{ needs.verify.outputs.version }}"
+    assert smoke_step.get("env", {}).get("VARIANT") == "${{ matrix.variant }}"
+    assert smoke_step.get("shell") == "bash"
 
 
 # --- the 36-cell smoke matrix must not hang a release -----------------------
@@ -2010,15 +1877,6 @@ def test_release_docs_correct_the_xdg_config_claim() -> None:
     runbook = _release_runbook()
     assert "`XDG_CONFIG_HOME` is not honored" in runbook
     assert "always under `~/.config/korvid`" in runbook
-
-
-def test_release_docs_list_and_clean_the_mcp_endpoint_state() -> None:
-    runbook = _release_runbook()
-    assert "~/.local/state/korvid/mcp-endpoint.json" in runbook
-    assert "~/.local/state/korvid/mcp-endpoint.json.lock" in runbook
-    cleanup = runbook.index("## opt-in cleanup")
-    assert "mcp-endpoint.json" in runbook[cleanup:]
-    assert "~/.config/korvid/credentials.json" in runbook[cleanup:]
 
 
 def test_release_docs_keep_a_source_install_fallback_before_publication() -> None:

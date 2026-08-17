@@ -34,7 +34,7 @@ from korvid.tools.executor import (
 from korvid.tools.registry import mcp_tool_schemas
 from korvid.tools.structured import load_structured_document
 from tests.platforms import POSIX
-from tests.tools.test_executor import (
+from tests.tools.executor_fakes import (
     LONG_NAME_ENV_SENTINEL,
     NESTED_SECRET_SENTINEL,
     PARENT_SECRET,

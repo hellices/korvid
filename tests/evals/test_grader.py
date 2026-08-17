@@ -529,7 +529,7 @@ def test_grade_credits_diagnose_service_against_name_keyed_evidence() -> None:
     assert result.evidence_fetched
 
 
-def test_grade_credits_diagnose_pvc_against_name_keyed_evidence() -> None:
+def test_grade_credits_diagnostic_pvc_for_its_name_keyed_evidence() -> None:
     """`diagnose_pvc(pvc=...)` names the same object as `name=...`."""
     evidence = Evidence(
         tool="get_resource",
@@ -610,25 +610,6 @@ def test_grade_rejects_a_pod_read_against_deployment_evidence() -> None:
     ]
     result = grade(scenario, "OOMKilled, exit 137.", records)
     assert not result.evidence_fetched
-
-
-def test_grade_still_credits_a_diagnostic_call_for_its_own_kind() -> None:
-    """The implied kind must match its own evidence, not block it."""
-    evidence = Evidence(
-        tool="get_resource",
-        contains="phase: Pending",
-        args={"kind": "persistentvolumeclaims", "name": "data", "namespace": "front"},
-    )
-    scenario = _scenario(expected_evidence=((evidence,),))
-    records = [
-        _record(
-            name="diagnose_pvc",
-            result="outcome: findings\nphase: Pending",
-            arguments={"pvc": "data", "namespace": "front"},
-        )
-    ]
-    result = grade(scenario, "OOMKilled, exit 137.", records)
-    assert result.evidence_fetched
 
 
 def test_grade_prefers_the_implied_kind_over_a_conflicting_kind_argument() -> None:

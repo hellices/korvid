@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from textual.css.query import NoMatches
+
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
@@ -13,6 +15,9 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.hints import EventsFetcher
+from korvid.ui.widgets.resource_table import ResourceTable
+
+from .waits import until
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 
@@ -108,6 +113,19 @@ def _rendered_plain(widget: Any) -> str:
     return capture.get()
 
 
+def _resource_row_count(app: KorvidApp) -> int:
+    try:
+        return app.query_one(ResourceTable).row_count
+    except NoMatches:
+        return -1
+
+
+def _describe_open(app: KorvidApp) -> bool:
+    from korvid.ui.widgets.describe_screen import DescribeScreen
+
+    return isinstance(app.screen, DescribeScreen)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -125,9 +143,9 @@ async def test_d_opens_describe_screen_with_pod_name_and_events() -> None:
 
     app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 1, label="pod row rendered")
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _describe_open(app), label="describe screen opened")
         # DescribeScreen should be pushed as a modal
         screen = app.screen
         assert isinstance(screen, DescribeScreen)
@@ -148,9 +166,9 @@ async def test_managed_fields_stripped_from_describe() -> None:
 
     app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 1, label="pod row rendered")
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _describe_open(app), label="describe screen opened")
         screen = app.screen
         assert isinstance(screen, DescribeScreen)
         content = _rendered_plain(screen.query_one("#describe-body"))
@@ -169,9 +187,9 @@ async def test_events_rendered_in_describe_screen() -> None:
 
     app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 1, label="pod row rendered")
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _describe_open(app), label="describe screen opened")
         screen = app.screen
         assert isinstance(screen, DescribeScreen)
         content = _rendered_plain(screen.query_one("#describe-body"))
@@ -190,9 +208,9 @@ async def test_no_events_shows_no_events_placeholder() -> None:
 
     app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 1, label="pod row rendered")
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _describe_open(app), label="describe screen opened")
         screen = app.screen
         assert isinstance(screen, DescribeScreen)
         content = _rendered_plain(screen.query_one("#describe-body"))
@@ -211,12 +229,12 @@ async def test_esc_dismisses_describe_screen() -> None:
 
     app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 1, label="pod row rendered")
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _describe_open(app), label="describe screen opened")
         assert isinstance(app.screen, DescribeScreen)
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: not _describe_open(app), label="describe screen closed")
         # Modal should be dismissed; main app screen should be back
         assert not isinstance(app.screen, DescribeScreen)
 
@@ -233,12 +251,12 @@ async def test_q_in_describe_screen_dismisses_not_quit_app() -> None:
 
     app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 1, label="pod row rendered")
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _describe_open(app), label="describe screen opened")
         assert isinstance(app.screen, DescribeScreen)
         await pilot.press("q")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: not _describe_open(app), label="describe screen dismissed")
         # Modal dismissed, app still running (not exited)
         assert not isinstance(app.screen, DescribeScreen)
         # app should still be running (not exited)
@@ -257,9 +275,13 @@ async def test_get_manifest_403_shows_rbac_notification_no_modal() -> None:
 
     app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 1, label="pod row rendered")
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: any("RBAC" in n.message for n in app._notifications),
+            label="rbac notification shown",
+        )
         # DescribeScreen should NOT be mounted
         assert not isinstance(app.screen, DescribeScreen)
         # Notification should contain "RBAC"
@@ -279,9 +301,13 @@ async def test_no_row_selected_shows_warning_no_crash() -> None:
 
     app = make_describe_app([], get_manifest=get_manifest, get_events=get_events)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 0, label="empty table rendered")
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: any("No resource selected" in n.message for n in app._notifications),
+            label="empty-selection warning shown",
+        )
         assert not isinstance(app.screen, DescribeScreen)
         notifications = [n.message for n in app._notifications]
         assert len(notifications) > 0
@@ -293,9 +319,13 @@ async def test_describe_unavailable_when_no_get_manifest() -> None:
 
     app = make_describe_app([_pod("my-pod")], get_manifest=None, get_events=None)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 1, label="pod row rendered")
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: any("Describe unavailable" in n.message for n in app._notifications),
+            label="describe unavailable warning shown",
+        )
         assert not isinstance(app.screen, DescribeScreen)
 
 
@@ -314,10 +344,10 @@ async def test_describe_non_pod_kind_skips_events() -> None:
 
     app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 1, label="pod row rendered")
         app.current_kind = "deployments"
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _describe_open(app), label="describe screen opened")
         assert isinstance(app.screen, DescribeScreen)
         assert events_calls == []
         content = _rendered_plain(app.screen.query_one("#describe-body"))
@@ -339,9 +369,9 @@ async def test_describe_body_renders_bracketed_text_literally() -> None:
 
     app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 1, label="pod row rendered")
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _describe_open(app), label="describe screen opened")
         assert isinstance(app.screen, DescribeScreen)
         content = _rendered_plain(app.screen.query_one("#describe-body"))
         assert "[red]not-a-style[/red]" in content
@@ -359,9 +389,13 @@ async def test_describe_unknown_kind_notifies_error() -> None:
 
     app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)
+        await until(pilot, lambda: _resource_row_count(app) == 1, label="pod row rendered")
         await pilot.press("d")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: any("Unknown resource kind" in n.message for n in app._notifications),
+            label="unknown-kind error shown",
+        )
         assert not isinstance(app.screen, DescribeScreen)
         notifications = [n.message for n in app._notifications]
         assert any("Unknown resource kind" in m for m in notifications)

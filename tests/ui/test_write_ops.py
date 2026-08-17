@@ -18,6 +18,8 @@ from unittest import mock
 
 import pytest
 import yaml
+from textual.css.query import NoMatches
+from textual.widgets import Input
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -189,12 +191,27 @@ def make_app(
     )
 
 
+def _selected_name(app: KorvidApp) -> str | None:
+    try:
+        table = app.query_one(ResourceTable)
+    except NoMatches:
+        return None
+    if table.row_count == 0:
+        return None
+    return str(table.get_row_at(table.cursor_row)[0])
+
+
 async def _to_view(pilot, view: str) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed by the fixture
     await pilot.press("colon")
     for ch in view:
         await pilot.press(ch)
     await pilot.press("enter")
-    await pilot.pause(0.1)
+    expected = {"pods": "web-1", "deployments": "web", "nodes": "worker-1"}[view]
+    await until(
+        pilot,
+        lambda: pilot.app.current_kind == view and _selected_name(pilot.app) == expected,
+        label=f"{view} view selected",
+    )
 
 
 async def test_ctrl_d_delete_confirmed_executes_and_audits(tmp_path: Path) -> None:
@@ -202,11 +219,17 @@ async def test_ctrl_d_delete_confirmed_executes_and_audits(tmp_path: Path) -> No
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="success audit recorded",
+        )
         assert rec.calls == [("delete", "pods", "default", "web-1")]
         lines = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert lines[0]["outcome"] == "intent"  # recorded before the write ran
@@ -221,10 +244,20 @@ async def test_ctrl_d_cancelled_does_nothing(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        base_screen = app.screen
         await pilot.press("ctrl+d")
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="delete confirmation opened",
+        )
         await pilot.press("n")
+        await until(
+            pilot,
+            lambda: app.screen is base_screen,
+            label="delete cancel returned to base resource screen",
+        )
         await pilot.pause(0.2)
         assert rec.calls == []
         assert not audit_path.exists()
@@ -234,9 +267,13 @@ async def test_readonly_blocks_delete(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl", readonly=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("ctrl+d")
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: any("Read-only mode" in n.message for n in app._notifications),
+            label="read-only warning shown",
+        )
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
 
@@ -245,19 +282,27 @@ async def test_cluster_scoped_delete_requires_typed_name(tmp_path: Path) -> None
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await _to_view(pilot, "nodes")
         await pilot.press("ctrl+d")
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="cluster delete confirmation opened",
+        )
         assert isinstance(app.screen, ConfirmScreen)
         await pilot.press("y")  # goes into the input; must NOT confirm by itself
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#confirm-name", Input).value == "y",
+            label="typed confirmation input updated",
+        )
         assert rec.calls == []
         await pilot.press("backspace")  # clear the stray 'y'
         for ch in "worker-1":
             await pilot.press(ch)
         await pilot.press("enter")
-        await until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls, label="write call recorded")
         assert rec.calls == [("delete", "nodes", None, "worker-1")]
 
 
@@ -265,12 +310,14 @@ async def test_rollout_restart_on_deployment(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await _to_view(pilot, "deployments")
         await pilot.press("r")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls, label="write call recorded")
         assert rec.calls == [("restart", "deployments", "default", "web")]
 
 
@@ -278,7 +325,7 @@ async def test_rollout_restart_rejected_on_pods(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("r")
         await pilot.pause()
         assert not isinstance(app.screen, ConfirmScreen)
@@ -289,15 +336,19 @@ async def test_scale_flow_prompts_then_confirms(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await _to_view(pilot, "deployments")
         await pilot.press("S")
-        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await until(
+            pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt opened"
+        )
         await pilot.press("5")
         await pilot.press("enter")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls, label="write call recorded")
         assert rec.calls == [("scale", "deployments", "default", "web", 5)]
 
 
@@ -306,11 +357,17 @@ async def test_failed_write_audits_error(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: audit_path.exists() and "error" in audit_path.read_text())
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "error" in audit_path.read_text(),
+            label="error audit recorded",
+        )
         entry = json.loads(audit_path.read_text().splitlines()[-1])
         assert entry["outcome"].startswith("error")
 
@@ -320,9 +377,13 @@ async def test_permission_denied_blocks_delete(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl", permitted=False)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("ctrl+d")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: any("missing permission: delete pods" in n.message for n in app._notifications),
+            label="delete permission denial shown",
+        )
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
 
@@ -331,11 +392,13 @@ async def test_permission_allowed_proceeds(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl", permitted=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls, label="write call recorded")
         assert rec.calls == [("delete", "pods", "default", "web-1")]
 
 
@@ -347,24 +410,31 @@ async def test_unwritable_audit_blocks_write(tmp_path: Path) -> None:
     audit_path.mkdir()  # a directory at the log path makes appends fail
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await pilot.pause(0.3)  # write path must stay blocked; nothing to wait on
+        await until(
+            pilot,
+            lambda: any("blocked: audit log unavailable" in n.message for n in app._notifications),
+            label="audit-blocked write warning shown",
+        )
+        await pilot.pause(0.3)
         assert rec.calls == []
 
 
 async def test_scale_prompt_prefills_current_replicas(tmp_path: Path) -> None:
-    from textual.widgets import Input
-
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await _to_view(pilot, "deployments")
         await pilot.press("S")
-        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await until(
+            pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt opened"
+        )
         # Deployment summaries preserve spec.replicas as `desired`, so the
         # prompt starts prefilled with the current count.
         assert app.screen.query_one(Input).value == "3"
@@ -379,18 +449,20 @@ async def test_dialog_opened_during_permission_check_aborts_write(tmp_path: Path
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl", permitted=True)
     release = asyncio.Event()
+    started = asyncio.Event()
 
     async def slow_check(
         verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
     ) -> bool:
+        started.set()
         await release.wait()
         return True
 
     app._check_permission = slow_check
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("ctrl+d")  # handler now awaits the stalled pre-check
-        await pilot.pause(0.1)
+        await until(pilot, started.is_set, label="permission check in flight")
         blocker = PickScreen("opened while the check was pending", ["a", "b"])
         await app.push_screen(blocker)
         release.set()
@@ -419,12 +491,14 @@ async def test_y_queued_during_stalled_check_cannot_approve(
 
     app._check_permission = stall
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         # The input driver timestamps keys on arrival: one typed during the
         # stalled check predates the dialog, which only exists afterwards.
         stale = events.Key("y", "y")
         await pilot.press("ctrl+d")  # stalls, then fails open into the dialog
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         app.screen.post_message(stale)
         await pilot.pause(0.2)
         assert isinstance(app.screen, ConfirmScreen)  # discarded: still open
@@ -445,11 +519,13 @@ async def test_delete_binds_selected_row_uid(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls, label="write call recorded")
         assert rec.uids == ["pod-uid-1"]
 
 
@@ -457,15 +533,19 @@ async def test_scale_binds_selected_row_uid(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await _to_view(pilot, "deployments")
         await pilot.press("S")
-        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await until(
+            pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt opened"
+        )
         await pilot.press("5")
         await pilot.press("enter")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls, label="write call recorded")
         assert rec.uids == ["deploy-uid-1"]
 
 
@@ -475,13 +555,16 @@ async def test_conflict_reports_target_changed_since_approval(tmp_path: Path) ->
     rec = Recorder(fail_status=409)
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
         await until(
             pilot,
             lambda: any("changed since it was approved" in n.message for n in app._notifications),
+            label="target-changed notification shown",
         )
 
 
@@ -530,11 +613,17 @@ async def test_e_edit_confirmed_replaces_with_uid(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="success audit recorded",
+        )
     assert len(rec.calls) == 1
     op, plural, ns, name, manifest = rec.calls[0]
     assert (op, plural, ns, name) == ("replace", "pods", "default", "web-1")
@@ -551,9 +640,9 @@ async def test_e_edit_strips_managed_fields_from_editor_text(tmp_path: Path) -> 
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: bool(seen))
+        await until(pilot, lambda: bool(seen), label="editor text captured")
     assert "managedFields" not in seen[0]
     assert "resourceVersion" in seen[0]
 
@@ -563,9 +652,13 @@ async def test_e_edit_cancelled_editor_makes_no_call(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: any("cancelled" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("cancelled" in n.message for n in app._notifications),
+            label="edit cancellation notification shown",
+        )
     assert rec.calls == []
 
 
@@ -574,9 +667,13 @@ async def test_e_edit_unchanged_text_is_a_noop(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: any("no changes" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("no changes" in n.message for n in app._notifications),
+            label="no-change edit notification shown",
+        )
         assert not isinstance(app.screen, ConfirmScreen)
     assert rec.calls == []
 
@@ -586,9 +683,13 @@ async def test_e_edit_invalid_yaml_aborts(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: any("invalid YAML" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("invalid YAML" in n.message for n in app._notifications),
+            label="invalid-yaml notification shown",
+        )
     assert rec.calls == []
 
 
@@ -597,9 +698,13 @@ async def test_e_edit_non_mapping_yaml_aborts(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: any("not a mapping" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("not a mapping" in n.message for n in app._notifications),
+            label="non-mapping notification shown",
+        )
     assert rec.calls == []
 
 
@@ -620,11 +725,17 @@ async def test_e_edit_reinjects_deleted_resource_version(tmp_path: Path) -> None
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="success audit recorded",
+        )
     manifest = rec.calls[0][4]
     assert isinstance(manifest, dict)
     assert manifest["metadata"]["resourceVersion"] == "41"
@@ -637,9 +748,13 @@ async def test_e_edit_readonly_blocked(tmp_path: Path) -> None:
         rec, tmp_path / "a.jsonl", readonly=True, get_manifest=get_manifest, edit_text=edit_text
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: any("Read-only" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("Read-only" in n.message for n in app._notifications),
+            label="read-only warning shown",
+        )
     assert seen == []
     assert rec.calls == []
 
@@ -648,9 +763,13 @@ async def test_e_edit_without_manifest_source_notifies(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: any("unavailable" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("unavailable" in n.message for n in app._notifications),
+            label="unavailable notification shown",
+        )
     assert rec.calls == []
 
 
@@ -666,9 +785,13 @@ async def test_e_edit_deleting_only_resource_version_is_a_noop(tmp_path: Path) -
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: any("no changes" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("no changes" in n.message for n in app._notifications),
+            label="no-change edit notification shown",
+        )
     assert rec.calls == []
 
 
@@ -688,11 +811,17 @@ async def test_e_edit_null_metadata_gets_rebuilt_with_resource_version(tmp_path:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="success audit recorded",
+        )
     manifest = rec.calls[0][4]
     assert isinstance(manifest, dict)
     assert manifest["metadata"] == {"resourceVersion": "41"}
@@ -704,11 +833,15 @@ async def test_external_editor_invocation_failure_notifies_and_cancels(tmp_path:
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         with mock.patch.dict(os.environ, {"VISUAL": "bad 'quote", "EDITOR": ""}):
             result = await app._edit_in_external_editor("a: 1\n")
         assert result is None
-        await until(pilot, lambda: any("editor" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("editor" in n.message for n in app._notifications),
+            label="editor failure notification shown",
+        )
     assert rec.calls == []
 
 
@@ -727,11 +860,17 @@ async def test_e_edit_blank_resource_version_restored(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="success audit recorded",
+        )
     manifest = rec.calls[0][4]
     assert isinstance(manifest, dict)
     assert manifest["metadata"]["resourceVersion"] == "41"
@@ -744,9 +883,11 @@ async def test_e_edit_confirm_dialog_summarizes_changed_sections(tmp_path: Path)
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         operation = str(app.screen.query_one(".confirm-operation").render())
         assert "PUT pods/web-1" in operation
         assert "spec" in operation  # the edited top-level section is named
@@ -769,13 +910,19 @@ async def test_e_edit_scalar_type_change_reaches_approval(tmp_path: Path) -> Non
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         operation = str(app.screen.query_one(".confirm-operation").render())
         assert "spec" in operation  # the type change is named in the summary
         await pilot.press("y")
-        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="success audit recorded",
+        )
     manifest = rec.calls[0][4]
     assert isinstance(manifest, dict)
     assert manifest["spec"]["replicas"] is True
@@ -795,9 +942,11 @@ async def test_e_edit_added_null_section_named_in_summary(tmp_path: Path) -> Non
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         operation = str(app.screen.query_one(".confirm-operation").render())
         assert "status" in operation
         await pilot.press("escape")
@@ -828,9 +977,15 @@ async def test_e_edit_survives_alias_refresh_during_editor(tmp_path: Path) -> No
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).row_count > 0, label="pod row")
         await pilot.press("e")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         await pilot.press("y")
-        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="success audit recorded",
+        )
     assert len(rec.calls) == 1
 
 
@@ -841,9 +996,13 @@ async def test_e_edit_non_string_top_level_key_aborts(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: any("non-string" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("non-string" in n.message for n in app._notifications),
+            label="non-string-key notification shown",
+        )
     assert rec.calls == []
 
 
@@ -861,9 +1020,9 @@ async def test_e_edit_precheck_uses_update_verb(tmp_path: Path) -> None:
         check_calls=calls,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         await pilot.press("e")
-        await until(pilot, lambda: bool(calls))
+        await until(pilot, lambda: bool(calls), label="edit precheck recorded")
     assert calls[0] == ("update", "pods", "", "default", "", "web-1")
 
 
@@ -908,6 +1067,7 @@ async def test_e_edit_selection_change_during_editor_aborts(tmp_path: Path) -> N
                 "selection changed during the editor session" in n.message
                 for n in app._notifications
             ),
+            label="editor-session selection-change shown",
         )
         assert not isinstance(app.screen, ConfirmScreen)
     assert rec.calls == []
@@ -919,11 +1079,15 @@ async def test_external_editor_mkstemp_failure_notifies_and_cancels(tmp_path: Pa
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         with mock.patch("tempfile.mkstemp", side_effect=OSError("no space")):
             result = await app._edit_in_external_editor("a: 1\n")
         assert result is None
-        await until(pilot, lambda: any("temp file failed" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("temp file failed" in n.message for n in app._notifications),
+            label="temp-file failure notification shown",
+        )
     assert rec.calls == []
 
 
@@ -939,7 +1103,7 @@ async def test_external_editor_undecodable_output_notifies_and_cancels(tmp_path:
         return 0
 
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         with (
             mock.patch.dict(os.environ, {"VISUAL": "true", "EDITOR": ""}),
             mock.patch("subprocess.call", side_effect=write_binary),
@@ -949,7 +1113,11 @@ async def test_external_editor_undecodable_output_notifies_and_cancels(tmp_path:
             fake_suspend.return_value.__exit__ = mock.MagicMock(return_value=False)
             result = await app._edit_in_external_editor("a: 1\n")
         assert result is None
-        await until(pilot, lambda: any("unreadable" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("unreadable" in n.message for n in app._notifications),
+            label="unreadable-editor-output notification shown",
+        )
     assert rec.calls == []
 
 
@@ -980,11 +1148,15 @@ async def test_external_editor_whitespace_only_editor_cancels(tmp_path: Path) ->
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         with mock.patch.dict(os.environ, {"VISUAL": "   ", "EDITOR": ""}):
             result = await app._edit_in_external_editor("a: 1\n")
         assert result is None
-        await until(pilot, lambda: any("editor" in n.message for n in app._notifications))
+        await until(
+            pilot,
+            lambda: any("editor" in n.message for n in app._notifications),
+            label="editor failure notification shown",
+        )
     assert rec.calls == []
 
 
@@ -1044,6 +1216,7 @@ async def test_e_edit_selection_change_during_fetch_never_opens_editor(tmp_path:
                 "selection changed during the manifest fetch" in n.message
                 for n in app._notifications
             ),
+            label="manifest-fetch selection-change shown",
         )
     assert seen == []  # the editor never opened for the stale target
     assert rec.calls == []
@@ -1058,13 +1231,14 @@ async def test_external_editor_suspend_not_supported_cancels(tmp_path: Path) -> 
     rec = Recorder()
     app = make_app(rec, tmp_path / "a.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         with mock.patch.dict(os.environ, {"VISUAL": "true", "EDITOR": ""}):
             result = await app._edit_in_external_editor("a: 1\n")
         assert result is None
         await until(
             pilot,
             lambda: any("does not support" in n.message for n in app._notifications),
+            label="suspend-unsupported notification shown",
         )
     assert rec.calls == []
 
@@ -1098,7 +1272,9 @@ async def test_delete_confirm_shows_the_ownership_banner(tmp_path: Path) -> None
     async with app.run_test() as pilot:
         await _to_view(pilot, "deployments")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         banner = app.screen.query_one(".confirm-managed")
         assert "helm release web/nginx" in str(banner.render())
 
@@ -1144,7 +1320,9 @@ async def test_pod_banner_walks_the_controller_chain(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).row_count > 0, label="pod row")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         banner = app.screen.query_one(".confirm-managed")
         assert "helm release web/nginx" in str(banner.render())
 
@@ -1179,7 +1357,9 @@ async def test_banner_walks_through_a_replication_controller(tmp_path: Path) -> 
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).row_count > 0, label="pod row")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         banner = app.screen.query_one(".confirm-managed")
         assert "helm release web/nginx" in str(banner.render())
 
@@ -1192,7 +1372,9 @@ async def test_unmanaged_target_shows_no_banner(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await _to_view(pilot, "deployments")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         assert not app.screen.query(".confirm-managed")
 
 
@@ -1209,10 +1391,16 @@ async def test_banner_lookup_failure_never_blocks_the_dialog(tmp_path: Path) -> 
     async with app.run_test() as pilot:
         await _to_view(pilot, "deployments")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
         assert not app.screen.query(".confirm-managed")
         await pilot.press("y")
-        await until(pilot, lambda: rec.calls == [("delete", "deployments", "default", "web")])
+        await until(
+            pilot,
+            lambda: rec.calls == [("delete", "deployments", "default", "web")],
+            label="deployment delete recorded",
+        )
         assert rec.calls == [("delete", "deployments", "default", "web")]
 
 
@@ -1393,6 +1581,7 @@ async def test_edit_cancelled_when_selection_changes_during_ownership_lookup(
                 "selection changed during the ownership lookup" in n.message
                 for n in app._notifications
             ),
+            label="ownership-lookup selection-change shown",
         )
         assert not isinstance(app.screen, ConfirmScreen)
     assert rec.calls == []
@@ -1425,7 +1614,9 @@ async def test_banner_kind_captured_before_the_preview_await(tmp_path: Path) -> 
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).row_count > 0, label="pod row")
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
     assert looked_up == ["pods"]
 
 

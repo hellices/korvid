@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from textual.css.query import NoMatches
 from textual.widgets import Input, Static
 
 from korvid.core.audit import AuditLog
@@ -23,6 +24,7 @@ from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
+from korvid.ui.widgets.resource_table import ResourceTable
 
 from .waits import until
 
@@ -169,7 +171,29 @@ async def _to_view(pilot, view: str) -> None:  # type: ignore[no-untyped-def]  #
     for ch in view:
         await pilot.press(ch)
     await pilot.press("enter")
-    await pilot.pause(0.1)
+
+    def _selected_name() -> str | None:
+        try:
+            table = pilot.app.query_one(ResourceTable)
+        except NoMatches:
+            return None
+        if table.row_count == 0:
+            return None
+        return str(table.get_row_at(table.cursor_row)[0])
+
+    expected = {"pods": "web-1", "deployments": "web"}[view]
+    await until(
+        pilot,
+        lambda: pilot.app.current_kind == view and _selected_name() == expected,
+        label=f"{view} view selected",
+    )
+
+
+def _row_count(app: KorvidApp) -> int:
+    try:
+        return app.query_one(ResourceTable).row_count
+    except NoMatches:
+        return -1
 
 
 async def test_resize_confirmed_executes_and_audits(tmp_path: Path) -> None:
@@ -177,9 +201,11 @@ async def test_resize_confirmed_executes_and_audits(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         await pilot.press("R")
-        await until(pilot, lambda: isinstance(app.screen, ResizePrompt))
+        await until(
+            pilot, lambda: isinstance(app.screen, ResizePrompt), label="resize prompt opened"
+        )
         prompt_text = " ".join(str(node.render()) for node in app.screen.query(Static))
         assert "In-place pod resize" in prompt_text
         field = app.screen.query_one("#resize-0-requests-cpu", Input)
@@ -187,11 +213,19 @@ async def test_resize_confirmed_executes_and_audits(tmp_path: Path) -> None:
         field.value = "200m"
         field.focus()
         await pilot.press("enter")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="resize confirmation opened",
+        )
         confirm_text = " ".join(str(node.render()) for node in app.screen.query(Static))
         assert "Apply in-place pod resize" in confirm_text
         await pilot.press("y")
-        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="resize success audited",
+        )
         assert rec.calls == [("resize", "default", "web-1", {"app": {"requests": {"cpu": "200m"}}})]
         assert rec.uids == ["pod-uid-1"]
         lines = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
@@ -204,14 +238,20 @@ async def test_resize_confirm_shows_preview(tmp_path: Path) -> None:
     rec = ResizeRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         await pilot.press("R")
-        await until(pilot, lambda: isinstance(app.screen, ResizePrompt))
+        await until(
+            pilot, lambda: isinstance(app.screen, ResizePrompt), label="resize prompt opened"
+        )
         field = app.screen.query_one("#resize-0-requests-cpu", Input)
         field.value = "200m"
         field.focus()
         await pilot.press("enter")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="resize confirmation opened",
+        )
         assert "200m" in str(app.screen.query_one(".confirm-preview").render())
 
 
@@ -219,9 +259,13 @@ async def test_resize_gated_when_cluster_lacks_subresource(tmp_path: Path) -> No
     rec = ResizeRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl", resize_supported=False)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         await pilot.press("R")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: any("pods/resize" in n.message for n in app._notifications),
+            label="resize unsupported warning shown",
+        )
         assert not isinstance(app.screen, ResizePrompt)
         assert rec.calls == []
 
@@ -230,7 +274,7 @@ async def test_resize_only_applies_to_pods(tmp_path: Path) -> None:
     rec = ResizeRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         await _to_view(pilot, "deployments")
         await pilot.press("R")
         await pilot.pause(0.2)
@@ -242,9 +286,13 @@ async def test_readonly_blocks_resize(tmp_path: Path) -> None:
     rec = ResizeRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl", readonly=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         await pilot.press("R")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: any("Read-only mode" in n.message for n in app._notifications),
+            label="read-only warning shown",
+        )
         assert not isinstance(app.screen, ResizePrompt)
         assert rec.calls == []
 
@@ -254,9 +302,9 @@ async def test_resize_precheck_asks_patch_on_pods_resize(tmp_path: Path) -> None
     calls: list[tuple[str, str, str, str | None, str, str]] = []
     app = make_app(rec, tmp_path / "audit.jsonl", permitted=False, check_calls=calls)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         await pilot.press("R")
-        await pilot.pause(0.2)
+        await until(pilot, lambda: bool(calls), label="resize precheck recorded")
         assert calls == [("patch", "pods", "resize", "default", "", "web-1")]
         assert not isinstance(app.screen, ResizePrompt)
 
@@ -266,11 +314,17 @@ async def test_resize_prompt_cancel_does_nothing(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         await pilot.press("R")
-        await until(pilot, lambda: isinstance(app.screen, ResizePrompt))
+        await until(
+            pilot, lambda: isinstance(app.screen, ResizePrompt), label="resize prompt opened"
+        )
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: not isinstance(app.screen, ResizePrompt),
+            label="resize prompt dismissed",
+        )
         assert rec.calls == []
         assert not audit_path.exists()
 
@@ -291,14 +345,18 @@ async def test_agent_resize_approved_by_user_key(tmp_path: Path) -> None:
     app = make_app(rec, audit_path)
     resources = {"app": {"requests": {"cpu": "200m"}}}
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         _expand_panel(app)
         task = asyncio.ensure_future(
             app.agent_request_write(
                 "resize", "pods", "web-1", namespace="default", resources=resources
             )
         )
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="agent resize confirmation opened",
+        )
         assert rec.calls == []  # nothing executes before the user's keystroke
         await pilot.press("y")
         result = await task
@@ -315,7 +373,7 @@ async def test_agent_resize_requires_resources(tmp_path: Path) -> None:
     rec = ResizeRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         result = await app.agent_request_write("resize", "pods", "web-1", namespace="default")
         assert result.startswith("ERROR:")
         assert rec.calls == []
@@ -325,7 +383,7 @@ async def test_agent_resize_rejected_for_non_pod_kind(tmp_path: Path) -> None:
     rec = ResizeRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         result = await app.agent_request_write(
             "resize",
             "deployments",
@@ -342,7 +400,7 @@ async def test_agent_resize_rejected_when_cluster_lacks_subresource(tmp_path: Pa
     rec = ResizeRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl", resize_supported=False)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         result = await app.agent_request_write(
             "resize",
             "pods",
@@ -380,14 +438,20 @@ async def test_resize_banner_reuses_the_prompt_manifest(tmp_path: Path) -> None:
 
     app = make_app(ResizeRecorder(), tmp_path / "audit.jsonl", get_manifest=counting)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         await pilot.press("R")
-        await until(pilot, lambda: isinstance(app.screen, ResizePrompt))
+        await until(
+            pilot, lambda: isinstance(app.screen, ResizePrompt), label="resize prompt opened"
+        )
         field = app.screen.query_one("#resize-0-requests-cpu", Input)
         field.value = "200m"
         field.focus()
         await pilot.press("enter")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="resize confirmation opened",
+        )
         banner = app.screen.query_one(".confirm-managed", Static)
         assert "helm release web/nginx" in str(banner.render())
     assert fetches == ["pods"]

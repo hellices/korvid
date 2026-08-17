@@ -121,8 +121,8 @@ def make_app(
 async def test_pods_appear_in_table() -> None:
     app = make_app([_pod("api-1"), _pod("checkout-2", phase="CrashLoopBackOff")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pod rows visible")
         assert table.row_count == 2
         assert table.get_row_at(0)[0] == "api-1"
 
@@ -130,53 +130,57 @@ async def test_pods_appear_in_table() -> None:
 async def test_watch_update_refreshes_table() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        app.store.apply_event("pods", "default", "ADDED", _pod("zzz-new"))
-        await pilot.pause(0.1)
         table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="initial pod row visible")
+        app.store.apply_event("pods", "default", "ADDED", _pod("zzz-new"))
+        await until(pilot, lambda: table.row_count == 2, label="watch update rendered")
         assert table.row_count == 2
 
 
 async def test_colon_opens_command_bar_and_ns_switch() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("colon")
         for ch in "ns prod":
             await pilot.press(ch if ch != " " else "space")
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.current_namespace == "prod", label="namespace switched")
         assert app.current_namespace == "prod"
 
 
 async def test_slash_filter_narrows_rows() -> None:
     app = make_app([_pod("api-1"), _pod("checkout-2")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pod rows visible")
         await pilot.press("slash")
         for ch in "check":
             await pilot.press(ch)
-        await pilot.pause(0.1)
-        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="filtered row visible")
         assert table.row_count == 1
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await until(pilot, lambda: table.row_count == 2, label="filter cleared")
         assert table.row_count == 2
 
 
 async def test_watch_update_preserves_filter() -> None:
     app = make_app([_pod("api-1"), _pod("checkout-2")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pod rows visible")
         await pilot.press("slash")
         for ch in "check":
             await pilot.press(ch)
-        await pilot.pause(0.1)
-        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="filtered row visible")
         assert table.row_count == 1  # only checkout-2
         # A new pod arrives while the filter is active.
         app.store.apply_event("pods", "default", "ADDED", _pod("checkout-3"))
-        await pilot.pause(0.1)
+        await until(pilot, lambda: table.row_count == 2, label="filtered update visible")
         # Filter must still apply: checkout-2 + checkout-3 visible; api-1 filtered out.
         assert table.row_count == 2
 
@@ -184,8 +188,8 @@ async def test_watch_update_preserves_filter() -> None:
 async def test_empty_namespace_shows_guidance() -> None:
     app = make_app([])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         empty = app.query_one("#empty-state")
+        await until(pilot, lambda: empty.display is True, label="empty state shown")
         assert empty.display is True
         text = str(empty.render())
         assert "default" in text  # names the namespace so users know where they are
@@ -195,30 +199,42 @@ async def test_empty_namespace_shows_guidance() -> None:
 async def test_empty_state_hidden_when_pods_exist() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         assert app.query_one("#empty-state").display is False
 
 
 async def test_empty_state_appears_when_filter_matches_nothing() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        empty = app.query_one("#empty-state")
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("slash")
         for ch in "zzz":
             await pilot.press(ch)
-        await pilot.pause(0.1)
-        empty = app.query_one("#empty-state")
+        await until(pilot, lambda: empty.display is True, label="filtered empty state shown")
         assert empty.display is True
         assert "zzz" in str(empty.render())
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await until(pilot, lambda: empty.display is False, label="empty state hidden")
         assert empty.display is False
 
 
 async def test_status_bar_shows_ns_and_agent_state() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         bar = app.query_one(StatusBar)
         text = str(bar.render())
         assert "default" in text
@@ -228,16 +244,19 @@ async def test_status_bar_shows_ns_and_agent_state() -> None:
 async def test_filter_enter_closes_bar_keeps_filter() -> None:
     app = make_app([_pod("api-1"), _pod("checkout-2")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pod rows visible")
         await pilot.press("slash")
         for ch in "check":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.1)
         from korvid.ui.widgets.filter_bar import FilterBar
 
-        assert app.query_one(FilterBar).display is False
-        table = app.query_one(ResourceTable)
+        await until(
+            pilot,
+            lambda: app.query_one(FilterBar).display is False and table.row_count == 1,
+            label="filter bar closed with filter active",
+        )
         assert table.row_count == 1  # filter still active after Enter
         # focus must be back on the table so app bindings (q, :, /) work again
         assert app.focused is app.query_one(ResourceTable)
@@ -249,7 +268,11 @@ async def test_bars_show_mode_placeholder() -> None:
 
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         assert app.query_one(CommandBar).placeholder != ""
         assert app.query_one(FilterBar).placeholder != ""
         assert app.query_one(CommandBar).placeholder != app.query_one(FilterBar).placeholder
@@ -260,19 +283,31 @@ async def test_bare_ns_opens_picker_and_selection_switches() -> None:
 
     app = make_app([_pod("api-1")], namespaces=["default", "kube-system", "prod"])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("colon")
         for ch in "ns":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.2)
         picker = app.query_one(NamespacePicker)
+        await until(
+            pilot,
+            lambda: picker.display is True and picker.option_count == 3,
+            label="namespace picker opened",
+        )
         assert picker.display is True
         assert picker.option_count == 3
         # navigate down to kube-system and select it
         await pilot.press("down")
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: picker.display is False and app.current_namespace == "kube-system",
+            label="namespace switched from picker",
+        )
         assert picker.display is False
         assert app.current_namespace == "kube-system"
 
@@ -282,14 +317,26 @@ async def test_picker_escape_dismisses_without_switch() -> None:
 
     app = make_app([_pod("api-1")], namespaces=["default", "prod"])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("colon")
         for ch in "ns":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: app.query_one(NamespacePicker).display is True,
+            label="namespace picker opened",
+        )
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(NamespacePicker).display is False,
+            label="namespace picker closed",
+        )
         assert app.query_one(NamespacePicker).display is False
         assert app.current_namespace == "default"
 
@@ -305,8 +352,8 @@ async def test_rows_sorted_by_eviction_order_reversed() -> None:
         ]
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 4, label="pod rows visible")
         names = [table.get_row_at(i)[0] for i in range(table.row_count)]
         assert names == ["a-guaranteed", "z-guaranteed", "m-burstable", "b-besteffort"]
 
@@ -322,8 +369,8 @@ async def test_qos_cells_are_color_coded() -> None:
         ]
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 3, label="pod rows visible")
         styles = {}
         for i in range(table.row_count):
             row = table.get_row_at(i)
@@ -340,12 +387,20 @@ async def test_bare_ns_with_empty_list_warns_instead_of_empty_picker() -> None:
 
     app = make_app([_pod("api-1")], namespaces=[])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("colon")
         for ch in "ns":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: len(app._notifications) > 0,
+            label="empty namespace warning shown",
+        )
         assert app.query_one(NamespacePicker).display is False
 
 
@@ -365,11 +420,14 @@ async def test_namespace_picker_api_error_shows_actionable_message() -> None:
         list_namespaces=failing_list,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.05)
         from korvid.ui.messages import ShowNamespacePicker
 
         app.post_message(ShowNamespacePicker())
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: any("RBAC" in n.message for n in app._notifications),
+            label="RBAC guidance shown",
+        )
         notifications = [n.message for n in app._notifications]
         assert any("RBAC" in m for m in notifications)
         assert not any("API 403" in m for m in notifications)
@@ -387,13 +445,17 @@ async def test_deployments_view_renders_generic_columns() -> None:
         extra_data={"deployments": [_deploy("frontend"), _deploy("backend")]},
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod row visible")
         await pilot.press("colon")
         for ch in "deployments":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.2)
-        table = app.query_one(ResourceTable)
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and table.row_count == 2,
+            label="deployment view rendered",
+        )
         assert app.current_kind == "deployments"
         assert table.row_count == 2
         # Generic view: 2 columns (NAME, AGE) in single-ns scope
@@ -408,7 +470,8 @@ async def test_pods_all_adds_namespace_column() -> None:
     ]
     app = make_app(pods)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pod rows visible")
         await pilot.press("colon")
         for ch in "pods":
             await pilot.press(ch)
@@ -416,8 +479,11 @@ async def test_pods_all_adds_namespace_column() -> None:
         for ch in "all":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.2)
-        table = app.query_one(ResourceTable)
+        await until(
+            pilot,
+            lambda: app.current_scope == ALL_NAMESPACES and table.row_count == 2,
+            label="all-namespaces pod view rendered",
+        )
         assert app.current_scope == ALL_NAMESPACES
         assert table.row_count == 2
         # Pod view all-ns: 14 columns (NAMESPACE + 13 pod columns incl. usage + AGE)
@@ -428,13 +494,21 @@ async def test_zero_key_toggles_all_namespaces() -> None:
     """`0` toggles current_scope between default and ALL_NAMESPACES."""
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         assert app.current_scope == "default"
         await pilot.press("0")
-        await pilot.pause(0.15)
+        await until(
+            pilot,
+            lambda: app.current_scope == ALL_NAMESPACES,
+            label="all-namespaces scope entered",
+        )
         assert app.current_scope == ALL_NAMESPACES
         await pilot.press("0")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: app.current_scope == "default", label="namespace scope restored")
         assert app.current_scope == "default"
 
 
@@ -442,9 +516,17 @@ async def test_status_bar_shows_star_in_all_namespaces() -> None:
     """StatusBar must show `ns: *` (or `ns:*`) when scope is ALL_NAMESPACES."""
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("0")
-        await pilot.pause(0.15)
+        await until(
+            pilot,
+            lambda: app.current_scope == ALL_NAMESPACES,
+            label="all-namespaces scope entered",
+        )
         bar = app.query_one(StatusBar)
         text = str(bar.render())
         assert "*" in text
@@ -454,7 +536,8 @@ async def test_row_keys_are_namespace_slash_name() -> None:
     """Row keys must be `namespace/name` in ALL cases (for describe/logs/shell)."""
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod row visible")
         table = app.query_one(ResourceTable)
         # RowKey wraps our string key; .value holds the string we passed
         keys = [str(k.value) for k in table.rows]
@@ -470,23 +553,26 @@ async def test_filter_works_in_generic_view() -> None:
         },
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         # Navigate to deployments
+        table = app.query_one(ResourceTable)
         await pilot.press("colon")
         for ch in "deployments":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.2)
-        table = app.query_one(ResourceTable)
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and table.row_count == 2,
+            label="deployment view rendered",
+        )
         assert table.row_count == 2
         # Apply filter
         await pilot.press("slash")
         for ch in "front":
             await pilot.press(ch)
-        await pilot.pause(0.1)
+        await until(pilot, lambda: table.row_count == 1, label="generic filter applied")
         assert table.row_count == 1
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await until(pilot, lambda: table.row_count == 2, label="generic filter cleared")
         assert table.row_count == 2
 
 
@@ -497,20 +583,29 @@ async def test_ns_command_keeps_current_kind() -> None:
         extra_data={"deployments": [_deploy("frontend")]},
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod row visible")
         # Switch to deployments first
         await pilot.press("colon")
         for ch in "deployments":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: app.current_kind == "deployments" and table.row_count == 1,
+            label="deployment view rendered",
+        )
         assert app.current_kind == "deployments"
         # Now switch namespace only
         await pilot.press("colon")
         for ch in "ns kube-system":
             await pilot.press(ch if ch != " " else "space")
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: app.current_scope == "kube-system",
+            label="namespace switched on deployment view",
+        )
         assert app.current_kind == "deployments"
         assert app.current_scope == "kube-system"
 
@@ -591,17 +686,34 @@ async def test_log_reconnect_flaky_stream() -> None:
     app._reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         log_pane = app.query_one(LogPane)
 
         await pilot.press("l")
         # Call 1 has failed; call 2 is blocked on `resume`, so the state
         # deterministically stays "reconnecting" until we release it.
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: log_pane._state == "\u27f3 reconnecting",
+            label="reconnecting state visible",
+        )
         assert log_pane._state == "\u27f3 reconnecting"
 
         resume.set()
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: (
+                call_count == 2
+                and app._log_buffer is not None
+                and len(app._log_buffer.lines()) == 4
+                and log_pane._state == "\u25cf streaming"
+            ),
+            label="reconnected stream resumed",
+        )
         assert call_count == 2
         assert app._log_buffer is not None
         assert len(app._log_buffer.lines()) == 4
@@ -633,11 +745,19 @@ async def test_log_reconnect_exhausted_shows_error() -> None:
     app._reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("l")
-        await pilot.pause(0.5)
 
         log_pane = app.query_one(LogPane)
+        await until(
+            pilot,
+            lambda: call_count == 6 and log_pane._state == "\u25ae error",
+            label="reconnect exhausted",
+        )
         assert log_pane._state == "\u25ae error"
         assert call_count == 6  # 1 initial + 5 reconnects
 
@@ -671,11 +791,19 @@ async def test_log_reconnect_api_error_no_retry() -> None:
     app._reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("l")
-        await pilot.pause(0.2)
 
         log_pane = app.query_one(LogPane)
+        await until(
+            pilot,
+            lambda: call_count == 1 and log_pane._state == "\u25ae error",
+            label="api error surfaced",
+        )
         assert call_count == 1
         assert log_pane._state == "\u25ae error"
 
@@ -712,14 +840,22 @@ async def test_log_previous_no_reconnect() -> None:
     app._reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         # Open live stream then switch to previous logs.
         await pilot.press("l")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: app.query_one(LogPane).display, label="live pane open")
         await pilot.press("p")
-        await pilot.pause(0.2)
 
         log_pane = app.query_one(LogPane)
+        await until(
+            pilot,
+            lambda: prev_call_count == 1 and log_pane._state == "\u25ae ended",
+            label="previous stream ended",
+        )
         assert prev_call_count == 1
         assert log_pane._state == "\u25ae ended"
 
@@ -746,7 +882,11 @@ async def test_log_overflow_banner_shown_once() -> None:
     app._log_buffer_max_lines = 3  # small cap so overflow fires on line 4
 
     async with app.run_test() as pilot:
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         from korvid.ui.widgets.log_pane import LogPane
 
         log_pane = app.query_one(LogPane)
@@ -761,7 +901,16 @@ async def test_log_overflow_banner_shown_once() -> None:
         log_pane.show_overflow_banner = _counting_banner  # type: ignore[method-assign]
 
         await pilot.press("l")
-        await pilot.pause(0.3)
+        await until(
+            pilot,
+            lambda: (
+                app._log_buffer is not None
+                and app._log_buffer.overflowed
+                and len(app._log_buffer.lines()) == 3
+                and banner_calls == 1
+            ),
+            label="overflow banner shown",
+        )
 
         # Buffer should be overflowed and capped at max_lines.
         assert app._log_buffer is not None
@@ -792,13 +941,25 @@ async def test_log_cancel_during_reconnect_sleep_no_error() -> None:
     app._reconnect_sleep = 100.0  # long sleep so task is sleeping when we close
 
     async with app.run_test() as pilot:
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("l")
-        await pilot.pause(0.05)  # stream fails → task now sleeping 100 s
+        await until(
+            pilot,
+            lambda: app.query_one(LogPane)._state == "\u27f3 reconnecting",
+            label="reconnect sleep entered",
+        )
 
         # Close the pane (cancels the sleeping task)
         await pilot.press("l")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(LogPane).display is False,
+            label="pane closed during reconnect sleep",
+        )
 
         log_pane = app.query_one(LogPane)
         assert log_pane.display is False
@@ -819,7 +980,11 @@ async def test_command_bar_completes_kind_with_tab() -> None:
 
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("colon")
         for ch in "dep":
             await pilot.press(ch)
@@ -834,7 +999,11 @@ async def test_command_bar_completes_namespace_argument() -> None:
 
     app = make_app([_pod("api-1")], namespaces=["default", "kube-system"])
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)  # allow namespace prefetch to land
+        await until(
+            pilot,
+            lambda: "kube-system" in app.query_one(CommandBar).namespace_words,
+            label="namespace words prefetched",
+        )
         await pilot.press("colon")
         for ch in "ns ku":
             await pilot.press(ch if ch != " " else "space")
@@ -901,7 +1070,11 @@ async def test_shell_nonzero_exit_offers_debug_fallback(tmp_path: Path) -> None:
     # The debug fallback mutates the pod spec, so it needs an audit sink.
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         with (
             patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
             patch("korvid.ui.app.subprocess.call", return_value=1),
@@ -909,7 +1082,11 @@ async def test_shell_nonzero_exit_offers_debug_fallback(tmp_path: Path) -> None:
             patch.object(app, "suspend", nullcontext),
         ):
             await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, PickScreen),
+                label="debug picker opened",
+            )
         assert isinstance(app.screen, PickScreen)  # debug image picker
 
 
@@ -924,7 +1101,11 @@ async def test_splash_replaced_by_table_on_first_data() -> None:
 
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.2)  # first store notification lands
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).display and not app.query_one(SplashLogo).display,
+            label="splash replaced by table",
+        )
         assert app.query_one(SplashLogo).display is False
         assert app.query_one(ResourceTable).display is True
 
@@ -947,13 +1128,17 @@ async def test_list_seed_coalesces_table_renders() -> None:
 
     app._render_table = counting_render  # type: ignore[method-assign]
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one("#empty-state").display is True,
+            label="empty state shown",
+        )
         renders.clear()
         # Simulate a LIST seed: all events applied back-to-back without yielding.
         for p in pods:
             app.store.apply_event("pods", "default", "ADDED", p)
-        await pilot.pause(0.2)
         table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 50, label="coalesced table seeded")
         assert table.row_count == 50
         # One coalesced render (a stray timer tick may add one more) — not 50.
         assert len(renders) <= 2
@@ -1011,7 +1196,6 @@ async def test_favorite_namespace_keys_navigate_like_ns_command() -> None:
         await pilot.press("1")
         await until(pilot, lambda: app.current_scope == "team-a", label="favorite 1 entered")
         await pilot.press("3")  # no third favorite: stays put
-        await pilot.pause()
         assert app.current_scope == "team-a"
 
 
@@ -1045,9 +1229,8 @@ async def test_favorite_namespace_403_keeps_a_usable_ui() -> None:
             return sum("no permission" in n.message.lower() for n in app._notifications)
 
         await until(pilot, lambda: _denials() > 0, label="denial surfaced")
-        # One report, no retry loop: give a would-be retry time to fire.
-        await pilot.pause()
-        await pilot.pause()
+        # One report, no retry loop: keep a short absence window for retry_delay=0.
+        await pilot.pause(0.04)
         assert _denials() == 1
         # The UI stays usable: navigating away still works.
         await pilot.press("0")  # all-namespaces toggle

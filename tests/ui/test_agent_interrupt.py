@@ -4,8 +4,9 @@ replacement queueing, transcript markers, and write-safety invariants."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
+from unittest.mock import patch
 
 from textual.widgets import Input
 
@@ -14,6 +15,8 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.agent_panel import AgentPanel, ChatEntry
 from tests.ui.test_agent_wiring import StubRuntime, make_app
 
+from .agent_write_support import Recorder, _expand_panel
+from .agent_write_support import make_app as make_write_app
 from .waits import until
 
 
@@ -353,10 +356,13 @@ async def test_stop_while_a_replacement_is_queued_discards_it() -> None:
     async with app.run_test() as pilot:
         await _start_turn(app, pilot, "first")
         await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
+        task = app._agent_task
+        assert task is not None
+        drained = asyncio.Event()
+        task.add_done_callback(lambda _done: drained.set())
         app.on_agent_prompt_submitted(AgentPromptSubmitted("second"))
         app.action_interrupt_agent()  # same tick: the queue must be dropped
-        await until(pilot, lambda: runtime.finalized >= 1, label="turn finalized")
-        await pilot.pause()
+        await until(pilot, lambda: drained.is_set(), label="queued replacement drain ran")
         assert runtime.calls == ["first"]  # the replacement never started
         assert app._agent_replacement is None
 
@@ -389,13 +395,10 @@ async def test_interrupt_while_awaiting_approval_dismisses_dialog(tmp_path: Any)
     import pytest
 
     from korvid.ui.widgets.confirm_screen import ConfirmScreen
-    from tests.ui.test_agent_write import Recorder, _expand_panel
-    from tests.ui.test_agent_write import make_app as make_write_app
 
     rec = Recorder()
     app = make_write_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         _expand_panel(app)
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
@@ -404,7 +407,11 @@ async def test_interrupt_while_awaiting_approval_dismisses_dialog(tmp_path: Any)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: not isinstance(app.screen, ConfirmScreen),
+            label="approval dialog dismissed after cancellation",
+        )
         assert not isinstance(app.screen, ConfirmScreen)  # dialog cleaned up
         assert rec.calls == []  # the write never ran
 
@@ -418,8 +425,6 @@ async def test_interrupt_after_approval_lets_the_write_finish(tmp_path: Any) -> 
 
     from korvid.k8s.discovery import ResourceMeta
     from korvid.ui.widgets.confirm_screen import ConfirmScreen
-    from tests.ui.test_agent_write import Recorder, _expand_panel
-    from tests.ui.test_agent_write import make_app as make_write_app
 
     class SlowRecorder(Recorder):
         def __init__(self) -> None:
@@ -443,7 +448,6 @@ async def test_interrupt_after_approval_lets_the_write_finish(tmp_path: Any) -> 
     audit_path = tmp_path / "audit.jsonl"
     app = make_write_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         _expand_panel(app)
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
@@ -471,8 +475,6 @@ async def test_repeated_cancels_never_kill_an_approved_write(tmp_path: Any) -> N
 
     from korvid.k8s.discovery import ResourceMeta
     from korvid.ui.widgets.confirm_screen import ConfirmScreen
-    from tests.ui.test_agent_write import Recorder, _expand_panel
-    from tests.ui.test_agent_write import make_app as make_write_app
 
     class SlowRecorder(Recorder):
         def __init__(self) -> None:
@@ -492,26 +494,57 @@ async def test_repeated_cancels_never_kill_an_approved_write(tmp_path: Any) -> N
             await self.gate.wait()
             await super().delete_object(meta, namespace, name, uid=uid)
 
+    class ShieldProbe:
+        def __init__(
+            self,
+            original: Callable[[asyncio.Future[Any] | Awaitable[Any]], asyncio.Future[Any]],
+        ) -> None:
+            self._original = original
+            self.await_count = 0
+            self.resumed_after_first_cancel = asyncio.Event()
+            self.resumed_after_second_cancel = asyncio.Event()
+
+        def shield(self, awaitable: asyncio.Future[Any] | Awaitable[Any]) -> asyncio.Future[Any]:
+            self.await_count += 1
+            if self.await_count >= 2:
+                self.resumed_after_first_cancel.set()
+            if self.await_count >= 3:
+                self.resumed_after_second_cancel.set()
+            return self._original(awaitable)
+
     rec = SlowRecorder()
     audit_path = tmp_path / "audit.jsonl"
-    app = make_write_app(rec, audit_path)
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        _expand_panel(app)
-        task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
-        )
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog shown")
-        await pilot.press("y")
-        await until(pilot, lambda: rec.started.is_set(), label="write in flight")
-        task.cancel()
-        await pilot.pause()  # the first CancelledError is being absorbed…
-        task.cancel()  # …when a second cancellation arrives
-        await pilot.pause()
-        rec.gate.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await until(pilot, lambda: bool(rec.calls), label="write completed")
-        assert rec.calls == [("delete", "deployments", "default", "web")]
-        lines = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
-        assert lines[-1]["outcome"] == "success"  # never intent-with-no-outcome
+    probe = ShieldProbe(asyncio.shield)
+    with patch("korvid.ui.app.asyncio.shield", new=probe.shield):
+        app = make_write_app(rec, audit_path)
+        async with app.run_test() as pilot:
+            _expand_panel(app)
+            task = asyncio.ensure_future(
+                app.agent_request_write("delete", "deployments", "web", namespace="default")
+            )
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog shown")
+            await pilot.press("y")
+            await until(pilot, lambda: rec.started.is_set(), label="write in flight")
+            task.cancel()
+            await until(
+                pilot,
+                lambda: probe.resumed_after_first_cancel.is_set(),
+                label="shield loop resumed after first cancellation",
+            )
+            assert not task.done()
+            assert rec.calls == []
+            task.cancel()
+            await until(
+                pilot,
+                lambda: probe.resumed_after_second_cancel.is_set(),
+                label="shield loop resumed after second cancellation",
+            )
+            assert not task.done()
+            assert rec.calls == []
+            rec.gate.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await until(pilot, lambda: bool(rec.calls), label="write completed")
+            assert rec.calls == [("delete", "deployments", "default", "web")]
+            lines = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+            assert lines[-1]["outcome"] == "success"  # never intent-with-no-outcome

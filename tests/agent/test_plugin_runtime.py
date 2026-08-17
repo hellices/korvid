@@ -17,7 +17,7 @@ from korvid.agent.runtime import AgentRuntime
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.providers.plugin_registry import ProviderPluginRegistry
 from korvid.tools.executor import RecordedExecution
-from tests.agent.test_runtime import EchoExecutor, collect
+from tests.agent.runtime_fakes import EchoExecutor, collect
 from tests.fixtures.provider_plugin.site_helpers import (
     FIXTURES_DIR,
     build_dist_info,

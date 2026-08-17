@@ -1056,9 +1056,17 @@ async def test_mcp_toggle_queued_before_switch_rechecks_inside_lock() -> None:
     app._mcp = cast("Any", mcp)
     async with app.run_test() as pilot:
         await app._nav_lock.acquire()  # stand-in for the switch holding it
+        workers_before = {id(worker) for worker in app.workers}
         try:
             app._handle_mcp_command(["on"])  # pre-check passes; worker blocks
-            await pilot.pause()
+            await until(
+                pilot,
+                lambda: any(
+                    id(worker) not in workers_before and not worker.is_finished
+                    for worker in app.workers
+                ),
+                label="queued mcp toggle worker started",
+            )
             app._ctx_switching = True  # the switch claims while the toggle waits
         finally:
             app._nav_lock.release()
@@ -1369,10 +1377,14 @@ async def test_mid_swap_failure_records_context_failure_before_restore() -> None
         await until(
             pilot,
             lambda: any("Restored context" in n.message for n in env.app._notifications),
-            label="restore notification",
+            label="restore notification shown after failed switch",
         )
         await until(pilot, lambda: len(_ctx_phases(timeline)) == 2, label="failure recorded")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: env.switch_calls == ["ctx-b", "ctx-a"],
+            label="recovery switch back to ctx-a completed",
+        )
     assert _ctx_phases(timeline) == [(0, "started"), (0, "failed")]
 
 

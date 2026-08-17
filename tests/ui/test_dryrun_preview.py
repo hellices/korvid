@@ -24,6 +24,7 @@ from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
+from korvid.ui.widgets.resource_table import ResourceTable
 
 from .waits import until
 
@@ -150,12 +151,20 @@ def make_app(ops: WriteOps, audit_path: Path) -> KorvidApp:
     )
 
 
-async def _to_deployments(pilot) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed by the fixture
+def _deployments_row_ready(app: KorvidApp) -> bool:
+    return app.current_kind == "deployments" and app.query_one(ResourceTable).row_count == 1
+
+
+async def _to_deployments(app: KorvidApp, pilot) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed by the fixture
     await pilot.press("colon")
     for ch in "deployments":
         await pilot.press(ch)
     await pilot.press("enter")
-    await pilot.pause(0.1)
+    await until(
+        pilot,
+        lambda: _deployments_row_ready(app),
+        label="deployments view active with selected row",
+    )
 
 
 def _preview_render(app: KorvidApp) -> str:
@@ -167,10 +176,13 @@ async def test_delete_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
     ops = PreviewOps(lines=["- deployments/web (uid u1, created t1)"])
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await _to_deployments(pilot)
+        await _to_deployments(app, pilot)
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="delete confirmation dialog opened",
+        )
         assert "- deployments/web (uid u1, created t1)" in _preview_render(app)
         assert ops.preview_calls == [("delete", "default", "web", "u-web")]
 
@@ -179,10 +191,13 @@ async def test_restart_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
     ops = PreviewOps(lines=['+ spec.template.metadata.annotations.restartedAt: "t"'])
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await _to_deployments(pilot)
+        await _to_deployments(app, pilot)
         await pilot.press("r")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="restart confirmation dialog opened",
+        )
         assert "restartedAt" in _preview_render(app)
         assert ops.preview_calls[0][:4] == ("restart", "default", "web", "u-web")
         # Exact replay: the stamp shown in the preview is the stamp the
@@ -190,7 +205,7 @@ async def test_restart_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
         stamp = ops.preview_calls[0][4]
         assert stamp
         await pilot.press("y")
-        await until(pilot, lambda: ops.calls)
+        await until(pilot, lambda: bool(ops.calls), label="restart write completed")
         assert ops.calls == [("restart", "default", "web", stamp)]
 
 
@@ -198,17 +213,24 @@ async def test_scale_dialog_previews_requested_replicas(tmp_path: Path) -> None:
     ops = PreviewOps(lines=["~ spec.replicas: 3 -> 5"])
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await _to_deployments(pilot)
+        await _to_deployments(app, pilot)
         await pilot.press("S")
-        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ReplicasPrompt),
+            label="replicas prompt opened",
+        )
         await pilot.press("5")
         await pilot.press("enter")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="scale confirmation dialog opened",
+        )
         assert "~ spec.replicas: 3 -> 5" in _preview_render(app)
         assert ops.preview_calls == [("scale", "default", "web", 5, "u-web")]
         await pilot.press("y")
-        await until(pilot, lambda: ops.calls)
+        await until(pilot, lambda: bool(ops.calls), label="scale write completed")
         assert ops.calls == [("scale", "default", "web", 5)]
 
 
@@ -216,13 +238,16 @@ async def test_failed_preview_still_opens_dialog(tmp_path: Path) -> None:
     ops = PreviewOps(fail=True)
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await _to_deployments(pilot)
+        await _to_deployments(app, pilot)
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="delete confirmation dialog opened after preview failure",
+        )
         assert not app.screen.query(".confirm-preview")
         await pilot.press("y")
-        await until(pilot, lambda: ops.calls)
+        await until(pilot, lambda: bool(ops.calls), label="delete write completed")
         assert ops.calls == [("delete", "default", "web")]
 
 
@@ -231,10 +256,13 @@ async def test_slow_preview_times_out_and_opens_dialog(tmp_path: Path) -> None:
     app = make_app(ops, tmp_path / "audit.jsonl")
     with mock.patch("korvid.ui.app._PREVIEW_TIMEOUT", 0.05):
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
-            await _to_deployments(pilot)
+            await _to_deployments(app, pilot)
             await pilot.press("ctrl+d")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="delete confirmation dialog opened after preview timeout",
+            )
             assert not app.screen.query(".confirm-preview")
 
 
@@ -251,10 +279,13 @@ async def test_no_preview_support_falls_back(tmp_path: Path) -> None:
     ops = Plain()
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await _to_deployments(pilot)
+        await _to_deployments(app, pilot)
         await pilot.press("ctrl+d")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="delete confirmation dialog opened without preview support",
+        )
         assert not app.screen.query(".confirm-preview")
 
 
@@ -262,12 +293,16 @@ async def test_agent_write_dialog_shows_preview(tmp_path: Path) -> None:
     ops = PreviewOps(lines=["~ spec.replicas: 3 -> 4"])
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _to_deployments(app, pilot)
         app.query_one(AgentPanel).display = True
         task = asyncio.ensure_future(
             app.agent_request_write("scale", "deployments", "web", namespace="default", replicas=4)
         )
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="agent write confirmation dialog opened",
+        )
         assert "~ spec.replicas: 3 -> 4" in _preview_render(app)
         assert ("scale", "default", "web", 4, None) in ops.preview_calls
         await pilot.press("y")

@@ -18,7 +18,7 @@ from korvid.agent.evidence import EvidenceLedger
 from korvid.agent.runtime import AgentRuntime, evidence_note
 from korvid.tools.executor import RecordedExecution, ToolOutcome
 
-from .test_runtime import ScriptedProvider
+from .runtime_fakes import ScriptedProvider
 
 
 def test_a_successful_read_is_given_a_reference() -> None:

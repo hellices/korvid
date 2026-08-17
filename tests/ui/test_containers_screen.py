@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from typing import Any
 from unittest.mock import patch
 
+from textual.widgets import DataTable
+
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -119,9 +121,17 @@ async def _get_manifest(kind: str, namespace: str | None, name: str) -> dict[str
 async def test_enter_on_pod_opens_containers_screen() -> None:
     app = make_app([_pod("web-1")], get_manifest=_get_manifest)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ContainersScreen),
+            label="containers screen opened",
+        )
         assert isinstance(app.screen, ContainersScreen)
         text = app.screen.query_one("#containers-title").render()
         assert "web-1" in str(text)
@@ -130,12 +140,24 @@ async def test_enter_on_pod_opens_containers_screen() -> None:
 async def test_containers_screen_escape_closes() -> None:
     app = make_app([_pod("web-1")], get_manifest=_get_manifest)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ContainersScreen),
+            label="containers screen opened",
+        )
         assert isinstance(app.screen, ContainersScreen)
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: not isinstance(app.screen, ContainersScreen),
+            label="containers screen dismissed",
+        )
         assert not isinstance(app.screen, ContainersScreen)
 
 
@@ -143,9 +165,17 @@ async def test_containers_screen_enter_is_noop() -> None:
     """Enter must not trigger logs — only l/s act (user request)."""
     app = make_app([_pod("web-1")], get_manifest=_get_manifest)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ContainersScreen),
+            label="containers screen opened",
+        )
         assert isinstance(app.screen, ContainersScreen)
         await pilot.press("enter")
         await pilot.pause(0.2)
@@ -164,12 +194,29 @@ async def test_containers_screen_l_opens_logs() -> None:
 
     app = make_app([_pod("web-1")], get_manifest=_get_manifest, stream_logs=stream_logs)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ContainersScreen),
+            label="containers screen opened",
+        )
         assert isinstance(app.screen, ContainersScreen)
         await pilot.press("l")  # first row = "app" → logs
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: ("default", "web-1", "app") in lines_streamed,
+            label="container log stream requested",
+        )
+        await until(
+            pilot,
+            lambda: not isinstance(app.screen, ContainersScreen),
+            label="containers screen closed for logs",
+        )
         assert not isinstance(app.screen, ContainersScreen)
         assert ("default", "web-1", "app") in lines_streamed
 
@@ -188,12 +235,24 @@ async def test_containers_screen_s_opens_shell() -> None:
         patch.object(type(app), "suspend", side_effect=lambda *a: _noop_cm()),
     ):
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await until(
+                pilot,
+                lambda: app.query_one(ResourceTable).row_count == 1,
+                label="pod row visible",
+            )
             await pilot.press("enter")
-            await pilot.pause(0.1)
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ContainersScreen),
+                label="containers screen opened",
+            )
             assert isinstance(app.screen, ContainersScreen)
             await pilot.press("down", "s")  # second row = "sidecar" → shell
-            await pilot.pause(0.2)
+            await until(
+                pilot,
+                lambda: bool(calls),
+                label="kubectl exec launched for selected container",
+            )
     assert calls, "kubectl exec was not invoked"
     assert "-c" in calls[0]
     assert calls[0][calls[0].index("-c") + 1] == "sidecar"
@@ -202,12 +261,25 @@ async def test_containers_screen_s_opens_shell() -> None:
 async def test_enter_without_manifest_falls_back_to_store() -> None:
     app = make_app([_pod("web-1", containers=("only",))])  # no get_manifest
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count == 1,
+            label="pod row visible",
+        )
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ContainersScreen),
+            label="containers screen opened",
+        )
+        await until(
+            pilot,
+            lambda: app.screen.query_one(DataTable).row_count == 1,
+            label="fallback container row rendered",
+        )
         assert isinstance(app.screen, ContainersScreen)
-        table = app.screen.query_one("DataTable")
-        assert table.row_count == 1  # type: ignore[attr-defined]
+        table = app.screen.query_one(DataTable)
+        assert table.row_count == 1
 
 
 @contextmanager

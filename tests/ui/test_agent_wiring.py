@@ -6,7 +6,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
-from textual.widgets import Input
+from textual.css.query import NoMatches
+from textual.widgets import Input, OptionList
 
 from korvid.agent.events import AgentEvent, TextDelta, TurnComplete
 from korvid.agent.outbound import OutboundSnapshot
@@ -92,6 +93,23 @@ def _snapshot() -> OutboundSnapshot:
 
 def _notification_text(app: KorvidApp) -> str:
     return " ".join(str(notification.message) for notification in app._notifications)
+
+
+def _agent_setup_screen_initialized(app: KorvidApp) -> bool:
+    from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
+
+    if not isinstance(app.screen, AgentSetupScreen):
+        return False
+    try:
+        provider_list = app.screen.query_one("#setup-provider", OptionList)
+        auth_list = app.screen.query_one("#setup-auth", OptionList)
+    except NoMatches:
+        return False
+    return (
+        provider_list.highlighted == 0
+        and auth_list.display is False
+        and app.focused is provider_list
+    )
 
 
 async def test_ctrl_a_toggles_panel_display() -> None:
@@ -193,7 +211,7 @@ async def test_second_submit_interrupts_and_replaces_running_turn() -> None:
         inp = panel.query_one("#agent-input", Input)
         inp.value = "first"
         await pilot.press("enter")
-        await pilot.pause()
+        await until(pilot, lambda: bool(runtime.calls), label="first agent turn running")
         panel.post_message(AgentPromptSubmitted("second"))
         await until(
             pilot,
@@ -211,7 +229,11 @@ async def test_status_bar_reflects_runtime_not_config_flag() -> None:
     app = make_app(runtime=None)
     app.config = KorvidConfig(namespace="default", agent_enabled=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: "AI off" in str(app.query_one(StatusBar).render()),
+            label="status bar shows AI off",
+        )
         assert "AI off" in str(app.query_one(StatusBar).render())
 
 
@@ -220,7 +242,11 @@ async def test_status_bar_on_when_runtime_present() -> None:
 
     app = make_app(StubRuntime([]))
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: "AI on" in str(app.query_one(StatusBar).render()),
+            label="status bar shows AI on",
+        )
         assert "AI on" in str(app.query_one(StatusBar).render())
 
 
@@ -236,7 +262,6 @@ async def test_setup_hint_not_duplicated_on_retoggle() -> None:
 
 async def test_ai_command_pushes_setup_screen() -> None:
     from korvid.ui.messages import UnknownCommand
-    from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 
     class NoopConfigurator:
         async def begin_device_login(self) -> Any:
@@ -257,8 +282,12 @@ async def test_ai_command_pushes_setup_screen() -> None:
     app = make_app(runtime=None, model=None, agent_configurator=NoopConfigurator())
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("ai"))
-        await pilot.pause()
-        assert isinstance(app.screen, AgentSetupScreen)
+        await until(
+            pilot,
+            lambda: _agent_setup_screen_initialized(app),
+            label="agent setup provider list initialized",
+        )
+        assert _agent_setup_screen_initialized(app)
 
 
 async def test_ai_command_without_configurator_notifies() -> None:
@@ -267,7 +296,11 @@ async def test_ai_command_without_configurator_notifies() -> None:
     app = make_app(runtime=None, model=None)
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("ai"))
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: "Agent setup unavailable" in _notification_text(app),
+            label="agent setup unavailable notification shown",
+        )
         # No crash and no setup screen pushed.
         from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 
@@ -352,7 +385,13 @@ async def test_apply_agent_settings_enables_agent() -> None:
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")  # open panel: setup hint, input disabled
         app._apply_agent_settings(settings)
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: (
+                app._agent_runtime is runtime and "AI on" in str(app.query_one(StatusBar).render())
+            ),
+            label="agent runtime rebuilt and status bar updated",
+        )
         assert app._agent_runtime is runtime
         assert app._agent_model_name == "llama3"
         assert "AI on" in str(app.query_one(StatusBar).render())
@@ -418,7 +457,11 @@ async def test_model_command_without_config_does_not_crash() -> None:
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
         app.on_unknown_command(UnknownCommand("model"))
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: len(app._notifications) >= 2,
+            label="not-configured model notifications shown",
+        )
         assert app._agent_model_name is None
 
 
@@ -612,7 +655,11 @@ async def test_apply_agent_settings_notifies_on_rebuild_failure() -> None:
     app = make_app(runtime=None, model=None, rebuild_agent=lambda s: None)
     async with app.run_test() as pilot:
         app._apply_agent_settings(settings)
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: any("rebuild failed" in str(n.message).lower() for n in app._notifications),
+            label="agent rebuild failure notification shown",
+        )
         msgs = [n.message for n in app._notifications]
         assert any("rebuild failed" in m.lower() for m in msgs)
 
@@ -794,7 +841,11 @@ async def test_model_switch_blocked_while_turn_running() -> None:
         app._agent_task = asyncio.create_task(asyncio.sleep(30))  # simulate a live turn
         try:
             app._apply_agent_settings(settings)
-            await pilot.pause()
+            await until(
+                pilot,
+                lambda: any("busy" in str(n.message).lower() for n in app._notifications),
+                label="busy model-switch refusal shown",
+            )
             assert not rebuilt  # swap must be blocked mid-turn
             assert app._agent_runtime is old_runtime
             msgs = [n.message for n in app._notifications]
@@ -815,7 +866,11 @@ async def test_input_reenabled_even_when_panel_closed() -> None:
         await pilot.press("ctrl+a")  # open unconfigured: hint disables input
         await pilot.press("ctrl+a")  # close panel
         app._apply_agent_settings(settings)
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: app._agent_runtime is new_runtime,
+            label="agent runtime rebuilt while panel closed",
+        )
         await pilot.press("ctrl+a")  # reopen: input must be usable again
         assert app.query_one(AgentPanel).query_one("#agent-input", Input).disabled is False
 
@@ -829,9 +884,8 @@ async def test_model_query_requires_live_runtime() -> None:
     app = make_app(runtime=None, model="gpt-4o")
     notices: list[str] = []
     app.notify = lambda msg, **kw: notices.append(str(msg))  # type: ignore[method-assign]
-    async with app.run_test() as pilot:
+    async with app.run_test():
         app.on_unknown_command(UnknownCommand("model"))
-        await pilot.pause()
     assert notices, "expected a notification"
     assert "gpt-4o" not in notices[-1]
     assert "not configured" in notices[-1]
@@ -896,7 +950,11 @@ async def test_mcp_command_bare_and_bad_args_do_not_touch_server() -> None:
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("mcp"))
         app.on_unknown_command(UnknownCommand("mcp bogus"))
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: len(app._notifications) == 2,
+            label="mcp usage notifications shown",
+        )
         assert mcp.calls == []
 
 
@@ -906,7 +964,11 @@ async def test_mcp_command_without_controller_does_not_crash() -> None:
     app = make_app(StubRuntime([]))
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("mcp on"))
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: "MCP unavailable" in _notification_text(app),
+            label="mcp unavailable notification shown",
+        )
         msgs = [str(n.message) for n in app._notifications]
         assert any("MCP unavailable" in m for m in msgs)
 
