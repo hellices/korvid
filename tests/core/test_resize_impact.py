@@ -106,6 +106,37 @@ def test_restart_container_policy_is_scoped_to_the_changed_resource() -> None:
     assert context.all_changed_resources_not_required is False
 
 
+def test_mixed_container_changes_aggregate_restart_and_memory_warnings() -> None:
+    manifest = {
+        "spec": {
+            "containers": [
+                {
+                    "name": "app",
+                    "resources": {"requests": {"cpu": "100m"}},
+                    "resizePolicy": [{"resourceName": "cpu", "restartPolicy": "RestartContainer"}],
+                },
+                {
+                    "name": "sidecar",
+                    "resources": {"limits": {"memory": "1Gi"}},
+                    "resizePolicy": [{"resourceName": "memory", "restartPolicy": "NotRequired"}],
+                },
+            ]
+        }
+    }
+    context = classify_pod_resize(
+        manifest,
+        {
+            "app": {"requests": {"cpu": "200m"}},
+            "sidecar": {"limits": {"memory": "900Mi"}},
+        },
+    )
+    assert context.restart_required is True
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is True
+    assert context.restart_policy_unknown is False
+    assert context.memory_limit_assessment_unknown is False
+
+
 def test_restart_policy_scans_past_malformed_items_before_valid_policy() -> None:
     context = classify_pod_resize(
         _manifest(

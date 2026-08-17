@@ -19,7 +19,7 @@ from textual.worker import Worker, WorkerState
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
-from korvid.core.store import ResourceStore, Summary
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary
@@ -454,6 +454,78 @@ async def test_cancelled_resize_impact_load_writes_nothing(tmp_path: Path) -> No
             assert len(app.screen_stack) == 1
             assert lister.reservations_during_load
             assert all(value == 0 for value in lister.reservations_during_load)
+            assert app._active_cluster_writes == 0
+            assert recorder.calls == []
+            assert not audit_path.exists()
+        finally:
+            lister.release.set()
+
+
+async def test_resize_focus_change_during_impact_load_writes_nothing(tmp_path: Path) -> None:
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    lister = BlockingRelationshipLister()
+    app = make_app(recorder, audit_path, relationship_lister=lister)
+    lister.app = app
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
+        await pilot.press("ctrl+w", "v")
+        await until(
+            pilot,
+            lambda: len(app.query(ResourceTable)) == 2,
+            label="second pane mounted",
+        )
+        origin = app._pane
+        worker = await _start_resize_confirmation_worker(app, pilot)
+        await until(pilot, lister.entered.is_set, label="resize impact listing")
+        try:
+            app._focus_other_pane()
+            lister.release.set()
+            await until(pilot, lambda: worker.is_finished, label="resize worker finished")
+            await until(
+                pilot,
+                lambda: any(
+                    "selection changed during the impact preview" in notification.message
+                    for notification in app._notifications
+                ),
+                label="pane drift refused",
+            )
+            assert app._pane is not origin
+            assert not isinstance(app.screen, ConfirmScreen)
+            assert app._active_cluster_writes == 0
+            assert recorder.calls == []
+            assert not audit_path.exists()
+        finally:
+            lister.release.set()
+
+
+async def test_resize_origin_scope_change_during_impact_load_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    lister = BlockingRelationshipLister()
+    app = make_app(recorder, audit_path, relationship_lister=lister)
+    lister.app = app
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
+        origin = app._pane
+        worker = await _start_resize_confirmation_worker(app, pilot)
+        await until(pilot, lister.entered.is_set, label="resize impact listing")
+        try:
+            origin.scope = ALL_NAMESPACES
+            lister.release.set()
+            await until(pilot, lambda: worker.is_finished, label="resize worker finished")
+            await until(
+                pilot,
+                lambda: any(
+                    "selection changed during the impact preview" in notification.message
+                    for notification in app._notifications
+                ),
+                label="scope drift refused",
+            )
+            assert app._pane is origin
+            assert not isinstance(app.screen, ConfirmScreen)
             assert app._active_cluster_writes == 0
             assert recorder.calls == []
             assert not audit_path.exists()
