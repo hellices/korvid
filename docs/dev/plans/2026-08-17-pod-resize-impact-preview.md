@@ -776,12 +776,16 @@ async def _open_resize_confirmation(
     app: KorvidApp, pilot: object, *, value: str = "200m"
 ) -> None:
     await pilot.press("R")
-    await until(pilot, lambda: isinstance(app.screen, ResizePrompt))
+    await until(pilot, lambda: isinstance(app.screen, ResizePrompt), label="resize prompt opened")
     field = app.screen.query_one("#resize-0-requests-cpu", Input)
     field.value = value
     field.focus()
     await pilot.press("enter")
-    await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+    await until(
+        pilot,
+        lambda: isinstance(app.screen, ConfirmScreen),
+        label="resize confirmation opened",
+    )
 
 
 async def test_resize_confirm_shows_empty_graph_and_pod_local_impact(tmp_path: Path) -> None:
@@ -844,9 +848,17 @@ async def test_resize_refuses_uid_drift_while_confirmation_is_open(tmp_path: Pat
         await until(
             pilot,
             lambda: app.store.get("pods", "default")[0].uid == "pod-uid-2",
+            label="replacement pod rendered",
         )
         await pilot.press("y")
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: any(
+                "selection changed during the confirmation dialog" in n.message
+                for n in app._notifications
+            ),
+            label="stale resize approval refused",
+        )
         assert recorder.calls == []
         assert not audit_path.exists()
 ```
@@ -1067,7 +1079,11 @@ async def test_agent_resize_uses_explicit_namespace_for_impact(tmp_path: Path) -
                 resources=resources,
             )
         )
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="agent resize confirmation opened",
+        )
         text = str(app.screen.query_one(".confirm-impact", Static).render())
         assert "Pod-local resize impact (advisory):" in text
         assert any(namespace == "default" for _, namespace in calls)
@@ -1104,7 +1120,11 @@ async def test_agent_resize_keeps_local_notes_when_manifest_lookup_fails_open(
                 resources={"app": {"requests": {"cpu": "200m"}}},
             )
         )
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="agent resize confirmation opened",
+        )
         text = str(app.screen.query_one(".confirm-impact", Static).render())
         assert "restart requirements could not be determined" in text
         assert recorder.calls == []
@@ -1129,7 +1149,11 @@ async def test_non_resize_agent_writes_do_not_gain_impact(tmp_path: Path) -> Non
                 namespace="default",
             )
         )
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="agent delete confirmation opened",
+        )
         assert not app.screen.query(".confirm-impact")
         await pilot.press("n")
         assert "denied" in await task
@@ -1274,6 +1298,7 @@ graph-derived impact (advisory):
   known direct dependents (may be affected): none in this snapshot
   known transitive dependents (may be affected): none in this snapshot
   scope: prod
+  graph coverage: complete
 Pod-local resize impact (advisory):
   Pod identity and relationship membership stay unchanged; graph relations are not traversed
   changed resources do not require a container restart under resizePolicy

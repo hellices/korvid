@@ -326,6 +326,45 @@ async def test_resize_keeps_local_notes_without_relationship_loader(tmp_path: Pa
         assert recorder.calls == []
 
 
+@pytest.mark.parametrize("mode", ["failure", "timeout"])
+async def test_resize_graph_unavailable_keeps_local_notes_and_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    leaked_detail = "leaked backend response body"
+    blocker: BlockingRelationshipLister | None = None
+
+    async def failing_lister(_meta: ResourceMeta, _namespace: str | None) -> list[GenericSummary]:
+        raise RuntimeError(leaked_detail)
+
+    relationship_lister: Callable[[ResourceMeta, str | None], Awaitable[list[GenericSummary]]]
+    if mode == "timeout":
+        monkeypatch.setattr("korvid.ui.app._IMPACT_TIMEOUT", 0.01)
+        blocker = BlockingRelationshipLister()
+        relationship_lister = blocker
+    else:
+        relationship_lister = failing_lister
+
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(recorder, audit_path, relationship_lister=relationship_lister)
+    async with app.run_test() as pilot:
+        try:
+            await _open_resize_confirmation(app, pilot)
+            text = str(app.screen.query_one(".confirm-impact", Static).render())
+            assert "graph-derived impact (advisory):" in text
+            assert "impact unavailable; approval remains available" in text
+            assert leaked_detail not in text
+            assert "Pod-local resize impact (advisory):" in text
+            assert "graph relations are not traversed" in text
+            assert recorder.calls == []
+            assert not audit_path.exists()
+        finally:
+            if blocker is not None:
+                blocker.release.set()
+
+
 async def test_resize_refuses_uid_drift_while_confirmation_is_open(tmp_path: Path) -> None:
     recorder = ResizeRecorder()
     audit_path = tmp_path / "audit.jsonl"
@@ -568,20 +607,46 @@ async def test_agent_resize_uses_explicit_namespace_for_impact(tmp_path: Path) -
     calls: list[tuple[str, str | None]] = []
     recorder = ResizeRecorder()
     audit_path = tmp_path / "audit.jsonl"
+
+    async def prod_manifest(_kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return {
+            "metadata": {"name": name, "namespace": ns, "uid": "pod-uid-prod"},
+            "spec": _POD_MANIFEST["spec"],
+        }
+
+    async def list_relationship_objects(
+        meta: ResourceMeta, namespace: str | None
+    ) -> list[GenericSummary]:
+        calls.append((meta.plural, namespace))
+        if meta.plural == "pods":
+            return [
+                GenericSummary(
+                    name="web-1",
+                    namespace=namespace or "",
+                    kind="Pod",
+                    created="",
+                    uid="pod-uid-prod",
+                )
+            ]
+        return []
+
     app = make_app(
         recorder,
         audit_path,
-        relationship_calls=calls,
+        get_manifest=prod_manifest,
+        relationship_lister=list_relationship_objects,
     )
     resources = {"app": {"requests": {"cpu": "200m"}}}
     async with app.run_test() as pilot:
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
+        assert app.current_scope == "default"
         _expand_panel(app)
         task = asyncio.create_task(
             app.agent_request_write(
                 "resize",
                 "pods",
                 "web-1",
-                namespace="default",
+                namespace="prod",
                 resources=resources,
             )
         )
@@ -591,8 +656,10 @@ async def test_agent_resize_uses_explicit_namespace_for_impact(tmp_path: Path) -
             label="agent resize confirmation opened",
         )
         text = str(app.screen.query_one(".confirm-impact", Static).render())
+        assert "pod resize Pod/prod/web-1" in text
         assert "Pod-local resize impact (advisory):" in text
-        assert any(namespace == "default" for _, namespace in calls)
+        assert calls
+        assert {namespace for _, namespace in calls} == {"prod"}
         assert app.current_scope == "default"
         assert not recorder.calls
         await pilot.press("n")

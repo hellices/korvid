@@ -249,6 +249,7 @@ requested resources:
       known direct dependents (may be affected): none in this snapshot
       known transitive dependents (may be affected): none in this snapshot
       scope: prod
+      graph coverage: complete
     Pod-local resize impact (advisory):
       Pod identity and relationship membership stay unchanged; graph relations are not traversed
       changed resources do not require a container restart under resizePolicy

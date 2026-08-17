@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from korvid.core.resize_impact import ResizeImpactContext, classify_pod_resize
 
 
@@ -122,6 +124,56 @@ def test_malformed_resize_policy_is_unknown() -> None:
         {"app": {"requests": {"memory": "256Mi"}}},
     )
     assert context.restart_policy_unknown is True
+
+
+def test_memory_limit_decrease_with_unknown_policy_stays_indeterminate() -> None:
+    context = classify_pod_resize(
+        _manifest(memory_limit="1Gi", policy={"resourceName": "memory"}),
+        {"app": {"limits": {"memory": "900Mi"}}},
+    )
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is False
+    assert context.memory_limit_assessment_unknown is True
+
+
+def test_matching_invalid_restart_policy_is_unknown() -> None:
+    context = classify_pod_resize(
+        _manifest(policy=[{"resourceName": "cpu", "restartPolicy": "MaybeRestart"}]),
+        {"app": {"requests": {"cpu": "200m"}}},
+    )
+    assert context.restart_required is False
+    assert context.restart_policy_unknown is True
+    assert context.all_changed_resources_not_required is False
+
+
+def test_policy_for_unchanged_resource_defaults_changed_resource_to_not_required() -> None:
+    context = classify_pod_resize(
+        _manifest(policy=[{"resourceName": "memory", "restartPolicy": "RestartContainer"}]),
+        {"app": {"requests": {"cpu": "200m"}}},
+    )
+    assert context.restart_required is False
+    assert context.restart_policy_unknown is False
+    assert context.all_changed_resources_not_required is True
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {"spec": {"containers": "malformed"}},
+        {"spec": {"containers": [{"name": "app", "resources": "malformed"}]}},
+        {"spec": {"containers": [{"name": "app", "resources": {"limits": "malformed"}}]}},
+    ],
+)
+def test_malformed_memory_limit_sources_keep_assessment_unknown(
+    manifest: dict[str, object],
+) -> None:
+    context = classify_pod_resize(
+        manifest,
+        {"app": {"limits": {"memory": "256Mi"}}},
+    )
+    assert context.memory_limit_decreased is False
+    assert context.memory_limit_decrease_not_required is False
+    assert context.memory_limit_assessment_unknown is True
 
 
 def test_invalid_captured_memory_quantity_is_unknown() -> None:
