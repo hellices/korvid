@@ -124,10 +124,6 @@ def _default_data() -> dict[str, list[Summary]]:
     }
 
 
-def _base_screen_ready(app: KorvidApp) -> bool:
-    return len(app.screen_stack) == 1 and app.current_kind == "pods"
-
-
 async def _navigate(pilot, command: str, expect_kind: str) -> None:  # type: ignore[no-untyped-def]  # Pilot is generic; concrete app type not exposed
     """Type `:command<enter>` and wait until the view actually switched -
     a fixed pause races the command dispatch on slow runners."""
@@ -143,7 +139,6 @@ async def _navigate(pilot, command: str, expect_kind: str) -> None:  # type: ign
 async def test_helm_command_lists_releases_with_helm_columns() -> None:
     app, _ = make_app(_default_data())
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
         await _navigate(pilot, "helm", "helmreleases")
         assert app.current_kind == "helmreleases"
         table = app.query_one(ResourceTable)
@@ -160,7 +155,6 @@ async def test_helm_command_lists_releases_with_helm_columns() -> None:
 async def test_failed_release_status_is_highlighted() -> None:
     app, _ = make_app(_default_data())
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="releases listed")
@@ -176,7 +170,6 @@ async def test_failed_release_status_is_highlighted() -> None:
 async def test_enter_on_release_drills_into_its_revisions() -> None:
     app, _ = make_app(_default_data())
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="releases listed")
@@ -204,7 +197,6 @@ async def test_enter_on_release_drills_into_its_revisions() -> None:
 async def test_revisions_view_shows_history_columns() -> None:
     app, _ = make_app(_default_data())
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
         await _navigate(pilot, "helmrevisions", "helmrevisions")
         table = app.query_one(ResourceTable)
         labels = [str(col.label) for col in table.columns.values()]
@@ -223,7 +215,6 @@ async def test_revisions_view_shows_history_columns() -> None:
 async def test_d_on_release_describes_the_helm_release() -> None:
     app, describe_calls = make_app(_default_data())
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base pods view ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="releases listed")

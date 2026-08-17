@@ -168,10 +168,6 @@ def _tree_labels(app: KorvidApp) -> list[str]:
     return [str(line.node.label) for line in tree._tree_lines]
 
 
-def _base_screen_ready(app: KorvidApp) -> bool:
-    return len(app.screen_stack) == 1 and not isinstance(app.screen, HierarchyScreen)
-
-
 def _table_headers(app: KorvidApp) -> tuple[str, ...]:
     table = app.query_one(ResourceTable)
     return tuple(str(column.label) for column in table.columns.values())
@@ -219,7 +215,6 @@ _WEB_COMPONENTS = {
 async def test_enter_on_release_opens_hierarchy_tree() -> None:
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -240,7 +235,6 @@ async def test_enter_on_release_opens_hierarchy_tree() -> None:
 async def test_h_on_release_opens_revision_history() -> None:
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -258,7 +252,6 @@ async def test_h_on_release_opens_revision_history() -> None:
 async def test_goto_from_tree_jumps_to_view_with_cursor() -> None:
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -284,7 +277,6 @@ async def test_escape_after_goto_reopens_the_tree_on_the_release_view() -> None:
     origin view, cursor still on the picked node."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -329,7 +321,6 @@ async def test_explicit_navigation_clears_the_hierarchy_return() -> None:
     new view must not teleport back to a tree the user walked away from."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -356,7 +347,6 @@ async def test_escape_over_a_modal_keeps_the_hierarchy_return() -> None:
     the base view still reopens the tree."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -384,7 +374,6 @@ async def test_hierarchy_return_is_scoped_to_the_initiating_pane() -> None:
     initiating pane, Escape still reopens the tree."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -418,7 +407,6 @@ async def test_a_jump_in_one_pane_does_not_erase_the_other_panes_return() -> Non
     must not overwrite pane A's way back."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -457,7 +445,6 @@ async def test_return_origin_is_captured_at_tree_open_not_at_dismissal() -> None
     whatever the pane happened to show at dismissal."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -486,7 +473,6 @@ async def test_return_is_refused_when_a_ctx_switch_starts_during_the_navigate() 
     cluster."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -528,8 +514,7 @@ async def test_refresh_hierarchy_survives_an_empty_screen_stack() -> None:
     (flaky-CI issue #147) - the refresh must treat 'no screen' as
     'no tree open'."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
-    async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
+    async with app.run_test():
         # Simulate the teardown interleaving deterministically: the message
         # handler runs while the screen stack is already empty.
         with mock.patch.object(
@@ -542,7 +527,6 @@ async def test_refresh_hierarchy_survives_an_empty_screen_stack() -> None:
 async def test_describe_from_tree_node() -> None:
     app, describe_calls = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -601,7 +585,6 @@ async def test_enter_on_subscription_opens_hierarchy_from_operator_refs() -> Non
         namespace="operators",
     )
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "subscriptions", "subscriptions")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="subscription listed")
@@ -640,7 +623,6 @@ async def test_subscription_falls_back_to_installplan_components() -> None:
         aliases=aliases_without_operator,
     )
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "subscriptions", "subscriptions")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="subscription listed")
@@ -685,7 +667,6 @@ async def test_open_tree_refreshes_on_store_update() -> None:
     (issue #120 requires live updates via store notifications)."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -719,7 +700,6 @@ async def test_tree_does_not_open_when_view_changed_during_fetch() -> None:
 
     app._get_helm_components = slow_components
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -775,7 +755,6 @@ async def test_enter_on_csv_opens_hierarchy_from_operator_labels() -> None:
         namespace="operators",
     )
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "clusterserviceversions", "clusterserviceversions")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="csv listed")
@@ -840,7 +819,6 @@ async def test_same_named_component_in_another_namespace_is_kept() -> None:
         namespace="operators",
     )
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "clusterserviceversions", "clusterserviceversions")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="csv listed")
@@ -860,7 +838,6 @@ async def test_enter_without_components_accessor_falls_back_to_revision_drill() 
     pre-#120 behaviour and drills into the release's revisions."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS, helm_components=False)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -888,7 +865,6 @@ async def test_jump_notifies_when_object_never_appears() -> None:
 
     async with app.run_test() as pilot:
         app.notify = _capture  # type: ignore[method-assign]  # test spy
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -923,7 +899,6 @@ async def test_lookup_uses_a_watch_covering_the_component_namespace() -> None:
     components = {"web": [ComponentRef(kind="Service", name="ext", namespace="other")]}
     app, _ = make_app(data, components=components)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -940,7 +915,6 @@ async def test_jump_aborts_on_stale_context_epoch() -> None:
     navigates to (or focuses) a same-named object in the new cluster."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
@@ -980,7 +954,6 @@ async def test_csv_without_operator_api_lists_owned_workloads() -> None:
         aliases=aliases_without_operator,
     )
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "clusterserviceversions", "clusterserviceversions")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="csv listed")
@@ -1026,7 +999,6 @@ async def test_owned_workloads_fallback_is_capped() -> None:
         namespace="operators",
     )
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await app.watch_manager.start("deployments", "operators")
         await until(
             pilot,
@@ -1056,7 +1028,6 @@ async def test_alias_discovery_refreshes_open_tree() -> None:
     late_aliases = {k: v for k, v in _ALIASES.items() if k != "deployments"}
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS, aliases=late_aliases)
     async with app.run_test() as pilot:
-        await until(pilot, lambda: _base_screen_ready(app), label="base screen ready")
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")

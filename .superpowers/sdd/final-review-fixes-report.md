@@ -120,3 +120,64 @@ Results:
 ## Commit
 - Message: `test: extract agent write test support`
 - Trailer: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
+
+---
+
+## Issue
+Second whole-branch review issue: `_base_screen_ready` in `tests/ui/test_helm_view.py` and `tests/ui/test_hierarchy_nav.py` was already true on `run_test()` entry, so every `until(..._base_screen_ready...)` call was vacuous.
+
+## Audit decisions
+- `tests/ui/test_helm_view.py`
+  - Removed `_base_screen_ready` and all five startup waits.
+  - Kept the real downstream observables already attached to the behavior under test: `_navigate(..., expect_kind=...)`, release/revision row counts, revision drill-down activation, and describe-call capture.
+- `tests/ui/test_hierarchy_nav.py`
+  - Removed `_base_screen_ready` and all startup waits, including the helper definition.
+  - Kept each test anchored to its actual dependency instead of a startup-default predicate:
+    - `_navigate(..., expect_kind=...)` for command-driven view switches.
+    - row counts / selected row keys for table readiness.
+    - `HierarchyScreen` appearance/dismissal for tree open/close flows.
+    - `_empty_pods_view_rendered(...)` for the explicit pods navigation cases.
+    - store population after `watch_manager.start(...)` for watch-backed scenarios.
+    - hierarchy worker creation/finish predicates for the fetch-race scenario.
+    - notification capture for missing jump-target behavior.
+  - `test_refresh_hierarchy_survives_an_empty_screen_stack()` no longer binds an unused `pilot`; the teardown interleaving still starts only after `run_test()` entry and immediately patches `App.screen` to the failure seam it exercises.
+  - No sleeps or replacement startup predicates were introduced.
+
+## Static RED/GREEN evidence
+
+### RED (before change)
+Command:
+```bash
+rg -n "_base_screen_ready" tests/ui/test_helm_view.py tests/ui/test_hierarchy_nav.py
+```
+Observed before editing: `32 matches across 2 files` (`6` in `test_helm_view.py`, `26` in `test_hierarchy_nav.py`) covering the helper definitions and all call sites.
+
+### GREEN (after change)
+Command:
+```bash
+rg -n "_base_screen_ready" tests/ui/test_helm_view.py tests/ui/test_hierarchy_nav.py
+```
+Observed after editing: no matches.
+
+## Exact tests and checks
+Commands:
+```bash
+uv run --no-sync pytest -p no:tach -q tests/ui/test_helm_view.py tests/ui/test_hierarchy_nav.py
+uv run --no-sync pytest -p no:tach -q \
+  tests/ui/test_hierarchy_nav.py::test_return_is_refused_when_a_ctx_switch_starts_during_the_navigate \
+  tests/ui/test_hierarchy_nav.py::test_tree_does_not_open_when_view_changed_during_fetch
+uv run --no-sync ruff check tests/ui/test_helm_view.py tests/ui/test_hierarchy_nav.py
+uv run --no-sync ruff format --check tests/ui/test_helm_view.py tests/ui/test_hierarchy_nav.py
+uv run --no-sync mypy tests/ui/test_helm_view.py tests/ui/test_hierarchy_nav.py
+```
+
+Results:
+- pytest (both files): `32 passed in 32.02s`
+- repeated representative navigation/worker race tests: `2 passed in 2.39s`
+- ruff check: `All checks passed!`
+- ruff format --check: `2 files already formatted`
+- mypy: `Success: no issues found in 2 source files`
+
+## Commit
+- Message: `test: remove remaining vacuous startup waits`
+- Trailer: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
