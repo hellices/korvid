@@ -773,8 +773,10 @@ async def test_agent_resize_uses_explicit_namespace_for_impact(tmp_path: Path) -
         )
         await until(
             pilot,
-            lambda: isinstance(app.screen, ConfirmScreen),
-            label="agent resize confirmation opened",
+            lambda: (
+                isinstance(app.screen, ConfirmScreen) and bool(app.screen.query(".confirm-impact"))
+            ),
+            label="agent resize confirmation impact rendered",
         )
         text = str(app.screen.query_one(".confirm-impact", Static).render())
         assert "pod resize Pod/prod/web-1" in text
@@ -815,8 +817,10 @@ async def test_agent_resize_keeps_local_notes_when_manifest_lookup_fails_open(
         )
         await until(
             pilot,
-            lambda: isinstance(app.screen, ConfirmScreen),
-            label="agent resize confirmation opened",
+            lambda: (
+                isinstance(app.screen, ConfirmScreen) and bool(app.screen.query(".confirm-impact"))
+            ),
+            label="agent resize confirmation impact rendered",
         )
         text = str(app.screen.query_one(".confirm-impact", Static).render())
         assert "restart requirements could not be determined" in text
