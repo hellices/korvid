@@ -201,10 +201,11 @@ timeline:
 
 ## Write impact preview
 
-Destructive writes that have tested relationship semantics — delete
-(`Ctrl-D`), rollout restart (`r`), and a *known* workload scale-down (`S`,
-covered below) — show a graph-derived impact section above the server
-dry-run preview in the approval dialog. It answers one bounded question:
+Writes that have tested impact semantics — delete (`Ctrl-D`), rollout
+restart (`r`), a *known* workload scale-down (`S`, covered below), and Pod
+resize (`R`, covered below) — show advisory impact notes above the server
+dry-run preview in the approval dialog. For delete, rollout restart, and
+known scale-down, the graph-derived section answers one bounded question:
 which resources korvid has already observed depend on this one?
 
     graph-derived impact (advisory):
@@ -234,9 +235,32 @@ still on screen with the target rather than below a body that can run to the
 preview's caps. It never predicts failure, never replaces the
 server dry-run, and never blocks approval: the y/typed-name gate, the UID
 precondition, the RBAC pre-check, and the fail-closed audit log are exactly
-what they were. Edit, resize, cordon/uncordon, drain, Helm, and operator
-flows never show it — they have no tested per-relation semantics yet, and
-korvid would rather show nothing than a plausible guess.
+what they were. Edit, cordon/uncordon, drain, Helm, and operator flows
+never show it — they have no tested per-relation semantics yet, and korvid
+would rather show nothing than a plausible guess.
+
+Pod resize uses the same graph renderer with an intentionally empty relation
+set, then adds a Pod-local section derived from the captured Pod manifest and
+requested resources:
+
+    graph-derived impact (advisory):
+      pod resize Pod/prod/web-abc-1
+      advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
+      known direct dependents (may be affected): none in this snapshot
+      known transitive dependents (may be affected): none in this snapshot
+      scope: prod
+    Pod-local resize impact (advisory):
+      Pod identity and relationship membership stay unchanged; graph relations are not traversed
+      changed resources do not require a container restart under resizePolicy
+      node feasibility, Deferred/Infeasible status, actuation, and completion are not predicted
+
+The restart and memory-limit-decrease lines are conditional: a
+`RestartContainer` policy adds a restart-required line, a proven memory-limit
+decrease with `NotRequired` adds the best-effort OOM-avoidance line, and
+malformed or incomplete input produces bounded "could not be determined"
+text instead of optimistic claims. If graph loading fails or is unavailable,
+those safe Pod-local notes remain visible; graph failure never removes them
+or blocks approval.
 
 ### Reading it
 
@@ -322,11 +346,14 @@ korvid would rather show nothing than a plausible guess.
 ### The snapshot, its scope, and UID matching
 
 The snapshot is the same bounded, read-only LIST fan-out the relationship
-view (`g`) performs — scoped to the namespace of the pane the write was
-raised from for a namespaced target, and cluster-wide for a cluster-scoped
-one so a dependent in another namespace cannot be quietly missed — with a
-5-second deadline. If it times out or fails, the dialog says `impact
-unavailable; approval remains available` and the approval proceeds normally.
+view (`g`) performs. For TUI writes, the scope is captured from the pane the
+write was raised from: that pane's namespace for a namespaced target, and
+cluster-wide for a cluster-scoped one so a dependent in another namespace
+cannot be quietly missed. Agent resize requests are not raised from a pane;
+their scope comes from the explicit namespace in the request instead of the
+currently focused view. The snapshot has a 5-second deadline. If it times out
+or fails, the dialog says `impact unavailable; approval remains available`
+and the approval proceeds normally.
 If the context switches, the selection moves, focus lands in the other pane
 of a split workspace, or that pane changes its namespace while the snapshot
 loads, the write is cancelled before any dialog opens — even when the newly
