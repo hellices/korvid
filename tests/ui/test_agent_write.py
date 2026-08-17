@@ -5,112 +5,18 @@ approve with a real keystroke (issue #16, spec §6.2): the agent can only
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from korvid.core.audit import AuditLog
-from korvid.core.config import KorvidConfig
-from korvid.core.store import ResourceStore, Summary
-from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
-from korvid.k8s.models import GenericSummary
-from korvid.k8s.writes import WriteOps
-from korvid.ui.app import KorvidApp
-from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.pick_screen import PickScreen
 
+from .agent_write_support import _DEPLOY_META, Recorder, _expand_panel, make_app
 from .waits import until
-
-_DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
-_ALIASES = {"deployments": _DEPLOY_META, "deploy": _DEPLOY_META}
-
-
-def _expand_panel(app: KorvidApp) -> None:
-    # Approval dialogs only surface while the panel is expanded (spec 6.1);
-    # tests that reach the dialog must open the panel first.
-    app.query_one(AgentPanel).display = True
-
-
-class Recorder(WriteOps):
-    def __init__(self) -> None:
-        self.calls: list[tuple[object, ...]] = []
-        self.uids: list[str | None] = []
-
-    async def delete_object(
-        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
-    ) -> None:
-        self.uids.append(uid)
-        self.calls.append(("delete", meta.plural, namespace, name))
-
-    async def scale_object(
-        self,
-        meta: ResourceMeta,
-        namespace: str | None,
-        name: str,
-        replicas: int,
-        *,
-        uid: str | None = None,
-    ) -> None:
-        self.uids.append(uid)
-        self.calls.append(("scale", meta.plural, namespace, name, replicas))
-
-    async def rollout_restart(
-        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
-    ) -> None:
-        self.uids.append(uid)
-        self.calls.append(("restart", meta.plural, namespace, name))
-
-    async def replace_object(
-        self,
-        meta: ResourceMeta,
-        namespace: str | None,
-        name: str,
-        manifest: dict[str, Any],
-        *,
-        uid: str | None = None,
-    ) -> None:
-        self.uids.append(uid)
-        self.calls.append(("replace", meta.plural, namespace, name, manifest))
-
-
-def make_app(
-    recorder: Recorder,
-    audit_path: Path,
-    *,
-    readonly: bool = False,
-    permitted: bool | None = None,
-    get_manifest: Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None = None,
-) -> KorvidApp:
-    store = ResourceStore()
-    deploys = [GenericSummary(name="web", namespace="default", kind="Deployment", created="")]
-
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        for obj in deploys if kind == "deployments" else []:
-            yield ("ADDED", obj)
-        while True:
-            await asyncio.sleep(0.01)
-
-    async def check_permission(
-        verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
-    ) -> bool:
-        assert permitted is not None
-        return permitted
-
-    return KorvidApp(
-        config=KorvidConfig(namespace="default", readonly=readonly),
-        store=store,
-        watch_manager=WatchManager(store, source),
-        aliases=dict(_ALIASES),
-        get_manifest=get_manifest,
-        write_ops=recorder,
-        audit=AuditLog(audit_path),
-        check_permission=None if permitted is None else check_permission,
-    )
 
 
 async def test_agent_delete_approved_by_user_key(tmp_path: Path) -> None:

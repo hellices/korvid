@@ -68,3 +68,55 @@ Results:
 ## Commit
 - Message: `test: remove vacuous UI readiness waits`
 - Trailer: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
+
+---
+
+## Issue
+Final review issue 2: `tests/ui/test_agent_interrupt.py` imported branch-added helpers from `tests/ui/test_agent_write.py`, coupling one test module to another.
+
+## Move inventory and equivalence
+- Added neutral support module: `tests/ui/agent_write_support.py`
+- Moved source-equivalently:
+  - `Recorder`
+  - `_expand_panel`
+  - `make_app`
+  - required shared constants/helpers for those symbols: `_DEPLOY_META`, `_ALIASES`
+- Support module imports only stdlib + product modules; it does not import any `test_*.py`.
+- `tests/ui/test_agent_write.py`
+  - Now imports shared support symbols from `tests/ui/agent_write_support.py`.
+  - Test bodies/assertions/decorators/node IDs were preserved; the `_DEPLOY_META` identity assertion still points at the moved constant.
+- `tests/ui/test_agent_interrupt.py`
+  - Replaced the three `from tests.ui.test_agent_write ...` lines with module-level imports from the support module.
+  - Kept scenario-specific doubles (`SlowRecorder`, `ShieldProbe`) in place; no behavior changes.
+
+## Collect equivalence
+Baseline and final normalized collect node-id sets were compared for both files and matched exactly.
+
+| File | Baseline count | Final count | Exact normalized set |
+| --- | ---: | ---: | --- |
+| `tests/ui/test_agent_write.py` | 26 | 26 | unchanged |
+| `tests/ui/test_agent_interrupt.py` | 21 | 21 | unchanged |
+
+## Verification
+Commands:
+```bash
+uv run --no-sync pytest -p no:tach --collect-only -q tests/ui/test_agent_write.py
+uv run --no-sync pytest -p no:tach --collect-only -q tests/ui/test_agent_interrupt.py
+uv run --no-sync pytest -p no:tach -q tests/ui/test_agent_write.py tests/ui/test_agent_interrupt.py
+uv run --no-sync ruff check tests/ui/agent_write_support.py tests/ui/test_agent_write.py tests/ui/test_agent_interrupt.py
+uv run --no-sync ruff format --check tests/ui/agent_write_support.py tests/ui/test_agent_write.py tests/ui/test_agent_interrupt.py
+uv run --no-sync mypy tests/ui/agent_write_support.py tests/ui/test_agent_write.py tests/ui/test_agent_interrupt.py
+rg -n "from tests\\.ui\\.test_agent_write|from \\.test_agent_write|import test_agent_write" tests/ui/agent_write_support.py tests/ui/test_agent_write.py tests/ui/test_agent_interrupt.py
+```
+
+Results:
+- collect equivalence: exact normalized node-id sets unchanged (`26`, `21`)
+- pytest: `47 passed in 10.96s`
+- ruff check: `All checks passed!`
+- ruff format --check: `3 files already formatted`
+- mypy: `Success: no issues found in 3 source files`
+- rg: no matches in touched files
+
+## Commit
+- Message: `test: extract agent write test support`
+- Trailer: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`

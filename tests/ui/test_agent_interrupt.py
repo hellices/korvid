@@ -15,6 +15,8 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.agent_panel import AgentPanel, ChatEntry
 from tests.ui.test_agent_wiring import StubRuntime, make_app
 
+from .agent_write_support import Recorder, _expand_panel
+from .agent_write_support import make_app as make_write_app
 from .waits import until
 
 
@@ -393,8 +395,6 @@ async def test_interrupt_while_awaiting_approval_dismisses_dialog(tmp_path: Any)
     import pytest
 
     from korvid.ui.widgets.confirm_screen import ConfirmScreen
-    from tests.ui.test_agent_write import Recorder, _expand_panel
-    from tests.ui.test_agent_write import make_app as make_write_app
 
     rec = Recorder()
     app = make_write_app(rec, tmp_path / "audit.jsonl")
@@ -425,8 +425,6 @@ async def test_interrupt_after_approval_lets_the_write_finish(tmp_path: Any) -> 
 
     from korvid.k8s.discovery import ResourceMeta
     from korvid.ui.widgets.confirm_screen import ConfirmScreen
-    from tests.ui.test_agent_write import Recorder, _expand_panel
-    from tests.ui.test_agent_write import make_app as make_write_app
 
     class SlowRecorder(Recorder):
         def __init__(self) -> None:
@@ -477,8 +475,6 @@ async def test_repeated_cancels_never_kill_an_approved_write(tmp_path: Any) -> N
 
     from korvid.k8s.discovery import ResourceMeta
     from korvid.ui.widgets.confirm_screen import ConfirmScreen
-    from tests.ui.test_agent_write import Recorder, _expand_panel
-    from tests.ui.test_agent_write import make_app as make_write_app
 
     class SlowRecorder(Recorder):
         def __init__(self) -> None:
