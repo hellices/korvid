@@ -252,6 +252,7 @@ def test_cpu_change_uses_default_not_required_policy() -> None:
         restart_required=False,
         restart_policy_unknown=False,
         all_changed_resources_not_required=True,
+        memory_limit_decreased=False,
         memory_limit_decrease_not_required=False,
         memory_limit_assessment_unknown=False,
     )
@@ -263,6 +264,7 @@ def test_memory_limit_decrease_with_not_required_is_identified_numerically() -> 
         {"app": {"limits": {"memory": "900Mi"}}},
     )
     assert context.memory_limit_changed is True
+    assert context.memory_limit_decreased is True
     assert context.memory_limit_decrease_not_required is True
     assert context.memory_limit_assessment_unknown is False
 
@@ -272,6 +274,7 @@ def test_equivalent_memory_quantities_are_not_a_decrease() -> None:
         _manifest(memory_limit="1Gi"),
         {"app": {"limits": {"memory": "1024Mi"}}},
     )
+    assert context.memory_limit_decreased is False
     assert context.memory_limit_decrease_not_required is False
     assert context.memory_limit_assessment_unknown is False
 
@@ -352,6 +355,7 @@ class ResizeImpactContext:
     restart_required: bool
     restart_policy_unknown: bool
     all_changed_resources_not_required: bool
+    memory_limit_decreased: bool
     memory_limit_decrease_not_required: bool
     memory_limit_assessment_unknown: bool
 
@@ -371,7 +375,8 @@ def classify_pod_resize(
         _restart_policy(containers.get(name), resource)
         for name, resource in changed_resources
     ]
-    memory_decrease = False
+    memory_decreased = False
+    memory_decrease_not_required = False
     memory_unknown = False
     for name, sections in changes.items():
         desired = sections.get("limits", {}).get("memory")
@@ -388,8 +393,10 @@ def classify_pod_resize(
         except ValueError:
             memory_unknown = True
             continue
+        if decreased:
+            memory_decreased = True
         if decreased and policy == "NotRequired":
-            memory_decrease = True
+            memory_decrease_not_required = True
         elif decreased and policy is None:
             memory_unknown = True
 
@@ -408,7 +415,8 @@ def classify_pod_resize(
         all_changed_resources_not_required=bool(policies)
         and not restart_required
         and not policy_unknown,
-        memory_limit_decrease_not_required=memory_decrease,
+        memory_limit_decreased=memory_decreased,
+        memory_limit_decrease_not_required=memory_decrease_not_required,
         memory_limit_assessment_unknown=memory_unknown,
     )
 ```
@@ -527,6 +535,7 @@ def _context(**changes: bool) -> ResizeImpactContext:
         "restart_required": False,
         "restart_policy_unknown": False,
         "all_changed_resources_not_required": True,
+        "memory_limit_decreased": False,
         "memory_limit_decrease_not_required": False,
         "memory_limit_assessment_unknown": False,
     }
