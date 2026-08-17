@@ -63,12 +63,7 @@ def classify_pod_resize(
     policy_unknown = any(policy is None for policy in policies)
     restart_required = any(policy == "RestartContainer" for policy in policies)
     return ResizeImpactContext(
-        cpu_changed=any(
-            resource == "cpu"
-            for sections in changes.values()
-            for values in sections.values()
-            for resource in values
-        ),
+        cpu_changed=any(resource == "cpu" for _, resource in changed_resources),
         memory_request_changed=any(
             "memory" in sections.get("requests", {}) for sections in changes.values()
         ),
@@ -111,13 +106,20 @@ def _restart_policy(container: Mapping[str, Any] | None, resource: str) -> str |
         return "NotRequired"
     if not isinstance(raw, list):
         return None
+    malformed = False
     for item in raw:
         if not isinstance(item, Mapping):
-            return None
+            malformed = True
+            continue
         if item.get("resourceName") != resource:
             continue
         policy = item.get("restartPolicy")
-        return policy if policy in {"NotRequired", "RestartContainer"} else None
+        if isinstance(policy, str) and policy in {"NotRequired", "RestartContainer"}:
+            return policy
+        malformed = True
+    if malformed:
+        return None
+    # Kubernetes falls through to NotRequired when no per-resource policy exists.
     return "NotRequired"
 
 

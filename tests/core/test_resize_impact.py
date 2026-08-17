@@ -55,6 +55,16 @@ def test_equivalent_memory_quantities_are_not_a_decrease() -> None:
     assert context.memory_limit_assessment_unknown is False
 
 
+def test_increased_memory_quantities_are_not_a_decrease() -> None:
+    context = classify_pod_resize(
+        _manifest(memory_limit="1Gi"),
+        {"app": {"limits": {"memory": "2Gi"}}},
+    )
+    assert context.memory_limit_decreased is False
+    assert context.memory_limit_decrease_not_required is False
+    assert context.memory_limit_assessment_unknown is False
+
+
 def test_restart_container_policy_is_scoped_to_the_changed_resource() -> None:
     context = classify_pod_resize(
         _manifest(
@@ -66,6 +76,34 @@ def test_restart_container_policy_is_scoped_to_the_changed_resource() -> None:
         {"app": {"limits": {"memory": "768Mi"}}},
     )
     assert context.restart_required is True
+    assert context.all_changed_resources_not_required is False
+
+
+def test_restart_policy_scans_past_malformed_items_before_valid_policy() -> None:
+    context = classify_pod_resize(
+        _manifest(
+            policy=[
+                None,
+                {"resourceName": "cpu", "restartPolicy": "RestartContainer"},
+            ]
+        ),
+        {"app": {"requests": {"cpu": "200m"}}},
+    )
+    assert context.restart_required is True
+    assert context.restart_policy_unknown is False
+
+
+def test_restart_policy_is_unknown_when_malformed_structure_leaves_resource_unresolved() -> None:
+    context = classify_pod_resize(
+        _manifest(
+            policy=[
+                None,
+                {"resourceName": "memory", "restartPolicy": "NotRequired"},
+            ]
+        ),
+        {"app": {"requests": {"cpu": "200m"}}},
+    )
+    assert context.restart_policy_unknown is True
     assert context.all_changed_resources_not_required is False
 
 
