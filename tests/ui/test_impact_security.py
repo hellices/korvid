@@ -379,7 +379,7 @@ async def test_impact_preview_works_with_the_agent_disabled(tmp_path: Path) -> N
     async with env.app.run_test() as pilot:
         assert env.app.config.agent_enabled is False
         await open_delete_dialog(env, pilot, "deploy", expect="web")
-        assert "known direct dependents (may be affected): 1" in impact_text(env.app)
+        assert "known direct dependents (may be affected): 2 or more" in impact_text(env.app)
 
 
 async def test_no_secret_value_or_manifest_content_reaches_the_dialog(tmp_path: Path) -> None:

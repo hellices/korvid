@@ -210,20 +210,23 @@ which resources korvid has already observed depend on this one?
     graph-derived impact (advisory):
       delete apps/Deployment/prod/web
       advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
-      known direct dependents (may be affected): 1 or more
+      known direct dependents (may be affected): 2 or more
+        - Pod/prod/web-abc-1 via managed_by (declared) at apps/Deployment/prod/web: spec.selector
         - apps/ReplicaSet/prod/web-abc via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]
-      known transitive dependents (may be affected): 1 or more
-        - Pod/prod/web-abc-1 via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0] -> owned_by (declared) at Pod/prod/web-abc-1: metadata.ownerReferences[0]
-      additional known paths: 1 or more (already-listed dependents reached again)
+      known transitive dependents (may be affected): none in this snapshot
+      additional known paths: 2 or more (already-listed dependents reached again)
       scope: prod
       graph coverage: incomplete - a missing dependent here does not prove none exists
         - gateway.networking.k8s.io/*: unavailable
 
-Every count reads `1 or more` above because the Gateway API group could not
-be listed: that one incomplete coverage record is enough to make the whole
-answer a floor rather than a total (see the `N or more` bullet below). With
-every source `complete` and neither bound hit, the same summary renders
-exact counts.
+The two non-zero counts are `2` because this snapshot reached two direct
+dependents and folded two additional paths. They read `2 or more`, rather
+than exact `2`, because the Gateway API group could not be listed: that one
+incomplete coverage record makes them lower bounds, not totals (see the `N
+or more` bullet below). The transitive line remains `none in this snapshot`;
+with incomplete coverage that means none was observed here, not that none
+exists. With every source `complete` and neither bound hit, the same summary
+renders exact counts.
 
 The section is **advisory**, and says so on its second body line — directly
 under the action, before the first count, because that is where the hedge is
@@ -405,14 +408,17 @@ policy the `apps` API defines and it does not have.
 A workload's Pods are one hop from it, not two: a Deployment,
 StatefulSet or ReplicaSet declares `spec.selector`, which is a `managed_by`
 relationship to every Pod it matches, alongside the `owned_by` chain the
-Pods' `metadata.ownerReferences` give. So the routing chain from a
-Deployment is `Deployment -> Pod (managed_by) -> Service (selects) ->
+Pods' `metadata.ownerReferences` give. The shortest selector path is used
+for delete, rollout restart, and scale-down because all three actions
+include `managed_by`. So the routing chain from a Deployment is
+`Deployment -> Pod (managed_by) -> Service (selects) ->
 Ingress/Gateway route (routes_to)` — three hops, inside the walk's bound —
 and the dialog names the Ingress. The ReplicaSet in between is itself a
-direct dependent, and the further ways to the same Pod (through it) are
-counted under `additional known paths` rather than listed twice. Scaling
-that ReplicaSet down reaches the same chain through the `spec.selector` it
-declares itself, also three hops. The
+second direct dependent, and the two ReplicaSet-to-Pod facts — its selector
+and the Pod's ownerReference back to it — are counted under `additional
+known paths` rather than listed twice. Scaling that ReplicaSet down reaches
+the same chain through the `spec.selector` it declares itself, also three
+hops. The
 ordinary 3-hop, 50-dependent bound still applies to everything past that:
 a longer chain is disclosed by `traversal capped` (see [Reading
 it](#reading-it)), which never means "not affected", only "not reached".

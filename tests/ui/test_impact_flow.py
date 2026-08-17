@@ -107,19 +107,8 @@ def _workload_selector(*, app: str = "web") -> SelectorFact:
     )
 
 
-def _deployment(
-    name: str, uid: str, *, desired: int | None = 3, selects_pods: bool = False
-) -> GenericSummary:
-    """A Deployment row. `desired` is what the scale flow reads to decide
-    whether a requested count is a decrease; `None` is a summary that does
-    not carry one at all.
-
-    `selects_pods` attaches the workload selector a real Deployment always
-    has. It is opt-in only so the delete/rollout-restart fixtures keep the
-    exact dependent sets their own assertions were written against; every
-    row a scale-down walks carries it, because the hop counts a scale-down
-    reports depend on it.
-    """
+def _deployment(name: str, uid: str, *, desired: int | None = 3) -> GenericSummary:
+    """A production-shaped Deployment row with its workload selector."""
     return GenericSummary(
         name=name,
         namespace="prod",
@@ -127,26 +116,15 @@ def _deployment(
         created="",
         desired=desired,
         uid=uid,
-        relationships=(
-            RelationshipFacts(api_group="apps", selectors=(_workload_selector(),))
-            if selects_pods
-            # Byte-identical to the pre-#295 fixture when the selector is
-            # not asked for: the delete/rollout-restart assertions below are
-            # written against exactly that row.
-            else RelationshipFacts()
+        relationships=RelationshipFacts(
+            api_group="apps",
+            selectors=(_workload_selector(app=name),),
         ),
     )
 
 
-def _replicaset(*, desired: int | None = 3, selects_pods: bool = False) -> GenericSummary:
-    """A ReplicaSet row owned by the `web` Deployment.
-
-    `selects_pods` attaches the `spec.selector -> Pod` fact a real
-    ReplicaSet summary always carries, exactly as `_deployment` does and for
-    the same reason: it is opt-in only so the delete/rollout-restart
-    fixtures keep the dependent sets their own assertions were written
-    against, while every row a scale-down walks carries it.
-    """
+def _replicaset(*, desired: int | None = 3) -> GenericSummary:
+    """A production-shaped ReplicaSet owned by `web` with its selector."""
     return GenericSummary(
         name="web-abc",
         namespace="prod",
@@ -157,7 +135,7 @@ def _replicaset(*, desired: int | None = 3, selects_pods: bool = False) -> Gener
         relationships=RelationshipFacts(
             api_group="apps",
             references=(_owner("Deployment", "web", "deploy-1", group="apps"),),
-            selectors=(_workload_selector(),) if selects_pods else (),
+            selectors=(_workload_selector(),),
         ),
     )
 
@@ -642,19 +620,23 @@ async def open_delete_dialog(
     )
 
 
-async def test_delete_dialog_shows_direct_and_transitive_dependents(tmp_path: Path) -> None:
+async def test_delete_dialog_shows_realistic_workload_selector_paths(tmp_path: Path) -> None:
     env = ImpactEnv(tmp_path / "audit.jsonl")
     async with env.app.run_test() as pilot:
         await open_delete_dialog(env, pilot, "deploy", expect="web")
         text = impact_text(env.app)
         assert "delete apps/Deployment/prod/web" in text
-        assert "known direct dependents (may be affected): 1" in text
+        assert "known direct dependents (may be affected): 2 or more" in text
+        assert (
+            "Pod/prod/web-abc-1 via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector" in text
+        )
         assert (
             "apps/ReplicaSet/prod/web-abc via owned_by (declared) at"
             " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]" in text
         )
-        assert "known transitive dependents (may be affected): 1" in text
-        assert "Pod/prod/web-abc-1 via owned_by (declared)" in text
+        assert "known transitive dependents (may be affected): none in this snapshot" in text
+        assert "additional known paths: 2 or more" in text
         assert "scope: prod" in text
         assert env.ops.calls == []
 
@@ -669,7 +651,9 @@ async def test_delete_of_a_pod_never_claims_the_selecting_service_fails(tmp_path
         assert "known direct dependents (may be affected): none in this snapshot" in text
 
 
-async def test_rollout_restart_dialog_shows_the_owner_chain_only(tmp_path: Path) -> None:
+async def test_rollout_restart_dialog_shows_realistic_workload_selector_paths(
+    tmp_path: Path,
+) -> None:
     env = ImpactEnv(tmp_path / "audit.jsonl")
     async with env.app.run_test() as pilot:
         await to_view(pilot, "deploy", expect="web")
@@ -679,7 +663,14 @@ async def test_rollout_restart_dialog_shows_the_owner_chain_only(tmp_path: Path)
         )
         text = impact_text(env.app)
         assert "rollout restart apps/Deployment/prod/web" in text
+        assert "known direct dependents (may be affected): 2 or more" in text
+        assert (
+            "Pod/prod/web-abc-1 via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector" in text
+        )
         assert "apps/ReplicaSet/prod/web-abc via owned_by (declared)" in text
+        assert "known transitive dependents (may be affected): none in this snapshot" in text
+        assert "additional known paths: 2 or more" in text
         assert "ConfigMap/prod/app-config" not in text
         assert env.ops.calls == []
 
@@ -911,8 +902,8 @@ async def test_a_namespaced_target_in_an_all_namespaces_pane_covers_every_namesp
 def _scale_down_rows() -> dict[str, list[Any]]:
     return {
         "pods": [_pod()],
-        "deployments": [_deployment("web", "deploy-1", selects_pods=True)],
-        "replicasets": [_replicaset(selects_pods=True)],
+        "deployments": [_deployment("web", "deploy-1")],
+        "replicasets": [_replicaset()],
         "configmaps": [_configmap()],
         "services": [_service()],
         "endpointslices": [_endpoint_slice()],

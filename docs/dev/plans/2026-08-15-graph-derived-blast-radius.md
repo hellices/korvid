@@ -3175,22 +3175,55 @@ def _owner(kind: str, name: str, uid: str, *, group: str) -> ReferenceFact:
     )
 
 
-def _deployment(name: str, uid: str) -> GenericSummary:
-    return GenericSummary(
-        name=name, namespace="prod", kind="Deployment", created="", desired=3, uid=uid
+def _workload_selector(*, app: str = "web") -> SelectorFact:
+    """The `spec.selector -> Pod` fact every real workload summary carries.
+
+    Built exactly the way `korvid.k8s.relationship_facts._workload_selector`
+    builds it for a Deployment/ReplicaSet/StatefulSet: relation `managed_by`,
+    `match_is_subject=True`, so the resulting edge runs *Pod -> workload* and
+    the reverse impact walk reaches the Pod from the workload in one hop,
+    beside (not through) the ReplicaSet the ownerReferences chain gives it.
+    """
+    return SelectorFact(
+        relation=RelationKind.MANAGED_BY,
+        target_group="",
+        target_kind="Pod",
+        selector=LabelSelector(match_labels=(("app", app),), present=True),
+        confidence=FactConfidence.DECLARED,
+        field="spec.selector",
+        match_is_subject=True,
     )
 
 
-def _replicaset() -> GenericSummary:
+def _deployment(name: str, uid: str, *, desired: int | None = 3) -> GenericSummary:
+    """A production-shaped Deployment row with its workload selector."""
+    return GenericSummary(
+        name=name,
+        namespace="prod",
+        kind="Deployment",
+        created="",
+        desired=desired,
+        uid=uid,
+        relationships=RelationshipFacts(
+            api_group="apps",
+            selectors=(_workload_selector(app=name),),
+        ),
+    )
+
+
+def _replicaset(*, desired: int | None = 3) -> GenericSummary:
+    """A production-shaped ReplicaSet owned by `web` with its selector."""
     return GenericSummary(
         name="web-abc",
         namespace="prod",
         kind="ReplicaSet",
         created="",
+        desired=desired,
         uid="rs-1",
         relationships=RelationshipFacts(
             api_group="apps",
             references=(_owner("Deployment", "web", "deploy-1", group="apps"),),
+            selectors=(_workload_selector(),),
         ),
     )
 
@@ -3476,19 +3509,23 @@ async def open_delete_dialog(
     )
 
 
-async def test_delete_dialog_shows_direct_and_transitive_dependents(tmp_path: Path) -> None:
+async def test_delete_dialog_shows_realistic_workload_selector_paths(tmp_path: Path) -> None:
     env = ImpactEnv(tmp_path / "audit.jsonl")
     async with env.app.run_test() as pilot:
         await open_delete_dialog(env, pilot, "deploy", expect="web")
         text = impact_text(env.app)
         assert "delete apps/Deployment/prod/web" in text
-        assert "known direct dependents (may be affected): 1" in text
+        assert "known direct dependents (may be affected): 2 or more" in text
+        assert (
+            "Pod/prod/web-abc-1 via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector" in text
+        )
         assert (
             "apps/ReplicaSet/prod/web-abc via owned_by (declared) at"
             " apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]" in text
         )
-        assert "known transitive dependents (may be affected): 1" in text
-        assert "Pod/prod/web-abc-1 via owned_by (declared)" in text
+        assert "known transitive dependents (may be affected): none in this snapshot" in text
+        assert "additional known paths: 2 or more" in text
         assert "scope: prod" in text
         assert env.ops.calls == []
 
@@ -3503,7 +3540,9 @@ async def test_delete_of_a_pod_never_claims_the_selecting_service_fails(tmp_path
         assert "known direct dependents (may be affected): none in this snapshot" in text
 
 
-async def test_rollout_restart_dialog_shows_the_owner_chain_only(tmp_path: Path) -> None:
+async def test_rollout_restart_dialog_shows_realistic_workload_selector_paths(
+    tmp_path: Path,
+) -> None:
     env = ImpactEnv(tmp_path / "audit.jsonl")
     async with env.app.run_test() as pilot:
         await to_view(pilot, "deploy", expect="web")
@@ -3513,7 +3552,14 @@ async def test_rollout_restart_dialog_shows_the_owner_chain_only(tmp_path: Path)
         )
         text = impact_text(env.app)
         assert "rollout restart apps/Deployment/prod/web" in text
+        assert "known direct dependents (may be affected): 2 or more" in text
+        assert (
+            "Pod/prod/web-abc-1 via managed_by (declared) at"
+            " apps/Deployment/prod/web: spec.selector" in text
+        )
         assert "apps/ReplicaSet/prod/web-abc via owned_by (declared)" in text
+        assert "known transitive dependents (may be affected): none in this snapshot" in text
+        assert "additional known paths: 2 or more" in text
         assert "ConfigMap/prod/app-config" not in text
         assert env.ops.calls == []
 
@@ -3734,7 +3780,7 @@ uv run pytest -p no:tach tests/ui/test_impact_flow.py -q
 
 Expected (15 tests: 12 fail, 3 pass):
 - `test_impact_timeout_renders_the_static_unavailable_advisory` fails with `AttributeError: <module 'korvid.ui.app' ...> does not have the attribute '_IMPACT_TIMEOUT'` (raised by `mock.patch` before the app even starts)
-- `test_delete_dialog_shows_direct_and_transitive_dependents`, `test_delete_of_a_pod_never_claims_the_selecting_service_fails`, `test_rollout_restart_dialog_shows_the_owner_chain_only`, `test_rollout_restart_warns_about_an_unresolved_config_reference`, `test_deleting_a_cluster_scoped_node_covers_every_namespace`, `test_a_target_replaced_since_the_watch_is_reported_as_unknown`, `test_incomplete_graph_still_renders_a_summary_with_the_coverage_warning`, and `test_unexpected_loader_failure_renders_the_static_unavailable_advisory` fail with `textual.css.query.NoMatches: No nodes match '.confirm-impact'`
+- `test_delete_dialog_shows_realistic_workload_selector_paths`, `test_delete_of_a_pod_never_claims_the_selecting_service_fails`, `test_rollout_restart_dialog_shows_realistic_workload_selector_paths`, `test_rollout_restart_warns_about_an_unresolved_config_reference`, `test_deleting_a_cluster_scoped_node_covers_every_namespace`, `test_a_target_replaced_since_the_watch_is_reported_as_unknown`, `test_incomplete_graph_still_renders_a_summary_with_the_coverage_warning`, and `test_unexpected_loader_failure_renders_the_static_unavailable_advisory` fail with `textual.css.query.NoMatches: No nodes match '.confirm-impact'`
 - `test_context_switch_during_the_impact_load_aborts_before_the_dialog` and `test_selection_change_during_the_impact_load_aborts_before_the_dialog` fail on `assert len(app.screen_stack) == 1` (no impact load runs, so nothing fires `on_first_call` and the dialog opens)
 - `test_impact_loads_after_the_permission_check_and_the_dry_run_preview` fails on `assert env.order[:3] == ["rbac", "preview", "list"]` (the list phase never happens)
 - `test_no_impact_section_without_a_relationship_loader`, `test_scale_dialog_has_no_impact_section`, and `test_cordon_dialog_has_no_impact_section` already pass (they assert an absence)
@@ -4299,7 +4345,7 @@ async def test_impact_preview_works_with_the_agent_disabled(tmp_path: Path) -> N
     async with env.app.run_test() as pilot:
         assert env.app.config.agent_enabled is False
         await open_delete_dialog(env, pilot, "deploy", expect="web")
-        assert "known direct dependents (may be affected): 1" in impact_text(env.app)
+        assert "known direct dependents (may be affected): 2 or more" in impact_text(env.app)
 
 
 async def test_no_secret_value_or_manifest_content_reaches_the_dialog(tmp_path: Path) -> None:
@@ -4407,11 +4453,11 @@ one?
     graph-derived impact (advisory):
       delete apps/Deployment/prod/web
       advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
-      known direct dependents (may be affected): 1 or more
+      known direct dependents (may be affected): 2 or more
+        - Pod/prod/web-abc-1 via managed_by (declared) at apps/Deployment/prod/web: spec.selector
         - apps/ReplicaSet/prod/web-abc via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]
-      known transitive dependents (may be affected): 1 or more
-        - Pod/prod/web-abc-1 via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0] -> owned_by (declared) at Pod/prod/web-abc-1: metadata.ownerReferences[0]
-      additional known paths: 1 or more (already-listed dependents reached again)
+      known transitive dependents (may be affected): none in this snapshot
+      additional known paths: 2 or more (already-listed dependents reached again)
       scope: prod
       graph coverage: incomplete - a missing dependent here does not prove none exists
         - gateway.networking.k8s.io/*: unavailable
