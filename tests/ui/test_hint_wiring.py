@@ -126,8 +126,8 @@ async def test_cursor_on_healthy_pod_hides_hint_strip() -> None:
     async with app.run_test() as pilot:
         await until(
             pilot,
-            lambda: _selected_name(app) == "api-1",
-            label="healthy api-1 row selected",
+            lambda: app.query_one(ResourceTable).row_count == 2 and _selected_name(app) == "api-1",
+            label="both pod rows rendered with healthy api-1 selected",
         )
         # rows sort by name: api-1 (healthy) first, cursor starts there
         assert app.query_one(HintStrip).display is False
@@ -211,8 +211,8 @@ async def test_event_fetch_is_cached_per_pod() -> None:
     async with app.run_test() as pilot:
         await until(
             pilot,
-            lambda: _selected_name(app) == "api-1",
-            label="healthy api-1 row selected",
+            lambda: app.query_one(ResourceTable).row_count == 2 and _selected_name(app) == "api-1",
+            label="both pod rows rendered with healthy api-1 selected",
         )
         await pilot.press("down")  # web-1: triggers fetch
         await until(pilot, lambda: len(calls) == 1, label="web-1 events fetched once")

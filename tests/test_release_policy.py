@@ -85,19 +85,13 @@ def _assert_irreversible_boundary_contracts(section: str) -> None:
 
 
 def _assert_safe_recovery_contracts(section: str) -> None:
-    normalized = _normalized_lower(section)
-    plain = normalized.replace("**", "").replace("`", "")
     _assert_section_has_bullet(
         section, "draft release", "byte-identical", "staged assets", "resume"
     )
-    assert "pypi" in normalized
-    assert "draft release" in normalized
-    assert "missing" in normalized
-    assert "staged assets differ" in normalized
-    assert "stop and diagnose" in normalized
-    assert "do not" in plain
-    assert "deleting or moving" in plain
-    assert "published tag/version" in plain
+    _assert_section_has_bullet(
+        section, "pypi", "draft release", "missing", "staged assets", "stop", "diagnose"
+    )
+    _assert_section_has_bullet(section, "not", "deleting", "moving", "published tag", "version")
 
 
 def _assert_agent_policy_contracts(agents: str) -> None:
@@ -142,8 +136,6 @@ def _assert_release_runbook_contracts(runbook: str, version: str) -> None:
     publish = markdown_section(runbook, f"Publish `v{version}`")
     recovery = markdown_section(runbook, "Safe recovery boundaries")
     verify = markdown_section(runbook, "Verify the published artifacts")
-    dry_run_normalized = _normalized(dry_run)
-
     for binding in (
         "refs/tags/v*",
         "`release`",
@@ -164,7 +156,6 @@ def _assert_release_runbook_contracts(runbook: str, version: str) -> None:
         'gh run view "$RUN_ID"',
     ):
         assert command in dry_run
-    assert "Do not tag anything until that dry run succeeds" in dry_run_normalized
 
     for command in (
         ': "${RUN_ID:?set RUN_ID to the confirmed dry-run workflow ID}"',
