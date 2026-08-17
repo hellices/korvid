@@ -30,15 +30,10 @@ def classify_pod_resize(
 ) -> ResizeImpactContext:
     containers = _containers_by_name(manifest)
     applied_containers = _applied_containers_by_name(manifest)
-    changed_resources = [
-        (name, resource)
-        for name, sections in changes.items()
-        for values in sections.values()
-        for resource in values
-        if resource in {"cpu", "memory"}
-    ]
+    changed_resources = _changed_resources(containers, applied_containers, changes)
     policies = [
-        _restart_policy(containers.get(name), resource) for name, resource in changed_resources
+        _restart_policy(containers.get(name), resource)
+        for name, _section, resource in changed_resources
     ]
     memory_decreased, memory_decrease_not_required, memory_unknown = _memory_limit_impact(
         containers, applied_containers, changes
@@ -47,19 +42,21 @@ def classify_pod_resize(
     restart_required = any(policy == "RestartContainer" for policy in policies)
     cpu_restart_required = any(
         resource == "cpu" and policy == "RestartContainer"
-        for (_, resource), policy in zip(changed_resources, policies, strict=True)
+        for (_, _section, resource), policy in zip(changed_resources, policies, strict=True)
     )
     memory_restart_required = any(
         resource == "memory" and policy == "RestartContainer"
-        for (_, resource), policy in zip(changed_resources, policies, strict=True)
+        for (_, _section, resource), policy in zip(changed_resources, policies, strict=True)
     )
     return ResizeImpactContext(
-        cpu_changed=any(resource == "cpu" for _, resource in changed_resources),
+        cpu_changed=any(resource == "cpu" for _, _, resource in changed_resources),
         memory_request_changed=any(
-            "memory" in sections.get("requests", {}) for sections in changes.values()
+            section == "requests" and resource == "memory"
+            for _, section, resource in changed_resources
         ),
         memory_limit_changed=any(
-            "memory" in sections.get("limits", {}) for sections in changes.values()
+            section == "limits" and resource == "memory"
+            for _, section, resource in changed_resources
         ),
         restart_required=restart_required,
         cpu_restart_required=cpu_restart_required,
@@ -72,6 +69,37 @@ def classify_pod_resize(
         memory_limit_decrease_not_required=memory_decrease_not_required,
         memory_limit_assessment_unknown=memory_unknown,
     )
+
+
+def _changed_resources(
+    containers: Mapping[str, Mapping[str, Any]],
+    applied_containers: Mapping[str, Mapping[str, Any]],
+    changes: ResizeResourceChanges,
+) -> list[tuple[str, str, str]]:
+    changed: list[tuple[str, str, str]] = []
+    for name, sections in changes.items():
+        for section, values in sections.items():
+            if section not in {"requests", "limits"}:
+                continue
+            for resource, desired in values.items():
+                if resource not in {"cpu", "memory"}:
+                    continue
+                current_known, current = _current_quantity_state(
+                    containers.get(name),
+                    applied_containers.get(name),
+                    section,
+                    resource,
+                )
+                if not current_known or current is None:
+                    changed.append((name, section, resource))
+                    continue
+                try:
+                    differs = parse_quantity(desired) != parse_quantity(current)
+                except (DecimalException, ValueError):
+                    differs = True
+                if differs:
+                    changed.append((name, section, resource))
+    return changed
 
 
 def _memory_limit_impact(
@@ -87,11 +115,9 @@ def _memory_limit_impact(
         if desired is None:
             continue
         container = containers.get(name)
-        current_known, current = _applied_limit_state(applied_containers.get(name), "memory")
-        if not current_known:
-            spec_known, spec_current = _limit_state(container, "memory")
-            if spec_known:
-                current_known, current = spec_known, spec_current
+        current_known, current = _current_quantity_state(
+            container, applied_containers.get(name), "limits", "memory"
+        )
         policy = _restart_policy(container, "memory")
         if not current_known:
             unknown = True
@@ -168,7 +194,9 @@ def _restart_policy(container: Mapping[str, Any] | None, resource: str) -> str |
     return "NotRequired"
 
 
-def _limit_state(container: Mapping[str, Any] | None, resource: str) -> tuple[bool, str | None]:
+def _quantity_state(
+    container: Mapping[str, Any] | None, section: str, resource: str
+) -> tuple[bool, str | None]:
     if container is None:
         return False, None
     resources = container.get("resources")
@@ -176,23 +204,25 @@ def _limit_state(container: Mapping[str, Any] | None, resource: str) -> tuple[bo
         return True, None
     if not isinstance(resources, Mapping):
         return False, None
-    limits = resources.get("limits")
-    if limits is None:
+    values = resources.get(section)
+    if values is None:
         return True, None
-    if not isinstance(limits, Mapping):
+    if not isinstance(values, Mapping):
         return False, None
-    value = limits.get(resource)
+    value = values.get(resource)
     if value is None:
         return True, None
     return (True, value) if isinstance(value, str) else (False, None)
 
 
-def _applied_limit_state(
-    container: Mapping[str, Any] | None, resource: str
+def _current_quantity_state(
+    container: Mapping[str, Any] | None,
+    applied_container: Mapping[str, Any] | None,
+    section: str,
+    resource: str,
 ) -> tuple[bool, str | None]:
-    if container is None:
-        return False, None
-    resources = container.get("resources")
-    if not isinstance(resources, Mapping) or not resources:
-        return False, None
-    return _limit_state(container, resource)
+    if applied_container is not None:
+        resources = applied_container.get("resources")
+        if isinstance(resources, Mapping) and resources:
+            return _quantity_state(applied_container, section, resource)
+    return _quantity_state(container, section, resource)

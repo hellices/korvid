@@ -152,7 +152,19 @@ def test_equivalent_memory_quantities_are_not_a_decrease() -> None:
     )
     assert context.memory_limit_decreased is False
     assert context.memory_limit_decrease_not_required is False
+    assert context.memory_limit_changed is False
     assert context.memory_limit_assessment_unknown is False
+
+
+def test_equivalent_cpu_quantity_is_not_a_restart_trigger() -> None:
+    context = classify_pod_resize(
+        _manifest(policy=[{"resourceName": "cpu", "restartPolicy": "RestartContainer"}]),
+        {"app": {"limits": {"cpu": "1000m"}}},
+    )
+    assert context.cpu_changed is False
+    assert context.restart_required is False
+    assert context.cpu_restart_required is False
+    assert context.all_changed_resources_not_required is False
 
 
 def test_increased_memory_quantities_are_not_a_decrease() -> None:
