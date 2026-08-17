@@ -6055,6 +6055,13 @@ class KorvidApp(App[None]):
         if fetched is None:
             return
         containers, pod_manifest = fetched
+        if not self._uid_intact_after_fetch(pod_manifest, ns, name, uid):
+            self.notify(
+                f"resize {self._gvr_label(meta)}/{name} cancelled -"
+                " the pod changed during the manifest fetch",
+                severity="warning",
+            )
+            return
         if not self._write_identity_intact(
             "resize",
             meta,

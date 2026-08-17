@@ -403,6 +403,36 @@ async def test_resize_refuses_uid_drift_while_confirmation_is_open(tmp_path: Pat
         assert not audit_path.exists()
 
 
+async def test_resize_refuses_replacement_manifest_before_prompt(tmp_path: Path) -> None:
+    async def replacement_manifest(
+        _kind: str, _namespace: str | None, _name: str
+    ) -> dict[str, Any]:
+        metadata = _POD_MANIFEST["metadata"]
+        assert isinstance(metadata, dict)
+        return {
+            **_POD_MANIFEST,
+            "metadata": {**metadata, "uid": "pod-uid-2"},
+        }
+
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(recorder, audit_path, get_manifest=replacement_manifest)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
+        await pilot.press("R")
+        await until(
+            pilot,
+            lambda: any(
+                "pod changed during the manifest fetch" in notification.message
+                for notification in app._notifications
+            ),
+            label="replacement pod manifest refused",
+        )
+        assert not isinstance(app.screen, ResizePrompt)
+        assert recorder.calls == []
+        assert not audit_path.exists()
+
+
 async def test_cancelled_resize_impact_load_writes_nothing(tmp_path: Path) -> None:
     recorder = ResizeRecorder()
     audit_path = tmp_path / "audit.jsonl"

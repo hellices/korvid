@@ -182,3 +182,12 @@ def test_invalid_captured_memory_quantity_is_unknown() -> None:
         {"app": {"limits": {"memory": "256Mi"}}},
     )
     assert context.memory_limit_assessment_unknown is True
+
+
+def test_decimal_overflow_in_requested_memory_is_unknown() -> None:
+    context = classify_pod_resize(
+        _manifest(memory_limit="256Mi"),
+        {"app": {"limits": {"memory": "1e999999999999999999999999"}}},
+    )
+    assert context.memory_limit_decreased is False
+    assert context.memory_limit_assessment_unknown is True

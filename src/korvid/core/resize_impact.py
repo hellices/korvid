@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import DecimalException
 from typing import Any
 
 from korvid.k8s.models import parse_quantity
@@ -51,7 +52,7 @@ def classify_pod_resize(
             continue
         try:
             decreased = parse_quantity(desired) < parse_quantity(current)
-        except ValueError:
+        except (DecimalException, ValueError):
             memory_unknown = True
             continue
         if decreased:
