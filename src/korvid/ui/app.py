@@ -7966,12 +7966,25 @@ class KorvidApp(App[None]):
         )
         note = await self._managed_note_from(snapshot, ns) if snapshot is not None else None
         require = name if action == "delete" and not meta.namespaced else None
+        impact_lines = (
+            await self._agent_resize_impact(
+                meta,
+                ns,
+                name,
+                uid,
+                snapshot,
+                resources,
+            )
+            if action == "resize" and resources
+            else None
+        )
         decision = await self._await_user_approval(
             f"Agent requests: {action} {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
             operation,
             require_name=require,
             preview=preview,
             managed_note=note,
+            impact_lines=impact_lines,
         )
         if decision == "expired":
             return (
@@ -8052,6 +8065,26 @@ class KorvidApp(App[None]):
                 ops.preview_resize(ns or "", name, resources, uid=uid)
             )
         return None
+
+    async def _agent_resize_impact(
+        self,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        snapshot: dict[str, Any] | None,
+        resources: dict[str, dict[str, dict[str, str]]],
+    ) -> tuple[str, ...]:
+        context = classify_pod_resize(snapshot or {}, resources)
+        graph_lines = await self._impact_preview_for_scope(
+            ImpactAction.POD_RESIZE,
+            meta,
+            ns,
+            name,
+            uid,
+            scope=ns if meta.namespaced else None,
+        )
+        return compose_resize_impact_lines(graph_lines, context)
 
     async def _target_manifest(
         self, kind_alias: str, ns: str | None, name: str
@@ -8782,6 +8815,7 @@ class KorvidApp(App[None]):
         require_name: str | None = None,
         preview: list[str] | None = None,
         managed_note: str | None = None,
+        impact_lines: tuple[str, ...] | None = None,
     ) -> Literal["approved", "declined", "expired"]:
         """Show a ConfirmScreen and wait for the user's decision. Only real key
         input can resolve it. While the agent panel is collapsed, or another
@@ -8810,6 +8844,7 @@ class KorvidApp(App[None]):
             require_name=require_name,
             preview=preview,
             managed_note=managed_note,
+            impact_lines=impact_lines,
         )
         try:
             await self.push_screen(screen, _done)
