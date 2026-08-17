@@ -293,6 +293,7 @@ async def test_agent_write_dialog_shows_preview(tmp_path: Path) -> None:
     ops = PreviewOps(lines=["~ spec.replicas: 3 -> 4"])
     app = make_app(ops, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
+        await _to_deployments(app, pilot)
         app.query_one(AgentPanel).display = True
         task = asyncio.ensure_future(
             app.agent_request_write("scale", "deployments", "web", namespace="default", replicas=4)
