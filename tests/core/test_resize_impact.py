@@ -72,6 +72,18 @@ def test_memory_limit_decrease_compares_against_applied_status() -> None:
     assert context.memory_limit_assessment_unknown is False
 
 
+def test_memory_limit_decrease_falls_back_when_applied_value_is_absent() -> None:
+    manifest = _manifest(memory_limit="1Gi")
+    manifest["status"] = {"containerStatuses": [{"name": "app", "resources": {}}]}
+    context = classify_pod_resize(
+        manifest,
+        {"app": {"limits": {"memory": "900Mi"}}},
+    )
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is True
+    assert context.memory_limit_assessment_unknown is False
+
+
 def test_equivalent_memory_quantities_are_not_a_decrease() -> None:
     context = classify_pod_resize(
         _manifest(memory_limit="1Gi"),

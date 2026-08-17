@@ -47,7 +47,9 @@ def classify_pod_resize(
             continue
         container = containers.get(name)
         applied_container = applied_containers.get(name)
-        current = _current_limit(applied_container or container, "memory")
+        current = _current_limit(applied_container, "memory")
+        if current is None:
+            current = _current_limit(container, "memory")
         policy = _restart_policy(container, "memory")
         if current is None:
             memory_unknown = True
