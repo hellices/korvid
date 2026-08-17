@@ -69,6 +69,15 @@ def _assert_section_has_bullet(section: str, *terms: str) -> None:
     raise AssertionError(f"missing bullet containing terms {terms!r}")
 
 
+def _numbered_step(section: str, number: int) -> str:
+    match = re.search(
+        rf"(?ms)^{number}\.\s+(.*?)(?=^\d+\.\s+|\Z)",
+        section,
+    )
+    assert match is not None, f"missing numbered step {number}"
+    return _normalized_lower(match.group(1))
+
+
 def _assert_irreversible_boundary_contracts(section: str) -> None:
     _assert_section_has_bullet(section, "annotated tag", "irreversible")
     _assert_section_has_bullet(section, "pypi", "irreversible")
@@ -95,15 +104,18 @@ def _assert_agent_policy_contracts(agents: str) -> None:
     pull_requests = markdown_section(agents, "Pull Requests")
     review_loop = markdown_section(agents, "Review Loop")
     policy = f"{pull_requests}\n{review_loop}"
-    normalized = _normalized_lower(policy)
     for blocked_route in ("gh pr merge", "auto-merge", "REST/GraphQL merge endpoints"):
         assert blocked_route in policy
-    assert "maintainer merges" in normalized
-    assert "no merge automation, in any form." in normalized
-    assert "do not add a workflow, action, script or scheduled job that merges" in normalized
-    assert "the release pr the release workflow opens there" in normalized
-    assert "Never approve your own work" in policy
-    assert "This loop ends in a report, never in a merge" in review_loop
+    _assert_section_has_bullet(pull_requests, "maintainer", "merge", "human decision")
+    _assert_section_has_bullet(
+        pull_requests, "merge automation", "workflow", "script", "rest/graphql"
+    )
+    _assert_section_has_bullet(pull_requests, "homebrew-korvid", "release pr", "maintainer")
+    _assert_section_has_bullet(pull_requests, "approve", "own work")
+    handoff_step = _numbered_step(review_loop, 10)
+    for term in ("required check", "report", "stop", "merge"):
+        assert term in handoff_step
+    assert re.search(r"\b(?:never|not)\b[^.]{0,40}\bmerge\b", handoff_step)
     assert "gh pr merge" not in review_loop
     assert "toward merge" not in review_loop
     assert "Testing Gotchas" not in review_loop
@@ -218,6 +230,9 @@ def _assert_cleanup_contracts(readme: str, runbook: str) -> None:
         "Then remove the retained files"
     )
     assert 'keyring.delete_password("korvid", "github-oauth")' in cleanup
+    assert "rm -f ~/.config/korvid/config.yaml ~/.config/korvid/credentials.json" in cleanup
+    assert 'state_root="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"' in cleanup
+    assert 'data_root="${XDG_DATA_HOME:-$HOME/.local/share}/korvid"' in cleanup
     assert 'rm -f "$state_root/audit.jsonl"' in cleanup
     assert '"$state_root/audit.jsonl.lock"' in cleanup
     assert 'rm -f "$state_root/mcp-endpoint.json" "$state_root/mcp-endpoint.json.lock"' in cleanup
@@ -250,6 +265,8 @@ def _assert_release_versions_contracts(version: str, readme: str, runbook: str, 
     )
 
     assert f"python -m pip install 'korvid[all]=={version}'" in readme
+    install = markdown_section(runbook, "Install, reinstall, and uninstall from PyPI")
+    assert f"python -m pip install 'korvid[all]=={version}'" in install
     assert "## Install or upgrade" in notes
     assert f"uv tool install 'korvid[all]=={version}'" in notes
     assert f"pipx install --force 'korvid[all]=={version}'" in notes

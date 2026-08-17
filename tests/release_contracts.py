@@ -34,9 +34,11 @@ def _is_closing_markdown_fence(line: str, fence: tuple[str, int]) -> bool:
     fence_marker = _markdown_fence(line)
     if fence_marker is None or fence_marker[0] != fence[0]:
         return False
+    if fence_marker[1] < fence[1]:
+        return False
     stripped = line.lstrip(" ")
-    suffix = stripped[fence[1] :]
-    return fence_marker[1] >= fence[1] and not suffix.strip()
+    suffix = stripped[fence_marker[1] :]
+    return not suffix.strip()
 
 
 def _markdown_sections(text: str) -> list[tuple[str, list[str]]]:

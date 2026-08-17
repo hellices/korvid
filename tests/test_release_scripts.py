@@ -1148,6 +1148,13 @@ def test_markdown_section_ignores_level_two_like_lines_inside_fenced_code_blocks
     )
 
 
+def test_markdown_section_accepts_a_longer_closing_fence() -> None:
+    text = (
+        "# Title\n## Release\n```yaml\n## not a real heading\n````\nstill keep\n## Cleanup\ndrop\n"
+    )
+    assert markdown_section(text, "Release") == ("```yaml\n## not a real heading\n````\nstill keep")
+
+
 def test_run_scripts_returns_only_shell_steps() -> None:
     job = {"steps": [{"uses": "actions/checkout@sha"}, {"run": "uv build"}, {"run": "uv publish"}]}
     assert run_scripts(job) == ("uv build", "uv publish")

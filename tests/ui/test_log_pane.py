@@ -175,6 +175,11 @@ def _panel_texts(app: KorvidApp) -> dict[str, str]:
     return result
 
 
+def _panels_contain_line(app: KorvidApp, keys: set[str], line: str) -> bool:
+    panels = _panel_texts(app)
+    return set(panels) == keys and all(line in panels[key] for key in keys)
+
+
 def _titles_visible(app: KorvidApp) -> bool:
     """Whether panel title bars are shown (source attribution)."""
     from textual.widgets import Static
@@ -267,8 +272,8 @@ async def test_l_multi_container_split_panels() -> None:
         await pilot.press("l")
         await until(
             pilot,
-            lambda: set(_panel_texts(app)) == {"myapp/main", "myapp/sidecar"},
-            label="container panels rendered",
+            lambda: _panels_contain_line(app, {"myapp/main", "myapp/sidecar"}, "line0"),
+            label="container panels streamed",
         )
         panels = _panel_texts(app)
         assert set(panels) == {"myapp/main", "myapp/sidecar"}
@@ -357,8 +362,8 @@ async def test_L_streams_multiple_pods_with_prefix() -> None:
         await pilot.press("shift+l")
         await until(
             pilot,
-            lambda: set(_panel_texts(app)) == {"app-alpha/main", "app-beta/main"},
-            label="multi-pod panels rendered",
+            lambda: _panels_contain_line(app, {"app-alpha/main", "app-beta/main"}, "line0"),
+            label="multi-pod panels streamed",
         )
         assert app.query_one(LogPane).display is True
         panels = _panel_texts(app)
@@ -482,8 +487,8 @@ async def test_L_single_pod_always_shows_prefix() -> None:
         await pilot.press("shift+l")
         await until(
             pilot,
-            lambda: set(_panel_texts(app)) == {"app-only/main"},
-            label="single-panel multi-log rendered",
+            lambda: _panels_contain_line(app, {"app-only/main"}, "line0"),
+            label="single-panel multi-log streamed",
         )
         # Title must be shown even with only 1 visible pod (L path)
         panels = _panel_texts(app)
@@ -992,8 +997,8 @@ async def test_l_on_second_pod_adds_side_by_side() -> None:
         await pilot.press("l")
         await until(
             pilot,
-            lambda: set(_panel_texts(app)) == {"app-a/main", "app-b/main"},
-            label="second pod panel rendered",
+            lambda: _panels_contain_line(app, {"app-a/main", "app-b/main"}, "line0"),
+            label="second pod panel streamed",
         )
         panels = _panel_texts(app)
         assert set(panels) == {"app-a/main", "app-b/main"}

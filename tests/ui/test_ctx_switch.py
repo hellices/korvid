@@ -1385,7 +1385,6 @@ async def test_mid_swap_failure_records_context_failure_before_restore() -> None
             lambda: env.switch_calls == ["ctx-b", "ctx-a"],
             label="recovery switch back to ctx-a completed",
         )
-        await pilot.pause(0.1)
     assert _ctx_phases(timeline) == [(0, "started"), (0, "failed")]
 
 

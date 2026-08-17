@@ -193,6 +193,11 @@ async def test_event_restating_the_trouble_is_not_appended() -> None:
         )
         await until(
             pilot,
+            lambda: bool(app._hints.cache),
+            label="warning event applied to hint cache",
+        )
+        await until(
+            pilot,
             lambda: "CrashLoopBackOff" in _strip_text(app),
             label="trouble hint rendered",
         )
@@ -277,6 +282,11 @@ async def test_event_older_than_status_termination_is_suppressed() -> None:
     app, calls = make_app([_pod("web-1", (crash,))], events=[_OLD_EVENT])
     async with app.run_test() as pilot:
         await until(pilot, lambda: len(calls) == 1, label="dated warning fetched")
+        await until(
+            pilot,
+            lambda: bool(app._hints.cache),
+            label="dated warning applied to hint cache",
+        )
         await until(
             pilot,
             lambda: "CrashLoopBackOff" in _strip_text(app),
