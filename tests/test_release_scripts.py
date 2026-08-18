@@ -1900,6 +1900,14 @@ def test_release_docs_keep_a_source_install_fallback_for_unreleased_main() -> No
     readme = _readme()
     source_install = "pip install 'korvid[all] @ git+https://github.com/hellices/korvid'"
     assert source_install in runbook
+    runbook_install = runbook[
+        runbook.index("## Install, reinstall, and uninstall from PyPI") : runbook.index(
+            "## What the smoke matrix proves"
+        )
+    ]
+    assert "activated virtual environment or a container image you control" in " ".join(
+        runbook_install.split()
+    )
     assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in readme
     assert "Tagged versions should be installed from PyPI" in readme
     assert "appearing on PyPI" not in runbook
