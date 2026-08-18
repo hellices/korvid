@@ -1501,7 +1501,11 @@ def test_readme_recommends_an_isolated_install_for_an_application() -> None:
     readme = _readme()
     quick_start = markdown_section(readme, "Quick start")
     install = markdown_section(readme, "Installation")
+    pip_fallback = f"python -m pip install 'korvid[all]=={version}'"
     assert f"uv tool install 'korvid[all]=={version}'" in quick_start
+    assert pip_fallback in quick_start
+    assert "inside a virtualenv or a container image you control" in quick_start
+    assert quick_start.index("uv tool install") < quick_start.index(pip_fallback)
     assert f"pipx install 'korvid[all]=={version}'" in quick_start
     pip_index = quick_start.find("python -m pip install")
     assert pip_index == -1 or quick_start.index("uv tool install") < pip_index, (
