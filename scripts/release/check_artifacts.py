@@ -35,7 +35,7 @@ def _sdist_metadata(path: Path) -> Message:
 
 def _validate_install_guidance(artifact: Path, description: str) -> None:
     section_match = re.search(
-        r"(?ms)^## Installation[ \t]*\n(?P<body>.*?)(?=^##[ \t]|\Z)",
+        r"(?ms)^## Installation[ \t]*\r?\n(?P<body>.*?)(?=^##[ \t]|\Z)",
         description,
     )
     if section_match is None:

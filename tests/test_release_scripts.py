@@ -869,6 +869,11 @@ def test_wheel_and_sdist_metadata_match_version_and_extras(tmp_path: Path) -> No
     assert check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"]) == 0
 
 
+def test_artifact_metadata_accepts_windows_newlines(tmp_path: Path) -> None:
+    dist = _fake_dist(tmp_path, _metadata_text().replace("\n", "\r\n"))
+    assert check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"]) == 0
+
+
 def test_artifact_metadata_missing_an_extra_fails(tmp_path: Path) -> None:
     dist = _fake_dist(tmp_path, _metadata_text(include_entra=False))
     with pytest.raises(ValueError, match="entra"):
