@@ -43,15 +43,20 @@ def _validate_install_guidance(artifact: Path, description: str) -> None:
             f"{artifact.name}: the PyPI long description is missing ## Installation section"
         )
     section = section_match.group("body")
+    options = r"(?:[ \t]+--[A-Za-z0-9][A-Za-z0-9-]*)*"
+    korvid_requirement = r"""[ \t]+['"]?korvid(?:\[|==|[ @'"]|$)"""
     pip_match = re.search(
-        r"(?m)^[ \t]*(?:python(?:3(?:\.\d+)?)? -m )?pip install\b",
+        rf"(?m)^[ \t]*(?:python(?:3(?:\.\d+)?)? -m )?pip install{options}"
+        rf"{korvid_requirement}",
         section,
     )
     pip_position = pip_match.start() if pip_match else -1
     isolated_positions = [
-        position
-        for installer in ("uv tool install", "pipx install")
-        if (position := section.find(installer)) != -1
+        match.start()
+        for match in re.finditer(
+            rf"(?m)^[ \t]*(?:uv tool|pipx) install{options}{korvid_requirement}",
+            section,
+        )
     ]
     if not isolated_positions or (pip_position != -1 and pip_position < min(isolated_positions)):
         raise ValueError(

@@ -941,6 +941,30 @@ def test_artifact_metadata_rejects_pip_first_install_guidance(tmp_path: Path, co
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
+@pytest.mark.parametrize(
+    "misleading_isolated_reference",
+    [
+        "Do not use `uv tool install` for this application.",
+        "```sh\nuv tool install unrelated\n```",
+    ],
+)
+def test_artifact_metadata_requires_an_isolated_command_that_installs_korvid(
+    tmp_path: Path, misleading_isolated_reference: str
+) -> None:
+    body = (
+        "# korvid\n\nAI-native Kubernetes TUI with enough project detail to"
+        " produce a valid PyPI long description while reproducing misleading"
+        " isolated-installer text that does not install korvid.\n\n"
+        "## Installation\n\n"
+        f"{misleading_isolated_reference}\n\n"
+        "```sh\npip install korvid\n```\n"
+    )
+    dist = _fake_dist(tmp_path, _metadata_text(body=body))
+
+    with pytest.raises(ValueError, match="isolated application installer"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
 def test_artifact_metadata_requires_a_markdown_content_type(tmp_path: Path) -> None:
     dist = _fake_dist(tmp_path, _metadata_text(content_type=None))
     with pytest.raises(ValueError, match="Description-Content-Type"):
