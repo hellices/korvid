@@ -1,7 +1,7 @@
 # PEP 668-safe installation guidance
 
-**Issue:** #302  
-**Status:** Approved for implementation  
+**Issue:** #302
+**Status:** Approved for implementation
 **Scope:** Public installation documentation and its release-policy tests
 
 ## Problem
