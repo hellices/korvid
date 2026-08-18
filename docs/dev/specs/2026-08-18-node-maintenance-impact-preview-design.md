@@ -120,7 +120,7 @@ Add a pure node-maintenance renderer with bounded, constant-only lines.
 Cordon states:
 
 - current Pods are not evicted or moved;
-- new scheduling to the Node is blocked;
+- the Node is marked unschedulable for ordinary workload placement;
 - workload availability and future placement are not predicted.
 
 Uncordon states:
@@ -133,7 +133,8 @@ Drain states:
 
 - the drain plan, not the graph, defines exact eviction targets and skip
   reasons;
-- the Node remains cordoned if execution fails or is cancelled;
+- after the Node is successfully cordoned, it remains cordoned if drain
+  execution later fails or is cancelled;
 - replacement placement, readiness, and application availability are not
   predicted.
 

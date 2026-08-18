@@ -14,7 +14,7 @@ from korvid.ui.node_impact_preview import (
             ImpactAction.CORDON_NODE,
             (
                 "current Pods are not evicted or moved",
-                "new scheduling to the Node is blocked",
+                "the Node is marked unschedulable for ordinary workload placement",
                 "future placement and workload availability are not predicted",
             ),
         ),
@@ -30,7 +30,10 @@ from korvid.ui.node_impact_preview import (
             ImpactAction.DRAIN_NODE,
             (
                 "the drain impact plan defines exact eviction targets and skip reasons",
-                "the Node remains cordoned if drain execution fails or is cancelled",
+                (
+                    "after the Node is successfully cordoned, it remains cordoned"
+                    " if drain execution later fails or is cancelled"
+                ),
                 "replacement placement, readiness, and application availability are not predicted",
             ),
         ),
@@ -52,6 +55,12 @@ def test_graph_lines_precede_local_node_maintenance_lines() -> None:
     )
     assert lines[0] == "graph-derived impact (advisory):"
     assert lines[1] == "Node maintenance impact (advisory):"
+
+
+@pytest.mark.parametrize("action", [ImpactAction.CORDON_NODE, ImpactAction.UNCORDON_NODE])
+def test_non_drain_action_rejects_graph_lines(action: ImpactAction) -> None:
+    with pytest.raises(ValueError, match="must not carry graph-derived lines"):
+        compose_node_maintenance_lines(("graph-derived impact (advisory):",), action)
 
 
 def test_non_node_action_is_rejected() -> None:

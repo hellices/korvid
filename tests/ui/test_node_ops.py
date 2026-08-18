@@ -824,7 +824,7 @@ async def test_cancelled_in_flight_eviction_that_lands_is_counted(tmp_path: Path
 @pytest.mark.parametrize(
     ("key", "expected"),
     [
-        ("c", "new scheduling to the Node is blocked"),
+        ("c", "the Node is marked unschedulable for ordinary workload placement"),
         ("u", "future scheduling to the Node is permitted"),
     ],
 )

@@ -251,7 +251,7 @@ lines are derived locally from the action:
 
     Node maintenance impact (advisory):
       current Pods are not evicted or moved
-      new scheduling to the Node is blocked
+      the Node is marked unschedulable for ordinary workload placement
       future placement and workload availability are not predicted
 
 for a cordon, and
@@ -264,10 +264,10 @@ for a cordon, and
 for an uncordon.
 
 Drain keeps `drain impact plan:` as the authoritative section — the
-preview rendered by `DrainPlan.preview_lines()`, shown under the heading
-`drain impact plan:` above the server dry-run preview. The node maintenance
-advisory appears in the impact section above that plan. When the relationship
-graph load succeeds, the graph section appears first (above the local advisory lines);
+preview rendered by `DrainPlan.preview_lines()` under that heading. The node
+maintenance advisory appears in the impact section above that plan. When the
+relationship graph load succeeds, the graph section appears first (above the local
+advisory lines);
 when it fails, the local lines remain visible and graph failure never
 removes the plan or blocks approval. Plan failure (an exception from
 `ops.drain_plan`) aborts the whole flow before any dialog opens — no
@@ -281,7 +281,7 @@ will be evicted and why others are skipped; the graph section is advisory.
 If drain execution begins and is then cancelled, the Node remains cordoned.
 The local advisory line states this explicitly:
 
-    the Node remains cordoned if drain execution fails or is cancelled
+    after the Node is successfully cordoned, it remains cordoned if drain execution later fails or is cancelled
 
 Pod resize uses the same graph renderer with an intentionally empty relation
 set, then adds a Pod-local section derived from the captured Pod manifest and
