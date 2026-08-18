@@ -231,7 +231,9 @@ Tagged versions should be installed from PyPI; the source form is only a
 fallback for unreleased code.
 
 If pip reports `error: externally-managed-environment`, it is protecting a
-Python installation owned by your operating system (PEP 668). Do not use `--break-system-packages`; rerun the install with `uv tool` or `pipx`. If you specifically need pip inside a container or development environment, create and activate a virtual environment first.
+Python installation owned by your operating system (PEP 668). Do not use `--break-system-packages`; rerun the install with `uv tool` or `pipx`.
+If you specifically need pip inside a container or development environment,
+create and activate a virtual environment first.
 
 Without the `[agent]` extra the agent surface is simply absent — no agent
 panel, and `Ctrl-A` / `:ai` / `:model` are not registered. Without the
