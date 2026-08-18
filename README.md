@@ -84,9 +84,12 @@ Prefer `uv` if you have neither: korvid needs **Python 3.11+**, which is
 newer than the system Python on macOS and on most enterprise Linux, and `uv`
 fetches a suitable interpreter for you instead of making that your problem.
 
-`python -m pip install 'korvid[all]==0.2.0'` also works and is the right
-choice inside a virtualenv or a container image you control — just don't
-point it at your system Python.
+`python -m pip install 'korvid[all]==0.2.0'` also works **inside a
+virtualenv or a container image you control**. Do not run `pip install`
+against your system Python — modern distros (Debian 12+, Ubuntu 23.04+,
+Fedora 38+) block this with [PEP 668](https://peps.python.org/pep-0668/)
+and you will get an `externally-managed-environment` error. Use `uv tool`,
+`pipx`, or create a venv first.
 
 `korvid[all]` is the simplest install: the TUI, embedded agent, MCP server, and
 read-only observability connectors together. For slimmer extras, upgrade
