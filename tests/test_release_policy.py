@@ -255,7 +255,7 @@ def _assert_release_versions_contracts(version: str, readme: str, runbook: str, 
         f"({version}); found {sorted(notes_versions)}"
     )
 
-    assert f"python -m pip install 'korvid[all]=={version}'" in readme
+    assert f"uv tool install 'korvid[all]=={version}'" in readme
     install = markdown_section(runbook, "Install, reinstall, and uninstall from PyPI")
     assert f"python -m pip install 'korvid[all]=={version}'" in install
     assert "## Install or upgrade" in notes

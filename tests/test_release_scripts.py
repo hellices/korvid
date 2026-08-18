@@ -1491,18 +1491,11 @@ def test_readme_has_no_relative_links_because_pypi_cannot_follow_them() -> None:
 
 
 def test_readme_recommends_an_isolated_install_for_an_application() -> None:
-    """`pip install` is the wrong first instruction for a CLI application.
-
-    It drops korvid and its dependency tree into whatever environment
-    happens to be active, and it fails outright when the active interpreter
-    is older than 3.11 - the default on macOS and on most enterprise Linux.
-    `uv tool install` and `pipx` isolate the application and put `korvid` on
-    PATH, and uv fetches a suitable interpreter, so the version requirement
-    stops being the reader's problem.
-    """
+    """Every active public path isolates this CLI from system Python."""
     version = _project_version()
     readme = _readme()
-    quick_start = readme[readme.index("## Quick start") : readme.index("## Installation")]
+    quick_start = markdown_section(readme, "Quick start")
+    install = markdown_section(readme, "Installation")
     assert f"uv tool install 'korvid[all]=={version}'" in quick_start
     assert f"pipx install 'korvid[all]=={version}'" in quick_start
     pip_index = quick_start.find("python -m pip install")
