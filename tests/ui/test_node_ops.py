@@ -11,6 +11,7 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import pytest
 from textual.css.query import NoMatches
 from textual.widgets import Input, Static
 
@@ -98,6 +99,7 @@ def make_app(
     readonly: bool = False,
     check_calls: list[tuple[str, str, str, str | None, str, str]] | None = None,
     extra_nodes: tuple[str, ...] = (),
+    relationship_calls: list[tuple[str, str | None]] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -138,6 +140,13 @@ def make_app(
             check_calls.append((verb, resource, sub, ns, group, name))
         return True
 
+    async def list_relationship_objects(
+        meta: ResourceMeta, namespace: str | None
+    ) -> list[GenericSummary]:
+        assert relationship_calls is not None
+        relationship_calls.append((meta.plural, namespace))
+        return []
+
     return KorvidApp(
         config=KorvidConfig(namespace="default", readonly=readonly),
         store=store,
@@ -146,6 +155,9 @@ def make_app(
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None if check_calls is None else check_permission,
+        list_relationship_objects=list_relationship_objects
+        if relationship_calls is not None
+        else None,
     )
 
 
@@ -774,3 +786,103 @@ async def test_cancelled_in_flight_eviction_that_lands_is_counted(tmp_path: Path
         assert ("evict", "default", "web-1", "uid-web-1") in rec.calls
         entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert "evicted 1 of 2" in entries[-1]["detail"]
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("c", "new scheduling to the Node is blocked"),
+        ("u", "future scheduling to the Node is permitted"),
+    ],
+)
+async def test_cordon_toggle_shows_local_impact_without_graph_load(
+    tmp_path: Path, key: str, expected: str
+) -> None:
+    calls: list[tuple[str, str | None]] = []
+    app = make_app(
+        NodeRecorder(),
+        tmp_path / "audit.jsonl",
+        relationship_calls=calls,
+    )
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        await pilot.press(key)
+        await until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ConfirmScreen) and bool(app.screen.query(".confirm-impact"))
+            ),
+            label="node scheduling impact rendered",
+        )
+        text = str(app.screen.query_one(".confirm-impact", Static).render())
+        assert "Node maintenance impact (advisory):" in text
+        assert expected in text
+        assert "graph-derived impact" not in text
+        assert calls == []
+        await pilot.press("n")
+
+
+class _StoreReplacingRecorder(NodeRecorder):
+    """NodeRecorder that mutates the node UID from within preview_cordon.
+
+    Simulates a replacement arriving during the dry-run gap without relying
+    on asyncio.Event blocking, which Textual's accelerated test clock can
+    cancel prematurely via asyncio.wait_for's internal timeout.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._store: ResourceStore | None = None
+        self._scope: str = "default"
+
+    def attach_store(self, store: "ResourceStore", scope: str) -> None:
+        self._store = store
+        self._scope = scope
+
+    async def preview_cordon(
+        self, name: str, unschedulable: bool, *, uid: str | None = None
+    ) -> list[str] | None:
+        if self._store is not None:
+            replacement = GenericSummary(
+                name=name, namespace="", kind="Node", created="", uid="node-uid-REPLACED"
+            )
+            self._store.apply_event("nodes", self._scope, "MODIFIED", replacement)
+        return None
+
+
+async def test_cordon_uid_drift_during_dry_run_blocks_write(tmp_path: Path) -> None:
+    rec = _StoreReplacingRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    rec.attach_store(app.store, app.config.namespace or "default")
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        # Attach the live scope once the nodes view is active.
+        rec.attach_store(app.store, app.current_scope)
+        await pilot.press("c")
+        await pilot.pause(0.4)
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert rec.calls == []
+        assert not audit_path.exists() or "success" not in audit_path.read_text()
+
+
+async def test_cordon_uid_drift_during_confirmation_blocks_write(tmp_path: Path) -> None:
+    rec = NodeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        await pilot.press("c")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="cordon dialog open",
+        )
+        replacement = GenericSummary(
+            name="worker-1", namespace="", kind="Node", created="", uid="node-uid-REPLACED"
+        )
+        app.store.apply_event("nodes", app.current_scope, "MODIFIED", replacement)
+        await pilot.press("y")
+        await pilot.pause(0.4)
+        assert rec.calls == []
+        assert not audit_path.exists() or "success" not in audit_path.read_text()

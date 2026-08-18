@@ -142,6 +142,7 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 from korvid.ui.navigation import DrillLevel, NavigationStack
+from korvid.ui.node_impact_preview import render_node_maintenance_lines
 from korvid.ui.operator_controller import OperatorController
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader
 from korvid.ui.resize_impact_preview import compose_resize_impact_lines
@@ -6365,13 +6366,33 @@ class KorvidApp(App[None]):
             )
             return
         epoch = self._ctx_epoch
+        origin = self._write_origin()
         if not await self._precheck_keybinding_write(action, meta, None, name):
             return
-        preview = await self._dry_run_preview(ops.preview_cordon(name, unschedulable, uid=uid))
-        if not self._write_context_intact(
-            action, meta, None, name, phase="the dry-run preview", epoch=epoch
+        if not self._write_identity_intact(
+            action,
+            meta,
+            None,
+            name,
+            uid,
+            phase="the permission check",
+            epoch=epoch,
+            origin=origin,
         ):
             return
+        preview = await self._dry_run_preview(ops.preview_cordon(name, unschedulable, uid=uid))
+        if not self._write_identity_intact(
+            action,
+            meta,
+            None,
+            name,
+            uid,
+            phase="the dry-run preview",
+            epoch=epoch,
+            origin=origin,
+        ):
+            return
+        impact_action = ImpactAction.CORDON_NODE if unschedulable else ImpactAction.UNCORDON_NODE
         flag = "true" if unschedulable else "false"
         await self._push_write_confirmation(
             f"{action.capitalize()} nodes/{name}?",
@@ -6383,6 +6404,17 @@ class KorvidApp(App[None]):
             op_factory=lambda: ops.cordon_node(name, unschedulable, uid=uid),
             detail=f"spec.unschedulable={flag}",
             preview=preview,
+            impact_lines=render_node_maintenance_lines(impact_action),
+            approval_guard=lambda: self._write_identity_intact(
+                action,
+                meta,
+                None,
+                name,
+                uid,
+                phase="the confirmation dialog",
+                epoch=epoch,
+                origin=origin,
+            ),
         )
 
     async def action_drain_node(self) -> None:
