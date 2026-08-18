@@ -84,8 +84,8 @@ Prefer `uv` if you have neither: korvid needs **Python 3.11+**, which is
 newer than the system Python on macOS and on most enterprise Linux, and `uv`
 fetches a suitable interpreter for you instead of making that your problem.
 
-`python -m pip install 'korvid[all]==0.2.0'` also works **inside a
-virtualenv or a container image you control**. Do not run `pip install`
+`python -m pip install 'korvid[all]==0.2.0'` also works inside an activated
+virtual environment, including one created inside a container. Do not run `pip install`
 against your system Python — [PEP 668](https://peps.python.org/pep-0668/)
 managed Python installations block this with an
 `externally-managed-environment` error. Use `uv tool`, `pipx`, or create a
@@ -211,8 +211,8 @@ the full desired extra set instead of assuming extras expand in place:
 uv tool install --force 'korvid[all]==0.2.0'
 ```
 
-Use `python -m pip` only inside an activated virtual environment or a
-container image you control:
+Use `python -m pip` only inside an activated virtual environment, including
+one created inside a container:
 
 ```sh
 python -m pip install --upgrade 'korvid[all]==0.2.0'
@@ -243,9 +243,9 @@ Remove the tool with the installer that created its environment:
 uv tool uninstall korvid                 # or: pipx uninstall korvid
 ```
 
-Inside a virtual environment or a container image you control, pip users can
-run `python -m pip uninstall -y korvid`. These commands remove the package
-only. They do **not** remove `~/.config/korvid/config.yaml`, the fallback
+Inside the same activated virtual environment, including one created inside a
+container, pip users can run `python -m pip uninstall -y korvid`. These commands
+remove the package only. They do **not** remove `~/.config/korvid/config.yaml`, the fallback
 `~/.config/korvid/credentials.json`, the OS keyring credential
 (`korvid` / `github-oauth`), `~/.local/state/korvid/audit.jsonl`,
 `~/.local/state/korvid/mcp-endpoint.json` (and its `.lock` sibling),

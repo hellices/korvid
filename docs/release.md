@@ -318,7 +318,7 @@ brew test hellices/korvid/korvid
 ## Install, reinstall, and uninstall from PyPI
 
 The pip commands in this release-maintainer section assume an activated
-virtual environment or a container image you control. For a normal
+virtual environment, including one created inside a container. For a normal
 user-facing application install, follow the README's isolated `uv tool` or
 `pipx` path instead of pointing pip at the system Python.
 

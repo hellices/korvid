@@ -45,12 +45,13 @@ def _validate_install_guidance(artifact: Path, description: str) -> None:
     section = section_match.group("body")
     options = r"(?:[ \t]+--[A-Za-z0-9][A-Za-z0-9-]*)*"
     korvid_requirement = r"""[ \t]+['"]?korvid(?:\[|==|[ @'"]|$)"""
-    pip_match = re.search(
-        rf"(?m)^[ \t]*(?:python(?:3(?:\.\d+)?)? -m )?pip install{options}"
-        rf"{korvid_requirement}",
-        section,
-    )
-    pip_position = pip_match.start() if pip_match else -1
+    pip_command = rf"(?:python(?:3(?:\.\d+)?)? -m )?pip install{options}{korvid_requirement}"
+    pip_matches = [
+        match
+        for pattern in (rf"(?m)^[ \t]*{pip_command}", rf"`{pip_command}[^`\n]*`")
+        if (match := re.search(pattern, section)) is not None
+    ]
+    pip_position = min((match.start() for match in pip_matches), default=-1)
     isolated_positions = [
         match.start()
         for match in re.finditer(

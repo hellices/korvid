@@ -941,6 +941,21 @@ def test_artifact_metadata_rejects_pip_first_install_guidance(tmp_path: Path, co
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
+def test_artifact_metadata_rejects_an_inline_pip_first_command(tmp_path: Path) -> None:
+    body = (
+        "# korvid\n\nAI-native Kubernetes TUI with enough project detail to"
+        " produce a valid PyPI long description while reproducing inline"
+        " pip-first installation guidance.\n\n"
+        "## Installation\n\n"
+        "`python3 -m pip install 'korvid[all]==1.2.3'` also works.\n\n"
+        "```sh\nuv tool install 'korvid[all]==1.2.3'\n```\n"
+    )
+    dist = _fake_dist(tmp_path, _metadata_text(body=body))
+
+    with pytest.raises(ValueError, match="isolated application installer"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
 @pytest.mark.parametrize(
     "misleading_isolated_reference",
     [
@@ -1579,9 +1594,11 @@ def test_readme_recommends_an_isolated_install_for_an_application() -> None:
     install = readme[readme.index("## Installation") : readme.index("### Development")]
     assert f"uv tool install 'korvid[all]=={version}'" in install
     assert f"python -m pip install 'korvid[all]=={version}'        # recommended" not in install
-    assert "inside an activated virtual environment or a container image you control" in " ".join(
-        install.split()
+    assert "activated virtual environment, including one created inside a container" in " ".join(
+        readme.split()
     )
+    assert "virtualenv or a container image you control" not in readme
+    assert "virtual environment or a container image you control" not in readme
     assert "uv tool uninstall korvid" in install
     assert "pipx uninstall korvid" in install
     assert "3.11" in readme
@@ -1972,9 +1989,10 @@ def test_release_docs_keep_a_source_install_fallback_for_unreleased_main() -> No
             "## What the smoke matrix proves"
         )
     ]
-    assert "activated virtual environment or a container image you control" in " ".join(
+    assert "activated virtual environment, including one created inside a container" in " ".join(
         runbook_install.split()
     )
+    assert "virtual environment or a container image you control" not in runbook_install
     assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in readme
     assert "Tagged versions should be installed from PyPI" in readme
     assert "appearing on PyPI" not in runbook
