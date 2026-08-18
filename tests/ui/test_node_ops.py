@@ -31,7 +31,7 @@ from korvid.k8s.relationship_facts import (
     TargetReference,
 )
 from korvid.k8s.writes import WriteOps
-from korvid.ui.app import KorvidApp
+from korvid.ui.app import KorvidApp, PaneState
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
@@ -1057,3 +1057,393 @@ async def test_drain_plan_failure_never_calls_graph(tmp_path: Path) -> None:
             not (tmp_path / "audit.jsonl").exists()
             or "success" not in (tmp_path / "audit.jsonl").read_text()
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Injection-based fakes for drain identity/cancellation race tests (Task 5)
+#
+# Unlike asyncio.Event blocking (which deadlocks with Textual's pilot because
+# _wait_for_screen cannot complete while the action coroutine is suspended),
+# these fakes mutate app state FROM WITHIN the awaited call and return
+# immediately — the same pattern as _StoreReplacingRecorder above.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _CtxSwitchDuringPlanRecorder(NodeRecorder):
+    """Increments _ctx_epoch from within drain_plan, simulating a context switch
+    that happens while the API call for the plan is in flight."""
+
+    def __init__(self, plan: DrainPlan | None = None) -> None:
+        super().__init__(plan=plan)
+        self._app: KorvidApp | None = None
+
+    def attach(self, app: KorvidApp) -> None:
+        self._app = app
+
+    async def drain_plan(self, node_name: str) -> DrainPlan:
+        self.calls.append(("plan", node_name))
+        if self._app is not None:
+            self._app._ctx_epoch += 1
+        return DrainPlan(
+            targets=tuple(t for t in self.plan.targets if t.name not in self.evicted_names),
+            skipped_daemonset=self.plan.skipped_daemonset,
+            skipped_mirror=self.plan.skipped_mirror,
+        )
+
+
+class _FocusSwitchDuringGraphLister:
+    """list_relationship_objects fake that adds a second pane and switches focus
+    from within the call, simulating a workspace split that happens mid-load."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self._app: KorvidApp | None = None
+
+    def attach(self, app: KorvidApp) -> None:
+        self._app = app
+
+    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
+        self.calls.append((meta.plural, namespace))
+        if self._app is not None and meta.plural == "nodes":
+            # Replace pane-0 with a fresh object (same kind/scope/table_id but
+            # different identity) so origin.pane is not self._app._pane — the
+            # same effect as the user focusing a different pane, but without
+            # a second ResourceTable widget in the DOM.
+            current = self._app._panes[0]
+            replacement = PaneState(current.kind, current.scope, current.table_id)
+            self._app._panes[0] = replacement
+        if meta.plural == "nodes":
+            return [
+                GenericSummary(
+                    name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
+                )
+            ]
+        if meta.plural == "pods":
+            return [
+                PodSummary(
+                    name="web-1",
+                    namespace="default",
+                    phase="Running",
+                    ready="1/1",
+                    restarts=0,
+                    node="worker-1",
+                    uid="pod-uid-1",
+                )
+            ]
+        return []
+
+
+class _ScopeChangeDuringGraphLister:
+    """list_relationship_objects fake that mutates the pane scope from within
+    the call, simulating a :ns re-scope that arrives while the graph LIST is
+    in flight."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self._app: KorvidApp | None = None
+
+    def attach(self, app: KorvidApp) -> None:
+        self._app = app
+
+    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
+        self.calls.append((meta.plural, namespace))
+        if self._app is not None and meta.plural == "nodes":
+            self._app._panes[0].scope = "other-namespace"
+        if meta.plural == "nodes":
+            return [
+                GenericSummary(
+                    name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
+                )
+            ]
+        if meta.plural == "pods":
+            return [
+                PodSummary(
+                    name="web-1",
+                    namespace="default",
+                    phase="Running",
+                    ready="1/1",
+                    restarts=0,
+                    node="worker-1",
+                    uid="pod-uid-1",
+                )
+            ]
+        return []
+
+
+class _UidChangeDuringGraphLister:
+    """list_relationship_objects fake that replaces the node UID in the store
+    from within the call, simulating a pod-delete-recreate that completes while
+    the graph LIST is in flight."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self._store: ResourceStore | None = None
+        self._scope: str = "default"
+
+    def attach(self, store: ResourceStore, scope: str) -> None:
+        self._store = store
+        self._scope = scope
+
+    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
+        self.calls.append((meta.plural, namespace))
+        if self._store is not None and meta.plural == "nodes":
+            replacement = GenericSummary(
+                name="worker-1", namespace="", kind="Node", created="", uid="node-uid-REPLACED"
+            )
+            self._store.apply_event("nodes", self._scope, "MODIFIED", replacement)
+        if meta.plural == "nodes":
+            return [
+                GenericSummary(
+                    name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
+                )
+            ]
+        if meta.plural == "pods":
+            return [
+                PodSummary(
+                    name="web-1",
+                    namespace="default",
+                    phase="Running",
+                    ready="1/1",
+                    restarts=0,
+                    node="worker-1",
+                    uid="pod-uid-1",
+                )
+            ]
+        return []
+
+
+class _CtxSwitchDuringGraphLister:
+    """list_relationship_objects fake that increments _ctx_epoch from within the
+    call, simulating a context switch (`:ctx`) that completes while the graph
+    LIST is in flight.  The graph load itself returns normally; the identity
+    check immediately after it detects the stale epoch and cancels."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self._app: KorvidApp | None = None
+
+    def attach(self, app: KorvidApp) -> None:
+        self._app = app
+
+    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
+        self.calls.append((meta.plural, namespace))
+        if self._app is not None and meta.plural == "nodes":
+            self._app._ctx_epoch += 1
+        if meta.plural == "nodes":
+            return [
+                GenericSummary(
+                    name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
+                )
+            ]
+        if meta.plural == "pods":
+            return [
+                PodSummary(
+                    name="web-1",
+                    namespace="default",
+                    phase="Running",
+                    ready="1/1",
+                    restarts=0,
+                    node="worker-1",
+                    uid="pod-uid-1",
+                )
+            ]
+        return []
+
+
+def _make_app_with_custom_lister(
+    recorder: NodeRecorder,
+    audit_path: Path,
+    lister: object,
+) -> KorvidApp:
+    """Minimal KorvidApp fixture wired with an arbitrary list_relationship_objects."""
+    store = ResourceStore()
+    data: dict[str, list[Summary]] = {
+        "pods": [
+            PodSummary(
+                name="web-1",
+                namespace="default",
+                phase="Running",
+                ready="1/1",
+                restarts=0,
+                node="worker-1",
+                uid="pod-uid-1",
+            )
+        ],
+        "nodes": [
+            GenericSummary(
+                name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
+            ),
+        ],
+    }
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        for obj in data.get(kind, []):
+            yield ("ADDED", obj)
+        while True:
+            await asyncio.sleep(0.01)
+
+    return KorvidApp(
+        config=KorvidConfig(namespace="default", readonly=False),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        aliases=dict(_ALIASES),
+        write_ops=recorder,
+        audit=AuditLog(audit_path),
+        check_permission=None,
+        list_relationship_objects=lister,  # type: ignore[arg-type]
+    )
+
+
+async def test_drain_context_switch_during_plan_refuses_confirmation(
+    tmp_path: Path,
+) -> None:
+    """Context switch that arrives while drain_plan is awaited cancels before dialog."""
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = _CtxSwitchDuringPlanRecorder(plan=plan)
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)  # no relationship lister needed
+    rec.attach(app)
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(
+            pilot,
+            lambda: any("cancelled" in n.message for n in app._notifications),
+            label="drain cancelled notification",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert app._active_cluster_writes == 0
+        assert not any(call[0] == "cordon" for call in rec.calls)
+        assert not any(call[0] == "evict" for call in rec.calls)
+        assert not audit_path.exists()
+
+
+async def test_drain_focus_change_during_graph_load_refuses_confirmation(
+    tmp_path: Path,
+) -> None:
+    """Switching pane focus during graph load cancels before the dialog."""
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = NodeRecorder(plan=plan)
+    audit_path = tmp_path / "audit.jsonl"
+    lister = _FocusSwitchDuringGraphLister()
+    app = _make_app_with_custom_lister(rec, audit_path, lister)
+    lister.attach(app)
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(
+            pilot,
+            lambda: any("cancelled" in n.message for n in app._notifications),
+            label="drain cancelled notification",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert app._active_cluster_writes == 0
+        assert not any(call[0] == "cordon" for call in rec.calls)
+        assert not any(call[0] == "evict" for call in rec.calls)
+        assert not audit_path.exists()
+
+
+async def test_drain_scope_change_during_graph_load_refuses_confirmation(
+    tmp_path: Path,
+) -> None:
+    """Re-scoping the originating pane during graph load cancels before the dialog."""
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = NodeRecorder(plan=plan)
+    audit_path = tmp_path / "audit.jsonl"
+    lister = _ScopeChangeDuringGraphLister()
+    app = _make_app_with_custom_lister(rec, audit_path, lister)
+    lister.attach(app)
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(
+            pilot,
+            lambda: any("cancelled" in n.message for n in app._notifications),
+            label="drain cancelled notification",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert app._active_cluster_writes == 0
+        assert not any(call[0] == "cordon" for call in rec.calls)
+        assert not any(call[0] == "evict" for call in rec.calls)
+        assert not audit_path.exists()
+
+
+async def test_drain_uid_change_during_graph_load_refuses_confirmation(
+    tmp_path: Path,
+) -> None:
+    """Node UID replaced while the graph LIST is in flight cancels before dialog."""
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = NodeRecorder(plan=plan)
+    audit_path = tmp_path / "audit.jsonl"
+    lister = _UidChangeDuringGraphLister()
+    app = _make_app_with_custom_lister(rec, audit_path, lister)
+    lister.attach(app.store, app.config.namespace or "default")
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        lister.attach(app.store, app.current_scope)
+        await pilot.press("D")
+        await until(
+            pilot,
+            lambda: any("cancelled" in n.message for n in app._notifications),
+            label="drain cancelled notification",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert app._active_cluster_writes == 0
+        assert not any(call[0] == "cordon" for call in rec.calls)
+        assert not any(call[0] == "evict" for call in rec.calls)
+        assert not audit_path.exists()
+
+
+async def test_drain_uid_change_in_confirmation_dispatches_nothing(
+    tmp_path: Path,
+) -> None:
+    """UID replaced while the drain confirmation dialog is open: no write, no audit."""
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    calls: list[tuple[str, str | None]] = []
+    rec = NodeRecorder(plan=plan)
+    rec.release_evictions.clear()  # hold any eviction so nothing can run
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path, relationship_calls=calls)
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        # Replace the node UID while the dialog is open.
+        replacement = GenericSummary(
+            name="worker-1", namespace="", kind="Node", created="", uid="node-uid-REPLACED"
+        )
+        app.store.apply_event("nodes", app.current_scope, "MODIFIED", replacement)
+        await _confirm_typed(pilot, "worker-1")
+        await until(
+            pilot,
+            lambda: any("cancelled" in n.message for n in app._notifications),
+            label="drain cancelled after uid drift in confirmation",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert app._active_cluster_writes == 0
+        assert not any(call[0] == "cordon" for call in rec.calls)
+        assert not any(call[0] == "evict" for call in rec.calls)
+        assert not audit_path.exists()
+
+
+async def test_cancelled_drain_graph_load_dispatches_nothing(tmp_path: Path) -> None:
+    """Context switch occurring during graph load cancels the drain before dialog."""
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = NodeRecorder(plan=plan)
+    audit_path = tmp_path / "audit.jsonl"
+    lister = _CtxSwitchDuringGraphLister()
+    app = _make_app_with_custom_lister(rec, audit_path, lister)
+    lister.attach(app)
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(
+            pilot,
+            lambda: any("cancelled" in n.message for n in app._notifications),
+            label="drain cancelled after context switch during graph",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert app._active_cluster_writes == 0
+        assert not any(call[0] == "cordon" for call in rec.calls)
+        assert not any(call[0] == "evict" for call in rec.calls)
+        assert not audit_path.exists()

@@ -6498,9 +6498,19 @@ class KorvidApp(App[None]):
             return
 
         def _done(confirmed: bool | None) -> None:
-            if confirmed:
-                self._drain_node = name
-                self._drain_worker = self.run_worker(self._run_drain(ops, meta, name, uid, plan))
+            if not confirmed or not self._write_identity_intact(
+                "drain",
+                meta,
+                None,
+                name,
+                uid,
+                phase="the confirmation dialog",
+                epoch=epoch,
+                origin=origin,
+            ):
+                return
+            self._drain_node = name
+            self._drain_worker = self.run_worker(self._run_drain(ops, meta, name, uid, plan))
 
         blocked_now = sum(1 for t in plan.targets if t.pdb_blocked is not None)
         note = f"; {blocked_now} currently PDB-blocked" if blocked_now else ""
