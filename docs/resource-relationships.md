@@ -390,6 +390,16 @@ participate, and the set differs by action:
 | delete | `owned_by`, `managed_by`, `routes_to`, `uses_volume`, `uses_config`, `protected_by`, `scheduled_on`, `bound_to` |
 | rollout restart | `owned_by`, `managed_by` |
 | scale down (known decrease only) | `owned_by`, `managed_by`, `selects`, `routes_to` |
+| cordon Node | none |
+| uncordon Node | none |
+| drain Node | `scheduled_on` |
+
+For cordon and uncordon, no snapshot is loaded and no graph walk is
+performed — the advisory section is derived locally. For drain, the
+graph walk follows `scheduled_on` (Pods currently placed on the Node).
+`protected_by` remains excluded from the drain walk because PDB blocker
+state comes from `DrainPlan`, not the graph dependent walk; the plan is
+the authoritative source for which Pods are PDB-blocked.
 
 `selects` is deliberately excluded from delete and rollout restart. A Service
 selecting many Pods does not fail because one selected Pod is deleted, so
@@ -511,5 +521,6 @@ resize considerations are rendered from the captured Pod manifest and
 requested resources, not inferred from graph edges.
 
 The remaining write types (scale-up, a scale with no readable current count,
-edit, cordon/uncordon, drain, Helm, operator) have no tested per-relation
-semantics yet and deliberately show nothing rather than a plausible guess.
+edit, Helm, operator) have no tested per-relation semantics yet and
+deliberately show nothing rather than a plausible guess. Cordon, uncordon,
+and drain use the node maintenance advisory path described above.

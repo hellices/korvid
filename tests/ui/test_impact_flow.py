@@ -1260,11 +1260,10 @@ async def test_non_decreasing_or_unknown_scale_never_loads_relationships(
         assert env.lister.calls == []
 
 
-async def test_cordon_dialog_has_no_impact_section(tmp_path: Path) -> None:
-    """A second unsupported flow, on a cluster-scoped kind: the delivery
-    boundary is delete, rollout restart and scale-down, and everything else
-    stays exactly as it was (see the roadmap deviation in Global
-    Constraints)."""
+async def test_cordon_dialog_shows_local_impact_without_graph_load(tmp_path: Path) -> None:
+    """Cordon shows the node maintenance advisory (local lines only) without
+    loading the relationship graph — no snapshot LIST is issued and no write
+    op is recorded before the dialog is dismissed."""
     rows: dict[str, list[Any]] = {"nodes": [_node()]}
     env = ImpactEnv(tmp_path / "audit.jsonl", rows=rows)
     async with env.app.run_test() as pilot:
@@ -1273,7 +1272,9 @@ async def test_cordon_dialog_has_no_impact_section(tmp_path: Path) -> None:
         await until(
             pilot, lambda: isinstance(env.app.screen, ConfirmScreen), label="cordon confirm"
         )
-        assert not env.app.screen.query(".confirm-impact")
+        assert env.app.screen.query(".confirm-impact")
+        impact_text = str(env.app.screen.query_one(".confirm-impact", Static).render())
+        assert "Node maintenance impact (advisory):" in impact_text
         assert env.lister.calls == []
         assert env.ops.calls == []
 
