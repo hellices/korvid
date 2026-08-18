@@ -915,7 +915,15 @@ def test_artifact_metadata_requires_an_installation_section(tmp_path: Path) -> N
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
-def test_artifact_metadata_rejects_pip_first_install_guidance(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python -m pip install",
+        "python3 -m pip install",
+        "pip install",
+    ],
+)
+def test_artifact_metadata_rejects_pip_first_install_guidance(tmp_path: Path, command: str) -> None:
     """The uploaded long description, not the repository README, is the PyPI page."""
     body = (
         "# korvid\n\nAI-native Kubernetes TUI with a Quick Start that already"
@@ -923,8 +931,9 @@ def test_artifact_metadata_rejects_pip_first_install_guidance(tmp_path: Path) ->
         " project detail to represent the metadata that was published for"
         " version 0.2.0.\n\n"
         "## Installation\n\n"
-        "```sh\npython -m pip install 'korvid[all]==1.2.3'\n```\n\n"
-        "This pip-first section is what users reach from the PyPI project page.\n"
+        f"```sh\n{command} 'korvid[all]==1.2.3'\n```\n\n"
+        "An isolated installer is mentioned only afterward:\n\n"
+        "```sh\nuv tool install 'korvid[all]==1.2.3'\n```\n"
     )
     dist = _fake_dist(tmp_path, _metadata_text(body=body))
 

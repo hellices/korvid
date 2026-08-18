@@ -43,7 +43,11 @@ def _validate_install_guidance(artifact: Path, description: str) -> None:
             f"{artifact.name}: the PyPI long description is missing ## Installation section"
         )
     section = section_match.group("body")
-    pip_position = section.find("python -m pip install")
+    pip_match = re.search(
+        r"(?m)^[ \t]*(?:python(?:3(?:\.\d+)?)? -m )?pip install\b",
+        section,
+    )
+    pip_position = pip_match.start() if pip_match else -1
     isolated_positions = [
         position
         for installer in ("uv tool install", "pipx install")
