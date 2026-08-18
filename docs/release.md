@@ -325,33 +325,37 @@ user-facing application install, follow the README's isolated `uv tool` or
 The simplest install is the full feature set:
 
 ```sh
-python -m pip install 'korvid[all]==0.2.0'
+uv tool install 'korvid[all]==0.2.0'
+# or
+pipx install 'korvid[all]==0.2.0'
 ```
 
 For unreleased `main` development, install from source instead:
 
 ```sh
-python -m pip install 'korvid[all] @ git+https://github.com/hellices/korvid'
+uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'
+# or
+pipx install 'korvid[all] @ git+https://github.com/hellices/korvid'
 ```
 
 Tagged versions should be installed from PyPI; the source install is only a
 fallback for unreleased code.
 
-If you already installed any narrower korvid requirement, rerun your package
-manager with the full desired extra set rather than assuming it will expand
-extras in place. With pip, the explicit reinstall/extra-expansion command is:
+If you already installed any narrower korvid requirement, reinstall the full
+desired extra set:
 
 ```sh
-python -m pip install --upgrade 'korvid[all]==0.2.0'
+uv tool install --force 'korvid[all]==0.2.0'
+# or
+pipx install --force 'korvid[all]==0.2.0'
 ```
-
-With other installers, use their reinstall/upgrade equivalent or uninstall
-first, then install the exact requirement you want.
 
 To remove the package itself:
 
 ```sh
-python -m pip uninstall -y korvid
+uv tool uninstall korvid
+# or
+pipx uninstall korvid
 ```
 
 ## What the smoke matrix proves
