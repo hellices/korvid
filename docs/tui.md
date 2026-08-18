@@ -241,7 +241,7 @@ than a plausible guess.
 
 ### Node maintenance impact
 
-Cordon (`C`), uncordon (`U`), and drain (`shift-D`) show a separate
+Cordon (`c`), uncordon (`u`), and drain (`shift-D`) show a separate
 advisory section headed exactly:
 
     Node maintenance impact (advisory):
@@ -266,8 +266,8 @@ for an uncordon.
 Drain keeps `drain impact plan:` as the authoritative section — the
 preview rendered by `DrainPlan.preview_lines()`, shown under the heading
 `drain impact plan:` above the server dry-run preview. The node maintenance
-advisory is appended below that plan. When the relationship graph load
-succeeds, the graph section appears first (above the local advisory lines);
+advisory appears in the impact section above that plan. When the relationship
+graph load succeeds, the graph section appears first (above the local advisory lines);
 when it fails, the local lines remain visible and graph failure never
 removes the plan or blocks approval. Plan failure (an exception from
 `ops.drain_plan`) aborts the whole flow before any dialog opens — no
