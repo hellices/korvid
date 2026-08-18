@@ -23,6 +23,13 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.drain import DrainPlan, DrainTarget
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.k8s.relationship_facts import (
+    FactConfidence,
+    ReferenceFact,
+    RelationKind,
+    RelationshipFacts,
+    TargetReference,
+)
 from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
@@ -145,6 +152,32 @@ def make_app(
     ) -> list[GenericSummary]:
         assert relationship_calls is not None
         relationship_calls.append((meta.plural, namespace))
+        if meta.plural == "nodes":
+            return [
+                GenericSummary(
+                    name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
+                )
+            ]
+        if meta.plural == "pods":
+            return [
+                GenericSummary(
+                    name="web-1",
+                    namespace="default",
+                    kind="Pod",
+                    created="",
+                    uid="pod-uid-1",
+                    relationships=RelationshipFacts(
+                        references=(
+                            ReferenceFact(
+                                relation=RelationKind.SCHEDULED_ON,
+                                target=TargetReference("", "Node", "", "worker-1", "node-uid-1"),
+                                confidence=FactConfidence.OBSERVED,
+                                field="spec.nodeName",
+                            ),
+                        )
+                    ),
+                )
+            ]
         return []
 
     return KorvidApp(
@@ -886,3 +919,141 @@ async def test_cordon_uid_drift_during_confirmation_blocks_write(tmp_path: Path)
         await pilot.pause(0.4)
         assert rec.calls == []
         assert not audit_path.exists() or "success" not in audit_path.read_text()
+
+
+async def test_drain_shows_plan_graph_and_local_sections(tmp_path: Path) -> None:
+    plan = DrainPlan(
+        targets=(_target("web-1"),),
+        skipped_daemonset=("default/agent",),
+        skipped_mirror=(),
+    )
+    calls: list[tuple[str, str | None]] = []
+    app = make_app(
+        NodeRecorder(plan),
+        tmp_path / "audit.jsonl",
+        relationship_calls=calls,
+    )
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ConfirmScreen) and bool(app.screen.query(".confirm-impact"))
+            ),
+            label="drain impact rendered",
+        )
+        preview = str(app.screen.query_one(".confirm-preview", Static).render())
+        impact = str(app.screen.query_one(".confirm-impact", Static).render())
+        assert "web-1" in preview
+        assert "agent" in preview
+        assert "graph-derived impact (advisory):" in impact
+        assert "Pod/default/web-1" in impact
+        assert "Node maintenance impact (advisory):" in impact
+        assert "the drain impact plan defines exact eviction targets" in impact
+        assert {namespace for _, namespace in calls} == {None}
+        await pilot.press("escape")
+
+
+async def test_drain_graph_failure_keeps_plan_and_notes(tmp_path: Path) -> None:
+    plan = DrainPlan(
+        targets=(_target("web-1"),),
+        skipped_daemonset=(),
+        skipped_mirror=(),
+    )
+    calls: list[tuple[str, str | None]] = []
+
+    async def _bad_relationship(meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
+        calls.append((meta.plural, namespace))
+        raise RuntimeError("secret response body")
+
+    store = ResourceStore()
+    data: dict[str, list[Summary]] = {
+        "pods": [
+            PodSummary(
+                name="web-1",
+                namespace="default",
+                phase="Running",
+                ready="1/1",
+                restarts=0,
+                node="worker-1",
+                uid="pod-uid-1",
+            )
+        ],
+        "nodes": [
+            GenericSummary(
+                name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
+            ),
+        ],
+    }
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        for obj in data.get(kind, []):
+            yield ("ADDED", obj)
+        while True:
+            await asyncio.sleep(0.01)
+
+    rec = NodeRecorder(plan)
+    audit_path = tmp_path / "audit.jsonl"
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default", readonly=False),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        aliases=dict(_ALIASES),
+        write_ops=rec,
+        audit=AuditLog(audit_path),
+        check_permission=None,
+        list_relationship_objects=_bad_relationship,
+    )
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ConfirmScreen) and bool(app.screen.query(".confirm-impact"))
+            ),
+            label="drain impact rendered after graph failure",
+        )
+        preview = str(app.screen.query_one(".confirm-preview", Static).render())
+        impact = str(app.screen.query_one(".confirm-impact", Static).render())
+        assert "web-1" in preview
+        assert "impact unavailable; approval remains available" in impact
+        assert "Node maintenance impact (advisory):" in impact
+        assert "the drain impact plan defines exact eviction targets" in impact
+        assert "secret response body" not in impact
+        assert "secret response body" not in preview
+        # Declining must not create a write or audit entry
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        assert not any(call[0] == "cordon" for call in rec.calls)
+        assert not audit_path.exists() or "success" not in audit_path.read_text()
+
+
+async def test_drain_plan_failure_never_calls_graph(tmp_path: Path) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    class FailingWithGraph(NodeRecorder):
+        async def drain_plan(self, node_name: str) -> DrainPlan:
+            raise ApiStatusError(403, "Forbidden")
+
+    rec = FailingWithGraph()
+    app = make_app(rec, tmp_path / "audit.jsonl", relationship_calls=calls)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(
+            pilot,
+            lambda: any(
+                "could not compute the impact plan" in n.message for n in app._notifications
+            ),
+            label="drain plan failure shown",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert calls == []
+        assert not any(call[0] == "cordon" for call in rec.calls)
+        assert (
+            not (tmp_path / "audit.jsonl").exists()
+            or "success" not in (tmp_path / "audit.jsonl").read_text()
+        )

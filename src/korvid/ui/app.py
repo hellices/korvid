@@ -142,7 +142,10 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 from korvid.ui.navigation import DrillLevel, NavigationStack
-from korvid.ui.node_impact_preview import render_node_maintenance_lines
+from korvid.ui.node_impact_preview import (
+    compose_node_maintenance_lines,
+    render_node_maintenance_lines,
+)
 from korvid.ui.operator_controller import OperatorController
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader
 from korvid.ui.resize_impact_preview import compose_resize_impact_lines
@@ -6447,6 +6450,7 @@ class KorvidApp(App[None]):
             return
         ops, meta, name, uid = resolved
         epoch = self._ctx_epoch
+        origin = self._write_origin()
         if not await self._precheck_keybinding_write("drain", meta, None, name):
             return
         try:
@@ -6457,8 +6461,39 @@ class KorvidApp(App[None]):
                 severity="error",
             )
             return
-        if not self._write_context_intact(
-            "drain", meta, None, name, phase="the drain plan", epoch=epoch
+        if not self._write_identity_intact(
+            "drain",
+            meta,
+            None,
+            name,
+            uid,
+            phase="the drain plan",
+            epoch=epoch,
+            origin=origin,
+        ):
+            return
+
+        graph_lines = await self._impact_preview(
+            ImpactAction.DRAIN_NODE,
+            meta,
+            None,
+            name,
+            uid,
+            origin=origin,
+        )
+        impact_lines = compose_node_maintenance_lines(
+            graph_lines,
+            ImpactAction.DRAIN_NODE,
+        )
+        if not self._write_identity_intact(
+            "drain",
+            meta,
+            None,
+            name,
+            uid,
+            phase="the impact preview",
+            epoch=epoch,
+            origin=origin,
         ):
             return
 
@@ -6478,6 +6513,7 @@ class KorvidApp(App[None]):
                 require_name=name,
                 preview=plan.preview_lines(),
                 preview_title="drain impact plan:",
+                impact_lines=impact_lines,
             ),
             _done,
         )
