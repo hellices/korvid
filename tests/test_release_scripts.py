@@ -1491,7 +1491,12 @@ def test_readme_has_no_relative_links_because_pypi_cannot_follow_them() -> None:
 
 
 def test_readme_recommends_an_isolated_install_for_an_application() -> None:
-    """Every active public path isolates this CLI from system Python."""
+    """Every active public path isolates this CLI from system Python.
+
+    PEP 668 protects the system interpreter, so `--break-system-packages` is
+    prohibited and installs must stay in isolated `uv tool` or `pipx`
+    environments.
+    """
     version = _project_version()
     readme = _readme()
     quick_start = markdown_section(readme, "Quick start")
