@@ -903,7 +903,7 @@ async def test_cordon_uid_drift_during_dry_run_blocks_write(tmp_path: Path) -> N
         )
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
-        assert not audit_path.exists() or "success" not in audit_path.read_text()
+        assert not audit_path.exists()
 
 
 async def test_cordon_uid_drift_during_confirmation_blocks_write(tmp_path: Path) -> None:
@@ -932,7 +932,7 @@ async def test_cordon_uid_drift_during_confirmation_blocks_write(tmp_path: Path)
             label="cordon confirmation UID drift cancellation",
         )
         assert rec.calls == []
-        assert not audit_path.exists() or "success" not in audit_path.read_text()
+        assert not audit_path.exists()
 
 
 async def test_drain_shows_plan_graph_and_local_sections(tmp_path: Path) -> None:
