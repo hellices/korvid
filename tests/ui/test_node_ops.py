@@ -893,7 +893,14 @@ async def test_cordon_uid_drift_during_dry_run_blocks_write(tmp_path: Path) -> N
         # Attach the live scope once the nodes view is active.
         rec.attach_store(app.store, app.current_scope)
         await pilot.press("c")
-        await pilot.pause(0.4)
+        await until(
+            pilot,
+            lambda: any(
+                "selection changed during the dry-run preview" in n.message
+                for n in app._notifications
+            ),
+            label="cordon dry-run UID drift cancellation",
+        )
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
         assert not audit_path.exists() or "success" not in audit_path.read_text()
@@ -916,7 +923,14 @@ async def test_cordon_uid_drift_during_confirmation_blocks_write(tmp_path: Path)
         )
         app.store.apply_event("nodes", app.current_scope, "MODIFIED", replacement)
         await pilot.press("y")
-        await pilot.pause(0.4)
+        await until(
+            pilot,
+            lambda: any(
+                "selection changed during the confirmation dialog" in n.message
+                for n in app._notifications
+            ),
+            label="cordon confirmation UID drift cancellation",
+        )
         assert rec.calls == []
         assert not audit_path.exists() or "success" not in audit_path.read_text()
 
@@ -1025,7 +1039,11 @@ async def test_drain_graph_failure_keeps_plan_and_notes(tmp_path: Path) -> None:
         assert "secret response body" not in preview
         # Declining must not create a write or audit entry
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: not isinstance(app.screen, ConfirmScreen),
+            label="drain confirmation dismissed",
+        )
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not audit_path.exists() or "success" not in audit_path.read_text()
 
@@ -1172,7 +1190,7 @@ class _ScopeChangeDuringGraphLister:
 
 class _UidChangeDuringGraphLister:
     """list_relationship_objects fake that replaces the node UID in the store
-    from within the call, simulating a pod-delete-recreate that completes while
+    from within the call, simulating a Node delete-recreate that completes while
     the graph LIST is in flight."""
 
     def __init__(self) -> None:
@@ -1290,6 +1308,7 @@ def _make_app_with_custom_lister(
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None,
+        # Race fakes return the broader Summary union used by relationship loading.
         list_relationship_objects=lister,  # type: ignore[arg-type]
     )
 
