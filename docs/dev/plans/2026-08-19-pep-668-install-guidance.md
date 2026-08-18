@@ -13,7 +13,8 @@
 - Work only in `/Users/hwang-inhwan/workspace/kube/.worktrees/fix-302-pep668-install` on branch `fix/302-pep668-install`.
 - Public application installation uses `uv tool install` first and names `pipx install` as the equivalent alternative.
 - `python -m pip` remains only in an explicitly activated virtualenv, controlled container, air-gap bundle, or maintainer-only release procedure.
-- Never recommend or execute `--break-system-packages`.
+- Never recommend or execute `--break-system-packages`; active guidance must
+  explicitly tell readers not to use it.
 - Do not change `pyproject.toml`, dependency declarations, build-system pins, release workflows, or `uv.lock`.
 - Do not rewrite historical implementation plans or immutable historical release notes.
 - Derive release-version assertions from `pyproject.toml`; active commands must name `0.2.0` on this branch.
@@ -76,7 +77,7 @@ def test_readme_recommends_an_isolated_install_for_an_application() -> None:
     assert "python -m pip uninstall" not in install
     assert "externally-managed-environment" in install
     assert "virtual environment" in install
-    assert "--break-system-packages" not in readme
+    assert "Do not use `--break-system-packages`" in install
     assert "3.11" in readme
 ```
 
@@ -433,13 +434,16 @@ git commit -m "docs: isolate optional and release installs"
 Run:
 
 ```bash
-if rg -n -- '--break-system-packages' README.md docs/agent.md docs/observability.md docs/release.md; then
+rg -n -F 'Do not use `--break-system-packages`' README.md
+
+if rg -n -- '--break-system-packages' docs/agent.md docs/observability.md docs/release.md; then
   echo "unsafe PEP 668 override found" >&2
   exit 1
 fi
 ```
 
-Expected: exit 0 with no matches.
+Expected: README contains the explicit prohibition, secondary docs contain no
+unsafe override, and the command exits 0.
 
 - [ ] **Step 2: Verify the issue's failed command has an isolated replacement**
 
