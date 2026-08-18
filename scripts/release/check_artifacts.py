@@ -33,6 +33,29 @@ def _sdist_metadata(path: Path) -> Message:
         return email.message_from_bytes(extracted.read())
 
 
+def _validate_install_guidance(artifact: Path, description: str) -> None:
+    section_match = re.search(
+        r"(?ms)^## Installation[ \t]*\n(?P<body>.*?)(?=^##[ \t]|\Z)",
+        description,
+    )
+    if section_match is None:
+        raise ValueError(
+            f"{artifact.name}: the PyPI long description is missing ## Installation section"
+        )
+    section = section_match.group("body")
+    pip_position = section.find("python -m pip install")
+    isolated_positions = [
+        position
+        for installer in ("uv tool install", "pipx install")
+        if (position := section.find(installer)) != -1
+    ]
+    if not isolated_positions or (pip_position != -1 and pip_position < min(isolated_positions)):
+        raise ValueError(
+            f"{artifact.name}: the PyPI Installation section must recommend"
+            " an isolated application installer before pip"
+        )
+
+
 def _validate_project_page(artifact: Path, metadata: Message) -> None:
     """The fields that decide whether PyPI shows a page or a blank slab.
 
@@ -60,6 +83,7 @@ def _validate_project_page(artifact: Path, metadata: Message) -> None:
             f"{artifact.name}: the long description is empty or truncated;"
             " it is the PyPI project page"
         )
+    _validate_install_guidance(artifact, description)
     # A label alone is not a link: `Project-URL: Homepage` and
     # `Project-URL: Homepage,` both name the entry while pointing nowhere,
     # and either would render an empty sidebar.

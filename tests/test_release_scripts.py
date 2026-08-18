@@ -800,7 +800,11 @@ def _metadata_text(
         "# korvid\n\nAI-native Kubernetes TUI - a keyboard-first cockpit with an"
         " embedded agent that can read your cluster, explain what it found, and"
         " carry out changes only behind an explicit approval gate. Runs on"
-        " Linux, macOS and Windows against any reachable kube context.\n"
+        " Linux, macOS and Windows against any reachable kube context.\n\n"
+        "## Installation\n\n"
+        "Install this application in an isolated tool environment:\n\n"
+        "```sh\nuv tool install 'korvid[all]==1.2.3'\n```\n\n"
+        "Use `python -m pip` only inside an activated virtual environment.\n"
     ),
 ) -> str:
     entra = (
@@ -895,6 +899,36 @@ def test_artifact_metadata_requires_the_pypi_project_page_fields(tmp_path: Path)
     """
     dist = _fake_dist(tmp_path, _metadata_text(body=""))
     with pytest.raises(ValueError, match="long description"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_artifact_metadata_requires_an_installation_section(tmp_path: Path) -> None:
+    body = (
+        "# korvid\n\nAI-native Kubernetes TUI with enough project detail to"
+        " produce a valid PyPI long description, but no dedicated installation"
+        " section. Without that section, the release gate cannot prove which"
+        " installer the published project page recommends to application users.\n"
+    )
+    dist = _fake_dist(tmp_path, _metadata_text(body=body))
+
+    with pytest.raises(ValueError, match="missing ## Installation section"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_artifact_metadata_rejects_pip_first_install_guidance(tmp_path: Path) -> None:
+    """The uploaded long description, not the repository README, is the PyPI page."""
+    body = (
+        "# korvid\n\nAI-native Kubernetes TUI with a Quick Start that already"
+        " mentions `uv tool install` and `pipx install`, followed by enough"
+        " project detail to represent the metadata that was published for"
+        " version 0.2.0.\n\n"
+        "## Installation\n\n"
+        "```sh\npython -m pip install 'korvid[all]==1.2.3'\n```\n\n"
+        "This pip-first section is what users reach from the PyPI project page.\n"
+    )
+    dist = _fake_dist(tmp_path, _metadata_text(body=body))
+
+    with pytest.raises(ValueError, match="isolated application installer"):
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
