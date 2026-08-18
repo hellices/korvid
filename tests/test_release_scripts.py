@@ -921,6 +921,8 @@ def test_artifact_metadata_requires_an_installation_section(tmp_path: Path) -> N
         "python -m pip install",
         "python3 -m pip install",
         "pip install",
+        "pip install -U",
+        "pip install --index-url https://packages.example.com/simple",
     ],
 )
 def test_artifact_metadata_rejects_pip_first_install_guidance(tmp_path: Path, command: str) -> None:
