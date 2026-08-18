@@ -439,6 +439,8 @@ git commit -m "feat: render node maintenance impact notes"
 
 - [ ] **Step 1: Add failing no-load and wording tests**
 
+Add `import pytest` beside the existing test imports.
+
 Extend `make_app` in `tests/ui/test_node_ops.py` with:
 
 ```python
@@ -627,7 +629,7 @@ Add:
 async def test_drain_shows_plan_graph_and_local_sections(tmp_path: Path) -> None:
     plan = DrainPlan(
         targets=(_target("web-1"),),
-        skipped_daemonset=(_target("agent"),),
+        skipped_daemonset=("default/agent",),
         skipped_mirror=(),
     )
     calls: list[tuple[str, str | None]] = []
