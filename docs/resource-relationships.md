@@ -378,12 +378,12 @@ all.
 ## Blast radius in write previews
 
 The same snapshot feeds the approval dialogs for `Ctrl-D` (delete), `r`
-(rollout restart), and `S` (scale) when the scale is a *known decrease* —
-the row's current desired replica count was readable and the requested count
-is lower than it; a scale-up, a no-op, or a row with no readable desired
-count gets the ordinary confirmation with no graph section and no snapshot
-LIST at all. Only relationships with explicitly tested action semantics
-participate, and the set differs by action:
+(rollout restart), `S` (scale) when the scale is a *known decrease*, Pod
+resize, and Node drain. For scale, the row's current desired replica count
+must be readable and the requested count lower than it; a scale-up, a no-op,
+or a row with no readable desired count gets the ordinary confirmation with
+no graph section and no snapshot LIST at all. Only relationships with
+explicitly tested action semantics participate, and the set differs by action:
 
 | Action | Relations followed (target → its dependents) |
 |---|---|
@@ -513,14 +513,15 @@ that name now. The summary is advisory — see [Write impact
 preview](tui.md#write-impact-preview) for how it appears and what it never
 does.
 
-Delete, rollout restart, a known scale-down decrease, and Pod resize show
-this section today. `POD_RESIZE` (Pod resize) intentionally traverses no
-relation. The existing Pod object keeps its UID/IP, owner, node placement,
-mounts/config references, PDB membership, and routing membership. Runtime
-resize considerations are rendered from the captured Pod manifest and
-requested resources, not inferred from graph edges.
+Delete, rollout restart, a known scale-down decrease, Pod resize, and Node
+drain show this section today. `POD_RESIZE` (Pod resize) intentionally
+traverses no relation. The existing Pod object keeps its UID/IP, owner, node
+placement, mounts/config references, PDB membership, and routing membership.
+Runtime resize considerations are rendered from the captured Pod manifest
+and requested resources, not inferred from graph edges.
 
 The remaining write types (scale-up, a scale with no readable current count,
 edit, Helm, operator) have no tested per-relation semantics yet and
-deliberately show nothing rather than a plausible guess. Cordon, uncordon,
-and drain use the node maintenance advisory path described above.
+deliberately show nothing rather than a plausible guess. Cordon and uncordon
+use only the local node maintenance advisory path described above; drain
+combines its `scheduled_on` graph section with that local advisory.

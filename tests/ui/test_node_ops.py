@@ -832,9 +832,11 @@ async def test_cordon_toggle_shows_local_impact_without_graph_load(
     tmp_path: Path, key: str, expected: str
 ) -> None:
     calls: list[tuple[str, str | None]] = []
+    rec = NodeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
     app = make_app(
-        NodeRecorder(),
-        tmp_path / "audit.jsonl",
+        rec,
+        audit_path,
         relationship_calls=calls,
     )
     async with app.run_test() as pilot:
@@ -853,6 +855,13 @@ async def test_cordon_toggle_shows_local_impact_without_graph_load(
         assert "graph-derived impact" not in text
         assert calls == []
         await pilot.press("n")
+        await until(
+            pilot,
+            lambda: not isinstance(app.screen, ConfirmScreen),
+            label="node scheduling confirmation dismissed",
+        )
+        assert rec.calls == []
+        assert not audit_path.exists()
 
 
 class _StoreReplacingRecorder(NodeRecorder):
@@ -1045,7 +1054,8 @@ async def test_drain_graph_failure_keeps_plan_and_notes(tmp_path: Path) -> None:
             label="drain confirmation dismissed",
         )
         assert not any(call[0] == "cordon" for call in rec.calls)
-        assert not audit_path.exists() or "success" not in audit_path.read_text()
+        assert not any(call[0] == "evict" for call in rec.calls)
+        assert not audit_path.exists()
 
 
 async def test_drain_plan_failure_never_calls_graph(tmp_path: Path) -> None:
