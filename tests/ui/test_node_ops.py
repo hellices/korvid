@@ -1268,6 +1268,24 @@ class _CtxSwitchDuringGraphLister:
         return []
 
 
+class _BlockingGraphLister:
+    """Relationship lister that exposes cancellation while its first LIST is blocked."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
+        self.entered.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        return []
+
+
 def _make_app_with_custom_lister(
     recorder: NodeRecorder,
     audit_path: Path,
@@ -1445,7 +1463,9 @@ async def test_drain_uid_change_in_confirmation_dispatches_nothing(
         assert not audit_path.exists()
 
 
-async def test_cancelled_drain_graph_load_dispatches_nothing(tmp_path: Path) -> None:
+async def test_drain_context_switch_during_graph_load_refuses_confirmation(
+    tmp_path: Path,
+) -> None:
     """Context switch occurring during graph load cancels the drain before dialog."""
     plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
     rec = NodeRecorder(plan=plan)
@@ -1466,3 +1486,28 @@ async def test_cancelled_drain_graph_load_dispatches_nothing(tmp_path: Path) -> 
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
+
+
+async def test_cancelled_drain_graph_load_dispatches_nothing(tmp_path: Path) -> None:
+    """Task cancellation propagates from a blocked graph LIST without side effects."""
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = NodeRecorder(plan=plan)
+    audit_path = tmp_path / "audit.jsonl"
+    lister = _BlockingGraphLister()
+    app = _make_app_with_custom_lister(rec, audit_path, lister)
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        task = asyncio.create_task(app.action_drain_node())
+        try:
+            await until(pilot, lister.entered.is_set, label="drain graph LIST started")
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError, match=r"^$"):
+                await task
+            assert lister.cancelled.is_set()
+            assert not isinstance(app.screen, ConfirmScreen)
+            assert app._active_cluster_writes == 0
+            assert not any(call[0] == "cordon" for call in rec.calls)
+            assert not any(call[0] == "evict" for call in rec.calls)
+            assert not audit_path.exists()
+        finally:
+            lister.release.set()
