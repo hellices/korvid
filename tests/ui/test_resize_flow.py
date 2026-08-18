@@ -7,16 +7,19 @@ pods/resize; the executed write lands in the audit log.
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
+import pytest
 from textual.css.query import NoMatches
 from textual.widgets import Input, Static
+from textual.worker import Worker, WorkerState
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
-from korvid.core.store import ResourceStore, Summary
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary
@@ -110,6 +113,11 @@ def make_app(
     permitted: bool | None = None,
     check_calls: list[tuple[str, str, str, str | None, str, str]] | None = None,
     get_manifest: object = None,
+    pod_uid: str | None = "pod-uid-1",
+    relationship_calls: list[tuple[str, str | None]] | None = None,
+    relationship_lister: (
+        Callable[[ResourceMeta, str | None], Awaitable[list[GenericSummary]]] | None
+    ) = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -121,7 +129,7 @@ def make_app(
                 ready="1/1",
                 restarts=0,
                 node=None,
-                uid="pod-uid-1",
+                uid=pod_uid or "",
             )
         ],
         "deployments": [
@@ -153,6 +161,23 @@ def make_app(
             check_calls.append((verb, resource, sub, ns, group, name))
         return permitted
 
+    async def list_relationship_objects(
+        meta: ResourceMeta, namespace: str | None
+    ) -> list[GenericSummary]:
+        assert relationship_calls is not None
+        relationship_calls.append((meta.plural, namespace))
+        if meta.plural == "pods":
+            return [
+                GenericSummary(
+                    name="web-1",
+                    namespace="default",
+                    kind="Pod",
+                    created="",
+                    uid="pod-uid-1",
+                )
+            ]
+        return []
+
     return KorvidApp(
         config=KorvidConfig(namespace="default", readonly=readonly),
         store=store,
@@ -163,6 +188,13 @@ def make_app(
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,
         pod_resize_supported=resize_supported,
+        list_relationship_objects=(
+            relationship_lister
+            if relationship_lister is not None
+            else list_relationship_objects
+            if relationship_calls is not None
+            else None
+        ),
     )
 
 
@@ -194,6 +226,330 @@ def _row_count(app: KorvidApp) -> int:
         return app.query_one(ResourceTable).row_count
     except NoMatches:
         return -1
+
+
+async def _open_resize_confirmation(app: KorvidApp, pilot: object, *, value: str = "200m") -> None:
+    await pilot.press("R")  # type: ignore[attr-defined]  # Pilot's app type isn't exposed
+    await until(pilot, lambda: isinstance(app.screen, ResizePrompt), label="resize prompt opened")
+    field = app.screen.query_one("#resize-0-requests-cpu", Input)
+    field.value = value
+    field.focus()
+    await pilot.press("enter")  # type: ignore[attr-defined]  # Pilot's app type isn't exposed
+    await until(
+        pilot,
+        lambda: isinstance(app.screen, ConfirmScreen),
+        label="resize confirmation opened",
+    )
+
+
+class BlockingRelationshipLister:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls: list[tuple[str, str | None]] = []
+        self.app: KorvidApp | None = None
+        self.reservations_during_load: list[int] = []
+
+    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
+        self.calls.append((meta.plural, namespace))
+        if self.app is not None:
+            self.reservations_during_load.append(self.app._active_cluster_writes)
+        self.entered.set()
+        await self.release.wait()
+        if meta.plural == "pods":
+            return [
+                GenericSummary(
+                    name="web-1",
+                    namespace="default",
+                    kind="Pod",
+                    created="",
+                    uid="pod-uid-1",
+                )
+            ]
+        return []
+
+
+async def _start_resize_confirmation_worker(app: KorvidApp, pilot: object) -> Worker[Any]:
+    started: list[Worker[Any]] = []
+    original_run_worker = app.run_worker
+
+    def record_worker(work: Any, *args: Any, **kwargs: Any) -> Worker[Any]:
+        worker: Worker[Any] = original_run_worker(work, *args, **kwargs)
+        started.append(worker)
+        return worker
+
+    with mock.patch.object(app, "run_worker", side_effect=record_worker):
+        await pilot.press("R")  # type: ignore[attr-defined]  # Pilot's app type isn't exposed
+        await until(
+            pilot, lambda: isinstance(app.screen, ResizePrompt), label="resize prompt opened"
+        )
+        field = app.screen.query_one("#resize-0-requests-cpu", Input)
+        field.value = "200m"
+        field.focus()
+        await pilot.press("enter")  # type: ignore[attr-defined]  # Pilot's app type isn't exposed
+        await until(pilot, lambda: len(started) == 1, label="resize worker started")
+    return started[0]
+
+
+async def test_resize_confirm_shows_empty_graph_and_pod_local_impact(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str | None]] = []
+    recorder = ResizeRecorder()
+    app = make_app(
+        recorder,
+        tmp_path / "audit.jsonl",
+        relationship_calls=calls,
+    )
+    async with app.run_test() as pilot:
+        await _open_resize_confirmation(app, pilot)
+        text = str(app.screen.query_one(".confirm-impact", Static).render())
+        assert "pod resize Pod/default/web-1" in text
+        assert "known direct dependents (may be affected): none in this snapshot" in text
+        assert "Pod-local resize impact (advisory):" in text
+        assert "graph relations are not traversed" in text
+        assert not any(
+            word in text
+            for word in ("Service/default", "Deployment/default", "PodDisruptionBudget/default")
+        )
+        assert calls
+        assert recorder.calls == []
+
+
+async def test_resize_keeps_local_notes_without_relationship_loader(tmp_path: Path) -> None:
+    recorder = ResizeRecorder()
+    app = make_app(recorder, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _open_resize_confirmation(app, pilot)
+        text = str(app.screen.query_one(".confirm-impact", Static).render())
+        assert "Pod-local resize impact (advisory):" in text
+        assert "graph-derived impact" not in text
+        assert recorder.calls == []
+
+
+async def test_resize_without_uid_skips_graph_and_keeps_local_notes(tmp_path: Path) -> None:
+    calls: list[tuple[str, str | None]] = []
+    recorder = ResizeRecorder()
+    app = make_app(
+        recorder,
+        tmp_path / "audit.jsonl",
+        pod_uid=None,
+        relationship_calls=calls,
+    )
+    async with app.run_test() as pilot:
+        await _open_resize_confirmation(app, pilot)
+        text = str(app.screen.query_one(".confirm-impact", Static).render())
+        assert "Pod-local resize impact (advisory):" in text
+        assert "graph-derived impact" not in text
+        assert calls == []
+        assert recorder.calls == []
+
+
+@pytest.mark.parametrize("mode", ["failure", "timeout"])
+async def test_resize_graph_unavailable_keeps_local_notes_and_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    leaked_detail = "leaked backend response body"
+    blocker: BlockingRelationshipLister | None = None
+
+    async def failing_lister(_meta: ResourceMeta, _namespace: str | None) -> list[GenericSummary]:
+        raise RuntimeError(leaked_detail)
+
+    relationship_lister: Callable[[ResourceMeta, str | None], Awaitable[list[GenericSummary]]]
+    if mode == "timeout":
+        monkeypatch.setattr("korvid.ui.app._IMPACT_TIMEOUT", 0.01)
+        blocker = BlockingRelationshipLister()
+        relationship_lister = blocker
+    else:
+        relationship_lister = failing_lister
+
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(recorder, audit_path, relationship_lister=relationship_lister)
+    async with app.run_test() as pilot:
+        try:
+            await _open_resize_confirmation(app, pilot)
+            text = str(app.screen.query_one(".confirm-impact", Static).render())
+            assert "graph-derived impact (advisory):" in text
+            assert "impact unavailable; approval remains available" in text
+            assert leaked_detail not in text
+            assert "Pod-local resize impact (advisory):" in text
+            assert "graph relations are not traversed" in text
+            assert recorder.calls == []
+            assert not audit_path.exists()
+        finally:
+            if blocker is not None:
+                blocker.release.set()
+
+
+async def test_resize_refuses_uid_drift_while_confirmation_is_open(tmp_path: Path) -> None:
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(recorder, audit_path, relationship_calls=[])
+    async with app.run_test() as pilot:
+        await _open_resize_confirmation(app, pilot)
+        app.store.apply_event(
+            "pods",
+            "default",
+            "MODIFIED",
+            PodSummary(
+                name="web-1",
+                namespace="default",
+                phase="Running",
+                ready="1/1",
+                restarts=0,
+                node=None,
+                uid="pod-uid-2",
+            ),
+        )
+        await until(
+            pilot,
+            lambda: getattr(app.store.get("pods", "default")[0], "uid", None) == "pod-uid-2",
+            label="replacement pod rendered",
+        )
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any(
+                "selection changed during the confirmation dialog" in n.message
+                for n in app._notifications
+            ),
+            label="stale resize approval refused",
+        )
+        assert recorder.calls == []
+        assert not audit_path.exists()
+
+
+async def test_resize_refuses_replacement_manifest_before_prompt(tmp_path: Path) -> None:
+    async def replacement_manifest(
+        _kind: str, _namespace: str | None, _name: str
+    ) -> dict[str, Any]:
+        metadata = _POD_MANIFEST["metadata"]
+        assert isinstance(metadata, dict)
+        return {
+            **_POD_MANIFEST,
+            "metadata": {**metadata, "uid": "pod-uid-2"},
+        }
+
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(recorder, audit_path, get_manifest=replacement_manifest)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
+        await pilot.press("R")
+        await until(
+            pilot,
+            lambda: any(
+                "pod changed during the manifest fetch" in notification.message
+                for notification in app._notifications
+            ),
+            label="replacement pod manifest refused",
+        )
+        assert not isinstance(app.screen, ResizePrompt)
+        assert recorder.calls == []
+        assert not audit_path.exists()
+
+
+async def test_cancelled_resize_impact_load_writes_nothing(tmp_path: Path) -> None:
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    lister = BlockingRelationshipLister()
+    app = make_app(recorder, audit_path, relationship_lister=lister)
+    lister.app = app
+    async with app.run_test() as pilot:
+        worker = await _start_resize_confirmation_worker(app, pilot)
+        await until(pilot, lister.entered.is_set, label="resize impact listing")
+        try:
+            worker.cancel()
+            await until(
+                pilot,
+                lambda: worker.is_cancelled and worker.is_finished,
+                label="resize worker cancelled",
+            )
+            assert worker.state is WorkerState.CANCELLED
+            assert not isinstance(app.screen, ConfirmScreen)
+            assert len(app.screen_stack) == 1
+            assert lister.reservations_during_load
+            assert all(value == 0 for value in lister.reservations_during_load)
+            assert app._active_cluster_writes == 0
+            assert recorder.calls == []
+            assert not audit_path.exists()
+        finally:
+            lister.release.set()
+
+
+async def test_resize_focus_change_during_impact_load_writes_nothing(tmp_path: Path) -> None:
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    lister = BlockingRelationshipLister()
+    app = make_app(recorder, audit_path, relationship_lister=lister)
+    lister.app = app
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
+        await pilot.press("ctrl+w", "v")
+        await until(
+            pilot,
+            lambda: len(app.query(ResourceTable)) == 2,
+            label="second pane mounted",
+        )
+        origin = app._pane
+        worker = await _start_resize_confirmation_worker(app, pilot)
+        await until(pilot, lister.entered.is_set, label="resize impact listing")
+        try:
+            app._focus_other_pane()
+            lister.release.set()
+            await until(pilot, lambda: worker.is_finished, label="resize worker finished")
+            await until(
+                pilot,
+                lambda: any(
+                    "selection changed during the impact preview" in notification.message
+                    for notification in app._notifications
+                ),
+                label="pane drift refused",
+            )
+            assert app._pane is not origin
+            assert not isinstance(app.screen, ConfirmScreen)
+            assert app._active_cluster_writes == 0
+            assert recorder.calls == []
+            assert not audit_path.exists()
+        finally:
+            lister.release.set()
+
+
+async def test_resize_origin_scope_change_during_impact_load_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    lister = BlockingRelationshipLister()
+    app = make_app(recorder, audit_path, relationship_lister=lister)
+    lister.app = app
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
+        origin = app._pane
+        worker = await _start_resize_confirmation_worker(app, pilot)
+        await until(pilot, lister.entered.is_set, label="resize impact listing")
+        try:
+            origin.scope = ALL_NAMESPACES
+            lister.release.set()
+            await until(pilot, lambda: worker.is_finished, label="resize worker finished")
+            await until(
+                pilot,
+                lambda: any(
+                    "selection changed during the impact preview" in notification.message
+                    for notification in app._notifications
+                ),
+                label="scope drift refused",
+            )
+            assert app._pane is origin
+            assert not isinstance(app.screen, ConfirmScreen)
+            assert app._active_cluster_writes == 0
+            assert recorder.calls == []
+            assert not audit_path.exists()
+        finally:
+            lister.release.set()
 
 
 async def test_resize_confirmed_executes_and_audits(tmp_path: Path) -> None:
@@ -277,7 +633,6 @@ async def test_resize_only_applies_to_pods(tmp_path: Path) -> None:
         await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         await _to_view(pilot, "deployments")
         await pilot.press("R")
-        await pilot.pause(0.2)
         assert not isinstance(app.screen, ResizePrompt)
         assert rec.calls == []
 
@@ -367,6 +722,206 @@ async def test_agent_resize_approved_by_user_key(tmp_path: Path) -> None:
         assert lines[-1]["action"] == "resize"
         assert lines[-1]["outcome"] == "success"
         assert "agent" in lines[-1]["detail"]
+
+
+async def test_agent_resize_uses_explicit_namespace_for_impact(tmp_path: Path) -> None:
+    calls: list[tuple[str, str | None]] = []
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def prod_manifest(_kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return {
+            "metadata": {"name": name, "namespace": ns, "uid": "pod-uid-prod"},
+            "spec": _POD_MANIFEST["spec"],
+        }
+
+    async def list_relationship_objects(
+        meta: ResourceMeta, namespace: str | None
+    ) -> list[GenericSummary]:
+        calls.append((meta.plural, namespace))
+        if meta.plural == "pods":
+            return [
+                GenericSummary(
+                    name="web-1",
+                    namespace=namespace or "",
+                    kind="Pod",
+                    created="",
+                    uid="pod-uid-prod",
+                )
+            ]
+        return []
+
+    app = make_app(
+        recorder,
+        audit_path,
+        get_manifest=prod_manifest,
+        relationship_lister=list_relationship_objects,
+    )
+    resources = {"app": {"requests": {"cpu": "200m"}}}
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
+        assert app.current_scope == "default"
+        _expand_panel(app)
+        task = asyncio.create_task(
+            app.agent_request_write(
+                "resize",
+                "pods",
+                "web-1",
+                namespace="prod",
+                resources=resources,
+            )
+        )
+        await until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ConfirmScreen) and bool(app.screen.query(".confirm-impact"))
+            ),
+            label="agent resize confirmation impact rendered",
+        )
+        text = str(app.screen.query_one(".confirm-impact", Static).render())
+        assert "pod resize Pod/prod/web-1" in text
+        assert "Pod-local resize impact (advisory):" in text
+        assert calls
+        assert {namespace for _, namespace in calls} == {"prod"}
+        assert app.current_scope == "default"
+        assert not recorder.calls
+        await pilot.press("n")
+        assert "denied" in await task
+        assert not audit_path.exists()
+
+
+async def test_agent_resize_keeps_local_notes_when_manifest_lookup_fails_open(
+    tmp_path: Path,
+) -> None:
+    async def failing_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        raise RuntimeError("manifest backend unavailable")
+
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        recorder,
+        audit_path,
+        get_manifest=failing_manifest,
+        relationship_calls=[],
+    )
+    async with app.run_test() as pilot:
+        _expand_panel(app)
+        task = asyncio.create_task(
+            app.agent_request_write(
+                "resize",
+                "pods",
+                "web-1",
+                namespace="default",
+                resources={"app": {"requests": {"cpu": "200m"}}},
+            )
+        )
+        await until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ConfirmScreen) and bool(app.screen.query(".confirm-impact"))
+            ),
+            label="agent resize confirmation impact rendered",
+        )
+        text = str(app.screen.query_one(".confirm-impact", Static).render())
+        assert "restart requirements could not be determined" in text
+        assert recorder.calls == []
+        await pilot.press("n")
+        assert "denied" in await task
+        assert not audit_path.exists()
+
+
+async def test_agent_resize_expiry_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("korvid.ui.app._APPROVAL_TIMEOUT", 0.2)
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        recorder,
+        audit_path,
+        relationship_calls=[],
+    )
+    async with app.run_test() as pilot:
+        _expand_panel(app)
+        task = asyncio.create_task(
+            app.agent_request_write(
+                "resize",
+                "pods",
+                "web-1",
+                namespace="default",
+                resources={"app": {"requests": {"cpu": "200m"}}},
+            )
+        )
+        await until(
+            pilot,
+            lambda: task.done() or isinstance(app.screen, ConfirmScreen),
+            label="agent resize expired or surfaced",
+        )
+        result = await task
+        assert "expired" in result
+        assert "declined" not in result
+        assert recorder.calls == []
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert not audit_path.exists()
+
+
+async def test_non_resize_agent_writes_do_not_gain_impact(tmp_path: Path) -> None:
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        recorder,
+        audit_path,
+        relationship_calls=[],
+    )
+    async with app.run_test() as pilot:
+        _expand_panel(app)
+        task = asyncio.create_task(
+            app.agent_request_write(
+                "delete",
+                "deployments",
+                "web",
+                namespace="default",
+            )
+        )
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="agent delete confirmation opened",
+        )
+        assert not app.screen.query(".confirm-impact")
+        await pilot.press("n")
+        assert "denied" in await task
+        assert not audit_path.exists()
+
+
+async def test_cancelled_agent_resize_impact_load_writes_nothing(tmp_path: Path) -> None:
+    recorder = ResizeRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    lister = BlockingRelationshipLister()
+    app = make_app(recorder, audit_path, relationship_lister=lister)
+    lister.app = app
+    resources = {"app": {"requests": {"cpu": "200m"}}}
+    async with app.run_test() as pilot:
+        task = asyncio.create_task(
+            app.agent_request_write(
+                "resize",
+                "pods",
+                "web-1",
+                namespace="default",
+                resources=resources,
+            )
+        )
+        try:
+            await until(pilot, lister.entered.is_set, label="agent resize impact listing")
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError, match=r"^$"):
+                await task
+            assert not isinstance(app.screen, ConfirmScreen)
+            assert len(app.screen_stack) == 1
+            assert recorder.calls == []
+            assert not audit_path.exists()
+        finally:
+            lister.release.set()
 
 
 async def test_agent_resize_requires_resources(tmp_path: Path) -> None:

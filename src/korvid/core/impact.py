@@ -71,6 +71,7 @@ class ImpactAction(StrEnum):
     DELETE = "delete"
     ROLLOUT_RESTART = "rollout_restart"
     SCALE_DOWN = "scale_down"
+    POD_RESIZE = "pod_resize"
 
 
 #: Relations a delete may follow in reverse (target -> its dependents).
@@ -136,10 +137,18 @@ _SCALE_DOWN_RELATIONS: frozenset[RelationKind] = frozenset(
     }
 )
 
+#: Resizing a Pod keeps the Pod object, its membership, its references, and
+#: its placement intact, so every one of the nine relation kinds is excluded.
+#: That closed set is intentionally empty: the action carries no graph impact
+#: semantics yet, so later integration can thread the enum through without
+#: accidentally claiming a dependent set.
+_POD_RESIZE_RELATIONS: frozenset[RelationKind] = frozenset()
+
 ACTION_RELATIONS: Mapping[ImpactAction, frozenset[RelationKind]] = {
     ImpactAction.DELETE: _DELETE_RELATIONS,
     ImpactAction.ROLLOUT_RESTART: _ROLLOUT_RESTART_RELATIONS,
     ImpactAction.SCALE_DOWN: _SCALE_DOWN_RELATIONS,
+    ImpactAction.POD_RESIZE: _POD_RESIZE_RELATIONS,
 }
 
 #: Which relations each action's unresolved-reference warning may report,
@@ -166,6 +175,7 @@ ACTION_UNRESOLVED_RELATIONS: Mapping[ImpactAction, frozenset[RelationKind] | Non
     ImpactAction.DELETE: None,
     ImpactAction.ROLLOUT_RESTART: None,
     ImpactAction.SCALE_DOWN: _SCALE_DOWN_RELATIONS,
+    ImpactAction.POD_RESIZE: _POD_RESIZE_RELATIONS,
 }
 
 

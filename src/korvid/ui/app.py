@@ -74,6 +74,7 @@ from korvid.core.portforward import (
     controller_owner,
 )
 from korvid.core.relationships import GraphResource, SummaryLike
+from korvid.core.resize_impact import classify_pod_resize
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.session_timeline import AppendResult, SessionTimeline, TimelineResourceRef
 from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
@@ -143,6 +144,7 @@ from korvid.ui.messages import (
 from korvid.ui.navigation import DrillLevel, NavigationStack
 from korvid.ui.operator_controller import OperatorController
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader
+from korvid.ui.resize_impact_preview import compose_resize_impact_lines
 from korvid.ui.shell_controller import ShellController, ShellSettings
 from korvid.ui.transfer import TransferController, TransferProgress
 from korvid.ui.ui_surface import ScreenResultT, Severity, UiSurface
@@ -5230,6 +5232,34 @@ class KorvidApp(App[None]):
         pane = self._pane
         return _WriteOrigin(pane, pane.scope)
 
+    async def _impact_preview_for_scope(
+        self,
+        action: ImpactAction,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        *,
+        scope: str | None,
+    ) -> tuple[str, ...] | None:
+        loader = self._relationship_loader
+        if loader is None or uid is None:
+            return None
+        root = GraphResource(
+            group=meta.group, kind=meta.kind, namespace=ns or "", name=name, uid=uid
+        )
+        try:
+            async with asyncio.timeout(_IMPACT_TIMEOUT):
+                graph = await loader.load(root, scope, self.aliases)
+                return render_impact_lines(summarize_impact(graph, action, root, scope=scope))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Type only: never the message (CodeQL py/clear-text-logging-
+            # sensitive-data), and never anything derived from a manifest.
+            logger.debug("impact summary unavailable for %s: %s", action, type(exc).__name__)
+            return render_unavailable_lines(action, meta.group, meta.kind)
+
     async def _impact_preview(
         self,
         action: ImpactAction,
@@ -5284,24 +5314,14 @@ class KorvidApp(App[None]):
         `scope:`/`graph coverage:` lines derived from it) at another pane's
         view of the cluster.
         """
-        loader = self._relationship_loader
-        if loader is None or uid is None:
-            return None
-        root = GraphResource(
-            group=meta.group, kind=meta.kind, namespace=ns or "", name=name, uid=uid
+        return await self._impact_preview_for_scope(
+            action,
+            meta,
+            ns,
+            name,
+            uid,
+            scope=origin.impact_scope(meta),
         )
-        scope = origin.impact_scope(meta)
-        try:
-            async with asyncio.timeout(_IMPACT_TIMEOUT):
-                graph = await loader.load(root, scope, self.aliases)
-                return render_impact_lines(summarize_impact(graph, action, root, scope=scope))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # Type only: never the message (CodeQL py/clear-text-logging-
-            # sensitive-data), and never anything derived from a manifest.
-            logger.debug("impact summary unavailable for %s: %s", action, type(exc).__name__)
-            return render_unavailable_lines(action, meta.group, meta.kind)
 
     async def _push_write_confirmation(
         self,
@@ -5985,37 +6005,72 @@ class KorvidApp(App[None]):
             ),
         )
 
-    async def action_resize_pod(self) -> None:
-        """R: in-place resize of the selected pod (prompt, then confirm).
-
-        Only offered on the pods view and only when discovery found the
-        pods/resize subresource (Kubernetes 1.35 GA)."""
+    def _resize_pod_target(
+        self,
+    ) -> tuple[WriteOps, ResourceMeta, str | None, str, str | None] | None:
         ops = self._write_ops
         if ops is None:
             self.notify("Resize unavailable in this session", severity="warning")
-            return
+            return None
         target = self._write_target()
         if target is None:
-            return
+            return None
         meta, ns, name, uid = target
         if (meta.group, meta.plural) != ("", "pods"):
             self.notify(f"resize does not apply to {self._gvr_label(meta)}", severity="warning")
-            return
+            return None
         if not self._pod_resize_supported:
             self.notify(
                 "This cluster does not expose pods/resize (requires Kubernetes 1.35+)",
                 severity="warning",
             )
+            return None
+        return ops, meta, ns, name, uid
+
+    async def action_resize_pod(self) -> None:
+        """R: in-place resize of the selected pod (prompt, then confirm).
+
+        Only offered on the pods view and only when discovery found the
+        pods/resize subresource (Kubernetes 1.35 GA)."""
+        target = self._resize_pod_target()
+        if target is None:
             return
+        _, meta, ns, name, uid = target
         epoch = self._ctx_epoch
+        origin = self._write_origin()
         if not await self._precheck_keybinding_write("resize", meta, ns, name):
+            return
+        if not self._write_identity_intact(
+            "resize",
+            meta,
+            ns,
+            name,
+            uid,
+            phase="the permission check",
+            epoch=epoch,
+            origin=origin,
+        ):
             return
         fetched = await self._pod_container_resources(ns, name)
         if fetched is None:
             return
         containers, pod_manifest = fetched
-        if not self._write_context_intact(
-            "resize", meta, ns, name, phase="the manifest fetch", epoch=epoch
+        if not self._uid_intact_after_fetch(pod_manifest, ns, name, uid):
+            self.notify(
+                f"resize {self._gvr_label(meta)}/{name} cancelled -"
+                " the pod changed during the manifest fetch",
+                severity="warning",
+            )
+            return
+        if not self._write_identity_intact(
+            "resize",
+            meta,
+            ns,
+            name,
+            uid,
+            phase="the manifest fetch",
+            epoch=epoch,
+            origin=origin,
         ):
             return
 
@@ -6025,7 +6080,16 @@ class KorvidApp(App[None]):
             # The dry-run round trip must not run inside a screen callback:
             # a worker fetches the preview, revalidates, then confirms.
             self.run_worker(
-                self._confirm_resize(meta, ns, name, uid, resources, epoch, pod_manifest)
+                self._confirm_resize(
+                    meta,
+                    ns,
+                    name,
+                    uid,
+                    resources,
+                    epoch,
+                    pod_manifest,
+                    origin,
+                )
             )
 
         await self.push_screen(
@@ -6084,6 +6148,7 @@ class KorvidApp(App[None]):
         resources: dict[str, dict[str, dict[str, str]]],
         epoch: int,
         pod_manifest: dict[str, Any],
+        origin: _WriteOrigin,
     ) -> None:
         """Dry-run preview + approval dialog for an in-place pod resize.
         Revalidates the selection after the preview round trip: keystrokes
@@ -6094,12 +6159,51 @@ class KorvidApp(App[None]):
         if ops is None:
             return
         namespace = ns or ""
+        if not self._write_identity_intact(
+            "resize",
+            meta,
+            ns,
+            name,
+            uid,
+            phase="the resize prompt",
+            epoch=epoch,
+            origin=origin,
+        ):
+            return
         preview = await self._dry_run_preview(
             ops.preview_resize(namespace, name, resources, uid=uid)
         )
         note = await self._managed_note_from(pod_manifest, ns)
-        if not self._write_context_intact(
-            "resize", meta, ns, name, phase="the dry-run preview", epoch=epoch
+        if not self._write_identity_intact(
+            "resize",
+            meta,
+            ns,
+            name,
+            uid,
+            phase="the dry-run preview",
+            epoch=epoch,
+            origin=origin,
+        ):
+            return
+        context = classify_pod_resize(pod_manifest, resources)
+        graph_lines = await self._impact_preview(
+            ImpactAction.POD_RESIZE,
+            meta,
+            ns,
+            name,
+            uid,
+            origin=origin,
+        )
+        impact_lines = compose_resize_impact_lines(graph_lines, context)
+        if not self._write_identity_intact(
+            "resize",
+            meta,
+            ns,
+            name,
+            uid,
+            phase="the impact preview",
+            epoch=epoch,
+            origin=origin,
         ):
             return
         summary = self._resize_summary(resources)
@@ -6114,6 +6218,17 @@ class KorvidApp(App[None]):
             detail=summary,
             preview=preview,
             managed_note=note,
+            impact_lines=impact_lines,
+            approval_guard=lambda: self._write_identity_intact(
+                "resize",
+                meta,
+                ns,
+                name,
+                uid,
+                phase="the confirmation dialog",
+                epoch=epoch,
+                origin=origin,
+            ),
         )
 
     def _node_target(self, action: str) -> tuple[WriteOps, ResourceMeta, str, str | None] | None:
@@ -7858,12 +7973,25 @@ class KorvidApp(App[None]):
         )
         note = await self._managed_note_from(snapshot, ns) if snapshot is not None else None
         require = name if action == "delete" and not meta.namespaced else None
+        impact_lines = (
+            await self._agent_resize_impact(
+                meta,
+                ns,
+                name,
+                uid,
+                snapshot,
+                resources,
+            )
+            if action == "resize" and resources
+            else None
+        )
         decision = await self._await_user_approval(
             f"Agent requests: {action} {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
             operation,
             require_name=require,
             preview=preview,
             managed_note=note,
+            impact_lines=impact_lines,
         )
         if decision == "expired":
             return (
@@ -7944,6 +8072,26 @@ class KorvidApp(App[None]):
                 ops.preview_resize(ns or "", name, resources, uid=uid)
             )
         return None
+
+    async def _agent_resize_impact(
+        self,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        snapshot: dict[str, Any] | None,
+        resources: dict[str, dict[str, dict[str, str]]],
+    ) -> tuple[str, ...]:
+        context = classify_pod_resize(snapshot or {}, resources)
+        graph_lines = await self._impact_preview_for_scope(
+            ImpactAction.POD_RESIZE,
+            meta,
+            ns,
+            name,
+            uid,
+            scope=ns if meta.namespaced else None,
+        )
+        return compose_resize_impact_lines(graph_lines, context)
 
     async def _target_manifest(
         self, kind_alias: str, ns: str | None, name: str
@@ -8674,6 +8822,7 @@ class KorvidApp(App[None]):
         require_name: str | None = None,
         preview: list[str] | None = None,
         managed_note: str | None = None,
+        impact_lines: tuple[str, ...] | None = None,
     ) -> Literal["approved", "declined", "expired"]:
         """Show a ConfirmScreen and wait for the user's decision. Only real key
         input can resolve it. While the agent panel is collapsed, or another
@@ -8702,6 +8851,7 @@ class KorvidApp(App[None]):
             require_name=require_name,
             preview=preview,
             managed_note=managed_note,
+            impact_lines=impact_lines,
         )
         try:
             await self.push_screen(screen, _done)

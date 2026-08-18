@@ -1,0 +1,356 @@
+from __future__ import annotations
+
+import pytest
+
+from korvid.core.resize_impact import ResizeImpactContext, classify_pod_resize
+
+
+def _manifest(
+    *,
+    policy: object = None,
+    memory_limit: str = "512Mi",
+    applied_memory_limit: str | None = None,
+) -> dict[str, object]:
+    container: dict[str, object] = {
+        "name": "app",
+        "resources": {
+            "requests": {"cpu": "100m", "memory": "128Mi"},
+            "limits": {"cpu": "1", "memory": memory_limit},
+        },
+    }
+    if policy is not None:
+        container["resizePolicy"] = policy
+    manifest: dict[str, object] = {"spec": {"containers": [container]}}
+    if applied_memory_limit is not None:
+        manifest["status"] = {
+            "containerStatuses": [
+                {
+                    "name": "app",
+                    "resources": {"limits": {"memory": applied_memory_limit}},
+                }
+            ]
+        }
+    return manifest
+
+
+def test_cpu_change_uses_default_not_required_policy() -> None:
+    context = classify_pod_resize(
+        _manifest(),
+        {"app": {"requests": {"cpu": "200m"}}},
+    )
+    assert context == ResizeImpactContext(
+        cpu_changed=True,
+        memory_request_changed=False,
+        memory_limit_changed=False,
+        restart_required=False,
+        cpu_restart_required=False,
+        memory_restart_required=False,
+        restart_policy_unknown=False,
+        all_changed_resources_not_required=True,
+        memory_limit_decreased=False,
+        memory_limit_decrease_not_required=False,
+        memory_limit_assessment_unknown=False,
+    )
+
+
+def test_memory_limit_decrease_with_not_required_is_identified_numerically() -> None:
+    context = classify_pod_resize(
+        _manifest(memory_limit="1Gi"),
+        {"app": {"limits": {"memory": "900Mi"}}},
+    )
+    assert context.memory_limit_changed is True
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is True
+    assert context.memory_limit_assessment_unknown is False
+
+
+def test_memory_limit_decrease_compares_against_applied_status() -> None:
+    context = classify_pod_resize(
+        _manifest(memory_limit="512Mi", applied_memory_limit="1Gi"),
+        {"app": {"limits": {"memory": "768Mi"}}},
+    )
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is True
+    assert context.memory_limit_assessment_unknown is False
+
+
+def test_memory_limit_decrease_falls_back_when_applied_value_is_absent() -> None:
+    manifest = _manifest(memory_limit="1Gi")
+    manifest["status"] = {"containerStatuses": [{"name": "app", "resources": {}}]}
+    context = classify_pod_resize(
+        manifest,
+        {"app": {"limits": {"memory": "900Mi"}}},
+    )
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is True
+    assert context.memory_limit_assessment_unknown is False
+
+
+def test_adding_memory_limit_to_unbounded_container_is_a_decrease() -> None:
+    manifest = {
+        "spec": {
+            "containers": [
+                {
+                    "name": "app",
+                    "resources": {"requests": {"memory": "128Mi"}},
+                }
+            ]
+        }
+    }
+    context = classify_pod_resize(
+        manifest,
+        {"app": {"limits": {"memory": "256Mi"}}},
+    )
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is True
+    assert context.memory_limit_assessment_unknown is False
+
+
+def test_applied_status_without_memory_limit_stays_unbounded() -> None:
+    manifest = _manifest(memory_limit="1Gi")
+    manifest["status"] = {
+        "containerStatuses": [
+            {
+                "name": "app",
+                "resources": {"requests": {"memory": "128Mi"}},
+            }
+        ]
+    }
+    context = classify_pod_resize(
+        manifest,
+        {"app": {"limits": {"memory": "2Gi"}}},
+    )
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is True
+    assert context.memory_limit_assessment_unknown is False
+
+
+def test_invalid_requested_limit_for_unbounded_container_is_unknown() -> None:
+    manifest = {
+        "spec": {
+            "containers": [
+                {
+                    "name": "app",
+                    "resources": {"requests": {"memory": "128Mi"}},
+                }
+            ]
+        }
+    }
+    context = classify_pod_resize(
+        manifest,
+        {"app": {"limits": {"memory": "not-a-quantity"}}},
+    )
+    assert context.memory_limit_decreased is False
+    assert context.memory_limit_decrease_not_required is False
+    assert context.memory_limit_assessment_unknown is True
+
+
+def test_equivalent_memory_quantities_are_not_a_decrease() -> None:
+    context = classify_pod_resize(
+        _manifest(memory_limit="1Gi"),
+        {"app": {"limits": {"memory": "1024Mi"}}},
+    )
+    assert context.memory_limit_decreased is False
+    assert context.memory_limit_decrease_not_required is False
+    assert context.memory_limit_changed is False
+    assert context.memory_limit_assessment_unknown is False
+
+
+def test_equivalent_cpu_quantity_is_not_a_restart_trigger() -> None:
+    context = classify_pod_resize(
+        _manifest(policy=[{"resourceName": "cpu", "restartPolicy": "RestartContainer"}]),
+        {"app": {"limits": {"cpu": "1000m"}}},
+    )
+    assert context.cpu_changed is False
+    assert context.restart_required is False
+    assert context.cpu_restart_required is False
+    assert context.all_changed_resources_not_required is False
+
+
+def test_increased_memory_quantities_are_not_a_decrease() -> None:
+    context = classify_pod_resize(
+        _manifest(memory_limit="1Gi"),
+        {"app": {"limits": {"memory": "2Gi"}}},
+    )
+    assert context.memory_limit_decreased is False
+    assert context.memory_limit_decrease_not_required is False
+    assert context.memory_limit_assessment_unknown is False
+
+
+def test_restart_container_policy_is_scoped_to_the_changed_resource() -> None:
+    context = classify_pod_resize(
+        _manifest(
+            policy=[
+                {"resourceName": "cpu", "restartPolicy": "NotRequired"},
+                {"resourceName": "memory", "restartPolicy": "RestartContainer"},
+            ]
+        ),
+        {"app": {"limits": {"memory": "768Mi"}}},
+    )
+    assert context.restart_required is True
+    assert context.cpu_restart_required is False
+    assert context.memory_restart_required is True
+    assert context.all_changed_resources_not_required is False
+
+
+def test_mixed_container_changes_aggregate_restart_and_memory_warnings() -> None:
+    manifest = {
+        "spec": {
+            "containers": [
+                {
+                    "name": "app",
+                    "resources": {"requests": {"cpu": "100m"}},
+                    "resizePolicy": [{"resourceName": "cpu", "restartPolicy": "RestartContainer"}],
+                },
+                {
+                    "name": "sidecar",
+                    "resources": {"limits": {"memory": "1Gi"}},
+                    "resizePolicy": [{"resourceName": "memory", "restartPolicy": "NotRequired"}],
+                },
+            ]
+        }
+    }
+    context = classify_pod_resize(
+        manifest,
+        {
+            "app": {"requests": {"cpu": "200m"}},
+            "sidecar": {"limits": {"memory": "900Mi"}},
+        },
+    )
+    assert context.restart_required is True
+    assert context.cpu_restart_required is True
+    assert context.memory_restart_required is False
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is True
+    assert context.restart_policy_unknown is False
+    assert context.memory_limit_assessment_unknown is False
+
+
+def test_restart_policy_scans_past_malformed_items_before_valid_policy() -> None:
+    context = classify_pod_resize(
+        _manifest(
+            policy=[
+                None,
+                {"resourceName": "cpu", "restartPolicy": "RestartContainer"},
+            ]
+        ),
+        {"app": {"requests": {"cpu": "200m"}}},
+    )
+    assert context.restart_required is True
+    assert context.restart_policy_unknown is False
+
+
+def test_restart_policy_is_unknown_when_malformed_structure_leaves_resource_unresolved() -> None:
+    context = classify_pod_resize(
+        _manifest(
+            policy=[
+                None,
+                {"resourceName": "memory", "restartPolicy": "NotRequired"},
+            ]
+        ),
+        {"app": {"requests": {"cpu": "200m"}}},
+    )
+    assert context.restart_policy_unknown is True
+    assert context.all_changed_resources_not_required is False
+
+
+@pytest.mark.parametrize(
+    "malformed_policy",
+    [
+        {"restartPolicy": "RestartContainer"},
+        {"resourceName": "memory"},
+    ],
+)
+def test_incomplete_unrelated_policy_prevents_optimistic_default(
+    malformed_policy: dict[str, str],
+) -> None:
+    context = classify_pod_resize(
+        _manifest(policy=[malformed_policy]),
+        {"app": {"requests": {"cpu": "200m"}}},
+    )
+    assert context.restart_policy_unknown is True
+    assert context.all_changed_resources_not_required is False
+
+
+def test_missing_container_is_unknown_not_optimistic() -> None:
+    context = classify_pod_resize(
+        _manifest(),
+        {"missing": {"limits": {"memory": "256Mi"}}},
+    )
+    assert context.restart_policy_unknown is True
+    assert context.memory_limit_assessment_unknown is True
+
+
+def test_malformed_resize_policy_is_unknown() -> None:
+    context = classify_pod_resize(
+        _manifest(policy={"resourceName": "memory"}),
+        {"app": {"requests": {"memory": "256Mi"}}},
+    )
+    assert context.restart_policy_unknown is True
+
+
+def test_memory_limit_decrease_with_unknown_policy_stays_indeterminate() -> None:
+    context = classify_pod_resize(
+        _manifest(memory_limit="1Gi", policy={"resourceName": "memory"}),
+        {"app": {"limits": {"memory": "900Mi"}}},
+    )
+    assert context.memory_limit_decreased is True
+    assert context.memory_limit_decrease_not_required is False
+    assert context.memory_limit_assessment_unknown is True
+
+
+def test_matching_invalid_restart_policy_is_unknown() -> None:
+    context = classify_pod_resize(
+        _manifest(policy=[{"resourceName": "cpu", "restartPolicy": "MaybeRestart"}]),
+        {"app": {"requests": {"cpu": "200m"}}},
+    )
+    assert context.restart_required is False
+    assert context.restart_policy_unknown is True
+    assert context.all_changed_resources_not_required is False
+
+
+def test_policy_for_unchanged_resource_defaults_changed_resource_to_not_required() -> None:
+    context = classify_pod_resize(
+        _manifest(policy=[{"resourceName": "memory", "restartPolicy": "RestartContainer"}]),
+        {"app": {"requests": {"cpu": "200m"}}},
+    )
+    assert context.restart_required is False
+    assert context.restart_policy_unknown is False
+    assert context.all_changed_resources_not_required is True
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {"spec": {"containers": "malformed"}},
+        {"spec": {"containers": [{"name": "app", "resources": "malformed"}]}},
+        {"spec": {"containers": [{"name": "app", "resources": {"limits": "malformed"}}]}},
+    ],
+)
+def test_malformed_memory_limit_sources_keep_assessment_unknown(
+    manifest: dict[str, object],
+) -> None:
+    context = classify_pod_resize(
+        manifest,
+        {"app": {"limits": {"memory": "256Mi"}}},
+    )
+    assert context.memory_limit_decreased is False
+    assert context.memory_limit_decrease_not_required is False
+    assert context.memory_limit_assessment_unknown is True
+
+
+def test_invalid_captured_memory_quantity_is_unknown() -> None:
+    context = classify_pod_resize(
+        _manifest(memory_limit="not-a-quantity"),
+        {"app": {"limits": {"memory": "256Mi"}}},
+    )
+    assert context.memory_limit_assessment_unknown is True
+
+
+def test_decimal_overflow_in_requested_memory_is_unknown() -> None:
+    context = classify_pod_resize(
+        _manifest(memory_limit="256Mi"),
+        {"app": {"limits": {"memory": "1e999999999999999999999999"}}},
+    )
+    assert context.memory_limit_decreased is False
+    assert context.memory_limit_assessment_unknown is True

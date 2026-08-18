@@ -503,8 +503,13 @@ that name now. The summary is advisory — see [Write impact
 preview](tui.md#write-impact-preview) for how it appears and what it never
 does.
 
-Delete, rollout restart, and a known scale-down decrease show this section
-today. The remaining write types (scale-up, a scale with no readable current
-count, edit, resize, cordon/uncordon, drain, Helm, operator) have no tested
-per-relation semantics yet and deliberately show nothing rather than a
-plausible guess.
+Delete, rollout restart, a known scale-down decrease, and Pod resize show
+this section today. `POD_RESIZE` (Pod resize) intentionally traverses no
+relation. The existing Pod object keeps its UID/IP, owner, node placement,
+mounts/config references, PDB membership, and routing membership. Runtime
+resize considerations are rendered from the captured Pod manifest and
+requested resources, not inferred from graph edges.
+
+The remaining write types (scale-up, a scale with no readable current count,
+edit, cordon/uncordon, drain, Helm, operator) have no tested per-relation
+semantics yet and deliberately show nothing rather than a plausible guess.

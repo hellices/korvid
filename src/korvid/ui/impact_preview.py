@@ -85,6 +85,7 @@ _ACTION_LABEL = {
     ImpactAction.DELETE: "delete",
     ImpactAction.ROLLOUT_RESTART: "rollout restart",
     ImpactAction.SCALE_DOWN: "scale down",
+    ImpactAction.POD_RESIZE: "pod resize",
 }
 
 #: Machine-defined limitation notes shown only for `ImpactAction.SCALE_DOWN`.

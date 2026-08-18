@@ -208,7 +208,9 @@ def test_a_statefulset_kind_in_another_group_gets_no_pvc_limitation() -> None:
     assert _SCALE_DOWN_STS_PVC_LINE not in lines
 
 
-@pytest.mark.parametrize("action", [ImpactAction.DELETE, ImpactAction.ROLLOUT_RESTART])
+@pytest.mark.parametrize(
+    "action", [ImpactAction.DELETE, ImpactAction.ROLLOUT_RESTART, ImpactAction.POD_RESIZE]
+)
 def test_non_scale_actions_never_render_scale_down_limitations(action: ImpactAction) -> None:
     lines = render_impact_lines(_summary(action=action))
     assert _SCALE_DOWN_PDB_LINE not in lines
