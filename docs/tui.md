@@ -235,9 +235,53 @@ still on screen with the target rather than below a body that can run to the
 preview's caps. It never predicts failure, never replaces the
 server dry-run, and never blocks approval: the y/typed-name gate, the UID
 precondition, the RBAC pre-check, and the fail-closed audit log are exactly
-what they were. Edit, cordon/uncordon, drain, Helm, and operator flows
-never show it — they have no tested per-relation semantics yet, and korvid
-would rather show nothing than a plausible guess.
+what they were. Edit, Helm, and operator flows never show it — they have
+no tested per-relation semantics yet, and korvid would rather show nothing
+than a plausible guess.
+
+### Node maintenance impact
+
+Cordon (`c`), uncordon (`u`), and drain (`shift-D`) show a separate
+advisory section headed exactly:
+
+    Node maintenance impact (advisory):
+
+Neither cordon nor uncordon loads the relationship graph; their advisory
+lines are derived locally from the action:
+
+    Node maintenance impact (advisory):
+      current Pods are not evicted or moved
+      the Node is marked unschedulable for ordinary workload placement
+      future placement and workload availability are not predicted
+
+for a cordon, and
+
+    Node maintenance impact (advisory):
+      current Pods are not moved
+      future scheduling to the Node is permitted
+      scheduler choice and capacity are not predicted
+
+for an uncordon.
+
+Drain keeps `drain impact plan:` as the authoritative section — the
+preview rendered by `DrainPlan.preview_lines()` under that heading. The node
+maintenance advisory appears in the impact section above that plan. When the
+relationship graph load succeeds, the graph section appears first (above the local
+advisory lines);
+when it fails, the local lines remain visible and graph failure never
+removes the plan or blocks approval. Plan failure (an exception from
+`ops.drain_plan`) aborts the whole flow before any dialog opens — no
+graph-only approval dialog is ever shown without a plan.
+
+The graph section for drain can list mirror Pods and DaemonSet Pods that
+the drain plan skips (the plan itself excludes them per its own eviction
+logic). The plan section is always the authoritative source for which Pods
+will be evicted and why others are skipped; the graph section is advisory.
+
+If drain execution begins and is then cancelled, the Node remains cordoned.
+The local advisory line states this explicitly:
+
+    after the Node is successfully cordoned, it remains cordoned if drain execution later fails or is cancelled
 
 Pod resize uses the same graph renderer with an intentionally empty relation
 set, then adds a Pod-local section derived from the captured Pod manifest and

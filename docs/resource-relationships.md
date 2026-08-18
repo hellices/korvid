@@ -378,18 +378,28 @@ all.
 ## Blast radius in write previews
 
 The same snapshot feeds the approval dialogs for `Ctrl-D` (delete), `r`
-(rollout restart), and `S` (scale) when the scale is a *known decrease* —
-the row's current desired replica count was readable and the requested count
-is lower than it; a scale-up, a no-op, or a row with no readable desired
-count gets the ordinary confirmation with no graph section and no snapshot
-LIST at all. Only relationships with explicitly tested action semantics
-participate, and the set differs by action:
+(rollout restart), `S` (scale) when the scale is a *known decrease*, Pod
+resize, and Node drain. For scale, the row's current desired replica count
+must be readable and the requested count lower than it; a scale-up, a no-op,
+or a row with no readable desired count gets the ordinary confirmation with
+no graph section and no snapshot LIST at all. Only relationships with
+explicitly tested action semantics participate, and the set differs by action:
 
 | Action | Relations followed (target → its dependents) |
 |---|---|
 | delete | `owned_by`, `managed_by`, `routes_to`, `uses_volume`, `uses_config`, `protected_by`, `scheduled_on`, `bound_to` |
 | rollout restart | `owned_by`, `managed_by` |
 | scale down (known decrease only) | `owned_by`, `managed_by`, `selects`, `routes_to` |
+| cordon Node | none |
+| uncordon Node | none |
+| drain Node | `scheduled_on` |
+
+For cordon and uncordon, no snapshot is loaded and no graph walk is
+performed — the advisory section is derived locally. For drain, the
+graph walk follows `scheduled_on` (Pods currently placed on the Node).
+`protected_by` remains excluded from the drain walk because PDB blocker
+state comes from `DrainPlan`, not the graph dependent walk; the plan is
+the authoritative source for which Pods are PDB-blocked.
 
 `selects` is deliberately excluded from delete and rollout restart. A Service
 selecting many Pods does not fail because one selected Pod is deleted, so
@@ -503,13 +513,15 @@ that name now. The summary is advisory — see [Write impact
 preview](tui.md#write-impact-preview) for how it appears and what it never
 does.
 
-Delete, rollout restart, a known scale-down decrease, and Pod resize show
-this section today. `POD_RESIZE` (Pod resize) intentionally traverses no
-relation. The existing Pod object keeps its UID/IP, owner, node placement,
-mounts/config references, PDB membership, and routing membership. Runtime
-resize considerations are rendered from the captured Pod manifest and
-requested resources, not inferred from graph edges.
+Delete, rollout restart, a known scale-down decrease, Pod resize, and Node
+drain show this section today. `POD_RESIZE` (Pod resize) intentionally
+traverses no relation. The existing Pod object keeps its UID/IP, owner, node
+placement, mounts/config references, PDB membership, and routing membership.
+Runtime resize considerations are rendered from the captured Pod manifest
+and requested resources, not inferred from graph edges.
 
 The remaining write types (scale-up, a scale with no readable current count,
-edit, cordon/uncordon, drain, Helm, operator) have no tested per-relation
-semantics yet and deliberately show nothing rather than a plausible guess.
+edit, Helm, operator) have no tested per-relation semantics yet and
+deliberately show nothing rather than a plausible guess. Cordon and uncordon
+use only the local node maintenance advisory path described above; drain
+combines its `scheduled_on` graph section with that local advisory.

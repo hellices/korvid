@@ -193,6 +193,9 @@ def test_only_supported_writes_carry_action_semantics() -> None:
         "rollout_restart",
         "scale_down",
         "pod_resize",
+        "cordon_node",
+        "uncordon_node",
+        "drain_node",
     ]
     assert set(ACTION_RELATIONS) == set(ImpactAction)
     assert ACTION_RELATIONS[ImpactAction.SCALE_DOWN] == frozenset(
@@ -208,6 +211,9 @@ def test_only_supported_writes_carry_action_semantics() -> None:
     assert {
         cast(RelationshipEdge, edge).relation for param in _DELETE_CASES for edge in param.values
     } == ACTION_RELATIONS[ImpactAction.DELETE]
+    assert ACTION_RELATIONS[ImpactAction.CORDON_NODE] == frozenset()
+    assert ACTION_RELATIONS[ImpactAction.UNCORDON_NODE] == frozenset()
+    assert ACTION_RELATIONS[ImpactAction.DRAIN_NODE] == frozenset({RelationKind.SCHEDULED_ON})
 
 
 @pytest.mark.parametrize("relation", list(RelationKind))
@@ -243,6 +249,131 @@ def test_pod_resize_ignores_every_unresolved_relationship(relation: RelationKind
     assert summary.unresolved == ()
 
 
+@pytest.mark.parametrize(
+    "action",
+    [ImpactAction.CORDON_NODE, ImpactAction.UNCORDON_NODE],
+)
+@pytest.mark.parametrize("relation", list(RelationKind))
+def test_node_scheduling_toggle_ignores_every_relationship(
+    action: ImpactAction, relation: RelationKind
+) -> None:
+    node = _res("Node", "worker-1", namespace="", uid="node-1")
+    related = _res("Pod", "web-1", uid="pod-1")
+    summary = summarize_impact(
+        _graph(_edge(related, node, relation, field="spec.example")),
+        action,
+        node,
+    )
+    assert summary.direct == ()
+    assert summary.transitive == ()
+
+
+def test_drain_follows_scheduled_pods() -> None:
+    node = _res("Node", "worker-1", namespace="", uid="node-1")
+    pod = _res("Pod", "web-1", uid="pod-1")
+    summary = summarize_impact(
+        _graph(_edge(pod, node, RelationKind.SCHEDULED_ON, field="spec.nodeName")),
+        ImpactAction.DRAIN_NODE,
+        node,
+    )
+    assert [item.resource for item in summary.direct] == [pod]
+    assert summary.transitive == ()
+
+
+@pytest.mark.parametrize(
+    "relation",
+    [relation for relation in RelationKind if relation is not RelationKind.SCHEDULED_ON],
+)
+def test_drain_ignores_every_relation_outside_scheduled_on(
+    relation: RelationKind,
+) -> None:
+    node = _res("Node", "worker-1", namespace="", uid="node-1")
+    related = _res("Pod", "web-1", uid="pod-1")
+    summary = summarize_impact(
+        _graph(_edge(related, node, relation, field="spec.example")),
+        ImpactAction.DRAIN_NODE,
+        node,
+    )
+    assert summary.direct == ()
+    assert summary.transitive == ()
+
+
+@pytest.mark.parametrize(
+    "action",
+    [ImpactAction.CORDON_NODE, ImpactAction.UNCORDON_NODE],
+)
+@pytest.mark.parametrize("relation", list(RelationKind))
+def test_node_scheduling_toggle_suppresses_every_unresolved_relationship(
+    action: ImpactAction, relation: RelationKind
+) -> None:
+    node = _res("Node", "worker-1", namespace="", uid="node-1")
+    missing = _res("Pod", "ghost")
+    summary = summarize_impact(
+        _graph(
+            _edge(
+                missing,
+                node,
+                relation,
+                resolution=EdgeResolution.MISSING,
+                field="spec.example",
+            )
+        ),
+        action,
+        node,
+    )
+    assert summary.unresolved == ()
+
+
+def test_drain_reports_unresolved_scheduled_on_edge_for_affected_pod() -> None:
+    node = _res("Node", "worker-1", namespace="", uid="node-1")
+    pod = _res("Pod", "web-1", uid="pod-1")
+    missing_node = _res("Node", "ghost", namespace="", uid="node-ghost")
+    summary = summarize_impact(
+        _graph(
+            _edge(pod, node, RelationKind.SCHEDULED_ON, field="spec.nodeName"),
+            _edge(
+                pod,
+                missing_node,
+                RelationKind.SCHEDULED_ON,
+                resolution=EdgeResolution.MISSING,
+                field="spec.nodeName",
+            ),
+        ),
+        ImpactAction.DRAIN_NODE,
+        node,
+    )
+    assert [item.resource for item in summary.direct] == [pod]
+    assert [edge.target for edge in summary.unresolved] == [missing_node]
+
+
+@pytest.mark.parametrize(
+    "relation",
+    [relation for relation in RelationKind if relation is not RelationKind.SCHEDULED_ON],
+)
+def test_drain_suppresses_unresolved_relations_outside_scheduled_on(
+    relation: RelationKind,
+) -> None:
+    node = _res("Node", "worker-1", namespace="", uid="node-1")
+    pod = _res("Pod", "web-1", uid="pod-1")
+    missing = _res("ConfigMap", "ghost")
+    summary = summarize_impact(
+        _graph(
+            _edge(pod, node, RelationKind.SCHEDULED_ON, field="spec.nodeName"),
+            _edge(
+                pod,
+                missing,
+                relation,
+                resolution=EdgeResolution.MISSING,
+                field="spec.example",
+            ),
+        ),
+        ImpactAction.DRAIN_NODE,
+        node,
+    )
+    assert [item.resource for item in summary.direct] == [pod]
+    assert summary.unresolved == ()
+
+
 def test_every_action_chooses_its_unresolved_reference_policy() -> None:
     """The unresolved-warning policy is keyed by action, never opted into.
 
@@ -270,6 +401,12 @@ def test_every_action_chooses_its_unresolved_reference_policy() -> None:
         ACTION_UNRESOLVED_RELATIONS[ImpactAction.POD_RESIZE]
         is ACTION_RELATIONS[ImpactAction.POD_RESIZE]
     )
+    for action in (
+        ImpactAction.CORDON_NODE,
+        ImpactAction.UNCORDON_NODE,
+        ImpactAction.DRAIN_NODE,
+    ):
+        assert ACTION_UNRESOLVED_RELATIONS[action] is ACTION_RELATIONS[action]
 
 
 @pytest.mark.parametrize("action", list(ImpactAction))

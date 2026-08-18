@@ -72,6 +72,9 @@ class ImpactAction(StrEnum):
     ROLLOUT_RESTART = "rollout_restart"
     SCALE_DOWN = "scale_down"
     POD_RESIZE = "pod_resize"
+    CORDON_NODE = "cordon_node"
+    UNCORDON_NODE = "uncordon_node"
+    DRAIN_NODE = "drain_node"
 
 
 #: Relations a delete may follow in reverse (target -> its dependents).
@@ -144,11 +147,25 @@ _SCALE_DOWN_RELATIONS: frozenset[RelationKind] = frozenset(
 #: accidentally claiming a dependent set.
 _POD_RESIZE_RELATIONS: frozenset[RelationKind] = frozenset()
 
+#: Cordoning a node only marks it unschedulable; it does not affect existing
+#: Pod placements or dependencies. This action carries no graph impact
+#: semantics - the set is deliberately empty.
+_NODE_SCHEDULING_TOGGLE_RELATIONS: frozenset[RelationKind] = frozenset()
+
+#: Draining a node evicts Pods that are scheduled on it. We follow only the
+#: SCHEDULED_ON relationship to find those Pods. PROTECTED_BY is deliberately
+#: absent because the current dependent walk cannot reach a PDB from a Node
+#: through that edge direction and DrainPlan owns blocker state.
+_DRAIN_NODE_RELATIONS: frozenset[RelationKind] = frozenset({RelationKind.SCHEDULED_ON})
+
 ACTION_RELATIONS: Mapping[ImpactAction, frozenset[RelationKind]] = {
     ImpactAction.DELETE: _DELETE_RELATIONS,
     ImpactAction.ROLLOUT_RESTART: _ROLLOUT_RESTART_RELATIONS,
     ImpactAction.SCALE_DOWN: _SCALE_DOWN_RELATIONS,
     ImpactAction.POD_RESIZE: _POD_RESIZE_RELATIONS,
+    ImpactAction.CORDON_NODE: _NODE_SCHEDULING_TOGGLE_RELATIONS,
+    ImpactAction.UNCORDON_NODE: _NODE_SCHEDULING_TOGGLE_RELATIONS,
+    ImpactAction.DRAIN_NODE: _DRAIN_NODE_RELATIONS,
 }
 
 #: Which relations each action's unresolved-reference warning may report,
@@ -176,6 +193,9 @@ ACTION_UNRESOLVED_RELATIONS: Mapping[ImpactAction, frozenset[RelationKind] | Non
     ImpactAction.ROLLOUT_RESTART: None,
     ImpactAction.SCALE_DOWN: _SCALE_DOWN_RELATIONS,
     ImpactAction.POD_RESIZE: _POD_RESIZE_RELATIONS,
+    ImpactAction.CORDON_NODE: _NODE_SCHEDULING_TOGGLE_RELATIONS,
+    ImpactAction.UNCORDON_NODE: _NODE_SCHEDULING_TOGGLE_RELATIONS,
+    ImpactAction.DRAIN_NODE: _DRAIN_NODE_RELATIONS,
 }
 
 
