@@ -46,7 +46,8 @@ def _validate_install_guidance(artifact: Path, description: str) -> None:
     korvid_requirement = r"""\bkorvid(?:\[|==|[ @'"]|$)"""
     command_tail = r"[^\n`#]*"
     pip_command = (
-        rf"(?:python(?:3(?:\.\d+)?)? -m )?pip\b{command_tail}\binstall\b"
+        rf"(?:python(?:3(?:\.\d+)?)? -m )?pip(?:3(?:\.\d+)?)?\b"
+        rf"{command_tail}\binstall\b"
         rf"{command_tail}{korvid_requirement}"
     )
     pip_matches = [

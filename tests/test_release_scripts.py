@@ -926,6 +926,8 @@ def test_artifact_metadata_requires_an_installation_section(tmp_path: Path) -> N
         "python -m pip install",
         "python3 -m pip install",
         "pip install",
+        "pip3 install",
+        "pip3.12 install",
         "pip install -U",
         "pip install --index-url https://packages.example.com/simple",
         "python -m pip --disable-pip-version-check install",
