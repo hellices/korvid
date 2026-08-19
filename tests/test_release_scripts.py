@@ -972,7 +972,9 @@ def test_artifact_metadata_rejects_an_inline_pip_first_command(tmp_path: Path) -
     "misleading_isolated_reference",
     [
         "Do not use `uv tool install` for this application.",
+        "Do not use `uv tool install korvid`; use pip instead.",
         "```sh\nuv tool install unrelated\n```",
+        "```sh\nuv tool install --with korvid unrelated\n```",
         "```sh\nuv tool install unrelated  # not korvid\n```",
         "```sh\nuv tool install unrelated && echo korvid\n```",
         "```sh\nuv tool install unrelated; korvid\n```",

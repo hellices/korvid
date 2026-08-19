@@ -16,6 +16,7 @@ from pathlib import Path
 
 _SHELL_CONTROL = frozenset(";&|")
 _NOOP_FLAGS = frozenset(("-h", "--help", "--version"))
+_ISOLATED_VALUELESS_FLAGS = frozenset(("--force",))
 
 
 def _wheel_metadata(path: Path) -> Message:
@@ -52,14 +53,15 @@ def _shell_tokens(command: str) -> list[str]:
     return tokens
 
 
+def _is_korvid_requirement(requirement: str) -> bool:
+    return requirement == "korvid" or requirement.startswith(("korvid[", "korvid=="))
+
+
 def _installs_korvid(tokens: list[str], install_index: int) -> bool:
     if any(token in _NOOP_FLAGS for token in tokens):
         return False
     requirements = tokens[install_index + 1 :]
-    return any(
-        requirement == "korvid" or requirement.startswith(("korvid[", "korvid=="))
-        for requirement in requirements
-    )
+    return any(_is_korvid_requirement(requirement) for requirement in requirements)
 
 
 def _pip_install_index(tokens: list[str]) -> int | None:
@@ -99,20 +101,32 @@ def _is_pip_install(tokens: list[str]) -> bool:
 
 def _is_isolated_install(tokens: list[str]) -> bool:
     if tokens[:3] == ["uv", "tool", "install"]:
-        return _installs_korvid(tokens, 2)
-    if tokens[:2] == ["pipx", "install"]:
-        return _installs_korvid(tokens, 1)
-    return False
+        target_index = 3
+    elif tokens[:2] == ["pipx", "install"]:
+        target_index = 2
+    else:
+        return False
+    if any(token in _NOOP_FLAGS for token in tokens):
+        return False
+    while target_index < len(tokens) and tokens[target_index] in _ISOLATED_VALUELESS_FLAGS:
+        target_index += 1
+    return target_index < len(tokens) and _is_korvid_requirement(tokens[target_index])
 
 
-def _installation_commands(section: str) -> list[tuple[int, list[str]]]:
-    matches = [
-        *re.finditer(r"(?m)^[ \t]*(?P<command>[^`\r\n]+)", section),
-        *re.finditer(r"`(?P<command>[^`\r\n]+)`", section),
+def _installation_commands(section: str) -> list[tuple[int, list[str], bool]]:
+    candidates = [
+        *(
+            (match, False)
+            for match in re.finditer(
+                r"(?m)^[ \t]*(?P<command>[^`\r\n]+)",
+                section,
+            )
+        ),
+        *((match, True) for match in re.finditer(r"`(?P<command>[^`\r\n]+)`", section)),
     ]
     commands = [
-        (match.start(), tokens)
-        for match in matches
+        (match.start(), tokens, is_inline)
+        for match, is_inline in candidates
         if (tokens := _shell_tokens(match.group("command")))
     ]
     return sorted(commands)
@@ -130,10 +144,14 @@ def _validate_install_guidance(artifact: Path, description: str) -> None:
     section = section_match.group("body")
     commands = _installation_commands(section)
     pip_position = min(
-        (position for position, tokens in commands if _is_pip_install(tokens)),
+        (position for position, tokens, _is_inline in commands if _is_pip_install(tokens)),
         default=-1,
     )
-    isolated_positions = [position for position, tokens in commands if _is_isolated_install(tokens)]
+    isolated_positions = [
+        position
+        for position, tokens, is_inline in commands
+        if not is_inline and _is_isolated_install(tokens)
+    ]
     if not isolated_positions or (pip_position != -1 and pip_position < min(isolated_positions)):
         raise ValueError(
             f"{artifact.name}: the PyPI Installation section must recommend"
