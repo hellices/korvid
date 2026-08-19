@@ -3709,7 +3709,7 @@ class KorvidApp(App[None]):
     def _open_agent_setup(self) -> None:
         if self._agent_configurator is None:
             self.notify(
-                f"Agent setup unavailable — {isolated_install_hint()}",
+                f"Agent setup unavailable — {isolated_install_hint(extras='agent')}",
                 severity="warning",
             )
             return
@@ -3883,7 +3883,7 @@ class KorvidApp(App[None]):
         mcp = self._mcp
         if mcp is None:
             self.notify(
-                f"MCP unavailable — {isolated_install_hint()}",
+                f"MCP unavailable — {isolated_install_hint(extras='mcp')}",
                 severity="warning",
             )
             return
@@ -3995,7 +3995,7 @@ class KorvidApp(App[None]):
         """
         if self._rebuild_agent is None:
             self.notify(
-                f"Agent rebuild unavailable — {isolated_install_hint()}",
+                f"Agent rebuild unavailable — {isolated_install_hint(extras='agent')}",
                 severity="warning",
             )
             return False

@@ -1537,14 +1537,12 @@ def test_readme_describes_pep_668_without_an_inaccurate_fedora_claim() -> None:
     assert "Fedora 38" not in quick_start
 
 
-def test_runtime_install_hints_never_target_system_pip() -> None:
+def test_runtime_install_hint_consumers_use_the_shared_helper() -> None:
     root = Path(__file__).parents[1] / "src" / "korvid"
-    hints = "\n".join(
-        (root / relative).read_text(encoding="utf-8")
-        for relative in ("__main__.py", "ui/app.py", "providers/entra.py")
-    )
-    assert "pip install" not in hints
-    assert "isolated_install_hint" in hints
+    for relative in ("__main__.py", "ui/app.py", "providers/entra.py"):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "from korvid.agent.install_hint import isolated_install_hint" in source
+        assert "isolated_install_hint(" in source
 
 
 def test_release_smoke_docs_describe_a_ci_venv_pip_check() -> None:

@@ -9,6 +9,7 @@ from typing import Any, cast
 from textual.css.query import NoMatches
 from textual.widgets import Input, OptionList
 
+from korvid import __version__
 from korvid.agent.events import AgentEvent, TextDelta, TurnComplete
 from korvid.agent.outbound import OutboundSnapshot
 from korvid.core.config import KorvidConfig
@@ -304,6 +305,11 @@ async def test_ai_command_without_configurator_notifies() -> None:
         # No crash and no setup screen pushed.
         from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 
+        text = _notification_text(app)
+        requirement = f"korvid[agent]=={__version__}"
+        assert "Agent setup unavailable" in text
+        assert f"uv tool install --force '{requirement}'" in text
+        assert f"pipx install --force '{requirement}'" in text
         assert not isinstance(app.screen, AgentSetupScreen)
 
 
@@ -969,8 +975,11 @@ async def test_mcp_command_without_controller_does_not_crash() -> None:
             lambda: "MCP unavailable" in _notification_text(app),
             label="mcp unavailable notification shown",
         )
-        msgs = [str(n.message) for n in app._notifications]
-        assert any("MCP unavailable" in m for m in msgs)
+        text = _notification_text(app)
+        requirement = f"korvid[mcp]=={__version__}"
+        assert "MCP unavailable" in text
+        assert f"uv tool install --force '{requirement}'" in text
+        assert f"pipx install --force '{requirement}'" in text
 
 
 async def test_agent_unavailable_mounts_no_panel_and_hides_the_binding() -> None:

@@ -37,7 +37,8 @@ class EntraCredentialSource(CredentialSource):
                 from azure.identity.aio import DefaultAzureCredential
             except ImportError as exc:
                 raise RuntimeError(
-                    f"Entra auth requires isolated extras — {isolated_install_hint(entra=True)}"
+                    "Entra auth requires isolated extras — "
+                    f"{isolated_install_hint(extras='all,entra')}"
                 ) from exc
             self._credential = DefaultAzureCredential()
         return self._credential
