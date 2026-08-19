@@ -858,7 +858,7 @@ def _fake_dist(tmp_path: Path, metadata_text: str) -> Path:
     with zipfile.ZipFile(dist / "korvid-1.2.3-py3-none-any.whl", "w") as wheel:
         wheel.writestr("korvid-1.2.3.dist-info/METADATA", metadata_text)
     pkg_info = tmp_path / "PKG-INFO"
-    pkg_info.write_text(metadata_text)
+    pkg_info.write_text(metadata_text, newline="")
     with tarfile.open(dist / "korvid-1.2.3.tar.gz", "w:gz") as sdist:
         sdist.add(pkg_info, arcname="korvid-1.2.3/PKG-INFO")
     return dist
@@ -928,6 +928,7 @@ def test_artifact_metadata_requires_an_installation_section(tmp_path: Path) -> N
         "pip install",
         "pip install -U",
         "pip install --index-url https://packages.example.com/simple",
+        "python -m pip --disable-pip-version-check install",
     ],
 )
 def test_artifact_metadata_rejects_pip_first_install_guidance(tmp_path: Path, command: str) -> None:
@@ -968,6 +969,7 @@ def test_artifact_metadata_rejects_an_inline_pip_first_command(tmp_path: Path) -
     [
         "Do not use `uv tool install` for this application.",
         "```sh\nuv tool install unrelated\n```",
+        "```sh\nuv tool install unrelated  # not korvid\n```",
     ],
 )
 def test_artifact_metadata_requires_an_isolated_command_that_installs_korvid(

@@ -44,7 +44,11 @@ def _validate_install_guidance(artifact: Path, description: str) -> None:
         )
     section = section_match.group("body")
     korvid_requirement = r"""\bkorvid(?:\[|==|[ @'"]|$)"""
-    pip_command = rf"(?:python(?:3(?:\.\d+)?)? -m )?pip install\b[^\n`]*{korvid_requirement}"
+    command_tail = r"[^\n`#]*"
+    pip_command = (
+        rf"(?:python(?:3(?:\.\d+)?)? -m )?pip\b{command_tail}\binstall\b"
+        rf"{command_tail}{korvid_requirement}"
+    )
     pip_matches = [
         match
         for pattern in (rf"(?m)^[ \t]*{pip_command}", rf"`{pip_command}[^`\n]*`")
@@ -54,7 +58,7 @@ def _validate_install_guidance(artifact: Path, description: str) -> None:
     isolated_positions = [
         match.start()
         for match in re.finditer(
-            rf"(?m)^[ \t]*(?:uv tool|pipx) install\b[^\n`]*{korvid_requirement}",
+            rf"(?m)^[ \t]*(?:uv tool|pipx) install\b{command_tail}{korvid_requirement}",
             section,
         )
     ]
