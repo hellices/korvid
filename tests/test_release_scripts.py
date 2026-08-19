@@ -1531,6 +1531,26 @@ def test_readme_describes_pep_668_without_an_inaccurate_fedora_claim() -> None:
     assert "Fedora 38" not in quick_start
 
 
+def test_runtime_install_hints_never_target_system_pip() -> None:
+    root = Path(__file__).parents[1] / "src" / "korvid"
+    hints = "\n".join(
+        (root / relative).read_text()
+        for relative in ("__main__.py", "ui/app.py", "providers/entra.py")
+    )
+    assert "pip install" not in hints
+    assert "isolated_install_hint" in hints
+
+
+def test_release_smoke_docs_describe_a_ci_venv_pip_check() -> None:
+    root = Path(__file__).parents[1]
+    runbook = markdown_section(_release_runbook(), "What the smoke matrix proves")
+    smoke = (root / "scripts" / "release" / "smoke_install.py").read_text()
+    assert "disposable CI virtual environment" in runbook
+    assert "disposable CI virtual environment" in smoke
+    assert "the documented base-to-extra expansion command" not in smoke
+    assert "run the documented" not in runbook
+
+
 def test_release_docs_runbook_requires_protected_tags_and_maintainer_approval() -> None:
     runbook = " ".join(_release_runbook().split())
     assert "allow protected tags only" in runbook

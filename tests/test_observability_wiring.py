@@ -9,11 +9,13 @@ trust these clients get.
 from __future__ import annotations
 
 import dataclasses
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from korvid import __version__
 from korvid.__main__ import _build_observability
 from korvid.core.config import KorvidConfig, ObservabilityBackend
 
@@ -175,7 +177,14 @@ class TestMissingExtra:
         import korvid.__main__ as main
 
         monkeypatch.setattr(main, "_missing_extra_packages", lambda roots: ["httpx"])
-        with pytest.raises(SystemExit, match=r"korvid\[observability\]"):
+        requirement = f"korvid[all]=={__version__}"
+        with pytest.raises(
+            SystemExit,
+            match=(
+                rf"uv tool install --force '{re.escape(requirement)}'.*"
+                rf"pipx install --force '{re.escape(requirement)}'"
+            ),
+        ):
             _build_observability(
                 _config(observability_prometheus=ObservabilityBackend(url="https://p.example.com"))
             )

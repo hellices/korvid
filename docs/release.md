@@ -371,8 +371,8 @@ leaves no user state behind.
 
 Every non-base variant additionally gets a
 **separate base-to-extra expansion check** in its own clean virtual
-environment: install base `korvid`, then run the documented
-`--upgrade 'korvid[extra]'` command and re-assert the same contract. The two
+environment: install base `korvid`, then use pip's `--upgrade` inside that
+disposable CI virtual environment and re-assert the same contract. The two
 checks are independent, so a passing fresh install is never inferred from an
 expansion (or vice versa).
 

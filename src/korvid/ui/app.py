@@ -53,6 +53,7 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, WorkerError, WorkerState
 
 from korvid.agent.events import AgentError, AgentEvent, ToolCallFinished, ToolCallStarted
+from korvid.agent.install_hint import isolated_install_hint
 from korvid.agent.navigation import EvidenceTarget, target_for
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
@@ -3708,7 +3709,7 @@ class KorvidApp(App[None]):
     def _open_agent_setup(self) -> None:
         if self._agent_configurator is None:
             self.notify(
-                "Agent setup unavailable — install with: pip install 'korvid[agent]'",
+                f"Agent setup unavailable — {isolated_install_hint()}",
                 severity="warning",
             )
             return
@@ -3882,7 +3883,7 @@ class KorvidApp(App[None]):
         mcp = self._mcp
         if mcp is None:
             self.notify(
-                "MCP unavailable — install with: pip install 'korvid[mcp]'",
+                f"MCP unavailable — {isolated_install_hint()}",
                 severity="warning",
             )
             return
@@ -3994,7 +3995,7 @@ class KorvidApp(App[None]):
         """
         if self._rebuild_agent is None:
             self.notify(
-                "Agent rebuild unavailable — install with: pip install 'korvid[agent]'",
+                f"Agent rebuild unavailable — {isolated_install_hint()}",
                 severity="warning",
             )
             return False
