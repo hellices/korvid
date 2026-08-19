@@ -2,7 +2,8 @@
 
 **Issue:** #302
 **Status:** Approved for implementation
-**Scope:** Public installation documentation and its release-policy tests
+**Scope:** Public installation guidance, runtime missing-extra hints, and their
+release-policy tests
 
 ## Problem
 
@@ -28,6 +29,7 @@ commands without seeing the earlier virtual-environment caveat.
 
 - Make isolated application installation the consistent public path.
 - Give users who hit PEP 668 an immediately actionable recovery command.
+- Keep in-app and startup missing-extra hints consistent with that command.
 - Keep valid pip workflows for virtual environments, containers, air-gapped
   bundles, and release verification.
 - Never recommend `--break-system-packages`.
@@ -142,6 +144,16 @@ The implementation will update:
 - `docs/release.md`
   - retain maintainer-only pip commands where a venv is explicit;
   - avoid presenting raw pip as the end-user install path.
+- runtime missing-extra hints
+  - use one version-aware helper for `uv tool install --force` and `pipx
+    install --force`;
+  - use `[all]` for the standard feature set and `[all,entra]` for Entra;
+  - never direct a tool-managed korvid executable to an unrelated pip
+    environment.
+- release smoke descriptions
+  - describe base-to-extra expansion as a disposable CI-venv pip check;
+  - do not claim that it executes the documented end-user tool-manager
+    reinstall command.
 - release documentation tests
   - require isolated commands in public sections;
   - reject `--break-system-packages`;
@@ -170,6 +182,10 @@ Tests will establish these contracts:
 5. Pip commands that remain in active docs are adjacent to an explicit venv,
    container, air-gap, or maintainer context.
 6. Version references still match `pyproject.toml`.
+7. Runtime missing-extra hints contain both isolated tool-manager commands and
+   contain no raw `pip install`.
+8. Release smoke prose distinguishes its CI-only pip expansion check from the
+   documented end-user `--force` reinstall path.
 
 Targeted release-policy and documentation tests run first. The final branch
 gate runs ruff, formatting, mypy, pytest, and tach without regenerating

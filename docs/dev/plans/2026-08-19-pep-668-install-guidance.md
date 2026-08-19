@@ -4,7 +4,12 @@
 
 **Goal:** Make every active end-user installation path safe on PEP 668 systems by leading with isolated `uv tool`/`pipx` environments and reserving pip for explicitly isolated contexts.
 
-**Architecture:** This is a documentation-contract fix: active user docs define the supported installation boundary, and release tests pin the exact commands, current version, PEP 668 recovery, and prohibition on `--break-system-packages`. No runtime, packaging metadata, dependency, release workflow, or lockfile behavior changes.
+**Architecture:** Active user docs and runtime missing-extra messages share the
+same isolated-install boundary. A pure agent-layer helper renders
+version-aware `uv tool`/`pipx` reinstall commands for the composition root, UI,
+and provider layer; release tests pin docs and smoke-test descriptions. Package
+functionality, metadata, dependencies, workflows, and lockfile behavior do not
+change.
 
 **Tech Stack:** Markdown, pytest, Python `pathlib`, existing `markdown_section` release-test helper, uv tool/pipx packaging commands
 
@@ -37,6 +42,15 @@
   - User-document contract tests for isolated installation, PEP 668 recovery, optional extras, and runbook commands.
 - `tests/test_release_policy.py`
   - Current-version contract for README and runbook installation commands.
+- `src/korvid/agent/install_hint.py`
+  - Pure version-aware formatter for isolated missing-extra recovery.
+- `src/korvid/__main__.py`, `src/korvid/ui/app.py`, `src/korvid/providers/entra.py`
+  - Existing startup/UI/provider missing-extra messages that consume the
+    formatter.
+- `scripts/release/smoke_install.py`
+  - CI-only disposable-venv expansion descriptions; execution stays unchanged.
+- `tests/agent/test_install_hint.py`
+  - Exact standard and Entra helper output contracts.
 
 ---
 
@@ -535,3 +549,183 @@ first.
 ````
 
 After merge, post this response to #302 and close the issue.
+
+---
+
+### Task 4: Align runtime hints and release-smoke descriptions
+
+**Files:**
+- Create: `src/korvid/agent/install_hint.py`
+- Create: `tests/agent/test_install_hint.py`
+- Modify: `src/korvid/__main__.py:86-111`
+- Modify: `src/korvid/ui/app.py:3708-3713`
+- Modify: `src/korvid/ui/app.py:3882-3887`
+- Modify: `src/korvid/ui/app.py:3994-3999`
+- Modify: `src/korvid/providers/entra.py:35-39`
+- Modify: `docs/release.md:357-373`
+- Modify: `scripts/release/smoke_install.py:1-8`
+- Modify: `scripts/release/smoke_install.py:112-119`
+- Modify: `tests/test_release_scripts.py`
+- Delete from Git tree: `.superpowers/sdd/round3-inline-fix-report.md`
+- Delete from Git tree: `.superpowers/sdd/task-1-report.md`
+
+**Interfaces:**
+- Produces:
+  `isolated_install_hint(*, entra: bool = False) -> str`.
+- Standard output contains versioned `[all]` uv tool and pipx `--force`
+  commands.
+- Entra output contains versioned `[all,entra]` commands.
+- Consumes: `korvid.__version__`.
+
+- [ ] **Step 1: Write failing helper and smoke-description tests**
+
+Create `tests/agent/test_install_hint.py`:
+
+```python
+from korvid import __version__
+from korvid.agent.install_hint import isolated_install_hint
+
+
+def test_standard_install_hint_uses_isolated_tool_environments() -> None:
+    hint = isolated_install_hint()
+    requirement = f"korvid[all]=={__version__}"
+    assert f"uv tool install --force '{requirement}'" in hint
+    assert f"pipx install --force '{requirement}'" in hint
+    assert "pip install" not in hint
+
+
+def test_entra_install_hint_keeps_the_entra_extra() -> None:
+    hint = isolated_install_hint(entra=True)
+    requirement = f"korvid[all,entra]=={__version__}"
+    assert f"uv tool install --force '{requirement}'" in hint
+    assert f"pipx install --force '{requirement}'" in hint
+```
+
+Add to `tests/test_release_scripts.py`:
+
+```python
+def test_runtime_install_hints_never_target_system_pip() -> None:
+    root = Path(__file__).parents[1] / "src" / "korvid"
+    hints = "\n".join(
+        (root / relative).read_text()
+        for relative in ("__main__.py", "ui/app.py", "providers/entra.py")
+    )
+    assert "pip install" not in hints
+    assert "isolated_install_hint" in hints
+
+
+def test_release_smoke_docs_describe_a_ci_venv_pip_check() -> None:
+    root = Path(__file__).parents[1]
+    runbook = markdown_section(_release_runbook(), "What the smoke matrix proves")
+    smoke = (root / "scripts" / "release" / "smoke_install.py").read_text()
+    assert "disposable CI virtual environment" in runbook
+    assert "disposable CI virtual environment" in smoke
+    assert "the documented base-to-extra expansion command" not in smoke
+    assert "run the documented" not in runbook
+```
+
+Run the four tests. Expected: import failure for the missing helper and
+assertion failures for raw runtime pip strings and stale smoke descriptions.
+
+- [ ] **Step 2: Implement the pure install-hint helper**
+
+Create `src/korvid/agent/install_hint.py`:
+
+```python
+from __future__ import annotations
+
+from korvid import __version__
+
+
+def isolated_install_hint(*, entra: bool = False) -> str:
+    extras = "all,entra" if entra else "all"
+    requirement = f"korvid[{extras}]=={__version__}"
+    return (
+        "reinstall with: "
+        f"uv tool install --force '{requirement}' "
+        f"(or: pipx install --force '{requirement}')"
+    )
+```
+
+Import and interpolate this helper in every named runtime hint. Standard
+agent/MCP/observability/UI hints call `isolated_install_hint()`. The Entra
+provider calls `isolated_install_hint(entra=True)`.
+
+- [ ] **Step 3: Correct smoke-test prose without changing execution**
+
+In `docs/release.md`, describe the expansion as:
+
+```markdown
+environment: install base `korvid`, then use pip's `--upgrade` inside that
+disposable CI virtual environment and re-assert the same contract.
+```
+
+In both `scripts/release/smoke_install.py` docstrings, replace “documented
+base-to-extra expansion command” with “pip base-to-extra expansion behavior
+inside a disposable CI virtual environment”. Do not change executable code.
+
+- [ ] **Step 4: Remove ignored SDD reports from the Git tree**
+
+Run:
+
+```bash
+git rm --cached \
+  .superpowers/sdd/round3-inline-fix-report.md \
+  .superpowers/sdd/task-1-report.md
+```
+
+The ignored working copies may remain locally, but neither path may appear in
+`git ls-tree -r HEAD .superpowers` after commit.
+
+- [ ] **Step 5: Verify GREEN and boundaries**
+
+Run:
+
+```bash
+UV_NO_SYNC=1 \
+UV_PROJECT_ENVIRONMENT=/Users/hwang-inhwan/workspace/kube/.venv \
+PYTHONPATH="$PWD/src:$PWD" \
+uv run pytest -p no:tach -q \
+  tests/agent/test_install_hint.py \
+  tests/test_main_wiring.py \
+  tests/test_observability_wiring.py \
+  tests/providers/test_entra.py \
+  tests/ui/test_agent_wiring.py \
+  tests/test_release_policy.py \
+  tests/test_release_scripts.py
+
+UV_NO_SYNC=1 \
+UV_PROJECT_ENVIRONMENT=/Users/hwang-inhwan/workspace/kube/.venv \
+PYTHONPATH="$PWD/src:$PWD" \
+uv run ruff check \
+  src/korvid/agent/install_hint.py \
+  src/korvid/__main__.py \
+  src/korvid/ui/app.py \
+  src/korvid/providers/entra.py \
+  tests/agent/test_install_hint.py \
+  tests/test_release_scripts.py
+
+UV_NO_SYNC=1 \
+UV_PROJECT_ENVIRONMENT=/Users/hwang-inhwan/workspace/kube/.venv \
+PYTHONPATH="$PWD/src:$PWD" \
+uv run tach check
+```
+
+Expected: all tests and checks pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add \
+  docs/dev/specs/2026-08-19-pep-668-install-guidance-design.md \
+  docs/dev/plans/2026-08-19-pep-668-install-guidance.md \
+  docs/release.md \
+  scripts/release/smoke_install.py \
+  src/korvid/agent/install_hint.py \
+  src/korvid/__main__.py \
+  src/korvid/ui/app.py \
+  src/korvid/providers/entra.py \
+  tests/agent/test_install_hint.py \
+  tests/test_release_scripts.py
+git commit -m "fix: isolate runtime install hints"
+```
