@@ -969,6 +969,48 @@ def test_artifact_metadata_rejects_an_inline_pip_first_command(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
+    "requirement",
+    [
+        "Korvid>=1.2.3",
+        "korvid~=1.2",
+        "korvid @ https://packages.example.com/korvid.whl",
+    ],
+)
+def test_artifact_metadata_rejects_pep508_pip_first_requirements(
+    tmp_path: Path, requirement: str
+) -> None:
+    body = (
+        "# korvid\n\nAI-native Kubernetes TUI with enough project detail to"
+        " produce a valid PyPI long description while reproducing pip-first"
+        " PEP 508 requirement spellings.\n\n"
+        "## Installation\n\n"
+        f"```sh\npip install '{requirement}'\n```\n\n"
+        "```sh\nuv tool install 'korvid[all]==1.2.3'\n```\n"
+    )
+    dist = _fake_dist(tmp_path, _metadata_text(body=body))
+
+    with pytest.raises(ValueError, match="isolated application installer"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_artifact_metadata_ignores_install_commands_hidden_in_html_comments(
+    tmp_path: Path,
+) -> None:
+    body = (
+        "# korvid\n\nAI-native Kubernetes TUI with enough project detail to"
+        " produce a valid PyPI long description while hiding an isolated"
+        " installer from the rendered project page.\n\n"
+        "## Installation\n\n"
+        "<!--\nuv tool install korvid\n-->\n\n"
+        "```sh\npip install korvid\n```\n"
+    )
+    dist = _fake_dist(tmp_path, _metadata_text(body=body))
+
+    with pytest.raises(ValueError, match="isolated application installer"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+@pytest.mark.parametrize(
     "misleading_isolated_reference",
     [
         "Do not use `uv tool install` for this application.",

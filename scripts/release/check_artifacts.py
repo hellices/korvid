@@ -54,7 +54,13 @@ def _shell_tokens(command: str) -> list[str]:
 
 
 def _is_korvid_requirement(requirement: str) -> bool:
-    return requirement == "korvid" or requirement.startswith(("korvid[", "korvid=="))
+    return (
+        re.match(
+            r"(?i)^korvid\s*(?:\[|===|==|!=|~=|>=|<=|>|<|@|$)",
+            requirement,
+        )
+        is not None
+    )
 
 
 def _installs_korvid(tokens: list[str], install_index: int) -> bool:
@@ -141,7 +147,7 @@ def _validate_install_guidance(artifact: Path, description: str) -> None:
         raise ValueError(
             f"{artifact.name}: the PyPI long description is missing ## Installation section"
         )
-    section = section_match.group("body")
+    section = re.sub(r"(?s)<!--.*?(?:-->|\Z)", "", section_match.group("body"))
     commands = _installation_commands(section)
     pip_position = min(
         (position for position, tokens, _is_inline in commands if _is_pip_install(tokens)),
