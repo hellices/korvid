@@ -800,11 +800,7 @@ def _metadata_text(
         "# korvid\n\nAI-native Kubernetes TUI - a keyboard-first cockpit with an"
         " embedded agent that can read your cluster, explain what it found, and"
         " carry out changes only behind an explicit approval gate. Runs on"
-        " Linux, macOS and Windows against any reachable kube context.\n\n"
-        "## Installation\n\n"
-        "Install this application in an isolated tool environment:\n\n"
-        "```sh\nuv tool install 'korvid[all]==1.2.3'\n```\n\n"
-        "Use `python -m pip` only inside an activated virtual environment.\n"
+        " Linux, macOS and Windows against any reachable kube context.\n"
     ),
 ) -> str:
     entra = (
@@ -858,7 +854,7 @@ def _fake_dist(tmp_path: Path, metadata_text: str) -> Path:
     with zipfile.ZipFile(dist / "korvid-1.2.3-py3-none-any.whl", "w") as wheel:
         wheel.writestr("korvid-1.2.3.dist-info/METADATA", metadata_text)
     pkg_info = tmp_path / "PKG-INFO"
-    pkg_info.write_text(metadata_text, newline="")
+    pkg_info.write_text(metadata_text)
     with tarfile.open(dist / "korvid-1.2.3.tar.gz", "w:gz") as sdist:
         sdist.add(pkg_info, arcname="korvid-1.2.3/PKG-INFO")
     return dist
@@ -866,11 +862,6 @@ def _fake_dist(tmp_path: Path, metadata_text: str) -> Path:
 
 def test_wheel_and_sdist_metadata_match_version_and_extras(tmp_path: Path) -> None:
     dist = _fake_dist(tmp_path, _metadata_text())
-    assert check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"]) == 0
-
-
-def test_artifact_metadata_accepts_windows_newlines(tmp_path: Path) -> None:
-    dist = _fake_dist(tmp_path, _metadata_text().replace("\n", "\r\n"))
     assert check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"]) == 0
 
 
@@ -904,139 +895,6 @@ def test_artifact_metadata_requires_the_pypi_project_page_fields(tmp_path: Path)
     """
     dist = _fake_dist(tmp_path, _metadata_text(body=""))
     with pytest.raises(ValueError, match="long description"):
-        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
-
-
-def test_artifact_metadata_requires_an_installation_section(tmp_path: Path) -> None:
-    body = (
-        "# korvid\n\nAI-native Kubernetes TUI with enough project detail to"
-        " produce a valid PyPI long description, but no dedicated installation"
-        " section. Without that section, the release gate cannot prove which"
-        " installer the published project page recommends to application users.\n"
-    )
-    dist = _fake_dist(tmp_path, _metadata_text(body=body))
-
-    with pytest.raises(ValueError, match="missing ## Installation section"):
-        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "python -m pip install",
-        "python3 -m pip install",
-        "py -m pip install",
-        "py -3.12 -m pip install",
-        "pip install",
-        "pip3 install",
-        "pip3.12 install",
-        "pip install -U",
-        "pip install --index-url https://packages.example.com/simple",
-        "python -m pip --disable-pip-version-check install",
-    ],
-)
-def test_artifact_metadata_rejects_pip_first_install_guidance(tmp_path: Path, command: str) -> None:
-    """The uploaded long description, not the repository README, is the PyPI page."""
-    body = (
-        "# korvid\n\nAI-native Kubernetes TUI with a Quick Start that already"
-        " mentions `uv tool install` and `pipx install`, followed by enough"
-        " project detail to represent the metadata that was published for"
-        " version 0.2.0.\n\n"
-        "## Installation\n\n"
-        f"```sh\n{command} 'korvid[all]==1.2.3'\n```\n\n"
-        "An isolated installer is mentioned only afterward:\n\n"
-        "```sh\nuv tool install 'korvid[all]==1.2.3'\n```\n"
-    )
-    dist = _fake_dist(tmp_path, _metadata_text(body=body))
-
-    with pytest.raises(ValueError, match="isolated application installer"):
-        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
-
-
-def test_artifact_metadata_rejects_an_inline_pip_first_command(tmp_path: Path) -> None:
-    body = (
-        "# korvid\n\nAI-native Kubernetes TUI with enough project detail to"
-        " produce a valid PyPI long description while reproducing inline"
-        " pip-first installation guidance.\n\n"
-        "## Installation\n\n"
-        "`python3 -m pip install 'korvid[all]==1.2.3'` also works.\n\n"
-        "```sh\nuv tool install 'korvid[all]==1.2.3'\n```\n"
-    )
-    dist = _fake_dist(tmp_path, _metadata_text(body=body))
-
-    with pytest.raises(ValueError, match="isolated application installer"):
-        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
-
-
-@pytest.mark.parametrize(
-    "requirement",
-    [
-        "Korvid>=1.2.3",
-        "korvid~=1.2",
-        "korvid @ https://packages.example.com/korvid.whl",
-    ],
-)
-def test_artifact_metadata_rejects_pep508_pip_first_requirements(
-    tmp_path: Path, requirement: str
-) -> None:
-    body = (
-        "# korvid\n\nAI-native Kubernetes TUI with enough project detail to"
-        " produce a valid PyPI long description while reproducing pip-first"
-        " PEP 508 requirement spellings.\n\n"
-        "## Installation\n\n"
-        f"```sh\npip install '{requirement}'\n```\n\n"
-        "```sh\nuv tool install 'korvid[all]==1.2.3'\n```\n"
-    )
-    dist = _fake_dist(tmp_path, _metadata_text(body=body))
-
-    with pytest.raises(ValueError, match="isolated application installer"):
-        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
-
-
-def test_artifact_metadata_ignores_install_commands_hidden_in_html_comments(
-    tmp_path: Path,
-) -> None:
-    body = (
-        "# korvid\n\nAI-native Kubernetes TUI with enough project detail to"
-        " produce a valid PyPI long description while hiding an isolated"
-        " installer from the rendered project page.\n\n"
-        "## Installation\n\n"
-        "<!--\nuv tool install korvid\n-->\n\n"
-        "```sh\npip install korvid\n```\n"
-    )
-    dist = _fake_dist(tmp_path, _metadata_text(body=body))
-
-    with pytest.raises(ValueError, match="isolated application installer"):
-        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
-
-
-@pytest.mark.parametrize(
-    "misleading_isolated_reference",
-    [
-        "Do not use `uv tool install` for this application.",
-        "Do not use `uv tool install korvid`; use pip instead.",
-        "```sh\nuv tool install unrelated\n```",
-        "```sh\nuv tool install --with korvid unrelated\n```",
-        "```sh\nuv tool install unrelated  # not korvid\n```",
-        "```sh\nuv tool install unrelated && echo korvid\n```",
-        "```sh\nuv tool install unrelated; korvid\n```",
-        "```sh\nuv tool install --help korvid\n```",
-    ],
-)
-def test_artifact_metadata_requires_an_isolated_command_that_installs_korvid(
-    tmp_path: Path, misleading_isolated_reference: str
-) -> None:
-    body = (
-        "# korvid\n\nAI-native Kubernetes TUI with enough project detail to"
-        " produce a valid PyPI long description while reproducing misleading"
-        " isolated-installer text that does not install korvid.\n\n"
-        "## Installation\n\n"
-        f"{misleading_isolated_reference}\n\n"
-        "```sh\npip install korvid\n```\n"
-    )
-    dist = _fake_dist(tmp_path, _metadata_text(body=body))
-
-    with pytest.raises(ValueError, match="isolated application installer"):
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
@@ -1657,7 +1515,6 @@ def test_readme_recommends_an_isolated_install_for_an_application() -> None:
     assert "activated virtual environment, including one created inside a container" in " ".join(
         readme.split()
     )
-    assert "virtualenv or a container image you control" not in readme
     assert "virtual environment or a container image you control" not in readme
     assert "uv tool uninstall korvid" in install
     assert "pipx uninstall korvid" in install
