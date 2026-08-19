@@ -148,9 +148,8 @@ The implementation will update:
   - use one version-aware helper for `uv tool install --force` and `pipx
     install --force`;
   - name the missing feature (`agent`, `mcp`, `observability`, or Entra) in
-    the prose while recommending a cumulative-safe `[all]` requirement, or
-    `[all,entra]` for Entra, so `--force` cannot remove previously installed
-    extras;
+    the prose while recommending the known-extras superset `[all,entra]`, so
+    `--force` cannot remove a previously installed Entra or standard extra;
   - never direct a tool-managed korvid executable to an unrelated pip
     environment;
   - tell development-checkout and active-virtualenv users to reinstall the
@@ -191,13 +190,16 @@ Tests will establish these contracts:
 6. Version references still match `pyproject.toml`.
 7. Runtime missing-extra hints contain both isolated tool-manager commands and
    contain no raw `pip install`; each consumer still identifies its missing
-   feature without narrowing the cumulative `[all]` reinstall requirement.
+   feature without narrowing the cumulative `[all,entra]` reinstall
+   requirement.
 8. Release smoke prose distinguishes its CI-only pip expansion check from the
    documented end-user `--force` reinstall path.
 9. Entra's lazy-import failure and UI/startup missing-extra paths exercise the
    generated hint behavior, rather than relying on whole-source text scans.
 10. UI tests assert `Notification.markup is False` for bracketed requirements
     and for rebuild exceptions that may carry the hint.
+11. Existing provider-plugin error coverage remains intact; hint-bearing
+    `RuntimeError` markup coverage is a separate test.
 
 Targeted release-policy and documentation tests run first. The final branch
 gate runs ruff, formatting, mypy, pytest, and tach without regenerating
