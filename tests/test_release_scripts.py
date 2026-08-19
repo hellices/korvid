@@ -972,6 +972,8 @@ def test_artifact_metadata_rejects_an_inline_pip_first_command(tmp_path: Path) -
         "Do not use `uv tool install` for this application.",
         "```sh\nuv tool install unrelated\n```",
         "```sh\nuv tool install unrelated  # not korvid\n```",
+        "```sh\nuv tool install unrelated && echo korvid\n```",
+        "```sh\nuv tool install unrelated; korvid\n```",
     ],
 )
 def test_artifact_metadata_requires_an_isolated_command_that_installs_korvid(
