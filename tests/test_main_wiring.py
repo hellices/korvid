@@ -1089,11 +1089,12 @@ def test_missing_mcp_extra_fails_actionably_when_requested(
     from korvid.k8s.client import KubeClient
 
     _uninstall_packages(monkeypatch, *_MCP_ROOTS)
-    requirement = f"korvid[mcp]=={korvid.__version__}"
+    requirement = f"korvid[all]=={korvid.__version__}"
     with pytest.raises(
         SystemExit,
         match=(
             r"MCP support was requested.*"
+            r"including mcp.*"
             rf"uv tool install --force '{re.escape(requirement)}'.*"
             rf"pipx install --force '{re.escape(requirement)}'"
         ),
@@ -1133,11 +1134,12 @@ def test_missing_agent_extra_fails_actionably_when_enabled(
     from korvid.k8s.client import KubeClient
 
     _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
-    requirement = f"korvid[agent]=={korvid.__version__}"
+    requirement = f"korvid[all]=={korvid.__version__}"
     with pytest.raises(
         SystemExit,
         match=(
             r"the embedded agent is enabled.*"
+            r"including agent.*"
             rf"uv tool install --force '{re.escape(requirement)}'.*"
             rf"pipx install --force '{re.escape(requirement)}'"
         ),

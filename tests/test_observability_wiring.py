@@ -177,11 +177,12 @@ class TestMissingExtra:
         import korvid.__main__ as main
 
         monkeypatch.setattr(main, "_missing_extra_packages", lambda roots: ["httpx"])
-        requirement = f"korvid[observability]=={__version__}"
+        requirement = f"korvid[all]=={__version__}"
         with pytest.raises(
             SystemExit,
             match=(
                 r"an observability backend is configured.*"
+                r"including observability.*"
                 rf"uv tool install --force '{re.escape(requirement)}'.*"
                 rf"pipx install --force '{re.escape(requirement)}'"
             ),

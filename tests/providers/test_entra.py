@@ -78,6 +78,7 @@ async def test_lazy_import_failure_names_entra_extra_and_isolated_tools(
         RuntimeError,
         match=(
             r"Entra auth requires isolated extras.*"
+            r"including Entra.*"
             rf"uv tool install --force '{re.escape(requirement)}'.*"
             rf"pipx install --force '{re.escape(requirement)}'"
         ),

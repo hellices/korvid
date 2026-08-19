@@ -89,11 +89,11 @@ logger = logging.getLogger(__name__)
 #: silently or dump an ImportError traceback.
 _MCP_INSTALL_HINT = (
     "MCP support was requested (--mcp or mcp.enabled) but its dependencies "
-    f"are not installed — {isolated_install_hint(extras='mcp')}"
+    f"are not installed — {isolated_install_hint(feature='mcp')}"
 )
 _AGENT_INSTALL_HINT = (
     "the embedded agent is enabled (agent.provider in config.yaml) but its "
-    f"dependencies are not installed — {isolated_install_hint(extras='agent')}"
+    f"dependencies are not installed — {isolated_install_hint(feature='agent')}"
 )
 
 #: Top-level packages each extra provides, probed explicitly before any
@@ -107,7 +107,7 @@ _AGENT_EXTRA_ROOTS = frozenset({"httpx", "keyring"})
 _OBSERVABILITY_EXTRA_ROOTS = frozenset({"httpx"})
 _OBSERVABILITY_INSTALL_HINT = (
     "an observability backend is configured (observability.prometheus/loki in "
-    f"config.yaml) but its dependencies are not installed — {isolated_install_hint(extras='observability')}"
+    f"config.yaml) but its dependencies are not installed — {isolated_install_hint(feature='observability')}"
 )
 
 
