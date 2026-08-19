@@ -571,10 +571,11 @@ After merge, post this response to #302 and close the issue.
 
 **Interfaces:**
 - Produces:
-  `isolated_install_hint(*, entra: bool = False) -> str`.
-- Standard output contains versioned `[all]` uv tool and pipx `--force`
-  commands.
-- Entra output contains versioned `[all,entra]` commands.
+  `isolated_install_hint(*, extras: str = "all") -> str`.
+- Output contains versioned `korvid[{extras}]` uv tool and pipx `--force`
+  commands plus development-checkout/active-virtualenv guidance.
+- MCP, agent, and observability callers pass their own extra; Entra passes
+  `all,entra`.
 - Consumes: `korvid.__version__`.
 
 - [ ] **Step 1: Write failing helper and smoke-description tests**
@@ -582,36 +583,30 @@ After merge, post this response to #302 and close the issue.
 Create `tests/agent/test_install_hint.py`:
 
 ```python
+import pytest
+
 from korvid import __version__
 from korvid.agent.install_hint import isolated_install_hint
 
 
-def test_standard_install_hint_uses_isolated_tool_environments() -> None:
-    hint = isolated_install_hint()
-    requirement = f"korvid[all]=={__version__}"
+@pytest.mark.parametrize("extras", ["agent", "mcp", "observability", "all,entra"])
+def test_install_hint_preserves_extras_and_uses_isolated_tools(extras: str) -> None:
+    hint = isolated_install_hint(extras=extras)
+    requirement = f"korvid[{extras}]=={__version__}"
     assert f"uv tool install --force '{requirement}'" in hint
     assert f"pipx install --force '{requirement}'" in hint
     assert "pip install" not in hint
-
-
-def test_entra_install_hint_keeps_the_entra_extra() -> None:
-    hint = isolated_install_hint(entra=True)
-    requirement = f"korvid[all,entra]=={__version__}"
-    assert f"uv tool install --force '{requirement}'" in hint
-    assert f"pipx install --force '{requirement}'" in hint
+    assert "development checkout or active virtualenv" in hint
 ```
 
 Add to `tests/test_release_scripts.py`:
 
 ```python
-def test_runtime_install_hints_never_target_system_pip() -> None:
+def test_runtime_install_hint_consumers_use_the_shared_helper() -> None:
     root = Path(__file__).parents[1] / "src" / "korvid"
-    hints = "\n".join(
-        (root / relative).read_text()
-        for relative in ("__main__.py", "ui/app.py", "providers/entra.py")
-    )
-    assert "pip install" not in hints
-    assert "isolated_install_hint" in hints
+    for relative in ("__main__.py", "ui/app.py", "providers/entra.py"):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "isolated_install_hint" in source
 
 
 def test_release_smoke_docs_describe_a_ci_venv_pip_check() -> None:
@@ -627,6 +622,18 @@ def test_release_smoke_docs_describe_a_ci_venv_pip_check() -> None:
 Run the four tests. Expected: import failure for the missing helper and
 assertion failures for raw runtime pip strings and stale smoke descriptions.
 
+Also strengthen existing behavioral tests:
+
+- `tests/test_main_wiring.py`: MCP and agent startup failures assert their
+  context prefix, their specific `korvid[mcp]`/`korvid[agent]` requirement,
+  and both isolated tool commands.
+- `tests/test_observability_wiring.py`: configured-backend failure asserts
+  `korvid[observability]` and both isolated commands.
+- `tests/ui/test_agent_wiring.py`: agent setup and MCP notifications assert
+  their specific extra.
+- `tests/providers/test_entra.py`: force the lazy Azure import to fail and
+  assert `korvid[all,entra]`, both isolated commands, and no raw pip command.
+
 - [ ] **Step 2: Implement the pure install-hint helper**
 
 Create `src/korvid/agent/install_hint.py`:
@@ -637,19 +644,21 @@ from __future__ import annotations
 from korvid import __version__
 
 
-def isolated_install_hint(*, entra: bool = False) -> str:
-    extras = "all,entra" if entra else "all"
+def isolated_install_hint(*, extras: str = "all") -> str:
     requirement = f"korvid[{extras}]=={__version__}"
     return (
         "reinstall with: "
         f"uv tool install --force '{requirement}' "
-        f"(or: pipx install --force '{requirement}')"
+        f"(or: pipx install --force '{requirement}'). "
+        "For a development checkout or active virtualenv, reinstall the "
+        "complete extras in that environment instead."
     )
 ```
 
 Import and interpolate this helper in every named runtime hint. Standard
-agent/MCP/observability/UI hints call `isolated_install_hint()`. The Entra
-provider calls `isolated_install_hint(entra=True)`.
+agent/MCP/observability/UI hints pass `extras="agent"`, `extras="mcp"`, or
+`extras="observability"` as appropriate. The Entra provider passes
+`extras="all,entra"`.
 
 - [ ] **Step 3: Correct smoke-test prose without changing execution**
 

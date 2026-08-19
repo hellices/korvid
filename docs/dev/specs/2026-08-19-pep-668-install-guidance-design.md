@@ -147,9 +147,12 @@ The implementation will update:
 - runtime missing-extra hints
   - use one version-aware helper for `uv tool install --force` and `pipx
     install --force`;
-  - use `[all]` for the standard feature set and `[all,entra]` for Entra;
+  - preserve the missing extra in each hint (`agent`, `mcp`,
+    `observability`), and use `[all,entra]` for Entra;
   - never direct a tool-managed korvid executable to an unrelated pip
-    environment.
+    environment;
+  - tell development-checkout and active-virtualenv users to reinstall the
+    complete extras in that environment instead.
 - release smoke descriptions
   - describe base-to-extra expansion as a disposable CI-venv pip check;
   - do not claim that it executes the documented end-user tool-manager
@@ -183,9 +186,11 @@ Tests will establish these contracts:
    container, air-gap, or maintainer context.
 6. Version references still match `pyproject.toml`.
 7. Runtime missing-extra hints contain both isolated tool-manager commands and
-   contain no raw `pip install`.
+   contain no raw `pip install`; each consumer still identifies its own extra.
 8. Release smoke prose distinguishes its CI-only pip expansion check from the
    documented end-user `--force` reinstall path.
+9. Entra's lazy-import failure and UI/startup missing-extra paths exercise the
+   generated hint behavior, rather than relying on whole-source text scans.
 
 Targeted release-policy and documentation tests run first. The final branch
 gate runs ruff, formatting, mypy, pytest, and tach without regenerating
