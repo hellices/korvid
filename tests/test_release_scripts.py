@@ -925,6 +925,8 @@ def test_artifact_metadata_requires_an_installation_section(tmp_path: Path) -> N
     [
         "python -m pip install",
         "python3 -m pip install",
+        "py -m pip install",
+        "py -3.12 -m pip install",
         "pip install",
         "pip3 install",
         "pip3.12 install",
@@ -974,6 +976,7 @@ def test_artifact_metadata_rejects_an_inline_pip_first_command(tmp_path: Path) -
         "```sh\nuv tool install unrelated  # not korvid\n```",
         "```sh\nuv tool install unrelated && echo korvid\n```",
         "```sh\nuv tool install unrelated; korvid\n```",
+        "```sh\nuv tool install --help korvid\n```",
     ],
 )
 def test_artifact_metadata_requires_an_isolated_command_that_installs_korvid(

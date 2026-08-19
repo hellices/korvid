@@ -6,12 +6,16 @@ from __future__ import annotations
 import argparse
 import email
 import re
+import shlex
 import sys
 import tarfile
 import tomllib
 import zipfile
 from email.message import Message
 from pathlib import Path
+
+_SHELL_CONTROL = frozenset(";&|")
+_NOOP_FLAGS = frozenset(("-h", "--help", "--version"))
 
 
 def _wheel_metadata(path: Path) -> Message:
@@ -33,6 +37,87 @@ def _sdist_metadata(path: Path) -> Message:
         return email.message_from_bytes(extracted.read())
 
 
+def _shell_tokens(command: str) -> list[str]:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    tokens: list[str] = []
+    try:
+        for token in lexer:
+            if token and set(token) <= _SHELL_CONTROL:
+                break
+            tokens.append(token)
+    except ValueError:
+        return []
+    return tokens
+
+
+def _installs_korvid(tokens: list[str], install_index: int) -> bool:
+    if any(token in _NOOP_FLAGS for token in tokens):
+        return False
+    requirements = tokens[install_index + 1 :]
+    return any(
+        requirement == "korvid" or requirement.startswith(("korvid[", "korvid=="))
+        for requirement in requirements
+    )
+
+
+def _pip_install_index(tokens: list[str]) -> int | None:
+    if not tokens:
+        return None
+    pip_pattern = r"pip(?:3(?:\.\d+)?)?"
+    argument_index = 0
+    if re.fullmatch(r"python(?:3(?:\.\d+)?)?", tokens[0]):
+        if len(tokens) < 3 or tokens[1] != "-m" or not re.fullmatch(pip_pattern, tokens[2]):
+            return None
+        argument_index = 3
+    elif tokens[0] == "py":
+        argument_index = 1
+        if argument_index < len(tokens) and re.fullmatch(r"-3(?:\.\d+)?", tokens[argument_index]):
+            argument_index += 1
+        if (
+            len(tokens) <= argument_index + 1
+            or tokens[argument_index] != "-m"
+            or not re.fullmatch(pip_pattern, tokens[argument_index + 1])
+        ):
+            return None
+        argument_index += 2
+    elif re.fullmatch(pip_pattern, tokens[0]):
+        argument_index = 1
+    else:
+        return None
+    try:
+        return tokens.index("install", argument_index)
+    except ValueError:
+        return None
+
+
+def _is_pip_install(tokens: list[str]) -> bool:
+    install_index = _pip_install_index(tokens)
+    return install_index is not None and _installs_korvid(tokens, install_index)
+
+
+def _is_isolated_install(tokens: list[str]) -> bool:
+    if tokens[:3] == ["uv", "tool", "install"]:
+        return _installs_korvid(tokens, 2)
+    if tokens[:2] == ["pipx", "install"]:
+        return _installs_korvid(tokens, 1)
+    return False
+
+
+def _installation_commands(section: str) -> list[tuple[int, list[str]]]:
+    matches = [
+        *re.finditer(r"(?m)^[ \t]*(?P<command>[^`\r\n]+)", section),
+        *re.finditer(r"`(?P<command>[^`\r\n]+)`", section),
+    ]
+    commands = [
+        (match.start(), tokens)
+        for match in matches
+        if (tokens := _shell_tokens(match.group("command")))
+    ]
+    return sorted(commands)
+
+
 def _validate_install_guidance(artifact: Path, description: str) -> None:
     section_match = re.search(
         r"(?ms)^## Installation[ \t]*\r?\n(?P<body>.*?)(?=^##[ \t]|\Z)",
@@ -43,26 +128,12 @@ def _validate_install_guidance(artifact: Path, description: str) -> None:
             f"{artifact.name}: the PyPI long description is missing ## Installation section"
         )
     section = section_match.group("body")
-    korvid_requirement = r"""\bkorvid(?:\[|==|[ @'"]|$)"""
-    command_tail = r"[^\n`#;&|]*"
-    pip_command = (
-        rf"(?:python(?:3(?:\.\d+)?)? -m )?pip(?:3(?:\.\d+)?)?\b"
-        rf"{command_tail}\binstall\b"
-        rf"{command_tail}{korvid_requirement}"
+    commands = _installation_commands(section)
+    pip_position = min(
+        (position for position, tokens in commands if _is_pip_install(tokens)),
+        default=-1,
     )
-    pip_matches = [
-        match
-        for pattern in (rf"(?m)^[ \t]*{pip_command}", rf"`{pip_command}[^`\n]*`")
-        if (match := re.search(pattern, section)) is not None
-    ]
-    pip_position = min((match.start() for match in pip_matches), default=-1)
-    isolated_positions = [
-        match.start()
-        for match in re.finditer(
-            rf"(?m)^[ \t]*(?:uv tool|pipx) install\b{command_tail}{korvid_requirement}",
-            section,
-        )
-    ]
+    isolated_positions = [position for position, tokens in commands if _is_isolated_install(tokens)]
     if not isolated_positions or (pip_position != -1 and pip_position < min(isolated_positions)):
         raise ValueError(
             f"{artifact.name}: the PyPI Installation section must recommend"
