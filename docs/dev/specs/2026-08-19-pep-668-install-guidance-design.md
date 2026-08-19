@@ -147,12 +147,16 @@ The implementation will update:
 - runtime missing-extra hints
   - use one version-aware helper for `uv tool install --force` and `pipx
     install --force`;
-  - preserve the missing extra in each hint (`agent`, `mcp`,
-    `observability`), and use `[all,entra]` for Entra;
+  - name the missing feature (`agent`, `mcp`, `observability`, or Entra) in
+    the prose while recommending a cumulative-safe `[all]` requirement, or
+    `[all,entra]` for Entra, so `--force` cannot remove previously installed
+    extras;
   - never direct a tool-managed korvid executable to an unrelated pip
     environment;
   - tell development-checkout and active-virtualenv users to reinstall the
-    complete extras in that environment instead.
+    complete extras in that environment instead;
+  - render UI notification commands with markup disabled so bracketed extras
+    remain literal.
 - release smoke descriptions
   - describe base-to-extra expansion as a disposable CI-venv pip check;
   - do not claim that it executes the documented end-user tool-manager
@@ -186,11 +190,14 @@ Tests will establish these contracts:
    container, air-gap, or maintainer context.
 6. Version references still match `pyproject.toml`.
 7. Runtime missing-extra hints contain both isolated tool-manager commands and
-   contain no raw `pip install`; each consumer still identifies its own extra.
+   contain no raw `pip install`; each consumer still identifies its missing
+   feature without narrowing the cumulative `[all]` reinstall requirement.
 8. Release smoke prose distinguishes its CI-only pip expansion check from the
    documented end-user `--force` reinstall path.
 9. Entra's lazy-import failure and UI/startup missing-extra paths exercise the
    generated hint behavior, rather than relying on whole-source text scans.
+10. UI tests assert `Notification.markup is False` for bracketed requirements
+    and for rebuild exceptions that may carry the hint.
 
 Targeted release-policy and documentation tests run first. The final branch
 gate runs ruff, formatting, mypy, pytest, and tach without regenerating

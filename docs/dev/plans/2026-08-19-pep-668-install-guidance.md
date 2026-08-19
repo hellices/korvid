@@ -571,11 +571,13 @@ After merge, post this response to #302 and close the issue.
 
 **Interfaces:**
 - Produces:
-  `isolated_install_hint(*, extras: str = "all") -> str`.
-- Output contains versioned `korvid[{extras}]` uv tool and pipx `--force`
-  commands plus development-checkout/active-virtualenv guidance.
-- MCP, agent, and observability callers pass their own extra; Entra passes
-  `all,entra`.
+  `isolated_install_hint(*, feature: str, requirement_extras: str = "all") -> str`.
+- Output names `feature` in prose and contains versioned
+  `korvid[{requirement_extras}]` uv tool and pipx `--force` commands plus
+  development-checkout/active-virtualenv guidance.
+- MCP, agent, and observability callers name their feature but retain the
+  cumulative `[all]` requirement; Entra passes `requirement_extras="all,entra"`.
+- UI notifications containing the generated hint always pass `markup=False`.
 - Consumes: `korvid.__version__`.
 
 - [ ] **Step 1: Write failing helper and smoke-description tests**
@@ -589,14 +591,22 @@ from korvid import __version__
 from korvid.agent.install_hint import isolated_install_hint
 
 
-@pytest.mark.parametrize("extras", ["agent", "mcp", "observability", "all,entra"])
-def test_install_hint_preserves_extras_and_uses_isolated_tools(extras: str) -> None:
-    hint = isolated_install_hint(extras=extras)
-    requirement = f"korvid[{extras}]=={__version__}"
+@pytest.mark.parametrize("feature", ["agent", "mcp", "observability"])
+def test_install_hint_names_feature_and_preserves_cumulative_extras(feature: str) -> None:
+    hint = isolated_install_hint(feature=feature)
+    requirement = f"korvid[all]=={__version__}"
+    assert feature in hint
     assert f"uv tool install --force '{requirement}'" in hint
     assert f"pipx install --force '{requirement}'" in hint
     assert "pip install" not in hint
     assert "development checkout or active virtualenv" in hint
+
+
+def test_entra_hint_keeps_entra_in_the_cumulative_requirement() -> None:
+    hint = isolated_install_hint(feature="Entra", requirement_extras="all,entra")
+    requirement = f"korvid[all,entra]=={__version__}"
+    assert requirement in hint
+    assert "pip install" not in hint
 ```
 
 Add to `tests/test_release_scripts.py`:
@@ -644,10 +654,10 @@ from __future__ import annotations
 from korvid import __version__
 
 
-def isolated_install_hint(*, extras: str = "all") -> str:
-    requirement = f"korvid[{extras}]=={__version__}"
+def isolated_install_hint(*, feature: str, requirement_extras: str = "all") -> str:
+    requirement = f"korvid[{requirement_extras}]=={__version__}"
     return (
-        "reinstall with: "
+        f"reinstall the complete extras you use (including {feature}) with: "
         f"uv tool install --force '{requirement}' "
         f"(or: pipx install --force '{requirement}'). "
         "For a development checkout or active virtualenv, reinstall the "
@@ -656,9 +666,13 @@ def isolated_install_hint(*, extras: str = "all") -> str:
 ```
 
 Import and interpolate this helper in every named runtime hint. Standard
-agent/MCP/observability/UI hints pass `extras="agent"`, `extras="mcp"`, or
-`extras="observability"` as appropriate. The Entra provider passes
-`extras="all,entra"`.
+agent/MCP/observability/UI hints pass their feature name. The Entra provider
+passes `feature="Entra", requirement_extras="all,entra"`.
+
+For the three direct UI missing-feature notifications and the rebuild-exception
+notification that may contain this hint, pass `markup=False`. UI tests assert
+both the raw message contract and `notification.markup is False`; this pins
+Textual's literal rendering of `[all]`.
 
 - [ ] **Step 3: Correct smoke-test prose without changing execution**
 
