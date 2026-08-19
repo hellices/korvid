@@ -177,7 +177,7 @@ class TestMissingExtra:
         import korvid.__main__ as main
 
         monkeypatch.setattr(main, "_missing_extra_packages", lambda roots: ["httpx"])
-        requirement = f"korvid[all]=={__version__}"
+        requirement = f"korvid[all,entra]=={__version__}"
         with pytest.raises(
             SystemExit,
             match=(

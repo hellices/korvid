@@ -1089,7 +1089,7 @@ def test_missing_mcp_extra_fails_actionably_when_requested(
     from korvid.k8s.client import KubeClient
 
     _uninstall_packages(monkeypatch, *_MCP_ROOTS)
-    requirement = f"korvid[all]=={korvid.__version__}"
+    requirement = f"korvid[all,entra]=={korvid.__version__}"
     with pytest.raises(
         SystemExit,
         match=(
@@ -1134,7 +1134,7 @@ def test_missing_agent_extra_fails_actionably_when_enabled(
     from korvid.k8s.client import KubeClient
 
     _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
-    requirement = f"korvid[all]=={korvid.__version__}"
+    requirement = f"korvid[all,entra]=={korvid.__version__}"
     with pytest.raises(
         SystemExit,
         match=(
