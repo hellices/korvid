@@ -1123,7 +1123,7 @@ _RELEASE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "relea
 
 
 def _release_workflow() -> str:
-    return _RELEASE_WORKFLOW.read_text()
+    return _RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
 
 def test_markdown_section_stops_at_the_next_peer_heading() -> None:
@@ -1204,17 +1204,17 @@ def _overwritten_annotated_tag_checkout(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _readme() -> str:
-    return (Path(__file__).parents[1] / "README.md").read_text()
+    return (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
 
 
 def _release_runbook() -> str:
     path = Path(__file__).parents[1] / "docs" / "release.md"
     assert path.is_file(), "docs/release.md is missing"
-    return path.read_text()
+    return path.read_text(encoding="utf-8")
 
 
 def _security_policy() -> str:
-    return (Path(__file__).parents[1] / "SECURITY.md").read_text()
+    return (Path(__file__).parents[1] / "SECURITY.md").read_text(encoding="utf-8")
 
 
 def _offsets_of(text: str, needle: str) -> list[int]:
@@ -1242,7 +1242,7 @@ def _project_version() -> str:
     version actually being shipped, and pinning the expected string in the
     test only moves the drift one file further away.
     """
-    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text()
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     match = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
     assert match is not None, "pyproject.toml has no project version"
     return match.group(1)
@@ -1270,7 +1270,9 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
     assert (
         "uv build --build-constraints scripts/release/build-constraints.txt --require-hashes"
     ) in workflow
-    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
     build_requirements = pyproject["build-system"]["requires"]
     assert build_requirements
     requirement_specs = [
@@ -1285,7 +1287,7 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
     )
     constraints_input = (
         Path(__file__).parents[1] / "scripts" / "release" / "build-constraints.in"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     input_requirements = {
         line.strip()
         for line in constraints_input.splitlines()
@@ -1294,7 +1296,7 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
     assert set(build_requirements) <= input_requirements
     constraints = (
         Path(__file__).parents[1] / "scripts" / "release" / "build-constraints.txt"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     constraint_blocks: dict[str, list[str]] = {}
     current_requirement = ""
     for line in constraints.splitlines():
@@ -1346,7 +1348,7 @@ def test_release_docs_require_immutable_protected_tags() -> None:
 def _release_notes() -> str:
     path = Path(__file__).parents[1] / "docs" / "release-notes" / f"v{_project_version()}.md"
     assert path.is_file(), f"{path.name} is missing; the release stages notes from this file"
-    return path.read_text()
+    return path.read_text(encoding="utf-8")
 
 
 def test_release_stages_written_notes_rather_than_a_generated_commit_list() -> None:
@@ -1401,7 +1403,9 @@ def test_pypi_metadata_gives_the_project_page_its_sidebar_links() -> None:
     where the code lives, on the one page where a stranger decides whether
     to trust the package.
     """
-    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
     urls = pyproject["project"]["urls"]
     repo = "https://github.com/hellices/korvid"
     assert urls["Homepage"] == repo
@@ -1421,7 +1425,7 @@ def test_every_sidebar_link_to_a_repository_file_points_at_a_real_file() -> None
     a file in this repository are resolved against the working tree.
     """
     root = Path(__file__).parents[1]
-    pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     prefix = "https://github.com/hellices/korvid/blob/main/"
     for label, url in pyproject["project"]["urls"].items():
         if not url.startswith(prefix):
@@ -1437,7 +1441,9 @@ def test_pypi_metadata_declares_audience_and_supported_pythons() -> None:
     is what installers enforce, but the classifier list is what a human
     reads, and the CI matrix is the thing that actually proves them.
     """
-    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
     classifiers = pyproject["project"]["classifiers"]
     assert "Environment :: Console :: Curses" in classifiers
     assert "Intended Audience :: System Administrators" in classifiers
@@ -1534,7 +1540,7 @@ def test_readme_describes_pep_668_without_an_inaccurate_fedora_claim() -> None:
 def test_runtime_install_hints_never_target_system_pip() -> None:
     root = Path(__file__).parents[1] / "src" / "korvid"
     hints = "\n".join(
-        (root / relative).read_text()
+        (root / relative).read_text(encoding="utf-8")
         for relative in ("__main__.py", "ui/app.py", "providers/entra.py")
     )
     assert "pip install" not in hints
@@ -1544,7 +1550,7 @@ def test_runtime_install_hints_never_target_system_pip() -> None:
 def test_release_smoke_docs_describe_a_ci_venv_pip_check() -> None:
     root = Path(__file__).parents[1]
     runbook = markdown_section(_release_runbook(), "What the smoke matrix proves")
-    smoke = (root / "scripts" / "release" / "smoke_install.py").read_text()
+    smoke = (root / "scripts" / "release" / "smoke_install.py").read_text(encoding="utf-8")
     assert "disposable CI virtual environment" in runbook
     assert "disposable CI virtual environment" in smoke
     assert "the documented base-to-extra expansion command" not in smoke
@@ -1883,7 +1889,9 @@ def test_release_workflow_smoke_job_declares_a_timeout() -> None:
 def test_pyproject_version_matches_the_package_version() -> None:
     import korvid
 
-    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
     assert pyproject["project"]["version"] == korvid.__version__
 
 

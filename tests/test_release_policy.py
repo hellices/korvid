@@ -14,7 +14,7 @@ _ALLOWED_RELEASE_DOC_HISTORY = frozenset({"0.1.0", "0.1.1", "0.1.2"})
 
 
 def _project_version() -> str:
-    pyproject = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     version = pyproject["project"]["version"]
     assert isinstance(version, str)
     assert version
@@ -24,7 +24,7 @@ def _project_version() -> str:
 def _release_notes(version: str) -> str:
     path = _ROOT / "docs" / "release-notes" / f"v{version}.md"
     assert path.is_file(), f"{path.name} is missing; the release stages notes from this file"
-    return path.read_text()
+    return path.read_text(encoding="utf-8")
 
 
 def _normalized(text: str) -> str:
@@ -269,22 +269,24 @@ def _assert_release_versions_contracts(version: str, readme: str, runbook: str, 
 
 
 def test_agent_policy_forbids_agent_controlled_merge_paths() -> None:
-    _assert_agent_policy_contracts(_AGENTS.read_text())
+    _assert_agent_policy_contracts(_AGENTS.read_text(encoding="utf-8"))
 
 
 def test_release_runbook_preserves_release_order_and_exact_source_binding() -> None:
-    _assert_release_runbook_contracts(_RUNBOOK.read_text(), _project_version())
+    _assert_release_runbook_contracts(_RUNBOOK.read_text(encoding="utf-8"), _project_version())
 
 
 def test_release_docs_preserve_retained_state_and_explicit_cleanup_controls() -> None:
-    _assert_cleanup_contracts(_README.read_text(), _RUNBOOK.read_text())
+    _assert_cleanup_contracts(
+        _README.read_text(encoding="utf-8"), _RUNBOOK.read_text(encoding="utf-8")
+    )
 
 
 def test_current_release_docs_only_name_allowed_versions() -> None:
     version = _project_version()
     _assert_release_versions_contracts(
         version,
-        _README.read_text(),
-        _RUNBOOK.read_text(),
+        _README.read_text(encoding="utf-8"),
+        _RUNBOOK.read_text(encoding="utf-8"),
         _release_notes(version),
     )

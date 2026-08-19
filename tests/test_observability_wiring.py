@@ -155,7 +155,7 @@ class TestTrust:
         obs = Path(__file__).resolve().parents[1] / "src" / "korvid" / "obs"
         offenders: list[str] = []
         for path in sorted(obs.glob("*.py")):
-            for node in ast.walk(ast.parse(path.read_text())):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if not isinstance(node, ast.Call):
                     continue
                 if any(kw.arg == "verify" for kw in node.keywords):
