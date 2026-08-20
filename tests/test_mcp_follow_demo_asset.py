@@ -128,6 +128,9 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert 'test "$context" = "$prepared_context"' in runbook
     assert '--kube-context "$prepared_context"' in runbook
     assert "korvid.dev/demo=mcp-follow" in runbook
+    assert "Refusing MCP startup after context changed" in runbook
+    assert "kube_context: %s" in runbook
+    assert 'HOME="$demo_home"' in runbook
     assert (
         'kubectl --context "$prepared_context" delete namespace shop --ignore-not-found' in runbook
     )

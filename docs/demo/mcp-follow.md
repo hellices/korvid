@@ -38,10 +38,31 @@ kubectl -n shop get events \
 
 ## Connect GitHub Copilot CLI
 
-Start korvid:
+Re-read the recorded context immediately before startup, require an exact
+match, and pin korvid to it through an isolated config:
 
 ```sh
-korvid --mcp --namespace shop
+demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context"
+if [ ! -r "$demo_context_file" ]; then
+  echo "Refusing MCP startup without the recorded demo context" >&2
+  exit 1
+fi
+prepared_context="$(cat "$demo_context_file")"
+context="$(kubectl config current-context)"
+if ! test "$context" = "$prepared_context"; then
+  echo "Refusing MCP startup after context changed: $prepared_context -> $context" >&2
+  exit 1
+fi
+case "$prepared_context" in
+  kind-*|k3d-*|minikube|docker-desktop) ;;
+  *) echo "Refusing MCP startup on non-local context: $prepared_context" >&2; exit 1 ;;
+esac
+demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
+mkdir -p "$demo_home/.config/korvid"
+printf 'kube_context: %s\n' "$prepared_context" \
+  > "$demo_home/.config/korvid/config.yaml"
+demo_kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
+HOME="$demo_home" KUBECONFIG="$demo_kubeconfig" korvid --mcp --namespace shop
 ```
 
 In korvid, run `:mcp follow on`. Register only the three read tools used by the
@@ -151,5 +172,7 @@ fi
 helm uninstall shop-demo --namespace shop --kube-context "$prepared_context"
 kubectl --context "$prepared_context" delete namespace shop --ignore-not-found
 copilot mcp remove korvid
+demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
+rm -rf -- "$demo_home"
 rm -f "$demo_context_file"
 ```
