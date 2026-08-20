@@ -183,8 +183,16 @@ fi
 demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context"
 mkdir -p "$(dirname "$demo_context_file")"
 printf '%s\n' "$context" > "$demo_context_file"
-kubectl --context "$context" create namespace shop
-kubectl --context "$context" label namespace shop korvid.dev/demo=mcp-follow
+if ! kubectl --context "$context" create namespace shop; then
+  echo "Failed to create the dedicated shop namespace" >&2
+  exit 1
+fi
+if ! kubectl --context "$context" label namespace shop \
+  korvid.dev/demo=mcp-follow; then
+  echo "Failed to mark the dedicated namespace as demo-owned" >&2
+  kubectl --context "$context" delete namespace shop --ignore-not-found
+  exit 1
+fi
 
 helm upgrade --install shop-demo docs/demo/mcp-follow-fixture \
   --namespace shop --kube-context "$context"
@@ -292,7 +300,7 @@ only that observed idle interval and the trailing tail; it retains every MCP
 call and follow transition.
 
 ```sh
-idle_start=0.5
+idle_start=1.0
 idle_end=7.0
 demo_end=17.0
 ffmpeg -y -i docs/assets/mcp-follow-demo.raw.gif \
