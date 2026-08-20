@@ -1123,7 +1123,7 @@ _RELEASE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "relea
 
 
 def _release_workflow() -> str:
-    return _RELEASE_WORKFLOW.read_text()
+    return _RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
 
 def test_markdown_section_stops_at_the_next_peer_heading() -> None:
@@ -1204,17 +1204,17 @@ def _overwritten_annotated_tag_checkout(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _readme() -> str:
-    return (Path(__file__).parents[1] / "README.md").read_text()
+    return (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
 
 
 def _release_runbook() -> str:
     path = Path(__file__).parents[1] / "docs" / "release.md"
     assert path.is_file(), "docs/release.md is missing"
-    return path.read_text()
+    return path.read_text(encoding="utf-8")
 
 
 def _security_policy() -> str:
-    return (Path(__file__).parents[1] / "SECURITY.md").read_text()
+    return (Path(__file__).parents[1] / "SECURITY.md").read_text(encoding="utf-8")
 
 
 def _offsets_of(text: str, needle: str) -> list[int]:
@@ -1242,7 +1242,7 @@ def _project_version() -> str:
     version actually being shipped, and pinning the expected string in the
     test only moves the drift one file further away.
     """
-    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text()
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     match = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
     assert match is not None, "pyproject.toml has no project version"
     return match.group(1)
@@ -1270,7 +1270,9 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
     assert (
         "uv build --build-constraints scripts/release/build-constraints.txt --require-hashes"
     ) in workflow
-    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
     build_requirements = pyproject["build-system"]["requires"]
     assert build_requirements
     requirement_specs = [
@@ -1285,7 +1287,7 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
     )
     constraints_input = (
         Path(__file__).parents[1] / "scripts" / "release" / "build-constraints.in"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     input_requirements = {
         line.strip()
         for line in constraints_input.splitlines()
@@ -1294,7 +1296,7 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
     assert set(build_requirements) <= input_requirements
     constraints = (
         Path(__file__).parents[1] / "scripts" / "release" / "build-constraints.txt"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     constraint_blocks: dict[str, list[str]] = {}
     current_requirement = ""
     for line in constraints.splitlines():
@@ -1346,7 +1348,7 @@ def test_release_docs_require_immutable_protected_tags() -> None:
 def _release_notes() -> str:
     path = Path(__file__).parents[1] / "docs" / "release-notes" / f"v{_project_version()}.md"
     assert path.is_file(), f"{path.name} is missing; the release stages notes from this file"
-    return path.read_text()
+    return path.read_text(encoding="utf-8")
 
 
 def test_release_stages_written_notes_rather_than_a_generated_commit_list() -> None:
@@ -1401,7 +1403,9 @@ def test_pypi_metadata_gives_the_project_page_its_sidebar_links() -> None:
     where the code lives, on the one page where a stranger decides whether
     to trust the package.
     """
-    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
     urls = pyproject["project"]["urls"]
     repo = "https://github.com/hellices/korvid"
     assert urls["Homepage"] == repo
@@ -1421,7 +1425,7 @@ def test_every_sidebar_link_to_a_repository_file_points_at_a_real_file() -> None
     a file in this repository are resolved against the working tree.
     """
     root = Path(__file__).parents[1]
-    pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     prefix = "https://github.com/hellices/korvid/blob/main/"
     for label, url in pyproject["project"]["urls"].items():
         if not url.startswith(prefix):
@@ -1437,7 +1441,9 @@ def test_pypi_metadata_declares_audience_and_supported_pythons() -> None:
     is what installers enforce, but the classifier list is what a human
     reads, and the CI matrix is the thing that actually proves them.
     """
-    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
     classifiers = pyproject["project"]["classifiers"]
     assert "Environment :: Console :: Curses" in classifiers
     assert "Intended Audience :: System Administrators" in classifiers
@@ -1491,27 +1497,29 @@ def test_readme_has_no_relative_links_because_pypi_cannot_follow_them() -> None:
 
 
 def test_readme_recommends_an_isolated_install_for_an_application() -> None:
-    """`pip install` is the wrong first instruction for a CLI application.
+    """Every active public path isolates this CLI from system Python.
 
-    It drops korvid and its dependency tree into whatever environment
-    happens to be active, and it fails outright when the active interpreter
-    is older than 3.11 - the default on macOS and on most enterprise Linux.
-    `uv tool install` and `pipx` isolate the application and put `korvid` on
-    PATH, and uv fetches a suitable interpreter, so the version requirement
-    stops being the reader's problem.
+    PEP 668 protects the system interpreter, so `--break-system-packages` is
+    prohibited and installs must stay in isolated `uv tool` or `pipx`
+    environments.
     """
     version = _project_version()
     readme = _readme()
-    quick_start = readme[readme.index("## Quick start") : readme.index("## Installation")]
+    quick_start = markdown_section(readme, "Quick start")
+    normalized_quick_start = " ".join(quick_start.split())
+    pip_fallback = f"python -m pip install 'korvid[all]=={version}'"
     assert f"uv tool install 'korvid[all]=={version}'" in quick_start
+    assert pip_fallback in quick_start
+    assert "inside an activated virtual environment" in normalized_quick_start
+    assert "including one created inside a container" in normalized_quick_start
+    assert quick_start.index("uv tool install") < quick_start.index(pip_fallback)
     assert f"pipx install 'korvid[all]=={version}'" in quick_start
-    pip_index = quick_start.find("python -m pip install")
-    assert pip_index == -1 or quick_start.index("uv tool install") < pip_index, (
-        "the quick start leads with pip; an isolated install must come first"
-    )
     install = readme[readme.index("## Installation") : readme.index("### Development")]
     assert f"uv tool install 'korvid[all]=={version}'" in install
+    assert f"uv tool install --force 'korvid[all]=={version}'" in install
+    assert f"pipx install --force 'korvid[all]=={version}'" in install
     assert f"python -m pip install 'korvid[all]=={version}'        # recommended" not in install
+    assert "Use `python -m pip` only inside" not in install
     assert "activated virtual environment, including one created inside a container" in " ".join(
         readme.split()
     )
@@ -1527,6 +1535,47 @@ def test_readme_describes_pep_668_without_an_inaccurate_fedora_claim() -> None:
     assert "PEP 668" in quick_start
     assert "externally-managed-environment" in quick_start
     assert "Fedora 38" not in quick_start
+
+
+def test_optional_feature_docs_follow_the_project_version() -> None:
+    version = _project_version()
+    root = Path(__file__).parents[1]
+    agent = (root / "docs" / "agent.md").read_text(encoding="utf-8")
+    observability = (root / "docs" / "observability.md").read_text(encoding="utf-8")
+
+    assert f"uv tool install --force 'korvid[all,entra]=={version}'" in agent
+    assert f"pipx install --force 'korvid[all,entra]=={version}'" in agent
+    assert f"uv tool install 'korvid[agent,observability]=={version}'" in observability
+    assert f"uv tool install 'korvid[mcp,observability]=={version}'" in observability
+    assert "pip install korvid" not in agent
+    assert "pip install " not in observability
+
+
+def test_release_runbook_install_section_uses_tool_managed_environments() -> None:
+    install = markdown_section(_release_runbook(), "Install, reinstall, and uninstall from PyPI")
+    assert "These commands use isolated tool-managed environments." in install
+    assert "The pip commands in this release-maintainer section" not in install
+    assert "python -m pip install" not in install
+    assert "uv tool install --force" in install
+    assert "pipx install --force" in install
+
+
+def test_runtime_install_hint_consumers_use_the_shared_helper() -> None:
+    root = Path(__file__).parents[1] / "src" / "korvid"
+    for relative in ("__main__.py", "ui/app.py", "providers/entra.py"):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "from korvid.agent.install_hint import isolated_install_hint" in source
+        assert "isolated_install_hint(" in source
+
+
+def test_release_smoke_docs_describe_a_ci_venv_pip_check() -> None:
+    root = Path(__file__).parents[1]
+    runbook = markdown_section(_release_runbook(), "What the smoke matrix proves")
+    smoke = (root / "scripts" / "release" / "smoke_install.py").read_text(encoding="utf-8")
+    assert "disposable CI virtual environment" in runbook
+    assert "disposable CI virtual environment" in smoke
+    assert "the documented base-to-extra expansion command" not in smoke
+    assert "run the documented" not in runbook
 
 
 def test_release_docs_runbook_requires_protected_tags_and_maintainer_approval() -> None:
@@ -1861,7 +1910,9 @@ def test_release_workflow_smoke_job_declares_a_timeout() -> None:
 def test_pyproject_version_matches_the_package_version() -> None:
     import korvid
 
-    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
     assert pyproject["project"]["version"] == korvid.__version__
 
 
@@ -1899,18 +1950,17 @@ def test_release_docs_correct_the_xdg_config_claim() -> None:
 def test_release_docs_keep_a_source_install_fallback_for_unreleased_main() -> None:
     runbook = _release_runbook()
     readme = _readme()
-    source_install = "pip install 'korvid[all] @ git+https://github.com/hellices/korvid'"
+    source_install = "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'"
+    pipx_source_install = "pipx install 'korvid[all] @ git+https://github.com/hellices/korvid'"
     assert source_install in runbook
     runbook_install = runbook[
         runbook.index("## Install, reinstall, and uninstall from PyPI") : runbook.index(
             "## What the smoke matrix proves"
         )
     ]
-    assert "activated virtual environment, including one created inside a container" in " ".join(
-        runbook_install.split()
-    )
-    assert "virtual environment or a container image you control" not in runbook_install
-    assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in readme
+    assert pipx_source_install in runbook_install
+    assert "python -m pip install" not in runbook_install
+    assert source_install in readme
     assert "Tagged versions should be installed from PyPI" in readme
     assert "appearing on PyPI" not in runbook
     assert "For unreleased `main` development" in runbook

@@ -18,10 +18,14 @@ exactly the pod you want to read after a restart.
 
 ## Install
 
+Install the complete application variant in its own tool environment:
+
 ```bash
-pip install 'korvid[agent,observability]'  # embedded agent tools
-pip install 'korvid[mcp,observability]'    # external MCP tools
+uv tool install 'korvid[agent,observability]==0.2.0'  # embedded agent tools
+uv tool install 'korvid[mcp,observability]==0.2.0'    # external MCP tools
 ```
+
+`pipx install` accepts the same requirement strings.
 
 Observability is a tool add-on for the agent or MCP surface; it does not add a
 standalone base-TUI panel. The connector boundary itself is stdlib. The extra

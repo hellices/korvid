@@ -4,7 +4,8 @@
 Every variant is first installed *fresh*: one direct install of that variant's
 own requirement from the single downloaded wheel, in a brand-new virtual
 environment. Non-base variants then get a second, separate clean environment
-that exercises the documented base-to-extra expansion command.
+that exercises pip base-to-extra expansion behavior inside a disposable CI
+virtual environment.
 """
 
 from __future__ import annotations
@@ -114,8 +115,9 @@ def install_plan(wheel: Path, variant: str) -> tuple[InstallPhase, ...]:
 
     The primary phase is always a fresh, direct install of the variant's own
     requirement — never a base install that is later widened. Non-base variants
-    additionally get a *separate* clean environment that proves the documented
-    base-to-extra expansion command really adds the extra in place.
+    additionally get a *separate* clean environment that proves pip
+    base-to-extra expansion behavior inside a disposable CI virtual environment
+    really adds the extra in place.
     """
     normalized = _normalize_variant(variant)
     fresh = InstallPhase(

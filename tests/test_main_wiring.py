@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import re
 import sys
 from pathlib import Path
 from typing import Any, ClassVar, cast
@@ -1088,7 +1089,16 @@ def test_missing_mcp_extra_fails_actionably_when_requested(
     from korvid.k8s.client import KubeClient
 
     _uninstall_packages(monkeypatch, *_MCP_ROOTS)
-    with pytest.raises(SystemExit, match=r"korvid\[mcp\]"):
+    requirement = f"korvid[all,entra]=={korvid.__version__}"
+    with pytest.raises(
+        SystemExit,
+        match=(
+            r"MCP support was requested.*"
+            r"including mcp.*"
+            rf"uv tool install --force '{re.escape(requirement)}'.*"
+            rf"pipx install --force '{re.escape(requirement)}'"
+        ),
+    ):
         _build_mcp_controller(
             KorvidConfig(mcp_enabled=True), cast("KubeClient", object()), {}, None
         )
@@ -1124,7 +1134,16 @@ def test_missing_agent_extra_fails_actionably_when_enabled(
     from korvid.k8s.client import KubeClient
 
     _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
-    with pytest.raises(SystemExit, match=r"korvid\[agent\]"):
+    requirement = f"korvid[all,entra]=={korvid.__version__}"
+    with pytest.raises(
+        SystemExit,
+        match=(
+            r"the embedded agent is enabled.*"
+            r"including agent.*"
+            rf"uv tool install --force '{re.escape(requirement)}'.*"
+            rf"pipx install --force '{re.escape(requirement)}'"
+        ),
+    ):
         _build_agent_wiring(
             KorvidConfig(agent_enabled=True, agent_provider="ollama"),
             cast("KubeClient", object()),

@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.install_hint import isolated_install_hint
 
 ENTRA_SCOPE = "https://cognitiveservices.azure.com/.default"
 _REFRESH_MARGIN_S = 300.0
@@ -35,7 +36,10 @@ class EntraCredentialSource(CredentialSource):
             try:
                 from azure.identity.aio import DefaultAzureCredential
             except ImportError as exc:
-                raise RuntimeError("Entra auth requires: pip install korvid[entra]") from exc
+                raise RuntimeError(
+                    "Entra auth requires isolated extras — "
+                    f"{isolated_install_hint(feature='Entra')}"
+                ) from exc
             self._credential = DefaultAzureCredential()
         return self._credential
 

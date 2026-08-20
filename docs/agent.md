@@ -192,8 +192,16 @@ To keep using the OpenAI-compatibility shim instead, set
 > may change or break without notice.  It requires an active GitHub Copilot
 > subscription.
 
-Entra ID auth needs the optional extra: `pip install korvid[entra]`
-(or `uv sync --extra entra` for development).  Configs written before
+Entra ID auth needs the optional extra. For a tool-managed application install,
+reinstall the complete desired extra set:
+
+```sh
+uv tool install --force 'korvid[all,entra]==0.2.0'
+# or
+pipx install --force 'korvid[all,entra]==0.2.0'
+```
+
+Use `uv sync --extra entra` for development. Configs written before
 `agent.auth` existed keep working: `api_key_env` implies
 `auth: {method: api_key}`.
 

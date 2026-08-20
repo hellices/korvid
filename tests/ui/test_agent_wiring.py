@@ -9,6 +9,7 @@ from typing import Any, cast
 from textual.css.query import NoMatches
 from textual.widgets import Input, OptionList
 
+from korvid import __version__
 from korvid.agent.events import AgentEvent, TextDelta, TurnComplete
 from korvid.agent.outbound import OutboundSnapshot
 from korvid.core.config import KorvidConfig
@@ -304,6 +305,16 @@ async def test_ai_command_without_configurator_notifies() -> None:
         # No crash and no setup screen pushed.
         from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 
+        notification = next(
+            n for n in app._notifications if "Agent setup unavailable" in str(n.message)
+        )
+        text = str(notification.message)
+        requirement = f"korvid[all,entra]=={__version__}"
+        assert "Agent setup unavailable" in text
+        assert "including agent" in text
+        assert f"uv tool install --force '{requirement}'" in text
+        assert f"pipx install --force '{requirement}'" in text
+        assert notification.markup is False
         assert not isinstance(app.screen, AgentSetupScreen)
 
 
@@ -664,6 +675,36 @@ async def test_apply_agent_settings_notifies_on_rebuild_failure() -> None:
         assert any("rebuild failed" in m.lower() for m in msgs)
 
 
+async def test_apply_agent_settings_without_rebuild_agent_shows_literal_hint() -> None:
+    from korvid.agent.setup import AgentSettings
+
+    settings = AgentSettings(
+        provider="openai-compat",
+        auth_method="api_key",
+        base_url="http://x/v1",
+        model="m",
+        api_key_env="MISSING_ENV",
+    )
+    app = make_app(runtime=None, model=None)
+    async with app.run_test() as pilot:
+        app._apply_agent_settings(settings)
+        await until(
+            pilot,
+            lambda: any("Agent rebuild unavailable" in str(n.message) for n in app._notifications),
+            label="agent rebuild unavailable notification shown",
+        )
+        notification = next(
+            n for n in app._notifications if "Agent rebuild unavailable" in str(n.message)
+        )
+        text = str(notification.message)
+        requirement = f"korvid[all,entra]=={__version__}"
+        assert "Agent rebuild unavailable" in text
+        assert "including agent" in text
+        assert f"uv tool install --force '{requirement}'" in text
+        assert f"pipx install --force '{requirement}'" in text
+        assert notification.markup is False
+
+
 async def test_apply_agent_settings_notifies_on_plugin_error() -> None:
     """ProviderPluginError raised by rebuild_agent must surface via the
     existing error notification path (rebuild failure), not crash the app."""
@@ -693,6 +734,41 @@ async def test_apply_agent_settings_notifies_on_plugin_error() -> None:
         )
         msgs = [n.message for n in app._notifications]
         assert any("rebuild failed" in m.lower() or "plugin" in m.lower() for m in msgs)
+
+
+async def test_apply_agent_settings_notifies_on_runtime_hint_rebuild_error() -> None:
+    from korvid.agent.install_hint import isolated_install_hint
+    from korvid.agent.setup import AgentSettings
+
+    settings = AgentSettings(
+        provider="corp-llm",
+        auth_method="api_key",
+        base_url="http://x/v1",
+        model="m",
+    )
+    requirement = f"korvid[all,entra]=={__version__}"
+
+    def boom(s: Any) -> Any:
+        raise RuntimeError(isolated_install_hint(feature="agent"))
+
+    app = make_app(runtime=None, model=None, rebuild_agent=boom)
+    async with app.run_test() as pilot:
+        app._apply_agent_settings(settings)
+        await until(
+            pilot,
+            lambda: any("rebuild failed" in str(n.message).lower() for n in app._notifications),
+            label="hint-bearing rebuild exception notification",
+        )
+        notification = next(
+            n for n in app._notifications if "Agent rebuild failed:" in str(n.message)
+        )
+        text = str(notification.message)
+        assert "Agent rebuild failed:" in text
+        assert "including agent" in text
+        assert f"uv tool install --force '{requirement}'" in text
+        assert f"pipx install --force '{requirement}'" in text
+        assert "pip install" not in text
+        assert notification.markup is False
 
 
 async def test_options_preserved_across_model_change() -> None:
@@ -969,8 +1045,14 @@ async def test_mcp_command_without_controller_does_not_crash() -> None:
             lambda: "MCP unavailable" in _notification_text(app),
             label="mcp unavailable notification shown",
         )
-        msgs = [str(n.message) for n in app._notifications]
-        assert any("MCP unavailable" in m for m in msgs)
+        notification = next(n for n in app._notifications if "MCP unavailable" in str(n.message))
+        text = str(notification.message)
+        requirement = f"korvid[all,entra]=={__version__}"
+        assert "MCP unavailable" in text
+        assert "including mcp" in text
+        assert f"uv tool install --force '{requirement}'" in text
+        assert f"pipx install --force '{requirement}'" in text
+        assert notification.markup is False
 
 
 async def test_agent_unavailable_mounts_no_panel_and_hides_the_binding() -> None:

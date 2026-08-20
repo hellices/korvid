@@ -317,41 +317,44 @@ brew test hellices/korvid/korvid
 
 ## Install, reinstall, and uninstall from PyPI
 
-The pip commands in this release-maintainer section assume an activated
-virtual environment, including one created inside a container. For a normal
-user-facing application install, follow the README's isolated `uv tool` or
-`pipx` path instead of pointing pip at the system Python.
+These commands use isolated tool-managed environments. Use the installer that
+owns the existing korvid environment so reinstall, extra expansion, and
+uninstall all target the same application.
 
 The simplest install is the full feature set:
 
 ```sh
-python -m pip install 'korvid[all]==0.2.0'
+uv tool install 'korvid[all]==0.2.0'
+# or
+pipx install 'korvid[all]==0.2.0'
 ```
 
 For unreleased `main` development, install from source instead:
 
 ```sh
-python -m pip install 'korvid[all] @ git+https://github.com/hellices/korvid'
+uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'
+# or
+pipx install 'korvid[all] @ git+https://github.com/hellices/korvid'
 ```
 
 Tagged versions should be installed from PyPI; the source install is only a
 fallback for unreleased code.
 
-If you already installed any narrower korvid requirement, rerun your package
-manager with the full desired extra set rather than assuming it will expand
-extras in place. With pip, the explicit reinstall/extra-expansion command is:
+If you already installed any narrower korvid requirement, reinstall the full
+desired extra set:
 
 ```sh
-python -m pip install --upgrade 'korvid[all]==0.2.0'
+uv tool install --force 'korvid[all]==0.2.0'
+# or
+pipx install --force 'korvid[all]==0.2.0'
 ```
-
-With other installers, use their reinstall/upgrade equivalent or uninstall
-first, then install the exact requirement you want.
 
 To remove the package itself:
 
 ```sh
-python -m pip uninstall -y korvid
+uv tool uninstall korvid
+# or
+pipx uninstall korvid
 ```
 
 ## What the smoke matrix proves
@@ -367,8 +370,8 @@ leaves no user state behind.
 
 Every non-base variant additionally gets a
 **separate base-to-extra expansion check** in its own clean virtual
-environment: install base `korvid`, then run the documented
-`--upgrade 'korvid[extra]'` command and re-assert the same contract. The two
+environment: install base `korvid`, then use pip's `--upgrade` inside that
+disposable CI virtual environment and re-assert the same contract. The two
 checks are independent, so a passing fresh install is never inferred from an
 expansion (or vice versa).
 

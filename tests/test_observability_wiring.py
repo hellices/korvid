@@ -9,11 +9,13 @@ trust these clients get.
 from __future__ import annotations
 
 import dataclasses
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from korvid import __version__
 from korvid.__main__ import _build_observability
 from korvid.core.config import KorvidConfig, ObservabilityBackend
 
@@ -153,7 +155,7 @@ class TestTrust:
         obs = Path(__file__).resolve().parents[1] / "src" / "korvid" / "obs"
         offenders: list[str] = []
         for path in sorted(obs.glob("*.py")):
-            for node in ast.walk(ast.parse(path.read_text())):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if not isinstance(node, ast.Call):
                     continue
                 if any(kw.arg == "verify" for kw in node.keywords):
@@ -175,7 +177,16 @@ class TestMissingExtra:
         import korvid.__main__ as main
 
         monkeypatch.setattr(main, "_missing_extra_packages", lambda roots: ["httpx"])
-        with pytest.raises(SystemExit, match=r"korvid\[observability\]"):
+        requirement = f"korvid[all,entra]=={__version__}"
+        with pytest.raises(
+            SystemExit,
+            match=(
+                r"an observability backend is configured.*"
+                r"including observability.*"
+                rf"uv tool install --force '{re.escape(requirement)}'.*"
+                rf"pipx install --force '{re.escape(requirement)}'"
+            ),
+        ):
             _build_observability(
                 _config(observability_prometheus=ObservabilityBackend(url="https://p.example.com"))
             )

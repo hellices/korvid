@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from korvid import __version__
 from korvid.agent.context import cluster_context_note
+from korvid.agent.install_hint import isolated_install_hint
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
@@ -88,11 +89,11 @@ logger = logging.getLogger(__name__)
 #: silently or dump an ImportError traceback.
 _MCP_INSTALL_HINT = (
     "MCP support was requested (--mcp or mcp.enabled) but its dependencies "
-    "are not installed — install them with: pip install 'korvid[mcp]'"
+    f"are not installed — {isolated_install_hint(feature='mcp')}"
 )
 _AGENT_INSTALL_HINT = (
     "the embedded agent is enabled (agent.provider in config.yaml) but its "
-    "dependencies are not installed — install them with: pip install 'korvid[agent]'"
+    f"dependencies are not installed — {isolated_install_hint(feature='agent')}"
 )
 
 #: Top-level packages each extra provides, probed explicitly before any
@@ -106,8 +107,7 @@ _AGENT_EXTRA_ROOTS = frozenset({"httpx", "keyring"})
 _OBSERVABILITY_EXTRA_ROOTS = frozenset({"httpx"})
 _OBSERVABILITY_INSTALL_HINT = (
     "an observability backend is configured (observability.prometheus/loki in "
-    "config.yaml) but its dependencies are not installed — install them with: "
-    "pip install 'korvid[observability]'"
+    f"config.yaml) but its dependencies are not installed — {isolated_install_hint(feature='observability')}"
 )
 
 

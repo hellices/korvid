@@ -209,17 +209,9 @@ the full desired extra set instead of assuming extras expand in place:
 
 ```sh
 uv tool install --force 'korvid[all]==0.2.0'
+# or
+pipx install --force 'korvid[all]==0.2.0'
 ```
-
-Use `python -m pip` only inside an activated virtual environment, including
-one created inside a container:
-
-```sh
-python -m pip install --upgrade 'korvid[all]==0.2.0'
-```
-
-With other isolated installers, use their reinstall/upgrade equivalent or
-uninstall first, then install the exact requirement you want.
 
 For unreleased `main` development, install straight from the repository:
 
@@ -229,6 +221,11 @@ uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'
 
 Tagged versions should be installed from PyPI; the source form is only a
 fallback for unreleased code.
+
+If pip reports `error: externally-managed-environment`, it is protecting a
+Python installation owned by your operating system (PEP 668). Do not use `--break-system-packages`; rerun the install with `uv tool` or `pipx`.
+If you specifically need pip inside a container or development environment,
+create and activate a virtual environment first.
 
 Without the `[agent]` extra the agent surface is simply absent — no agent
 panel, and `Ctrl-A` / `:ai` / `:model` are not registered. Without the
