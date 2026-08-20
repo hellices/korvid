@@ -143,7 +143,12 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert f'Type "{prompt}"' in tape
     assert runbook.index("tmux new-session") < runbook.index("korvid --mcp")
     assert "tmux select-pane -t korvid-mcp-demo:0.1" in runbook
-    assert "Sleep 45s" in tape
+    capture_wait = re.search(
+        rf'Type "{re.escape(prompt)}"\nSleep \d+ms\nEnter\n(?:#.*\n)*Sleep (\d+)s',
+        tape,
+    )
+    assert capture_wait is not None
+    assert int(capture_wait.group(1)) >= 30
     assert "--available-tools=korvid-mcp-demo" in runbook
     assert "mcp-demo-registration" in runbook
     assert "Failed to write the recording MCP marker" in runbook
@@ -173,6 +178,7 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert "mcp-demo-namespace-uid" in runbook
     assert "Failed to create the demo state directory" in runbook
     assert "Failed to write the demo context marker" in runbook
+    assert "clear_demo_identity" in runbook
     assert 'test "$cluster_uid" = "$prepared_cluster_uid"' in runbook
     assert '--context "$prepared_context"' in runbook
     assert "create_namespace(" in runbook

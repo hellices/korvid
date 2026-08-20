@@ -181,6 +181,10 @@ demo_state_dir="$(dirname "$demo_context_file")"
 demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
 demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
 demo_namespace_uid_file="$demo_state_dir/mcp-demo-namespace-uid"
+clear_demo_identity() {
+  rm -f "$demo_context_file" "$demo_kubeconfig" "$demo_cluster_uid_file" \
+    "$demo_namespace_uid_file"
+}
 umask 077
 if ! mkdir -p "$demo_state_dir"; then
   echo "Failed to create the demo state directory" >&2
@@ -188,26 +192,31 @@ if ! mkdir -p "$demo_state_dir"; then
 fi
 if ! printf '%s\n' "$context" > "$demo_context_file"; then
   echo "Failed to write the demo context marker" >&2
+  clear_demo_identity
   exit 1
 fi
 if ! kubectl --context "$context" config view --minify --flatten --raw \
   > "$demo_kubeconfig"; then
   echo "Failed to snapshot the demo kubeconfig" >&2
+  clear_demo_identity
   exit 1
 fi
 if ! cluster_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
   --context "$context" get namespace kube-system \
   -o jsonpath='{.metadata.uid}')"; then
   echo "Failed to read the demo cluster identity" >&2
+  clear_demo_identity
   exit 1
 fi
 if ! printf '%s\n' "$cluster_uid" > "$demo_cluster_uid_file"; then
   echo "Failed to write the demo cluster identity" >&2
+  clear_demo_identity
   exit 1
 fi
 if kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
   get namespace shop >/dev/null 2>&1; then
   echo "Refusing to reuse existing namespace: shop" >&2
+  clear_demo_identity
   exit 1
 fi
 if ! DEMO_KUBECONFIG="$demo_kubeconfig" DEMO_CONTEXT="$context" \
