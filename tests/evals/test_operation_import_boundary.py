@@ -12,7 +12,13 @@ import sys
 
 import pytest
 
-_SHIPPED_OPERATION_MODULES = ("korvid.evals.operation",)
+_SHIPPED_OPERATION_MODULES = (
+    "korvid.evals.operation",
+    "korvid.evals.operation_journal",
+    "korvid.evals.operation_outcome",
+    "korvid.evals.operation_state",
+    "korvid.evals.operation_grader",
+)
 
 _PROBE = """
 import sys
