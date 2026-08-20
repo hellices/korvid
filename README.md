@@ -209,17 +209,9 @@ the full desired extra set instead of assuming extras expand in place:
 
 ```sh
 uv tool install --force 'korvid[all]==0.2.0'
+# or
+pipx install --force 'korvid[all]==0.2.0'
 ```
-
-Use `python -m pip` only inside an activated virtual environment, including
-one created inside a container:
-
-```sh
-pipx install 'korvid[all]==0.2.0'
-```
-
-With other isolated installers, use their reinstall/upgrade equivalent or
-uninstall first, then install the exact requirement you want.
 
 For unreleased `main` development, install straight from the repository:
 

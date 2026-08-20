@@ -317,10 +317,9 @@ brew test hellices/korvid/korvid
 
 ## Install, reinstall, and uninstall from PyPI
 
-The pip commands in this release-maintainer section assume an activated
-virtual environment, including one created inside a container. For a normal
-user-facing application install, follow the README's isolated `uv tool` or
-`pipx` path instead of pointing pip at the system Python.
+These commands use isolated tool-managed environments. Use the installer that
+owns the existing korvid environment so reinstall, extra expansion, and
+uninstall all target the same application.
 
 The simplest install is the full feature set:
 

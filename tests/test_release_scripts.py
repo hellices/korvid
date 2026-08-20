@@ -1516,7 +1516,10 @@ def test_readme_recommends_an_isolated_install_for_an_application() -> None:
     assert f"pipx install 'korvid[all]=={version}'" in quick_start
     install = readme[readme.index("## Installation") : readme.index("### Development")]
     assert f"uv tool install 'korvid[all]=={version}'" in install
+    assert f"uv tool install --force 'korvid[all]=={version}'" in install
+    assert f"pipx install --force 'korvid[all]=={version}'" in install
     assert f"python -m pip install 'korvid[all]=={version}'        # recommended" not in install
+    assert "Use `python -m pip` only inside" not in install
     assert "activated virtual environment, including one created inside a container" in " ".join(
         readme.split()
     )
@@ -1532,6 +1535,15 @@ def test_readme_describes_pep_668_without_an_inaccurate_fedora_claim() -> None:
     assert "PEP 668" in quick_start
     assert "externally-managed-environment" in quick_start
     assert "Fedora 38" not in quick_start
+
+
+def test_release_runbook_install_section_uses_tool_managed_environments() -> None:
+    install = markdown_section(_release_runbook(), "Install, reinstall, and uninstall from PyPI")
+    assert "These commands use isolated tool-managed environments." in install
+    assert "The pip commands in this release-maintainer section" not in install
+    assert "python -m pip install" not in install
+    assert "uv tool install --force" in install
+    assert "pipx install --force" in install
 
 
 def test_runtime_install_hint_consumers_use_the_shared_helper() -> None:
