@@ -285,6 +285,16 @@ call and follow transition.
 idle_start=1.0
 idle_end=7.0
 demo_end=17.0
+if ! raw_duration="$(ffprobe -v error -show_entries format=duration \
+  -of csv=p=0 docs/assets/mcp-follow-demo.raw.gif)"; then
+  echo "Failed to read the source recording duration" >&2
+  exit 1
+fi
+if ! awk -v end="$idle_end" -v demo="$demo_end" -v raw="$raw_duration" \
+  'BEGIN { exit !(end < raw && demo <= raw) }'; then
+  echo "Trim timestamps exceed the source recording" >&2
+  exit 1
+fi
 kept_duration="$(awk -v a="$idle_start" -v b="$idle_end" -v c="$demo_end" \
   'BEGIN { print (a < b && b < c) ? a + (c - b) : "invalid" }')"
 if [ "$kept_duration" = "invalid" ]; then

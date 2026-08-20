@@ -36,8 +36,7 @@ small enough for the README to load quickly, targeting 8 MB or less.
 Leave the Copilot pane focused at an empty prompt. The tape starts capture,
 types, and submits this prompt:
 
-> Use korvid MCP in order: list_resources shop pods → get_logs for the
-> unhealthy one → helm_list_releases.
+> Use korvid MCP in order: list_resources shop pods → get_logs unhealthy one → helm_list_releases.
 
 The expected visible sequence is:
 

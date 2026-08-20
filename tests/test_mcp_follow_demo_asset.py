@@ -132,6 +132,9 @@ def test_readme_embeds_mcp_follow_demo() -> None:
 def test_recording_tape_owns_prompt_entry() -> None:
     runbook = (ROOT / "docs" / "demo" / "mcp-follow.md").read_text(encoding="utf-8")
     tape = (ROOT / "docs" / "demo" / "mcp-follow.tape").read_text(encoding="utf-8")
+    spec = (
+        ROOT / "docs" / "superpowers" / "specs" / "2026-08-20-mcp-follow-readme-demo-design.md"
+    ).read_text(encoding="utf-8")
     prompt = (
         "Use korvid MCP in order: list_resources shop pods → "
         "get_logs unhealthy one → helm_list_releases."
@@ -141,6 +144,7 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Do not enter the scenario prompt yourself" in runbook
     assert "Start the visible capture with Enter" not in runbook
     assert f'Type "{prompt}"' in tape
+    assert prompt in spec
     assert "resize-window -A" in tape
     assert runbook.index("tmux new-session") < runbook.index("korvid --mcp")
     assert 'tmux select-pane -t "$session_name:0.1"' in runbook
@@ -173,6 +177,7 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "ffmpeg -y -i docs/assets/mcp-follow-demo.raw.gif" in runbook
     assert "Invalid trim timestamps" in runbook
     assert "Trimmed duration exceeds the 15s budget" in runbook
+    assert "Trim timestamps exceed the source recording" in runbook
 
 
 def test_recording_runbook_only_deletes_cluster_it_created() -> None:
