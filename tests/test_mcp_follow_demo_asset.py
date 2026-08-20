@@ -142,22 +142,23 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Start the visible capture with Enter" not in runbook
     assert f'Type "{prompt}"' in tape
     assert runbook.index("tmux new-session") < runbook.index("korvid --mcp")
-    assert "tmux select-pane -t korvid-mcp-demo:0.1" in runbook
+    assert 'tmux select-pane -t "$session_name:0.1"' in runbook
     capture_wait = re.search(
         rf'Type "{re.escape(prompt)}"\nSleep \d+ms\nEnter\n(?:#.*\n)*Sleep (\d+)s',
         tape,
     )
     assert capture_wait is not None
     assert int(capture_wait.group(1)) >= 30
-    assert "--available-tools=korvid-mcp-demo" in runbook
+    assert "--available-tools=$recording_server" in runbook
     assert "mcp-demo-registration" in runbook
+    assert 'recording_server="korvid-mcp-demo-$run_id"' in runbook
     assert "Failed to write the recording MCP marker" in runbook
     assert runbook.index("mcp-demo-registration") < runbook.index("copilot mcp add")
-    assert "tmux kill-session -t korvid-mcp-demo" in runbook
-    assert "Refusing to reuse existing tmux session: korvid-mcp-demo" in runbook
+    assert 'tmux kill-session -t "$cluster_name"' in runbook
+    assert "Refusing to reuse existing tmux session:" in runbook
     assert "if ! tmux new-session" in runbook
     assert 'if ! copilot mcp remove "$recording_server"; then' in runbook
-    assert runbook.index("copilot mcp remove") < runbook.rindex("V1Preconditions")
+    assert runbook.index("copilot mcp remove") < runbook.index("k3d cluster delete")
     assert "helm uninstall" not in runbook
     for variable in ("idle_start", "idle_end", "demo_end"):
         assert re.search(rf"^{variable}=\d+(?:\.\d+)?$", runbook, re.MULTILINE)
@@ -168,42 +169,34 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Trimmed duration exceeds the 15s budget" in runbook
 
 
-def test_recording_runbook_only_deletes_namespace_it_created() -> None:
+def test_recording_runbook_only_deletes_cluster_it_created() -> None:
     runbook = (ROOT / "docs" / "demo" / "mcp-follow.md").read_text(encoding="utf-8")
 
-    assert "Refusing to reuse existing namespace: shop" in runbook
+    assert 'cluster_name="korvid-mcp-demo-$run_id"' in runbook
+    assert 'k3d cluster create "$cluster_name"' in runbook
+    assert 'k3d cluster delete "$cluster_name"' in runbook
     assert "mcp-demo-context" in runbook
     assert "mcp-demo-kubeconfig" in runbook
     assert "mcp-demo-cluster-uid" in runbook
-    assert "mcp-demo-namespace-uid" in runbook
     assert "Failed to create the demo state directory" in runbook
     assert "Failed to write the demo context marker" in runbook
-    assert "clear_demo_identity" in runbook
     assert 'test "$cluster_uid" = "$prepared_cluster_uid"' in runbook
     assert '--context "$prepared_context"' in runbook
-    assert "create_namespace(" in runbook
-    assert 'labels={"korvid.dev/demo": "mcp-follow"}' in runbook
-    assert runbook.count("V1Preconditions(") >= 2
     assert "if ! helm upgrade --install shop-demo" in runbook
     assert "Failed to install the recording release" in runbook
     assert "Run the cleanup section before retrying" in runbook
     assert "-n shop get pods --watch" in runbook
     assert '--context "$context" -n shop get events' in runbook
     assert "Refusing MCP startup after cluster identity changed" in runbook
-    assert "Refusing MCP startup after namespace identity changed" in runbook
-    assert "Refusing MCP startup because namespace ownership changed" in runbook
     assert "Failed to create the isolated config directory" in runbook
     assert "Failed to write the isolated korvid config" in runbook
     assert "kube_context: %s" in runbook
     assert 'HOME=\\"$demo_home\\"' in runbook
     assert 'XDG_CONFIG_HOME=\\"$demo_home/.config\\"' in runbook
     assert '--kubeconfig "$demo_kubeconfig"' in runbook
-    assert "Recording namespace is already absent; continuing cleanup" in runbook
-    assert "V1Preconditions(" in runbook
-    assert 'uid=os.environ["DEMO_NAMESPACE_UID"]' in runbook
-    assert "from kubernetes_asyncio import client, config" in runbook
-    assert "asyncio.run(delete_namespace())" in runbook
-    assert "from kubernetes import client, config" not in runbook
+    assert runbook.index("tmux kill-session") < runbook.index(
+        "Refusing cleanup after cluster identity changed"
+    )
 
 
 def test_gif_duration_ignores_marker_bytes_inside_image_data() -> None:

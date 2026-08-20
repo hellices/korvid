@@ -48,10 +48,11 @@ The expected visible sequence is:
 | 3–7 s | `get_logs` | Live logs for the unhealthy pod |
 | 7–11 s | `helm_list_releases` | Helm release browser |
 
-Use a stable demo cluster or deterministic fixture data containing one
-obviously unhealthy pod in `shop` and at least one Helm release. Allow the
-known read-only korvid MCP tools in the recording session before capture so
-confirmation prompts do not interrupt the sequence.
+Create a uniquely named disposable k3d cluster owned by the recording run and
+seed it with deterministic fixture data containing one obviously unhealthy pod
+in `shop` and at least one Helm release. Allow the known read-only korvid MCP
+tools in the recording session before capture so confirmation prompts do not
+interrupt the sequence.
 
 ## Editing rules
 

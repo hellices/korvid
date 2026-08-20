@@ -5,112 +5,69 @@ context: MCP log results are not credential-pattern masked by korvid.
 
 ## Prepare the fixture
 
-The guard accepts only common local-cluster context names:
+The workflow owns a uniquely named k3d cluster. It refuses an existing cluster
+instead of reusing any operator-managed context:
 
 ```sh
-context="$(kubectl config current-context)"
-case "$context" in
-  kind-*|k3d-*|minikube|docker-desktop) ;;
-  *) echo "Refusing to seed non-local context: $context" >&2; exit 1 ;;
-esac
-demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context"
-demo_state_dir="$(dirname "$demo_context_file")"
-demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
-demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
-demo_namespace_uid_file="$demo_state_dir/mcp-demo-namespace-uid"
-clear_demo_identity() {
-  rm -f "$demo_context_file" "$demo_kubeconfig" "$demo_cluster_uid_file" \
-    "$demo_namespace_uid_file"
-}
+demo_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"
 umask 077
 if ! mkdir -p "$demo_state_dir"; then
   echo "Failed to create the demo state directory" >&2
   exit 1
 fi
+run_id="$(date -u +%Y%m%d%H%M%S)-$$"
+cluster_name="korvid-mcp-demo-$run_id"
+cluster_name_file="$demo_state_dir/mcp-demo-cluster-name"
+if k3d cluster list --no-headers | awk '{print $1}' | grep -Fxq "$cluster_name"; then
+  echo "Refusing to reuse existing k3d cluster: $cluster_name" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$cluster_name" > "$cluster_name_file"; then
+  echo "Failed to write the demo cluster marker" >&2
+  exit 1
+fi
+if ! k3d cluster create "$cluster_name" --agents 1 --wait; then
+  echo "Failed to create the dedicated k3d cluster" >&2
+  rm -f "$cluster_name_file"
+  exit 1
+fi
+context="k3d-$cluster_name"
+demo_context_file="$demo_state_dir/mcp-demo-context"
+demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
+demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
 if ! printf '%s\n' "$context" > "$demo_context_file"; then
   echo "Failed to write the demo context marker" >&2
-  clear_demo_identity
+  echo "Dedicated cluster retained for cleanup: $cluster_name" >&2
   exit 1
 fi
 if ! kubectl --context "$context" config view --minify --flatten --raw \
   > "$demo_kubeconfig"; then
   echo "Failed to snapshot the demo kubeconfig" >&2
-  clear_demo_identity
+  echo "Dedicated cluster retained for cleanup: $cluster_name" >&2
   exit 1
 fi
 if ! cluster_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
   --context "$context" get namespace kube-system \
   -o jsonpath='{.metadata.uid}')"; then
   echo "Failed to read the demo cluster identity" >&2
-  clear_demo_identity
+  echo "Dedicated cluster retained for cleanup: $cluster_name" >&2
   exit 1
 fi
 if ! printf '%s\n' "$cluster_uid" > "$demo_cluster_uid_file"; then
   echo "Failed to write the demo cluster identity" >&2
-  clear_demo_identity
+  echo "Dedicated cluster retained for cleanup: $cluster_name" >&2
   exit 1
 fi
-if kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
-  get namespace shop >/dev/null 2>&1; then
-  echo "Refusing to reuse existing namespace: shop" >&2
-  clear_demo_identity
-  exit 1
-fi
-if ! DEMO_KUBECONFIG="$demo_kubeconfig" DEMO_CONTEXT="$context" \
-  DEMO_NAMESPACE_UID_FILE="$demo_namespace_uid_file" uv run --no-sync python - <<'PY'
-import asyncio
-import os
-
-from kubernetes_asyncio import client, config
-
-
-async def create_namespace() -> None:
-    configuration = client.Configuration()
-    await config.load_kube_config(
-        config_file=os.environ["DEMO_KUBECONFIG"],
-        context=os.environ["DEMO_CONTEXT"],
-        client_configuration=configuration,
-    )
-    api_client = client.ApiClient(configuration)
-    try:
-        namespace = await client.CoreV1Api(api_client).create_namespace(
-            body=client.V1Namespace(
-                metadata=client.V1ObjectMeta(
-                    name="shop",
-                    labels={"korvid.dev/demo": "mcp-follow"},
-                )
-            )
-        )
-        namespace_uid = namespace.metadata.uid
-        if not namespace_uid:
-            raise RuntimeError("created namespace has no UID")
-        try:
-            fd = os.open(
-                os.environ["DEMO_NAMESPACE_UID_FILE"],
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                stream.write(f"{namespace_uid}\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-        except OSError:
-            await client.CoreV1Api(api_client).delete_namespace(
-                "shop",
-                body=client.V1DeleteOptions(
-                    preconditions=client.V1Preconditions(uid=namespace_uid)
-                ),
-            )
-            raise
-    finally:
-        await api_client.close()
-
-
-asyncio.run(create_namespace())
-PY
+if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$context" create -f - <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop
+  labels:
+    korvid.dev/demo: mcp-follow
+YAML
 then
-  echo "Failed to atomically create and record the demo namespace" >&2
-  echo "Demo identity state retained for investigation" >&2
+  echo "Failed to create the demo namespace in the dedicated cluster" >&2
   exit 1
 fi
 
@@ -143,21 +100,22 @@ match, and pin korvid to it through an isolated config:
 ```sh
 demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context"
 demo_state_dir="$(dirname "$demo_context_file")"
+cluster_name_file="$demo_state_dir/mcp-demo-cluster-name"
 demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
 demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
-demo_namespace_uid_file="$demo_state_dir/mcp-demo-namespace-uid"
-if [ ! -r "$demo_context_file" ] || [ ! -r "$demo_kubeconfig" ] ||
-  [ ! -r "$demo_cluster_uid_file" ] || [ ! -r "$demo_namespace_uid_file" ]; then
+if [ ! -r "$cluster_name_file" ] || [ ! -r "$demo_context_file" ] ||
+  [ ! -r "$demo_kubeconfig" ] ||
+  [ ! -r "$demo_cluster_uid_file" ]; then
   echo "Refusing MCP startup without the recorded demo identity" >&2
   exit 1
 fi
+cluster_name="$(cat "$cluster_name_file")"
 prepared_context="$(cat "$demo_context_file")"
 prepared_cluster_uid="$(cat "$demo_cluster_uid_file")"
-prepared_namespace_uid="$(cat "$demo_namespace_uid_file")"
-case "$prepared_context" in
-  kind-*|k3d-*|minikube|docker-desktop) ;;
-  *) echo "Refusing MCP startup on non-local context: $prepared_context" >&2; exit 1 ;;
-esac
+if ! test "$prepared_context" = "k3d-$cluster_name"; then
+  echo "Refusing MCP startup because cluster marker and context differ" >&2
+  exit 1
+fi
 if ! cluster_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
   --context "$prepared_context" get namespace kube-system \
   -o jsonpath='{.metadata.uid}')"; then
@@ -166,16 +124,6 @@ if ! cluster_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
 fi
 if ! test "$cluster_uid" = "$prepared_cluster_uid"; then
   echo "Refusing MCP startup after cluster identity changed" >&2
-  exit 1
-fi
-if ! namespace_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
-  --context "$prepared_context" get namespace shop \
-  -o jsonpath='{.metadata.uid}')"; then
-  echo "Refusing MCP startup because namespace identity is unavailable" >&2
-  exit 1
-fi
-if ! test "$namespace_uid" = "$prepared_namespace_uid"; then
-  echo "Refusing MCP startup after namespace identity changed" >&2
   exit 1
 fi
 if ! owner="$(kubectl --kubeconfig "$demo_kubeconfig" \
@@ -198,17 +146,18 @@ if ! printf 'kube_context: %s\nmcp:\n  enabled: true\n  follow: true\n' \
   echo "Failed to write the isolated korvid config" >&2
   exit 1
 fi
-if tmux has-session -t korvid-mcp-demo 2>/dev/null; then
-  echo "Refusing to reuse existing tmux session: korvid-mcp-demo" >&2
+session_name="$cluster_name"
+if tmux has-session -t "$session_name" 2>/dev/null; then
+  echo "Refusing to reuse existing tmux session: $session_name" >&2
   exit 1
 fi
-if ! tmux new-session -d -s korvid-mcp-demo -x 160 -y 45 -c "$PWD" \
+if ! tmux new-session -d -s "$session_name" -x 160 -y 45 -c "$PWD" \
   "HOME=\"$demo_home\" XDG_CONFIG_HOME=\"$demo_home/.config\" XDG_STATE_HOME=\"$demo_home/.local/state\" XDG_CACHE_HOME=\"$demo_home/.cache\" KUBECONFIG=\"$demo_kubeconfig\" korvid --mcp --namespace shop"; then
   echo "Failed to create the recording tmux session" >&2
   exit 1
 fi
-if ! tmux set-option -t korvid-mcp-demo status off; then
-  tmux kill-session -t korvid-mcp-demo
+if ! tmux set-option -t "$session_name" status off; then
+  tmux kill-session -t "$session_name"
   echo "Failed to configure the recording tmux session" >&2
   exit 1
 fi
@@ -218,7 +167,9 @@ Wait until the left pane status shows `MCP on` and `·follow`, then register onl
 the three read tools used by the recording:
 
 ```sh
-recording_server="korvid-mcp-demo"
+cluster_name="$(cat "$(dirname "$demo_context_file")/mcp-demo-cluster-name")"
+run_id="${cluster_name#korvid-mcp-demo-}"
+recording_server="korvid-mcp-demo-$run_id"
 registration_file="$(dirname "$demo_context_file")/mcp-demo-registration"
 if copilot mcp get "$recording_server" >/dev/null 2>&1; then
   echo "Refusing to replace existing Copilot MCP server: $recording_server" >&2
@@ -237,13 +188,15 @@ if ! copilot mcp add --transport http \
 fi
 ```
 
-Start Copilot in a 35-column right pane. Here
-`--available-tools=korvid-mcp-demo` is Copilot CLI's server-level MCP selector:
+Start Copilot in a 35-column right pane. The recorded unique server name is
+Copilot CLI's server-level MCP selector:
 
 ```sh
-tmux split-window -h -l 35 -t korvid-mcp-demo:0 -c "$PWD" \
-  "copilot --disable-builtin-mcps --allow-all-tools --available-tools=korvid-mcp-demo"
-tmux select-pane -t korvid-mcp-demo:0.1
+recording_server="$(cat "$(dirname "$demo_context_file")/mcp-demo-registration")"
+session_name="$(cat "$(dirname "$demo_context_file")/mcp-demo-cluster-name")"
+tmux split-window -h -l 35 -t "$session_name:0" -c "$PWD" \
+  "copilot --disable-builtin-mcps --allow-all-tools --available-tools=$recording_server"
+tmux select-pane -t "$session_name:0.1"
 ```
 
 Complete any Copilot trust prompt.
@@ -317,76 +270,39 @@ pod list, logs, and Helm views are each readable.
 ## Clean up
 
 ```sh
-demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context"
-demo_state_dir="$(dirname "$demo_context_file")"
+demo_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"
+cluster_name_file="$demo_state_dir/mcp-demo-cluster-name"
+demo_context_file="$demo_state_dir/mcp-demo-context"
 demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
 demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
-demo_namespace_uid_file="$demo_state_dir/mcp-demo-namespace-uid"
-if [ ! -r "$demo_context_file" ] || [ ! -r "$demo_kubeconfig" ] ||
-  [ ! -r "$demo_cluster_uid_file" ] || [ ! -r "$demo_namespace_uid_file" ]; then
+if [ ! -r "$cluster_name_file" ] || [ ! -r "$demo_context_file" ] ||
+  [ ! -r "$demo_kubeconfig" ] || [ ! -r "$demo_cluster_uid_file" ]; then
   echo "Refusing cleanup without the recorded demo identity" >&2
   exit 1
 fi
+cluster_name="$(cat "$cluster_name_file")"
 prepared_context="$(cat "$demo_context_file")"
 prepared_cluster_uid="$(cat "$demo_cluster_uid_file")"
-prepared_namespace_uid="$(cat "$demo_namespace_uid_file")"
-case "$prepared_context" in
-  kind-*|k3d-*|minikube|docker-desktop) ;;
-  *) echo "Refusing to clean non-local context: $prepared_context" >&2; exit 1 ;;
-esac
-if ! cluster_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
-  --context "$prepared_context" get namespace kube-system \
-  -o jsonpath='{.metadata.uid}')"; then
-  echo "Refusing cleanup because cluster identity is unavailable" >&2
+if ! test "$prepared_context" = "k3d-$cluster_name"; then
+  echo "Refusing cleanup because cluster marker and context differ" >&2
   exit 1
-fi
-if ! test "$cluster_uid" = "$prepared_cluster_uid"; then
-  echo "Refusing cleanup after cluster identity changed" >&2
-  exit 1
-fi
-if ! namespace_name="$(kubectl --kubeconfig "$demo_kubeconfig" \
-  --context "$prepared_context" get namespace shop --ignore-not-found \
-  -o jsonpath='{.metadata.name}')"; then
-  echo "Refusing cleanup because namespace state is unknown" >&2
-  exit 1
-fi
-namespace_exists=false
-if [ -n "$namespace_name" ]; then
-  if ! namespace_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
-    --context "$prepared_context" get namespace shop \
-    -o jsonpath='{.metadata.uid}')"; then
-    echo "Refusing cleanup because namespace identity is unknown" >&2
-    exit 1
-  fi
-  if ! test "$namespace_uid" = "$prepared_namespace_uid"; then
-    echo "Refusing cleanup after namespace identity changed" >&2
-    exit 1
-  fi
-  if ! owner="$(kubectl --kubeconfig "$demo_kubeconfig" \
-    --context "$prepared_context" get namespace shop \
-    -o jsonpath='{.metadata.labels.korvid\.dev/demo}')"; then
-    echo "Refusing cleanup because namespace ownership is unknown" >&2
-    exit 1
-  fi
-  if [ "$owner" != "mcp-follow" ]; then
-    echo "Refusing cleanup of namespace not owned by this demo" >&2
-    exit 1
-  fi
-  namespace_exists=true
-else
-  echo "Recording namespace is already absent; continuing cleanup" >&2
 fi
 
-if tmux has-session -t korvid-mcp-demo 2>/dev/null; then
-  tmux kill-session -t korvid-mcp-demo
+# Local teardown comes first so no MCP endpoint remains live if cluster
+# validation later refuses a mutation.
+if tmux has-session -t "$cluster_name" 2>/dev/null; then
+  tmux kill-session -t "$cluster_name"
 fi
-registration_file="$(dirname "$demo_context_file")/mcp-demo-registration"
+registration_file="$demo_state_dir/mcp-demo-registration"
 if [ -r "$registration_file" ]; then
   recording_server="$(cat "$registration_file")"
-  if [ "$recording_server" != "korvid-mcp-demo" ]; then
+  case "$recording_server" in
+    korvid-mcp-demo-*) ;;
+    *)
     echo "Refusing to remove unexpected MCP registration: $recording_server" >&2
     exit 1
-  fi
+      ;;
+  esac
   if copilot mcp get "$recording_server" >/dev/null 2>&1; then
     if ! copilot mcp remove "$recording_server"; then
       echo "Failed to remove the recording MCP server; cleanup state retained" >&2
@@ -394,51 +310,26 @@ if [ -r "$registration_file" ]; then
     fi
   fi
   rm -f "$registration_file"
-elif copilot mcp get korvid-mcp-demo >/dev/null 2>&1; then
-  echo "Refusing to remove an untracked korvid-mcp-demo registration" >&2
-  exit 1
 else
   echo "Recording MCP server is already absent; continuing cleanup" >&2
 fi
-if [ "$namespace_exists" = true ]; then
-  if ! DEMO_KUBECONFIG="$demo_kubeconfig" DEMO_CONTEXT="$prepared_context" \
-    DEMO_NAMESPACE_UID="$prepared_namespace_uid" uv run --no-sync python - <<'PY'
-import asyncio
-import os
 
-from kubernetes_asyncio import client, config
-
-
-async def delete_namespace() -> None:
-    configuration = client.Configuration()
-    await config.load_kube_config(
-        config_file=os.environ["DEMO_KUBECONFIG"],
-        context=os.environ["DEMO_CONTEXT"],
-        client_configuration=configuration,
-    )
-    api_client = client.ApiClient(configuration)
-    try:
-        await client.CoreV1Api(api_client).delete_namespace(
-            "shop",
-            body=client.V1DeleteOptions(
-                preconditions=client.V1Preconditions(
-                    uid=os.environ["DEMO_NAMESPACE_UID"]
-                )
-            ),
-        )
-    finally:
-        await api_client.close()
-
-
-asyncio.run(delete_namespace())
-PY
-  then
-    echo "Failed to delete the recording namespace; cleanup state retained" >&2
-    exit 1
-  fi
+if ! cluster_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
+  --context "$prepared_context" get namespace kube-system \
+  -o jsonpath='{.metadata.uid}')"; then
+  echo "Refusing cluster deletion because identity is unavailable" >&2
+  exit 1
+fi
+if ! test "$cluster_uid" = "$prepared_cluster_uid"; then
+  echo "Refusing cleanup after cluster identity changed" >&2
+  exit 1
+fi
+if ! k3d cluster delete "$cluster_name"; then
+  echo "Failed to delete the dedicated recording cluster; state retained" >&2
+  exit 1
 fi
 demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
 rm -rf -- "$demo_home"
-rm -f "$demo_context_file" "$demo_kubeconfig" "$demo_cluster_uid_file" \
-  "$demo_namespace_uid_file"
+rm -f "$cluster_name_file" "$demo_context_file" "$demo_kubeconfig" \
+  "$demo_cluster_uid_file"
 ```
