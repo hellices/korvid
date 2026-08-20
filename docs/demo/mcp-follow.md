@@ -84,8 +84,8 @@ through a temporary output file:
 ffmpeg -y -i docs/assets/mcp-follow-demo.gif \
   -filter_complex \
   "fps=12,scale=1280:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
-  -loop 0 /tmp/mcp-follow-demo.gif
-mv /tmp/mcp-follow-demo.gif docs/assets/mcp-follow-demo.gif
+  -loop 0 docs/assets/mcp-follow-demo.tmp.gif &&
+mv docs/assets/mcp-follow-demo.tmp.gif docs/assets/mcp-follow-demo.gif
 ```
 
 Verify the result:
@@ -99,7 +99,7 @@ stat -f '%z bytes' docs/assets/mcp-follow-demo.gif
 
 The duration must be at most 15 seconds, width exactly 1280 pixels, and file
 size at most 8,388,608 bytes. Inspect the GIF at README width and confirm the
-pod list, describe, logs, and Helm views are each readable.
+pod list, logs, and Helm views are each readable.
 
 ## Clean up
 

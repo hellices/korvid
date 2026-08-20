@@ -9,9 +9,12 @@ Output docs/assets/mcp-follow-demo.gif
 Set FontSize 14
 Set Width 1440
 Set Height 800
+Set Framerate 25
 Set Padding 8
 Set TypingSpeed 5ms
 Set Shell bash
+
+# The export step in mcp-follow.md scales this 1440px source to 1280px/12fps.
 
 Hide
 Type "tmux attach-session -t korvid-mcp-demo"

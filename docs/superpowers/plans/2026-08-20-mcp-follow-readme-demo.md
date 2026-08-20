@@ -14,7 +14,7 @@
 - The final GIF must be 1280 pixels wide, 12 to 15 frames per second, and no larger than 8 MB.
 - The korvid TUI must occupy approximately 75% of the window and Copilot CLI approximately 25%.
 - The recording must show real MCP requests and real follow-mode transitions; only idle time may be removed.
-- The visible sequence is pod list, unhealthy-pod describe, live logs, then Helm release browser.
+- The visible sequence is pod list, live logs, then Helm release browser.
 - The `MCP ·follow` status must remain visible whenever the main TUI is visible.
 - The animation demonstrates reads only and must not imply MCP-driven Helm installation.
 - No production resources, credentials, customer identifiers, or sensitive logs may appear.
@@ -249,8 +249,8 @@ through a temporary output file:
 ffmpeg -y -i docs/assets/mcp-follow-demo.gif \
   -filter_complex \
   "fps=12,scale=1280:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
-  -loop 0 /tmp/mcp-follow-demo.gif
-mv /tmp/mcp-follow-demo.gif docs/assets/mcp-follow-demo.gif
+  -loop 0 docs/assets/mcp-follow-demo.tmp.gif &&
+mv docs/assets/mcp-follow-demo.tmp.gif docs/assets/mcp-follow-demo.gif
 ```
 
 Verify the result:
@@ -264,7 +264,7 @@ stat -f '%z bytes' docs/assets/mcp-follow-demo.gif
 
 The duration must be at most 15 seconds, width exactly 1280 pixels, and file
 size at most 8,388,608 bytes. Inspect the GIF at README width and confirm the
-pod list, describe, logs, and Helm views are each readable.
+pod list, logs, and Helm views are each readable.
 
 ## Clean up
 
