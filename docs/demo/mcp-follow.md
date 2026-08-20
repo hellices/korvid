@@ -17,6 +17,11 @@ demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context
 demo_state_dir="$(dirname "$demo_context_file")"
 demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
 demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
+demo_namespace_uid_file="$demo_state_dir/mcp-demo-namespace-uid"
+clear_demo_identity() {
+  rm -f "$demo_context_file" "$demo_kubeconfig" "$demo_cluster_uid_file" \
+    "$demo_namespace_uid_file"
+}
 umask 077
 if ! mkdir -p "$demo_state_dir"; then
   echo "Failed to create the demo state directory" >&2
@@ -49,13 +54,33 @@ fi
 if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
   create namespace shop; then
   echo "Failed to create the dedicated shop namespace" >&2
+  clear_demo_identity
   exit 1
 fi
 if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
   label namespace shop korvid.dev/demo=mcp-follow; then
   echo "Failed to mark the dedicated namespace as demo-owned" >&2
-  kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
-    delete namespace shop --ignore-not-found
+  if kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
+    delete namespace shop --ignore-not-found; then
+    clear_demo_identity
+  fi
+  exit 1
+fi
+if ! namespace_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
+  --context "$context" get namespace shop -o jsonpath='{.metadata.uid}')"; then
+  echo "Failed to read the recording namespace identity" >&2
+  if kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
+    delete namespace shop --ignore-not-found; then
+    clear_demo_identity
+  fi
+  exit 1
+fi
+if ! printf '%s\n' "$namespace_uid" > "$demo_namespace_uid_file"; then
+  echo "Failed to write the recording namespace identity" >&2
+  if kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
+    delete namespace shop --ignore-not-found; then
+    clear_demo_identity
+  fi
   exit 1
 fi
 
@@ -67,7 +92,7 @@ if ! helm upgrade --install shop-demo docs/demo/mcp-follow-fixture \
     echo "Failed to clean the namespace; demo context state retained" >&2
     exit 1
   fi
-  rm -f "$demo_context_file" "$demo_kubeconfig" "$demo_cluster_uid_file"
+  clear_demo_identity
   exit 1
 fi
 kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
@@ -95,8 +120,9 @@ demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context
 demo_state_dir="$(dirname "$demo_context_file")"
 demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
 demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
+demo_namespace_uid_file="$demo_state_dir/mcp-demo-namespace-uid"
 if [ ! -r "$demo_context_file" ] || [ ! -r "$demo_kubeconfig" ] ||
-  [ ! -r "$demo_cluster_uid_file" ]; then
+  [ ! -r "$demo_cluster_uid_file" ] || [ ! -r "$demo_namespace_uid_file" ]; then
   echo "Refusing MCP startup without the recorded demo identity" >&2
   exit 1
 fi
@@ -211,6 +237,16 @@ call and follow transition.
 idle_start=1.0
 idle_end=7.0
 demo_end=17.0
+kept_duration="$(awk -v a="$idle_start" -v b="$idle_end" -v c="$demo_end" \
+  'BEGIN { print (a < b && b < c) ? a + (c - b) : "invalid" }')"
+if [ "$kept_duration" = "invalid" ]; then
+  echo "Invalid trim timestamps" >&2
+  exit 1
+fi
+if ! awk -v duration="$kept_duration" 'BEGIN { exit !(duration <= 15) }'; then
+  echo "Trimmed duration exceeds the 15s budget" >&2
+  exit 1
+fi
 ffmpeg -y -i docs/assets/mcp-follow-demo.raw.gif \
   -filter_complex \
   "[0:v]trim=start=0:end=${idle_start},setpts=PTS-STARTPTS[first];[0:v]trim=start=${idle_end}:end=${demo_end},setpts=PTS-STARTPTS[rest];[first][rest]concat=n=2:v=1:a=0,fps=12,scale=1280:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
@@ -239,13 +275,15 @@ demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context
 demo_state_dir="$(dirname "$demo_context_file")"
 demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
 demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
+demo_namespace_uid_file="$demo_state_dir/mcp-demo-namespace-uid"
 if [ ! -r "$demo_context_file" ] || [ ! -r "$demo_kubeconfig" ] ||
-  [ ! -r "$demo_cluster_uid_file" ]; then
+  [ ! -r "$demo_cluster_uid_file" ] || [ ! -r "$demo_namespace_uid_file" ]; then
   echo "Refusing cleanup without the recorded demo identity" >&2
   exit 1
 fi
 prepared_context="$(cat "$demo_context_file")"
 prepared_cluster_uid="$(cat "$demo_cluster_uid_file")"
+prepared_namespace_uid="$(cat "$demo_namespace_uid_file")"
 case "$prepared_context" in
   kind-*|k3d-*|minikube|docker-desktop) ;;
   *) echo "Refusing to clean non-local context: $prepared_context" >&2; exit 1 ;;
@@ -268,6 +306,16 @@ if ! namespace_name="$(kubectl --kubeconfig "$demo_kubeconfig" \
 fi
 namespace_exists=false
 if [ -n "$namespace_name" ]; then
+  if ! namespace_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
+    --context "$prepared_context" get namespace shop \
+    -o jsonpath='{.metadata.uid}')"; then
+    echo "Refusing cleanup because namespace identity is unknown" >&2
+    exit 1
+  fi
+  if ! test "$namespace_uid" = "$prepared_namespace_uid"; then
+    echo "Refusing cleanup after namespace identity changed" >&2
+    exit 1
+  fi
   if ! owner="$(kubectl --kubeconfig "$demo_kubeconfig" \
     --context "$prepared_context" get namespace shop \
     -o jsonpath='{.metadata.labels.korvid\.dev/demo}')"; then
@@ -318,13 +366,30 @@ if [ "$namespace_exists" = true ]; then
     echo "Failed to uninstall the recording release; cleanup state retained" >&2
     exit 1
   fi
-  if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$prepared_context" \
-    delete namespace shop --ignore-not-found; then
+  if ! DEMO_KUBECONFIG="$demo_kubeconfig" DEMO_CONTEXT="$prepared_context" \
+    DEMO_NAMESPACE_UID="$prepared_namespace_uid" uv run --no-sync python - <<'PY'
+import os
+
+from kubernetes import client, config
+
+config.load_kube_config(
+    config_file=os.environ["DEMO_KUBECONFIG"],
+    context=os.environ["DEMO_CONTEXT"],
+)
+client.CoreV1Api().delete_namespace(
+    "shop",
+    body=client.V1DeleteOptions(
+        preconditions=client.V1Preconditions(uid=os.environ["DEMO_NAMESPACE_UID"])
+    ),
+)
+PY
+  then
     echo "Failed to delete the recording namespace; cleanup state retained" >&2
     exit 1
   fi
 fi
 demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
 rm -rf -- "$demo_home"
-rm -f "$demo_context_file" "$demo_kubeconfig" "$demo_cluster_uid_file"
+rm -f "$demo_context_file" "$demo_kubeconfig" "$demo_cluster_uid_file" \
+  "$demo_namespace_uid_file"
 ```

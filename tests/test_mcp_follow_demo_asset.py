@@ -73,9 +73,7 @@ def _read_gif_block(
             raise ValueError(f"multiple GIF frame delays before image at offset {cursor}")
         return cursor, delay, False
     if introducer == 0x2C:
-        if pending_delay is None:
-            raise ValueError(f"GIF image has no frame delay at offset {introducer_offset}")
-        delays.append(pending_delay)
+        delays.append(0 if pending_delay is None else pending_delay)
         return _skip_gif_image(payload, cursor), None, False
     raise ValueError(
         f"unexpected GIF block introducer 0x{introducer:02x} at offset {introducer_offset}"
@@ -160,6 +158,8 @@ def test_recording_tape_owns_prompt_entry() -> None:
         assert f"${{{variable}}}" in runbook
     assert "Output docs/assets/mcp-follow-demo.raw.gif" in tape
     assert "ffmpeg -y -i docs/assets/mcp-follow-demo.raw.gif" in runbook
+    assert "Invalid trim timestamps" in runbook
+    assert "Trimmed duration exceeds the 15s budget" in runbook
 
 
 def test_recording_runbook_only_deletes_namespace_it_created() -> None:
@@ -169,6 +169,7 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert "mcp-demo-context" in runbook
     assert "mcp-demo-kubeconfig" in runbook
     assert "mcp-demo-cluster-uid" in runbook
+    assert "mcp-demo-namespace-uid" in runbook
     assert "Failed to create the demo state directory" in runbook
     assert "Failed to write the demo context marker" in runbook
     assert 'test "$cluster_uid" = "$prepared_cluster_uid"' in runbook
@@ -188,6 +189,7 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert 'XDG_CONFIG_HOME=\\"$demo_home/.config\\"' in runbook
     assert '--kubeconfig "$demo_kubeconfig"' in runbook
     assert "Recording namespace is already absent; continuing cleanup" in runbook
+    assert 'V1Preconditions(uid=os.environ["DEMO_NAMESPACE_UID"])' in runbook
     assert "delete namespace shop --ignore-not-found" in runbook
 
 
@@ -230,15 +232,14 @@ def test_gif_parser_rejects_bytes_after_trailer() -> None:
         _gif_duration_centiseconds(payload)
 
 
-def test_gif_parser_rejects_image_without_frame_delay() -> None:
+def test_gif_parser_records_zero_for_image_without_frame_delay() -> None:
     payload = (
         b"GIF89a\x01\x00\x01\x00\x00\x00\x00"
         b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00"
         b"\x02\x01\x00\x00\x3b"
     )
 
-    with pytest.raises(ValueError, match="GIF image has no frame delay"):
-        _gif_duration_centiseconds(payload)
+    assert _gif_frame_delays_centiseconds(payload) == [0]
 
 
 def test_gif_effective_frame_rate_uses_encoded_delays() -> None:
