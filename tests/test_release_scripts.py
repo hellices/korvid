@@ -2002,7 +2002,7 @@ def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
     normalized = " ".join(runbook.split())
     assert "HOMEBREW_TAP_TOKEN" in runbook
     assert f"gh release download v{version} --pattern korvid.rb" in runbook
-    assert 'formula_path="$PWD/dist/v0.3.0/korvid.rb"' in runbook
+    assert f'formula_path="$PWD/dist/v{version}/korvid.rb"' in runbook
     assert 'if [ ! -f "$formula_path" ]' in runbook
     assert 'cp "$formula_path" Formula/korvid.rb' in runbook
     assert 'if cmp -s "$formula_path" Formula/korvid.rb' in runbook
@@ -2027,9 +2027,9 @@ def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
         assert "reviewed and green" not in runbook[preceding:claim]
     assert "--json number,title,baseRefName,headRefName,headRepositoryOwner" in runbook
     assert '.baseRefName == "main"' in runbook
-    assert '.headRefName == "bump-korvid-0.3.0"' in runbook
+    assert f'.headRefName == "bump-korvid-{version}"' in runbook
     assert '.headRepositoryOwner.login == "hellices"' in runbook
-    assert "trusted bump-korvid-0.3.0 tap PR not found" in runbook
+    assert f"trusted bump-korvid-{version} tap PR not found" in runbook
     assert "branch=bump-korvid-" in runbook
     assert 'git show-ref --verify --quiet "refs/remotes/origin/$branch"' in runbook
     assert 'git switch --track -c "$branch" "origin/$branch"' in runbook
@@ -2053,6 +2053,7 @@ def test_release_docs_upgrade_from_previous_minor_candidate() -> None:
     assert f"korvid-{version}-py3-none-any.whl" in runbook
     assert f"korvid {version}" in runbook
     assert f"published `{UPGRADE_SOURCE_VERSION}` installation to the candidate wheel" in readme
+    assert f"This checkout is prepared for `v{version}`" in readme
 
 
 # --- metadata ---------------------------------------------------------------

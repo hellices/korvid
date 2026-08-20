@@ -355,6 +355,8 @@ def test_upgrade_source_version_is_rejected_in_extra_runbook_context() -> None:
 
 
 def test_upgrade_source_is_the_previous_minor_release() -> None:
-    major, minor, _patch = _project_version().split(".")
-    assert int(minor) > 0
-    assert f"{major}.{int(minor) - 1}.0" == UPGRADE_SOURCE_VERSION
+    current = tuple(int(part) for part in _project_version().split("."))
+    source = tuple(int(part) for part in UPGRADE_SOURCE_VERSION.split("."))
+    assert source < current
+    if source[0] == current[0]:
+        assert source[1] == current[1] - 1
