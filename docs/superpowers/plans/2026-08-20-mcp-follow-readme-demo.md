@@ -131,7 +131,21 @@ Run:
 helm lint docs/demo/mcp-follow-fixture
 helm template shop-demo docs/demo/mcp-follow-fixture \
   --namespace shop >/tmp/korvid-mcp-follow-fixture.yaml
-kubectl apply --dry-run=client -f /tmp/korvid-mcp-follow-fixture.yaml >/dev/null
+uv run python - <<'PY'
+from pathlib import Path
+
+import yaml
+
+documents = [
+    item
+    for item in yaml.safe_load_all(
+        Path("/tmp/korvid-mcp-follow-fixture.yaml").read_text()
+    )
+    if item
+]
+assert [item["kind"] for item in documents] == ["Service", "Deployment"]
+print("rendered Service and Deployment")
+PY
 ```
 
 Expected:
@@ -140,7 +154,7 @@ Expected:
 1 chart(s) linted, 0 chart(s) failed
 ```
 
-The template and client-side dry-run commands exit with status 0.
+The template and offline YAML validation commands exit with status 0.
 
 - [ ] **Step 4: Write the recording runbook**
 
