@@ -18,12 +18,13 @@ fi
 run_id="$(date -u +%Y%m%d%H%M%S)-$$"
 cluster_name="korvid-mcp-demo-$run_id"
 cluster_name_file="$demo_state_dir/mcp-demo-cluster-name"
-if k3d cluster list --no-headers | awk '{print $1}' | grep -Fxq "$cluster_name"; then
-  echo "Refusing to reuse existing k3d cluster: $cluster_name" >&2
+if ! (set -o noclobber; printf '%s\n' "$cluster_name" > "$cluster_name_file") 2>/dev/null; then
+  echo "Refusing setup while another recording run is active" >&2
   exit 1
 fi
-if ! printf '%s\n' "$cluster_name" > "$cluster_name_file"; then
-  echo "Failed to write the demo cluster marker" >&2
+if k3d cluster list --no-headers | awk '{print $1}' | grep -Fxq "$cluster_name"; then
+  echo "Refusing to reuse existing k3d cluster: $cluster_name" >&2
+  rm -f "$cluster_name_file"
   exit 1
 fi
 if ! k3d cluster create "$cluster_name" --agents 1 --wait \
@@ -148,7 +149,7 @@ if [ "$owner" != "mcp-follow" ]; then
   echo "Refusing MCP startup because namespace ownership changed" >&2
   exit 1
 fi
-demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
+demo_home="$demo_state_dir/runs/$cluster_name/home"
 if ! mkdir -p "$demo_home/.config/korvid"; then
   echo "Failed to create the isolated config directory" >&2
   exit 1
@@ -378,7 +379,7 @@ if ! k3d cluster delete "$cluster_name"; then
   echo "Failed to delete the dedicated recording cluster; state retained" >&2
   exit 1
 fi
-demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
+demo_home="$demo_state_dir/runs/$cluster_name/home"
 rm -rf -- "$demo_home"
 rm -f "$cluster_name_file" "$demo_context_file" "$demo_kubeconfig" \
   "$demo_cluster_uid_file" "$mcp_url_file"

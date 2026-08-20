@@ -155,6 +155,8 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "mcp-endpoint.json" in runbook
     assert "mcp-demo-url" in runbook
     assert "http://127.0.0.1:7878/mcp" not in runbook
+    assert "Refusing setup while another recording run is active" in runbook
+    assert "set -o noclobber" in runbook
     assert 'recording_server="korvid-mcp-demo-$run_id"' in runbook
     assert "Failed to write the recording MCP marker" in runbook
     assert runbook.index("mcp-demo-registration") < runbook.index("copilot mcp add")
@@ -177,6 +179,7 @@ def test_recording_runbook_only_deletes_cluster_it_created() -> None:
     runbook = (ROOT / "docs" / "demo" / "mcp-follow.md").read_text(encoding="utf-8")
 
     assert 'cluster_name="korvid-mcp-demo-$run_id"' in runbook
+    assert 'demo_home="$demo_state_dir/runs/$cluster_name/home"' in runbook
     assert 'k3d cluster create "$cluster_name"' in runbook
     assert "--kubeconfig-switch-context=false" in runbook
     assert 'k3d cluster delete "$cluster_name"' in runbook
