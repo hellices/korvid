@@ -181,8 +181,15 @@ if kubectl --context "$context" get namespace shop >/dev/null 2>&1; then
   exit 1
 fi
 demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context"
-mkdir -p "$(dirname "$demo_context_file")"
-printf '%s\n' "$context" > "$demo_context_file"
+demo_state_dir="$(dirname "$demo_context_file")"
+if ! mkdir -p "$demo_state_dir"; then
+  echo "Failed to create the demo state directory" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$context" > "$demo_context_file"; then
+  echo "Failed to write the demo context marker" >&2
+  exit 1
+fi
 if ! kubectl --context "$context" create namespace shop; then
   echo "Failed to create the dedicated shop namespace" >&2
   exit 1
@@ -237,9 +244,15 @@ case "$prepared_context" in
   *) echo "Refusing MCP startup on non-local context: $prepared_context" >&2; exit 1 ;;
 esac
 demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
-mkdir -p "$demo_home/.config/korvid"
-printf 'kube_context: %s\nmcp:\n  enabled: true\n  follow: true\n' "$prepared_context" \
-  > "$demo_home/.config/korvid/config.yaml"
+if ! mkdir -p "$demo_home/.config/korvid"; then
+  echo "Failed to create the isolated config directory" >&2
+  exit 1
+fi
+if ! printf 'kube_context: %s\nmcp:\n  enabled: true\n  follow: true\n' \
+  "$prepared_context" > "$demo_home/.config/korvid/config.yaml"; then
+  echo "Failed to write the isolated korvid config" >&2
+  exit 1
+fi
 demo_kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
 if tmux has-session -t korvid-mcp-demo 2>/dev/null; then
   echo "Refusing to reuse existing tmux session: korvid-mcp-demo" >&2
@@ -267,13 +280,17 @@ if copilot mcp get "$recording_server" >/dev/null 2>&1; then
   echo "Refusing to replace existing Copilot MCP server: $recording_server" >&2
   exit 1
 fi
+if ! printf '%s\n' "$recording_server" > "$registration_file"; then
+  echo "Failed to write the recording MCP marker" >&2
+  exit 1
+fi
 if ! copilot mcp add --transport http \
   --tools 'list_resources,get_logs,helm_list_releases' \
   "$recording_server" http://127.0.0.1:7878/mcp; then
   echo "Failed to register the recording MCP server" >&2
+  rm -f "$registration_file"
   exit 1
 fi
-printf '%s\n' "$recording_server" > "$registration_file"
 ```
 
 Start Copilot in a 35-column right pane. Here
@@ -381,9 +398,11 @@ if [ -r "$registration_file" ]; then
     echo "Refusing to remove unexpected MCP registration: $recording_server" >&2
     exit 1
   fi
-  if ! copilot mcp remove "$recording_server"; then
-    echo "Failed to remove the recording MCP server; cleanup state retained" >&2
-    exit 1
+  if copilot mcp get "$recording_server" >/dev/null 2>&1; then
+    if ! copilot mcp remove "$recording_server"; then
+      echo "Failed to remove the recording MCP server; cleanup state retained" >&2
+      exit 1
+    fi
   fi
   rm -f "$registration_file"
 elif copilot mcp get korvid-mcp-demo >/dev/null 2>&1; then

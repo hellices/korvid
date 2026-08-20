@@ -120,7 +120,7 @@ def _gif_effective_frame_rate(delays: list[int]) -> float:
 
 
 def test_readme_embeds_mcp_follow_demo() -> None:
-    readme = (ROOT / "README.md").read_text()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "## Watch MCP follow" in readme
     assert f"]({ASSET_URL})" in readme
     assert "**One prompt. Korvid follows.**" in readme
@@ -131,8 +131,8 @@ def test_readme_embeds_mcp_follow_demo() -> None:
 
 
 def test_recording_tape_owns_prompt_entry() -> None:
-    runbook = (ROOT / "docs" / "demo" / "mcp-follow.md").read_text()
-    tape = (ROOT / "docs" / "demo" / "mcp-follow.tape").read_text()
+    runbook = (ROOT / "docs" / "demo" / "mcp-follow.md").read_text(encoding="utf-8")
+    tape = (ROOT / "docs" / "demo" / "mcp-follow.tape").read_text(encoding="utf-8")
     prompt = (
         "Use korvid MCP in order: list_resources shop pods → "
         "get_logs unhealthy one → helm_list_releases."
@@ -147,6 +147,8 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Sleep 45s" in tape
     assert "--available-tools=korvid-mcp-demo" in runbook
     assert "mcp-demo-registration" in runbook
+    assert "Failed to write the recording MCP marker" in runbook
+    assert runbook.index("mcp-demo-registration") < runbook.index("copilot mcp add")
     assert "tmux kill-session -t korvid-mcp-demo" in runbook
     assert "Refusing to reuse existing tmux session: korvid-mcp-demo" in runbook
     assert "if ! tmux new-session" in runbook
@@ -157,10 +159,12 @@ def test_recording_tape_owns_prompt_entry() -> None:
 
 
 def test_recording_runbook_only_deletes_namespace_it_created() -> None:
-    runbook = (ROOT / "docs" / "demo" / "mcp-follow.md").read_text()
+    runbook = (ROOT / "docs" / "demo" / "mcp-follow.md").read_text(encoding="utf-8")
 
     assert "Refusing to reuse existing namespace: shop" in runbook
     assert "mcp-demo-context" in runbook
+    assert "Failed to create the demo state directory" in runbook
+    assert "Failed to write the demo context marker" in runbook
     assert 'test "$context" = "$prepared_context"' in runbook
     assert '--kube-context "$prepared_context"' in runbook
     assert "korvid.dev/demo=mcp-follow" in runbook
@@ -171,6 +175,8 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert 'kubectl --context "$context" -n shop get pods --watch' in runbook
     assert 'kubectl --context "$context" -n shop get events' in runbook
     assert "Refusing MCP startup after context changed" in runbook
+    assert "Failed to create the isolated config directory" in runbook
+    assert "Failed to write the isolated korvid config" in runbook
     assert "kube_context: %s" in runbook
     assert 'HOME=\\"$demo_home\\"' in runbook
     assert (
