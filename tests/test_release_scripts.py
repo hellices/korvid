@@ -1506,17 +1506,14 @@ def test_readme_recommends_an_isolated_install_for_an_application() -> None:
     version = _project_version()
     readme = _readme()
     quick_start = markdown_section(readme, "Quick start")
-    install = markdown_section(readme, "Installation")
+    normalized_quick_start = " ".join(quick_start.split())
     pip_fallback = f"python -m pip install 'korvid[all]=={version}'"
     assert f"uv tool install 'korvid[all]=={version}'" in quick_start
     assert pip_fallback in quick_start
-    assert "inside a virtualenv or a container image you control" in quick_start
+    assert "inside an activated virtual environment" in normalized_quick_start
+    assert "including one created inside a container" in normalized_quick_start
     assert quick_start.index("uv tool install") < quick_start.index(pip_fallback)
     assert f"pipx install 'korvid[all]=={version}'" in quick_start
-    pip_index = quick_start.find("python -m pip install")
-    assert pip_index == -1 or quick_start.index("uv tool install") < pip_index, (
-        "the quick start leads with pip; an isolated install must come first"
-    )
     install = readme[readme.index("## Installation") : readme.index("### Development")]
     assert f"uv tool install 'korvid[all]=={version}'" in install
     assert f"python -m pip install 'korvid[all]=={version}'        # recommended" not in install
@@ -1927,18 +1924,17 @@ def test_release_docs_correct_the_xdg_config_claim() -> None:
 def test_release_docs_keep_a_source_install_fallback_for_unreleased_main() -> None:
     runbook = _release_runbook()
     readme = _readme()
-    source_install = "pip install 'korvid[all] @ git+https://github.com/hellices/korvid'"
+    source_install = "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'"
+    pipx_source_install = "pipx install 'korvid[all] @ git+https://github.com/hellices/korvid'"
     assert source_install in runbook
     runbook_install = runbook[
         runbook.index("## Install, reinstall, and uninstall from PyPI") : runbook.index(
             "## What the smoke matrix proves"
         )
     ]
-    assert "activated virtual environment, including one created inside a container" in " ".join(
-        runbook_install.split()
-    )
-    assert "virtual environment or a container image you control" not in runbook_install
-    assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in readme
+    assert pipx_source_install in runbook_install
+    assert "python -m pip install" not in runbook_install
+    assert source_install in readme
     assert "Tagged versions should be installed from PyPI" in readme
     assert "appearing on PyPI" not in runbook
     assert "For unreleased `main` development" in runbook
