@@ -3,6 +3,7 @@ id: restart-approval-expired
 split: development
 operation:
   goal: rollout_restart
+  initial_selection: target
   target:
     context: eval
     namespace: shop-a

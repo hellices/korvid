@@ -8,6 +8,7 @@ Every journey runs the real `KorvidApp`, the real `AgentRuntime`, the real
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -163,6 +164,17 @@ async def test_a_positive_journey_reaches_the_fixture_state(
     run = await run_scripted_journey(journey_id, tmp_path)
     assert run.grade.provisional_assertions != ()
     assert all(result.satisfied for result in run.grade.provisional_assertions)
+
+
+@pytest.mark.parametrize("journey_id", CORE_GATE_JOURNEYS)
+async def test_each_core_gate_journey_executes_from_the_declared_constant(
+    journey_id: str, tmp_path: Path
+) -> None:
+    """`CORE_GATE_JOURNEYS` is a real execution binding, not a set-membership
+    tautology."""
+    run = await run_scripted_journey(journey_id, tmp_path / journey_id)
+    assert run.grade.safe is True
+    assert run.grade.outcome == _JOURNEYS[journey_id].expected_outcome
 
 
 async def test_the_audit_intent_is_durable_before_the_mutation(tmp_path: Path) -> None:
@@ -396,17 +408,43 @@ async def test_an_ambiguous_journeys_first_turn_does_not_preselect_the_answer(
     tmp_path: Path,
 ) -> None:
     provider = _PromptSpy(OPERATION_SCRIPTS["scale-ambiguous-namespace"])
-    await run_operation_journey(
+    run = await run_operation_journey(
         _JOURNEYS["scale-ambiguous-namespace"],
         audit_path=tmp_path / "audit.jsonl",
         provider_factory=lambda: provider,
     )
+    seeded = [entry for entry in run.journal if entry["event"] == "screen_context_seeded"]
+    assert [entry["detail"] for entry in seeded] == ["row_key=shop-a/api"]
     first_prompt = "\n".join(
         str(message["content"]) for message in provider.calls[0] if message.get("role") == "user"
     )
     assert "scope=*" in first_prompt
+    assert "selected=api" in first_prompt
+    assert "selected_ns=shop-a" in first_prompt
     assert "selected=web" not in first_prompt
     assert "selected_ns=shop-b" not in first_prompt
+
+
+async def test_a_name_collision_cannot_flip_a_target_initial_selection(tmp_path: Path) -> None:
+    provider = _PromptSpy(OPERATION_SCRIPTS["scale-ambiguous-namespace"])
+    run = await run_operation_journey(
+        replace(_JOURNEYS["scale-ambiguous-namespace"], initial_selection="target"),
+        audit_path=tmp_path / "audit.jsonl",
+        provider_factory=lambda: provider,
+    )
+    selections = [
+        entry
+        for entry in run.journal
+        if entry["event"] in {"screen_context_seeded", "screen_target_selected"}
+    ]
+    assert [entry["event"] for entry in selections[:1]] == ["screen_target_selected"]
+    assert [entry for entry in run.journal if entry["event"] == "screen_context_seeded"] == []
+    first_prompt = "\n".join(
+        str(message["content"]) for message in provider.calls[0] if message.get("role") == "user"
+    )
+    assert "scope=*" not in first_prompt
+    assert "selected=web" in first_prompt
+    assert "selected_ns=shop-b" in first_prompt
 
 
 async def test_an_rbac_refusal_never_reaches_a_dialog_or_the_audit_log(tmp_path: Path) -> None:

@@ -688,18 +688,16 @@ def _select_target_row(app: KorvidApp, journey: OperationJourney, journal: Actio
     """
     table = app.query_one(ResourceTable)
     composite = f"{journey.target.namespace}/{journey.target.name}"
-    # The bare name is accepted only as the cluster-scoped fallback.
-    wanted = (composite, journey.target.name)
     for index, row in enumerate(table.ordered_rows):
         key = str(row.key.value)
-        if key not in wanted:
+        if key != composite:
             continue
         table.move_cursor(row=index)
         journal.append(
             event="screen_target_selected",
             actor="fixture_actor",
             target=JournalTarget.of(journey.target),
-            result="row_key" if key == composite else "bare_name",
+            result="row_key",
             detail=summarize(row_key=key),
         )
         return True
@@ -707,17 +705,19 @@ def _select_target_row(app: KorvidApp, journey: OperationJourney, journal: Actio
 
 
 def _select_neutral_row(app: KorvidApp, journey: OperationJourney, journal: ActionJournal) -> bool:
-    """Put the cursor on a deterministic non-target row for an ambiguity prompt.
+    """Put the cursor on a deterministic non-target row for a neutral fixture.
 
-    When the fixture is asking the model to clarify between same-named
-    objects, seeding the real target row would hand over the answer before
-    the first turn. A neutral row keeps the screen context truthful without
-    pre-disambiguating the write target.
+    `operation.initial_selection: neutral` means "start from a truthful
+    distractor row and let the scripted clarification reveal the target."
+    The loader guarantees such a distractor exists; if that contract ever
+    drifts, fail with the fixture id rather than timing out under `until`.
     """
     table = app.query_one(ResourceTable)
+    if not table.ordered_rows:
+        return False
     for index, row in enumerate(table.ordered_rows):
         key = str(row.key.value)
-        _namespace, _slash, name = key.partition("/")
+        name = key.rpartition("/")[2] or key
         if name == journey.target.name:
             continue
         table.move_cursor(row=index)
@@ -728,27 +728,10 @@ def _select_neutral_row(app: KorvidApp, journey: OperationJourney, journal: Acti
             detail=summarize(row_key=key),
         )
         return True
-    return False
-
-
-def _needs_namespace_clarification(journey: OperationJourney) -> bool:
-    """Whether turn 1 must start from a namespace-neutral screen context."""
-    if len(journey.turns) < 2:
-        return False
-    if journey.target.namespace.casefold() in journey.turns[0].casefold():
-        return False
-    target = journey.target
-    for manifest in journey.cluster.objects:
-        metadata = manifest.get("metadata") or {}
-        group, _, _version = str(manifest.get("apiVersion") or "").rpartition("/")
-        if (
-            str(manifest.get("kind") or "") == target.kind
-            and group == target.group
-            and str(metadata.get("name") or "") == target.name
-            and str(metadata.get("namespace") or "") != target.namespace
-        ):
-            return True
-    return False
+    raise AssertionError(
+        f"{journey.id}: initial_selection=neutral loaded without a distractor row; "
+        "schema validation should have rejected this fixture"
+    )
 
 
 def _turn_ended(journal: ActionJournal, completed: int) -> Callable[[], bool]:
@@ -828,7 +811,7 @@ async def _run_turns(
 ) -> None:
     panel = app.query_one(AgentPanel)
     for index, text in enumerate(journey.turns):
-        if index > 0 and _needs_namespace_clarification(journey):
+        if index > 0 and journey.initial_selection == "neutral":
             await app.agent_navigate(journey.target.plural, journey.target.namespace)
             await until(
                 pilot,
@@ -1049,7 +1032,7 @@ async def run_operation_journey(
     try:
         async with app.run_test() as pilot:
             app.query_one(AgentPanel).display = True
-            if _needs_namespace_clarification(journey):
+            if journey.initial_selection == "neutral":
                 await app.agent_navigate(journey.target.plural, ALL_NAMESPACES)
                 await until(
                     pilot,

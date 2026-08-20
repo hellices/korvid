@@ -239,6 +239,7 @@ id: scale-deployment-up
 split: development
 operation:
   goal: scale
+  initial_selection: target
   target:
     context: eval
     namespace: shop-a
@@ -265,6 +266,15 @@ user: Scale checkout-a in shop-a from 2 to 3 replicas.
 
 The target records group, kind, plural, namespace, name, and UID separately.
 No combined `namespace/name` string is accepted as target identity.
+
+`initial_selection` is either:
+
+- `target`: select the exact target row before the first turn;
+- `neutral`: select a declared distractor whose name differs from the target,
+  withholding the ambiguous target namespace until the user clarifies it.
+
+A `neutral` fixture is invalid without at least one distractor object. The
+driver never infers this behavior from user-text substrings.
 
 The only Slice A dialog intervention is declarative:
 

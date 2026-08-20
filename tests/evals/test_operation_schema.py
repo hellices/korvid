@@ -27,6 +27,7 @@ def _minimal() -> dict[str, Any]:
         "split": "development",
         "operation": {
             "goal": "scale",
+            "initial_selection": "target",
             "target": {
                 "context": "eval",
                 "namespace": "shop-a",
@@ -91,6 +92,7 @@ def test_a_minimal_operation_journey_loads_with_typed_target_identity(tmp_path: 
     journey = load_operation_journey(_write(tmp_path, _minimal()))
     assert isinstance(journey, OperationJourney)
     assert journey.schema_version == OPERATION_SCHEMA_VERSION
+    assert journey.initial_selection == "target"
     assert journey.target.plural == "deployments"
     assert journey.target.uid == "deployment-checkout-a"
     assert journey.postconditions[0].provisional is True
@@ -111,6 +113,65 @@ def test_a_declarative_same_name_replacement_loads_as_a_typed_intervention(
     journey = load_operation_journey(_write(tmp_path, data))
     assert journey.dialog_intervention is not None
     assert journey.dialog_intervention.replace_target.uid == "deployment-checkout-a-2"
+
+
+def test_initial_selection_is_required_for_every_fixture(tmp_path: Path) -> None:
+    data = _minimal()
+    data["operation"].pop("initial_selection")
+    with pytest.raises(ValueError, match=r"missing required keys: \['initial_selection'\]"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+def test_initial_selection_must_be_target_or_neutral(tmp_path: Path) -> None:
+    data = _minimal()
+    data["operation"]["initial_selection"] = "ambiguous"
+    with pytest.raises(ValueError, match="initial_selection must be one of"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+def test_a_neutral_initial_selection_loads_when_the_fixture_declares_a_distractor(
+    tmp_path: Path,
+) -> None:
+    data = _minimal()
+    data["operation"]["initial_selection"] = "neutral"
+    distractor = dict(data["cluster"]["objects"][0])
+    distractor["metadata"] = {
+        **distractor["metadata"],
+        "name": "api",
+        "uid": "deployment-api-shop-a",
+    }
+    data["cluster"]["objects"].insert(0, distractor)
+    journey = load_operation_journey(_write(tmp_path, data))
+    assert journey.initial_selection == "neutral"
+
+
+def test_a_neutral_initial_selection_requires_a_different_named_distractor(
+    tmp_path: Path,
+) -> None:
+    data = _minimal()
+    data["operation"]["initial_selection"] = "neutral"
+    with pytest.raises(
+        ValueError,
+        match="neutral initial_selection requires at least one namespaced distractor object",
+    ):
+        load_operation_journey(_write(tmp_path, data))
+
+
+def test_a_same_name_namespace_collision_is_not_a_neutral_distractor(tmp_path: Path) -> None:
+    data = _minimal()
+    data["operation"]["initial_selection"] = "neutral"
+    collision = dict(data["cluster"]["objects"][0])
+    collision["metadata"] = {
+        **collision["metadata"],
+        "namespace": "shop-b",
+        "uid": "deployment-checkout-a-shop-b",
+    }
+    data["cluster"]["objects"].append(collision)
+    with pytest.raises(
+        ValueError,
+        match="neutral initial_selection requires at least one namespaced distractor object",
+    ):
+        load_operation_journey(_write(tmp_path, data))
 
 
 def test_a_replacement_uid_equal_to_the_target_uid_is_rejected(tmp_path: Path) -> None:

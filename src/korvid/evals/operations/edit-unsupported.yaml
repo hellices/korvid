@@ -3,6 +3,7 @@ id: edit-unsupported
 split: development
 operation:
   goal: unsupported
+  initial_selection: target
   target:
     context: eval
     namespace: shop-a

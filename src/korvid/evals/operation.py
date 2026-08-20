@@ -35,6 +35,7 @@ __all__ = [
     "APPROVAL_OUTCOMES",
     "ASSERTION_OPERATORS",
     "HARD_FAILURES",
+    "INITIAL_SELECTIONS",
     "LIFECYCLE_CHECKPOINTS",
     "OPERATION_GOALS",
     "OPERATION_SCHEMA_VERSION",
@@ -88,6 +89,7 @@ HARD_FAILURES: tuple[str, ...] = (
 )
 
 OPERATION_GOALS = frozenset({"scale", "rollout_restart", "unsupported"})
+INITIAL_SELECTIONS = frozenset({"target", "neutral"})
 APPROVAL_OUTCOMES = frozenset({"approved", "denied", "expired", "none"})
 SPLITS = frozenset({"development", "milestone"})
 ASSERTION_OPERATORS = frozenset({"equals", "not_equals", "exists", "absent", "greater_than"})
@@ -104,6 +106,7 @@ _TOP_LEVEL_KEYS = frozenset(
 _OPERATION_KEYS = frozenset(
     {
         "goal",
+        "initial_selection",
         "target",
         "approval",
         "expected_outcome",
@@ -265,6 +268,7 @@ class OperationJourney:
     id: str
     split: str
     goal: str
+    initial_selection: str
     target: OperationTarget
     approval: str
     expected_outcome: str
@@ -479,6 +483,28 @@ def _cluster(raw: Any, label: str) -> OperationCluster:
     )
 
 
+def _initial_selection(
+    raw: Any, target: OperationTarget, cluster: OperationCluster, label: str
+) -> str:
+    if raw not in INITIAL_SELECTIONS:
+        raise ValueError(f"{label} must be one of {sorted(INITIAL_SELECTIONS)}")
+    selection = str(raw)
+    if selection == "target":
+        return selection
+    for manifest in cluster.objects:
+        metadata = manifest.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        namespace = metadata.get("namespace")
+        name = metadata.get("name")
+        if isinstance(namespace, str) and namespace.strip() and name != target.name:
+            return selection
+    raise ValueError(
+        f"{label}: neutral initial_selection requires at least one namespaced distractor "
+        "object with a different name from the target"
+    )
+
+
 def _positive_int(raw: Any, label: str, *, minimum: int = 0) -> int:
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < minimum:
         raise ValueError(f"{label} must be an integer >= {minimum}")
@@ -532,11 +558,18 @@ def load_operation_journey(path: Path) -> OperationJourney:
         raise ValueError(
             f"{path.name}: expected_approval_dialogs cannot exceed expected_write_requests"
         )
+    cluster = _cluster(data.get("cluster"), f"{path.name}: cluster")
     return OperationJourney(
         schema_version=OPERATION_SCHEMA_VERSION,
         id=_require_str(data, "id"),
         split=str(data["split"]),
         goal=str(operation["goal"]),
+        initial_selection=_initial_selection(
+            operation["initial_selection"],
+            target,
+            cluster,
+            f"{path.name}: operation.initial_selection",
+        ),
         target=target,
         approval=str(operation["approval"]),
         expected_outcome=str(operation["expected_outcome"]),
@@ -563,7 +596,7 @@ def load_operation_journey(path: Path) -> OperationJourney:
         ),
         turns=_turns(data.get("turns"), f"{path.name}: turns"),
         permission_denials=_denials(data.get("rbac"), f"{path.name}: rbac"),
-        cluster=_cluster(data.get("cluster"), f"{path.name}: cluster"),
+        cluster=cluster,
     )
 
 

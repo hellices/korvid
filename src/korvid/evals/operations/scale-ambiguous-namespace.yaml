@@ -3,6 +3,7 @@ id: scale-ambiguous-namespace
 split: development
 operation:
   goal: scale
+  initial_selection: neutral
   target:
     context: eval
     namespace: shop-b

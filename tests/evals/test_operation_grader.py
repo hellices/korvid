@@ -58,6 +58,7 @@ def _journey(**overrides: Any) -> OperationJourney:
         "id": "scale-deployment-up",
         "split": "development",
         "goal": "scale",
+        "initial_selection": "target",
         "target": _TARGET,
         "approval": "approved",
         "expected_outcome": "completed",

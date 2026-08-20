@@ -3,6 +3,7 @@ id: scale-statefulset-down
 split: development
 operation:
   goal: scale
+  initial_selection: target
   target:
     context: eval
     namespace: shop-a
