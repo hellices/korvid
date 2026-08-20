@@ -263,8 +263,12 @@ def test_scoped_upgrade_source_stripping_keeps_unapproved_mentions() -> None:
 
 def _assert_release_versions_contracts(version: str, readme: str, runbook: str, notes: str) -> None:
     readme_upgrade = f"published `{UPGRADE_SOURCE_VERSION}` installation to the candidate wheel"
-    upgrade_section = markdown_section(runbook, "Required cross-version upgrade gate")
-    runbook_upgrade_intro = f"`v{UPGRADE_SOURCE_VERSION}` is the supported upgrade source"
+    runbook_upgrade_contexts = (
+        f"`v{UPGRADE_SOURCE_VERSION}` is the supported upgrade source",
+        f"Install published `korvid[all]=={UPGRADE_SOURCE_VERSION}` in a clean environment",
+        f"uv pip install --python \"$upgrade_python\" 'korvid[all]=={UPGRADE_SOURCE_VERSION}'",
+        f"\"$upgrade_korvid\" --version | grep -Fx 'korvid {UPGRADE_SOURCE_VERSION}'",
+    )
     _assert_allowed_release_doc_versions(
         "README.md",
         _strip_scoped_upgrade_source(readme, (readme_upgrade,)),
@@ -272,7 +276,7 @@ def _assert_release_versions_contracts(version: str, readme: str, runbook: str, 
     )
     _assert_allowed_release_doc_versions(
         "docs/release.md",
-        _strip_scoped_upgrade_source(runbook, (runbook_upgrade_intro, upgrade_section)),
+        _strip_scoped_upgrade_source(runbook, runbook_upgrade_contexts),
         version,
     )
     notes_versions = _named_versions(notes)
@@ -331,3 +335,26 @@ def test_upgrade_source_version_is_rejected_outside_its_documented_context() -> 
             _RUNBOOK.read_text(encoding="utf-8"),
             _release_notes(version),
         )
+
+
+def test_upgrade_source_version_is_rejected_in_extra_runbook_context() -> None:
+    version = _project_version()
+    runbook = _RUNBOOK.read_text(encoding="utf-8")
+    approved = (
+        f"uv pip install --python \"$upgrade_python\" 'korvid[all]=={UPGRADE_SOURCE_VERSION}'"
+    )
+    stale_install = f"uv tool install 'korvid[all]=={UPGRADE_SOURCE_VERSION}'"
+    mutated = runbook.replace(approved, f"{approved}\n{stale_install}")
+    with pytest.raises(AssertionError, match=r"docs/release\.md names"):
+        _assert_release_versions_contracts(
+            version,
+            _README.read_text(encoding="utf-8"),
+            mutated,
+            _release_notes(version),
+        )
+
+
+def test_upgrade_source_is_the_previous_minor_release() -> None:
+    major, minor, _patch = _project_version().split(".")
+    assert int(minor) > 0
+    assert f"{major}.{int(minor) - 1}.0" == UPGRADE_SOURCE_VERSION
