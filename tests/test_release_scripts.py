@@ -1509,7 +1509,24 @@ def test_readme_recommends_an_isolated_install_for_an_application() -> None:
     assert pip_index == -1 or quick_start.index("uv tool install") < pip_index, (
         "the quick start leads with pip; an isolated install must come first"
     )
+    install = readme[readme.index("## Installation") : readme.index("### Development")]
+    assert f"uv tool install 'korvid[all]=={version}'" in install
+    assert f"python -m pip install 'korvid[all]=={version}'        # recommended" not in install
+    assert "activated virtual environment, including one created inside a container" in " ".join(
+        readme.split()
+    )
+    assert "virtual environment or a container image you control" not in readme
+    assert "uv tool uninstall korvid" in install
+    assert "pipx uninstall korvid" in install
     assert "3.11" in readme
+
+
+def test_readme_describes_pep_668_without_an_inaccurate_fedora_claim() -> None:
+    readme = _readme()
+    quick_start = readme[readme.index("## Quick start") :]
+    assert "PEP 668" in quick_start
+    assert "externally-managed-environment" in quick_start
+    assert "Fedora 38" not in quick_start
 
 
 def test_release_docs_runbook_requires_protected_tags_and_maintainer_approval() -> None:
@@ -1879,15 +1896,27 @@ def test_release_docs_correct_the_xdg_config_claim() -> None:
     assert "always under `~/.config/korvid`" in runbook
 
 
-def test_release_docs_keep_a_source_install_fallback_before_publication() -> None:
+def test_release_docs_keep_a_source_install_fallback_for_unreleased_main() -> None:
     runbook = _release_runbook()
     readme = _readme()
     source_install = "pip install 'korvid[all] @ git+https://github.com/hellices/korvid'"
     assert source_install in runbook
-    assert source_install in readme
+    runbook_install = runbook[
+        runbook.index("## Install, reinstall, and uninstall from PyPI") : runbook.index(
+            "## What the smoke matrix proves"
+        )
+    ]
+    assert "activated virtual environment, including one created inside a container" in " ".join(
+        runbook_install.split()
+    )
+    assert "virtual environment or a container image you control" not in runbook_install
+    assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in readme
     assert "Tagged versions should be installed from PyPI" in readme
+    assert "appearing on PyPI" not in runbook
+    assert "For unreleased `main` development" in runbook
     quick_start = readme[readme.index("## Quick start") : readme.index("## Features")]
-    assert "Until `0.2.0` is published on PyPI" in quick_start
+    assert "Until `0.2.0` is published on PyPI" not in quick_start
+    assert "For unreleased `main` development" in quick_start
     assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in quick_start
 
 

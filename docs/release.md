@@ -317,21 +317,25 @@ brew test hellices/korvid/korvid
 
 ## Install, reinstall, and uninstall from PyPI
 
+The pip commands in this release-maintainer section assume an activated
+virtual environment, including one created inside a container. For a normal
+user-facing application install, follow the README's isolated `uv tool` or
+`pipx` path instead of pointing pip at the system Python.
+
 The simplest install is the full feature set:
 
 ```sh
 python -m pip install 'korvid[all]==0.2.0'
 ```
 
-During the brief window between this workflow landing on `main` and `v0.2.0`
-appearing on PyPI, install from source instead:
+For unreleased `main` development, install from source instead:
 
 ```sh
 python -m pip install 'korvid[all] @ git+https://github.com/hellices/korvid'
 ```
 
-Once `v0.2.0` is published, PyPI is the release path and the source install is
-only a fallback for unreleased code.
+Tagged versions should be installed from PyPI; the source install is only a
+fallback for unreleased code.
 
 If you already installed any narrower korvid requirement, rerun your package
 manager with the full desired extra set rather than assuming it will expand
