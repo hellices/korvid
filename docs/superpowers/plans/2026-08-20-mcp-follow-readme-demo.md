@@ -209,8 +209,8 @@ copilot mcp add --transport http \
 
 Create a tmux session named `korvid-mcp-demo`, place korvid in the left pane and
 an interactive Copilot CLI in the right pane, and size the regions
-approximately 75% TUI / 25% Copilot. Start Copilot with only the registered
-korvid server available:
+approximately 75% TUI / 25% Copilot. Start Copilot with only the registered korvid server available. Here
+`--available-tools=korvid` is Copilot CLI's server-level MCP selector:
 
 ```sh
 copilot --disable-builtin-mcps --allow-all-tools \
@@ -231,35 +231,43 @@ Start the visible capture with Enter. The target sequence is:
 3. `helm_list_releases` — Helm release browser.
 
 Repeat the take if the model chooses another order. Do not fake or reorder
-tool cards.
+tool cards, and discard any take where all three cards and their visible TUI
+transitions were not captured.
 
 ## Export
 
-The tape hides only the model's initial idle period. Record the prepared tmux
-session:
+The tape captures the complete interaction, including model idle time, to a
+source GIF:
 
 ```sh
 vhs docs/demo/mcp-follow.tape
 ```
 
-VHS writes a 1440-pixel, 25 fps source GIF. Optimize it to the README contract
-through a temporary output file:
+Inspect the source GIF and set three timestamps: `idle_start` immediately after
+Enter, `idle_end` immediately before the first MCP tool card, and `demo_end`
+after the Helm browser has been visible long enough to read. The filter removes
+only that observed idle interval and the trailing tail; it retains every MCP
+call and follow transition.
 
 ```sh
-ffmpeg -y -i docs/assets/mcp-follow-demo.gif \
+idle_start=0.5
+idle_end=7.0
+demo_end=17.0
+ffmpeg -y -i docs/assets/mcp-follow-demo.raw.gif \
   -filter_complex \
-  "fps=12,scale=1280:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
+  "[0:v]trim=start=0:end=${idle_start},setpts=PTS-STARTPTS[first];[0:v]trim=start=${idle_end}:end=${demo_end},setpts=PTS-STARTPTS[rest];[first][rest]concat=n=2:v=1:a=0,fps=12,scale=1280:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
   -loop 0 docs/assets/mcp-follow-demo.tmp.gif &&
-mv docs/assets/mcp-follow-demo.tmp.gif docs/assets/mcp-follow-demo.gif
+mv docs/assets/mcp-follow-demo.tmp.gif docs/assets/mcp-follow-demo.gif &&
+rm docs/assets/mcp-follow-demo.raw.gif
 ```
 
 Verify the result:
 
 ```sh
-ffprobe -v error -show_entries format=duration \
-  -of default=noprint_wrappers=1:nokey=1 docs/assets/mcp-follow-demo.gif
-sips -g pixelWidth -g pixelHeight docs/assets/mcp-follow-demo.gif
-stat -f '%z bytes' docs/assets/mcp-follow-demo.gif
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=width,height,r_frame_rate:format=duration \
+  -of default=noprint_wrappers=1 docs/assets/mcp-follow-demo.gif
+wc -c < docs/assets/mcp-follow-demo.gif
 ```
 
 The duration must be at most 15 seconds, width exactly 1280 pixels, and file
@@ -270,7 +278,6 @@ pod list, logs, and Helm views are each readable.
 
 ```sh
 helm uninstall shop-demo --namespace shop
-kubectl delete namespace shop
 copilot mcp remove korvid
 ```
 ````
@@ -372,8 +379,10 @@ Run:
 test -f docs/assets/mcp-follow-demo.gif
 ffprobe -v error -show_entries format=duration \
   -of default=noprint_wrappers=1:nokey=1 docs/assets/mcp-follow-demo.gif
-sips -g pixelWidth docs/assets/mcp-follow-demo.gif
-stat -f '%z' docs/assets/mcp-follow-demo.gif
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=width,height,r_frame_rate \
+  -of default=noprint_wrappers=1 docs/assets/mcp-follow-demo.gif
+wc -c < docs/assets/mcp-follow-demo.gif
 ```
 
 Expected: the file exists; duration is no greater than `15.000000`; width is
@@ -410,7 +419,7 @@ uv run ruff format --check tests/test_mcp_follow_demo_asset.py
 git diff --check
 ```
 
-Expected: four tests pass, ruff check and format pass, and no whitespace errors
+Expected: five tests pass, ruff check and format pass, and no whitespace errors
 are reported.
 
 - [ ] **Step 6: Inspect the final README rendering**

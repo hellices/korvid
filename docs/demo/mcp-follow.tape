@@ -4,7 +4,7 @@
 #
 #   vhs docs/demo/mcp-follow.tape
 
-Output docs/assets/mcp-follow-demo.gif
+Output docs/assets/mcp-follow-demo.raw.gif
 
 Set FontSize 14
 Set Width 1440
@@ -25,10 +25,7 @@ Show
 Type "Use korvid MCP in order: list_resources shop pods → get_logs unhealthy one → helm_list_releases."
 Sleep 400ms
 Enter
-Hide
-Sleep 7s
-Show
-Sleep 10s
+Sleep 20s
 
 Hide
 Ctrl+B
