@@ -148,6 +148,8 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "--available-tools=korvid-mcp-demo" in runbook
     assert "mcp-demo-registration" in runbook
     assert "tmux kill-session -t korvid-mcp-demo" in runbook
+    assert "Refusing to reuse existing tmux session: korvid-mcp-demo" in runbook
+    assert "if ! tmux new-session" in runbook
     assert 'if ! copilot mcp remove "$recording_server"; then' in runbook
     assert runbook.index("copilot mcp remove") < runbook.index("helm uninstall")
     assert "idle_start=1.0" in runbook
@@ -164,6 +166,8 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert "korvid.dev/demo=mcp-follow" in runbook
     assert 'if ! kubectl --context "$context" create namespace shop; then' in runbook
     assert 'if ! kubectl --context "$context" label namespace shop' in runbook
+    assert "if ! helm upgrade --install shop-demo" in runbook
+    assert "Failed to install the recording release" in runbook
     assert 'kubectl --context "$context" -n shop get pods --watch' in runbook
     assert 'kubectl --context "$context" -n shop get events' in runbook
     assert "Refusing MCP startup after context changed" in runbook

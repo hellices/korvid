@@ -31,8 +31,16 @@ if ! kubectl --context "$context" label namespace shop \
   exit 1
 fi
 
-helm upgrade --install shop-demo docs/demo/mcp-follow-fixture \
-  --namespace shop --kube-context "$context"
+if ! helm upgrade --install shop-demo docs/demo/mcp-follow-fixture \
+  --namespace shop --kube-context "$context"; then
+  echo "Failed to install the recording release" >&2
+  if ! kubectl --context "$context" delete namespace shop --ignore-not-found; then
+    echo "Failed to clean the namespace; demo context state retained" >&2
+    exit 1
+  fi
+  rm -f "$demo_context_file"
+  exit 1
+fi
 kubectl --context "$context" -n shop get pods --watch
 ```
 
@@ -70,9 +78,20 @@ mkdir -p "$demo_home/.config/korvid"
 printf 'kube_context: %s\nmcp:\n  enabled: true\n  follow: true\n' "$prepared_context" \
   > "$demo_home/.config/korvid/config.yaml"
 demo_kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
-tmux new-session -d -s korvid-mcp-demo -x 160 -y 45 -c "$PWD" \
-  "HOME=\"$demo_home\" KUBECONFIG=\"$demo_kubeconfig\" korvid --mcp --namespace shop"
-tmux set-option -t korvid-mcp-demo status off
+if tmux has-session -t korvid-mcp-demo 2>/dev/null; then
+  echo "Refusing to reuse existing tmux session: korvid-mcp-demo" >&2
+  exit 1
+fi
+if ! tmux new-session -d -s korvid-mcp-demo -x 160 -y 45 -c "$PWD" \
+  "HOME=\"$demo_home\" KUBECONFIG=\"$demo_kubeconfig\" korvid --mcp --namespace shop"; then
+  echo "Failed to create the recording tmux session" >&2
+  exit 1
+fi
+if ! tmux set-option -t korvid-mcp-demo status off; then
+  tmux kill-session -t korvid-mcp-demo
+  echo "Failed to configure the recording tmux session" >&2
+  exit 1
+fi
 ```
 
 Wait until the left pane status shows `MCP on` and `·follow`, then register only
