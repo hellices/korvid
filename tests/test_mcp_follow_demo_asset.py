@@ -148,6 +148,8 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "--available-tools=korvid-mcp-demo" in runbook
     assert "mcp-demo-registration" in runbook
     assert "tmux kill-session -t korvid-mcp-demo" in runbook
+    assert 'if ! copilot mcp remove "$recording_server"; then' in runbook
+    assert runbook.index("copilot mcp remove") < runbook.index("helm uninstall")
     assert "idle_start=1.0" in runbook
     assert "idle_start=0.5" not in runbook
 

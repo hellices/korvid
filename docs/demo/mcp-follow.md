@@ -192,8 +192,6 @@ fi
 if tmux has-session -t korvid-mcp-demo 2>/dev/null; then
   tmux kill-session -t korvid-mcp-demo
 fi
-helm uninstall shop-demo --namespace shop --kube-context "$prepared_context"
-kubectl --context "$prepared_context" delete namespace shop --ignore-not-found
 registration_file="$(dirname "$demo_context_file")/mcp-demo-registration"
 if [ -r "$registration_file" ]; then
   recording_server="$(cat "$registration_file")"
@@ -201,10 +199,24 @@ if [ -r "$registration_file" ]; then
     echo "Refusing to remove unexpected MCP registration: $recording_server" >&2
     exit 1
   fi
-  copilot mcp remove "$recording_server"
+  if ! copilot mcp remove "$recording_server"; then
+    echo "Failed to remove the recording MCP server; cleanup state retained" >&2
+    exit 1
+  fi
   rm -f "$registration_file"
+elif copilot mcp get korvid-mcp-demo >/dev/null 2>&1; then
+  echo "Refusing to remove an untracked korvid-mcp-demo registration" >&2
+  exit 1
 else
-  echo "No demo MCP registration marker; leaving Copilot config unchanged" >&2
+  echo "Recording MCP server is already absent; continuing cleanup" >&2
+fi
+if ! helm uninstall shop-demo --namespace shop --kube-context "$prepared_context"; then
+  echo "Failed to uninstall the recording release; cleanup state retained" >&2
+  exit 1
+fi
+if ! kubectl --context "$prepared_context" delete namespace shop --ignore-not-found; then
+  echo "Failed to delete the recording namespace; cleanup state retained" >&2
+  exit 1
 fi
 demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
 rm -rf -- "$demo_home"
