@@ -19,7 +19,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.release_contracts import markdown_section, run_scripts, workflow_jobs
+from tests.release_contracts import (
+    UPGRADE_SOURCE_VERSION,
+    markdown_section,
+    run_scripts,
+    workflow_jobs,
+)
 
 SCRIPTS = Path(__file__).parents[1] / "scripts" / "release"
 sys.path.insert(0, str(SCRIPTS))
@@ -1647,9 +1652,12 @@ def test_security_policy_supports_only_the_current_minor_line() -> None:
     version = _project_version()
     policy = " ".join(_security_policy().split())
     major, minor, _patch = version.split(".")
-    previous_minor = f"{major}.{int(minor) - 1}.x"
+    previous_major, previous_minor, _previous_patch = UPGRADE_SOURCE_VERSION.split(".")
+    assert previous_major == major
+    previous_minor_line = f"{previous_major}.{previous_minor}.x"
     assert (
-        f"Until `v{version}` is published, that is the latest `{previous_minor}` version" in policy
+        f"Until `v{version}` is published, that is the latest `{previous_minor_line}` version"
+        in policy
     )
     assert f"latest `{major}.{minor}.x` version" in policy
     assert "After publication" in policy
@@ -2037,11 +2045,11 @@ def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
 def test_v030_release_docs_upgrade_from_v020_candidate() -> None:
     runbook = _release_runbook()
     readme = _readme()
-    assert "korvid[all]==0.2.0" in runbook
-    assert "korvid 0.2.0" in runbook
+    assert f"korvid[all]=={UPGRADE_SOURCE_VERSION}" in runbook
+    assert f"korvid {UPGRADE_SOURCE_VERSION}" in runbook
     assert "korvid-0.3.0-py3-none-any.whl" in runbook
     assert "korvid 0.3.0" in runbook
-    assert "published `0.2.0` installation to the candidate wheel" in readme
+    assert f"published `{UPGRADE_SOURCE_VERSION}` installation to the candidate wheel" in readme
 
 
 # --- metadata ---------------------------------------------------------------

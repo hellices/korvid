@@ -4,14 +4,15 @@ import re
 import tomllib
 from pathlib import Path
 
-from tests.release_contracts import markdown_section
+import pytest
+
+from tests.release_contracts import UPGRADE_SOURCE_VERSION, markdown_section
 
 _ROOT = Path(__file__).parents[1]
 _AGENTS = _ROOT / "AGENTS.md"
 _README = _ROOT / "README.md"
 _RUNBOOK = _ROOT / "docs" / "release.md"
-_UPGRADE_SOURCE_VERSION = "0.2.0"
-_ALLOWED_RELEASE_DOC_HISTORY = frozenset({"0.1.0", "0.1.1", "0.1.2", _UPGRADE_SOURCE_VERSION})
+_ALLOWED_RELEASE_DOC_HISTORY = frozenset({"0.1.0", "0.1.1", "0.1.2"})
 
 
 def _project_version() -> str:
@@ -165,7 +166,7 @@ def _assert_release_runbook_contracts(runbook: str, version: str) -> None:
         '[ "$DRY_RUN_COMMIT" != "$COMMIT" ]',
         'gh run download "$RUN_ID" --name dist --dir "$candidate_dir"',
         f'CANDIDATE="$PWD/$candidate_dir/korvid-{version}-py3-none-any.whl"',
-        f"uv pip install --python \"$upgrade_python\" 'korvid[all]=={_UPGRADE_SOURCE_VERSION}'",
+        f"uv pip install --python \"$upgrade_python\" 'korvid[all]=={UPGRADE_SOURCE_VERSION}'",
         f"\"$upgrade_korvid\" --version | grep -Fx 'korvid {version}'",
     ):
         assert command in upgrade
@@ -244,9 +245,36 @@ def _assert_allowed_release_doc_versions(name: str, text: str, version: str) -> 
     return found
 
 
+def _strip_scoped_upgrade_source(text: str, approved_contexts: tuple[str, ...]) -> str:
+    for context in approved_contexts:
+        assert text.count(context) == 1, f"upgrade-source context drifted: {context!r}"
+        sanitized = context.replace(UPGRADE_SOURCE_VERSION, "upgrade-source")
+        text = text.replace(context, sanitized)
+    return text
+
+
+def test_scoped_upgrade_source_stripping_keeps_unapproved_mentions() -> None:
+    approved = f"published `{UPGRADE_SOURCE_VERSION}` installation to the candidate wheel"
+    stale = f"uv tool install 'korvid[all]=={UPGRADE_SOURCE_VERSION}'"
+    cleaned = _strip_scoped_upgrade_source(f"{approved}\n{stale}", (approved,))
+    assert UPGRADE_SOURCE_VERSION in cleaned
+    assert stale in cleaned
+
+
 def _assert_release_versions_contracts(version: str, readme: str, runbook: str, notes: str) -> None:
-    _assert_allowed_release_doc_versions("README.md", readme, version)
-    _assert_allowed_release_doc_versions("docs/release.md", runbook, version)
+    readme_upgrade = f"published `{UPGRADE_SOURCE_VERSION}` installation to the candidate wheel"
+    upgrade_section = markdown_section(runbook, "Required cross-version upgrade gate")
+    runbook_upgrade_intro = f"`v{UPGRADE_SOURCE_VERSION}` is the supported upgrade source"
+    _assert_allowed_release_doc_versions(
+        "README.md",
+        _strip_scoped_upgrade_source(readme, (readme_upgrade,)),
+        version,
+    )
+    _assert_allowed_release_doc_versions(
+        "docs/release.md",
+        _strip_scoped_upgrade_source(runbook, (runbook_upgrade_intro, upgrade_section)),
+        version,
+    )
     notes_versions = _named_versions(notes)
     assert version in notes_versions, (
         f"docs/release-notes must name the version being shipped ({version})"
@@ -291,3 +319,15 @@ def test_current_release_docs_only_name_allowed_versions() -> None:
         _RUNBOOK.read_text(encoding="utf-8"),
         _release_notes(version),
     )
+
+
+def test_upgrade_source_version_is_rejected_outside_its_documented_context() -> None:
+    version = _project_version()
+    stale_install = f"\nuv tool install 'korvid[all]=={UPGRADE_SOURCE_VERSION}'\n"
+    with pytest.raises(AssertionError, match=r"README\.md names"):
+        _assert_release_versions_contracts(
+            version,
+            _README.read_text(encoding="utf-8") + stale_install,
+            _RUNBOOK.read_text(encoding="utf-8"),
+            _release_notes(version),
+        )
