@@ -181,10 +181,6 @@ demo_state_dir="$(dirname "$demo_context_file")"
 demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
 demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
 demo_namespace_uid_file="$demo_state_dir/mcp-demo-namespace-uid"
-clear_demo_identity() {
-  rm -f "$demo_context_file" "$demo_kubeconfig" "$demo_cluster_uid_file" \
-    "$demo_namespace_uid_file"
-}
 umask 077
 if ! mkdir -p "$demo_state_dir"; then
   echo "Failed to create the demo state directory" >&2
@@ -214,36 +210,61 @@ if kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
   echo "Refusing to reuse existing namespace: shop" >&2
   exit 1
 fi
-if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
-  create namespace shop; then
-  echo "Failed to create the dedicated shop namespace" >&2
-  clear_demo_identity
-  exit 1
-fi
-if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
-  label namespace shop korvid.dev/demo=mcp-follow; then
-  echo "Failed to mark the dedicated namespace as demo-owned" >&2
-  if kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
-    delete namespace shop --ignore-not-found; then
-    clear_demo_identity
-  fi
-  exit 1
-fi
-if ! namespace_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
-  --context "$context" get namespace shop -o jsonpath='{.metadata.uid}')"; then
-  echo "Failed to read the recording namespace identity" >&2
-  if kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
-    delete namespace shop --ignore-not-found; then
-    clear_demo_identity
-  fi
-  exit 1
-fi
-if ! printf '%s\n' "$namespace_uid" > "$demo_namespace_uid_file"; then
-  echo "Failed to write the recording namespace identity" >&2
-  if kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
-    delete namespace shop --ignore-not-found; then
-    clear_demo_identity
-  fi
+if ! DEMO_KUBECONFIG="$demo_kubeconfig" DEMO_CONTEXT="$context" \
+  DEMO_NAMESPACE_UID_FILE="$demo_namespace_uid_file" uv run --no-sync python - <<'PY'
+import asyncio
+import os
+
+from kubernetes_asyncio import client, config
+
+
+async def create_namespace() -> None:
+    configuration = client.Configuration()
+    await config.load_kube_config(
+        config_file=os.environ["DEMO_KUBECONFIG"],
+        context=os.environ["DEMO_CONTEXT"],
+        client_configuration=configuration,
+    )
+    api_client = client.ApiClient(configuration)
+    try:
+        namespace = await client.CoreV1Api(api_client).create_namespace(
+            body=client.V1Namespace(
+                metadata=client.V1ObjectMeta(
+                    name="shop",
+                    labels={"korvid.dev/demo": "mcp-follow"},
+                )
+            )
+        )
+        namespace_uid = namespace.metadata.uid
+        if not namespace_uid:
+            raise RuntimeError("created namespace has no UID")
+        try:
+            fd = os.open(
+                os.environ["DEMO_NAMESPACE_UID_FILE"],
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(f"{namespace_uid}\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError:
+            await client.CoreV1Api(api_client).delete_namespace(
+                "shop",
+                body=client.V1DeleteOptions(
+                    preconditions=client.V1Preconditions(uid=namespace_uid)
+                ),
+            )
+            raise
+    finally:
+        await api_client.close()
+
+
+asyncio.run(create_namespace())
+PY
+then
+  echo "Failed to atomically create and record the demo namespace" >&2
+  echo "Demo identity state retained for investigation" >&2
   exit 1
 fi
 

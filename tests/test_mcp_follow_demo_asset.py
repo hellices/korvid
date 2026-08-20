@@ -152,7 +152,7 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Refusing to reuse existing tmux session: korvid-mcp-demo" in runbook
     assert "if ! tmux new-session" in runbook
     assert 'if ! copilot mcp remove "$recording_server"; then' in runbook
-    assert runbook.index("copilot mcp remove") < runbook.index("V1Preconditions")
+    assert runbook.index("copilot mcp remove") < runbook.rindex("V1Preconditions")
     assert "helm uninstall" not in runbook
     for variable in ("idle_start", "idle_end", "demo_end"):
         assert re.search(rf"^{variable}=\d+(?:\.\d+)?$", runbook, re.MULTILINE)
@@ -175,9 +175,9 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert "Failed to write the demo context marker" in runbook
     assert 'test "$cluster_uid" = "$prepared_cluster_uid"' in runbook
     assert '--context "$prepared_context"' in runbook
-    assert "korvid.dev/demo=mcp-follow" in runbook
-    assert "create namespace shop; then" in runbook
-    assert "label namespace shop korvid.dev/demo=mcp-follow; then" in runbook
+    assert "create_namespace(" in runbook
+    assert 'labels={"korvid.dev/demo": "mcp-follow"}' in runbook
+    assert runbook.count("V1Preconditions(") >= 2
     assert "if ! helm upgrade --install shop-demo" in runbook
     assert "Failed to install the recording release" in runbook
     assert "Run the cleanup section before retrying" in runbook
@@ -198,7 +198,6 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert "from kubernetes_asyncio import client, config" in runbook
     assert "asyncio.run(delete_namespace())" in runbook
     assert "from kubernetes import client, config" not in runbook
-    assert "delete namespace shop --ignore-not-found" in runbook
 
 
 def test_gif_duration_ignores_marker_bytes_inside_image_data() -> None:
