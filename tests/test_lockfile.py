@@ -45,13 +45,17 @@ def _uv_lock() -> str:
 def test_lockfile_project_version_matches_pyproject() -> None:
     project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads(_uv_lock())
+    packages = lock.get("package")
+    assert isinstance(packages, list), "uv.lock package table is not a list"
+    assert packages, "uv.lock has no package entries"
     korvid = next(
-        (package for package in lock["package"] if package["name"] == "korvid"),
+        (package for package in packages if package.get("name") == "korvid"),
         None,
     )
     assert korvid is not None, "uv.lock has no korvid project entry"
-    assert korvid["version"] == project["project"]["version"], (
-        f"uv.lock korvid version {korvid['version']} != pyproject {project['project']['version']}"
+    lock_version = korvid.get("version")
+    assert lock_version == project["project"]["version"], (
+        f"uv.lock korvid version {lock_version!r} != pyproject {project['project']['version']}"
     )
 
 

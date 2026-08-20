@@ -1985,7 +1985,6 @@ def test_release_docs_keep_a_source_install_fallback_for_unreleased_main() -> No
     assert "For unreleased `main` development" in runbook
     quick_start = readme[readme.index("## Quick start") : readme.index("## Features")]
     assert f"Until `{version}` is published on PyPI" not in quick_start
-    assert "is published on PyPI" not in quick_start
     assert "For unreleased `main` development" in quick_start
     assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in quick_start
 

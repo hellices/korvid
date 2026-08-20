@@ -360,3 +360,5 @@ def test_upgrade_source_is_the_previous_minor_release() -> None:
     assert source < current
     if source[0] == current[0]:
         assert source[1] == current[1] - 1
+    else:
+        pytest.fail("major bump requires an explicit UPGRADE_SOURCE_VERSION contract review")
