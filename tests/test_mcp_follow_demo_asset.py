@@ -180,9 +180,12 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert "label namespace shop korvid.dev/demo=mcp-follow; then" in runbook
     assert "if ! helm upgrade --install shop-demo" in runbook
     assert "Failed to install the recording release" in runbook
+    assert "Run the cleanup section before retrying" in runbook
     assert "-n shop get pods --watch" in runbook
     assert '--context "$context" -n shop get events' in runbook
     assert "Refusing MCP startup after cluster identity changed" in runbook
+    assert "Refusing MCP startup after namespace identity changed" in runbook
+    assert "Refusing MCP startup because namespace ownership changed" in runbook
     assert "Failed to create the isolated config directory" in runbook
     assert "Failed to write the isolated korvid config" in runbook
     assert "kube_context: %s" in runbook

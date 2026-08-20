@@ -87,12 +87,7 @@ fi
 if ! helm upgrade --install shop-demo docs/demo/mcp-follow-fixture \
   --namespace shop --kubeconfig "$demo_kubeconfig" --kube-context "$context"; then
   echo "Failed to install the recording release" >&2
-  if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
-    delete namespace shop --ignore-not-found; then
-    echo "Failed to clean the namespace; demo context state retained" >&2
-    exit 1
-  fi
-  clear_demo_identity
+  echo "Run the cleanup section before retrying; demo identity state retained" >&2
   exit 1
 fi
 kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
@@ -128,6 +123,7 @@ if [ ! -r "$demo_context_file" ] || [ ! -r "$demo_kubeconfig" ] ||
 fi
 prepared_context="$(cat "$demo_context_file")"
 prepared_cluster_uid="$(cat "$demo_cluster_uid_file")"
+prepared_namespace_uid="$(cat "$demo_namespace_uid_file")"
 case "$prepared_context" in
   kind-*|k3d-*|minikube|docker-desktop) ;;
   *) echo "Refusing MCP startup on non-local context: $prepared_context" >&2; exit 1 ;;
@@ -140,6 +136,26 @@ if ! cluster_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
 fi
 if ! test "$cluster_uid" = "$prepared_cluster_uid"; then
   echo "Refusing MCP startup after cluster identity changed" >&2
+  exit 1
+fi
+if ! namespace_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
+  --context "$prepared_context" get namespace shop \
+  -o jsonpath='{.metadata.uid}')"; then
+  echo "Refusing MCP startup because namespace identity is unavailable" >&2
+  exit 1
+fi
+if ! test "$namespace_uid" = "$prepared_namespace_uid"; then
+  echo "Refusing MCP startup after namespace identity changed" >&2
+  exit 1
+fi
+if ! owner="$(kubectl --kubeconfig "$demo_kubeconfig" \
+  --context "$prepared_context" get namespace shop \
+  -o jsonpath='{.metadata.labels.korvid\.dev/demo}')"; then
+  echo "Refusing MCP startup because namespace ownership is unavailable" >&2
+  exit 1
+fi
+if [ "$owner" != "mcp-follow" ]; then
+  echo "Refusing MCP startup because namespace ownership changed" >&2
   exit 1
 fi
 demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
