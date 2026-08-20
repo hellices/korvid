@@ -203,7 +203,7 @@ it is unpublished audit history too. `v0.1.2` is the first public PyPI release;
 `v0.3.0` is the current feature release. The smoke matrix proves clean installs
 of `korvid`, `korvid[agent]`, `korvid[mcp]`, and `korvid[all]`, plus uninstall.
 Before creating the release tag, a maintainer separately upgrades a clean
-published `0.1.2` installation to the candidate wheel as documented in the
+published `0.2.0` installation to the candidate wheel as documented in the
 release runbook.
 
 korvid is an application, so install the desired variant in its own tool

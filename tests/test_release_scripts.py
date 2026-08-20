@@ -2036,10 +2036,12 @@ def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
 
 def test_v030_release_docs_upgrade_from_v020_candidate() -> None:
     runbook = _release_runbook()
+    readme = _readme()
     assert "korvid[all]==0.2.0" in runbook
     assert "korvid 0.2.0" in runbook
     assert "korvid-0.3.0-py3-none-any.whl" in runbook
     assert "korvid 0.3.0" in runbook
+    assert "published `0.2.0` installation to the candidate wheel" in readme
 
 
 # --- metadata ---------------------------------------------------------------
