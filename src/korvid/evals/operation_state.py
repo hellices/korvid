@@ -31,6 +31,7 @@ from korvid.evals.operation import OperationCluster, walk_path
 from korvid.evals.operation_journal import ActionJournal, JournalTarget, summarize
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.drain import DrainPlan
+from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.writes import WriteOps, restart_stamp
 
@@ -116,6 +117,22 @@ def _group_of(manifest: Mapping[str, Any]) -> str:
     return group
 
 
+def _safe_summarize(**fields: Any) -> str:
+    """Best-effort journal detail that never masks the real operation result."""
+
+    try:
+        return summarize(**fields)
+    except ValueError:
+        safe_fields: dict[str, Any] = {}
+        for key, value in fields.items():
+            try:
+                summarize(**{key: value})
+            except ValueError:
+                continue
+            safe_fields[key] = value
+        return summarize(**safe_fields) if safe_fields else ""
+
+
 class FakeClusterState:
     """One mutable object store, shared by the read and write fakes.
 
@@ -136,7 +153,13 @@ class FakeClusterState:
         self, *, group: str, kind: str, namespace: str | None, name: str
     ) -> dict[str, Any] | None:
         """The live manifest dict, or None. Mutating it mutates the store."""
-        for manifest in self._objects:
+        index = self._index_of(group=group, kind=kind, namespace=namespace, name=name)
+        if index is not None:
+            return self._objects[index]
+        return None
+
+    def _index_of(self, *, group: str, kind: str, namespace: str | None, name: str) -> int | None:
+        for index, manifest in enumerate(self._objects):
             metadata = manifest.get("metadata") or {}
             if (
                 str(manifest.get("kind") or "") == kind
@@ -144,7 +167,7 @@ class FakeClusterState:
                 and str(metadata.get("namespace") or "") == (namespace or "")
                 and str(metadata.get("name") or "") == name
             ):
-                return manifest
+                return index
         return None
 
     def snapshot(
@@ -179,15 +202,16 @@ class FakeClusterState:
         conflict rather than mutate the newcomer."""
         replacement = deepcopy(dict(manifest))
         metadata = replacement.get("metadata") or {}
-        existing = self.find(
+        index = self._index_of(
             group=_group_of(replacement),
             kind=str(replacement.get("kind") or ""),
             namespace=str(metadata.get("namespace") or ""),
             name=str(metadata.get("name") or ""),
         )
-        if existing is not None:
-            self._objects.remove(existing)
-        self._objects.append(replacement)
+        if index is None:
+            self._objects.append(replacement)
+            return
+        self._objects[index] = replacement
 
     def replace_incarnation(
         self, *, group: str, kind: str, namespace: str | None, name: str, uid: str
@@ -200,15 +224,15 @@ class FakeClusterState:
         incarnation. `metadata.resourceVersion` advances because a
         recreated object is not the one that was read.
         """
-        existing = self.find(group=group, kind=kind, namespace=namespace, name=name)
-        if existing is None:
+        index = self._index_of(group=group, kind=kind, namespace=namespace, name=name)
+        if index is None:
             return False
+        existing = self._objects[index]
         replacement = deepcopy(existing)
         metadata = replacement.setdefault("metadata", {})
         metadata["uid"] = uid
         metadata["resourceVersion"] = self.next_revision()
-        self._objects.remove(existing)
-        self._objects.append(replacement)
+        self._objects[index] = replacement
         return True
 
     def next_revision(self) -> str:
@@ -254,6 +278,7 @@ class StatefulFakeWriteOps(WriteOps):
         self._journal = journal
         self._context = context
         self._audit_intent_probe = audit_intent_probe
+        self._consumed_audit_intents: dict[tuple[str, str, str, str, str, str], int] = {}
 
     # -- helpers ------------------------------------------------------
 
@@ -299,13 +324,18 @@ class StatefulFakeWriteOps(WriteOps):
             and (record.namespace or "") == (namespace or "")
             and record.name == name
         ]
+        key = (self._context, action, meta.group, meta.plural, namespace or "", name)
+        consumed = self._consumed_audit_intents.get(key, 0)
+        available = max(len(matched) - consumed, 0)
+        if available > 0:
+            self._consumed_audit_intents[key] = consumed + 1
         self._journal.append(
-            event="audit_intent_observed" if matched else "audit_intent_missing",
+            event="audit_intent_observed" if available > 0 else "audit_intent_missing",
             actor="audit",
             action=action,
             target=self._target(meta, namespace, name, uid),
-            result="durable" if matched else "absent",
-            detail=summarize(action=action, context=self._context, count=len(matched)),
+            result="durable" if available > 0 else "absent",
+            detail=_safe_summarize(action=action, context=self._context, count=available),
         )
 
     def _unsupported(
@@ -324,7 +354,9 @@ class StatefulFakeWriteOps(WriteOps):
             action=action,
             target=self._target(meta, namespace, name, uid),
             result="refused",
-            detail=summarize(action=action, kind=meta.kind, status=status, reason="unsupported"),
+            detail=_safe_summarize(
+                action=action, kind=meta.kind, status=status, reason="unsupported"
+            ),
         )
         raise ApiStatusError(status, reason)
 
@@ -346,11 +378,19 @@ class StatefulFakeWriteOps(WriteOps):
                 action=action,
                 target=target,
                 result="hard_failure",
-                detail=summarize(action=action, reason="no_uid_precondition"),
+                detail=_safe_summarize(action=action, reason="no_uid_precondition"),
             )
             raise ApiStatusError(400, f"{_FAKE}: refusing a write with no uid precondition")
         found = self._state.find(group=meta.group, kind=meta.kind, namespace=namespace, name=name)
         if found is None:
+            self._journal.append(
+                event="wrong_target_write",
+                actor="write_ops",
+                action=action,
+                target=target,
+                result="refused",
+                detail=_safe_summarize(action=action, reason="not_found"),
+            )
             raise ApiStatusError(404, f"{meta.plural} {namespace or ''}/{name} not found")
         live = (found.get("metadata") or {}).get("uid")
         if str(live or "") != uid:
@@ -360,7 +400,7 @@ class StatefulFakeWriteOps(WriteOps):
                 action=action,
                 target=target,
                 result="conflict",
-                detail=summarize(action=action, uid=uid, reason="uid_changed"),
+                detail=_safe_summarize(action=action, uid=uid, reason="uid_changed"),
             )
             raise ApiStatusError(
                 409, "the target changed since it was approved - refresh and retry"
@@ -493,12 +533,12 @@ class StatefulFakeWriteOps(WriteOps):
         *,
         uid: str | None = None,
     ) -> list[str] | None:
-        found, before = self._state.read(
-            group=meta.group, kind=meta.kind, namespace=namespace, name=name, path="spec.replicas"
-        )
-        if uid is None or not found:
+        current = self._preview_target(meta, namespace, name, uid)
+        if current is None:
             return None
-        return [f"~ spec.replicas: {before} -> {replicas}"]
+        proposed = deepcopy(current)
+        proposed.setdefault("spec", {})["replicas"] = replicas
+        return diff_manifests(current, proposed)
 
     async def preview_rollout_restart(
         self,
@@ -509,14 +549,32 @@ class StatefulFakeWriteOps(WriteOps):
         uid: str | None = None,
         restarted_at: str | None = None,
     ) -> list[str] | None:
-        if (
-            uid is None
-            or self._state.find(group=meta.group, kind=meta.kind, namespace=namespace, name=name)
-            is None
-        ):
+        current = self._preview_target(meta, namespace, name, uid)
+        if current is None:
             return None
+        proposed = deepcopy(current)
         stamp = restarted_at or restart_stamp()
-        return [f"~ spec.template.metadata.annotations.{RESTART_ANNOTATION}: {stamp}"]
+        template = proposed.setdefault("spec", {}).setdefault("template", {})
+        annotations = template.setdefault("metadata", {}).setdefault("annotations", {})
+        annotations[RESTART_ANNOTATION] = stamp
+        return diff_manifests(current, proposed)
+
+    def _preview_target(
+        self, meta: ResourceMeta, namespace: str | None, name: str, uid: str | None
+    ) -> dict[str, Any] | None:
+        if uid is None:
+            return None
+        current = self._state.snapshot(
+            group=meta.group, kind=meta.kind, namespace=namespace, name=name
+        )
+        if current is None:
+            return None
+        live_uid = self._state.uid_of(
+            group=meta.group, kind=meta.kind, namespace=namespace, name=name
+        )
+        if live_uid != uid:
+            return None
+        return current
 
     # -- unsupported writes, refused as API errors ----------------------
 
