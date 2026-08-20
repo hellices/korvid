@@ -2053,7 +2053,7 @@ def test_release_docs_upgrade_from_previous_minor_candidate() -> None:
     assert f"\"$upgrade_korvid\" --version | grep -Fx 'korvid {UPGRADE_SOURCE_VERSION}'" in upgrade
     assert f"\"$upgrade_korvid\" --version | grep -Fx 'korvid {version}'" in upgrade
     assert f"published `{UPGRADE_SOURCE_VERSION}` installation to the candidate wheel" in readme
-    assert f"This checkout is prepared for `v{version}`" in readme
+    assert f"`v{version}` is the feature release described by this checkout" in readme
 
 
 # --- metadata ---------------------------------------------------------------

@@ -200,7 +200,7 @@ The protected `v0.1.0` workflow failed before publication, so that tag remains
 immutable, unpublished audit history. `v0.1.1` reached the publish step and
 stopped there, because the PyPI Trusted Publisher had not been registered yet;
 it is unpublished audit history too. `v0.1.2` is the first public PyPI release.
-This checkout is prepared for `v0.3.0`. The smoke matrix proves clean installs
+`v0.3.0` is the feature release described by this checkout. The smoke matrix proves clean installs
 of `korvid`, `korvid[agent]`, `korvid[mcp]`, and `korvid[all]`, plus uninstall.
 Before creating the release tag, a maintainer separately upgrades a clean
 published `0.2.0` installation to the candidate wheel as documented in the
