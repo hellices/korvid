@@ -400,9 +400,14 @@ section:
 while the TUI moves from the unhealthy pod list to its logs, then finishes in
 the Helm release browser.
 
+<details open>
+<summary>Show or hide the 10-second MCP follow animation</summary>
+
 ![korvid MCP follow — one prompt drives pods, logs, and Helm](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/mcp-follow-demo.gif)
 
 *Recorded against a disposable local cluster — see [docs/demo/mcp-follow.md](https://github.com/hellices/korvid/blob/main/docs/demo/mcp-follow.md) to reproduce it.*
+
+</details>
 ```
 
 - [ ] **Step 5: Run the focused tests to verify GREEN**

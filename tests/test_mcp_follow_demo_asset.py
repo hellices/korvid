@@ -67,6 +67,9 @@ def test_readme_embeds_mcp_follow_demo() -> None:
     assert "## Watch MCP follow" in readme
     assert f"]({ASSET_URL})" in readme
     assert "**One prompt. Korvid follows.**" in readme
+    section = readme.split("## Watch MCP follow", 1)[1].split("## Status", 1)[0]
+    assert section.index("<details open>") < section.index(ASSET_URL)
+    assert section.index(ASSET_URL) < section.index("</details>")
 
 
 def test_recording_tape_owns_prompt_entry() -> None:

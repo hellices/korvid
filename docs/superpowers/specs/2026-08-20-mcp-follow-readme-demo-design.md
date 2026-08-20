@@ -33,13 +33,13 @@ small enough for the README to load quickly, targeting 8 MB or less.
 
 ## Scenario
 
-Enter this prompt before recording starts:
+Leave the Copilot pane focused at an empty prompt. The tape starts capture,
+types, and submits this prompt:
 
 > Use korvid MCP in order: list_resources shop pods → get_logs for the
 > unhealthy one → helm_list_releases.
 
-Start the visible recording with the Enter key. The expected tool and screen
-sequence is:
+The expected visible sequence is:
 
 | Time | MCP activity | Visible korvid state |
 |---|---|---|
@@ -61,8 +61,8 @@ cards, fake transitions, reorder calls, or accelerate cursor and screen motion
 to imply behavior that did not occur.
 
 Hold each destination screen for roughly two seconds so the viewer can
-distinguish the pod list, describe, logs, and Helm views. Prefer hard cuts in
-idle regions over a global speed increase.
+distinguish the pod list, logs, and Helm views. Prefer observed idle cuts over
+a global speed increase.
 
 If the model chooses a different tool sequence, repeat the recording rather
 than editing it into the expected sequence. The final take must visibly match
@@ -89,6 +89,8 @@ credential-pattern masked by korvid.
 - Add the optimized animation as `docs/assets/mcp-follow-demo.gif`.
 - Add recording and optimization instructions under `docs/demo/`.
 - Add the animation and a one-sentence caption to the README MCP section.
+- Put the animation in an open disclosure so readers can hide motion without
+  losing its default visibility.
 - Keep `docs/assets/demo.gif` and its existing regeneration workflow unchanged.
 
 VHS attaches to a prepared tmux session because Copilot CLI and the live TUI
