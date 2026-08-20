@@ -1,5 +1,6 @@
 """README contract for the short MCP follow recording."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -154,8 +155,11 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "if ! tmux new-session" in runbook
     assert 'if ! copilot mcp remove "$recording_server"; then' in runbook
     assert runbook.index("copilot mcp remove") < runbook.index("helm uninstall")
-    assert "idle_start=1.0" in runbook
-    assert "idle_start=0.5" not in runbook
+    for variable in ("idle_start", "idle_end", "demo_end"):
+        assert re.search(rf"^{variable}=\d+(?:\.\d+)?$", runbook, re.MULTILINE)
+        assert f"${{{variable}}}" in runbook
+    assert "Output docs/assets/mcp-follow-demo.raw.gif" in tape
+    assert "ffmpeg -y -i docs/assets/mcp-follow-demo.raw.gif" in runbook
 
 
 def test_recording_runbook_only_deletes_namespace_it_created() -> None:
@@ -163,25 +167,28 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
 
     assert "Refusing to reuse existing namespace: shop" in runbook
     assert "mcp-demo-context" in runbook
+    assert "mcp-demo-kubeconfig" in runbook
+    assert "mcp-demo-cluster-uid" in runbook
     assert "Failed to create the demo state directory" in runbook
     assert "Failed to write the demo context marker" in runbook
-    assert 'test "$context" = "$prepared_context"' in runbook
+    assert 'test "$cluster_uid" = "$prepared_cluster_uid"' in runbook
     assert '--kube-context "$prepared_context"' in runbook
     assert "korvid.dev/demo=mcp-follow" in runbook
-    assert 'if ! kubectl --context "$context" create namespace shop; then' in runbook
-    assert 'if ! kubectl --context "$context" label namespace shop' in runbook
+    assert "create namespace shop; then" in runbook
+    assert "label namespace shop korvid.dev/demo=mcp-follow; then" in runbook
     assert "if ! helm upgrade --install shop-demo" in runbook
     assert "Failed to install the recording release" in runbook
-    assert 'kubectl --context "$context" -n shop get pods --watch' in runbook
-    assert 'kubectl --context "$context" -n shop get events' in runbook
-    assert "Refusing MCP startup after context changed" in runbook
+    assert "-n shop get pods --watch" in runbook
+    assert '--context "$context" -n shop get events' in runbook
+    assert "Refusing MCP startup after cluster identity changed" in runbook
     assert "Failed to create the isolated config directory" in runbook
     assert "Failed to write the isolated korvid config" in runbook
     assert "kube_context: %s" in runbook
     assert 'HOME=\\"$demo_home\\"' in runbook
-    assert (
-        'kubectl --context "$prepared_context" delete namespace shop --ignore-not-found' in runbook
-    )
+    assert 'XDG_CONFIG_HOME=\\"$demo_home/.config\\"' in runbook
+    assert '--kubeconfig "$demo_kubeconfig"' in runbook
+    assert "Recording namespace is already absent; continuing cleanup" in runbook
+    assert "delete namespace shop --ignore-not-found" in runbook
 
 
 def test_gif_duration_ignores_marker_bytes_inside_image_data() -> None:

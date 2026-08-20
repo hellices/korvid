@@ -176,12 +176,11 @@ case "$context" in
   kind-*|k3d-*|minikube|docker-desktop) ;;
   *) echo "Refusing to seed non-local context: $context" >&2; exit 1 ;;
 esac
-if kubectl --context "$context" get namespace shop >/dev/null 2>&1; then
-  echo "Refusing to reuse existing namespace: shop" >&2
-  exit 1
-fi
 demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context"
 demo_state_dir="$(dirname "$demo_context_file")"
+demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
+demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
+umask 077
 if ! mkdir -p "$demo_state_dir"; then
   echo "Failed to create the demo state directory" >&2
   exit 1
@@ -190,35 +189,62 @@ if ! printf '%s\n' "$context" > "$demo_context_file"; then
   echo "Failed to write the demo context marker" >&2
   exit 1
 fi
-if ! kubectl --context "$context" create namespace shop; then
+if ! kubectl --context "$context" config view --minify --flatten --raw \
+  > "$demo_kubeconfig"; then
+  echo "Failed to snapshot the demo kubeconfig" >&2
+  exit 1
+fi
+if ! cluster_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
+  --context "$context" get namespace kube-system \
+  -o jsonpath='{.metadata.uid}')"; then
+  echo "Failed to read the demo cluster identity" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$cluster_uid" > "$demo_cluster_uid_file"; then
+  echo "Failed to write the demo cluster identity" >&2
+  exit 1
+fi
+if kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
+  get namespace shop >/dev/null 2>&1; then
+  echo "Refusing to reuse existing namespace: shop" >&2
+  exit 1
+fi
+if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
+  create namespace shop; then
   echo "Failed to create the dedicated shop namespace" >&2
   exit 1
 fi
-if ! kubectl --context "$context" label namespace shop \
-  korvid.dev/demo=mcp-follow; then
+if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
+  label namespace shop korvid.dev/demo=mcp-follow; then
   echo "Failed to mark the dedicated namespace as demo-owned" >&2
-  kubectl --context "$context" delete namespace shop --ignore-not-found
+  kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
+    delete namespace shop --ignore-not-found
   exit 1
 fi
 
 if ! helm upgrade --install shop-demo docs/demo/mcp-follow-fixture \
-  --namespace shop --kube-context "$context"; then
+  --namespace shop --kubeconfig "$demo_kubeconfig" --kube-context "$context"; then
   echo "Failed to install the recording release" >&2
-  if ! kubectl --context "$context" delete namespace shop --ignore-not-found; then
+  if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
+    delete namespace shop --ignore-not-found; then
     echo "Failed to clean the namespace; demo context state retained" >&2
     exit 1
   fi
-  rm -f "$demo_context_file"
+  rm -f "$demo_context_file" "$demo_kubeconfig" "$demo_cluster_uid_file"
   exit 1
 fi
-kubectl --context "$context" -n shop get pods --watch
+kubectl --kubeconfig "$demo_kubeconfig" --context "$context" \
+  -n shop get pods --watch
 ```
 
 Stop the watch with Ctrl-C after the `payment-worker` pod shows `Error` or
 `CrashLoopBackOff`, then confirm Kubernetes recorded the restart backoff:
 
 ```sh
-kubectl --context "$context" -n shop get events \
+demo_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"
+context="$(cat "$demo_state_dir/mcp-demo-context")"
+kubectl --kubeconfig "$demo_state_dir/mcp-demo-kubeconfig" \
+  --context "$context" -n shop get events \
   --field-selector reason=BackOff,type=Warning
 ```
 
@@ -229,20 +255,30 @@ match, and pin korvid to it through an isolated config:
 
 ```sh
 demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context"
-if [ ! -r "$demo_context_file" ]; then
-  echo "Refusing MCP startup without the recorded demo context" >&2
+demo_state_dir="$(dirname "$demo_context_file")"
+demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
+demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
+if [ ! -r "$demo_context_file" ] || [ ! -r "$demo_kubeconfig" ] ||
+  [ ! -r "$demo_cluster_uid_file" ]; then
+  echo "Refusing MCP startup without the recorded demo identity" >&2
   exit 1
 fi
 prepared_context="$(cat "$demo_context_file")"
-context="$(kubectl config current-context)"
-if ! test "$context" = "$prepared_context"; then
-  echo "Refusing MCP startup after context changed: $prepared_context -> $context" >&2
-  exit 1
-fi
+prepared_cluster_uid="$(cat "$demo_cluster_uid_file")"
 case "$prepared_context" in
   kind-*|k3d-*|minikube|docker-desktop) ;;
   *) echo "Refusing MCP startup on non-local context: $prepared_context" >&2; exit 1 ;;
 esac
+if ! cluster_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
+  --context "$prepared_context" get namespace kube-system \
+  -o jsonpath='{.metadata.uid}')"; then
+  echo "Refusing MCP startup because cluster identity is unavailable" >&2
+  exit 1
+fi
+if ! test "$cluster_uid" = "$prepared_cluster_uid"; then
+  echo "Refusing MCP startup after cluster identity changed" >&2
+  exit 1
+fi
 demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
 if ! mkdir -p "$demo_home/.config/korvid"; then
   echo "Failed to create the isolated config directory" >&2
@@ -253,13 +289,12 @@ if ! printf 'kube_context: %s\nmcp:\n  enabled: true\n  follow: true\n' \
   echo "Failed to write the isolated korvid config" >&2
   exit 1
 fi
-demo_kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
 if tmux has-session -t korvid-mcp-demo 2>/dev/null; then
   echo "Refusing to reuse existing tmux session: korvid-mcp-demo" >&2
   exit 1
 fi
 if ! tmux new-session -d -s korvid-mcp-demo -x 160 -y 45 -c "$PWD" \
-  "HOME=\"$demo_home\" KUBECONFIG=\"$demo_kubeconfig\" korvid --mcp --namespace shop"; then
+  "HOME=\"$demo_home\" XDG_CONFIG_HOME=\"$demo_home/.config\" XDG_STATE_HOME=\"$demo_home/.local/state\" XDG_CACHE_HOME=\"$demo_home/.cache\" KUBECONFIG=\"$demo_kubeconfig\" korvid --mcp --namespace shop"; then
   echo "Failed to create the recording tmux session" >&2
   exit 1
 fi
@@ -364,28 +399,51 @@ pod list, logs, and Helm views are each readable.
 
 ```sh
 demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context"
-if [ ! -r "$demo_context_file" ]; then
-  echo "Refusing cleanup without the recorded demo context" >&2
+demo_state_dir="$(dirname "$demo_context_file")"
+demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
+demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
+if [ ! -r "$demo_context_file" ] || [ ! -r "$demo_kubeconfig" ] ||
+  [ ! -r "$demo_cluster_uid_file" ]; then
+  echo "Refusing cleanup without the recorded demo identity" >&2
   exit 1
 fi
 prepared_context="$(cat "$demo_context_file")"
-context="$(kubectl config current-context)"
-if ! test "$context" = "$prepared_context"; then
-  echo "Refusing cleanup after context changed: $prepared_context -> $context" >&2
-  exit 1
-fi
+prepared_cluster_uid="$(cat "$demo_cluster_uid_file")"
 case "$prepared_context" in
   kind-*|k3d-*|minikube|docker-desktop) ;;
   *) echo "Refusing to clean non-local context: $prepared_context" >&2; exit 1 ;;
 esac
-if ! owner="$(kubectl --context "$prepared_context" get namespace shop \
-  -o jsonpath='{.metadata.labels.korvid\.dev/demo}')"; then
-  echo "Refusing cleanup because namespace ownership is unknown" >&2
+if ! cluster_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
+  --context "$prepared_context" get namespace kube-system \
+  -o jsonpath='{.metadata.uid}')"; then
+  echo "Refusing cleanup because cluster identity is unavailable" >&2
   exit 1
 fi
-if [ "$owner" != "mcp-follow" ]; then
-  echo "Refusing cleanup of namespace not owned by this demo" >&2
+if ! test "$cluster_uid" = "$prepared_cluster_uid"; then
+  echo "Refusing cleanup after cluster identity changed" >&2
   exit 1
+fi
+if ! namespace_name="$(kubectl --kubeconfig "$demo_kubeconfig" \
+  --context "$prepared_context" get namespace shop --ignore-not-found \
+  -o jsonpath='{.metadata.name}')"; then
+  echo "Refusing cleanup because namespace state is unknown" >&2
+  exit 1
+fi
+namespace_exists=false
+if [ -n "$namespace_name" ]; then
+  if ! owner="$(kubectl --kubeconfig "$demo_kubeconfig" \
+    --context "$prepared_context" get namespace shop \
+    -o jsonpath='{.metadata.labels.korvid\.dev/demo}')"; then
+    echo "Refusing cleanup because namespace ownership is unknown" >&2
+    exit 1
+  fi
+  if [ "$owner" != "mcp-follow" ]; then
+    echo "Refusing cleanup of namespace not owned by this demo" >&2
+    exit 1
+  fi
+  namespace_exists=true
+else
+  echo "Recording namespace is already absent; continuing cleanup" >&2
 fi
 
 if tmux has-session -t korvid-mcp-demo 2>/dev/null; then
@@ -411,17 +469,27 @@ elif copilot mcp get korvid-mcp-demo >/dev/null 2>&1; then
 else
   echo "Recording MCP server is already absent; continuing cleanup" >&2
 fi
-if ! helm uninstall shop-demo --namespace shop --kube-context "$prepared_context"; then
-  echo "Failed to uninstall the recording release; cleanup state retained" >&2
-  exit 1
-fi
-if ! kubectl --context "$prepared_context" delete namespace shop --ignore-not-found; then
-  echo "Failed to delete the recording namespace; cleanup state retained" >&2
-  exit 1
+if [ "$namespace_exists" = true ]; then
+  if ! release="$(helm list --namespace shop --kubeconfig "$demo_kubeconfig" \
+    --kube-context "$prepared_context" --filter '^shop-demo$' --short)"; then
+    echo "Failed to determine recording release state; cleanup state retained" >&2
+    exit 1
+  fi
+  if [ "$release" = "shop-demo" ] &&
+    ! helm uninstall shop-demo --namespace shop --kubeconfig "$demo_kubeconfig" \
+      --kube-context "$prepared_context"; then
+    echo "Failed to uninstall the recording release; cleanup state retained" >&2
+    exit 1
+  fi
+  if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$prepared_context" \
+    delete namespace shop --ignore-not-found; then
+    echo "Failed to delete the recording namespace; cleanup state retained" >&2
+    exit 1
+  fi
 fi
 demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
 rm -rf -- "$demo_home"
-rm -f "$demo_context_file"
+rm -f "$demo_context_file" "$demo_kubeconfig" "$demo_cluster_uid_file"
 ```
 ````
 
