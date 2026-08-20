@@ -172,6 +172,21 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
   bypass, the single provider choke point, and how a claim becomes
   checkable evidence. Diagrams, and the tensions the design still has.
 
+## Watch MCP follow
+
+**One prompt. Korvid follows.** GitHub Copilot CLI uses real read-only MCP calls
+while the TUI moves from the unhealthy pod list to its logs, then finishes in
+the Helm release browser.
+
+<details open>
+<summary>Show or hide the up-to-15-second MCP follow animation</summary>
+
+![korvid MCP follow — one prompt drives pods, logs, and Helm](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/mcp-follow-demo.gif)
+
+*Recorded against a disposable local cluster.*
+
+</details>
+
 ## Status
 
 Work in progress — core TUI, log viewer, live metrics, MCP server, and
