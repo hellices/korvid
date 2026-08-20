@@ -48,11 +48,15 @@ def test_lockfile_project_version_matches_pyproject() -> None:
     packages = lock.get("package")
     assert isinstance(packages, list), "uv.lock package table is not a list"
     assert packages, "uv.lock has no package entries"
-    korvid = next(
-        (package for package in packages if package.get("name") == "korvid"),
-        None,
+    project_entries = [
+        package
+        for package in packages
+        if package.get("name") == "korvid" and package.get("source", {}).get("editable") == "."
+    ]
+    assert len(project_entries) == 1, (
+        f"uv.lock has {len(project_entries)} editable korvid project entries"
     )
-    assert korvid is not None, "uv.lock has no korvid project entry"
+    korvid = project_entries[0]
     lock_version = korvid.get("version")
     assert lock_version == project["project"]["version"], (
         f"uv.lock korvid version {lock_version!r} != pyproject {project['project']['version']}"

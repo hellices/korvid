@@ -2047,10 +2047,11 @@ def test_release_docs_upgrade_from_previous_minor_candidate() -> None:
     version = _project_version()
     runbook = _release_runbook()
     readme = _readme()
-    assert f"korvid[all]=={UPGRADE_SOURCE_VERSION}" in runbook
-    assert f"korvid {UPGRADE_SOURCE_VERSION}" in runbook
-    assert f"korvid-{version}-py3-none-any.whl" in runbook
-    assert f"korvid {version}" in runbook
+    upgrade = markdown_section(runbook, "Required cross-version upgrade gate")
+    assert f"korvid[all]=={UPGRADE_SOURCE_VERSION}" in upgrade
+    assert f"korvid-{version}-py3-none-any.whl" in upgrade
+    assert f"\"$upgrade_korvid\" --version | grep -Fx 'korvid {UPGRADE_SOURCE_VERSION}'" in upgrade
+    assert f"\"$upgrade_korvid\" --version | grep -Fx 'korvid {version}'" in upgrade
     assert f"published `{UPGRADE_SOURCE_VERSION}` installation to the candidate wheel" in readme
     assert f"This checkout is prepared for `v{version}`" in readme
 

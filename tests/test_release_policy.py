@@ -362,3 +362,5 @@ def test_upgrade_source_is_the_previous_minor_release() -> None:
         assert source[1] == current[1] - 1
     else:
         pytest.fail("major bump requires an explicit UPGRADE_SOURCE_VERSION contract review")
+    source_notes = _ROOT / "docs" / "release-notes" / f"v{UPGRADE_SOURCE_VERSION}.md"
+    assert source_notes.is_file(), f"upgrade source has no release notes: {source_notes.name}"
