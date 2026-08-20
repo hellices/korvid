@@ -177,6 +177,7 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Refusing to reuse existing tmux session:" in runbook
     assert "if ! tmux new-session" in runbook
     assert 'if ! copilot mcp remove "$recording_server"; then' in runbook
+    assert "Failed to inspect the recording MCP server; cleanup state retained" in runbook
     assert runbook.index("copilot mcp remove") < runbook.rindex("k3d cluster delete")
     assert "helm uninstall" not in runbook
     for variable in ("idle_start", "idle_end", "demo_end"):
@@ -230,7 +231,8 @@ def test_recording_runbook_only_deletes_cluster_it_created() -> None:
     assert 'HOME=\\"$demo_home\\"' in runbook
     assert 'XDG_CONFIG_HOME=\\"$demo_home/.config\\"' in runbook
     assert '--kubeconfig "$demo_kubeconfig"' in runbook
-    assert runbook.index("tmux kill-session") < runbook.index(
+    cleanup = runbook.split("## Clean up", 1)[1]
+    assert cleanup.index("tmux kill-session") < cleanup.index(
         "Refusing cleanup after cluster identity changed"
     )
 

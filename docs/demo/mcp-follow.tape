@@ -9,7 +9,7 @@ Output docs/assets/mcp-follow-demo.raw.gif
 Set FontSize 14
 Set Width 1440
 Set Height 800
-Set Framerate 25
+Set Framerate 15
 Set Padding 8
 Set TypingSpeed 5ms
 Set Shell bash

@@ -406,15 +406,25 @@ if [ -r "$registration_file" ]; then
   case "$recording_server" in
     korvid-mcp-demo-*) ;;
     *)
-    echo "Refusing to remove unexpected MCP registration: $recording_server" >&2
-    exit 1
+      echo "Refusing to remove unexpected MCP registration: $recording_server" >&2
+      exit 1
       ;;
   esac
-  if copilot mcp get "$recording_server" >/dev/null 2>&1; then
+  if mcp_details="$(copilot mcp get "$recording_server" 2>&1)"; then
     if ! copilot mcp remove "$recording_server"; then
       echo "Failed to remove the recording MCP server; cleanup state retained" >&2
       exit 1
     fi
+  else
+    case "$mcp_details" in
+      *"not found"*)
+        echo "Recording MCP server is already absent; continuing cleanup" >&2
+        ;;
+      *)
+        echo "Failed to inspect the recording MCP server; cleanup state retained" >&2
+        exit 1
+        ;;
+    esac
   fi
   rm -f "$registration_file"
 else
