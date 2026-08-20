@@ -24,7 +24,3 @@ uv run python docs/demo/demo.py
 The harness wires `KorvidApp` with fake watch sources the same way the UI
 tests do, so it stays honest about what the real TUI looks like. If the app's
 constructor or key flows change, re-run the tape and commit the new GIF.
-
-The separate [MCP follow recording](mcp-follow.md) uses a disposable local
-cluster and GitHub Copilot CLI to capture real external tool calls alongside
-the TUI. It has its own fixture and does not change the canned VHS demo.

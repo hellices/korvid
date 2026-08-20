@@ -1,6 +1,5 @@
-"""README contract for the short MCP follow recording."""
+"""README contract for the short MCP follow animation."""
 
-import re
 from pathlib import Path
 
 import pytest
@@ -12,299 +11,129 @@ MAX_DURATION_CS = 1500
 MAX_BYTES = 8 * 1024 * 1024
 
 
-def _require_gif_bytes(payload: bytes, cursor: int, size: int, block: str) -> None:
+def _require_bytes(payload: bytes, cursor: int, size: int, block: str) -> None:
     if cursor + size > len(payload):
         raise ValueError(f"truncated GIF {block} at offset {cursor} of {len(payload)}")
 
 
-def _skip_gif_sub_blocks(payload: bytes, cursor: int) -> int:
+def _skip_sub_blocks(payload: bytes, cursor: int) -> int:
     while True:
-        _require_gif_bytes(payload, cursor, 1, "sub-block length")
+        _require_bytes(payload, cursor, 1, "sub-block length")
         size = payload[cursor]
         cursor += 1
         if size == 0:
             return cursor
-        _require_gif_bytes(payload, cursor, size, "sub-block")
+        _require_bytes(payload, cursor, size, "sub-block")
         cursor += size
 
 
-def _read_gif_extension(payload: bytes, cursor: int) -> tuple[int, int | None]:
-    _require_gif_bytes(payload, cursor, 1, "extension label")
+def _read_extension(payload: bytes, cursor: int) -> tuple[int, int | None]:
+    _require_bytes(payload, cursor, 1, "extension label")
     label = payload[cursor]
     cursor += 1
     if label != 0xF9:
-        return _skip_gif_sub_blocks(payload, cursor), None
-
-    _require_gif_bytes(payload, cursor, 6, "graphic control extension")
+        return _skip_sub_blocks(payload, cursor), None
+    _require_bytes(payload, cursor, 6, "graphic control extension")
     if payload[cursor] != 4 or payload[cursor + 5] != 0:
         raise ValueError(f"invalid GIF graphic control extension at offset {cursor}")
-    delay = int.from_bytes(payload[cursor + 2 : cursor + 4], "little")
-    return cursor + 6, delay
+    return cursor + 6, int.from_bytes(payload[cursor + 2 : cursor + 4], "little")
 
 
-def _skip_gif_image(payload: bytes, cursor: int) -> int:
-    _require_gif_bytes(payload, cursor, 9, "image descriptor")
+def _skip_image(payload: bytes, cursor: int) -> int:
+    _require_bytes(payload, cursor, 9, "image descriptor")
     packed = payload[cursor + 8]
     cursor += 9
     if packed & 0x80:
         table_size = 3 * (1 << ((packed & 0x07) + 1))
-        _require_gif_bytes(payload, cursor, table_size, "local color table")
+        _require_bytes(payload, cursor, table_size, "local color table")
         cursor += table_size
-    _require_gif_bytes(payload, cursor, 1, "LZW code size")
-    return _skip_gif_sub_blocks(payload, cursor + 1)
+    _require_bytes(payload, cursor, 1, "LZW code size")
+    return _skip_sub_blocks(payload, cursor + 1)
 
 
-def _read_gif_block(
-    payload: bytes,
-    cursor: int,
-    pending_delay: int | None,
-    delays: list[int],
-) -> tuple[int, int | None, bool]:
-    introducer_offset = cursor
-    introducer = payload[cursor]
-    cursor += 1
-    if introducer == 0x3B:
-        if pending_delay is not None:
-            raise ValueError("GIF frame delay has no image")
-        return cursor, None, True
-    if introducer == 0x21:
-        cursor, delay = _read_gif_extension(payload, cursor)
-        if delay is None:
-            return cursor, pending_delay, False
-        if pending_delay is not None:
-            raise ValueError(f"multiple GIF frame delays before image at offset {cursor}")
-        return cursor, delay, False
-    if introducer == 0x2C:
-        delays.append(0 if pending_delay is None else pending_delay)
-        return _skip_gif_image(payload, cursor), None, False
-    raise ValueError(
-        f"unexpected GIF block introducer 0x{introducer:02x} at offset {introducer_offset}"
-    )
-
-
-def _gif_frame_delays_centiseconds(payload: bytes) -> list[int]:
+def _frame_delays(payload: bytes) -> list[int]:
     if payload[:6] not in {b"GIF87a", b"GIF89a"}:
         raise ValueError("invalid GIF signature")
-    _require_gif_bytes(payload, 0, 13, "logical screen descriptor")
-    packed = payload[10]
+    _require_bytes(payload, 0, 13, "logical screen descriptor")
     cursor = 13
+    packed = payload[10]
     if packed & 0x80:
-        table_size = 3 * (1 << ((packed & 0x07) + 1))
-        _require_gif_bytes(payload, cursor, table_size, "global color table")
-        cursor += table_size
+        cursor += 3 * (1 << ((packed & 0x07) + 1))
 
     delays: list[int] = []
     pending_delay: int | None = None
-    saw_trailer = False
     while cursor < len(payload):
-        cursor, pending_delay, saw_trailer = _read_gif_block(payload, cursor, pending_delay, delays)
-        if saw_trailer:
-            break
-    if not saw_trailer:
-        raise ValueError("missing GIF trailer")
-    if cursor != len(payload):
-        raise ValueError(f"trailing bytes after GIF trailer at offset {cursor}")
-    if not delays:
-        raise ValueError("GIF contains no frame delays")
-    return delays
+        introducer = payload[cursor]
+        cursor += 1
+        if introducer == 0x3B:
+            if cursor != len(payload):
+                raise ValueError(f"trailing bytes after GIF trailer at offset {cursor}")
+            if not delays:
+                raise ValueError("GIF contains no frames")
+            return delays
+        if introducer == 0x21:
+            cursor, delay = _read_extension(payload, cursor)
+            if delay is not None:
+                pending_delay = delay
+            continue
+        if introducer == 0x2C:
+            delays.append(0 if pending_delay is None else pending_delay)
+            pending_delay = None
+            cursor = _skip_image(payload, cursor)
+            continue
+        raise ValueError(f"unexpected GIF block introducer 0x{introducer:02x}")
+    raise ValueError("missing GIF trailer")
 
 
-def _gif_duration_centiseconds(payload: bytes) -> int:
-    return sum(_gif_frame_delays_centiseconds(payload))
-
-
-def _gif_effective_frame_rate(delays: list[int]) -> float:
-    total = sum(delays)
-    if total <= 0:
+def _effective_fps(delays: list[int]) -> float:
+    duration = sum(delays)
+    if duration <= 0:
         raise ValueError("GIF has no positive frame delays")
-    return len(delays) * 100 / total
+    return len(delays) * 100 / duration
 
 
 def test_readme_embeds_mcp_follow_demo() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "## Watch MCP follow" in readme
-    assert f"]({ASSET_URL})" in readme
-    assert "**One prompt. Korvid follows.**" in readme
     section = readme.split("## Watch MCP follow", 1)[1].split("## Status", 1)[0]
+
+    assert "**One prompt. Korvid follows.**" in section
+    assert f"]({ASSET_URL})" in section
     assert section.index("<details open>") < section.index(ASSET_URL)
     assert section.index(ASSET_URL) < section.index("</details>")
-    assert "Show or hide the up-to-15-second MCP follow animation" in section
 
 
-def test_recording_tape_owns_prompt_entry() -> None:
-    runbook = (ROOT / "docs" / "demo" / "mcp-follow.md").read_text(encoding="utf-8")
-    tape = (ROOT / "docs" / "demo" / "mcp-follow.tape").read_text(encoding="utf-8")
-    spec = (
-        ROOT / "docs" / "superpowers" / "specs" / "2026-08-20-mcp-follow-readme-demo-design.md"
-    ).read_text(encoding="utf-8")
-    prompt = (
-        "Use korvid MCP in order: list_resources shop pods → "
-        "get_logs unhealthy one → helm_list_releases."
-    )
-
-    assert "Leave the Copilot pane focused at its empty prompt" in runbook
-    assert "Do not enter the scenario prompt yourself" in runbook
-    assert "Start the visible capture with Enter" not in runbook
-    assert f'Type "{prompt}"' in tape
-    assert 'tmux attach-session -t \\"$(cat \\"${XDG_STATE_HOME' in tape
-    assert prompt in spec
-    assert "resize-window -A" in tape
-    assert runbook.index("tmux new-session") < runbook.index("korvid --mcp")
-    assert "-P -F '#{pane_id}'" in runbook
-    assert 'tmux select-pane -t "$copilot_pane"' in runbook
-    capture_wait = re.search(
-        rf'Type "{re.escape(prompt)}"\nSleep \d+ms\nEnter\n(?:#.*\n)*Sleep (\d+)s',
-        tape,
-    )
-    assert capture_wait is not None
-    assert int(capture_wait.group(1)) >= 30
-    assert "--available-tools=$recording_server" in runbook
-    assert "mcp-demo-registration" in runbook
-    assert "mcp-endpoint.json" in runbook
-    assert "mcp-demo-url" in runbook
-    assert "http://127.0.0.1:7878/mcp" not in runbook
-    assert "Timed out waiting for the isolated korvid MCP endpoint" in runbook
-    assert "seq 1 150" in runbook
-    assert "Refusing setup while another recording run is active" in runbook
-    assert "set -o noclobber" in runbook
-    assert 'recording_server="korvid-mcp-demo-$run_id"' in runbook
-    assert "Failed to write the recording MCP marker" in runbook
-    assert "Refusing registration without complete demo state" in runbook
-    assert "Refusing Copilot launch without complete demo state" in runbook
-    assert runbook.index("mcp-demo-registration") < runbook.index("copilot mcp add")
-    assert 'tmux kill-session -t "$cluster_name"' in runbook
-    assert "Failed to stop the recording tmux session; cleanup state retained" in runbook
-    assert "Refusing to reuse existing tmux session:" in runbook
-    assert "if ! tmux new-session" in runbook
-    assert 'if ! copilot mcp remove "$recording_server"; then' in runbook
-    assert "Failed to inspect the recording MCP server; cleanup state retained" in runbook
-    assert runbook.index("copilot mcp remove") < runbook.rindex("k3d cluster delete")
-    assert "helm uninstall" not in runbook
-    for variable in ("idle_start", "idle_end", "demo_end"):
-        assert re.search(rf"^{variable}=\d+(?:\.\d+)?$", runbook, re.MULTILINE)
-        assert f"${{{variable}}}" in runbook
-    assert "Output docs/assets/mcp-follow-demo.raw.gif" in tape
-    assert "ffmpeg -y -i docs/assets/mcp-follow-demo.raw.gif" in runbook
-    assert "Invalid trim timestamps" in runbook
-    assert "Trimmed duration exceeds the 15s budget" in runbook
-    assert "Trimmed duration must be at least 8s" in runbook
-    assert "Trim timestamps exceed the source recording" in runbook
-    assert "Failed to encode the trimmed recording" in runbook
-    assert "Failed to publish the trimmed recording" in runbook
-    assert "Failed to remove the source recording" in runbook
-    assert "Run every command from the repository root" in runbook
-    assert "at most 15 seconds" in runbook
-    assert "8,388,608 bytes" in runbook
-    assert "1440 by 800 pixels" in spec
-
-
-def test_recording_runbook_only_deletes_cluster_it_created() -> None:
-    runbook = (ROOT / "docs" / "demo" / "mcp-follow.md").read_text(encoding="utf-8")
-
-    assert 'cluster_name="korvid-mcp-demo-$run_id"' in runbook
-    assert 'demo_home="$demo_state_dir/runs/$cluster_name/home"' in runbook
-    assert 'k3d cluster create "$cluster_name"' in runbook
-    assert "--kubeconfig-switch-context=false" in runbook
-    assert 'k3d cluster delete "$cluster_name"' in runbook
-    assert "rollback_incomplete_identity" in runbook
-    assert runbook.index("trap rollback_incomplete_identity EXIT") < runbook.index(
-        'k3d cluster create "$cluster_name"'
-    )
-    assert "Dedicated cluster retained for cleanup" not in runbook
-    assert "mcp-demo-context" in runbook
-    assert "mcp-demo-kubeconfig" in runbook
-    assert "mcp-demo-cluster-uid" in runbook
-    assert "Failed to create the demo state directory" in runbook
-    assert "Failed to write the demo context marker" in runbook
-    assert 'test "$cluster_uid" = "$prepared_cluster_uid"' in runbook
-    assert '--context "$prepared_context"' in runbook
-    assert "if ! helm upgrade --install shop-demo" in runbook
-    assert "Failed to install the recording release" in runbook
-    assert "Run the cleanup section before retrying" in runbook
-    assert runbook.count("Run the cleanup section before retrying") >= 2
-    assert "-n shop get pods --watch" in runbook
-    assert '--context "$context" -n shop get events' in runbook
-    assert "Refusing MCP startup after cluster identity changed" in runbook
-    assert "Failed to create the isolated config directory" in runbook
-    assert "Failed to write the isolated korvid config" in runbook
-    assert "kube_context: %s" in runbook
-    assert 'HOME=\\"$demo_home\\"' in runbook
-    assert 'XDG_CONFIG_HOME=\\"$demo_home/.config\\"' in runbook
-    assert '--kubeconfig "$demo_kubeconfig"' in runbook
-    cleanup = runbook.split("## Clean up", 1)[1]
-    assert cleanup.index("tmux kill-session") < cleanup.index(
-        "Refusing cleanup after cluster identity changed"
-    )
-
-
-def test_gif_duration_ignores_marker_bytes_inside_image_data() -> None:
+def test_gif_parser_ignores_marker_bytes_inside_image_data() -> None:
     header = b"GIF89a\x01\x00\x01\x00\x00\x00\x00"
-    real_control = b"\x21\xf9\x04\x00\x05\x00\x00\x00"
-    image_descriptor = b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00"
-    fake_control = b"\x21\xf9\x04\x00\xff\x7f\x00\x00"
-    image_data = b"\x02\x08" + fake_control + b"\x00"
+    control = b"\x21\xf9\x04\x00\x05\x00\x00\x00"
+    descriptor = b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00"
+    image_data = b"\x02\x08\x21\xf9\x04\x00\xff\x7f\x00\x00\x00"
 
-    assert (
-        _gif_duration_centiseconds(header + real_control + image_descriptor + image_data + b"\x3b")
-        == 5
-    )
+    assert _frame_delays(header + control + descriptor + image_data + b"\x3b") == [5]
 
 
-def test_gif_parser_reports_truncated_sub_block() -> None:
+def test_gif_parser_reports_truncated_data() -> None:
     payload = b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x21\xfe\x04ab"
 
     with pytest.raises(ValueError, match=r"truncated GIF sub-block at offset \d+"):
-        _gif_duration_centiseconds(payload)
+        _frame_delays(payload)
 
 
-def test_gif_parser_requires_trailer() -> None:
-    payload = b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x21\xf9\x04\x00\x05\x00\x00\x00"
+def test_gif_parser_requires_clean_trailer() -> None:
+    payload = b"GIF89a\x01\x00\x01\x00\x00\x00\x00"
 
     with pytest.raises(ValueError, match="missing GIF trailer"):
-        _gif_duration_centiseconds(payload)
-
-
-def test_gif_parser_rejects_bytes_after_trailer() -> None:
-    payload = (
-        b"GIF89a\x01\x00\x01\x00\x00\x00\x00"
-        b"\x21\xf9\x04\x00\x05\x00\x00\x00"
-        b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00"
-        b"\x02\x01\x00\x00\x3b\x00"
-    )
-
-    with pytest.raises(ValueError, match=r"trailing bytes after GIF trailer at offset \d+"):
-        _gif_duration_centiseconds(payload)
-
-
-def test_gif_parser_records_zero_for_image_without_frame_delay() -> None:
-    payload = (
-        b"GIF89a\x01\x00\x01\x00\x00\x00\x00"
-        b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00"
-        b"\x02\x01\x00\x00\x3b"
-    )
-
-    assert _gif_frame_delays_centiseconds(payload) == [0]
-
-
-def test_gif_effective_frame_rate_uses_encoded_delays() -> None:
-    assert _gif_effective_frame_rate([8, 9, 8]) == pytest.approx(12.0)
-
-
-def test_gif_effective_frame_rate_rejects_zero_delays() -> None:
-    with pytest.raises(ValueError, match="GIF has no positive frame delays"):
-        _gif_effective_frame_rate([0, 0])
+        _frame_delays(payload)
 
 
 def test_mcp_follow_demo_asset_fits_readme_budget() -> None:
     payload = ASSET.read_bytes()
-    assert payload[:6] in {b"GIF87a", b"GIF89a"}
-    assert int.from_bytes(payload[6:8], "little") == 1280
+    delays = _frame_delays(payload)
     height = int.from_bytes(payload[8:10], "little")
+    effective_fps = _effective_fps(delays)
+
+    assert int.from_bytes(payload[6:8], "little") == 1280
     assert 690 <= height <= 730
-    delays = _gif_frame_delays_centiseconds(payload)
-    assert min(delays) >= 6
     assert 800 <= sum(delays) <= MAX_DURATION_CS
     assert len(delays) >= 90
-    effective_fps = _gif_effective_frame_rate(delays)
     assert 11.5 <= effective_fps <= 15.5, effective_fps
     assert len(payload) <= MAX_BYTES

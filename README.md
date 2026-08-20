@@ -183,7 +183,7 @@ the Helm release browser.
 
 ![korvid MCP follow — one prompt drives pods, logs, and Helm](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/mcp-follow-demo.gif)
 
-*Recorded against a disposable local cluster — see [docs/demo/mcp-follow.md](https://github.com/hellices/korvid/blob/main/docs/demo/mcp-follow.md) to reproduce it.*
+*Recorded against a disposable local cluster.*
 
 </details>
 
