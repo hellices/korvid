@@ -165,6 +165,7 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Failed to write the recording MCP marker" in runbook
     assert runbook.index("mcp-demo-registration") < runbook.index("copilot mcp add")
     assert 'tmux kill-session -t "$cluster_name"' in runbook
+    assert "Failed to stop the recording tmux session; cleanup state retained" in runbook
     assert "Refusing to reuse existing tmux session:" in runbook
     assert "if ! tmux new-session" in runbook
     assert 'if ! copilot mcp remove "$recording_server"; then' in runbook

@@ -350,7 +350,10 @@ fi
 # Local teardown comes first so no MCP endpoint remains live if cluster
 # validation later refuses a mutation.
 if tmux has-session -t "$cluster_name" 2>/dev/null; then
-  tmux kill-session -t "$cluster_name"
+  if ! tmux kill-session -t "$cluster_name"; then
+    echo "Failed to stop the recording tmux session; cleanup state retained" >&2
+    exit 1
+  fi
 fi
 registration_file="$demo_state_dir/mcp-demo-registration"
 mcp_url_file="$demo_state_dir/mcp-demo-url"
