@@ -57,7 +57,7 @@ fail-closed like every other write. Details in [docs/ops.md](https://github.com/
 ## Quick start
 
 ```sh
-uv tool install 'korvid[all]==0.2.0'    # or: pipx install 'korvid[all]==0.2.0'
+uv tool install 'korvid[all]==0.3.0'    # or: pipx install 'korvid[all]==0.3.0'
 korvid                                  # uses your current kubeconfig context
 ```
 
@@ -84,7 +84,7 @@ Prefer `uv` if you have neither: korvid needs **Python 3.11+**, which is
 newer than the system Python on macOS and on most enterprise Linux, and `uv`
 fetches a suitable interpreter for you instead of making that your problem.
 
-`python -m pip install 'korvid[all]==0.2.0'` also works inside an activated
+`python -m pip install 'korvid[all]==0.3.0'` also works inside an activated
 virtual environment, including one created inside a container. Do not run `pip install`
 against your system Python — [PEP 668](https://peps.python.org/pep-0668/)
 managed Python installations block this with an
@@ -93,7 +93,7 @@ venv first; do not bypass the protection with `--break-system-packages`.
 
 `korvid[all]` is the simplest install: the TUI, embedded agent, MCP server, and
 read-only observability connectors together. For slimmer extras, upgrade
-guidance, retained local state, and the exact `v0.2.0` publish procedure, see the
+guidance, retained local state, and the exact `v0.3.0` publish procedure, see the
 [release runbook](https://github.com/hellices/korvid/blob/main/docs/release.md).
 
 | Key | Action |
@@ -200,7 +200,7 @@ The protected `v0.1.0` workflow failed before publication, so that tag remains
 immutable, unpublished audit history. `v0.1.1` reached the publish step and
 stopped there, because the PyPI Trusted Publisher had not been registered yet;
 it is unpublished audit history too. `v0.1.2` is the first public PyPI release;
-`v0.2.0` is the current feature release. The smoke matrix proves clean installs
+`v0.3.0` is the current feature release. The smoke matrix proves clean installs
 of `korvid`, `korvid[agent]`, `korvid[mcp]`, and `korvid[all]`, plus uninstall.
 Before creating the release tag, a maintainer separately upgrades a clean
 published `0.1.2` installation to the candidate wheel as documented in the
@@ -210,22 +210,22 @@ korvid is an application, so install the desired variant in its own tool
 environment:
 
 ```sh
-uv tool install 'korvid==0.2.0'             # base TUI only
-uv tool install 'korvid[agent]==0.2.0'      # :ai / Ctrl-A
-uv tool install 'korvid[mcp]==0.2.0'        # korvid --mcp
-uv tool install 'korvid[agent,observability]==0.2.0'  # agent + Prometheus/Loki
-uv tool install 'korvid[mcp,observability]==0.2.0'    # MCP + Prometheus/Loki
-uv tool install 'korvid[all]==0.2.0'        # full feature set
-uv tool install 'korvid[all,entra]==0.2.0'  # add Entra auth too
+uv tool install 'korvid==0.3.0'             # base TUI only
+uv tool install 'korvid[agent]==0.3.0'      # :ai / Ctrl-A
+uv tool install 'korvid[mcp]==0.3.0'        # korvid --mcp
+uv tool install 'korvid[agent,observability]==0.3.0'  # agent + Prometheus/Loki
+uv tool install 'korvid[mcp,observability]==0.3.0'    # MCP + Prometheus/Loki
+uv tool install 'korvid[all]==0.3.0'        # full feature set
+uv tool install 'korvid[all,entra]==0.3.0'  # add Entra auth too
 ```
 
 If you already installed a narrower extra set, rerun your package manager with
 the full desired extra set instead of assuming extras expand in place:
 
 ```sh
-uv tool install --force 'korvid[all]==0.2.0'
+uv tool install --force 'korvid[all]==0.3.0'
 # or
-pipx install --force 'korvid[all]==0.2.0'
+pipx install --force 'korvid[all]==0.3.0'
 ```
 
 For unreleased `main` development, install straight from the repository:
@@ -286,14 +286,14 @@ The operator procedure, irreversible boundaries, and recovery rules for each
 release are in the [release runbook](https://github.com/hellices/korvid/blob/main/docs/release.md).
 
 ```sh
-uv tool install 'korvid[all]==0.2.0'
+uv tool install 'korvid[all]==0.3.0'
 ```
 
 Verify a downloaded artifact against its checksum and provenance:
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify korvid-0.2.0-py3-none-any.whl --repo hellices/korvid
+gh attestation verify korvid-0.3.0-py3-none-any.whl --repo hellices/korvid
 ```
 
 Offline installation from the wheelhouse bundles is documented in the

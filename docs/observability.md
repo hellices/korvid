@@ -21,8 +21,8 @@ exactly the pod you want to read after a restart.
 Install the complete application variant in its own tool environment:
 
 ```bash
-uv tool install 'korvid[agent,observability]==0.2.0'  # embedded agent tools
-uv tool install 'korvid[mcp,observability]==0.2.0'    # external MCP tools
+uv tool install 'korvid[agent,observability]==0.3.0'  # embedded agent tools
+uv tool install 'korvid[mcp,observability]==0.3.0'    # external MCP tools
 ```
 
 `pipx install` accepts the same requirement strings.

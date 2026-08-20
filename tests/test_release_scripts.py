@@ -1351,6 +1351,13 @@ def _release_notes() -> str:
     return path.read_text(encoding="utf-8")
 
 
+def test_current_release_notes_match_project_version() -> None:
+    version = _project_version()
+    notes = _release_notes()
+    assert notes.startswith(f"# korvid v{version}\n")
+    assert f"korvid[all]=={version}" in notes
+
+
 def test_release_stages_written_notes_rather_than_a_generated_commit_list() -> None:
     """`--generate-notes` lists merged pull requests.
 
@@ -1640,7 +1647,10 @@ def test_security_policy_supports_only_the_current_minor_line() -> None:
     version = _project_version()
     policy = " ".join(_security_policy().split())
     major, minor, _patch = version.split(".")
-    assert f"Until `v{version}` is published, that remains `0.1.2`" in policy
+    previous_minor = f"{major}.{int(minor) - 1}.x"
+    assert (
+        f"Until `v{version}` is published, that is the latest `{previous_minor}` version" in policy
+    )
     assert f"latest `{major}.{minor}.x` version" in policy
     assert "After publication" in policy
 
@@ -1965,7 +1975,7 @@ def test_release_docs_keep_a_source_install_fallback_for_unreleased_main() -> No
     assert "appearing on PyPI" not in runbook
     assert "For unreleased `main` development" in runbook
     quick_start = readme[readme.index("## Quick start") : readme.index("## Features")]
-    assert "Until `0.2.0` is published on PyPI" not in quick_start
+    assert "Until `0.3.0` is published on PyPI" not in quick_start
     assert "For unreleased `main` development" in quick_start
     assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in quick_start
 
@@ -1982,7 +1992,7 @@ def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
     normalized = " ".join(runbook.split())
     assert "HOMEBREW_TAP_TOKEN" in runbook
     assert f"gh release download v{version} --pattern korvid.rb" in runbook
-    assert 'formula_path="$PWD/dist/v0.2.0/korvid.rb"' in runbook
+    assert 'formula_path="$PWD/dist/v0.3.0/korvid.rb"' in runbook
     assert 'if [ ! -f "$formula_path" ]' in runbook
     assert 'cp "$formula_path" Formula/korvid.rb' in runbook
     assert 'if cmp -s "$formula_path" Formula/korvid.rb' in runbook
@@ -2007,9 +2017,9 @@ def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
         assert "reviewed and green" not in runbook[preceding:claim]
     assert "--json number,title,baseRefName,headRefName,headRepositoryOwner" in runbook
     assert '.baseRefName == "main"' in runbook
-    assert '.headRefName == "bump-korvid-0.2.0"' in runbook
+    assert '.headRefName == "bump-korvid-0.3.0"' in runbook
     assert '.headRepositoryOwner.login == "hellices"' in runbook
-    assert "trusted bump-korvid-0.2.0 tap PR not found" in runbook
+    assert "trusted bump-korvid-0.3.0 tap PR not found" in runbook
     assert "branch=bump-korvid-" in runbook
     assert 'git show-ref --verify --quiet "refs/remotes/origin/$branch"' in runbook
     assert 'git switch --track -c "$branch" "origin/$branch"' in runbook
@@ -2022,6 +2032,14 @@ def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
     assert "attested release asset" not in runbook
     verify = runbook[runbook.index("Finally verify the tap") : runbook.index("## Install")]
     assert "```sh\nset -eu" in verify
+
+
+def test_v030_release_docs_upgrade_from_v020_candidate() -> None:
+    runbook = _release_runbook()
+    assert "korvid[all]==0.2.0" in runbook
+    assert "korvid 0.2.0" in runbook
+    assert "korvid-0.3.0-py3-none-any.whl" in runbook
+    assert "korvid 0.3.0" in runbook
 
 
 # --- metadata ---------------------------------------------------------------

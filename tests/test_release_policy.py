@@ -10,7 +10,8 @@ _ROOT = Path(__file__).parents[1]
 _AGENTS = _ROOT / "AGENTS.md"
 _README = _ROOT / "README.md"
 _RUNBOOK = _ROOT / "docs" / "release.md"
-_ALLOWED_RELEASE_DOC_HISTORY = frozenset({"0.1.0", "0.1.1", "0.1.2"})
+_UPGRADE_SOURCE_VERSION = "0.2.0"
+_ALLOWED_RELEASE_DOC_HISTORY = frozenset({"0.1.0", "0.1.1", "0.1.2", _UPGRADE_SOURCE_VERSION})
 
 
 def _project_version() -> str:
@@ -164,7 +165,7 @@ def _assert_release_runbook_contracts(runbook: str, version: str) -> None:
         '[ "$DRY_RUN_COMMIT" != "$COMMIT" ]',
         'gh run download "$RUN_ID" --name dist --dir "$candidate_dir"',
         f'CANDIDATE="$PWD/$candidate_dir/korvid-{version}-py3-none-any.whl"',
-        "uv pip install --python \"$upgrade_python\" 'korvid[all]==0.1.2'",
+        f"uv pip install --python \"$upgrade_python\" 'korvid[all]=={_UPGRADE_SOURCE_VERSION}'",
         f"\"$upgrade_korvid\" --version | grep -Fx 'korvid {version}'",
     ):
         assert command in upgrade
