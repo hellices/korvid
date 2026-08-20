@@ -150,7 +150,8 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert prompt in spec
     assert "resize-window -A" in tape
     assert runbook.index("tmux new-session") < runbook.index("korvid --mcp")
-    assert 'tmux select-pane -t "$session_name:0.1"' in runbook
+    assert "-P -F '#{pane_id}'" in runbook
+    assert 'tmux select-pane -t "$copilot_pane"' in runbook
     capture_wait = re.search(
         rf'Type "{re.escape(prompt)}"\nSleep \d+ms\nEnter\n(?:#.*\n)*Sleep (\d+)s',
         tape,

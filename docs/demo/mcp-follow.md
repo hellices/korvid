@@ -265,12 +265,13 @@ if ! recording_server="$(cat "$registration_file")" ||
   echo "Failed to read the recording launch state" >&2
   exit 1
 fi
-if ! tmux split-window -h -l 35 -t "$session_name:0" -c "$PWD" \
-  "copilot --disable-builtin-mcps --allow-all-tools --available-tools=$recording_server"; then
+if ! copilot_pane="$(tmux split-window -h -l 35 -P -F '#{pane_id}' \
+  -t "$session_name" -c "$PWD" \
+  "copilot --disable-builtin-mcps --allow-all-tools --available-tools=$recording_server")"; then
   echo "Failed to start Copilot in the recording session" >&2
   exit 1
 fi
-if ! tmux select-pane -t "$session_name:0.1"; then
+if ! tmux select-pane -t "$copilot_pane"; then
   echo "Failed to focus the Copilot recording pane" >&2
   exit 1
 fi
