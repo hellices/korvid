@@ -1968,6 +1968,7 @@ def test_release_docs_correct_the_xdg_config_claim() -> None:
 def test_release_docs_keep_a_source_install_fallback_for_unreleased_main() -> None:
     runbook = _release_runbook()
     readme = _readme()
+    version = _project_version()
     source_install = "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'"
     pipx_source_install = "pipx install 'korvid[all] @ git+https://github.com/hellices/korvid'"
     assert source_install in runbook
@@ -1983,7 +1984,8 @@ def test_release_docs_keep_a_source_install_fallback_for_unreleased_main() -> No
     assert "appearing on PyPI" not in runbook
     assert "For unreleased `main` development" in runbook
     quick_start = readme[readme.index("## Quick start") : readme.index("## Features")]
-    assert "Until `0.3.0` is published on PyPI" not in quick_start
+    assert f"Until `{version}` is published on PyPI" not in quick_start
+    assert "is published on PyPI" not in quick_start
     assert "For unreleased `main` development" in quick_start
     assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in quick_start
 
@@ -2042,13 +2044,14 @@ def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
     assert "```sh\nset -eu" in verify
 
 
-def test_v030_release_docs_upgrade_from_v020_candidate() -> None:
+def test_release_docs_upgrade_from_previous_minor_candidate() -> None:
+    version = _project_version()
     runbook = _release_runbook()
     readme = _readme()
     assert f"korvid[all]=={UPGRADE_SOURCE_VERSION}" in runbook
     assert f"korvid {UPGRADE_SOURCE_VERSION}" in runbook
-    assert "korvid-0.3.0-py3-none-any.whl" in runbook
-    assert "korvid 0.3.0" in runbook
+    assert f"korvid-{version}-py3-none-any.whl" in runbook
+    assert f"korvid {version}" in runbook
     assert f"published `{UPGRADE_SOURCE_VERSION}` installation to the candidate wheel" in readme
 
 
