@@ -74,6 +74,7 @@ def make_app(
     readonly: bool = False,
     permitted: bool | None = None,
     get_manifest: Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None = None,
+    approval_timeout_seconds: float | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     deploys = [GenericSummary(name="web", namespace="default", kind="Deployment", created="")]
@@ -99,4 +100,5 @@ def make_app(
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,
+        approval_timeout_seconds=approval_timeout_seconds,
     )

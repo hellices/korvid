@@ -774,6 +774,7 @@ class KorvidApp(App[None]):
         ) = None,
         session_timeline: SessionTimeline | None = None,
         watch_warning_events: (Callable[[str | None], AsyncIterator[dict[str, Any]]] | None) = None,
+        approval_timeout_seconds: float | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -851,6 +852,11 @@ class KorvidApp(App[None]):
         #: or a composition root that chose not to wire it) simply means the
         #: timeline records no Events.
         self._watch_warning_events = watch_warning_events
+        if approval_timeout_seconds is not None and approval_timeout_seconds <= 0:
+            raise ValueError("approval_timeout_seconds must be positive")
+        self._approval_timeout: float = (
+            _APPROVAL_TIMEOUT if approval_timeout_seconds is None else approval_timeout_seconds
+        )
         #: App-owned execution context (issue #165), captured in on_mount;
         #: None until then. AppUIBridge._dispatch refuses pre-mount calls
         #: as 'UI not ready' (production-reachable: the MCP endpoint goes
@@ -8577,7 +8583,7 @@ class KorvidApp(App[None]):
         screen = self._confirm_screen(title, operation, require_name=require_name, preview=preview)
         await self.push_screen(screen, _done)
         try:
-            confirmed = await asyncio.wait_for(fut, timeout=_APPROVAL_TIMEOUT)
+            confirmed = await asyncio.wait_for(fut, timeout=self._approval_timeout)
         except TimeoutError:
             if self.screen is screen:
                 with contextlib.suppress(Exception):
@@ -8918,7 +8924,7 @@ class KorvidApp(App[None]):
         agent is never told the user declined when nobody answered) and an
         agent turn can never hang forever."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + _APPROVAL_TIMEOUT
+        deadline = loop.time() + self._approval_timeout
         if not await self._wait_until_surfaceable(deadline):
             return "expired"
         fut: asyncio.Future[bool] = loop.create_future()
