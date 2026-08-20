@@ -167,6 +167,8 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "set -o noclobber" in runbook
     assert 'recording_server="korvid-mcp-demo-$run_id"' in runbook
     assert "Failed to write the recording MCP marker" in runbook
+    assert "Refusing registration without complete demo state" in runbook
+    assert "Refusing Copilot launch without complete demo state" in runbook
     assert runbook.index("mcp-demo-registration") < runbook.index("copilot mcp add")
     assert 'tmux kill-session -t "$cluster_name"' in runbook
     assert "Failed to stop the recording tmux session; cleanup state retained" in runbook
@@ -182,7 +184,11 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "ffmpeg -y -i docs/assets/mcp-follow-demo.raw.gif" in runbook
     assert "Invalid trim timestamps" in runbook
     assert "Trimmed duration exceeds the 15s budget" in runbook
+    assert "Trimmed duration must be at least 8s" in runbook
     assert "Trim timestamps exceed the source recording" in runbook
+    assert "Failed to encode the trimmed recording" in runbook
+    assert "Failed to publish the trimmed recording" in runbook
+    assert "Failed to remove the source recording" in runbook
     assert "at most 15 seconds" in runbook
     assert "8,388,608 bytes" in runbook
     assert "1440 by 800 pixels" in spec

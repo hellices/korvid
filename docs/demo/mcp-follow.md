@@ -216,16 +216,21 @@ Wait until the left pane status shows `MCP on` and `·follow`, then register onl
 the three read tools used by the recording:
 
 ```sh
-cluster_name="$(cat "$(dirname "$demo_context_file")/mcp-demo-cluster-name")"
-run_id="${cluster_name#korvid-mcp-demo-}"
-recording_server="korvid-mcp-demo-$run_id"
-registration_file="$(dirname "$demo_context_file")/mcp-demo-registration"
-mcp_url_file="$(dirname "$demo_context_file")/mcp-demo-url"
-if [ ! -r "$mcp_url_file" ]; then
-  echo "Refusing registration without the verified MCP URL" >&2
+demo_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"
+cluster_name_file="$demo_state_dir/mcp-demo-cluster-name"
+registration_file="$demo_state_dir/mcp-demo-registration"
+mcp_url_file="$demo_state_dir/mcp-demo-url"
+if [ ! -r "$cluster_name_file" ] || [ ! -r "$mcp_url_file" ]; then
+  echo "Refusing registration without complete demo state" >&2
   exit 1
 fi
-mcp_url="$(cat "$mcp_url_file")"
+if ! cluster_name="$(cat "$cluster_name_file")" ||
+  ! mcp_url="$(cat "$mcp_url_file")"; then
+  echo "Failed to read the recording registration state" >&2
+  exit 1
+fi
+run_id="${cluster_name#korvid-mcp-demo-}"
+recording_server="korvid-mcp-demo-$run_id"
 if copilot mcp get "$recording_server" >/dev/null 2>&1; then
   echo "Refusing to replace existing Copilot MCP server: $recording_server" >&2
   exit 1
@@ -247,11 +252,27 @@ Start Copilot in a 35-column right pane. The recorded unique server name is
 Copilot CLI's server-level MCP selector:
 
 ```sh
-recording_server="$(cat "$(dirname "$demo_context_file")/mcp-demo-registration")"
-session_name="$(cat "$(dirname "$demo_context_file")/mcp-demo-cluster-name")"
-tmux split-window -h -l 35 -t "$session_name:0" -c "$PWD" \
-  "copilot --disable-builtin-mcps --allow-all-tools --available-tools=$recording_server"
-tmux select-pane -t "$session_name:0.1"
+demo_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"
+registration_file="$demo_state_dir/mcp-demo-registration"
+cluster_name_file="$demo_state_dir/mcp-demo-cluster-name"
+if [ ! -r "$registration_file" ] || [ ! -r "$cluster_name_file" ]; then
+  echo "Refusing Copilot launch without complete demo state" >&2
+  exit 1
+fi
+if ! recording_server="$(cat "$registration_file")" ||
+  ! session_name="$(cat "$cluster_name_file")"; then
+  echo "Failed to read the recording launch state" >&2
+  exit 1
+fi
+if ! tmux split-window -h -l 35 -t "$session_name:0" -c "$PWD" \
+  "copilot --disable-builtin-mcps --allow-all-tools --available-tools=$recording_server"; then
+  echo "Failed to start Copilot in the recording session" >&2
+  exit 1
+fi
+if ! tmux select-pane -t "$session_name:0.1"; then
+  echo "Failed to focus the Copilot recording pane" >&2
+  exit 1
+fi
 ```
 
 Complete any Copilot trust prompt.
@@ -307,16 +328,30 @@ if [ "$kept_duration" = "invalid" ]; then
   echo "Invalid trim timestamps" >&2
   exit 1
 fi
+if ! awk -v duration="$kept_duration" 'BEGIN { exit !(duration >= 8) }'; then
+  echo "Trimmed duration must be at least 8s" >&2
+  exit 1
+fi
 if ! awk -v duration="$kept_duration" 'BEGIN { exit !(duration <= 15) }'; then
   echo "Trimmed duration exceeds the 15s budget" >&2
   exit 1
 fi
-ffmpeg -y -i docs/assets/mcp-follow-demo.raw.gif \
+if ! ffmpeg -y -i docs/assets/mcp-follow-demo.raw.gif \
   -filter_complex \
   "[0:v]trim=start=0:end=${idle_start},setpts=PTS-STARTPTS[first];[0:v]trim=start=${idle_end}:end=${demo_end},setpts=PTS-STARTPTS[rest];[first][rest]concat=n=2:v=1:a=0,fps=12,scale=1280:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
-  -loop 0 docs/assets/mcp-follow-demo.tmp.gif &&
-mv docs/assets/mcp-follow-demo.tmp.gif docs/assets/mcp-follow-demo.gif &&
-rm docs/assets/mcp-follow-demo.raw.gif
+  -loop 0 docs/assets/mcp-follow-demo.tmp.gif; then
+  rm -f docs/assets/mcp-follow-demo.tmp.gif
+  echo "Failed to encode the trimmed recording" >&2
+  exit 1
+fi
+if ! mv docs/assets/mcp-follow-demo.tmp.gif docs/assets/mcp-follow-demo.gif; then
+  echo "Failed to publish the trimmed recording" >&2
+  exit 1
+fi
+if ! rm docs/assets/mcp-follow-demo.raw.gif; then
+  echo "Failed to remove the source recording" >&2
+  exit 1
+fi
 ```
 
 Verify the result:
@@ -328,9 +363,10 @@ ffprobe -v error -select_streams v:0 \
 wc -c < docs/assets/mcp-follow-demo.gif
 ```
 
-The duration must be at most 15 seconds, width exactly 1280 pixels, and file
-size at most 8,388,608 bytes. Inspect the GIF at README width and confirm the
-pod list, logs, and Helm views are each readable.
+The duration must be at least 8 seconds and at most 15 seconds, width exactly
+1280 pixels, height 690–730 pixels, effective frame rate approximately 12 fps,
+and file size at most 8,388,608 bytes. Inspect the GIF at README width and
+confirm the pod list, logs, and Helm views are each readable.
 
 ## Clean up
 
