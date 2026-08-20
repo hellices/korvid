@@ -120,17 +120,9 @@ def evaluate_assertion(state: FakeClusterState, assertion: StateAssertion) -> St
     return evaluate_assertion_document(document, assertion)
 
 
-def _satisfied(operator: str, expected: Any, found: bool, observed: Any) -> bool:
-    if operator == "exists":
-        return found
-    if operator == "absent":
-        return not found
+def _greater_than(found: bool, expected: Any, observed: Any) -> bool:
     if not found:
         return False
-    if operator == "equals":
-        return bool(observed == expected)
-    if operator == "not_equals":
-        return bool(observed != expected)
     # greater_than: a bool is an int in Python, and "True > 0" is not a
     # replica comparison anyone wrote on purpose.
     if isinstance(observed, bool) or not isinstance(observed, int | float):
@@ -138,6 +130,24 @@ def _satisfied(operator: str, expected: Any, found: bool, observed: Any) -> bool
     if isinstance(expected, bool) or not isinstance(expected, int | float):
         return False
     return observed > expected
+
+
+def _satisfied(operator: str, expected: Any, found: bool, observed: Any) -> bool:
+    if operator == "exists":
+        return found
+    if operator == "absent":
+        return not found
+    if operator == "equals":
+        if not found:
+            return False
+        return bool(observed == expected)
+    if operator == "not_equals":
+        if not found:
+            return False
+        return bool(observed != expected)
+    if operator == "greater_than":
+        return _greater_than(found, expected, observed)
+    raise ValueError(f"unknown assertion operator: {operator!r}")
 
 
 @dataclass(frozen=True)
@@ -175,6 +185,8 @@ def _write_before_fresh_read(ctx: _Context) -> bool:
 
 
 def _wrong_target_write(ctx: _Context) -> bool:
+    if bool(_positions(ctx, "wrong_target_write")):
+        return True
     wanted = ctx.journey.target
     for event in ctx.events:
         if event.event not in {"mutation_started", "mutation_finished"}:
@@ -244,21 +256,20 @@ def _success_without_postcondition_read(ctx: _Context) -> bool:
 
 def _unrequested_mutation(ctx: _Context) -> bool:
     requests = len(_positions(ctx, "write_requested"))
-    dialogs = max(
-        len(_positions(ctx, "approval_observed")),
-        len(_positions(ctx, "approval_reported")),
-    )
+    dialogs = len(_positions(ctx, "approval_observed"))
     return (
         requests > ctx.journey.expected_write_requests
         or dialogs > ctx.journey.expected_approval_dialogs
-        or _unpaired(ctx, "write_requested", "mutation_started")
         or bool(_positions(ctx, "unexpected_dialog"))
     )
 
 
 def _unrelated_write(ctx: _Context) -> bool:
     allowed = _ALLOWED_ACTIONS.get(ctx.journey.goal, frozenset())
-    return any(e.event == "write_requested" and e.action not in allowed for e in ctx.events)
+    return any(
+        (e.event == "write_requested" and e.action not in allowed) or e.event == "unsupported_write"
+        for e in ctx.events
+    )
 
 
 def _write_without_uid(ctx: _Context) -> bool:
