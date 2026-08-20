@@ -161,6 +161,8 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "mcp-endpoint.json" in runbook
     assert "mcp-demo-url" in runbook
     assert "http://127.0.0.1:7878/mcp" not in runbook
+    assert "Timed out waiting for the isolated korvid MCP endpoint" in runbook
+    assert "seq 1 150" in runbook
     assert "Refusing setup while another recording run is active" in runbook
     assert "set -o noclobber" in runbook
     assert 'recording_server="korvid-mcp-demo-$run_id"' in runbook
@@ -209,6 +211,7 @@ def test_recording_runbook_only_deletes_cluster_it_created() -> None:
     assert "if ! helm upgrade --install shop-demo" in runbook
     assert "Failed to install the recording release" in runbook
     assert "Run the cleanup section before retrying" in runbook
+    assert runbook.count("Run the cleanup section before retrying") >= 2
     assert "-n shop get pods --watch" in runbook
     assert '--context "$context" -n shop get events' in runbook
     assert "Refusing MCP startup after cluster identity changed" in runbook

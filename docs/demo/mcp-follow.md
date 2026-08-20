@@ -80,6 +80,7 @@ metadata:
 YAML
 then
   echo "Failed to create the demo namespace in the dedicated cluster" >&2
+  echo "Run the cleanup section before retrying; demo identity state retained" >&2
   exit 1
 fi
 
@@ -175,10 +176,15 @@ if ! tmux set-option -t "$session_name" status off; then
 fi
 endpoint_registry="$demo_home/.local/state/korvid/mcp-endpoint.json"
 mcp_url_file="$demo_state_dir/mcp-demo-url"
-for _attempt in $(seq 1 50); do
+for _attempt in $(seq 1 150); do
   [ -s "$endpoint_registry" ] && break
   sleep 0.2
 done
+if [ ! -s "$endpoint_registry" ]; then
+  tmux kill-session -t "$session_name"
+  echo "Timed out waiting for the isolated korvid MCP endpoint" >&2
+  exit 1
+fi
 if ! mcp_url="$(python3 - "$endpoint_registry" <<'PY'
 import json
 import sys
