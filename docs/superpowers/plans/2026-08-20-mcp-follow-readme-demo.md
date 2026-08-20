@@ -176,13 +176,18 @@ case "$context" in
   kind-*|k3d-*|minikube|docker-desktop) ;;
   *) echo "Refusing to seed non-local context: $context" >&2; exit 1 ;;
 esac
-if kubectl get namespace shop >/dev/null 2>&1; then
+if kubectl --context "$context" get namespace shop >/dev/null 2>&1; then
   echo "Refusing to reuse existing namespace: shop" >&2
   exit 1
 fi
+demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context"
+mkdir -p "$(dirname "$demo_context_file")"
+printf '%s\n' "$context" > "$demo_context_file"
+kubectl --context "$context" create namespace shop
+kubectl --context "$context" label namespace shop korvid.dev/demo=mcp-follow
 
 helm upgrade --install shop-demo docs/demo/mcp-follow-fixture \
-  --namespace shop --create-namespace
+  --namespace shop --kube-context "$context"
 kubectl -n shop get pods --watch
 ```
 
@@ -228,7 +233,7 @@ and submits it after capture starts:
 > Use korvid MCP in order: list_resources shop pods → get_logs unhealthy one
 > → helm_list_releases.
 
-Start the visible capture with Enter. The target sequence is:
+Run the tape. Its target sequence is:
 
 1. `list_resources` — pod list;
 2. `get_logs` — live logs;
@@ -281,15 +286,35 @@ pod list, logs, and Helm views are each readable.
 ## Clean up
 
 ```sh
+demo_context_file="${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-context"
+if [ ! -r "$demo_context_file" ]; then
+  echo "Refusing cleanup without the recorded demo context" >&2
+  exit 1
+fi
+prepared_context="$(cat "$demo_context_file")"
 context="$(kubectl config current-context)"
-case "$context" in
+if ! test "$context" = "$prepared_context"; then
+  echo "Refusing cleanup after context changed: $prepared_context -> $context" >&2
+  exit 1
+fi
+case "$prepared_context" in
   kind-*|k3d-*|minikube|docker-desktop) ;;
-  *) echo "Refusing to clean non-local context: $context" >&2; exit 1 ;;
+  *) echo "Refusing to clean non-local context: $prepared_context" >&2; exit 1 ;;
 esac
+if ! owner="$(kubectl --context "$prepared_context" get namespace shop \
+  -o jsonpath='{.metadata.labels.korvid\.dev/demo}')"; then
+  echo "Refusing cleanup because namespace ownership is unknown" >&2
+  exit 1
+fi
+if [ "$owner" != "mcp-follow" ]; then
+  echo "Refusing cleanup of namespace not owned by this demo" >&2
+  exit 1
+fi
 
-helm uninstall shop-demo --namespace shop
-kubectl delete namespace shop --ignore-not-found
+helm uninstall shop-demo --namespace shop --kube-context "$prepared_context"
+kubectl --context "$prepared_context" delete namespace shop --ignore-not-found
 copilot mcp remove korvid
+rm -f "$demo_context_file"
 ```
 ````
 
@@ -435,7 +460,7 @@ uv run ruff format --check tests/test_mcp_follow_demo_asset.py
 git diff --check
 ```
 
-Expected: eight tests pass, ruff check and format pass, and no whitespace errors
+Expected: eleven tests pass, ruff check and format pass, and no whitespace errors
 are reported.
 
 - [ ] **Step 6: Inspect the final README rendering**

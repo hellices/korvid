@@ -63,10 +63,12 @@ def _gif_frame_delays_centiseconds(payload: bytes) -> list[int]:
         cursor += table_size
 
     delays: list[int] = []
+    trailer_offset: int | None = None
     while cursor < len(payload):
         introducer = payload[cursor]
         cursor += 1
         if introducer == 0x3B:
+            trailer_offset = cursor - 1
             break
         if introducer == 0x21:
             cursor = _read_gif_extension(payload, cursor, delays)
@@ -77,6 +79,10 @@ def _gif_frame_delays_centiseconds(payload: bytes) -> list[int]:
         raise ValueError(
             f"unexpected GIF block introducer 0x{introducer:02x} at offset {cursor - 1}"
         )
+    if trailer_offset is None:
+        raise ValueError("missing GIF trailer")
+    if cursor != len(payload):
+        raise ValueError(f"trailing bytes after GIF trailer at offset {cursor}")
     if not delays:
         raise ValueError("GIF contains no frame delays")
     return delays
@@ -84,6 +90,10 @@ def _gif_frame_delays_centiseconds(payload: bytes) -> list[int]:
 
 def _gif_duration_centiseconds(payload: bytes) -> int:
     return sum(_gif_frame_delays_centiseconds(payload))
+
+
+def _gif_effective_frame_rate(delays: list[int]) -> float:
+    return len(delays) * 100 / sum(delays)
 
 
 def test_readme_embeds_mcp_follow_demo() -> None:
@@ -106,6 +116,7 @@ def test_recording_tape_owns_prompt_entry() -> None:
 
     assert "Leave the Copilot pane focused at its empty prompt" in runbook
     assert "Do not enter the scenario prompt yourself" in runbook
+    assert "Start the visible capture with Enter" not in runbook
     assert f'Type "{prompt}"' in tape
 
 
@@ -113,8 +124,13 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     runbook = (ROOT / "docs" / "demo" / "mcp-follow.md").read_text()
 
     assert "Refusing to reuse existing namespace: shop" in runbook
-    assert runbook.count("kind-*|k3d-*|minikube|docker-desktop") == 2
-    assert "kubectl delete namespace shop --ignore-not-found" in runbook
+    assert "mcp-demo-context" in runbook
+    assert 'test "$context" = "$prepared_context"' in runbook
+    assert '--kube-context "$prepared_context"' in runbook
+    assert "korvid.dev/demo=mcp-follow" in runbook
+    assert (
+        'kubectl --context "$prepared_context" delete namespace shop --ignore-not-found' in runbook
+    )
 
 
 def test_gif_duration_ignores_marker_bytes_inside_image_data() -> None:
@@ -137,6 +153,24 @@ def test_gif_parser_reports_truncated_sub_block() -> None:
         _gif_duration_centiseconds(payload)
 
 
+def test_gif_parser_requires_trailer() -> None:
+    payload = b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x21\xf9\x04\x00\x05\x00\x00\x00"
+
+    with pytest.raises(ValueError, match="missing GIF trailer"):
+        _gif_duration_centiseconds(payload)
+
+
+def test_gif_parser_rejects_bytes_after_trailer() -> None:
+    payload = b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x21\xf9\x04\x00\x05\x00\x00\x00\x3b\x00"
+
+    with pytest.raises(ValueError, match=r"trailing bytes after GIF trailer at offset \d+"):
+        _gif_duration_centiseconds(payload)
+
+
+def test_gif_effective_frame_rate_uses_encoded_delays() -> None:
+    assert _gif_effective_frame_rate([8, 9, 8]) == pytest.approx(12.0)
+
+
 def test_mcp_follow_demo_asset_fits_readme_budget() -> None:
     payload = ASSET.read_bytes()
     assert payload[:6] in {b"GIF87a", b"GIF89a"}
@@ -144,4 +178,5 @@ def test_mcp_follow_demo_asset_fits_readme_budget() -> None:
     delays = _gif_frame_delays_centiseconds(payload)
     assert min(delays) >= 6
     assert sum(delays) <= 1500
+    assert 12 <= _gif_effective_frame_rate(delays) <= 15
     assert len(payload) <= 8 * 1024 * 1024
