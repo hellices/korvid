@@ -27,12 +27,6 @@ if k3d cluster list --no-headers | awk '{print $1}' | grep -Fxq "$cluster_name";
   rm -f "$cluster_name_file"
   exit 1
 fi
-if ! k3d cluster create "$cluster_name" --agents 1 --wait \
-  --kubeconfig-switch-context=false; then
-  echo "Failed to create the dedicated k3d cluster" >&2
-  rm -f "$cluster_name_file"
-  exit 1
-fi
 identity_ready=false
 rollback_incomplete_identity() {
   if [ "$identity_ready" != true ]; then
@@ -46,6 +40,11 @@ rollback_incomplete_identity() {
   fi
 }
 trap rollback_incomplete_identity EXIT
+if ! k3d cluster create "$cluster_name" --agents 1 --wait \
+  --kubeconfig-switch-context=false; then
+  echo "Failed to create the dedicated k3d cluster" >&2
+  exit 1
+fi
 context="k3d-$cluster_name"
 demo_context_file="$demo_state_dir/mcp-demo-context"
 demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"

@@ -184,6 +184,9 @@ def test_recording_runbook_only_deletes_cluster_it_created() -> None:
     assert "--kubeconfig-switch-context=false" in runbook
     assert 'k3d cluster delete "$cluster_name"' in runbook
     assert "rollback_incomplete_identity" in runbook
+    assert runbook.index("trap rollback_incomplete_identity EXIT") < runbook.index(
+        'k3d cluster create "$cluster_name"'
+    )
     assert "Dedicated cluster retained for cleanup" not in runbook
     assert "mcp-demo-context" in runbook
     assert "mcp-demo-kubeconfig" in runbook
