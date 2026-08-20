@@ -2,12 +2,12 @@
 
 The journal records boundaries, not only model tool calls: the app's own
 target resolution, the approval driver's verified keystroke, the audit
-records, the injected ``WriteOps`` execution, fixture-actor interference,
+records, the injected `WriteOps` execution, fixture-actor interference,
 and the grader's final read.
 
-It is also a published artifact (``run.journal`` is serialized into campaign
-output), so it stores summaries rather than payloads: ``result`` is a token
-from a closed status vocabulary, ``detail`` is a key=value summary over an
+It is also a published artifact (`run.journal` is serialized into campaign
+output), so it stores summaries rather than payloads: `result` is a token
+from a closed status vocabulary, `detail` is a key=value summary over an
 allowlist, and state mappings reject Secret paths and non-scalars.
 """
 
@@ -105,11 +105,11 @@ _SECRET_SEGMENTS = frozenset({"data", "stringdata"})
 _SCALARS = (str, int, float, bool)
 _DETAIL_KEYS = frozenset(JOURNAL_DETAIL_KEYS)
 _RESULTS = frozenset(JOURNAL_RESULTS)
-_SUMMARY_VALUE = re.compile(r"[A-Za-z0-9._:/@=+-]{0,120}")
+_SUMMARY_VALUE = re.compile(r"[A-Za-z0-9._:/@=+-]{1,120}")
 
 
 def summarize(**fields: Any) -> str:
-    """Build a journal ``detail`` from allowlisted fields."""
+    """Build a journal `detail` from allowlisted fields."""
 
     parts: list[str] = []
     for key, value in fields.items():
@@ -132,7 +132,11 @@ def summarize_arguments(tool: str, arguments: Mapping[str, Any]) -> str:
     kept = {
         key: value
         for key, value in sorted(arguments.items())
-        if key in _DETAIL_KEYS and key != "tool" and isinstance(value, _SCALARS)
+        if key in _DETAIL_KEYS
+        and key != "tool"
+        and isinstance(value, _SCALARS)
+        and not isinstance(value, bool)
+        and (not isinstance(value, str) or value)
     }
     fields: dict[str, Any] = {"tool": tool}
     fields.update(kept)
@@ -266,12 +270,12 @@ class ActionJournal:
         return tuple(e.event for e in self._events if e.event in LIFECYCLE_CHECKPOINTS)
 
     def has(self, event: str) -> bool:
-        """Whether ``event`` was recorded at least once."""
+        """Whether `event` was recorded at least once."""
 
         return any(e.event == event for e in self._events)
 
     def count(self, event: str) -> int:
-        """How many times ``event`` was recorded."""
+        """How many times `event` was recorded."""
 
         return sum(1 for e in self._events if e.event == event)
 
