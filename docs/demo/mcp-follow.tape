@@ -20,6 +20,10 @@ Hide
 Type "tmux attach-session -t $(cat ${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-cluster-name)"
 Enter
 Sleep 3s
+Ctrl+B
+Type ":resize-window -A"
+Enter
+Sleep 1s
 Show
 
 Type "Use korvid MCP in order: list_resources shop pods → get_logs unhealthy one → helm_list_releases."

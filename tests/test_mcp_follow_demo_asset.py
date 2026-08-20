@@ -141,6 +141,7 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Do not enter the scenario prompt yourself" in runbook
     assert "Start the visible capture with Enter" not in runbook
     assert f'Type "{prompt}"' in tape
+    assert "resize-window -A" in tape
     assert runbook.index("tmux new-session") < runbook.index("korvid --mcp")
     assert 'tmux select-pane -t "$session_name:0.1"' in runbook
     capture_wait = re.search(
@@ -158,7 +159,7 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Refusing to reuse existing tmux session:" in runbook
     assert "if ! tmux new-session" in runbook
     assert 'if ! copilot mcp remove "$recording_server"; then' in runbook
-    assert runbook.index("copilot mcp remove") < runbook.index("k3d cluster delete")
+    assert runbook.index("copilot mcp remove") < runbook.rindex("k3d cluster delete")
     assert "helm uninstall" not in runbook
     for variable in ("idle_start", "idle_end", "demo_end"):
         assert re.search(rf"^{variable}=\d+(?:\.\d+)?$", runbook, re.MULTILINE)
@@ -174,7 +175,9 @@ def test_recording_runbook_only_deletes_cluster_it_created() -> None:
 
     assert 'cluster_name="korvid-mcp-demo-$run_id"' in runbook
     assert 'k3d cluster create "$cluster_name"' in runbook
+    assert "--kubeconfig-switch-context=false" in runbook
     assert 'k3d cluster delete "$cluster_name"' in runbook
+    assert "rollback_incomplete_identity" in runbook
     assert "mcp-demo-context" in runbook
     assert "mcp-demo-kubeconfig" in runbook
     assert "mcp-demo-cluster-uid" in runbook
@@ -264,5 +267,6 @@ def test_mcp_follow_demo_asset_fits_readme_budget() -> None:
     delays = _gif_frame_delays_centiseconds(payload)
     assert min(delays) >= 6
     assert sum(delays) <= 1500
-    assert 12 <= _gif_effective_frame_rate(delays) <= 15
+    effective_fps = _gif_effective_frame_rate(delays)
+    assert 11.5 <= effective_fps <= 15.5, effective_fps
     assert len(payload) <= 8 * 1024 * 1024

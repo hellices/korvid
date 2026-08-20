@@ -26,11 +26,19 @@ if ! printf '%s\n' "$cluster_name" > "$cluster_name_file"; then
   echo "Failed to write the demo cluster marker" >&2
   exit 1
 fi
-if ! k3d cluster create "$cluster_name" --agents 1 --wait; then
+if ! k3d cluster create "$cluster_name" --agents 1 --wait \
+  --kubeconfig-switch-context=false; then
   echo "Failed to create the dedicated k3d cluster" >&2
   rm -f "$cluster_name_file"
   exit 1
 fi
+identity_ready=false
+rollback_incomplete_identity() {
+  if [ "$identity_ready" != true ]; then
+    k3d cluster delete "$cluster_name"
+  fi
+}
+trap rollback_incomplete_identity EXIT
 context="k3d-$cluster_name"
 demo_context_file="$demo_state_dir/mcp-demo-context"
 demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
@@ -58,6 +66,8 @@ if ! printf '%s\n' "$cluster_uid" > "$demo_cluster_uid_file"; then
   echo "Dedicated cluster retained for cleanup: $cluster_name" >&2
   exit 1
 fi
+identity_ready=true
+trap - EXIT
 if ! kubectl --kubeconfig "$demo_kubeconfig" --context "$context" create -f - <<'YAML'
 apiVersion: v1
 kind: Namespace
