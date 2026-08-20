@@ -8,6 +8,8 @@ import pytest
 ROOT = Path(__file__).parents[1]
 ASSET = ROOT / "docs" / "assets" / "mcp-follow-demo.gif"
 ASSET_URL = "https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/mcp-follow-demo.gif"
+MAX_DURATION_CS = 1500
+MAX_BYTES = 8 * 1024 * 1024
 
 
 def _require_gif_bytes(payload: bytes, cursor: int, size: int, block: str) -> None:
@@ -179,6 +181,9 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Invalid trim timestamps" in runbook
     assert "Trimmed duration exceeds the 15s budget" in runbook
     assert "Trim timestamps exceed the source recording" in runbook
+    assert "at most 15 seconds" in runbook
+    assert "8,388,608 bytes" in runbook
+    assert "1440 by 800 pixels" in spec
 
 
 def test_recording_runbook_only_deletes_cluster_it_created() -> None:
@@ -280,11 +285,12 @@ def test_mcp_follow_demo_asset_fits_readme_budget() -> None:
     payload = ASSET.read_bytes()
     assert payload[:6] in {b"GIF87a", b"GIF89a"}
     assert int.from_bytes(payload[6:8], "little") == 1280
-    assert int.from_bytes(payload[8:10], "little") > 0
+    height = int.from_bytes(payload[8:10], "little")
+    assert 690 <= height <= 730
     delays = _gif_frame_delays_centiseconds(payload)
     assert min(delays) >= 6
-    assert 800 <= sum(delays) <= 1500
+    assert 800 <= sum(delays) <= MAX_DURATION_CS
     assert len(delays) >= 90
     effective_fps = _gif_effective_frame_rate(delays)
     assert 11.5 <= effective_fps <= 15.5, effective_fps
-    assert len(payload) <= 8 * 1024 * 1024
+    assert len(payload) <= MAX_BYTES

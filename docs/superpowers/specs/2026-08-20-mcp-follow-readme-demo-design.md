@@ -27,7 +27,7 @@ Keep the TUI status bar visible. The `MCP ·follow` indicator and Copilot's real
 MCP tool-call cards are the visual
 proof that the screen changes come from the external assistant.
 
-Capture at approximately 1440 by 900 pixels and export the final asset at
+Capture at approximately 1440 by 800 pixels and export the final asset at
 1280 pixels wide. The GIF should use 12 to 15 frames per second and remain
 small enough for the README to load quickly, targeting 8 MB or less.
 
