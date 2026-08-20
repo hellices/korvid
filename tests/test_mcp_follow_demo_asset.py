@@ -69,6 +69,19 @@ def test_readme_embeds_mcp_follow_demo() -> None:
     assert "**One prompt. Korvid follows.**" in readme
 
 
+def test_recording_tape_owns_prompt_entry() -> None:
+    runbook = (ROOT / "docs" / "demo" / "mcp-follow.md").read_text()
+    tape = (ROOT / "docs" / "demo" / "mcp-follow.tape").read_text()
+    prompt = (
+        "Use korvid MCP in order: list_resources shop pods → "
+        "get_logs unhealthy one → helm_list_releases."
+    )
+
+    assert "Leave the Copilot pane focused at its empty prompt" in runbook
+    assert "Do not enter the scenario prompt yourself" in runbook
+    assert f'Type "{prompt}"' in tape
+
+
 def test_gif_duration_ignores_marker_bytes_inside_image_data() -> None:
     header = b"GIF89a\x01\x00\x01\x00\x00\x00\x00"
     real_control = b"\x21\xf9\x04\x00\x05\x00\x00\x00"

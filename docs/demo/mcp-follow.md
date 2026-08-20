@@ -54,7 +54,9 @@ copilot --disable-builtin-mcps --allow-all-tools \
   --available-tools=korvid
 ```
 
-Keep `MCP ·follow` visible. Enter this prompt before capture:
+Keep `MCP ·follow` visible. Leave the Copilot pane focused at its empty prompt
+before running VHS. Do not enter the scenario prompt yourself; the tape types
+and submits it after capture starts:
 
 > Use korvid MCP in order: list_resources shop pods → get_logs unhealthy one
 > → helm_list_releases.

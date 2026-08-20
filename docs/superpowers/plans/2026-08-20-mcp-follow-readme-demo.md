@@ -217,9 +217,9 @@ copilot --disable-builtin-mcps --allow-all-tools \
   --available-tools=korvid
 ```
 
-Keep `MCP ·follow` visible.
-
-Enter this prompt before capture:
+Keep `MCP ·follow` visible. Leave the Copilot pane focused at its empty prompt
+before running VHS. Do not enter the scenario prompt yourself; the tape types
+and submits it after capture starts:
 
 > Use korvid MCP in order: list_resources shop pods → get_logs unhealthy one
 > → helm_list_releases.
@@ -419,7 +419,7 @@ uv run ruff format --check tests/test_mcp_follow_demo_asset.py
 git diff --check
 ```
 
-Expected: five tests pass, ruff check and format pass, and no whitespace errors
+Expected: six tests pass, ruff check and format pass, and no whitespace errors
 are reported.
 
 - [ ] **Step 6: Inspect the final README rendering**
