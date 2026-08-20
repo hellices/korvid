@@ -152,7 +152,8 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Refusing to reuse existing tmux session: korvid-mcp-demo" in runbook
     assert "if ! tmux new-session" in runbook
     assert 'if ! copilot mcp remove "$recording_server"; then' in runbook
-    assert runbook.index("copilot mcp remove") < runbook.index("helm uninstall")
+    assert runbook.index("copilot mcp remove") < runbook.index("V1Preconditions")
+    assert "helm uninstall" not in runbook
     for variable in ("idle_start", "idle_end", "demo_end"):
         assert re.search(rf"^{variable}=\d+(?:\.\d+)?$", runbook, re.MULTILINE)
         assert f"${{{variable}}}" in runbook
@@ -173,7 +174,7 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert "Failed to create the demo state directory" in runbook
     assert "Failed to write the demo context marker" in runbook
     assert 'test "$cluster_uid" = "$prepared_cluster_uid"' in runbook
-    assert '--kube-context "$prepared_context"' in runbook
+    assert '--context "$prepared_context"' in runbook
     assert "korvid.dev/demo=mcp-follow" in runbook
     assert "create namespace shop; then" in runbook
     assert "label namespace shop korvid.dev/demo=mcp-follow; then" in runbook

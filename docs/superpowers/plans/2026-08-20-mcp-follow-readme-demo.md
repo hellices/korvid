@@ -518,17 +518,6 @@ else
   echo "Recording MCP server is already absent; continuing cleanup" >&2
 fi
 if [ "$namespace_exists" = true ]; then
-  if ! release="$(helm list --namespace shop --kubeconfig "$demo_kubeconfig" \
-    --kube-context "$prepared_context" --filter '^shop-demo$' --short)"; then
-    echo "Failed to determine recording release state; cleanup state retained" >&2
-    exit 1
-  fi
-  if [ "$release" = "shop-demo" ] &&
-    ! helm uninstall shop-demo --namespace shop --kubeconfig "$demo_kubeconfig" \
-      --kube-context "$prepared_context"; then
-    echo "Failed to uninstall the recording release; cleanup state retained" >&2
-    exit 1
-  fi
   if ! DEMO_KUBECONFIG="$demo_kubeconfig" DEMO_CONTEXT="$prepared_context" \
     DEMO_NAMESPACE_UID="$prepared_namespace_uid" uv run --no-sync python - <<'PY'
 import os
