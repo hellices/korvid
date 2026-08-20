@@ -635,12 +635,13 @@ assertion failures for raw runtime pip strings and stale smoke descriptions.
 Also strengthen existing behavioral tests:
 
 - `tests/test_main_wiring.py`: MCP and agent startup failures assert their
-  context prefix, their specific `korvid[mcp]`/`korvid[agent]` requirement,
-  and both isolated tool commands.
+  context prefix, named missing feature, cumulative `korvid[all,entra]`
+  requirement, and both isolated tool commands.
 - `tests/test_observability_wiring.py`: configured-backend failure asserts
-  `korvid[observability]` and both isolated commands.
+  the named observability feature, cumulative requirement, and both isolated
+  commands.
 - `tests/ui/test_agent_wiring.py`: agent setup and MCP notifications assert
-  their specific extra.
+  their named missing feature and the cumulative requirement.
 - `tests/providers/test_entra.py`: force the lazy Azure import to fail and
   assert `korvid[all,entra]`, both isolated commands, and no raw pip command.
 

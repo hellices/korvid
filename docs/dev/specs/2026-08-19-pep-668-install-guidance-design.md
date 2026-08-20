@@ -52,7 +52,9 @@ equivalent alternative. Keep pip examples only where the text establishes an
 isolated interpreter first.
 
 This is the selected approach. It fixes the misleading source, follows the
-project's existing packaging design, and adds no runtime or installer code.
+project's existing packaging design, and adds no installer or
+dependency-management code. Runtime changes are limited to safe recovery
+messages for missing optional extras.
 
 ### 2. Add a korvid installer wrapper
 

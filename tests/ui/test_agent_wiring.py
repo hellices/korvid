@@ -305,10 +305,10 @@ async def test_ai_command_without_configurator_notifies() -> None:
         # No crash and no setup screen pushed.
         from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 
-        text = _notification_text(app)
         notification = next(
             n for n in app._notifications if "Agent setup unavailable" in str(n.message)
         )
+        text = str(notification.message)
         requirement = f"korvid[all,entra]=={__version__}"
         assert "Agent setup unavailable" in text
         assert "including agent" in text
@@ -1046,7 +1046,7 @@ async def test_mcp_command_without_controller_does_not_crash() -> None:
             label="mcp unavailable notification shown",
         )
         notification = next(n for n in app._notifications if "MCP unavailable" in str(n.message))
-        text = _notification_text(app)
+        text = str(notification.message)
         requirement = f"korvid[all,entra]=={__version__}"
         assert "MCP unavailable" in text
         assert "including mcp" in text

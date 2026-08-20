@@ -1537,6 +1537,20 @@ def test_readme_describes_pep_668_without_an_inaccurate_fedora_claim() -> None:
     assert "Fedora 38" not in quick_start
 
 
+def test_optional_feature_docs_follow_the_project_version() -> None:
+    version = _project_version()
+    root = Path(__file__).parents[1]
+    agent = (root / "docs" / "agent.md").read_text(encoding="utf-8")
+    observability = (root / "docs" / "observability.md").read_text(encoding="utf-8")
+
+    assert f"uv tool install --force 'korvid[all,entra]=={version}'" in agent
+    assert f"pipx install --force 'korvid[all,entra]=={version}'" in agent
+    assert f"uv tool install 'korvid[agent,observability]=={version}'" in observability
+    assert f"uv tool install 'korvid[mcp,observability]=={version}'" in observability
+    assert "pip install korvid" not in agent
+    assert "pip install " not in observability
+
+
 def test_release_runbook_install_section_uses_tool_managed_environments() -> None:
     install = markdown_section(_release_runbook(), "Install, reinstall, and uninstall from PyPI")
     assert "These commands use isolated tool-managed environments." in install
