@@ -188,14 +188,14 @@ kubectl --context "$context" label namespace shop korvid.dev/demo=mcp-follow
 
 helm upgrade --install shop-demo docs/demo/mcp-follow-fixture \
   --namespace shop --kube-context "$context"
-kubectl -n shop get pods --watch
+kubectl --context "$context" -n shop get pods --watch
 ```
 
 Stop the watch with Ctrl-C after the `payment-worker` pod shows `Error` or
 `CrashLoopBackOff`, then confirm Kubernetes recorded the restart backoff:
 
 ```sh
-kubectl -n shop get events \
+kubectl --context "$context" -n shop get events \
   --field-selector reason=BackOff,type=Warning
 ```
 
@@ -222,14 +222,16 @@ case "$prepared_context" in
 esac
 demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
 mkdir -p "$demo_home/.config/korvid"
-printf 'kube_context: %s\n' "$prepared_context" \
+printf 'kube_context: %s\nmcp:\n  enabled: true\n  follow: true\n' "$prepared_context" \
   > "$demo_home/.config/korvid/config.yaml"
 demo_kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
-HOME="$demo_home" KUBECONFIG="$demo_kubeconfig" korvid --mcp --namespace shop
+tmux new-session -d -s korvid-mcp-demo -x 160 -y 45 -c "$PWD" \
+  "HOME=\"$demo_home\" KUBECONFIG=\"$demo_kubeconfig\" korvid --mcp --namespace shop"
+tmux set-option -t korvid-mcp-demo status off
 ```
 
-In korvid, run `:mcp follow on`. Register only the three read tools used by the
-recording:
+Wait until the left pane status shows `MCP on` and `·follow`, then register only
+the three read tools used by the recording:
 
 ```sh
 copilot mcp add --transport http \
@@ -237,19 +239,19 @@ copilot mcp add --transport http \
   korvid http://127.0.0.1:7878/mcp
 ```
 
-Create a tmux session named `korvid-mcp-demo`, place korvid in the left pane and
-an interactive Copilot CLI in the right pane, and size the regions
-approximately 75% TUI / 25% Copilot. Start Copilot with only the registered korvid server available. Here
-`--available-tools=korvid` is Copilot CLI's server-level MCP selector:
+Start Copilot in a 35-column right pane. Here `--available-tools=korvid` is
+Copilot CLI's server-level MCP selector:
 
 ```sh
-copilot --disable-builtin-mcps --allow-all-tools \
-  --available-tools=korvid
+tmux split-window -h -l 35 -t korvid-mcp-demo:0 -c "$PWD" \
+  "copilot --disable-builtin-mcps --allow-all-tools --available-tools=korvid"
+tmux select-pane -t korvid-mcp-demo:0.1
 ```
 
-Keep `MCP ·follow` visible. Leave the Copilot pane focused at its empty prompt
-before running VHS. Do not enter the scenario prompt yourself; the tape types
-and submits it after capture starts:
+Complete any Copilot trust prompt.
+Leave the Copilot pane focused at its empty prompt before running VHS.
+Do not enter the scenario prompt yourself; the tape types and submits it after
+capture starts:
 
 > Use korvid MCP in order: list_resources shop pods → get_logs unhealthy one
 > → helm_list_releases.

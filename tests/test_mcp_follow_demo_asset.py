@@ -118,6 +118,8 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Do not enter the scenario prompt yourself" in runbook
     assert "Start the visible capture with Enter" not in runbook
     assert f'Type "{prompt}"' in tape
+    assert runbook.index("tmux new-session") < runbook.index("korvid --mcp")
+    assert "tmux select-pane -t korvid-mcp-demo:0.1" in runbook
 
 
 def test_recording_runbook_only_deletes_namespace_it_created() -> None:
@@ -128,9 +130,11 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert 'test "$context" = "$prepared_context"' in runbook
     assert '--kube-context "$prepared_context"' in runbook
     assert "korvid.dev/demo=mcp-follow" in runbook
+    assert 'kubectl --context "$context" -n shop get pods --watch' in runbook
+    assert 'kubectl --context "$context" -n shop get events' in runbook
     assert "Refusing MCP startup after context changed" in runbook
     assert "kube_context: %s" in runbook
-    assert 'HOME="$demo_home"' in runbook
+    assert 'HOME=\\"$demo_home\\"' in runbook
     assert (
         'kubectl --context "$prepared_context" delete namespace shop --ignore-not-found' in runbook
     )
