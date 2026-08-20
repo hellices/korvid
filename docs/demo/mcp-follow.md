@@ -13,6 +13,10 @@ case "$context" in
   kind-*|k3d-*|minikube|docker-desktop) ;;
   *) echo "Refusing to seed non-local context: $context" >&2; exit 1 ;;
 esac
+if kubectl get namespace shop >/dev/null 2>&1; then
+  echo "Refusing to reuse existing namespace: shop" >&2
+  exit 1
+fi
 
 helm upgrade --install shop-demo docs/demo/mcp-follow-fixture \
   --namespace shop --create-namespace
@@ -114,6 +118,13 @@ pod list, logs, and Helm views are each readable.
 ## Clean up
 
 ```sh
+context="$(kubectl config current-context)"
+case "$context" in
+  kind-*|k3d-*|minikube|docker-desktop) ;;
+  *) echo "Refusing to clean non-local context: $context" >&2; exit 1 ;;
+esac
+
 helm uninstall shop-demo --namespace shop
+kubectl delete namespace shop --ignore-not-found
 copilot mcp remove korvid
 ```
