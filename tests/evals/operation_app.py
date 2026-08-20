@@ -706,6 +706,51 @@ def _select_target_row(app: KorvidApp, journey: OperationJourney, journal: Actio
     return False
 
 
+def _select_neutral_row(app: KorvidApp, journey: OperationJourney, journal: ActionJournal) -> bool:
+    """Put the cursor on a deterministic non-target row for an ambiguity prompt.
+
+    When the fixture is asking the model to clarify between same-named
+    objects, seeding the real target row would hand over the answer before
+    the first turn. A neutral row keeps the screen context truthful without
+    pre-disambiguating the write target.
+    """
+    table = app.query_one(ResourceTable)
+    for index, row in enumerate(table.ordered_rows):
+        key = str(row.key.value)
+        _namespace, _slash, name = key.partition("/")
+        if name == journey.target.name:
+            continue
+        table.move_cursor(row=index)
+        journal.append(
+            event="screen_context_seeded",
+            actor="fixture_actor",
+            result="row_key",
+            detail=summarize(row_key=key),
+        )
+        return True
+    return False
+
+
+def _needs_namespace_clarification(journey: OperationJourney) -> bool:
+    """Whether turn 1 must start from a namespace-neutral screen context."""
+    if len(journey.turns) < 2:
+        return False
+    if journey.target.namespace.casefold() in journey.turns[0].casefold():
+        return False
+    target = journey.target
+    for manifest in journey.cluster.objects:
+        metadata = manifest.get("metadata") or {}
+        group, _, _version = str(manifest.get("apiVersion") or "").rpartition("/")
+        if (
+            str(manifest.get("kind") or "") == target.kind
+            and group == target.group
+            and str(metadata.get("name") or "") == target.name
+            and str(metadata.get("namespace") or "") != target.namespace
+        ):
+            return True
+    return False
+
+
 def _turn_ended(journal: ActionJournal, completed: int) -> Callable[[], bool]:
     """Observable turn end: the runtime wrapper journaled `turn_finished`
     (after capturing the answer) more times than when this turn started."""
@@ -783,6 +828,13 @@ async def _run_turns(
 ) -> None:
     panel = app.query_one(AgentPanel)
     for index, text in enumerate(journey.turns):
+        if index > 0 and _needs_namespace_clarification(journey):
+            await app.agent_navigate(journey.target.plural, journey.target.namespace)
+            await until(
+                pilot,
+                lambda: _select_target_row(app, journey, journal),
+                label="fixture target row selected",
+            )
         completed = journal.count("turn_finished")
         journal.append(event="user_turn", actor="fixture_actor", detail=summarize(count=index + 1))
         if index == 0:
@@ -997,12 +1049,20 @@ async def run_operation_journey(
     try:
         async with app.run_test() as pilot:
             app.query_one(AgentPanel).display = True
-            await app.agent_navigate(journey.target.plural, journey.target.namespace)
-            await until(
-                pilot,
-                lambda: _select_target_row(app, journey, journal),
-                label="fixture target row selected",
-            )
+            if _needs_namespace_clarification(journey):
+                await app.agent_navigate(journey.target.plural, ALL_NAMESPACES)
+                await until(
+                    pilot,
+                    lambda: _select_neutral_row(app, journey, journal),
+                    label="ambiguity journey neutral row selected",
+                )
+            else:
+                await app.agent_navigate(journey.target.plural, journey.target.namespace)
+                await until(
+                    pilot,
+                    lambda: _select_target_row(app, journey, journal),
+                    label="fixture target row selected",
+                )
             await _run_turns(app, pilot, journey, journal, driver, turn_timeout=turn_timeout)
     finally:
         aclose = getattr(raw_provider, "aclose", None)

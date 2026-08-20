@@ -45,6 +45,57 @@ def _get(kind: str, name: str, namespace: str) -> ToolStep:
 
 
 OPERATION_SCRIPTS: dict[str, Script] = {
+    "scale-no-op": _script(
+        _get("deployments", "checkout-b", "shop-a"),
+        "checkout-b is already at 3 replicas in shop-a, so no scale was requested and"
+        " nothing changed.",
+    ),
+    "scale-ambiguous-namespace": _script(
+        ("list_resources", {"kind": "deployments"}),
+        "There are two deployments named web, one in shop-a and one in shop-b."
+        " Which namespace should I scale? I have changed nothing.",
+        _get("deployments", "web", "shop-b"),
+        (
+            "scale_resource",
+            {"kind": "deployments", "name": "web", "namespace": "shop-b", "replicas": 4},
+        ),
+        _get("deployments", "web", "shop-b"),
+        "Scaled web in shop-b; a fresh read shows it is now 4 replicas.",
+    ),
+    "scale-same-name-replacement": _script(
+        _get("deployments", "checkout-a", "shop-a"),
+        (
+            "scale_resource",
+            {"kind": "deployments", "name": "checkout-a", "namespace": "shop-a", "replicas": 3},
+        ),
+        _get("deployments", "checkout-a", "shop-a"),
+        "The scale failed: checkout-a was replaced while you were deciding, so the API"
+        " answered 409 conflict and nothing changed.",
+    ),
+    "restart-denied": _script(
+        _get("deployments", "api", "shop-a"),
+        ("rollout_restart", {"kind": "deployments", "name": "api", "namespace": "shop-a"}),
+        "You declined the restart, so nothing changed. I will not retry unless you ask again.",
+    ),
+    "restart-approval-expired": _script(
+        _get("deployments", "worker", "shop-a"),
+        ("rollout_restart", {"kind": "deployments", "name": "worker", "namespace": "shop-a"}),
+        "The approval request expired before it was answered, so the restart did not run.",
+    ),
+    "scale-rbac-denied": _script(
+        _get("deployments", "payments-b", "shop-b"),
+        (
+            "scale_resource",
+            {"kind": "deployments", "name": "payments-b", "namespace": "shop-b", "replicas": 5},
+        ),
+        "I cannot scale payments-b: the cluster refused with missing permission"
+        " patch deployments/scale. No change was made.",
+    ),
+    "edit-unsupported": _script(
+        _get("deployments", "billing", "shop-a"),
+        "I cannot edit a container image on this profile; that is not supported here."
+        " Use the TUI edit key or the full profile. I made no change.",
+    ),
     "scale-deployment-up": _script(
         _get("deployments", "checkout-a", "shop-a"),
         (
