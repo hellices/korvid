@@ -35,7 +35,13 @@ fi
 identity_ready=false
 rollback_incomplete_identity() {
   if [ "$identity_ready" != true ]; then
-    k3d cluster delete "$cluster_name"
+    if k3d cluster delete "$cluster_name"; then
+      rm -f "$cluster_name_file" "$demo_state_dir/mcp-demo-context" \
+        "$demo_state_dir/mcp-demo-kubeconfig" \
+        "$demo_state_dir/mcp-demo-cluster-uid"
+    else
+      echo "Cluster rollback failed; identity markers retained" >&2
+    fi
   fi
 }
 trap rollback_incomplete_identity EXIT
@@ -45,25 +51,21 @@ demo_kubeconfig="$demo_state_dir/mcp-demo-kubeconfig"
 demo_cluster_uid_file="$demo_state_dir/mcp-demo-cluster-uid"
 if ! printf '%s\n' "$context" > "$demo_context_file"; then
   echo "Failed to write the demo context marker" >&2
-  echo "Dedicated cluster retained for cleanup: $cluster_name" >&2
   exit 1
 fi
 if ! kubectl --context "$context" config view --minify --flatten --raw \
   > "$demo_kubeconfig"; then
   echo "Failed to snapshot the demo kubeconfig" >&2
-  echo "Dedicated cluster retained for cleanup: $cluster_name" >&2
   exit 1
 fi
 if ! cluster_uid="$(kubectl --kubeconfig "$demo_kubeconfig" \
   --context "$context" get namespace kube-system \
   -o jsonpath='{.metadata.uid}')"; then
   echo "Failed to read the demo cluster identity" >&2
-  echo "Dedicated cluster retained for cleanup: $cluster_name" >&2
   exit 1
 fi
 if ! printf '%s\n' "$cluster_uid" > "$demo_cluster_uid_file"; then
   echo "Failed to write the demo cluster identity" >&2
-  echo "Dedicated cluster retained for cleanup: $cluster_name" >&2
   exit 1
 fi
 identity_ready=true
@@ -151,7 +153,7 @@ if ! mkdir -p "$demo_home/.config/korvid"; then
   echo "Failed to create the isolated config directory" >&2
   exit 1
 fi
-if ! printf 'kube_context: %s\nmcp:\n  enabled: true\n  follow: true\n' \
+if ! printf 'kube_context: %s\nmcp:\n  enabled: true\n  follow: true\n  port: 17878\n' \
   "$prepared_context" > "$demo_home/.config/korvid/config.yaml"; then
   echo "Failed to write the isolated korvid config" >&2
   exit 1
@@ -171,6 +173,37 @@ if ! tmux set-option -t "$session_name" status off; then
   echo "Failed to configure the recording tmux session" >&2
   exit 1
 fi
+endpoint_registry="$demo_home/.local/state/korvid/mcp-endpoint.json"
+mcp_url_file="$demo_state_dir/mcp-demo-url"
+for _attempt in $(seq 1 50); do
+  [ -s "$endpoint_registry" ] && break
+  sleep 0.2
+done
+if ! mcp_url="$(python3 - "$endpoint_registry" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+registry = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+matches = [
+    server["url"]
+    for server in registry.get("servers", {}).values()
+    if server.get("port") == 17878
+]
+if len(matches) != 1 or matches[0] != "http://127.0.0.1:17878/mcp":
+    raise SystemExit("isolated korvid MCP endpoint not found")
+print(matches[0])
+PY
+)"; then
+  tmux kill-session -t "$session_name"
+  echo "Refusing MCP registration without the isolated korvid endpoint" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$mcp_url" > "$mcp_url_file"; then
+  tmux kill-session -t "$session_name"
+  echo "Failed to write the recording MCP URL" >&2
+  exit 1
+fi
 ```
 
 Wait until the left pane status shows `MCP on` and `·follow`, then register only
@@ -181,6 +214,12 @@ cluster_name="$(cat "$(dirname "$demo_context_file")/mcp-demo-cluster-name")"
 run_id="${cluster_name#korvid-mcp-demo-}"
 recording_server="korvid-mcp-demo-$run_id"
 registration_file="$(dirname "$demo_context_file")/mcp-demo-registration"
+mcp_url_file="$(dirname "$demo_context_file")/mcp-demo-url"
+if [ ! -r "$mcp_url_file" ]; then
+  echo "Refusing registration without the verified MCP URL" >&2
+  exit 1
+fi
+mcp_url="$(cat "$mcp_url_file")"
 if copilot mcp get "$recording_server" >/dev/null 2>&1; then
   echo "Refusing to replace existing Copilot MCP server: $recording_server" >&2
   exit 1
@@ -191,7 +230,7 @@ if ! printf '%s\n' "$recording_server" > "$registration_file"; then
 fi
 if ! copilot mcp add --transport http \
   --tools 'list_resources,get_logs,helm_list_releases' \
-  "$recording_server" http://127.0.0.1:7878/mcp; then
+  "$recording_server" "$mcp_url"; then
   echo "Failed to register the recording MCP server" >&2
   rm -f "$registration_file"
   exit 1
@@ -304,6 +343,7 @@ if tmux has-session -t "$cluster_name" 2>/dev/null; then
   tmux kill-session -t "$cluster_name"
 fi
 registration_file="$demo_state_dir/mcp-demo-registration"
+mcp_url_file="$demo_state_dir/mcp-demo-url"
 if [ -r "$registration_file" ]; then
   recording_server="$(cat "$registration_file")"
   case "$recording_server" in
@@ -341,5 +381,5 @@ fi
 demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
 rm -rf -- "$demo_home"
 rm -f "$cluster_name_file" "$demo_context_file" "$demo_kubeconfig" \
-  "$demo_cluster_uid_file"
+  "$demo_cluster_uid_file" "$mcp_url_file"
 ```

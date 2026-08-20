@@ -152,6 +152,9 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert int(capture_wait.group(1)) >= 30
     assert "--available-tools=$recording_server" in runbook
     assert "mcp-demo-registration" in runbook
+    assert "mcp-endpoint.json" in runbook
+    assert "mcp-demo-url" in runbook
+    assert "http://127.0.0.1:7878/mcp" not in runbook
     assert 'recording_server="korvid-mcp-demo-$run_id"' in runbook
     assert "Failed to write the recording MCP marker" in runbook
     assert runbook.index("mcp-demo-registration") < runbook.index("copilot mcp add")
@@ -178,6 +181,7 @@ def test_recording_runbook_only_deletes_cluster_it_created() -> None:
     assert "--kubeconfig-switch-context=false" in runbook
     assert 'k3d cluster delete "$cluster_name"' in runbook
     assert "rollback_incomplete_identity" in runbook
+    assert "Dedicated cluster retained for cleanup" not in runbook
     assert "mcp-demo-context" in runbook
     assert "mcp-demo-kubeconfig" in runbook
     assert "mcp-demo-cluster-uid" in runbook
@@ -264,9 +268,11 @@ def test_mcp_follow_demo_asset_fits_readme_budget() -> None:
     payload = ASSET.read_bytes()
     assert payload[:6] in {b"GIF87a", b"GIF89a"}
     assert int.from_bytes(payload[6:8], "little") == 1280
+    assert int.from_bytes(payload[8:10], "little") > 0
     delays = _gif_frame_delays_centiseconds(payload)
     assert min(delays) >= 6
-    assert sum(delays) <= 1500
+    assert 800 <= sum(delays) <= 1500
+    assert len(delays) >= 90
     effective_fps = _gif_effective_frame_rate(delays)
     assert 11.5 <= effective_fps <= 15.5, effective_fps
     assert len(payload) <= 8 * 1024 * 1024
