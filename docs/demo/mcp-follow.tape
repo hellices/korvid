@@ -17,7 +17,7 @@ Set Shell bash
 # The export step in mcp-follow.md scales this 1440px source to 1280px/12fps.
 
 Hide
-Type "tmux attach-session -t $(cat ${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-cluster-name)"
+Type "tmux attach-session -t \"$(cat \"${XDG_STATE_HOME:-$HOME/.local/state}/korvid/mcp-demo-cluster-name\")\""
 Enter
 Sleep 3s
 Ctrl+B

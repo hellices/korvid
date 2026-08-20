@@ -146,6 +146,7 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Do not enter the scenario prompt yourself" in runbook
     assert "Start the visible capture with Enter" not in runbook
     assert f'Type "{prompt}"' in tape
+    assert 'tmux attach-session -t \\"$(cat \\"${XDG_STATE_HOME' in tape
     assert prompt in spec
     assert "resize-window -A" in tape
     assert runbook.index("tmux new-session") < runbook.index("korvid --mcp")
@@ -189,6 +190,7 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert "Failed to encode the trimmed recording" in runbook
     assert "Failed to publish the trimmed recording" in runbook
     assert "Failed to remove the source recording" in runbook
+    assert "Run every command from the repository root" in runbook
     assert "at most 15 seconds" in runbook
     assert "8,388,608 bytes" in runbook
     assert "1440 by 800 pixels" in spec

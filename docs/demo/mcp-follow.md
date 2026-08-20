@@ -2,6 +2,7 @@
 
 This recording uses a disposable local cluster. Never record a production
 context: MCP log results are not credential-pattern masked by korvid.
+Run every command from the repository root so the chart and asset paths resolve.
 
 ## Prepare the fixture
 
