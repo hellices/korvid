@@ -25,7 +25,8 @@ Show
 Type "Use korvid MCP in order: list_resources shop pods → get_logs unhealthy one → helm_list_releases."
 Sleep 400ms
 Enter
-Sleep 20s
+# Capture a slow model too; export trims the observed tail at demo_end.
+Sleep 45s
 
 Hide
 Ctrl+B

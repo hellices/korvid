@@ -25,18 +25,18 @@ def _skip_gif_sub_blocks(payload: bytes, cursor: int) -> int:
         cursor += size
 
 
-def _read_gif_extension(payload: bytes, cursor: int, delays: list[int]) -> int:
+def _read_gif_extension(payload: bytes, cursor: int) -> tuple[int, int | None]:
     _require_gif_bytes(payload, cursor, 1, "extension label")
     label = payload[cursor]
     cursor += 1
     if label != 0xF9:
-        return _skip_gif_sub_blocks(payload, cursor)
+        return _skip_gif_sub_blocks(payload, cursor), None
 
     _require_gif_bytes(payload, cursor, 6, "graphic control extension")
     if payload[cursor] != 4 or payload[cursor + 5] != 0:
         raise ValueError(f"invalid GIF graphic control extension at offset {cursor}")
-    delays.append(int.from_bytes(payload[cursor + 2 : cursor + 4], "little"))
-    return cursor + 6
+    delay = int.from_bytes(payload[cursor + 2 : cursor + 4], "little")
+    return cursor + 6, delay
 
 
 def _skip_gif_image(payload: bytes, cursor: int) -> int:
@@ -51,6 +51,36 @@ def _skip_gif_image(payload: bytes, cursor: int) -> int:
     return _skip_gif_sub_blocks(payload, cursor + 1)
 
 
+def _read_gif_block(
+    payload: bytes,
+    cursor: int,
+    pending_delay: int | None,
+    delays: list[int],
+) -> tuple[int, int | None, bool]:
+    introducer_offset = cursor
+    introducer = payload[cursor]
+    cursor += 1
+    if introducer == 0x3B:
+        if pending_delay is not None:
+            raise ValueError("GIF frame delay has no image")
+        return cursor, None, True
+    if introducer == 0x21:
+        cursor, delay = _read_gif_extension(payload, cursor)
+        if delay is None:
+            return cursor, pending_delay, False
+        if pending_delay is not None:
+            raise ValueError(f"multiple GIF frame delays before image at offset {cursor}")
+        return cursor, delay, False
+    if introducer == 0x2C:
+        if pending_delay is None:
+            raise ValueError(f"GIF image has no frame delay at offset {introducer_offset}")
+        delays.append(pending_delay)
+        return _skip_gif_image(payload, cursor), None, False
+    raise ValueError(
+        f"unexpected GIF block introducer 0x{introducer:02x} at offset {introducer_offset}"
+    )
+
+
 def _gif_frame_delays_centiseconds(payload: bytes) -> list[int]:
     if payload[:6] not in {b"GIF87a", b"GIF89a"}:
         raise ValueError("invalid GIF signature")
@@ -63,23 +93,13 @@ def _gif_frame_delays_centiseconds(payload: bytes) -> list[int]:
         cursor += table_size
 
     delays: list[int] = []
-    trailer_offset: int | None = None
+    pending_delay: int | None = None
+    saw_trailer = False
     while cursor < len(payload):
-        introducer = payload[cursor]
-        cursor += 1
-        if introducer == 0x3B:
-            trailer_offset = cursor - 1
+        cursor, pending_delay, saw_trailer = _read_gif_block(payload, cursor, pending_delay, delays)
+        if saw_trailer:
             break
-        if introducer == 0x21:
-            cursor = _read_gif_extension(payload, cursor, delays)
-            continue
-        if introducer == 0x2C:
-            cursor = _skip_gif_image(payload, cursor)
-            continue
-        raise ValueError(
-            f"unexpected GIF block introducer 0x{introducer:02x} at offset {cursor - 1}"
-        )
-    if trailer_offset is None:
+    if not saw_trailer:
         raise ValueError("missing GIF trailer")
     if cursor != len(payload):
         raise ValueError(f"trailing bytes after GIF trailer at offset {cursor}")
@@ -93,7 +113,10 @@ def _gif_duration_centiseconds(payload: bytes) -> int:
 
 
 def _gif_effective_frame_rate(delays: list[int]) -> float:
-    return len(delays) * 100 / sum(delays)
+    total = sum(delays)
+    if total <= 0:
+        raise ValueError("GIF has no positive frame delays")
+    return len(delays) * 100 / total
 
 
 def test_readme_embeds_mcp_follow_demo() -> None:
@@ -104,6 +127,7 @@ def test_readme_embeds_mcp_follow_demo() -> None:
     section = readme.split("## Watch MCP follow", 1)[1].split("## Status", 1)[0]
     assert section.index("<details open>") < section.index(ASSET_URL)
     assert section.index(ASSET_URL) < section.index("</details>")
+    assert "Show or hide the up-to-15-second MCP follow animation" in section
 
 
 def test_recording_tape_owns_prompt_entry() -> None:
@@ -120,6 +144,10 @@ def test_recording_tape_owns_prompt_entry() -> None:
     assert f'Type "{prompt}"' in tape
     assert runbook.index("tmux new-session") < runbook.index("korvid --mcp")
     assert "tmux select-pane -t korvid-mcp-demo:0.1" in runbook
+    assert "Sleep 45s" in tape
+    assert "--available-tools=korvid-mcp-demo" in runbook
+    assert "mcp-demo-registration" in runbook
+    assert "tmux kill-session -t korvid-mcp-demo" in runbook
 
 
 def test_recording_runbook_only_deletes_namespace_it_created() -> None:
@@ -168,14 +196,35 @@ def test_gif_parser_requires_trailer() -> None:
 
 
 def test_gif_parser_rejects_bytes_after_trailer() -> None:
-    payload = b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x21\xf9\x04\x00\x05\x00\x00\x00\x3b\x00"
+    payload = (
+        b"GIF89a\x01\x00\x01\x00\x00\x00\x00"
+        b"\x21\xf9\x04\x00\x05\x00\x00\x00"
+        b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00"
+        b"\x02\x01\x00\x00\x3b\x00"
+    )
 
     with pytest.raises(ValueError, match=r"trailing bytes after GIF trailer at offset \d+"):
         _gif_duration_centiseconds(payload)
 
 
+def test_gif_parser_rejects_image_without_frame_delay() -> None:
+    payload = (
+        b"GIF89a\x01\x00\x01\x00\x00\x00\x00"
+        b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00"
+        b"\x02\x01\x00\x00\x3b"
+    )
+
+    with pytest.raises(ValueError, match="GIF image has no frame delay"):
+        _gif_duration_centiseconds(payload)
+
+
 def test_gif_effective_frame_rate_uses_encoded_delays() -> None:
     assert _gif_effective_frame_rate([8, 9, 8]) == pytest.approx(12.0)
+
+
+def test_gif_effective_frame_rate_rejects_zero_delays() -> None:
+    with pytest.raises(ValueError, match="GIF has no positive frame delays"):
+        _gif_effective_frame_rate([0, 0])
 
 
 def test_mcp_follow_demo_asset_fits_readme_budget() -> None:

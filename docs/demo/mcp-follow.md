@@ -71,17 +71,27 @@ Wait until the left pane status shows `MCP on` and `·follow`, then register onl
 the three read tools used by the recording:
 
 ```sh
-copilot mcp add --transport http \
+recording_server="korvid-mcp-demo"
+registration_file="$(dirname "$demo_context_file")/mcp-demo-registration"
+if copilot mcp get "$recording_server" >/dev/null 2>&1; then
+  echo "Refusing to replace existing Copilot MCP server: $recording_server" >&2
+  exit 1
+fi
+if ! copilot mcp add --transport http \
   --tools 'list_resources,get_logs,helm_list_releases' \
-  korvid http://127.0.0.1:7878/mcp
+  "$recording_server" http://127.0.0.1:7878/mcp; then
+  echo "Failed to register the recording MCP server" >&2
+  exit 1
+fi
+printf '%s\n' "$recording_server" > "$registration_file"
 ```
 
-Start Copilot in a 35-column right pane. Here `--available-tools=korvid` is
-Copilot CLI's server-level MCP selector:
+Start Copilot in a 35-column right pane. Here
+`--available-tools=korvid-mcp-demo` is Copilot CLI's server-level MCP selector:
 
 ```sh
 tmux split-window -h -l 35 -t korvid-mcp-demo:0 -c "$PWD" \
-  "copilot --disable-builtin-mcps --allow-all-tools --available-tools=korvid"
+  "copilot --disable-builtin-mcps --allow-all-tools --available-tools=korvid-mcp-demo"
 tmux select-pane -t korvid-mcp-demo:0.1
 ```
 
@@ -171,9 +181,23 @@ if [ "$owner" != "mcp-follow" ]; then
   exit 1
 fi
 
+if tmux has-session -t korvid-mcp-demo 2>/dev/null; then
+  tmux kill-session -t korvid-mcp-demo
+fi
 helm uninstall shop-demo --namespace shop --kube-context "$prepared_context"
 kubectl --context "$prepared_context" delete namespace shop --ignore-not-found
-copilot mcp remove korvid
+registration_file="$(dirname "$demo_context_file")/mcp-demo-registration"
+if [ -r "$registration_file" ]; then
+  recording_server="$(cat "$registration_file")"
+  if [ "$recording_server" != "korvid-mcp-demo" ]; then
+    echo "Refusing to remove unexpected MCP registration: $recording_server" >&2
+    exit 1
+  fi
+  copilot mcp remove "$recording_server"
+  rm -f "$registration_file"
+else
+  echo "No demo MCP registration marker; leaving Copilot config unchanged" >&2
+fi
 demo_home="$(dirname "$demo_context_file")/mcp-demo-home"
 rm -rf -- "$demo_home"
 rm -f "$demo_context_file"
