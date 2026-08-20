@@ -42,6 +42,32 @@ def _uv_lock() -> str:
     return (_ROOT / "uv.lock").read_text()
 
 
+def test_lockfile_project_version_matches_pyproject() -> None:
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads(_uv_lock())
+    packages = lock.get("package")
+    assert isinstance(packages, list), "uv.lock package table is not a list"
+    assert packages, "uv.lock has no package entries"
+    korvid_entries = [package for package in packages if package.get("name") == "korvid"]
+    project_entries = []
+    for package in korvid_entries:
+        source = package.get("source", {})
+        if isinstance(source, dict) and "." in (
+            source.get("editable"),
+            source.get("virtual"),
+        ):
+            project_entries.append(package)
+    assert len(project_entries) == 1, (
+        f"uv.lock has {len(project_entries)} local korvid project entries; "
+        f"sources={[package.get('source') for package in korvid_entries]!r}"
+    )
+    korvid = project_entries[0]
+    lock_version = korvid.get("version")
+    assert lock_version == project["project"]["version"], (
+        f"uv.lock korvid version {lock_version!r} != pyproject {project['project']['version']}"
+    )
+
+
 def test_workflow_jobs_returns_jobs_mapping_for_relock_workflow() -> None:
     jobs = workflow_jobs(_RELOCK_WORKFLOW)
     assert {"relock", "propose"} <= jobs.keys()

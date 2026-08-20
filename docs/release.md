@@ -1,7 +1,7 @@
-# korvid v0.2.0 release runbook
+# korvid v0.3.0 release runbook
 
-This runbook covers the `v0.2.0` feature release. `v0.1.2` is the first public
-PyPI release and the supported upgrade source. `v0.1.0` remains immutable,
+This runbook covers the `v0.3.0` feature release. `v0.1.2` is the first public
+PyPI release; `v0.2.0` is the supported upgrade source. `v0.1.0` remains immutable,
 unpublished audit history after its protected tag workflow failed before build,
 attestation, staging, PyPI publication, or GitHub Release creation. `v0.1.1`
 is unpublished audit history for a different reason: it built and staged, then
@@ -12,7 +12,7 @@ and which recovery paths are safe to retry.
 
 ## One-time repository and publisher bindings
 
-Before anyone publishes `v0.2.0`, confirm these external trust boundaries:
+Before anyone publishes `v0.3.0`, confirm these external trust boundaries:
 
 - GitHub tag protection covers `refs/tags/v*` with an immutable rule: only
   trusted release maintainers may create tags, and tag update/deletion is
@@ -136,11 +136,11 @@ if [ -z "$DRY_RUN_COMMIT" ] || [ "$DRY_RUN_COMMIT" != "$COMMIT" ]; then
 fi
 candidate_dir="dist/dry-run-$RUN_ID"
 gh run download "$RUN_ID" --name dist --dir "$candidate_dir"
-CANDIDATE="$PWD/$candidate_dir/korvid-0.2.0-py3-none-any.whl"
+CANDIDATE="$PWD/$candidate_dir/korvid-0.3.0-py3-none-any.whl"
 test -f "$CANDIDATE"
 ```
 
-Install published `korvid[all]==0.1.2` in a clean environment, then upgrade that
+Install published `korvid[all]==0.2.0` in a clean environment, then upgrade that
 same environment from the downloaded candidate:
 
 ```sh
@@ -149,13 +149,13 @@ upgrade_root=$(mktemp -d)
 uv venv --python 3.12 "$upgrade_root/venv"
 upgrade_python="$upgrade_root/venv/bin/python"
 upgrade_korvid="$upgrade_root/venv/bin/korvid"
-uv pip install --python "$upgrade_python" 'korvid[all]==0.1.2'
-"$upgrade_korvid" --version | grep -Fx 'korvid 0.1.2'
+uv pip install --python "$upgrade_python" 'korvid[all]==0.2.0'
+"$upgrade_korvid" --version | grep -Fx 'korvid 0.2.0'
 candidate_url=$("$upgrade_python" -c \
   'import pathlib, sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$CANDIDATE")
 uv pip install --python "$upgrade_python" --upgrade \
   "korvid[all] @ $candidate_url"
-"$upgrade_korvid" --version | grep -Fx 'korvid 0.2.0'
+"$upgrade_korvid" --version | grep -Fx 'korvid 0.3.0'
 "$upgrade_korvid" --help >/dev/null
 "$upgrade_python" -c \
   'import korvid.mcp.server, korvid.obs.prometheus, korvid.providers.registry'
@@ -171,24 +171,24 @@ test ! -e "$runtime_root"
 Record the run ID, exact commit, and command result with the release evidence.
 Do not create or push the release tag until this gate passes.
 
-## Publish `v0.2.0`
+## Publish `v0.3.0`
 
 Create the annotated tag from the reviewed commit, then push only that tag:
 
 ```sh
 set -eu
-if git rev-parse --quiet --verify refs/tags/v0.2.0 >/dev/null; then
-  echo "local tag v0.2.0 already exists; refusing to push it" >&2
+if git rev-parse --quiet --verify refs/tags/v0.3.0 >/dev/null; then
+  echo "local tag v0.3.0 already exists; refusing to push it" >&2
   exit 1
 fi
-git tag -a v0.2.0 "$COMMIT" -m "korvid v0.2.0"
-test "$(git rev-list -n 1 refs/tags/v0.2.0)" = "$COMMIT"
-git push origin refs/tags/v0.2.0
+git tag -a v0.3.0 "$COMMIT" -m "korvid v0.3.0"
+test "$(git rev-list -n 1 refs/tags/v0.3.0)" = "$COMMIT"
+git push origin refs/tags/v0.3.0
 TAG_RUN_ID=
 attempt=0
 while [ -z "$TAG_RUN_ID" ] && [ "$attempt" -lt 30 ]; do
   TAG_RUN_ID=$(gh run list --workflow Release --event push \
-    --branch v0.2.0 --commit "$COMMIT" --limit 1 \
+    --branch v0.3.0 --commit "$COMMIT" --limit 1 \
     --json databaseId --jq '.[0].databaseId // empty') || exit 1
   attempt=$((attempt + 1))
   [ -n "$TAG_RUN_ID" ] || sleep 2
@@ -208,7 +208,7 @@ publishing the final GitHub Release.
 The workflow is intentionally idempotent only inside a narrow boundary:
 
 - If the staged draft release already exists **and** the rerun proves the staged assets are byte-identical, it is safe to resume the idempotent workflow only when the staged assets match.
-- If PyPI already has `0.2.0` but the matching draft release is missing, or if
+- If PyPI already has `0.3.0` but the matching draft release is missing, or if
   the staged assets differ, stop and diagnose.
 - Do **not** attempt recovery by deleting or moving a published tag/version.
 
@@ -219,10 +219,10 @@ attestation from GitHub:
 
 ```sh
 set -eu
-gh release download v0.2.0 --dir dist/v0.2.0
-gh attestation verify dist/v0.2.0/korvid-0.2.0-py3-none-any.whl --repo hellices/korvid
-gh attestation verify dist/v0.2.0/SHA256SUMS --repo hellices/korvid
-(cd dist/v0.2.0 && shasum --algorithm 256 --check SHA256SUMS)
+gh release download v0.3.0 --dir dist/v0.3.0
+gh attestation verify dist/v0.3.0/korvid-0.3.0-py3-none-any.whl --repo hellices/korvid
+gh attestation verify dist/v0.3.0/SHA256SUMS --repo hellices/korvid
+(cd dist/v0.3.0 && shasum --algorithm 256 --check SHA256SUMS)
 ```
 
 The attestation check establishes the provenance of `SHA256SUMS`; the final
@@ -248,13 +248,13 @@ TAP_PR=$(gh pr list --repo hellices/homebrew-korvid \
   --state open \
   --json number,title,baseRefName,headRefName,headRepositoryOwner \
   --jq '[.[] | select(
-    .title == "korvid 0.2.0" and
+    .title == "korvid 0.3.0" and
     .baseRefName == "main" and
-    .headRefName == "bump-korvid-0.2.0" and
+    .headRefName == "bump-korvid-0.3.0" and
     .headRepositoryOwner.login == "hellices"
   )] | if length == 1 then .[0].number else empty end')
 if [ -z "$TAP_PR" ]; then
-  echo "trusted bump-korvid-0.2.0 tap PR not found; use the manual path below" >&2
+  echo "trusted bump-korvid-0.3.0 tap PR not found; use the manual path below" >&2
   exit 1
 fi
 gh pr diff "$TAP_PR" --repo hellices/homebrew-korvid
@@ -269,17 +269,17 @@ trust basis is the release workflow: it is generated from the tag-revalidated
 
 ```sh
 set -eu
-formula_path="$PWD/dist/v0.2.0/korvid.rb"
+formula_path="$PWD/dist/v0.3.0/korvid.rb"
 if [ ! -f "$formula_path" ]; then
-  gh release download v0.2.0 --pattern korvid.rb --dir dist/v0.2.0
+  gh release download v0.3.0 --pattern korvid.rb --dir dist/v0.3.0
 fi
 test -f "$formula_path"
 gh repo clone hellices/homebrew-korvid dist/homebrew-korvid
 cd dist/homebrew-korvid
 if cmp -s "$formula_path" Formula/korvid.rb; then
-  echo "korvid 0.2.0 formula is already present on tap main"
+  echo "korvid 0.3.0 formula is already present on tap main"
 else
-  branch=bump-korvid-0.2.0
+  branch=bump-korvid-0.3.0
   if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
     git switch --track -c "$branch" "origin/$branch"
   else
@@ -290,11 +290,11 @@ else
   if git diff --cached --quiet; then
     echo "verified formula is already present on $branch"
   else
-    git commit -m "korvid 0.2.0"
+    git commit -m "korvid 0.3.0"
     git push -u origin "$branch"
   fi
-  TAP_PR_URL=$(gh pr create --title "korvid 0.2.0" \
-    --body "Generated by the korvid v0.2.0 release workflow from its tag-revalidated uv.lock.")
+  TAP_PR_URL=$(gh pr create --title "korvid 0.3.0" \
+    --body "Generated by the korvid v0.3.0 release workflow from its tag-revalidated uv.lock.")
   TAP_PR=${TAP_PR_URL##*/}
   case "$TAP_PR" in
     ""|*[!0-9]*) echo "could not identify created tap PR: $TAP_PR_URL" >&2; exit 1 ;;
@@ -311,7 +311,7 @@ Finally verify the tap, not merely the formula attached to the source release:
 set -eu
 brew update
 brew upgrade hellices/korvid/korvid || brew install hellices/korvid/korvid
-korvid --version | grep -Fx 'korvid 0.2.0'
+korvid --version | grep -Fx 'korvid 0.3.0'
 brew test hellices/korvid/korvid
 ```
 
@@ -324,9 +324,9 @@ uninstall all target the same application.
 The simplest install is the full feature set:
 
 ```sh
-uv tool install 'korvid[all]==0.2.0'
+uv tool install 'korvid[all]==0.3.0'
 # or
-pipx install 'korvid[all]==0.2.0'
+pipx install 'korvid[all]==0.3.0'
 ```
 
 For unreleased `main` development, install from source instead:
@@ -344,9 +344,9 @@ If you already installed any narrower korvid requirement, reinstall the full
 desired extra set:
 
 ```sh
-uv tool install --force 'korvid[all]==0.2.0'
+uv tool install --force 'korvid[all]==0.3.0'
 # or
-pipx install --force 'korvid[all]==0.2.0'
+pipx install --force 'korvid[all]==0.3.0'
 ```
 
 To remove the package itself:
@@ -452,5 +452,5 @@ The package uninstall command does not run that cleanup for you.
 No dry run can prove the publication path itself. Attestation, staging, PyPI
 upload, finalization, compare-assets recovery, and pre-publication tag
 revalidation remain tag-only boundaries. `v0.1.2` proved that path once;
-`v0.2.0` must still be supervised by a maintainer because its publication is
+`v0.3.0` must still be supervised by a maintainer because its publication is
 irreversible.

@@ -196,9 +196,9 @@ Entra ID auth needs the optional extra. For a tool-managed application install,
 reinstall the complete desired extra set:
 
 ```sh
-uv tool install --force 'korvid[all,entra]==0.2.0'
+uv tool install --force 'korvid[all,entra]==0.3.0'
 # or
-pipx install --force 'korvid[all,entra]==0.2.0'
+pipx install --force 'korvid[all,entra]==0.3.0'
 ```
 
 Use `uv sync --extra entra` for development. Configs written before

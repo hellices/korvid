@@ -27,10 +27,10 @@ best-effort basis.
 ## Supported versions
 
 Only the latest patch in the current published minor line is supported. Until
-`v0.2.0` is published, that remains `0.1.2`. After publication, the latest
-`0.2.x` version is supported and `0.1.2` is superseded. `v0.1.0` and `v0.1.1`
-remain immutable unpublished audit history. `main` is development-only and is
-not a supported target for security fixes.
+`v0.3.0` is published, that is the latest `0.2.x` version. After publication,
+the latest `0.3.x` version is supported and `0.2.x` is superseded. `v0.1.0`
+and `v0.1.1` remain immutable unpublished audit history. `main` is
+development-only and is not a supported target for security fixes.
 
 ## Coordinated disclosure
 
