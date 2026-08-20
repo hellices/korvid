@@ -17,14 +17,14 @@ animation belongs with the README's MCP feature description.
 
 ## Recording composition
 
-Record one VS Code window with two visible regions:
+Record one terminal window with two tmux panes:
 
 - the korvid TUI occupies approximately 75% of the width in an editor-area
   terminal;
-- GitHub Copilot Chat occupies approximately 25% in the secondary side bar.
+- GitHub Copilot CLI occupies approximately 25% in the right pane.
 
-Hide unrelated editor chrome and keep the TUI status bar visible. The
-`MCP ·follow` indicator and Copilot's real MCP tool-call cards are the visual
+Keep the TUI status bar visible. The `MCP ·follow` indicator and Copilot's real
+MCP tool-call cards are the visual
 proof that the screen changes come from the external assistant.
 
 Capture at approximately 1440 by 900 pixels and export the final asset at
@@ -35,8 +35,8 @@ small enough for the README to load quickly, targeting 8 MB or less.
 
 Enter this prompt before recording starts:
 
-> In the shop namespace, find the unhealthy pod, inspect the cause and open
-> its logs, then show me the Helm releases.
+> Use korvid MCP in order: list_resources shop pods → get_logs for the
+> unhealthy one → helm_list_releases.
 
 Start the visible recording with the Enter key. The expected tool and screen
 sequence is:
@@ -44,11 +44,9 @@ sequence is:
 | Time | MCP activity | Visible korvid state |
 |---|---|---|
 | 0–1 s | Prompt submitted | Pod view with `MCP ·follow` visible |
-| 1–4 s | `list_resources` | Shop pod list |
-| 4–7 s | `diagnose_pod` | Describe screen for the unhealthy pod |
-| 7–10 s | `get_logs` | Live logs for that pod |
-| 10–13 s | `helm_list_releases` | Helm release browser |
-| 13–15 s | No new call | End caption: **One prompt. Korvid follows.** |
+| 1–3 s | `list_resources` | Shop pod list |
+| 3–7 s | `get_logs` | Live logs for the unhealthy pod |
+| 7–11 s | `helm_list_releases` | Helm release browser |
 
 Use a stable demo cluster or deterministic fixture data containing one
 obviously unhealthy pod in `shop` and at least one Helm release. Allow the
@@ -68,7 +66,7 @@ idle regions over a global speed increase.
 
 If the model chooses a different tool sequence, repeat the recording rather
 than editing it into the expected sequence. The final take must visibly match
-the tool calls shown in Copilot Chat.
+the tool calls shown in Copilot CLI.
 
 ## Scope and safety
 
@@ -93,18 +91,18 @@ credential-pattern masked by korvid.
 - Add the animation and a one-sentence caption to the README MCP section.
 - Keep `docs/assets/demo.gif` and its existing regeneration workflow unchanged.
 
-The GUI recording itself is intentionally manual because VS Code Copilot Chat
-is part of the evidence. Repository instructions should make the setup,
-scenario, edit constraints, and export command repeatable even though the
-model's response latency is not deterministic.
+VHS attaches to a prepared tmux session because Copilot CLI and the live TUI
+are both part of the evidence. Repository instructions should make the setup,
+scenario, idle cuts, and export command repeatable even though the model's
+response latency is not deterministic.
 
 ## Verification
 
 - Confirm the final runtime is at most 15 seconds.
-- Inspect the GIF at rendered README width and verify all four TUI states are
+- Inspect the GIF at rendered README width and verify all three TUI states are
   distinguishable.
 - Confirm the Chat tool cards match the visible transition order.
 - Confirm `MCP ·follow` remains visible whenever the main TUI is shown.
-- Confirm the final frame is the Helm release browser with the end caption.
+- Confirm the final frame is the Helm release browser.
 - Confirm the file is 1280 pixels wide and no larger than 8 MB.
 - Run existing README and documentation contract tests after the README change.

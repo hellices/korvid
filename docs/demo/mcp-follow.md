@@ -15,14 +15,19 @@ case "$context" in
 esac
 
 helm upgrade --install shop-demo docs/demo/mcp-follow-fixture \
-  --namespace shop --create-namespace --wait=false
+  --namespace shop --create-namespace
 kubectl -n shop get pods --watch
 ```
 
-Stop the watch with Ctrl-C after the `payment-worker` pod shows
-`CrashLoopBackOff`.
+Stop the watch with Ctrl-C after the `payment-worker` pod shows `Error` or
+`CrashLoopBackOff`, then confirm Kubernetes recorded the restart backoff:
 
-## Connect VS Code
+```sh
+kubectl -n shop get events \
+  --field-selector reason=BackOff,type=Warning
+```
+
+## Connect GitHub Copilot CLI
 
 Start korvid:
 
@@ -30,41 +35,57 @@ Start korvid:
 korvid --mcp --namespace shop
 ```
 
-In korvid, run `:mcp follow on`. Configure `.vscode/mcp.json`:
+In korvid, run `:mcp follow on`. Register only the three read tools used by the
+recording:
 
-```json
-{"servers": {"korvid": {"type": "http", "url": "http://127.0.0.1:7878/mcp"}}}
+```sh
+copilot mcp add --transport http \
+  --tools 'list_resources,get_logs,helm_list_releases' \
+  korvid http://127.0.0.1:7878/mcp
 ```
 
-Allow the korvid read-only tools for this recording session. Move the terminal
-into the editor area, place Copilot Chat in the secondary side bar, and size
-the regions approximately 75% TUI / 25% Chat. Keep `MCP ·follow` visible.
+Create a tmux session named `korvid-mcp-demo`, place korvid in the left pane and
+an interactive Copilot CLI in the right pane, and size the regions
+approximately 75% TUI / 25% Copilot. Start Copilot with only the registered
+korvid server available:
 
-Enter this prompt before capture:
+```sh
+copilot --disable-builtin-mcps --allow-all-tools \
+  --available-tools=korvid
+```
 
-> In the shop namespace, find the unhealthy pod, inspect the cause and open
-> its logs, then show me the Helm releases.
+Keep `MCP ·follow` visible. Enter this prompt before capture:
+
+> Use korvid MCP in order: list_resources shop pods → get_logs unhealthy one
+> → helm_list_releases.
 
 Start the visible capture with Enter. The target sequence is:
 
 1. `list_resources` — pod list;
-2. `diagnose_pod` — pod describe;
-3. `get_logs` — live logs;
-4. `helm_list_releases` — Helm release browser.
+2. `get_logs` — live logs;
+3. `helm_list_releases` — Helm release browser.
 
 Repeat the take if the model chooses another order. Do not fake or reorder
 tool cards.
 
 ## Export
 
-Trim only idle regions from the screen recording and save the result as
-`/tmp/korvid-mcp-follow.mov`. Export the GIF:
+The tape hides only the model's initial idle period. Record the prepared tmux
+session:
 
 ```sh
-ffmpeg -y -i /tmp/korvid-mcp-follow.mov \
+vhs docs/demo/mcp-follow.tape
+```
+
+VHS writes a 1440-pixel, 25 fps source GIF. Optimize it to the README contract
+through a temporary output file:
+
+```sh
+ffmpeg -y -i docs/assets/mcp-follow-demo.gif \
   -filter_complex \
   "fps=12,scale=1280:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
-  -loop 0 docs/assets/mcp-follow-demo.gif
+  -loop 0 /tmp/mcp-follow-demo.gif
+mv /tmp/mcp-follow-demo.gif docs/assets/mcp-follow-demo.gif
 ```
 
 Verify the result:
@@ -85,4 +106,5 @@ pod list, describe, logs, and Helm views are each readable.
 ```sh
 helm uninstall shop-demo --namespace shop
 kubectl delete namespace shop
+copilot mcp remove korvid
 ```
