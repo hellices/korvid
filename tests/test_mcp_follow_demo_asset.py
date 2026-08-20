@@ -190,7 +190,11 @@ def test_recording_runbook_only_deletes_namespace_it_created() -> None:
     assert 'XDG_CONFIG_HOME=\\"$demo_home/.config\\"' in runbook
     assert '--kubeconfig "$demo_kubeconfig"' in runbook
     assert "Recording namespace is already absent; continuing cleanup" in runbook
-    assert 'V1Preconditions(uid=os.environ["DEMO_NAMESPACE_UID"])' in runbook
+    assert "V1Preconditions(" in runbook
+    assert 'uid=os.environ["DEMO_NAMESPACE_UID"]' in runbook
+    assert "from kubernetes_asyncio import client, config" in runbook
+    assert "asyncio.run(delete_namespace())" in runbook
+    assert "from kubernetes import client, config" not in runbook
     assert "delete namespace shop --ignore-not-found" in runbook
 
 

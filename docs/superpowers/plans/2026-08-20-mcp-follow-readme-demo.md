@@ -520,20 +520,34 @@ fi
 if [ "$namespace_exists" = true ]; then
   if ! DEMO_KUBECONFIG="$demo_kubeconfig" DEMO_CONTEXT="$prepared_context" \
     DEMO_NAMESPACE_UID="$prepared_namespace_uid" uv run --no-sync python - <<'PY'
+import asyncio
 import os
 
-from kubernetes import client, config
+from kubernetes_asyncio import client, config
 
-config.load_kube_config(
-    config_file=os.environ["DEMO_KUBECONFIG"],
-    context=os.environ["DEMO_CONTEXT"],
-)
-client.CoreV1Api().delete_namespace(
-    "shop",
-    body=client.V1DeleteOptions(
-        preconditions=client.V1Preconditions(uid=os.environ["DEMO_NAMESPACE_UID"])
-    ),
-)
+
+async def delete_namespace() -> None:
+    configuration = client.Configuration()
+    await config.load_kube_config(
+        config_file=os.environ["DEMO_KUBECONFIG"],
+        context=os.environ["DEMO_CONTEXT"],
+        client_configuration=configuration,
+    )
+    api_client = client.ApiClient(configuration)
+    try:
+        await client.CoreV1Api(api_client).delete_namespace(
+            "shop",
+            body=client.V1DeleteOptions(
+                preconditions=client.V1Preconditions(
+                    uid=os.environ["DEMO_NAMESPACE_UID"]
+                )
+            ),
+        )
+    finally:
+        await api_client.close()
+
+
+asyncio.run(delete_namespace())
 PY
   then
     echo "Failed to delete the recording namespace; cleanup state retained" >&2
