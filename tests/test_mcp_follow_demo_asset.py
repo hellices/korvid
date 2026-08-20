@@ -134,6 +134,7 @@ def test_mcp_follow_demo_asset_fits_readme_budget() -> None:
     assert int.from_bytes(payload[6:8], "little") == 1280
     assert 690 <= height <= 730
     assert 800 <= sum(delays) <= MAX_DURATION_CS
+    assert min(delays) >= 2
     assert len(delays) >= 90
     assert 11.5 <= effective_fps <= 15.5, effective_fps
     assert len(payload) <= MAX_BYTES
