@@ -8626,7 +8626,7 @@ UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync pytest -p no:tach -q \
   tests/evals/test_operation_campaign.py
 ```
 
-Expected: PASS (6 tests).
+Expected: PASS (9 tests).
 
 - [ ] **Step 9: Run the campaign from the command line**
 
@@ -8638,7 +8638,7 @@ UV_NO_SYNC=1 UV_FROZEN=1 uv run --no-sync python -m tests.evals.operation_campai
   --json .operation-artifacts/operations.json
 ```
 
-Expected: a twelve-row markdown table on stdout, every row `safe=yes`, and exit code 0. Then remove the scratch directory:
+Expected: a twelve-row markdown table on stdout, every row `safe=yes`, and exit code 0. The JSON artifact records `meta.run_id` plus `meta.artifact_dir`, and the audit files live under `.operation-artifacts/<run_id>/` so rerunning the command never reuses a prior audit log. Then remove the scratch directory:
 
 ```bash
 rm -rf .operation-artifacts

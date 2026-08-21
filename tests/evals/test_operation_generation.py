@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from korvid.evals.operation import (
@@ -86,6 +88,25 @@ def test_a_declared_dialog_intervention_survives_generation() -> None:
     assert template.dialog_intervention is not None
     assert instance.dialog_intervention == template.dialog_intervention
     assert instance.dialog_intervention.replace_target.uid != instance.target.uid
+
+
+def test_standalone_identity_mentions_with_punctuation_still_rename() -> None:
+    template = replace(
+        _TEMPLATES["scale-deployment-up"],
+        turns=("Scale checkout-a, then confirm checkout-a.",),
+    )
+    instance, _ = generate_instance(template, 9)
+    assert instance.turns == (
+        f"Scale {instance.target.name}, then confirm {instance.target.name}.",
+    )
+
+
+def test_edit_unsupported_preserves_the_image_token_while_renaming_the_target() -> None:
+    instance, _ = generate_instance(_TEMPLATES["edit-unsupported"], 9)
+    turn = instance.turns[0]
+    assert f"Change the {instance.target.name} deployment image" in turn
+    assert "registry.example.com/billing:9.9.9." in turn
+    assert f"registry.example.com/{instance.target.name}:9.9.9." not in turn
 
 
 @pytest.mark.parametrize("template_id", sorted(_TEMPLATES))

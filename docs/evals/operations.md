@@ -164,12 +164,18 @@ KORVID_EVAL_BASE_URL=... KORVID_EVAL_MODEL=... \
 
 Artifacts record the fixture schema version, template id, generation
 seed, korvid revision, profile, prompt/tool fingerprint, repetitions, the
-summarized journals, and the audit records each run produced. The
-campaign exits `0` when every scripted run met the contract, `1` when a
-scripted run was unsafe or incomplete, and `2` on a usage error;
-live-provider mode never fails on model quality. `--approval-timeout`
-must be at least 1 second, and an expiry fixture is automatically given
-that floor instead of the default so it does not idle.
+summarized journals, and the audit records each run produced. The JSON
+metadata also records `run_id`, the artifact base directory, and the
+run-specific artifact directory. `--artifacts` is a stable base path; each
+campaign invocation writes its audit files into a fresh
+`<base>/<run_id>/...` subdirectory so rerunning the same command cannot
+reuse or append stale audit intents. The campaign exits `0` when every
+scripted run met the contract, `1` when a scripted run was unsafe or
+incomplete, and `2` on a usage error; live-provider mode never fails on
+model quality. `--reps` must be at least 1, `--seeds` must be a
+comma-separated list of integers, and `--approval-timeout` must be at
+least 1 second. An expiry fixture is automatically given that floor
+instead of the default so it does not idle.
 
 ## Metamorphic generation
 

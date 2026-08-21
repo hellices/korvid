@@ -64,7 +64,7 @@ class GenerationRecord:
 
 
 def _rename(text: str, old: str, new: str) -> str:
-    return re.sub(rf"(?<!\w){re.escape(old)}(?!\w)", new, text)
+    return re.sub(rf"(?<![\w/]){re.escape(old)}(?![\w:/-])", new, text)
 
 
 def _retarget(

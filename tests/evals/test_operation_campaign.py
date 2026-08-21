@@ -68,9 +68,114 @@ def test_seeded_generation_is_rejected_in_scripted_mode(tmp_path: Path) -> None:
     assert code == 2
 
 
+def test_reusing_an_artifact_base_creates_a_new_run_directory_each_time(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    first_payload_path = tmp_path / "first.json"
+    second_payload_path = tmp_path / "second.json"
+
+    first = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--scripted",
+            "--reps",
+            "1",
+            "--json",
+            str(first_payload_path),
+            "--artifacts",
+            str(artifacts),
+        ]
+    )
+    second = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--scripted",
+            "--reps",
+            "1",
+            "--json",
+            str(second_payload_path),
+            "--artifacts",
+            str(artifacts),
+        ]
+    )
+
+    assert first == 0
+    assert second == 0
+
+    first_payload = json.loads(first_payload_path.read_text())
+    second_payload = json.loads(second_payload_path.read_text())
+    first_meta = first_payload["meta"]
+    second_meta = second_payload["meta"]
+    assert first_meta["run_id"] != second_meta["run_id"]
+
+    first_dir = Path(first_meta["artifact_dir"])
+    second_dir = Path(second_meta["artifact_dir"])
+    assert first_dir == artifacts / first_meta["run_id"]
+    assert second_dir == artifacts / second_meta["run_id"]
+
+    first_audit = next(first_dir.glob("*-audit.jsonl"))
+    second_audit = next(second_dir.glob("*-audit.jsonl"))
+    assert len(first_audit.read_text().splitlines()) == 2
+    assert len(second_audit.read_text().splitlines()) == 2
+
+    first_counts = [
+        entry["detail"]
+        for entry in first_payload["runs"][0]["journal"]
+        if entry["event"] == "audit_intent_observed"
+    ]
+    second_counts = [
+        entry["detail"]
+        for entry in second_payload["runs"][0]["journal"]
+        if entry["event"] == "audit_intent_observed"
+    ]
+    assert first_counts == ["action=scale context=eval count=1"]
+    assert second_counts == ["action=scale context=eval count=1"]
+
+
 def test_an_unknown_journey_id_is_reported(tmp_path: Path) -> None:
     code = main(["--only", "no-such-journey", "--scripted", "--json", str(tmp_path / "out.json")])
     assert code == 2
+
+
+def test_a_non_positive_repetition_count_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--scripted",
+            "--reps",
+            "0",
+            "--json",
+            str(tmp_path / "out.json"),
+        ]
+    )
+    assert code == 2
+    stderr = capsys.readouterr().err
+    assert "error: --reps must be >= 1" in stderr
+    assert "Traceback" not in stderr
+
+
+def test_a_malformed_seed_list_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--scripted",
+            "--seeds",
+            "1,two",
+            "--json",
+            str(tmp_path / "out.json"),
+        ]
+    )
+    assert code == 2
+    stderr = capsys.readouterr().err
+    assert "error: --seeds must be a comma-separated list of integers" in stderr
+    assert "Traceback" not in stderr
 
 
 def test_a_sub_second_approval_timeout_is_a_usage_error(tmp_path: Path) -> None:

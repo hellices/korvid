@@ -20,9 +20,11 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import asdict
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from korvid.agent.profiles import PromptOverrides, build_profile
 from korvid.evals.__main__ import prompt_fingerprint
@@ -72,7 +74,16 @@ def _korvid_revision() -> str:
 
 
 def _seeds(raw: str) -> list[int]:
-    return [int(part) for part in raw.split(",") if part.strip()]
+    seeds: list[int] = []
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        try:
+            seeds.append(int(token))
+        except ValueError as exc:
+            raise ValueError("--seeds must be a comma-separated list of integers") from exc
+    return seeds
 
 
 def _selected(journeys: list[OperationJourney], only: list[str]) -> list[OperationJourney]:
@@ -126,15 +137,23 @@ def approval_timeout_for(journey: OperationJourney, default: float) -> float:
 
 
 def _record(
-    run: OperationRun, template_id: str, generation: GenerationRecord | None, repetition: int
+    run: OperationRun,
+    template_id: str,
+    generation: GenerationRecord | None,
+    repetition: int,
+    *,
+    audit_path: Path,
+    run_id: str,
 ) -> dict[str, Any]:
     grade = run.grade
     return {
+        "run_id": run_id,
         "template_id": template_id,
         "instance_id": run.journey_id,
         "seed": None if generation is None else generation.seed,
         "generation": None if generation is None else asdict(generation),
         "repetition": repetition,
+        "audit_path": str(audit_path),
         "safe": grade.safe,
         "hard_failures": list(grade.hard_failures),
         "outcome": grade.outcome,
@@ -160,16 +179,64 @@ def _record(
     }
 
 
-async def _run(args: argparse.Namespace) -> list[dict[str, Any]]:
-    journeys = _selected(load_operation_journeys(args.operations), args.only)
-    pairs = _instances(journeys, _seeds(args.seeds))
-    args.artifacts.mkdir(parents=True, exist_ok=True)
+def _new_run_id() -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"run-{timestamp}-{uuid4().hex[:8]}"
+
+
+def _create_run_dir(base: Path) -> tuple[str, Path]:
+    base.mkdir(parents=True, exist_ok=True)
+    while True:
+        run_id = _new_run_id()
+        run_dir = base / run_id
+        try:
+            run_dir.mkdir()
+        except FileExistsError:
+            continue
+        return run_id, run_dir
+
+
+def _exit_code(exc: SystemExit) -> int:
+    code = exc.code
+    return code if isinstance(code, int) else 2
+
+
+def _validated_inputs(
+    args: argparse.Namespace,
+) -> tuple[list[int], list[tuple[OperationJourney, GenerationRecord | None]]]:
+    if args.reps < 1:
+        raise ValueError("--reps must be >= 1")
+    seeds = _seeds(args.seeds)
+    if args.scripted and seeds:
+        raise ValueError(
+            "--seeds requires a live provider; the deterministic scripts are written "
+            "against the template instances"
+        )
+    if args.approval_timeout < MIN_APPROVAL_TIMEOUT:
+        raise ValueError(
+            f"--approval-timeout must be at least {MIN_APPROVAL_TIMEOUT}s; a shorter "
+            "window can expire between two 0.05s polls"
+        )
+    try:
+        journeys = _selected(load_operation_journeys(args.operations), args.only)
+    except KeyError as exc:
+        raise ValueError(str(exc)) from exc
+    return seeds, _instances(journeys, seeds)
+
+
+async def _run(
+    args: argparse.Namespace,
+    pairs: list[tuple[OperationJourney, GenerationRecord | None]],
+    *,
+    run_id: str,
+    run_dir: Path,
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for instance, generation in pairs:
         template_id = instance.id if generation is None else generation.template_id
         for repetition in range(1, args.reps + 1):
             print(f"running {instance.id} rep {repetition}/{args.reps} ...", file=sys.stderr)
-            audit_path = args.artifacts / f"{instance.id}-{repetition}-audit.jsonl"
+            audit_path = run_dir / f"{instance.id}-{repetition}-audit.jsonl"
             run = await run_operation_journey(
                 instance,
                 audit_path=audit_path,
@@ -177,7 +244,16 @@ async def _run(args: argparse.Namespace) -> list[dict[str, Any]]:
                 profile_name=args.profile,
                 approval_timeout_seconds=approval_timeout_for(instance, args.approval_timeout),
             )
-            records.append(_record(run, template_id, generation, repetition))
+            records.append(
+                _record(
+                    run,
+                    template_id,
+                    generation,
+                    repetition,
+                    audit_path=audit_path,
+                    run_id=run_id,
+                )
+            )
     return records
 
 
@@ -209,26 +285,17 @@ def main(argv: list[str] | None = None) -> int:
         mode, or an approval timeout below the harness floor).
     """
 
-    args = _parse_args(argv)
-    if args.scripted and _seeds(args.seeds):
-        print(
-            "error: --seeds requires a live provider; the deterministic scripts are "
-            "written against the template instances",
-            file=sys.stderr,
-        )
-        return 2
-    if args.approval_timeout < MIN_APPROVAL_TIMEOUT:
-        print(
-            f"error: --approval-timeout must be at least {MIN_APPROVAL_TIMEOUT}s; a shorter "
-            "window can expire between two 0.05s polls",
-            file=sys.stderr,
-        )
-        return 2
     try:
-        records = asyncio.run(_run(args))
-    except KeyError as exc:
+        args = _parse_args(argv)
+    except SystemExit as exc:
+        return _exit_code(exc)
+    try:
+        seeds, pairs = _validated_inputs(args)
+    except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    run_id, run_dir = _create_run_dir(args.artifacts)
+    records = asyncio.run(_run(args, pairs, run_id=run_id, run_dir=run_dir))
     profile = build_profile(
         args.profile, readonly=False, resize_supported=False, overrides=PromptOverrides()
     )
@@ -240,7 +307,10 @@ def main(argv: list[str] | None = None) -> int:
             "prompts": prompt_fingerprint(profile, tools=profile.tools),
             "repetitions": args.reps,
             "mode": "scripted" if args.scripted else "live",
-            "seeds": _seeds(args.seeds),
+            "seeds": seeds,
+            "run_id": run_id,
+            "artifact_base": str(args.artifacts),
+            "artifact_dir": str(run_dir),
         },
         "runs": records,
     }
