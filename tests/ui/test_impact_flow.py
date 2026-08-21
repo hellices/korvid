@@ -1618,7 +1618,7 @@ async def test_focus_moving_to_another_pane_during_the_impact_load_aborts_the_de
     async with app.run_test() as pilot:
         await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
         origin = app._pane
-        env.lister.on_first_call = app._focus_other_pane
+        env.lister.on_first_call = app._workspace_ctl.focus_other_pane
         await app.action_delete_resource()
         assert app._pane is not origin
         assert len(app.screen_stack) == 1
@@ -1637,7 +1637,7 @@ async def test_focus_moving_to_another_pane_during_the_impact_load_aborts_the_re
     async with app.run_test() as pilot:
         await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
         origin = app._pane
-        env.lister.on_first_call = app._focus_other_pane
+        env.lister.on_first_call = app._workspace_ctl.focus_other_pane
         await app.action_rollout_restart()
         assert app._pane is not origin
         assert len(app.screen_stack) == 1
@@ -1661,7 +1661,7 @@ async def test_the_snapshot_scope_follows_the_pane_the_write_was_raised_from(
     app = env.app
     async with app.run_test() as pilot:
         await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
-        env.ops.on_first_preview = app._focus_other_pane
+        env.ops.on_first_preview = app._workspace_ctl.focus_other_pane
         await app.action_delete_resource()
         assert env.lister.calls != []
         assert _namespaced_list_scopes(env) == {"prod"}
@@ -1713,7 +1713,7 @@ async def test_scale_down_focus_move_to_same_object_aborts_before_confirmation(
     async with app.run_test() as pilot:
         await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
         origin = app._pane
-        env.lister.on_first_call = app._focus_other_pane
+        env.lister.on_first_call = app._workspace_ctl.focus_other_pane
         await pilot.press("S")
         await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
         await pilot.press("1")
@@ -1778,7 +1778,7 @@ async def test_scale_down_focus_move_while_the_prompt_is_open_aborts_before_any_
         origin = app._pane
         await pilot.press("S")
         await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
-        app._focus_other_pane()
+        app._workspace_ctl.focus_other_pane()
         await until(pilot, lambda: app._pane is not origin, label="focus on the other pane")
         assert isinstance(app.screen, ReplicasPrompt)
         await pilot.press("1")
@@ -1810,7 +1810,7 @@ def _uid_replacement_drift(app: KorvidApp) -> Callable[[], None]:
 
 def _focus_drift(app: KorvidApp) -> Callable[[], None]:
     """Focus lands in the second pane, whose cursor is on the same object."""
-    return app._focus_other_pane
+    return app._workspace_ctl.focus_other_pane
 
 
 def _scope_drift(app: KorvidApp) -> Callable[[], None]:
@@ -1898,7 +1898,7 @@ async def test_scale_down_focus_move_during_the_dry_run_never_loads_relationship
     async with app.run_test() as pilot:
         await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
         origin = app._pane
-        env.ops.on_first_preview = app._focus_other_pane
+        env.ops.on_first_preview = app._workspace_ctl.focus_other_pane
         await pilot.press("S")
         await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
         await pilot.press("1")

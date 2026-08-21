@@ -388,9 +388,9 @@ async def test_split_serializes_with_navigation_lock() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
         await _first_render(app, pilot)
-        await app._nav_lock.acquire()
+        await app._workspace_ctl.nav_lock.acquire()
         try:
-            task = asyncio.create_task(app._split_pane())
+            task = asyncio.create_task(app._workspace_ctl.split_pane())
             # Yield until the task reaches (and blocks on) the nav lock -
             # deterministic, unlike a wall-clock delay.
             for _ in range(10):
@@ -398,7 +398,7 @@ async def test_split_serializes_with_navigation_lock() -> None:
             assert not task.done()
             assert len(app._workspace.panes) == 1  # blocked behind the nav lock
         finally:
-            app._nav_lock.release()
+            app._workspace_ctl.nav_lock.release()
         await task
         await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="split completed")
         assert len(app._workspace.panes) == 2
@@ -565,15 +565,15 @@ async def test_concurrent_closes_do_not_underflow_pane_list() -> None:
     async with app.run_test() as pilot:
         await _first_render(app, pilot)
         await _split(app, pilot)
-        await app._nav_lock.acquire()
+        await app._workspace_ctl.nav_lock.acquire()
         try:
-            first = asyncio.create_task(app._close_focused_pane())
-            second = asyncio.create_task(app._close_focused_pane())
+            first = asyncio.create_task(app._workspace_ctl.close_focused_pane())
+            second = asyncio.create_task(app._workspace_ctl.close_focused_pane())
             # Yield until both tasks pass the outer guard and block on the lock.
             for _ in range(10):
                 await asyncio.sleep(0)
         finally:
-            app._nav_lock.release()
+            app._workspace_ctl.nav_lock.release()
         await first
         await second  # without the re-check this raises IndexError
         await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")
@@ -708,7 +708,7 @@ async def test_navigation_queued_behind_lock_lands_in_initiating_pane() -> None:
         release = asyncio.Event()
 
         async def hold() -> None:
-            async with app._nav_lock:
+            async with app._workspace_ctl.nav_lock:
                 await release.wait()
 
         holder = asyncio.create_task(hold())
@@ -743,13 +743,13 @@ async def test_drill_pop_queued_behind_lock_pops_initiating_pane() -> None:
         release = asyncio.Event()
 
         async def hold() -> None:
-            async with app._nav_lock:
+            async with app._workspace_ctl.nav_lock:
                 await release.wait()
 
         holder = asyncio.create_task(hold())
         for _ in range(10):
             await asyncio.sleep(0)
-        pop = asyncio.create_task(app._pop_drill())
+        pop = asyncio.create_task(app._workspace_ctl.pop_drill())
         for _ in range(10):
             await asyncio.sleep(0)
         app._workspace.focus_index(0)  # focus flips while the pop waits for the lock

@@ -488,7 +488,7 @@ async def test_unresolved_relationship_kind_renders_literally() -> None:
     env = _RelEnv(pods=(_pod("api-0", uid="pod-1"),))
     app = env.app
     async with app.run_test() as pilot:
-        app._on_relationship_result(
+        app._workspace_ctl.on_relationship_result(
             app._ctx_epoch,
             ("goto", "evil.example.io", "[/bold]", "default", "api-0"),
         )

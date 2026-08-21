@@ -489,13 +489,13 @@ async def test_return_is_refused_when_a_ctx_switch_starts_during_the_navigate() 
         )
 
         # A switch begins the moment the reopen's navigate runs.
-        original = app._navigate
+        original = app._workspace_ctl.navigate
 
         async def navigate_then_switch(*args: object, **kwargs: object) -> None:
             await original(*args, **kwargs)  # type: ignore[arg-type]  # passthrough wrapper
             app._ctx_switching = True
 
-        app._navigate = navigate_then_switch  # type: ignore[method-assign]  # test seam
+        app._workspace_ctl.navigate = navigate_then_switch  # type: ignore[method-assign]  # test seam
         try:
             await pilot.press("escape")
             await until(
@@ -505,24 +505,26 @@ async def test_return_is_refused_when_a_ctx_switch_starts_during_the_navigate() 
             )
             assert not isinstance(app.screen, HierarchyScreen)
         finally:
-            app._navigate = original  # type: ignore[method-assign]  # restore
+            app._workspace_ctl.navigate = original  # type: ignore[method-assign]  # restore
             app._ctx_switching = False
 
 
 async def test_refresh_hierarchy_survives_an_empty_screen_stack() -> None:
     """A ResourcesUpdated dispatched during app teardown reaches
-    _refresh_hierarchy after the screen stack is emptied: reading
+    refresh_hierarchy after the screen stack is emptied: reading
     App.screen then raises ScreenStackError and fails the whole run
     (flaky-CI issue #147) - the refresh must treat 'no screen' as
     'no tree open'."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test():
-        # Simulate the teardown interleaving deterministically: the message
-        # handler runs while the screen stack is already empty.
+        # A tree must be considered open, or the refresh returns before it
+        # ever reads the screen; then simulate the teardown interleaving
+        # deterministically: the handler runs while the stack is empty.
+        app._workspace_ctl._hierarchy_ctx = ("HelmRelease web", [], "default", "default")
         with mock.patch.object(
             type(app), "screen", property(mock.Mock(side_effect=ScreenStackError))
         ):
-            app._refresh_hierarchy()  # must not raise
+            app._workspace_ctl.refresh_hierarchy()  # must not raise
         assert True  # reaching here is the assertion: no ScreenStackError
 
 
@@ -646,22 +648,24 @@ def test_component_resolution_matches_declared_group() -> None:
     )
     app, _ = make_app({}, aliases=aliases)
     ref_b = ComponentRef(kind="Widget", name="x", api_version="b.example.com/v1")
-    assert app._view_for_component(ref_b) == ("widgets.b.example.com", False)
+    assert app._workspace_ctl._view_for_component(ref_b) == ("widgets.b.example.com", False)
     ref_a = ComponentRef(kind="Widget", name="x", api_version="a.example.com/v1")
-    assert app._view_for_component(ref_a) == ("widgets.a.example.com", True)
+    assert app._workspace_ctl._view_for_component(ref_a) == ("widgets.a.example.com", True)
     # Core group ("v1") and undeclared apiVersion still resolve normally.
-    assert app._view_for_component(ComponentRef(kind="Pod", name="p", api_version="v1")) == (
+    assert app._workspace_ctl._view_for_component(
+        ComponentRef(kind="Pod", name="p", api_version="v1")
+    ) == (
         "pods",
         True,
     )
-    assert app._view_for_component(ComponentRef(kind="Deployment", name="d")) == (
+    assert app._workspace_ctl._view_for_component(ComponentRef(kind="Deployment", name="d")) == (
         "deployments",
         True,
     )
     # A declared group with no discovered match must not fall back to the
     # wrong group's view.
     ghost = ComponentRef(kind="Widget", name="x", api_version="c.example.com/v1")
-    assert app._view_for_component(ghost) is None
+    assert app._workspace_ctl._view_for_component(ghost) is None
 
 
 async def test_open_tree_refreshes_on_store_update() -> None:
@@ -857,7 +861,7 @@ async def test_jump_notifies_when_object_never_appears() -> None:
     silently - the user gets told instead of staring at a wrong cursor."""
     components = {"web": [ComponentRef(kind="Deployment", name="ghost")]}
     app, _ = make_app(_HELM_DATA, components=components)
-    app._jump_poll_attempts = 3
+    app._workspace_ctl.jump_poll_attempts = 3
     notices: list[str] = []
     original = app.notify
 
@@ -920,7 +924,9 @@ async def test_jump_aborts_on_stale_context_epoch() -> None:
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
-        await app._jump_to_object("deployments", "default", "web-nginx", epoch=app._ctx_epoch - 1)
+        await app._workspace_ctl.jump_to_object(
+            "deployments", "default", "web-nginx", epoch=app._ctx_epoch - 1
+        )
         assert app.current_kind == "helmreleases"
 
 
@@ -1007,7 +1013,7 @@ async def test_owned_workloads_fallback_is_capped() -> None:
             lambda: len(app.store.get("deployments", "operators")) == len(owned),
             label="owned deployments watched",
         )
-        refs = app._refs_from_owned_workloads(csv_manifest, "operators")
+        refs = app._workspace_ctl._refs_from_owned_workloads(csv_manifest, "operators")
         assert len(refs) == MAX_COMPONENT_DOCS
 
 

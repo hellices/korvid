@@ -1055,7 +1055,7 @@ async def test_mcp_toggle_queued_before_switch_rechecks_inside_lock() -> None:
     mcp = _FakeMCP()
     app._mcp = cast("Any", mcp)
     async with app.run_test() as pilot:
-        await app._nav_lock.acquire()  # stand-in for the switch holding it
+        await app._workspace_ctl.nav_lock.acquire()  # stand-in for the switch holding it
         workers_before = {id(worker) for worker in app.workers}
         try:
             app._handle_mcp_command(["on"])  # pre-check passes; worker blocks
@@ -1069,7 +1069,7 @@ async def test_mcp_toggle_queued_before_switch_rechecks_inside_lock() -> None:
             )
             app._ctx_switching = True  # the switch claims while the toggle waits
         finally:
-            app._nav_lock.release()
+            app._workspace_ctl.nav_lock.release()
         try:
             await until(
                 pilot,

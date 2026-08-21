@@ -156,12 +156,12 @@ async def test_context_epoch_guard_discards_stale_modal_navigation() -> None:
 
 async def test_timeline_navigation_failure_renders_event_name_literally() -> None:
     app = make_app([_pod("web")], session_timeline=SessionTimeline(8, 4096))
-    app._jump_poll_attempts = 1
+    app._workspace_ctl.jump_poll_attempts = 1
     async with app.run_test() as pilot:
         await until(
             pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pods visible"
         )
-        await app._jump_to_object("pods", "default", "[/bold]", epoch=app._ctx_epoch)
+        await app._workspace_ctl.jump_to_object("pods", "default", "[/bold]", epoch=app._ctx_epoch)
         await until(
             pilot,
             lambda: any("is not visible" in item.message for item in app._notifications),

@@ -418,7 +418,7 @@ async def test_approval_racing_a_shutdown_expiry_loses_the_claim(tmp_path: Path)
         pid = store.pending()[0].id
         app._open_proposal_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
-        async with app._nav_lock:  # what :mcp off holds during shutdown
+        async with app._workspace_ctl.nav_lock:  # what :mcp off holds during shutdown
             await pilot.press("y")
             # The worker leaves the dialog and reaches the claim/lock wait.
             await until(pilot, lambda: not isinstance(app.screen, ConfirmScreen))

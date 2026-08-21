@@ -56,13 +56,13 @@ from korvid.agent.install_hint import isolated_install_hint
 from korvid.agent.navigation import EvidenceTarget, target_for
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
-from korvid.core.config import KorvidConfig, ViewConfig
+from korvid.core.config import KorvidConfig
 from korvid.core.debugimage import (
     FALLBACK_IMAGE,
     same_image_ref,
 )
 from korvid.core.errors import explain_api_error
-from korvid.core.filters import ResourceFilter, parse_filter
+from korvid.core.filters import ResourceFilter
 from korvid.core.impact import ImpactAction, summarize_impact
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.mcp import MCPControllerBase
@@ -75,15 +75,12 @@ from korvid.core.relationships import GraphResource, SummaryLike
 from korvid.core.resize_impact import classify_pod_resize
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.session_timeline import SessionTimeline, TimelineResourceRef
-from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
+from korvid.core.sorting import SortSpec
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.transfer import RemoteEntry, TransferError, TransferSpec, list_remote_dir
 from korvid.core.watch import WatchManager
 from korvid.k8s.components import (
-    MAX_COMPONENT_DOCS,
     ComponentRef,
-    installplan_components,
-    reference_components,
 )
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan
@@ -140,7 +137,7 @@ from korvid.ui.messages import (
     TransferCancelRequested,
     UnknownCommand,
 )
-from korvid.ui.navigation import DrillLevel, NavigationStack
+from korvid.ui.navigation import NavigationStack
 from korvid.ui.node_impact_preview import (
     compose_node_maintenance_lines,
     render_node_maintenance_lines,
@@ -166,7 +163,7 @@ from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.helm_install import HelmInstallPrompt
 from korvid.ui.widgets.help_screen import HelpScreen, collect_help
-from korvid.ui.widgets.hierarchy_screen import HierarchyScreen, build_hierarchy
+from korvid.ui.widgets.hierarchy_screen import HierarchyScreen
 from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.hint_strip import HintStrip
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
@@ -176,7 +173,6 @@ from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.port_forward_screen import PortForwardScreen
-from korvid.ui.widgets.relationship_screen import GotoResult, RelationshipScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.secret_screen import SecretScreen
@@ -184,7 +180,13 @@ from korvid.ui.widgets.status_bar import StatusBar
 from korvid.ui.widgets.telepresence_screen import TelepresenceScreen
 from korvid.ui.widgets.top_bar import KeyEntry, TopBar
 from korvid.ui.widgets.transfer_screen import TransferProgressScreen, TransferScreen
-from korvid.ui.workspace_state import HierarchyReturn, PaneState, WorkspaceState
+from korvid.ui.workspace_controller import (
+    RELATIONSHIP_GROUP,
+    ContextGuard,
+    WorkspaceController,
+    WorkspaceSurface,
+)
+from korvid.ui.workspace_state import PaneState, WorkspaceState
 from korvid.ui.write_gate import ReservedWrite, WriteGate
 
 _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
@@ -276,15 +278,6 @@ _HELM_PREVIEW_MAX_LINES = 60
 #: must not delay the overlay past this - the events are marked unavailable
 #: instead.
 _HINT_EVENTS_TIMEOUT = 3.0
-
-#: Header label -> builtin sort column (issue #138): the reverse of the
-#: table's ▲/▼ decoration map, for header-click sorting.
-_HEADER_SORT_COLUMNS = {"NAME": "name", "AGE": "age", "CPU": "cpu", "MEM": "mem"}
-
-#: The worker group every operational relationship graph load and its goto
-#: follow-up run in (issue #281): cancelled as a unit on a `:ctx` switch,
-#: and the only group whose failures are notified rather than fatal.
-_RELATIONSHIP_GROUP = "relationships"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -695,7 +688,7 @@ class KorvidApp(App[None]):
             epoch_crossed=self._ctx_switch_crossed,
             watch_warning_events=watch_warning_events,
             selected_resource=self._selected_timeline_resource,
-            navigate=lambda kind, namespace, name, epoch: self._jump_to_object(
+            navigate=lambda kind, namespace, name, epoch: self._workspace_ctl.jump_to_object(
                 kind, namespace, name, epoch=epoch
             ),
         )
@@ -881,20 +874,17 @@ class KorvidApp(App[None]):
         self._agent_replacement: str | None = None
         self._agent_turn_finalized = False
         self._shutting_down = False
-        # Serializes view/scope switches: keyboard NavigateCommands and the
-        # agent's navigate tool share this handler, which yields while
-        # stopping/starting watches — interleaving would corrupt state.
-        self._nav_lock = asyncio.Lock()
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)
         )
         # Workspace model (issue #48): the panes, focus, table-id counter and
         # the `ctrl+w` chord flag live in one pure owner; `current_kind` & co.
         # delegate to the focused pane so commands and keybindings target it.
+        # `WorkspaceController` (constructed below) owns the transitions and
+        # the workspace-only mutable state (nav lock, pre-warm leases, tree
+        # rebuild context, jump-poll budget, render-coalescing set, metrics
+        # target) that used to live directly on the app.
         self._workspace = WorkspaceState("pods", config.namespace or "default")
-        #: Scope the metrics poller currently serves (None = stopped); a
-        #: restart drops collected data, so equal targets are skipped.
-        self._metrics_target: tuple[str | None] | None = None
         #: Validated `keybindings:` overrides (action → key), applied via the
         #: keymap in on_mount; the help overlay renders these keys (issue #35).
         self._keybinding_overrides: dict[str, str] = {}
@@ -904,19 +894,6 @@ class KorvidApp(App[None]):
         self._ns_prefetch_task: asyncio.Task[None] | None = None
         self._ctx_prefetch_task: asyncio.Task[None] | None = None
         self._splash_shown_at: float = monotonic()
-        # Kinds with a table render already queued — coalesces the per-object
-        # notifications of a LIST seed into a single rebuild (see _on_store_update).
-        self._render_pending: set[str] = set()
-        #: Outstanding drill pre-warm leases per (kind, scope) (issue #157):
-        #: overlapping drills each hold one; only the last release may reap
-        #: a stream no pane displays.
-        self._prewarm_leases: dict[tuple[str, str], int] = {}
-        # Rebuild inputs for an open HierarchyScreen: (title, refs, namespace,
-        # scope). Store updates rebuild the tree in place while it is open.
-        self._hierarchy_ctx: tuple[str, list[ComponentRef], str, str] | None = None
-        # Cursor-placement poll budget for hierarchy goto (50ms per attempt);
-        # an attribute so tests can shrink the give-up window.
-        self._jump_poll_attempts: int = 200
         # Hint-strip lifecycle (issue #97 U3b): the controller owns the event
         # cache and the parked-cursor refresh timer; widget access and worker
         # scheduling stay here, injected as narrow callables.
@@ -953,6 +930,34 @@ class KorvidApp(App[None]):
             ctx_reads_allowed=self._ctx_reads_allowed,
             refresh_bindings=self.refresh_bindings,
             buffer_max_lines=config.log_buffer_lines,
+        )
+        #: Workspace orchestration (issue #187 / Deep Task 3): navigation,
+        #: filter/sort transitions, the drill pre-warm/watch-release flow, the
+        #: hierarchy tree and relationship-graph flows, and the split-pane
+        #: lifecycle all live in the controller, together with the
+        #: workspace-only mutable state (nav lock, pre-warm leases, tree
+        #: rebuild context, jump-poll budget, render-coalescing set, metrics
+        #: target). The app keeps compose/widget construction, the Textual
+        #: action/message entry points as thin delegates, and the narrow
+        #: widget surface the controller drives.
+        self._workspace_ctl = WorkspaceController(
+            state=self._workspace,
+            store=self.store,
+            watch_manager=self.watch_manager,
+            metrics=self._metrics,
+            relationship_loader=self._relationship_loader,
+            ui=AppUiSurface(self),
+            surface=AppWorkspaceSurface(self),
+            view=AppViewState(self),
+            context=AppContextGuard(self),
+            logs=self._logs,
+            hints=self._hints,
+            config=lambda: self.config,
+            get_manifest=lambda: self._get_manifest,
+            get_helm_components=lambda: self._get_helm_components,
+            olm_alias_key=self._olm.alias_key,
+            describe_named=self._describe_named,
+            cluster_list_permitted=self._cluster_list_permitted,
         )
 
     # -- Focused-pane delegation (issue #48): `WorkspaceState` owns the pane
@@ -1202,13 +1207,12 @@ class KorvidApp(App[None]):
         def _on_store_update(kind: str) -> None:
             # The initial LIST seeds objects one apply_event at a time in a
             # single event-loop slice; posting one message per object would
-            # rebuild the whole table N times. Post at most one render request
-            # per kind until it is consumed — _render_table reads the current
-            # store state, so a single deferred rebuild covers every event.
-            if kind in self._render_pending:
-                return
-            self._render_pending.add(kind)
-            self.post_message(ResourcesUpdated(kind))
+            # rebuild the whole table N times. The controller coalesces to at
+            # most one render request per kind until it is consumed —
+            # _render_table reads the current store state, so a single deferred
+            # rebuild covers every event.
+            if self._workspace_ctl.mark_render_pending(kind):
+                self.post_message(ResourcesUpdated(kind))
 
         def _on_watch_error(detail: str) -> None:
             self.post_message(ShowError("Watch failed", detail))
@@ -1220,7 +1224,7 @@ class KorvidApp(App[None]):
             # Metrics updates reuse the pods render path; the pending guard in
             # _on_store_update coalesces them with watch events.
             self._metrics.on_update = lambda: _on_store_update("pods")
-        await self._sync_metrics_poller()
+        await self._workspace_ctl.sync_metrics_poller()
         self._splash_shown_at = monotonic()
         await self.watch_manager.start(self.current_kind, self.current_scope)
         self._refresh_status()
@@ -1263,12 +1267,10 @@ class KorvidApp(App[None]):
             {*self.aliases, "ns", "namespaces", "ctx", "context", "contexts", "q", "quit"}
         )
         # A kind discovered late can turn display-only tree nodes navigable.
-        self._refresh_hierarchy()
+        self._workspace_ctl.refresh_hierarchy()
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
-        self._render_pending.discard(message.kind)
-        self._render_table(message.kind)
-        self._refresh_hierarchy()
+        self._workspace_ctl.on_resources_updated(message.kind)
 
     def _prefetch_namespaces(self) -> None:
         """Warm the command-bar namespace completions in the background."""
@@ -1395,16 +1397,10 @@ class KorvidApp(App[None]):
         self._filter_bar.open()
 
     def on_filter_command(self, message: FilterCommand) -> None:
-        self.filter_pattern = message.pattern
-        self._resource_filter = parse_filter(message.pattern)
-        self._render_table(self.current_kind, only=self._pane)
-        self._refresh_status()
+        self._workspace_ctl.set_filter(message.pattern)
 
     def on_clear_filter(self, message: ClearFilter) -> None:
-        self.filter_pattern = ""
-        self._resource_filter = parse_filter("")
-        self._render_table(self.current_kind, only=self._pane)
-        self._refresh_status()
+        self._workspace_ctl.clear_filter()
 
     def _filtered_rows(
         self, rows: list[Summary], resource_filter: ResourceFilter | None = None
@@ -1424,157 +1420,15 @@ class KorvidApp(App[None]):
         ]
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
-        # An explicit :view / agent navigate abandons any drill-down context;
-        # drill navigation goes through _navigate directly to keep its stack.
-        # The stack clear happens inside the navigation lock so a concurrent
-        # drill (agent path) can never interleave between clear and the
-        # kind/scope transition, which would strand a filterless child view.
-        # The stack is bound *now*: a focus flip while this waits for the
-        # lock must not redirect the clear to another pane's drill.
-        pane = self._pane
-        drill = pane.drill
-
-        def _abandon() -> None:
-            drill.clear()
-            # Walking away also drops this pane's pending hierarchy-tree
-            # return (issue #135) - Escape afterwards must not teleport
-            # back. Per-pane state: other panes' returns are untouched.
-            pane.hierarchy_return = None
-
-        await self._navigate(message.view, message.namespace, drill_op=_abandon)
-
-    def _default_scope_for(self, view: str | None, namespace: str | None) -> str | None:
-        """Catalog entries live in catalog namespaces (e.g. "olm"), not the
-        user's workload namespace: any packagemanifests view without an
-        explicit namespace defaults to the cluster-wide scope or the table
-        would commonly come up empty. Applied inside _navigate so every
-        entry path (command bar, agent, drill) behaves alike."""
-        if namespace is not None or view is None:
-            return namespace
-        meta = self.aliases.get(view)
-        if meta is not None and (meta.group, meta.plural) == (
-            PACKAGES_GROUP,
-            "packagemanifests",
-        ):
-            return ALL_NAMESPACES
-        return None
-
-    async def _navigate(
-        self,
-        view: str | None,
-        namespace: str | None,
-        *,
-        drill_op: Callable[[], None] | None = None,
-    ) -> None:
-        # The lock serializes the agent path (direct call from the agent
-        # task) with the keyboard path (message pump): both mutate
-        # current_kind/current_scope across awaits. The final state is the
-        # latest command's — a user keystroke arriving after an agent
-        # navigate always lands last. ``drill_op`` mutates the drill stack
-        # inside the same critical section so stack and view transition as
-        # one transaction.
-        # Capture the pane identity before waiting on the lock: the user may
-        # switch pane focus while this navigation queues behind another, or
-        # during `_navigate_locked`'s watch/log/metrics awaits - the
-        # transition (and drill_op, which callers bind to the same pane's
-        # stack at call time) must land in the pane that initiated it.
-        pane = self._pane
-        async with self._nav_lock:
-            if not self._workspace.contains(pane):
-                return  # the initiating pane was closed while queued
-            if drill_op is not None:
-                drill_op()
-            await self._navigate_locked(pane, view, self._default_scope_for(view, namespace))
-        self._render_table(pane.kind, only=pane)
-        self._refresh_status()
-
-    async def _navigate_locked(
-        self, pane: PaneState, view: str | None, namespace: str | None
-    ) -> None:
-        """Kind/scope transition body; caller must hold ``_nav_lock``."""
-        # Advance the pane's navigation generation first: a queued drill
-        # revalidating after its pre-warm must observe this command even
-        # when the kind/scope tuple ends up unchanged.
-        pane.nav_gen += 1
-        # A describe pane covering the table would show a stale manifest
-        # over the new view — dismiss it on any navigation, even when the
-        # requested kind/scope already matches.
-        self._describe_pane.hide()
-        new_kind = view if view is not None else pane.kind
-        new_scope = namespace if namespace is not None else pane.scope
-        if new_kind != pane.kind or new_scope != pane.scope:
-            # Only the owning pane's navigation closes the logs: the other
-            # pane must keep its stream (issue #48 workflow).
-            await self._logs.close_if_owned_by(pane)
-            old = (pane.kind, pane.scope)
-            # Another pane may still be watching the old (kind, scope):
-            # stopping it would freeze that pane's view (issue #48).
-            others = {(p.kind, p.scope) for p in self._workspace.panes if p is not pane}
-            if old not in others and self._prewarm_leases.get(old, 0) == 0:
-                # An outstanding drill pre-warm lease keeps the stream alive
-                # (issue #157): killing it here would force that drill's own
-                # navigate to re-LIST into the empty flash. The last lease
-                # release reaps it if no pane ends up displaying it.
-                await self.watch_manager.stop(*old)
-            pane.kind = new_kind
-            pane.scope = new_scope
-            # The footer legend follows the focused pane's kind (issue #114).
-            self.refresh_bindings()
-            await self.watch_manager.start(new_kind, new_scope)
-            await self._sync_metrics_poller()
-
-    async def _sync_metrics_poller(self) -> None:
-        """Poll metrics only while a pods view is on screen, in its scope.
-
-        metrics.k8s.io has no watch support, so this poller is the one
-        recurring request the app makes - stopping it off the pods view
-        keeps background load at zero for other kinds. With a split
-        workspace the poller serves every pod pane, not just the focused
-        one; two pod panes in different scopes poll cluster-wide so
-        neither goes stale. A restart drops collected data, so a target
-        the poller already serves is left running untouched.
-        """
-        if self._metrics is None:
-            return
-        scopes = {p.scope for p in self._workspace.panes if p.kind == "pods"}
-        if not scopes:
-            if self._metrics_target is not None:
-                self._metrics_target = None
-                await self._metrics.stop()
-            return
-        scope = scopes.pop() if len(scopes) == 1 else ALL_NAMESPACES
-        namespace = None if scope == ALL_NAMESPACES else scope
-        target = (namespace,)
-        if target == self._metrics_target:
-            return
-        self._metrics_target = target
-        await self._metrics.start(namespace)
+        await self._workspace_ctl.navigate_command(message.view, message.namespace)
 
     async def action_toggle_all_namespaces(self) -> None:
-        """Toggle scope between ALL_NAMESPACES and the config-default namespace.
-
-        Routed through the locked navigate handler so it serializes with
-        agent-driven navigation (both stop/start watches across awaits).
-        """
-        if self.current_scope == ALL_NAMESPACES:
-            new_scope = self.config.namespace or "default"
-        else:
-            if not await self._cluster_list_permitted():
-                return  # notified inside; stay in the current namespace
-            new_scope = ALL_NAMESPACES
-        await self.on_navigate_command(NavigateCommand(None, new_scope))
+        """Toggle scope between ALL_NAMESPACES and the config-default namespace."""
+        await self._workspace_ctl.toggle_all_namespaces()
 
     async def action_favorite_namespace(self, index: int) -> None:
-        """Jump to `favorite_namespaces[index-1]` (issue #108, keys 1-9).
-
-        A favorite is a UI-only shortcut: it uses the exact same navigation
-        path as `:ns <name>` — no access is granted, no namespace list is
-        derived, and a forbidden watch reports its own concise notice.
-        """
-        favorites = self.config.favorite_namespaces
-        if index > len(favorites):
-            return
-        await self.on_navigate_command(NavigateCommand(None, favorites[index - 1]))
+        """Jump to `favorite_namespaces[index-1]` (issue #108, keys 1-9)."""
+        await self._workspace_ctl.favorite_namespace(index)
 
     async def _cluster_list_permitted(self) -> bool:
         """All-namespaces guard (issue #108): a forbidden cluster-wide LIST
@@ -1770,7 +1624,7 @@ class KorvidApp(App[None]):
                 timeout=10,
             )
             return
-        async with self._nav_lock:
+        async with self._workspace_ctl.nav_lock:
             # The probe awaited network I/O — an agent turn or a dialog may
             # have started meanwhile; re-check before anything is torn down.
             blocker = self._ctx_switch_blocker()
@@ -1824,7 +1678,7 @@ class KorvidApp(App[None]):
                 msg = await self._mcp.start()
                 self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
             await self.watch_manager.start(self.current_kind, self.current_scope)
-            await self._sync_metrics_poller()
+            await self._workspace_ctl.sync_metrics_poller()
         self.post_message(ResourcesUpdated(self.current_kind))
         self._refresh_status()
         self._prefetch_namespaces()
@@ -1938,10 +1792,14 @@ class KorvidApp(App[None]):
         """
         await self._logs.close()
         self._describe_pane.hide()
-        # Every pane's kind/scope/filter/drill describes the old cluster: a
-        # surviving second pane would keep stale-but-actionable rows on
-        # screen, so the switch collapses the split back to a single view.
-        await self._collapse_split()
+        # The workspace controller folds the split back to one pane, stops and
+        # de-targets the metrics poller, clears the drill breadcrumb, cancels
+        # the relationship workers holding the old client, and clears the
+        # filter — the workspace-only halves of the teardown (issue #187 /
+        # Deep Task 3). It runs first (under this coordinator's nav lock, held
+        # by the caller) so those pollers and workers release the old
+        # connection before the wholesale watch stop below.
+        await self._workspace_ctl.quiesce_for_context_switch()
         # An old-cluster namespace prefetch still in flight could land after
         # the new cluster's and overwrite its completions — cancel it first.
         if self._ns_prefetch_task is not None:
@@ -1952,12 +1810,6 @@ class KorvidApp(App[None]):
         # Completions that already loaded are old-cluster names — drop them
         # now so they aren't offered while (or if) the new prefetch fails.
         self._command_bar.namespace_words = []
-        if self._metrics is not None:
-            await self._metrics.stop()
-            # The poller is gone: drop the served-target cache too, or a
-            # same-namespace switch would look already-served to
-            # _sync_metrics_poller and metrics would never restart.
-            self._metrics_target = None
         await self.watch_manager.stop_all()
         if self._forwards is not None:
             # Same quiesce-stop-audit sequence as app exit: in-flight
@@ -1970,7 +1822,6 @@ class KorvidApp(App[None]):
         # flush them before _apply_context_switch re-points the audit log,
         # or they would be written as belonging to the new cluster.
         await self._forward.flush_audits()
-        self._drill.clear()
         self.store.clear_all()
         # The hint-events worker holds the old client and its exception path
         # re-populates the cache — cancel it (and the parked-cursor refresh
@@ -1978,25 +1829,7 @@ class KorvidApp(App[None]):
         # resurrect old-cluster hints.
         self.workers.cancel_group(self, "hint-events")
         self._hints.teardown()
-        await self._cancel_relationship_workers()
         await self._timeline.stop()
-        self.filter_pattern = ""
-        self._resource_filter = parse_filter("")
-
-    async def _cancel_relationship_workers(self) -> None:
-        """Stop the `g` graph load (and its goto follow-up) before the swap.
-
-        A relationship worker holds the old client through every LIST it
-        still has in flight: left running, it would either resolve against
-        the old cluster or fail on a transport the swap is about to close.
-        Each cancelled worker is awaited so teardown cannot return while one
-        is still mid-LIST. `WorkerError` covers the three outcomes `wait()`
-        signals for a worker that did not return a value — cancelled,
-        failed, or never started — none of which is actionable here.
-        """
-        for worker in self.workers.cancel_group(self, _RELATIONSHIP_GROUP):
-            with contextlib.suppress(WorkerError):
-                await worker.wait()
 
     async def _retarget_context(self, name: str, old: str | None) -> tuple[bool, str | None]:
         """Swap the connection to *name*; on failure fall back to *old*.
@@ -2076,8 +1909,10 @@ class KorvidApp(App[None]):
             # started from now on target the new cluster.
             self._forwards.retarget(name)
             self._forward.reopen()
-        self.current_kind = "pods"
-        self.current_scope = self.config.namespace or "default"
+        # Adopt the new cluster's default view (pods in its default namespace)
+        # through the workspace controller, which owns the view state and the
+        # view-scoped binding refresh.
+        self._workspace_ctl.reset_view_after_switch()
         # Rebind the helm wrapper: it pins --kube-context per instance, and
         # helm writes must follow the active cluster (None when helm is off).
         self._helm = result.helm
@@ -2205,24 +2040,20 @@ class KorvidApp(App[None]):
         if not isinstance(event.data_table, ResourceTable):
             return
         if self.current_kind != "pods":
-            if self._hierarchy_root_kind() is not None:
+            if self._workspace_ctl.hierarchy_root_kind() is not None:
                 # Helm release / OLM Subscription / CSV: Enter opens the
                 # component hierarchy tree (issue #120).
                 event.stop()
                 parts = str(event.row_key.value).split("/", 1)
                 if len(parts) == 2:
-                    self.run_worker(
-                        self._open_hierarchy(parts[0], parts[1]),
-                        exclusive=True,
-                        group="hierarchy",
-                    )
+                    self._workspace_ctl.open_hierarchy(parts[0], parts[1])
                 return
             if drill_child(self._canonical_kind(self.current_kind)) is None:
                 # No drill chain for this kind: leave Enter unconsumed so
                 # future handlers (e.g. a default describe) can claim it.
                 return
             event.stop()
-            await self._drill_down_selected(str(event.row_key.value))
+            await self._workspace_ctl.drill_down_selected(str(event.row_key.value))
             return
         event.stop()
         row_key = str(event.row_key.value)
@@ -2314,575 +2145,6 @@ class KorvidApp(App[None]):
             default=qualified,
         )
 
-    async def _drill_down_selected(self, row_key: str) -> None:
-        """Keyboard Enter: push a drill level for the selected row."""
-        if drill_child(self._canonical_kind(self.current_kind)) is None:
-            return  # kind has no drill-down chain; Enter is a no-op
-        parts = row_key.split("/", 1)
-        if len(parts) != 2:
-            return
-        error = await self._drill_into(parts[0], parts[1])
-        if error is not None:
-            self.notify(error, severity="warning")
-
-    #: Longest a drill transition waits for the target view's initial LIST
-    #: before switching anyway (issue #157). A slow cluster degrades to the
-    #: old switch-then-fill behavior, never worse.
-    DRILL_PREWARM_TIMEOUT = 1.0
-
-    async def _prewarm_view(
-        self,
-        kind: str,
-        scope: str,
-        ready: Callable[[list[Summary]], bool],
-    ) -> None:
-        """Warm the drill target before the pane switches (issue #157).
-
-        Starting the watch for a kind no pane displays renders nowhere, so
-        the LIST happens invisibly while the current view stays up; the
-        bounded wait ends as soon as `ready` sees the expected rows. The
-        subsequent `_navigate_locked` start() is then a no-op (the watch is
-        already running), the bucket is warm, and the single post-switch
-        render lands with real rows instead of flashing an empty table.
-
-        A pane-backed watch (a split pane displays this kind/scope) is
-        already warm - restarting it would clear the bucket it serves, so
-        both restart and wait are skipped. A watch that is merely *active*
-        may be another drill's in-flight pre-warm whose LIST has not landed:
-        each caller waits on its own readiness, and the lease count makes
-        `_stop_watch_if_unused` reap the stream only when the last pre-warm
-        released it.
-        """
-        key = (kind, scope)
-        self._prewarm_leases[key] = self._prewarm_leases.get(key, 0) + 1
-        # Pane-backed *and* live: a pane's watch mid-teardown (a concurrent
-        # navigation awaiting stop()) leaves the pane tuple unchanged while
-        # the stream is already gone - skipping then would recreate the
-        # empty flash. Require the watch itself.
-        if (
-            any((p.kind, p.scope) == key for p in self._workspace.panes)
-            and key in self.watch_manager.active
-        ):
-            return
-        await self.watch_manager.start(kind, scope)
-        deadline = monotonic() + self.DRILL_PREWARM_TIMEOUT
-        with self._progress(f"loading {kind}"):
-            while monotonic() < deadline:
-                if ready(self.store.get(kind, scope)):
-                    return
-                await asyncio.sleep(0.03)
-
-    async def _stop_watch_if_unused(self, kind: str, scope: str) -> None:
-        """Release one pre-warm lease; reap the stream when it was the last
-        lease and no pane displays the (kind, scope) (issue #157): a drill
-        that lost its pane (or its race) must not leak a watch, and must
-        not stop one a concurrent pre-warm or pane still relies on."""
-        key = (kind, scope)
-        remaining = self._prewarm_leases.get(key, 0) - 1
-        if remaining > 0:
-            self._prewarm_leases[key] = remaining
-            return
-        self._prewarm_leases.pop(key, None)
-        if all((p.kind, p.scope) != key for p in self._workspace.panes):
-            await self.watch_manager.stop(kind, scope)
-
-    async def _drill_into(self, namespace: str, name: str) -> str | None:
-        """Push a drill level for (namespace, name) in the current view and
-        navigate to the child kind. Returns an error message, or None on success."""
-        canonical = self._canonical_kind(self.current_kind)
-        child = drill_child(canonical)
-        if child is None:
-            return f"{canonical} has no drill-down chain"
-        if child not in self.aliases:
-            return f"{child} not discovered yet, try again shortly"
-        obj = next(
-            (
-                o
-                for o in self.store.get(self.current_kind, self.current_scope)
-                if o.namespace == namespace and o.name == name
-            ),
-            None,
-        )
-        if obj is None:
-            return f"no {canonical} named {name!r} in the current view"
-        uid = str(getattr(obj, "uid", "") or "")
-        if not uid:
-            return f"cannot drill into {name}: no uid available"
-        level = DrillLevel(
-            parent_kind=canonical,
-            parent_name=name,
-            parent_namespace=namespace,
-            parent_uid=uid,
-            child_kind=child,
-        )
-        # Push and navigate as one transaction under the navigation lock:
-        # a concurrent :view/agent navigate can then never observe (or
-        # strand) a pushed level without its matching child view. If the
-        # transition itself fails, the pushed level is rolled back.
-        # Capture before waiting on the lock: focus may move (or the pane may
-        # close) while this drill queues behind another navigation.
-        pane = self._pane
-        # Staleness anchors (review on #160): the pre-warm below can wait up
-        # to a second, so a newer :view/:ns/:ctx may land first. The drill
-        # was issued against *this* view in *this* cluster - anything else
-        # under the lock means the newer command wins and the drill abandons.
-        origin = (pane.kind, pane.scope)
-        epoch = self._ctx_epoch
-        nav_gen = pane.nav_gen
-        # Warm the child view first (issue #157): wait - bounded - until the
-        # rows this drill will show exist, so the switch renders once with
-        # content instead of flashing an empty table while the LIST runs.
-        # Inside the try: a cancellation mid-pre-warm must still release the
-        # lease (the acquire is synchronous before the first await, so the
-        # finally never releases a lease that was not taken).
-        prewarm_scope = pane.scope
-        try:
-            await self._prewarm_view(
-                child,
-                prewarm_scope,
-                lambda rows: any(owned_by(r, uid) for r in rows),
-            )
-            async with self._nav_lock:
-                if not self._workspace.contains(pane):
-                    # An accurate outcome (review on #160): a None here reads
-                    # as success to agent_drill_down, which would report a
-                    # drill that never happened.
-                    return "the pane closed while preparing the drill — drill abandoned"
-                if (
-                    (pane.kind, pane.scope) != origin
-                    or pane.nav_gen != nav_gen
-                    or self._ctx_switching
-                    or epoch != self._ctx_epoch
-                ):
-                    return (
-                        "the view changed while preparing the drill — drill abandoned "
-                        "(the newer navigation takes priority)"
-                    )
-                pane.drill.push(level)
-                try:
-                    await self._navigate_locked(pane, child, None)
-                except BaseException:
-                    pane.drill.pop()
-                    raise
-        finally:
-            # No-op when the navigation landed (the pane now displays the
-            # warmed kind/scope); reaps the stream when the drill lost its
-            # pane or raced a scope change.
-            await self._stop_watch_if_unused(child, prewarm_scope)
-        self._render_table(pane.kind, only=pane)
-        self._refresh_status()
-        return None
-
-    async def _pop_drill(self) -> bool:
-        """Pop one drill level and navigate back to its parent kind as one
-        transaction under the navigation lock. Returns False when the stack
-        was empty (nothing to pop)."""
-        # Capture before waiting on the lock: focus may move (or the pane may
-        # close) while this pop queues behind another navigation.
-        pane = self._pane
-        peeked = pane.drill.peek()
-        if peeked is None:
-            return False
-        # Staleness anchors (review on #160): same rule as the push side -
-        # the Esc was issued against this view in this cluster.
-        origin = (pane.kind, pane.scope)
-        epoch = self._ctx_epoch
-        nav_gen = pane.nav_gen
-        # Warm the parent view first (issue #157): its watch was stopped
-        # when we drilled away, so navigating straight back would re-LIST
-        # into an empty flash. Readiness is what the post-pop view will
-        # actually show: a remaining drill level keeps filtering by its
-        # parent UID (pods -> replicasets keeps the deployment filter), so
-        # an unrelated row must not satisfy the wait; only a pop back to
-        # the root accepts any row.
-        under = pane.drill.copy()
-        under.pop()
-        uid_after = under.parent_uid
-        if uid_after is None:
-            ready: Callable[[list[Summary]], bool] = bool
-        else:
-
-            def ready(rows: list[Summary]) -> bool:
-                return any(owned_by(r, uid_after) for r in rows)
-
-        prewarm_scope = pane.scope
-        try:
-            await self._prewarm_view(peeked.parent_kind, prewarm_scope, ready)
-            async with self._nav_lock:
-                if not self._workspace.contains(pane):
-                    return False  # the initiating pane was closed while queued
-                if (
-                    (pane.kind, pane.scope) != origin
-                    or pane.nav_gen != nav_gen
-                    or self._ctx_switching
-                    or epoch != self._ctx_epoch
-                    or pane.drill.peek() is not peeked
-                ):
-                    # A newer navigation landed during the pre-warm: it wins.
-                    # Consume the Esc (True) so it does not cascade into the
-                    # hierarchy-return fallback against the changed view.
-                    return True
-                popped = pane.drill.pop()
-                if popped is None:
-                    return False
-                await self._navigate_locked(pane, popped.parent_kind, None)
-        finally:
-            await self._stop_watch_if_unused(peeked.parent_kind, prewarm_scope)
-        self._render_table(pane.kind, only=pane)
-        self._refresh_status()
-        return True
-
-    def _hierarchy_root_kind(self) -> str | None:
-        """The current view's hierarchy root kind ("HelmRelease",
-        "Subscription", "ClusterServiceVersion"), or None when the view has
-        no component tree (issue #120). Helm requires the components
-        accessor; without it Enter falls back to the revision drill."""
-        meta = self.aliases.get(self._canonical_kind(self.current_kind))
-        if meta is None:
-            return None
-        ident = (meta.group, meta.plural)
-        if ident == (HELM_RELEASES_META.group, HELM_RELEASES_META.plural):
-            return "HelmRelease" if self._get_helm_components is not None else None
-        if ident == (OPERATORS_GROUP, "subscriptions"):
-            return "Subscription"
-        if ident == (OPERATORS_GROUP, "clusterserviceversions"):
-            return "ClusterServiceVersion"
-        return None
-
-    def _view_for_component(self, ref: ComponentRef) -> tuple[str, bool] | None:
-        """Canonical view alias plus namespacedness for a component ref, or
-        None when no real (non-synthetic) view was discovered for it. A
-        declared apiVersion must match the discovered group - two CRDs
-        sharing a Kind across groups must not resolve to the wrong view."""
-        group = ref.api_version.rpartition("/")[0]  # core "v1" -> ""
-        fallback: tuple[str, bool] | None = None
-        for alias, meta in self.aliases.items():
-            if meta.kind != ref.kind or meta.synthetic or self._canonical_kind(alias) != alias:
-                continue
-            if meta.group == group:
-                return alias, meta.namespaced
-            if not ref.api_version and fallback is None:
-                fallback = (alias, meta.namespaced)
-        return fallback
-
-    async def _hierarchy_refs(
-        self, root: str, namespace: str, name: str
-    ) -> list[ComponentRef] | None:
-        """Component refs for the root, or None when unavailable (notified)."""
-        if root == "HelmRelease":
-            fetch = self._get_helm_components
-            if fetch is None:
-                return None
-            try:
-                return await fetch(namespace, name)
-            except (ApiStatusError, ValueError) as exc:
-                self.notify(f"hierarchy for {name} unavailable: {exc}", severity="error")
-                return None
-        return await self._operator_component_refs(root, namespace, name)
-
-    def _on_hierarchy_pick(
-        self,
-        epoch: int,
-        origin: tuple[PaneState, str, str],
-        result: tuple[str, str, str, str] | None,
-    ) -> None:
-        """A tree node action: jump to the object's view or describe it.
-
-        ``origin`` is (pane, canonical view, scope) captured when the tree
-        was *opened* — the pane may show something else by dismissal time
-        (agent navigation is not blocked by the modal), and the return
-        must lead back to where the tree actually came from."""
-        ctx = self._hierarchy_ctx
-        self._hierarchy_ctx = None  # tree closed: stop live rebuilds
-        if result is None:
-            return
-        if self._ctx_switching or epoch != self._ctx_epoch:
-            self.notify(
-                "hierarchy action cancelled - the kube context changed while the tree was open",
-                severity="warning",
-            )
-            return
-        action, kind, ns, obj = result
-        if action == "describe":
-            coro = self._describe_named(kind, ns, obj)
-        else:
-            if ctx is not None:
-                # The jump must stay reversible (issue #135): Escape on the
-                # target reopens this tree over the view it was opened from.
-                title, refs, namespace, scope = ctx
-                origin_pane, origin_view, origin_scope = origin
-                origin_pane.hierarchy_return = HierarchyReturn(
-                    origin_view=origin_view,
-                    origin_scope=origin_scope,
-                    title=title,
-                    refs=refs,
-                    namespace=namespace,
-                    tree_scope=scope,
-                    picked=(kind, ns, obj),
-                    epoch=epoch,
-                )
-            coro = self._jump_to_object(kind, ns, obj, epoch=epoch)
-        self.run_worker(coro, exclusive=True, group="hierarchy")
-
-    async def _reopen_hierarchy_return(self) -> bool:
-        """Escape on a hierarchy jump target: rebuild the tree over its
-        origin view, cursor on the picked node (issue #135). False when
-        the focused pane has no pending return or this Escape is not
-        eligible to use it — the return stays pending while another modal
-        is open, and is dropped only when its pane moved on (kind change,
-        context switch)."""
-        pane = self._pane
-        ret = pane.hierarchy_return
-        if ret is None:
-            return False
-        if len(self.screen_stack) > 1:
-            # This Escape belongs to the modal on top (its own close
-            # binding handles it) - the return stays pending for the next
-            # Escape on the base view.
-            return False
-        if self._ctx_switch_crossed(ret.epoch):
-            pane.hierarchy_return = None
-            return False
-        if self._canonical_kind(self.current_kind) != ret.picked[0]:
-            # The pane navigated elsewhere; nothing to return to.
-            pane.hierarchy_return = None
-            return False
-        pane.hierarchy_return = None  # consumed - never replayed
-        await self._navigate(ret.origin_view, ret.origin_scope)
-        if self._ctx_switch_crossed(ret.epoch):
-            # A :ctx switch started while the navigate held the nav lock:
-            # the refs describe the old cluster - do not expose the tree.
-            # The keystroke was still consumed (the navigation happened).
-            return True
-        tree_root = build_hierarchy(
-            ret.title,
-            ret.refs,
-            namespace=ret.namespace,
-            resolve=self._view_for_component,
-            lookup=self._hierarchy_lookup(ret.tree_scope),
-        )
-        self._hierarchy_ctx = (ret.title, ret.refs, ret.namespace, ret.tree_scope)
-        origin = (pane, ret.origin_view, ret.origin_scope)
-        await self.push_screen(
-            HierarchyScreen(ret.title, tree_root, initial_cursor=ret.picked),
-            functools.partial(self._on_hierarchy_pick, ret.epoch, origin),
-        )
-        return True
-
-    def _hierarchy_lookup(self, scope: str) -> Callable[[str, str], list[Summary] | None]:
-        """Store lookup for the tree: a list only for views a live watch is
-        actually feeding, else None - the builder must not claim "missing"
-        from a bucket nothing fills. The watch must cover the *component's*
-        namespace; cluster-scoped components (ns "") use the tree's scope.
-
-        Results are memoized per (view, watch scope) for this lookup's
-        lifetime (one tree build), so an all-namespaces watch serving many
-        component namespaces is fetched - and indexed by the builder, which
-        caches on bucket identity - exactly once."""
-        buckets: dict[tuple[str, str], list[Summary]] = {}
-
-        def lookup(view: str, namespace: str) -> list[Summary] | None:
-            active = self.watch_manager.active
-            for view_scope in (namespace or scope, ALL_NAMESPACES):
-                if (view, view_scope) in active:
-                    key = (view, view_scope)
-                    if key not in buckets:
-                        buckets[key] = self.store.get(view, view_scope)
-                    return buckets[key]
-            return None
-
-        return lookup
-
-    def _refresh_hierarchy(self) -> None:
-        """Rebuild an open hierarchy tree from the current store state."""
-        ctx = self._hierarchy_ctx
-        try:
-            screen = self.screen
-        except ScreenStackError:
-            # A ResourcesUpdated dispatched during app teardown can land
-            # after the screen stack is emptied (flaky-CI issue #147):
-            # no screen simply means no tree to refresh.
-            return
-        if ctx is None or not isinstance(screen, HierarchyScreen):
-            return
-        title, refs, namespace, scope = ctx
-        screen.update_tree(
-            build_hierarchy(
-                title,
-                refs,
-                namespace=namespace,
-                resolve=self._view_for_component,
-                lookup=self._hierarchy_lookup(scope),
-            )
-        )
-
-    async def _open_hierarchy(self, namespace: str, name: str) -> None:
-        """Gather component refs for the selected root and push the tree.
-
-        The fetches span awaited gaps: the captured epoch cancels a tree (or
-        a node action) that would otherwise describe the old cluster after a
-        context switch completed underneath, and the captured pane view
-        keeps the tree from popping over a view the user moved to."""
-        root = self._hierarchy_root_kind()
-        if root is None or not self._ctx_reads_allowed():
-            return
-        epoch = self._ctx_epoch
-        pane = self._pane
-        kind, scope = pane.kind, pane.scope
-        refs = await self._hierarchy_refs(root, namespace, name)
-        if refs is None:
-            return
-        if self._ctx_switching or epoch != self._ctx_epoch:
-            return
-        if self._pane is not pane or pane.kind != kind or pane.scope != scope:
-            return  # the user moved on while components were being fetched
-        if len(self.screen_stack) > 1:  # another dialog opened during the fetch
-            return
-        title = f"{root} {namespace}/{name}" if namespace else f"{root} {name}"
-        tree_root = build_hierarchy(
-            title,
-            refs,
-            namespace=namespace,
-            resolve=self._view_for_component,
-            lookup=self._hierarchy_lookup(scope),
-        )
-        self._hierarchy_ctx = (title, refs, namespace, scope)
-        origin = (pane, self._canonical_kind(kind), scope)
-        await self.push_screen(
-            HierarchyScreen(title, tree_root),
-            functools.partial(self._on_hierarchy_pick, epoch, origin),
-        )
-
-    async def _operator_component_refs(
-        self, root: str, namespace: str, name: str
-    ) -> list[ComponentRef] | None:
-        """Component refs for an OLM root, in the issue #120 preference
-        order: Operator ``status.components.refs`` (live, includes CRDs and
-        RBAC), then the Subscription's InstallPlan ``status.plan``. Returns
-        None when the root manifest itself cannot be fetched (already
-        notified); an empty list renders a root-only tree."""
-        if self._get_manifest is None:
-            self.notify("Hierarchy unavailable in this session", severity="warning")
-            return None
-        try:
-            manifest = await self._get_manifest(self.current_kind, namespace or None, name)
-        except (ApiStatusError, ValueError) as exc:
-            self.notify(f"hierarchy for {name} unavailable: {exc}", severity="error")
-            return None
-        refs = await self._refs_from_operator_object(manifest, namespace, root)
-        # The Operator's refs include the root object itself (the CSV, and
-        # sometimes the Subscription); a root listed as its own child would
-        # just loop Enter back to the same tree. Match the full identity:
-        # OLM copies CSVs into other namespaces under the same name, and
-        # those copies are real components.
-        refs = [
-            r
-            for r in refs
-            if (r.kind, r.name) != (root, name) or (r.namespace and r.namespace != namespace)
-        ]
-        if refs:
-            return refs
-        if root == "Subscription":
-            return await self._refs_from_installplan(manifest, namespace)
-        return self._refs_from_owned_workloads(manifest, namespace)
-
-    def _refs_from_owned_workloads(
-        self, manifest: dict[str, Any], namespace: str
-    ) -> list[ComponentRef]:
-        """CSV fallback (issue #120 third source): Deployments whose
-        ownerReferences point at the CSV, from buckets a live watch feeds.
-        Capped like the manifest parsers so a pathological bucket cannot
-        flood the tree."""
-        uid = str((manifest.get("metadata") or {}).get("uid") or "")
-        if not uid:
-            return []
-        lookup = self._hierarchy_lookup(self.current_scope)
-        refs: list[ComponentRef] = []
-        for obj in lookup("deployments", namespace) or []:
-            if obj.namespace != namespace or uid not in getattr(obj, "owner_uids", ()):
-                continue
-            refs.append(ComponentRef(kind="Deployment", name=str(obj.name), namespace=namespace))
-            if len(refs) >= MAX_COMPONENT_DOCS:
-                break
-        return refs
-
-    async def _refs_from_installplan(
-        self, manifest: dict[str, Any], namespace: str
-    ) -> list[ComponentRef]:
-        """InstallPlan fallback: ``status.plan`` records exactly what the
-        install created (older OLM without the Operator API)."""
-        key = self._olm.alias_key("installplans")
-        ref = (manifest.get("status") or {}).get("installPlanRef") or {}
-        plan_name = str(ref.get("name") or "")
-        if key is None or not plan_name or self._get_manifest is None:
-            return []
-        plan_ns = str(ref.get("namespace") or namespace)
-        try:
-            plan = await self._get_manifest(key, plan_ns or None, plan_name)
-        except (ApiStatusError, ValueError):
-            return []
-        return installplan_components((plan.get("status") or {}).get("plan"))
-
-    async def _refs_from_operator_object(
-        self, manifest: dict[str, Any], namespace: str, root: str
-    ) -> list[ComponentRef]:
-        """Refs from the cluster-scoped Operator object named
-        ``{package}.{namespace}`` (Subscriptions) or via the
-        ``operators.coreos.com/<name>`` component labels OLM stamps on CSVs."""
-        key = self._olm.alias_key("operators")
-        if key is None or self._get_manifest is None:
-            return []
-        names: list[str] = []
-        if root == "Subscription":
-            package = str((manifest.get("spec") or {}).get("name") or "")
-            if package:
-                names.append(f"{package}.{namespace}")
-        labels = (manifest.get("metadata") or {}).get("labels") or {}
-        prefix = f"{OPERATORS_GROUP}/"
-        names += [
-            k.removeprefix(prefix) for k in labels if isinstance(k, str) and k.startswith(prefix)
-        ]
-        for op_name in dict.fromkeys(names):
-            try:
-                operator = await self._get_manifest(key, None, op_name)
-            except (ApiStatusError, ValueError):
-                continue  # Operator object missing: fall through to the next source
-            components = (operator.get("status") or {}).get("components") or {}
-            refs = reference_components(components.get("refs"))
-            if refs:
-                return refs
-        return []
-
-    async def _jump_to_object(
-        self, kind: str, namespace: str, name: str, *, epoch: int | None = None
-    ) -> None:
-        """Navigate to *kind*'s view and put the cursor on the object - the
-        tree's Enter lands where every normal action works unchanged. Rows
-        stream in after the navigate, so the cursor placement polls briefly.
-        A context switch crossing *epoch* aborts: the same-named object in
-        the new cluster is not what the user picked."""
-        if epoch is not None and self._ctx_switch_crossed(epoch):
-            return
-        meta = self.aliases.get(kind)
-        if meta is None:
-            self.notify(f"{kind} is not a discovered view", severity="warning", markup=False)
-            return
-        await self._navigate(kind, namespace if meta.namespaced and namespace else None)
-        row_key = f"{namespace}/{name}"
-        for _ in range(self._jump_poll_attempts):
-            if epoch is not None and self._ctx_switch_crossed(epoch):
-                return
-            if self.current_kind != kind:
-                return  # the user moved on - stop quietly
-            if self._focus_row(row_key):
-                return
-            await asyncio.sleep(0.05)
-        self.notify(
-            f"{name} is not visible in {kind} - it may be gone or outside the current scope",
-            severity="warning",
-            markup=False,
-        )
-
     def _focus_row(self, row_key: str) -> bool:
         """Move the focused table's cursor to *row_key*; False when absent."""
         table = self._focused_table()
@@ -2940,67 +2202,10 @@ class KorvidApp(App[None]):
                     return rows
         return [(ctr, "-", "-", "-", "-") for ctr in self._get_pod_containers(namespace, name)]
 
-    def _selected_relationship_root(self) -> GraphResource | None:
-        """The exact root identity for `g`: authoritative discovery meta
-        (group/kind) for the current view plus the selected row's
-        namespace/name/UID from the store. None only after an
-        already-visible warning — no selection (`_selected_ns_name` warns
-        itself), the current view has no discovered `ResourceMeta`, or the
-        view is synthetic (an identity that cannot be built, or cannot ever
-        source a graph, is never silently dropped)."""
-        meta = self.aliases.get(self.current_kind)
-        if meta is None:
-            self.notify(f"{self.current_kind} is not a discovered view", severity="warning")
-            return None
-        if meta.synthetic:
-            # Korvid-invented views (e.g. the helm browser) have no backing
-            # API resource the fixed/discovered graph catalog could ever
-            # LIST - consistent with `_write_target`'s own synthetic check.
-            self.notify(f"{meta.kind} is a read-only view", severity="warning")
-            return None
-        namespace, name = self._selected_ns_name()
-        if namespace is None or name is None:
-            return None
-        uid = self._selected_uid(namespace or None, name)
-        return GraphResource(
-            group=meta.group, kind=meta.kind, namespace=namespace, name=name, uid=uid
-        )
-
     def action_relationships(self) -> None:
-        """Load and show the operational relationship graph for the
-        selected row (issue #281). This action itself performs no I/O —
-        every LIST runs inside the exclusive "relationships" worker
-        started below, exactly like the hierarchy tree's own jump worker."""
-        if self._relationship_loader is None:
-            self.notify("Relationships unavailable in this session", severity="warning")
-            return
-        if not self._ctx_reads_allowed():
-            return
-        target = self._selected_relationship_root()
-        if target is None:
-            return
-        pane = self._pane
-        origin = (pane, pane.kind, pane.scope)
-        namespace = None if pane.scope == ALL_NAMESPACES else pane.scope
-        self._run_relationship_worker(
-            self._load_relationships(target, namespace, self._ctx_epoch, origin)
-        )
-
-    def _run_relationship_worker(self, work: Coroutine[Any, Any, None]) -> None:
-        """Start one exclusive `relationships` worker with an error boundary.
-
-        `exit_on_error=False` keeps an unexpected failure (a transport or
-        parser bug that is neither an `ApiStatusError` nor an `OSError`)
-        from becoming `WorkerFailed` and tearing the whole TUI down over a
-        read-only view; `on_worker_state_changed` below turns it into a
-        visible notification instead. Cancellation — a `:ctx` switch, or an
-        exclusive re-run — is a normal outcome and stays silent."""
-        self.run_worker(
-            work,
-            exclusive=True,
-            group=_RELATIONSHIP_GROUP,
-            exit_on_error=False,
-        )
+        """Load and show the operational relationship graph for the selected
+        row (issue #281). The controller owns the load/open/goto flow."""
+        self._workspace_ctl.show_relationships()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Report a failed timeline or relationship worker instead of exiting.
@@ -3015,7 +2220,7 @@ class KorvidApp(App[None]):
             return
         if event.worker.group == TIMELINE_EVENT_GROUP:
             self._notify_worker_error("Warning-event timeline feed failed", event.worker)
-        elif event.worker.group == _RELATIONSHIP_GROUP:
+        elif event.worker.group == RELATIONSHIP_GROUP:
             self._notify_worker_error("Relationships failed", event.worker)
         elif event.worker.group == TIMELINE_NAVIGATION_GROUP:
             self._notify_worker_error("Timeline navigation failed", event.worker)
@@ -3033,59 +2238,6 @@ class KorvidApp(App[None]):
             timeout=10,
             markup=False,
         )
-
-    async def _load_relationships(
-        self,
-        target: GraphResource,
-        namespace: str | None,
-        epoch: int,
-        origin: tuple[PaneState, str, str],
-    ) -> None:
-        """Load one bounded snapshot and open `RelationshipScreen` over it.
-
-        A :ctx switch crossing *epoch* while the snapshot LISTs are in
-        flight discards the result. A pane, view, or scope change from
-        *origin* also discards it so an old selection cannot open over the
-        view the user moved to."""
-        loader = self._relationship_loader
-        if loader is None:
-            return  # composition changed under us since action_relationships checked
-        graph = await loader.load(target, namespace, self.aliases)
-        if self._ctx_switch_crossed(epoch):
-            return
-        pane, kind, scope = origin
-        if self._pane is not pane or pane.kind != kind or pane.scope != scope:
-            return
-        if len(self.screen_stack) > 1:  # another dialog opened during the LISTs
-            return
-        await self.push_screen(
-            RelationshipScreen(graph, target),
-            functools.partial(self._on_relationship_result, epoch),
-        )
-
-    def _on_relationship_result(self, epoch: int, result: GotoResult | None) -> None:
-        """Enter on a resolved row: reuse `_jump_to_object` — no second
-        navigation path — after translating the graph's (group, kind) back
-        to the discovered view alias `_jump_to_object` expects."""
-        if result is None:
-            return
-        if self._ctx_switch_crossed(epoch):
-            self.notify(
-                "relationship navigation cancelled - the kube context changed"
-                " while the graph was open",
-                severity="warning",
-            )
-            return
-        _, group, kind, namespace, name = result
-        api_version = f"{group}/v1" if group else ""
-        resolved = self._view_for_component(
-            ComponentRef(kind=kind, name=name, api_version=api_version, namespace=namespace)
-        )
-        if resolved is None:
-            self.notify(f"{kind} is not a discovered view", severity="warning", markup=False)
-            return
-        alias, _namespaced = resolved
-        self._run_relationship_worker(self._jump_to_object(alias, namespace, name, epoch=epoch))
 
     def _selected_timeline_resource(self) -> TimelineResourceRef | None:
         """The exact resource under the cursor when `T` is pressed, captured
@@ -3499,7 +2651,7 @@ class KorvidApp(App[None]):
             # toggle queued just before the switch claimed _ctx_switching
             # could otherwise start the server against the client/alias map
             # mid-swap, or have its stop undone by the switch's restart.
-            async with self._nav_lock:
+            async with self._workspace_ctl.nav_lock:
                 if self._ctx_switching:
                     self.notify(
                         "A context switch is in progress — try again once it completes",
@@ -3563,7 +2715,7 @@ class KorvidApp(App[None]):
         # fresh run came up while the old teardown dragged on, pending
         # proposals belong to that live run (its start transition already
         # swept old-run stragglers) and must not be expired here.
-        async with self._nav_lock:
+        async with self._workspace_ctl.nav_lock:
             if mcp.running:
                 return
             await self._expire_proposals_audited("the MCP server was stopped")
@@ -3975,8 +3127,8 @@ class KorvidApp(App[None]):
     async def on_key(self, event: Key) -> None:
         """Pane chords (`ctrl+w` v/w/q) and Escape (closes describe/log
         panes, then pops one drill-down level)."""
-        if self._workspace.chord_pending or event.key == "ctrl+w":
-            await self._handle_pane_chord(event)
+        if self._workspace_ctl.chord_pending or event.key == "ctrl+w":
+            await self._workspace_ctl.handle_pane_chord(event)
             return
         if event.key != "escape":
             return
@@ -4003,13 +3155,13 @@ class KorvidApp(App[None]):
             await self._logs.close()
             event.stop()
             return
-        popped = await self._pop_drill()
+        popped = await self._workspace_ctl.pop_drill()
         if popped:
             event.stop()
             return
         # No drill level left: a pending hierarchy return (issue #135)
         # reopens the component tree the last goto jumped away from.
-        if await self._reopen_hierarchy_return():
+        if await self._workspace_ctl.reopen_hierarchy_return():
             event.stop()
             # Without this the same Escape continues into binding
             # processing and hits the freshly pushed tree's own
@@ -4017,59 +3169,6 @@ class KorvidApp(App[None]):
             event.prevent_default()
 
     # -- 2-pane split workspace (issue #48) ---------------------------------
-
-    async def _handle_pane_chord(self, event: Key) -> None:
-        """`ctrl+w` chord state machine: the prefix always swallows the next
-        key - an unmapped second key must not fall through to normal
-        handling (q would quit)."""
-        if not self._workspace.chord_pending:
-            # Arm only while a table is focused: with an Input (command/
-            # filter bar) focused the second key never reaches App.on_key,
-            # which would orphan the pending flag and silently swallow the
-            # next table keypress after the bar closes.
-            if not isinstance(self.focused, ResourceTable):
-                return
-            self._workspace.chord_pending = True
-            event.stop()
-            event.prevent_default()
-            return
-        self._workspace.chord_pending = False
-        event.stop()
-        event.prevent_default()
-        if event.key == "v":
-            await self._split_pane()
-        elif event.key in ("w", "ctrl+w"):
-            self._focus_other_pane()
-        elif event.key == "q":
-            await self._close_focused_pane()
-
-    async def _split_pane(self) -> None:
-        """`ctrl+w v`: clone the focused view into a second pane and focus it."""
-        if self._workspace.is_split:
-            self.notify("workspace is already split - ctrl+w q closes a pane", severity="warning")
-            return
-        # The pane list and watch lifecycle are also mutated by navigation:
-        # take the same lock so a concurrent `:view`/`:ns` transition never
-        # interleaves with the split's pane snapshot and watch start.
-        async with self._nav_lock:
-            if self._workspace.is_split:
-                return  # lost the race to another split
-            pane = self._workspace.split()
-            table = ResourceTable(id=pane.table_id)
-            await self.query_one("#workspace", Horizontal).mount(table)
-            for pane_table in self.query(ResourceTable):
-                pane_table.add_class("split-pane")
-            # start() is idempotent - the clone usually shares the source's watch.
-            await self.watch_manager.start(pane.kind, pane.scope)
-        # A single-pane empty-state overlay must not linger over the split;
-        # each pane's own content is the guidance now.
-        self.query_one("#empty-state", Static).display = False
-        # Render only the new pane: the source is already current, and a
-        # repaint would reset its cursor/scroll.
-        self._render_table(pane.kind, only=pane)
-        self._update_pane_focus_classes()
-        table.focus()
-        self._refresh_status()
 
     def _update_pane_focus_classes(self) -> None:
         """Mark the command-routing target with `focused-pane`. A class, not
@@ -4090,74 +3189,14 @@ class KorvidApp(App[None]):
         # focus (issue #114).
         self.refresh_bindings()
 
-    def _focus_other_pane(self) -> None:
-        """`ctrl+w w`: move focus (commands, filters, keybindings) across."""
-        if not self._workspace.is_split:
-            return
-        self._workspace.focus_other()
-        self._update_pane_focus_classes()
-        self._focused_table().focus()
-        self._hints.refresh_for_focus()
-        self._refresh_status()
-
-    async def _close_focused_pane(self) -> None:
-        """`ctrl+w q`: back to the single view; the other pane survives."""
-        if not self._workspace.is_split:
-            return
-        async with self._nav_lock:
-            if not self._workspace.is_split:
-                return  # lost the race to another close
-            closed = self._workspace.close_focused()
-            closing, remaining = closed.closing, closed.remaining
-            # The pane whose selection drove the stream is gone: don't leave
-            # orphaned logs pinned over the survivor's view.
-            await self._logs.close_if_owned_by(closing)
-            if (closing.kind, closing.scope) != (remaining.kind, remaining.scope):
-                await self.watch_manager.stop(closing.kind, closing.scope)
-            # The survivor keeps its own table widget - and with it the
-            # cursor/scroll state the user had in that pane.
-            await self.query_one(f"#{closing.table_id}", ResourceTable).remove()
-            self.query_one(f"#{remaining.table_id}", ResourceTable).remove_class("split-pane")
-            await self._sync_metrics_poller()
-        self._update_pane_focus_classes()
-        # No repaint: `show()` clears and re-adds rows, which would reset the
-        # survivor's cursor/scroll; its table is already current. The
-        # single-pane empty-state does need a refresh (an empty survivor
-        # must show guidance, and a stale overlay must clear).
-        table = self._focused_table()
-        self._refresh_empty_state(remaining.kind, table.row_count)
-        table.focus()
-        self._hints.refresh_for_focus()
-        self._refresh_status()
-
-    async def _collapse_split(self) -> None:
-        """Fold the workspace back to a single pane (context-switch teardown).
-
-        The caller already holds the nav lock and stops all watches
-        wholesale right after, so this only removes the extra pane's state
-        and table widget. The survivor is pane 0; the switch resets its
-        kind/scope/filter afterwards, so which pane survives is cosmetic.
-        """
-        collapsed = self._workspace.collapse()
-        if collapsed is None:
-            return
-        await self.query_one(f"#{collapsed.closing.table_id}", ResourceTable).remove()
-        self.query_one(f"#{collapsed.remaining.table_id}", ResourceTable).remove_class("split-pane")
-        self._update_pane_focus_classes()
-
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         """Clicking a pane focuses it - command routing must follow. Any
         focus change also disarms a pending `ctrl+w` chord: the second key
         would go to the newly focused widget, leaving the flag set to
         swallow a later table keypress."""
-        self._workspace.chord_pending = False
         widget = event.widget
-        if not isinstance(widget, ResourceTable) or widget.id is None:
-            return
-        if self._workspace.focus_by_table_id(widget.id):
-            self._update_pane_focus_classes()
-            self._hints.refresh_for_focus()
-            self._refresh_status()
+        table_id = widget.id if isinstance(widget, ResourceTable) else None
+        self._workspace_ctl.on_descendant_focus(table_id)
 
     def on_descendant_blur(self, event: DescendantBlur) -> None:
         """Overlay widgets (command/filter bars, describe/log panes) hide
@@ -4165,14 +3204,7 @@ class KorvidApp(App[None]):
         Textual's sibling-fallback in `_reset_focus` finds nothing focusable
         and focus drops to None - restore it to the focused pane's table."""
         del event
-        self.call_later(self._restore_table_focus)
-
-    def _restore_table_focus(self) -> None:
-        """Refocus the focused pane's table when nothing else holds focus."""
-        if self.focused is not None or len(self.screen_stack) != 1:
-            return
-        if self.query(ResourceTable):
-            self._focused_table().focus()
+        self.call_later(self._workspace_ctl.restore_table_focus)
 
     async def action_logs(self) -> None:
         """Open logs for the selected pod, or toggle it in/out of the pane (``l``)."""
@@ -5733,7 +4765,7 @@ class KorvidApp(App[None]):
         namespace, name = self._selected_ns_name()
         if namespace is None or name is None:
             return
-        error = await self._drill_into(namespace, name)
+        error = await self._workspace_ctl.drill_into(namespace, name)
         if error is not None:
             self.notify(error, severity="warning")
 
@@ -6072,15 +5104,9 @@ class KorvidApp(App[None]):
         return "~"
 
     def _topbar_can_drill(self) -> bool:
-        """True when Enter drills on the current view: pods -> containers,
-        hierarchy roots -> component tree, or a registered ownership child
-        (mirrors on_data_table_row_selected, which otherwise leaves Enter
-        unconsumed - such views must not advertise `enter: drill`)."""
-        if self.current_kind == "pods":
-            return True
-        if self._hierarchy_root_kind() is not None:
-            return True
-        return drill_child(self._canonical_kind(self.current_kind)) is not None
+        """True when Enter drills on the current view (mirrors
+        on_data_table_row_selected); the controller owns the decision."""
+        return self._workspace_ctl.can_drill()
 
     def _refresh_top_bar(self) -> None:
         """Re-render the grouped legend for the current view (issue #142)."""
@@ -6249,121 +5275,40 @@ class KorvidApp(App[None]):
             return
         if self._logs.search_prev():
             return
-        self._toggle_sort("name")
+        self._workspace_ctl.sort_by("name")
 
     # ------------------------------------------------------------------
     # Column sorting (issue #37) — data-model sort keys, per-kind state.
     # ------------------------------------------------------------------
 
-    def _view_for(self, kind: str) -> ViewConfig | None:
-        """The `views:` config entry for a view kind, resolved via its meta."""
-        meta = self.aliases.get(kind)
-        return self.config.views.get(meta.plural if meta is not None else kind)
-
-    def _toggle_sort(self, column: str) -> None:
-        """Apply/flip a sort column for the current view kind and re-render."""
-        kind = self.current_kind
-        if column in ("cpu", "mem") and kind != "pods":
-            # Only the pods view has CPU/MEM columns and a metrics feed;
-            # elsewhere the keypress would silently discard the current
-            # order while showing no indicator, so ignore it.
-            return
-        view = self._view_for(kind)
-        if column != "name" and view is not None and view.replace:
-            # `replace: true` hides AGE/CPU/MEM — sorting by an invisible
-            # column would reorder rows with no indicator, so ignore it.
-            return
-        self._sorts[kind] = toggle_sort(self._sorts.get(kind), column)
-        self._render_table(kind, only=self._pane)
-
     def action_sort_by_age(self) -> None:
-        self._toggle_sort("age")
+        self._workspace_ctl.sort_by("age")
 
     def action_sort_by_cpu(self) -> None:
-        self._toggle_sort("cpu")
+        self._workspace_ctl.sort_by("cpu")
 
     def action_sort_by_mem(self) -> None:
-        self._toggle_sort("mem")
+        self._workspace_ctl.sort_by("mem")
 
     def on_sort_command(self, message: SortCommand) -> None:
         """`:sort <column>` (issue #45): builtin or custom column; bare `:sort` clears."""
-        kind = self.current_kind
-        if message.column is None:
-            self._sorts.pop(kind, None)
-            self._render_table(kind, only=self._pane)
-            return
-        requested = message.column
-        view = self._view_for(kind)
-        custom_names = tuple(column.name for column in view.columns) if view is not None else ()
-        builtins = ("name",) if view is not None and view.replace else SORT_COLUMNS
-        if requested.lower() in builtins:
-            self._toggle_sort(requested.lower())
-            return
-        matched = next((name for name in custom_names if name.lower() == requested.lower()), None)
-        if matched is None:
-            columns = ", ".join((*builtins, *custom_names))
-            self.notify(
-                f"Unknown sort column {requested!r} — available: {columns}",
-                severity="warning",
-            )
-            return
-        self._sorts[kind] = toggle_sort(self._sorts.get(kind), matched)
-        self._render_table(kind, only=self._pane)
-
-    def _sortable_columns(self, kind: str) -> tuple[str, ...]:
-        """Every column the current view can sort by (issue #138): the
-        visible builtins (cpu/mem only where a metrics feed exists, none
-        but name under `replace: true`) plus the view's custom columns."""
-        view = self._view_for(kind)
-        custom = tuple(column.name for column in view.columns) if view is not None else ()
-        if view is not None and view.replace:
-            builtins: tuple[str, ...] = ("name",)
-        elif kind == "pods":
-            builtins = SORT_COLUMNS
-        else:
-            builtins = ("name", "age")
-        return (*builtins, *custom)
-
-    def _apply_sort_column(self, column: str, *, pane: PaneState | None = None) -> None:
-        """Apply/flip *column* (builtin or custom, already validated for
-        *pane*'s view) on that pane and re-render. Defaults to the focused
-        pane; the header-click path passes the clicked table's pane."""
-        pane = pane if pane is not None else self._pane
-        kind = pane.kind
-        pane.sorts[kind] = toggle_sort(pane.sorts.get(kind), column)
-        self._render_table(kind, only=pane)
+        self._workspace_ctl.sort_command(message.column)
 
     def action_sort_picker(self) -> None:
         """`o` (issue #138): pick the sort column from a list instead of
         typing its exact name; re-picking the active column flips the
         direction, exactly like `:sort`."""
-        if len(self.screen_stack) > 1:
+        options = self._workspace_ctl.sort_picker_options()
+        if options is None:
             return  # never stack over another dialog
-        pane = self._pane
+        title, columns, pane = options
         kind = pane.kind
-        columns = self._sortable_columns(kind)
-        current = self._sorts.get(kind)
-        options = [
-            f"{column} {'▼' if current.descending else '▲'}"
-            if current is not None and current.column == column
-            else column
-            for column in columns
-        ]
 
         def _picked(choice: str | None) -> None:
-            if choice is None:
-                return
-            # Strip only the active-sort arrow: custom column names may
-            # legitimately contain spaces.
-            column = choice.removesuffix(" ▲").removesuffix(" ▼")
-            if (
-                self._workspace.contains(pane)
-                and pane.kind == kind
-                and column in self._sortable_columns(kind)
-            ):
-                self._apply_sort_column(column, pane=pane)
+            if choice is not None:
+                self._workspace_ctl.apply_sort_choice(choice, pane, kind)
 
-        self.push_screen(PickScreen(f"Sort {kind} by:", options), _picked)
+        self.push_screen(PickScreen(title, list(columns)), _picked)
 
     async def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
         """A header click sorts by that column (issue #138); clicking the
@@ -6373,25 +5318,7 @@ class KorvidApp(App[None]):
         if not isinstance(event.data_table, ResourceTable):
             return
         event.stop()
-        pane = next((p for p in self._workspace.panes if p.table_id == event.data_table.id), None)
-        if pane is None:
-            return  # a table without a live pane (mid-teardown)
-        # Labels may carry the ▲/▼ decoration of the active sort.
-        label = str(event.label).removesuffix(" ▲").removesuffix(" ▼")
-        kind = pane.kind
-        columns = self._sortable_columns(kind)
-        builtin = _HEADER_SORT_COLUMNS.get(label)
-        # Configured custom names may carry Rich markup ([red]TEAM[/]) that
-        # DataTable parses for display: match on the rendered plain text.
-        custom = next((name for name in columns if Text.from_markup(name).plain == label), None)
-        column = builtin if builtin in columns else custom
-        if column is None:
-            self.notify(
-                f"{label} is not sortable — sortable: {', '.join(columns)}",
-                severity="warning",
-            )
-            return
-        self._apply_sort_column(column, pane=pane)
+        self._workspace_ctl.header_sort(event.data_table.id, str(event.label))
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,
@@ -7045,7 +5972,7 @@ class KorvidApp(App[None]):
                 f"ERROR: multiple {canonical} named {name!r} across namespaces - "
                 "navigate to one namespace first"
             )
-        error = await self._drill_into(matches[0].namespace, name)
+        error = await self._workspace_ctl.drill_into(matches[0].namespace, name)
         if error is not None:
             return f"ERROR: {error}"
         self._mark_agent_action(f"drill → {self._drill.breadcrumb()}")
@@ -7796,7 +6723,7 @@ class KorvidApp(App[None]):
         pending proposal left to claim). After the claim, the context epoch
         and RBAC are rechecked, then the UID binding, then the same
         fail-closed audit-before-mutation path as every other write."""
-        async with self._nav_lock:
+        async with self._workspace_ctl.nav_lock:
             if not store.begin_execution(proposal.id):
                 # Cancelled, TTL-expired, or invalidated (MCP shutdown /
                 # context switch) before the claim landed: the approval no
@@ -8562,3 +7489,101 @@ class AppUiSurface(UiSurface):
 
     def screen_depth(self) -> int:
         return len(self._app.screen_stack)
+
+
+class AppContextGuard(ContextGuard):
+    """Nominal `ContextGuard` adapter over `KorvidApp` (issue #187).
+
+    Same metaclass reason as the other adapters: the boundary is an
+    `abc.ABC`, but Textual's `App` metaclass conflicts with `ABCMeta`, so the
+    app conforms through a thin adapter. The `:ctx`-switch epoch, the
+    in-flight flag, and the stream-read guard stay the app's single
+    implementation, which the workspace controller revalidates against.
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    def epoch(self) -> int:
+        return self._app._ctx_epoch
+
+    def switching(self) -> bool:
+        return self._app._ctx_switching
+
+    def reads_allowed(self) -> bool:
+        return self._app._ctx_reads_allowed()
+
+
+class AppWorkspaceSurface(WorkspaceSurface):
+    """Nominal `WorkspaceSurface` adapter over `KorvidApp` (issue #187).
+
+    The workspace controller drives the pane tables, the empty-state overlay,
+    the describe pane, the focus classes, and the open hierarchy tree only
+    through this named surface; `KorvidApp` keeps ownership of the widget tree
+    and its construction. Adapter for the same metaclass reason as the others.
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    def render_table(self, kind: str, *, only: PaneState | None = None) -> None:
+        self._app._render_table(kind, only=only)
+
+    def refresh_empty_state(self, kind: str) -> None:
+        self._app._refresh_empty_state(kind, self._app._focused_table().row_count)
+
+    def hide_empty_state(self) -> None:
+        self._app.query_one("#empty-state", Static).display = False
+
+    async def mount_pane_table(self, pane: PaneState) -> None:
+        table = ResourceTable(id=pane.table_id)
+        await self._app.query_one("#workspace", Horizontal).mount(table)
+        for pane_table in self._app.query(ResourceTable):
+            pane_table.add_class("split-pane")
+
+    async def remove_pane_table(self, table_id: str) -> None:
+        await self._app.query_one(f"#{table_id}", ResourceTable).remove()
+
+    def unsplit_survivor(self, table_id: str) -> None:
+        self._app.query_one(f"#{table_id}", ResourceTable).remove_class("split-pane")
+
+    def focus_table(self, table_id: str) -> None:
+        self._app.query_one(f"#{table_id}", ResourceTable).focus()
+
+    def focused_is_table(self) -> bool:
+        return isinstance(self._app.focused, ResourceTable)
+
+    def has_tables(self) -> bool:
+        return bool(self._app.query(ResourceTable))
+
+    def has_focus(self) -> bool:
+        return self._app.focused is not None
+
+    def update_pane_focus_classes(self) -> None:
+        self._app._update_pane_focus_classes()
+
+    def focus_row(self, row_key: str) -> bool:
+        return self._app._focus_row(row_key)
+
+    def hide_describe(self) -> None:
+        self._app._describe_pane.hide()
+
+    def refresh_status(self) -> None:
+        self._app._refresh_status()
+
+    def refresh_bindings(self) -> None:
+        self._app.refresh_bindings()
+
+    def hierarchy_open(self) -> bool:
+        try:
+            return isinstance(self._app.screen, HierarchyScreen)
+        except ScreenStackError:
+            # A ResourcesUpdated dispatched during app teardown can land after
+            # the screen stack is emptied (flaky-CI issue #147): no screen
+            # simply means no tree to refresh.
+            return False
+
+    def update_hierarchy_tree(self, root: Any) -> None:
+        screen = self._app.screen
+        if isinstance(screen, HierarchyScreen):
+            screen.update_tree(root)

@@ -11,8 +11,8 @@ touch.
 KorvidApp  (ui/app.py)
 │
 │  owns: Textual composition and message translation, screens and modals,
-│         navigation and scope, the write-approval perimeter, run_worker
-│         ownership, and the audited execution path
+│         the write-approval perimeter, run_worker ownership, the audited
+│         execution path, and the `:ctx`-switch coordinator
 │
 │  reached through: WriteGate, ViewState, UiSurface
 │
@@ -27,6 +27,7 @@ KorvidApp  (ui/app.py)
 ├── RelationshipSnapshotLoader
 │                       (ui/relationship_controller.py)  bounded read-only graph LISTs
 ├── LogController        (ui/log_controller.py)          log stream tasks, buffer, pane lifecycle
+├── WorkspaceController  (ui/workspace_controller.py)    navigation, drill, hierarchy, relationship, and pane flows
 ├── WorkspaceState       (ui/workspace_state.py)         split-pane collection, focus, and view state
 └── ...
 ```
@@ -45,16 +46,18 @@ the controller shape, deliberately:
   `Lister` protocol (one `list_objects` method) plus its own bounds;
 - every `load()` call is independent and holds no state across calls, so
   there is nothing for a `:ctx` switch to invalidate inside it;
-- the app owns the flow around it: `action_relationships` starts the
-  exclusive `relationships` worker (`exit_on_error=False`),
-  `_load_relationships` re-checks the context epoch and the screen stack
-  before pushing `RelationshipScreen`, `on_worker_state_changed` reports a
-  failed load instead of exiting, and `_teardown_for_context_switch`
-  cancels and awaits the whole group before the client is swapped;
+- `WorkspaceController` owns the flow around it (see below):
+  `show_relationships` starts the exclusive `relationships` worker
+  (`exit_on_error=False`), `_load_relationships` re-checks the context epoch
+  and the screen stack before pushing `RelationshipScreen`, and
+  `cancel_relationship_workers` cancels and awaits the whole group before the
+  client is swapped. `KorvidApp.on_worker_state_changed` still reports a
+  failed load instead of exiting, because worker-state events are dispatched
+  to the app that owns the event loop;
 - `RelationshipScreen` (`ui/widgets/relationship_screen.py`) renders one
-  already-built graph and dismisses with a navigation target, which the app
-  translates back into its ordinary `_jump_to_object` path — the screen
-  never navigates on its own.
+  already-built graph and dismisses with a navigation target, which the
+  controller translates back into its ordinary `jump_to_object` path — the
+  screen never navigates on its own.
 
 Because it holds no worker and no app reference, it needs none of the seams
 below; it is included here so the inventory of what lives in `ui/` stays
@@ -118,11 +121,13 @@ It is not a controller. It has no Textual import, no worker, and none of the
 its transitions, unit-tested directly in `tests/ui/test_workspace_state.py` with
 no running app. The division of labour with `KorvidApp` is deliberate:
 
-- **`WorkspaceState` decides, `KorvidApp` renders.** The transitions mutate only
-  in-memory state and never touch the DOM; the app calls them inside its
-  `_nav_lock` and then mounts/unmounts the `ResourceTable` widget for the pane
-  the transition reports. Because the transition is total and side-effect-free,
-  the app never has to reconstruct "which pane changed" from widget state.
+- **`WorkspaceState` decides, `WorkspaceController` drives, `KorvidApp`
+  renders.** The transitions mutate only in-memory state and never touch the
+  DOM; `WorkspaceController` calls them inside its `_nav_lock` and then asks
+  the `WorkspaceSurface` to mount/unmount the `ResourceTable` widget for the
+  pane the transition reports. Because the transition is total and
+  side-effect-free, nothing has to reconstruct "which pane changed" from
+  widget state.
 - **The raw fields are private to the owner.** `KorvidApp` no longer holds
   `_panes`, `_focused_pane`, `_pane_counter`, or `_pane_chord_pending`, and
   keeps **no** compatibility proxy for them — reaching pane state means going
@@ -135,6 +140,68 @@ no running app. The division of labour with `KorvidApp` is deliberate:
   live dict created in `__main__.py` and mutated by background discovery
   workers, so it is not workspace-owned; moving it would be cosmetic delegation,
   not ownership, and it stays where the workers can reach it.
+
+### WorkspaceController owns the workspace workflows
+
+`WorkspaceController` (`ui/workspace_controller.py`, issue #187) owns the
+cohesive workflows over `WorkspaceState` and the workspace-only mutable state
+they mutate:
+
+- **resource-view navigation and scope** — `navigate`/`navigate_command`,
+  `toggle_all_namespaces`, `favorite_namespace`, the `_navigate_locked`
+  kind/scope transition, and `sync_metrics_poller`, all serialized through the
+  `_nav_lock` it owns;
+- **filter and per-kind sort** — `set_filter`/`clear_filter`, `sort_by`,
+  `sort_command`, the sort picker and header-click paths;
+- **drill down/pop** — `drill_into`/`pop_drill` with the bounded `prewarm_view`
+  and its per-`(kind, scope)` lease accounting in `stop_watch_if_unused`, so an
+  overlapping drill never reaps a stream a pane or another pre-warm still needs;
+- **the component-hierarchy tree** — `open_hierarchy`/`refresh_hierarchy`/
+  `reopen_hierarchy_return`, the OLM/helm ref gathering, and the stale-result
+  guard in `_on_hierarchy_pick` that discards a tree action taken across a
+  `:ctx` switch;
+- **the operational relationship graph** — `show_relationships`,
+  `_load_relationships`, `on_relationship_result`, and
+  `cancel_relationship_workers`, run in the `relationships` worker group;
+- **the two-pane split lifecycle** — the `ctrl+w` chord, `split_pane`,
+  `focus_other_pane`, `close_focused_pane`, and the context-switch
+  `collapse_split`, with the focus-class, hint, status and binding refreshes;
+- **the shared goto** — `jump_to_object`, reused by the hierarchy, relationship
+  and timeline flows.
+
+The **workspace-only mutable state** moved with the workflows: `_nav_lock`, the
+drill `_prewarm_leases`, the open tree's `_hierarchy_ctx` rebuild inputs, the
+hierarchy-goto `_jump_poll_attempts` budget, the `_render_pending`
+coalescing set, and the metrics poller's served `_metrics_target`. `KorvidApp`
+holds none of them; its action/message handlers for these flows
+(`on_navigate_command`, `action_sort_*`, `on_key`, `action_relationships`,
+`on_data_table_row_selected`, …) are one-line delegates.
+
+It reaches Textual through three named boundaries plus a few typed collaborator
+ports, so its logic is unit-tested in `tests/ui/test_workspace_controller.py`
+with no running app:
+
+- **`UiSurface`** for notifications, workers, screens, progress and screen
+  inspection — the same surface every other controller uses;
+- **`WorkspaceSurface`** (`AppWorkspaceSurface`) for the workspace widgets the
+  app still owns: rendering a pane, mounting/removing a pane table, the
+  focus-class and empty-state refreshes, the describe-pane dismissal, and the
+  open hierarchy tree. The controller constructs the `HierarchyScreen`/
+  `RelationshipScreen` and pushes them through `UiSurface`, but never queries an
+  arbitrary widget;
+- **`ContextGuard`** (`AppContextGuard`) for the `:ctx` epoch, the in-flight
+  flag, and the stream-read guard it revalidates against across every awaited
+  gap. `crossed(epoch)` is the old `_ctx_switch_crossed`.
+
+The **`:ctx`-switch coordinator stays on `KorvidApp`** because it is tied to the
+app's epoch, MCP-quiesce, forward, store and audit teardown ordering. It calls a
+narrow reset/quiesce API on the controller: `quiesce_for_context_switch` (fold
+the split, stop and de-target the metrics poller, clear the drill, cancel the
+relationship workers, clear the filter — the workspace-only halves of the
+teardown) and `reset_view_after_switch` (adopt pods in the new cluster's default
+namespace). The coordinator serializes with navigation by taking the
+controller's `nav_lock`, which `:mcp` toggles and write execution share for the
+same reason.
 
 ### Why interfaces and not callables
 
@@ -184,6 +251,18 @@ So the boundaries that matter are named:
   controller `pop` or reorder screens, and a live `Screen` carries
   `dismiss` and `app`, which is app access routed around the surface.
   Implemented by `AppUiSurface`.
+- **`WorkspaceSurface`** (`ui/workspace_controller.py`) — the workspace
+  widgets `WorkspaceController` drives but does not own: rendering a pane,
+  mounting/removing a pane table, the focus-class/empty-state refreshes, the
+  describe-pane dismissal, and the open hierarchy tree. Widget *lookup,
+  construction and mounting* stay in `KorvidApp` behind this named surface, so
+  the controller never queries an arbitrary widget. Implemented by
+  `AppWorkspaceSurface`.
+- **`ContextGuard`** (`ui/workspace_controller.py`) — the `:ctx`-switch epoch,
+  the in-flight flag, and the stream-read guard the workspace flows revalidate
+  against; `crossed(epoch)` is the old `_ctx_switch_crossed`. It is a narrow
+  read-only view of the app's context state, deliberately *not* the whole
+  `WriteGate`. Implemented by `AppContextGuard`.
 
 `UiSurface.run_worker` gives supervision, not context safety: a `:ctx`
 switch cancels the groups it knows hold a stale-cluster connection, by
@@ -283,11 +362,23 @@ tests added before the move where the behaviour is not already pinned.
    together with the pure `split`/`focus`/`close`/`collapse` transitions. The
    app mounts and unmounts the `ResourceTable` widgets and keeps the view-state
    accessors as delegation properties; it holds no raw pane fields.
+9. ~~Workspace orchestration~~ — done (#187); `WorkspaceController`
+   (`ui/workspace_controller.py`) owns navigation/scope, filter/sort, the
+   drill pre-warm/watch-release flow, the hierarchy tree and relationship-graph
+   flows, the split-pane lifecycle, and the workspace-only state (`_nav_lock`,
+   pre-warm leases, tree rebuild context, jump-poll budget, render-coalescing
+   set, metrics target). It reaches Textual through `UiSurface`,
+   `WorkspaceSurface` and `ContextGuard`; the app keeps compose/widget
+   construction and thin action/message delegates, and the `:ctx` coordinator
+   calls the controller's `quiesce_for_context_switch`/`reset_view_after_switch`
+   reset API under the shared `nav_lock`.
 
 Issue #238 showed that logs and describe were technically extractable without
 introducing a new pane-composition seam, and issue #245 kept describe as a
 deliberate low-ROI non-extraction. Logs are now extracted through the narrow
 `LogPaneView` accessor (above); describe stays on the app for the same
 low-ROI reason. `SessionTimelineController` owns the timeline-specific
-boundary; context retargeting stays in `KorvidApp` because it is tied to the
-app's epoch management, selected-row capture, and navigation worker ordering.
+boundary; the `:ctx`-switch coordinator stays in `KorvidApp` because it is tied
+to the app's epoch management, MCP-quiesce, and store/forward/audit teardown
+ordering, and it drives the workspace half through the controller's narrow
+reset/quiesce API.

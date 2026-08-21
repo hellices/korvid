@@ -498,7 +498,7 @@ async def test_resize_focus_change_during_impact_load_writes_nothing(tmp_path: P
         worker = await _start_resize_confirmation_worker(app, pilot)
         await until(pilot, lister.entered.is_set, label="resize impact listing")
         try:
-            app._focus_other_pane()
+            app._workspace_ctl.focus_other_pane()
             lister.release.set()
             await until(pilot, lambda: worker.is_finished, label="resize worker finished")
             await until(
