@@ -9045,10 +9045,11 @@ class AppUiSurface(UiSurface):
     the app's, so controller work is supervised and cancelled on shutdown
     rather than left as a bare task.
 
-    It does not make controller work context-safe: `_teardown_context`
-    cancels only the `hint-events` group, so a worker started before a
-    `:ctx` switch keeps running against the cluster it captured. Controllers
-    revalidate explicitly through the epoch or `WriteGate.context_intact`.
+    It does not make controller work context-safe:
+    `_teardown_for_context_switch` cancels the `hint-events`, `relationships`,
+    and `timeline-warning-events` groups. Workers in other groups may keep
+    running against the cluster they captured, so controllers revalidate
+    explicitly through the epoch or `WriteGate.context_intact`.
     """
 
     def __init__(self, app: KorvidApp) -> None:

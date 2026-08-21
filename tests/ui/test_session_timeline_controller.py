@@ -406,9 +406,7 @@ def test_record_write_notifies_on_refused_append() -> None:
     warning_notes = [n for n in ui.notifications if n.severity == "warning"]
     assert len(warning_notes) == 1
     assert "write entry" in warning_notes[0].message
-    # The diagnostic string embeds a byte-count computed from redacted
-    # user/cluster data — markup=False so it is never parsed as console
-    # markup.
+    # Keep diagnostics literal rather than parsing their details as markup.
     assert warning_notes[0].markup is False
 
 
