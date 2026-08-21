@@ -18,6 +18,7 @@ _SHIPPED_OPERATION_MODULES = (
     "korvid.evals.operation_outcome",
     "korvid.evals.operation_state",
     "korvid.evals.operation_grader",
+    "korvid.evals.operation_generation",
 )
 
 _PROBE = """

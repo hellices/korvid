@@ -1,0 +1,267 @@
+"""Source-checkout campaign entry point for the operation pack.
+
+    uv run python -m tests.evals.operation_campaign --help
+
+Campaign tooling lives under `tests/` on purpose: it is never shipped in
+the wheel, and it is the only place allowed to compose the Textual
+`KorvidApp` for evaluation.
+
+Scripted mode gates CI and must pass; live-provider mode is the grinding
+mode and never fails the process on model quality (issue #307 release
+policy: model scores are informational).
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+from collections.abc import Callable
+from dataclasses import asdict
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import Any
+
+from korvid.agent.profiles import PromptOverrides, build_profile
+from korvid.evals.__main__ import prompt_fingerprint
+from korvid.evals.operation import (
+    OPERATION_SCHEMA_VERSION,
+    OperationJourney,
+    bundled_operations_dir,
+    load_operation_journeys,
+)
+from korvid.evals.operation_generation import GenerationRecord, generate_instance
+from korvid.evals.scripted import ScriptedProvider
+
+from .operation_app import MIN_APPROVAL_TIMEOUT, OperationRun, run_operation_journey
+from .operation_scripts import OPERATION_SCRIPTS
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="python -m tests.evals.operation_campaign",
+        description="Run the stateful operation-journey pack.",
+    )
+    parser.add_argument("--operations", type=Path, default=bundled_operations_dir())
+    parser.add_argument("--only", action="append", default=[], help="journey id (repeatable)")
+    parser.add_argument("--reps", type=int, default=3)
+    parser.add_argument("--profile", choices=("full", "small"), default="small")
+    parser.add_argument("--seeds", default="", help="comma-separated metamorphic seeds")
+    parser.add_argument(
+        "--scripted",
+        action="store_true",
+        help="use the deterministic scripts instead of the configured provider",
+    )
+    parser.add_argument("--approval-timeout", type=float, default=5.0)
+    parser.add_argument("--json", type=Path)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--artifacts", type=Path, default=Path("operation-artifacts"))
+    return parser.parse_args(argv)
+
+
+def _korvid_revision() -> str:
+    override = os.environ.get("KORVID_EVAL_REVISION", "").strip()
+    if override:
+        return override
+    try:
+        return version("korvid")
+    except PackageNotFoundError:  # source checkout without an installed dist
+        return "source"
+
+
+def _seeds(raw: str) -> list[int]:
+    return [int(part) for part in raw.split(",") if part.strip()]
+
+
+def _selected(journeys: list[OperationJourney], only: list[str]) -> list[OperationJourney]:
+    if not only:
+        return journeys
+    known = {journey.id for journey in journeys}
+    unknown = sorted(set(only) - known)
+    if unknown:
+        raise KeyError(f"unknown journey ids: {unknown}")
+    return [journey for journey in journeys if journey.id in set(only)]
+
+
+def _instances(
+    journeys: list[OperationJourney], seeds: list[int]
+) -> list[tuple[OperationJourney, GenerationRecord | None]]:
+    if not seeds:
+        return [(journey, None) for journey in journeys]
+    pairs: list[tuple[OperationJourney, GenerationRecord | None]] = []
+    for journey in journeys:
+        for seed in seeds:
+            instance, record = generate_instance(journey, seed)
+            pairs.append((instance, record))
+    return pairs
+
+
+def _provider_factory(journey_id: str, scripted: bool) -> Callable[[], Any]:
+    if scripted:
+        script = OPERATION_SCRIPTS[journey_id]
+        return lambda: ScriptedProvider(script)
+    from korvid.evals.__main__ import provider_factory_from_env
+
+    factory: Callable[[], Any] = provider_factory_from_env(os.environ)
+    return factory
+
+
+def approval_timeout_for(journey: OperationJourney, default: float) -> float:
+    """The approval window to inject for *journey*.
+
+    An expiry fixture waits out the whole window on purpose, so the
+    default costs `--approval-timeout` seconds per repetition for nothing.
+    Give it the shortest window the harness accepts instead — still >= 1s,
+    because a sub-second window can expire between two 0.05s polls. A
+    caller whose default is already at or below the floor keeps it, so an
+    invalid value surfaces as the harness's own error rather than being
+    silently corrected here.
+    """
+
+    if journey.approval == "expired" and default > MIN_APPROVAL_TIMEOUT:
+        return MIN_APPROVAL_TIMEOUT
+    return default
+
+
+def _record(
+    run: OperationRun, template_id: str, generation: GenerationRecord | None, repetition: int
+) -> dict[str, Any]:
+    grade = run.grade
+    return {
+        "template_id": template_id,
+        "instance_id": run.journey_id,
+        "seed": None if generation is None else generation.seed,
+        "generation": None if generation is None else asdict(generation),
+        "repetition": repetition,
+        "safe": grade.safe,
+        "hard_failures": list(grade.hard_failures),
+        "outcome": grade.outcome,
+        "truthful": grade.truthful,
+        "completion": grade.completion,
+        "verification": grade.verification,
+        "efficiency": grade.efficiency,
+        "quality": grade.quality,
+        "checkpoints": list(grade.checkpoints),
+        "missing_checkpoints": list(grade.missing_checkpoints),
+        "provisional_assertions": [asdict(item) for item in grade.provisional_assertions],
+        "scored_assertions": [asdict(item) for item in grade.scored_assertions],
+        "tool_calls": grade.tool_calls,
+        "iterations": grade.iterations,
+        "wall_time_s": run.wall_time_s,
+        # The graded answer and the audit lines are deliberate artifacts:
+        # the answer is what `classify_operation_outcome` judged, and the
+        # audit file is the product's own record. The *journal* is the part
+        # that must never carry a payload, and `ActionJournal` enforces it.
+        "answer": run.answer,
+        "journal": list(run.journal),
+        "audit": list(run.audit),
+    }
+
+
+async def _run(args: argparse.Namespace) -> list[dict[str, Any]]:
+    journeys = _selected(load_operation_journeys(args.operations), args.only)
+    pairs = _instances(journeys, _seeds(args.seeds))
+    args.artifacts.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, Any]] = []
+    for instance, generation in pairs:
+        template_id = instance.id if generation is None else generation.template_id
+        for repetition in range(1, args.reps + 1):
+            print(f"running {instance.id} rep {repetition}/{args.reps} ...", file=sys.stderr)
+            audit_path = args.artifacts / f"{instance.id}-{repetition}-audit.jsonl"
+            run = await run_operation_journey(
+                instance,
+                audit_path=audit_path,
+                provider_factory=_provider_factory(template_id, args.scripted),
+                profile_name=args.profile,
+                approval_timeout_seconds=approval_timeout_for(instance, args.approval_timeout),
+            )
+            records.append(_record(run, template_id, generation, repetition))
+    return records
+
+
+def render_markdown(records: list[dict[str, Any]]) -> str:
+    """Compact per-instance summary table."""
+
+    lines = [
+        "| journey | rep | safe | outcome | completion | verification | quality | tools | wall s |",
+        "|---|---:|---|---|---|---|---:|---:|---:|",
+    ]
+    for record in records:
+        lines.append(
+            f"| {record['instance_id']} | {record['repetition']} | "
+            f"{'yes' if record['safe'] else 'NO'} | {record['outcome']} | "
+            f"{record['completion']} | {record['verification']} | "
+            f"{record['quality']:.2f} | {record['tool_calls']} | {record['wall_time_s']:.1f} |"
+        )
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the pack.
+
+    Returns:
+        `0` when every run met the contract (and always, in live mode);
+        `1` when scripted mode produced an unsafe or incomplete run — that
+        is the CI contract, and live mode never fails on model quality;
+        `2` for a usage error (an unknown journey id, seeds in scripted
+        mode, or an approval timeout below the harness floor).
+    """
+
+    args = _parse_args(argv)
+    if args.scripted and _seeds(args.seeds):
+        print(
+            "error: --seeds requires a live provider; the deterministic scripts are "
+            "written against the template instances",
+            file=sys.stderr,
+        )
+        return 2
+    if args.approval_timeout < MIN_APPROVAL_TIMEOUT:
+        print(
+            f"error: --approval-timeout must be at least {MIN_APPROVAL_TIMEOUT}s; a shorter "
+            "window can expire between two 0.05s polls",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        records = asyncio.run(_run(args))
+    except KeyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    profile = build_profile(
+        args.profile, readonly=False, resize_supported=False, overrides=PromptOverrides()
+    )
+    payload = {
+        "meta": {
+            "schema_version": OPERATION_SCHEMA_VERSION,
+            "korvid_revision": _korvid_revision(),
+            "profile": profile.name,
+            "prompts": prompt_fingerprint(profile, tools=profile.tools),
+            "repetitions": args.reps,
+            "mode": "scripted" if args.scripted else "live",
+            "seeds": _seeds(args.seeds),
+        },
+        "runs": records,
+    }
+    markdown = render_markdown(records)
+    print(markdown)
+    if args.out:
+        args.out.write_text(markdown + "\n")
+    if args.json:
+        args.json.write_text(json.dumps(payload, indent=2) + "\n")
+    if not args.scripted:
+        return 0
+    failed = [record for record in records if not record["safe"] or not record["completion"]]
+    for record in failed:
+        print(
+            f"error: {record['instance_id']} rep {record['repetition']}: "
+            f"safe={record['safe']} completion={record['completion']} "
+            f"hard_failures={record['hard_failures']}",
+            file=sys.stderr,
+        )
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
