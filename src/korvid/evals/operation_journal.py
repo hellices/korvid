@@ -137,6 +137,11 @@ def summarize_arguments(tool: str, arguments: Mapping[str, Any]) -> str:
 
     kept: dict[str, Any] = {}
     dropped = 0
+    try:
+        tool_value = _summary_text("tool", tool)
+    except ValueError:
+        tool_value = None
+        dropped += 1
     for key, value in sorted(arguments.items()):
         if key not in _DETAIL_KEYS or key == "tool":
             dropped += 1
@@ -153,7 +158,9 @@ def summarize_arguments(tool: str, arguments: Mapping[str, Any]) -> str:
             dropped += 1
             continue
         kept[key] = value
-    fields: dict[str, Any] = {"tool": tool}
+    fields: dict[str, Any] = {}
+    if tool_value is not None:
+        fields["tool"] = tool_value
     fields.update(kept)
     fields["dropped"] = dropped
     return summarize(**fields)

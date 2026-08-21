@@ -190,6 +190,28 @@ def test_summarize_arguments_drops_bool_and_empty_values() -> None:
 
 
 @pytest.mark.parametrize(
+    "tool",
+    [
+        "",
+        "scale resource",
+        "mañana",
+        "n" * 121,
+    ],
+)
+def test_summarize_arguments_drops_invalid_tool_names(tool: str) -> None:
+    detail = summarize_arguments(
+        tool,
+        {
+            "kind": "deployments",
+            "name": "checkout-a",
+        },
+    )
+    assert detail == "kind=deployments name=checkout-a dropped=1"
+    assert "tool=" not in detail
+    ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
+
+
+@pytest.mark.parametrize(
     "namespace",
     [
         "shop-a ",
