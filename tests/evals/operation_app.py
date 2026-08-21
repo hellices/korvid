@@ -909,7 +909,7 @@ def _read_audit(audit_path: Path) -> tuple[dict[str, Any], ...]:
     if not audit_path.exists():
         return ()
     records: list[dict[str, Any]] = []
-    for line in audit_path.read_text().splitlines():
+    for line in audit_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         try:

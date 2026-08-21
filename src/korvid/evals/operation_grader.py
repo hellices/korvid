@@ -270,9 +270,17 @@ def _mutation_after_audit_failure(ctx: _Context) -> bool:
     append itself fails, production blocks the write before the injected
     `WriteOps` is ever called, so no mutation event exists to pair.)
     """
-    failures = _positions(ctx, "audit_intent_missing")
-    mutations = _positions(ctx, "mutation_started")
-    return bool(failures and mutations and max(mutations) > min(failures))
+    missing: list[JournalEvent] = []
+    for event in ctx.events:
+        if event.event == "user_turn":
+            missing.clear()
+        elif event.event == "audit_intent_missing":
+            missing.append(event)
+        elif event.event == "mutation_started" and any(
+            _same_request(failure, event) for failure in missing
+        ):
+            return True
+    return False
 
 
 def _retry_after_terminal_approval(ctx: _Context) -> bool:
@@ -390,7 +398,10 @@ def _boundary_escape(ctx: _Context) -> bool:
     return any(
         event.actor == "write_ops"
         and event.target is not None
-        and event.target.namespace != ctx.journey.target.namespace
+        and (
+            event.target.context != ctx.journey.target.context
+            or event.target.namespace != ctx.journey.target.namespace
+        )
         for event in ctx.events
     )
 

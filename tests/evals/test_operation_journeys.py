@@ -755,6 +755,18 @@ def test_a_torn_final_audit_record_does_not_erase_completed_records(tmp_path: Pa
     )
 
 
+def test_audit_artifacts_are_read_with_explicit_utf8() -> None:
+    class AuditPath:
+        def exists(self) -> bool:
+            return True
+
+        def read_text(self, *, encoding: str | None = None) -> str:
+            assert encoding == "utf-8"
+            return '{"action":"scale","outcome":"intent"}\n'
+
+    assert _read_audit(AuditPath()) == ({"action": "scale", "outcome": "intent"},)  # type: ignore[arg-type]  # Path-compatible test double
+
+
 async def test_an_unsupported_request_states_the_limit_without_substituting_a_write(
     tmp_path: Path,
 ) -> None:
