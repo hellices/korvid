@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping
+from typing import Any, cast
+
 import pytest
 
 from korvid.evals.operation_journal import (
@@ -44,6 +47,20 @@ def test_the_journal_is_append_only() -> None:
     assert len(snapshot) == 1
     assert len(journal.events) == 2
     assert journal.events[0] == snapshot[0]
+
+
+def test_event_state_cannot_be_mutated_after_append() -> None:
+    journal = ActionJournal()
+    event = journal.append(
+        event="mutation_started",
+        actor="write_ops",
+        target=_TARGET,
+        pre_state={"spec.replicas": 2},
+    )
+    mutable_view = cast(MutableMapping[str, Any], event.pre_state)
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        mutable_view["spec.replicas"] = 99
+    assert journal.payload()[0]["pre_state"] == {"spec.replicas": 2}
 
 
 def test_an_unknown_actor_is_rejected() -> None:

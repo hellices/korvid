@@ -153,6 +153,14 @@ def test_slice_a_rejects_a_cross_resource_assertion(tmp_path: Path) -> None:
         load_operation_journey(_write(tmp_path, data))
 
 
+def test_unsupported_goal_cannot_expect_a_write_request(tmp_path: Path) -> None:
+    data = _minimal()
+    data["operation"]["goal"] = "unsupported"
+    data["operation"]["expected_request"] = {"action": "unsupported"}
+    with pytest.raises(ValueError, match="unsupported journeys cannot expect write requests"):
+        load_operation_journey(_write(tmp_path, data))
+
+
 def test_schema_v2_loads_a_typed_scale_request(tmp_path: Path) -> None:
     data = _minimal()
     journey = load_operation_journey(_write(tmp_path, data))

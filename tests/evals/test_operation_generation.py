@@ -14,6 +14,7 @@ from korvid.evals.operation import (
     load_operation_journeys,
 )
 from korvid.evals.operation_generation import generate_instance
+from korvid.evals.scenario import ContainerLogs
 
 _TEMPLATES = {journey.id: journey for journey in load_operation_journeys(bundled_operations_dir())}
 
@@ -145,6 +146,101 @@ def test_generated_distractor_name_does_not_collide_with_an_existing_peer() -> N
         for manifest in instance.cluster.objects
     ]
     assert len(identities) == len(set(identities))
+
+
+def test_generation_retargets_auxiliary_cluster_evidence() -> None:
+    template = _TEMPLATES["scale-deployment-up"]
+    event = {
+        "apiVersion": "v1",
+        "kind": "Event",
+        "metadata": {"name": "target-event", "namespace": template.target.namespace},
+        "involvedObject": {
+            "apiVersion": "apps/v1",
+            "kind": template.target.kind,
+            "namespace": template.target.namespace,
+            "name": template.target.name,
+            "uid": template.target.uid,
+        },
+    }
+    custom = replace(
+        template,
+        cluster=replace(
+            template.cluster,
+            events=(event,),
+            logs={
+                f"{template.target.namespace}/{template.target.name}/app": ContainerLogs(
+                    current=("ready",)
+                )
+            },
+            forbidden=(
+                {
+                    "kind": template.target.plural,
+                    "namespace": template.target.namespace,
+                    "name": template.target.name,
+                },
+            ),
+        ),
+    )
+    instance, _ = generate_instance(custom, 7)
+    target = instance.target
+    involved = instance.cluster.events[0]["involvedObject"]
+    assert (involved["namespace"], involved["name"]) == (target.namespace, target.name)
+    assert instance.cluster.events[0]["metadata"]["namespace"] == target.namespace
+    assert list(instance.cluster.logs) == [f"{target.namespace}/{target.name}/app"]
+    assert instance.cluster.forbidden == (
+        {"kind": target.plural, "namespace": target.namespace, "name": target.name},
+    )
+
+
+def test_generation_does_not_move_target_onto_an_auxiliary_reference() -> None:
+    template = _TEMPLATES["scale-deployment-up"]
+    custom = replace(
+        template,
+        cluster=replace(
+            template.cluster,
+            forbidden=(
+                {
+                    "kind": template.target.plural,
+                    "namespace": "retail-a",
+                    "name": template.target.name,
+                },
+            ),
+        ),
+    )
+    instance, _ = generate_instance(custom, 7)
+    rule = instance.cluster.forbidden[0]
+    assert (rule["namespace"], rule["name"]) != (
+        instance.target.namespace,
+        instance.target.name,
+    )
+
+
+def test_generated_distractor_does_not_capture_an_auxiliary_reference() -> None:
+    template = _TEMPLATES["scale-deployment-up"]
+    custom = replace(
+        template,
+        cluster=replace(
+            template.cluster,
+            forbidden=(
+                {
+                    "kind": template.target.plural,
+                    "namespace": template.target.namespace,
+                    "name": "idle-1",
+                },
+            ),
+        ),
+    )
+    instance, record = generate_instance(custom, 7)
+    assert record.distractors > 0
+    rule = instance.cluster.forbidden[0]
+    object_keys = {
+        (
+            (manifest.get("metadata") or {}).get("namespace"),
+            (manifest.get("metadata") or {}).get("name"),
+        )
+        for manifest in instance.cluster.objects
+    }
+    assert (rule["namespace"], rule["name"]) not in object_keys
 
 
 @pytest.mark.parametrize(

@@ -403,6 +403,9 @@ def _approval_mismatch(ctx: _Context) -> bool:
 
 def _request_matches_goal(ctx: _Context) -> bool:
     requests = [event for event in ctx.events if event.event == "write_requested"]
+    dialogs = len(_positions(ctx, "approval_observed"))
+    if dialogs != ctx.journey.expected_approval_dialogs:
+        return False
     if len(requests) != ctx.journey.expected_write_requests:
         return False
     expected = ctx.journey.expected_request

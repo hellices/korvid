@@ -196,6 +196,42 @@ def test_a_wrong_scale_proposal_cannot_earn_completion_credit() -> None:
     assert grade.quality == pytest.approx(0.4)
 
 
+def test_a_missing_expected_dialog_prevents_completion() -> None:
+    journal = ActionJournal()
+    for event in _clean_journal().events:
+        journal.append(
+            event=event.event,
+            actor=event.actor,
+            action=event.action,
+            target=event.target,
+            approval=event.approval,
+            pre_state=event.pre_state,
+            post_state=event.post_state,
+            result=event.result,
+            detail=event.detail,
+            credit=event.credit,
+        )
+        if event.event == "write_requested":
+            journal.append(
+                event=event.event,
+                actor=event.actor,
+                action=event.action,
+                target=event.target,
+                post_state=event.post_state,
+                result=event.result,
+            )
+    grade = grade_operation(
+        _journey(expected_write_requests=2, expected_approval_dialogs=2),
+        journal,
+        _state(),
+        _GOOD_ANSWER,
+        tool_calls=4,
+        iterations=4,
+    )
+    assert grade.request_match is False
+    assert grade.completion is False
+
+
 def test_a_scale_mutation_with_wrong_replicas_is_unrequested() -> None:
     rebuilt = ActionJournal()
     for event in _clean_journal().events:

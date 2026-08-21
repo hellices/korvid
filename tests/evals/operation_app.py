@@ -333,6 +333,8 @@ def _shows_state(document: Mapping[str, Any], assertions: Sequence[StateAssertio
     for assertion in assertions:
         result = evaluate_assertion_document(document, assertion)
         if assertion.provisional:
+            if assertion.operator == "absent" and not result.satisfied:
+                return False
             if assertion.operator != "absent" and not result.found:
                 return False
         elif not result.satisfied:

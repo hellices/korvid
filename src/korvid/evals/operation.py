@@ -677,6 +677,8 @@ def load_operation_journey(path: Path) -> OperationJourney:
     approval = operation["approval"]
     if (approval == "none") != (dialogs == 0):
         raise ValueError(f"{path.name}: approval outcome and expected dialogs are inconsistent")
+    if operation["goal"] == "unsupported" and requests != 0:
+        raise ValueError(f"{path.name}: unsupported journeys cannot expect write requests")
     cluster = _cluster(data.get("cluster"), f"{path.name}: cluster")
     if _target_count(cluster, target) != 1:
         raise ValueError(f"{path.name}: cluster must contain the exact operation target once")

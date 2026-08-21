@@ -702,6 +702,16 @@ def test_provisional_values_do_not_control_model_read_credit() -> None:
     assert _shows_state(document, _JOURNEYS["scale-deployment-up"].preconditions) is True
 
 
+def test_provisional_absence_must_be_visible_in_the_model_read() -> None:
+    assertion = replace(
+        _JOURNEYS["scale-deployment-up"].postconditions[0],
+        operator="absent",
+        expected=None,
+    )
+    assert _shows_state({"spec": {"replicas": 3}}, (assertion,)) is False
+    assert _shows_state({"spec": {}}, (assertion,)) is True
+
+
 async def test_a_missing_expected_preview_is_declined_without_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

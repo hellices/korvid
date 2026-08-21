@@ -17,6 +17,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from korvid.evals.operation import LIFECYCLE_CHECKPOINTS, OperationTarget
@@ -228,16 +229,18 @@ class JournalEvent:
     action: str = ""
     target: JournalTarget | None = None
     approval: str | None = None
-    pre_state: dict[str, Any] = field(default_factory=dict)
-    post_state: dict[str, Any] = field(default_factory=dict)
+    pre_state: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    post_state: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     result: str = ""
     detail: str = ""
     credit: bool = False
 
 
-def _checked_state(state: Mapping[str, Any] | None, target: JournalTarget | None) -> dict[str, Any]:
+def _checked_state(
+    state: Mapping[str, Any] | None, target: JournalTarget | None
+) -> Mapping[str, Any]:
     if not state:
-        return {}
+        return MappingProxyType({})
     if target is not None and target.kind == "Secret":
         raise ValueError("Secret state is never journaled")
     checked: dict[str, Any] = {}
@@ -248,7 +251,7 @@ def _checked_state(state: Mapping[str, Any] | None, target: JournalTarget | None
         if value is not None and not isinstance(value, _SCALARS):
             raise ValueError(f"journal state values must be scalars: {path!r}")
         checked[str(path)] = value
-    return checked
+    return MappingProxyType(checked)
 
 
 def _checked_detail(detail: str) -> str:
@@ -337,4 +340,19 @@ class ActionJournal:
     def payload(self) -> list[dict[str, Any]]:
         """JSON-ready records for the campaign artifact."""
 
-        return [asdict(entry) for entry in self._events]
+        return [
+            {
+                "sequence": entry.sequence,
+                "event": entry.event,
+                "actor": entry.actor,
+                "action": entry.action,
+                "target": None if entry.target is None else asdict(entry.target),
+                "approval": entry.approval,
+                "pre_state": dict(entry.pre_state),
+                "post_state": dict(entry.post_state),
+                "result": entry.result,
+                "detail": entry.detail,
+                "credit": entry.credit,
+            }
+            for entry in self._events
+        ]

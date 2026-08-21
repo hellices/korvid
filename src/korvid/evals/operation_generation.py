@@ -106,8 +106,10 @@ def _distractor(
     return item
 
 
-def _distractor_name(objects: list[dict[str, Any]], namespace: str, index: int) -> str:
-    used = {
+def _distractor_name(
+    objects: list[dict[str, Any]], namespace: str, index: int, reserved: set[str]
+) -> str:
+    used = reserved | {
         str((manifest.get("metadata") or {}).get("name") or "")
         for manifest in objects
         if str((manifest.get("metadata") or {}).get("namespace") or "") == namespace
@@ -159,6 +161,57 @@ def _moved_denials(
     )
 
 
+def _moved_events(
+    events: tuple[dict[str, Any], ...], old: OperationTarget, namespace: str, name: str
+) -> tuple[dict[str, Any], ...]:
+    moved: list[dict[str, Any]] = []
+    for event in events:
+        item = deepcopy(event)
+        metadata = item.get("metadata") or {}
+        if str(metadata.get("namespace") or "") == old.namespace:
+            metadata["namespace"] = namespace
+        involved = item.get("involvedObject") or {}
+        if str(involved.get("namespace") or "") == old.namespace:
+            involved["namespace"] = namespace
+        if str(involved.get("name") or "") == old.name:
+            involved["name"] = name
+        moved.append(item)
+    return tuple(moved)
+
+
+def _moved_logs(
+    logs: dict[str, Any], old: OperationTarget, namespace: str, name: str
+) -> dict[str, Any]:
+    moved: dict[str, Any] = {}
+    for key, value in logs.items():
+        log_namespace, pod, container = key.split("/")
+        new_key = "/".join(
+            (
+                namespace if log_namespace == old.namespace else log_namespace,
+                name if pod == old.name else pod,
+                container,
+            )
+        )
+        if new_key in moved:
+            raise ValueError(f"generated log key collision: {new_key!r}")
+        moved[new_key] = value
+    return moved
+
+
+def _moved_forbidden(
+    rules: tuple[dict[str, str], ...], old: OperationTarget, namespace: str, name: str
+) -> tuple[dict[str, str], ...]:
+    moved: list[dict[str, str]] = []
+    for rule in rules:
+        item = dict(rule)
+        if item.get("namespace") == old.namespace:
+            item["namespace"] = namespace
+        if item.get("name") == old.name:
+            item["name"] = name
+        moved.append(item)
+    return tuple(moved)
+
+
 def _generated_namespace(rng: random.Random, used: set[str]) -> str:
     pool = [candidate for candidate in _NAMESPACE_POOL if candidate not in used]
     if pool:
@@ -172,12 +225,32 @@ def _generated_namespace(rng: random.Random, used: set[str]) -> str:
     return candidate
 
 
-def _generated_name(rng: random.Random, template: OperationJourney) -> str:
-    old = template.target
-    used = {
-        str((manifest.get("metadata") or {}).get("name") or "")
-        for manifest in template.cluster.objects
-    }
+def _reserved_identities(template: OperationJourney) -> tuple[set[str], set[str]]:
+    namespaces: set[str] = set()
+    names: set[str] = set()
+    for manifest in (*template.cluster.objects, *template.cluster.events):
+        metadata = manifest.get("metadata") or {}
+        namespaces.add(str(metadata.get("namespace") or ""))
+        names.add(str(metadata.get("name") or ""))
+        involved = manifest.get("involvedObject") or {}
+        namespaces.add(str(involved.get("namespace") or ""))
+        names.add(str(involved.get("name") or ""))
+    for key in template.cluster.logs:
+        namespace, pod, _container = key.split("/")
+        namespaces.add(namespace)
+        names.add(pod)
+    for rule in template.cluster.forbidden:
+        namespaces.add(rule.get("namespace", ""))
+        names.add(rule.get("name", ""))
+    namespaces.update(
+        rule.namespace for rule in template.permission_denials if rule.namespace is not None
+    )
+    namespaces.discard("")
+    names.discard("")
+    return namespaces, names
+
+
+def _generated_name(rng: random.Random, old: OperationTarget, used: set[str]) -> str:
     start = rng.randrange(len(_NAME_SUFFIXES))
     for offset in range(len(_NAME_SUFFIXES)):
         suffix = _NAME_SUFFIXES[(start + offset) % len(_NAME_SUFFIXES)]
@@ -208,16 +281,13 @@ def generate_instance(
         )
     rng = random.Random(seed)
     old = template.target
-    used = {
-        str((manifest.get("metadata") or {}).get("namespace") or "")
-        for manifest in template.cluster.objects
-    }
-    namespace = _generated_namespace(rng, used)
-    name = _generated_name(rng, template)
+    used_namespaces, used_names = _reserved_identities(template)
+    namespace = _generated_namespace(rng, used_namespaces)
+    name = _generated_name(rng, old, used_names)
     count = rng.randint(0, _MAX_DISTRACTORS)
     objects = list(_moved_objects(template, namespace, name))
     for index in range(1, count + 1):
-        distractor_name = _distractor_name(objects, namespace, index)
+        distractor_name = _distractor_name(objects, namespace, index, used_names)
         objects.append(_distractor(template, namespace, distractor_name, index))
     rng.shuffle(objects)
     target = replace(old, namespace=namespace, name=name)
@@ -234,9 +304,9 @@ def generate_instance(
         turns=turns,
         cluster=OperationCluster(
             objects=tuple(objects),
-            events=template.cluster.events,
-            logs=dict(template.cluster.logs),
-            forbidden=template.cluster.forbidden,
+            events=_moved_events(template.cluster.events, old, namespace, name),
+            logs=_moved_logs(template.cluster.logs, old, namespace, name),
+            forbidden=_moved_forbidden(template.cluster.forbidden, old, namespace, name),
             reconcile_status=template.cluster.reconcile_status,
         ),
     )
