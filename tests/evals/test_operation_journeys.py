@@ -17,14 +17,16 @@ import pytest
 
 from korvid.evals.operation import PermissionDenial, bundled_operations_dir, load_operation_journeys
 from korvid.evals.operation_journal import ActionJournal
-from korvid.evals.operation_state import RESTART_ANNOTATION
+from korvid.evals.operation_state import RESTART_ANNOTATION, StatefulFakeWriteOps
 from korvid.evals.scripted import ScriptedProvider
 
 from .operation_app import (
+    _APPROVAL_KEYS,
     MIN_APPROVAL_TIMEOUT,
     OperationRun,
     _journal_audit_records,
     _make_check_permission,
+    _shows_state,
     approval_from_result,
     run_operation_journey,
 )
@@ -598,6 +600,36 @@ async def test_an_rbac_refusal_never_reaches_a_dialog_or_the_audit_log(tmp_path:
     assert run.audit == ()
 
 
+def test_the_harness_uses_the_universal_explicit_decline_key() -> None:
+    assert _APPROVAL_KEYS["denied"] == "ctrl+n"
+
+
+def test_provisional_values_do_not_control_model_read_credit() -> None:
+    document = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "namespace": "shop-a",
+            "name": "checkout-a",
+            "uid": "deployment-checkout-a",
+        },
+        "spec": {"replicas": 99},
+    }
+    assert _shows_state(document, _JOURNEYS["scale-deployment-up"].preconditions) is True
+
+
+async def test_a_missing_expected_preview_is_declined_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def no_preview(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(StatefulFakeWriteOps, "preview_scale", no_preview)
+    run = await run_scripted_journey("scale-deployment-up", tmp_path)
+    assert [entry for entry in run.journal if entry["event"] == "unexpected_dialog"]
+    assert [entry for entry in run.journal if entry["event"] == "mutation_started"] == []
+
+
 async def test_a_wildcard_rbac_refusal_drops_a_hostile_namespace_without_aliasing() -> None:
     journal = ActionJournal()
     journey = replace(
@@ -683,6 +715,7 @@ async def test_a_wildcard_rbac_refusal_with_a_hostile_namespace_stays_on_the_pro
     assert [entry for entry in run.journal if entry["event"] == "dialog_observed"] == []
     assert [entry for entry in run.journal if entry["event"] == "mutation_started"] == []
     assert run.audit == ()
+    assert "wrong_target_write" in run.grade.hard_failures
 
 
 def test_hostile_audit_record_fields_are_dropped_without_leaking_or_mutating() -> None:
@@ -766,7 +799,8 @@ async def test_a_same_name_replacement_conflicts_instead_of_mutating(tmp_path: P
     assert run.grade.hard_failures == ()
     assert run.grade.outcome == "failed"
     assert run.grade.completion is True
-    assert all(result.satisfied for result in run.grade.provisional_assertions)
+    assert all(not result.satisfied for result in run.grade.provisional_assertions)
+    assert all(not result.found for result in run.grade.provisional_assertions)
     assert [entry["outcome"] for entry in run.audit] == [
         "intent",
         "error: API 409: the target changed since it was approved - refresh and retry",

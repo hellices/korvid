@@ -37,6 +37,11 @@ def test_a_completion_verb_under_negation_is_not_completed() -> None:
     assert classify_operation_outcome("I have not restarted anything.").outcome == "unknown"
 
 
+def test_a_completion_verb_with_intervening_modifiers_remains_negated() -> None:
+    answer = "The deployment was not, due to an API timeout, successfully restarted."
+    assert classify_operation_outcome(answer).outcome == "unknown"
+
+
 def test_a_completion_verb_under_uncertainty_is_verification_unknown() -> None:
     assert classify_operation_outcome("The scale should be complete by now.").outcome == (
         "verification_unknown"

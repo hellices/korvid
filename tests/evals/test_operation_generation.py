@@ -63,6 +63,22 @@ def test_distractors_never_collide_with_the_target() -> None:
     assert len(set(names)) == len(names)
 
 
+@pytest.mark.parametrize(
+    "template_id",
+    ["scale-statefulset-down", "restart-daemonset"],
+)
+def test_distractors_are_visible_in_the_target_kind_listing(template_id: str) -> None:
+    instance, record = generate_instance(_TEMPLATES[template_id], 0)
+    assert record.distractors > 0
+    distractors = [
+        manifest
+        for manifest in instance.cluster.objects
+        if manifest["metadata"]["name"] != instance.target.name
+    ]
+    assert len(distractors) == record.distractors
+    assert {manifest["kind"] for manifest in distractors} == {instance.target.kind}
+
+
 def test_the_ambiguity_template_keeps_both_same_named_copies() -> None:
     instance, _ = generate_instance(_TEMPLATES["scale-ambiguous-namespace"], 5)
     same_named = [

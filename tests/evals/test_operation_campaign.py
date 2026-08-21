@@ -10,7 +10,7 @@ import pytest
 from korvid.evals.operation import bundled_operations_dir, load_operation_journeys
 
 from .operation_app import MIN_APPROVAL_TIMEOUT
-from .operation_campaign import approval_timeout_for, main
+from .operation_campaign import _seeds, approval_timeout_for, main
 
 _JOURNEYS = {journey.id: journey for journey in load_operation_journeys(bundled_operations_dir())}
 
@@ -66,6 +66,21 @@ def test_seeded_generation_is_rejected_in_scripted_mode(tmp_path: Path) -> None:
         ]
     )
     assert code == 2
+
+
+def test_an_empty_operation_pack_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    operations = tmp_path / "operations"
+    operations.mkdir()
+    code = main(["--operations", str(operations), "--scripted"])
+    assert code == 2
+    assert "operation pack must contain at least one journey" in capsys.readouterr().err
+
+
+def test_duplicate_generation_seeds_are_rejected() -> None:
+    with pytest.raises(ValueError, match="--seeds must not contain duplicates"):
+        _seeds("7,7")
 
 
 def test_reusing_an_artifact_base_creates_a_new_run_directory_each_time(tmp_path: Path) -> None:

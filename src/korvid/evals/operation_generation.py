@@ -77,36 +77,29 @@ def _retarget(
     return replace(target, namespace=namespace, name=name)
 
 
-def _distractor(namespace: str, index: int) -> dict[str, Any]:
-    return {
-        "apiVersion": "apps/v1",
-        "kind": "Deployment",
-        "metadata": {
+def _distractor(template: OperationJourney, namespace: str, index: int) -> dict[str, Any]:
+    target = template.target
+    source = next(
+        manifest
+        for manifest in template.cluster.objects
+        if manifest.get("kind") == target.kind
+        and (manifest.get("metadata") or {}).get("name") == target.name
+        and (manifest.get("metadata") or {}).get("namespace") == target.namespace
+    )
+    item = deepcopy(source)
+    metadata = item.setdefault("metadata", {})
+    metadata.update(
+        {
             "name": f"idle-{index}",
             "namespace": namespace,
-            "uid": f"deployment-idle-{index}-{namespace}",
+            "uid": f"{target.kind.lower()}-idle-{index}-{namespace}",
             "generation": 1,
             "resourceVersion": f"90{index}0",
             "creationTimestamp": "2026-07-27T00:30:00Z",
             "labels": {"app": f"idle-{index}"},
-        },
-        "spec": {
-            "replicas": 1,
-            "selector": {"matchLabels": {"app": f"idle-{index}"}},
-            "template": {
-                "metadata": {"labels": {"app": f"idle-{index}"}},
-                "spec": {
-                    "containers": [{"name": "idle", "image": "registry.example.com/idle:1.0.0"}]
-                },
-            },
-        },
-        "status": {
-            "replicas": 1,
-            "readyReplicas": 1,
-            "availableReplicas": 1,
-            "observedGeneration": 1,
-        },
-    }
+        }
+    )
+    return item
 
 
 def _moved_objects(
@@ -168,7 +161,7 @@ def generate_instance(
     name = f"{old.name}-{rng.choice(_NAME_SUFFIXES)}"
     count = rng.randint(0, _MAX_DISTRACTORS)
     objects = list(_moved_objects(template, namespace, name))
-    objects.extend(_distractor(namespace, index) for index in range(1, count + 1))
+    objects.extend(_distractor(template, namespace, index) for index in range(1, count + 1))
     rng.shuffle(objects)
     target = replace(old, namespace=namespace, name=name)
     turns = tuple(

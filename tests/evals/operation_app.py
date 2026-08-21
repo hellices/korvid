@@ -95,7 +95,7 @@ __all__ = [
 ]
 
 _ALIASES = builtin_aliases()
-_APPROVAL_KEYS = {"approved": "y", "denied": "n"}
+_APPROVAL_KEYS = {"approved": "y", "denied": "ctrl+n"}
 #: The shortest approval window the harness accepts. `until` polls at
 #: 0.05s and `_await_user_approval` re-checks its remaining budget right
 #: after `push_screen`, so a sub-second window can be created and expired
@@ -311,15 +311,51 @@ def _is_target_document(
 
 
 def _shows_state(document: Mapping[str, Any], assertions: Sequence[StateAssertion]) -> bool:
-    """Whether the read document actually satisfies every assertion.
+    """Whether the read document carries every assertion's required state.
 
     Delegates to the grader's own `evaluate_assertion_document`, so the
-    model-visible check and the authoritative check are one implementation:
-    a leaf such as `replicas: 3` appearing under `status` can never stand
-    in for the asserted `spec.replicas`.
+    walked paths cannot drift. Provisional values are excluded from Slice A
+    scoring until live calibration, so they require only path observation
+    (`absent` is observable from a parsed target document). Calibrated
+    assertions must satisfy their typed operator.
     """
-    return all(
-        evaluate_assertion_document(document, assertion).satisfied for assertion in assertions
+    for assertion in assertions:
+        result = evaluate_assertion_document(document, assertion)
+        if assertion.provisional:
+            if assertion.operator != "absent" and not result.found:
+                return False
+        elif not result.satisfied:
+            return False
+    return True
+
+
+def _safe_argument(arguments: Mapping[str, Any], key: str) -> str | None:
+    """Project one untrusted argument through the journal's token policy."""
+    detail = summarize_untrusted(**{key: arguments.get(key)})
+    prefix = f"{key}="
+    suffix = " dropped=0"
+    if not detail.startswith(prefix) or not detail.endswith(suffix):
+        return None
+    return detail[len(prefix) : -len(suffix)]
+
+
+def _write_request_target(
+    journey: OperationJourney, arguments: Mapping[str, Any]
+) -> JournalTarget | None:
+    kind = _safe_argument(arguments, "kind")
+    name = _safe_argument(arguments, "name")
+    namespace = _safe_argument(arguments, "namespace")
+    meta = _ALIASES.get(kind.lower()) if kind is not None else None
+    if meta is None or name is None or namespace is None:
+        return None
+    return JournalTarget(
+        context=journey.target.context,
+        namespace=namespace,
+        group=meta.group,
+        kind=meta.kind,
+        plural=meta.plural,
+        name=name,
+        uid=None,
     )
 
 
@@ -341,6 +377,9 @@ class _JournalingExecutor(RecordedExecution):
     async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
         definition = TOOLS_BY_NAME.get(name)
         effect = definition.effect if definition is not None else "unknown"
+        request_target = (
+            _write_request_target(self._journey, arguments) if effect == "cluster_write" else None
+        )
         self.tool_calls += 1
         self._journal.append(
             event="tool_call",
@@ -354,7 +393,7 @@ class _JournalingExecutor(RecordedExecution):
                 event="write_requested",
                 actor="model_tool",
                 action=action,
-                target=self._target,
+                target=request_target,
                 result="requested",
                 detail=summarize_arguments(name, arguments),
             )
@@ -364,7 +403,7 @@ class _JournalingExecutor(RecordedExecution):
                 event="approval_reported",
                 actor="model_tool",
                 action=name,
-                target=self._target,
+                target=request_target,
                 approval=approval_from_result(outcome.text),
                 result="reported",
                 detail=summarize_untrusted(tool=name, chars=len(outcome.text)),
@@ -557,14 +596,14 @@ class _ApprovalDriver:
             result="present" if previews else "absent",
             detail=summarize_untrusted(count=previews),
         )
-        if not matched or self._remaining <= 0:
+        if not matched or previews == 0 or self._remaining <= 0:
             self._journal.append(
                 event="unexpected_dialog",
                 actor="approval_driver",
                 result="declined",
                 detail=self._dialog_detail(),
             )
-            await pilot.press("n")
+            await pilot.press(_APPROVAL_KEYS["denied"])
             await until(pilot, self._closed, label="unexpected dialog declined")
             return
         self._remaining -= 1

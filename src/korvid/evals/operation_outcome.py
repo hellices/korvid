@@ -177,12 +177,12 @@ _NEGATORS = (
 
 #: Sentence terminators plus the contrast conjunctions and the colon that
 #: introduce a new claim. A negator on one side must not reach the other.
-_CLAUSE_SPLIT = re.compile(r"[.;:!?\n]| but | however | although | though ")
+_CLAUSE_SPLIT = re.compile(r"[.;:!?\n]|\s+(?:but|however|although|though)\s+|,?\s+so\s+")
 
 #: How many words before a phrase a negator may sit and still cover it.
 #: Whole-clause scanning made "nothing was approved, so the request was
 #: denied" read as a negated denial.
-_NEGATION_WINDOW = 4
+_NEGATION_WINDOW = 10
 
 
 @dataclass(frozen=True)

@@ -83,6 +83,8 @@ def _seeds(raw: str) -> list[int]:
             seeds.append(int(token))
         except ValueError as exc:
             raise ValueError("--seeds must be a comma-separated list of integers") from exc
+    if len(seeds) != len(set(seeds)):
+        raise ValueError("--seeds must not contain duplicates")
     return seeds
 
 
@@ -221,6 +223,8 @@ def _validated_inputs(
         journeys = _selected(load_operation_journeys(args.operations), args.only)
     except KeyError as exc:
         raise ValueError(str(exc)) from exc
+    if not journeys:
+        raise ValueError("operation pack must contain at least one journey")
     if args.scripted:
         missing_scripts = sorted(
             journey.id for journey in journeys if journey.id not in OPERATION_SCRIPTS

@@ -135,3 +135,5 @@
   label: unknown
 - text: I have not restarted anything.
   label: unknown
+- text: The deployment was not, due to an API timeout, successfully restarted.
+  label: unknown
