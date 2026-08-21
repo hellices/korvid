@@ -441,16 +441,27 @@ async def test_a_malformed_delete_call_still_reaches_the_real_executor(tmp_path:
 
 
 @pytest.mark.parametrize(
-    "tool_name",
+    ("tool_name", "arguments", "expected_detail"),
     [
-        "delete resource",
-        "mañana",
-        "n" * 121,
-        "secret/password!",
+        (
+            'de"lete_resource',
+            {"kind": "deployments", "name": '"api"', "namespace": '"shop-a"'},
+            "kind=deployments dropped=3",
+        ),
+        (
+            'sc"ale_resource',
+            {
+                "kind": "deployments",
+                "name": '"api"',
+                "namespace": '"shop-a"',
+                "replicas": 3,
+            },
+            "kind=deployments replicas=3 dropped=3",
+        ),
     ],
 )
 async def test_a_malformed_tool_name_reaches_the_real_executor(
-    tool_name: str, tmp_path: Path
+    tool_name: str, arguments: dict[str, object], expected_detail: str, tmp_path: Path
 ) -> None:
     provider = _PromptSpy(
         [
@@ -459,10 +470,7 @@ async def test_a_malformed_tool_name_reaches_the_real_executor(
                     "type": "tool_call",
                     "id": "call-1",
                     "name": tool_name,
-                    "arguments": json.dumps(
-                        {"kind": "deployments", "name": "api", "tool": "shadow"},
-                        sort_keys=True,
-                    ),
+                    "arguments": json.dumps(arguments, sort_keys=True),
                 },
                 {"type": "usage", "input_tokens": 200, "output_tokens": 20},
             ],
@@ -486,7 +494,12 @@ async def test_a_malformed_tool_name_reaches_the_real_executor(
     assert tool_results == [f"ERROR: unknown tool: {tool_name!r}"]
     tool_events = [entry for entry in run.journal if entry["event"] == "tool_call"]
     assert [entry["action"] for entry in tool_events] == ["unknown_tool"]
-    assert [entry["detail"] for entry in tool_events] == ["kind=deployments name=api dropped=2"]
+    assert [entry["detail"] for entry in tool_events] == [expected_detail]
+    assert all("tool=" not in entry["detail"] for entry in tool_events)
+    assert all(
+        '"api"' not in entry["detail"] and '"shop-a"' not in entry["detail"]
+        for entry in tool_events
+    )
     payload = json.dumps(run.journal, sort_keys=True)
     assert tool_name not in payload
     assert "unknown_tool" in payload

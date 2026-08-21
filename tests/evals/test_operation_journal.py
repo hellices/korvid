@@ -160,6 +160,12 @@ def test_summarize_rejects_empty_summary_values() -> None:
         summarize(kind="")
 
 
+def test_summarize_still_strips_quotes_for_trusted_fields() -> None:
+    assert (
+        summarize(kind='"deployments"', name='"checkout-a"') == "kind=deployments name=checkout-a"
+    )
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -168,6 +174,8 @@ def test_summarize_rejects_empty_summary_values() -> None:
         "mañana",
         "n" * 121,
         "secret/password!",
+        'de"lete_resource',
+        'sc"ale_resource',
     ],
 )
 def test_summarize_action_is_total_and_bounded(value: str) -> None:
@@ -220,6 +228,39 @@ def test_summarize_arguments_counts_reserved_tool_and_dropped_keys() -> None:
         },
     )
     assert detail == "kind=deployments name=checkout-a dropped=4"
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "expected"),
+    [
+        (
+            'de"lete_resource',
+            {
+                "kind": "deployments",
+                "name": '"checkout-a"',
+                "namespace": '"shop-a"',
+            },
+            "kind=deployments dropped=3",
+        ),
+        (
+            'sc"ale_resource',
+            {
+                "kind": "deployments",
+                "name": '"checkout-a"',
+                "namespace": '"shop-a"',
+                "replicas": 3,
+            },
+            "kind=deployments replicas=3 dropped=3",
+        ),
+    ],
+)
+def test_summarize_arguments_rejects_quoted_raw_tokens(
+    tool: str, arguments: dict[str, object], expected: str
+) -> None:
+    detail = summarize_arguments(tool, arguments)
+    assert detail == expected
+    assert "tool=" not in detail
+    ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
 
 
 @pytest.mark.parametrize(

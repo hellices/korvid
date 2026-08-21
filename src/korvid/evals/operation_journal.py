@@ -13,6 +13,7 @@ allowlist, and state mappings reject Secret paths and non-scalars.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
@@ -110,12 +111,16 @@ _SUMMARY_VALUE = re.compile(r"[A-Za-z0-9._:/@=+-]{1,120}")
 _UNKNOWN_TOOL = "unknown_tool"
 
 
-def _summary_text(key: str, value: Any) -> str:
-    """Normalized summary token for one trusted field value."""
+def _summary_text(key: str, value: Any, *, strip_quotes: bool) -> str:
+    """Normalized summary token for one field value."""
 
     if isinstance(value, bool) or not isinstance(value, _SCALARS):
         raise ValueError(f"journal detail values must be scalars: {key!r}")
-    text = str(value).replace('"', "")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"journal detail value is not a bounded summary token: {key!r}")
+    text = str(value)
+    if strip_quotes:
+        text = text.replace('"', "")
     if not _SUMMARY_VALUE.fullmatch(text):
         raise ValueError(f"journal detail value is not a bounded summary token: {key!r}")
     return text
@@ -130,7 +135,7 @@ def summarize(**fields: Any) -> str:
             raise ValueError(f"journal detail key is not allowlisted: {key!r}")
         if value is None:
             continue
-        parts.append(f"{key}={_summary_text(key, value)}")
+        parts.append(f"{key}={_summary_text(key, value, strip_quotes=True)}")
     return " ".join(parts)
 
 
@@ -145,35 +150,23 @@ def summarize_action(value: str) -> str:
 def summarize_arguments(tool: str, arguments: Mapping[str, Any]) -> str:
     """Project raw tool arguments onto the detail allowlist best-effort."""
 
-    kept: dict[str, Any] = {}
+    parts: list[str] = []
     dropped = 0
     try:
-        tool_value = _summary_text("tool", tool)
+        parts.append(f"tool={_summary_text('tool', tool, strip_quotes=False)}")
     except ValueError:
-        tool_value = None
         dropped += 1
     for key, value in sorted(arguments.items()):
         if key not in _DETAIL_KEYS or key in {"tool", "dropped"}:
             dropped += 1
             continue
-        if isinstance(value, bool) or not isinstance(value, _SCALARS):
-            dropped += 1
-            continue
-        if isinstance(value, str) and not value:
-            dropped += 1
-            continue
         try:
-            _summary_text(key, value)
+            parts.append(f"{key}={_summary_text(key, value, strip_quotes=False)}")
         except ValueError:
             dropped += 1
             continue
-        kept[key] = value
-    fields: dict[str, Any] = {}
-    if tool_value is not None:
-        fields["tool"] = tool_value
-    fields.update(kept)
-    fields["dropped"] = dropped
-    return summarize(**fields)
+    parts.append(f"dropped={dropped}")
+    return " ".join(parts)
 
 
 @dataclass(frozen=True)
