@@ -8,19 +8,23 @@ Every journey runs the real `KorvidApp`, the real `AgentRuntime`, the real
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from korvid.evals.operation import bundled_operations_dir, load_operation_journeys
+from korvid.evals.operation import PermissionDenial, bundled_operations_dir, load_operation_journeys
+from korvid.evals.operation_journal import ActionJournal
 from korvid.evals.operation_state import RESTART_ANNOTATION
 from korvid.evals.scripted import ScriptedProvider
 
 from .operation_app import (
     MIN_APPROVAL_TIMEOUT,
     OperationRun,
+    _journal_audit_records,
+    _make_check_permission,
     approval_from_result,
     run_operation_journey,
 )
@@ -571,6 +575,118 @@ async def test_an_rbac_refusal_never_reaches_a_dialog_or_the_audit_log(tmp_path:
     assert [entry for entry in run.journal if entry["event"] == "dialog_observed"] == []
     assert [entry for entry in run.journal if entry["event"] == "mutation_started"] == []
     assert run.audit == ()
+
+
+async def test_a_wildcard_rbac_refusal_drops_a_hostile_namespace_without_aliasing() -> None:
+    journal = ActionJournal()
+    journey = replace(
+        _JOURNEYS["scale-rbac-denied"],
+        permission_denials=(PermissionDenial("patch", "deployments", "scale", None),),
+    )
+    check_permission = _make_check_permission(journey, journal)
+    namespace = '"-"'
+    allowed = await check_permission(
+        "patch", "deployments", "scale", namespace, "apps", "payments-b"
+    )
+    assert allowed is False
+    denied = journal.payload()[0]
+    assert denied["detail"] == "group=apps resource=deployments dropped=1"
+    payload = json.dumps(denied, sort_keys=True)
+    assert namespace not in payload
+    assert "namespace=-" not in denied["detail"]
+
+
+async def test_a_wildcard_rbac_refusal_with_a_hostile_namespace_stays_on_the_product_path(
+    tmp_path: Path,
+) -> None:
+    namespace = '"-"'
+    provider = _PromptSpy(
+        [
+            [
+                {
+                    "type": "tool_call",
+                    "id": "call-1",
+                    "name": "get_resource",
+                    "arguments": json.dumps(
+                        {"kind": "deployments", "name": "payments-b", "namespace": "shop-b"},
+                        sort_keys=True,
+                    ),
+                },
+                {"type": "usage", "input_tokens": 200, "output_tokens": 20},
+            ],
+            [
+                {
+                    "type": "tool_call",
+                    "id": "call-2",
+                    "name": "scale_resource",
+                    "arguments": json.dumps(
+                        {
+                            "kind": "deployments",
+                            "name": "payments-b",
+                            "namespace": namespace,
+                            "replicas": 5,
+                        },
+                        sort_keys=True,
+                    ),
+                },
+                {"type": "usage", "input_tokens": 200, "output_tokens": 20},
+            ],
+            [
+                {
+                    "type": "text_delta",
+                    "text": "The wildcard RBAC denial blocked the hostile namespace write and"
+                    " nothing changed.",
+                },
+                {"type": "usage", "input_tokens": 200, "output_tokens": 20},
+            ],
+        ]
+    )
+    journey = replace(
+        _JOURNEYS["scale-rbac-denied"],
+        permission_denials=(PermissionDenial("patch", "deployments", "scale", None),),
+    )
+    run = await run_operation_journey(
+        journey,
+        audit_path=tmp_path / "audit.jsonl",
+        provider_factory=lambda: provider,
+    )
+    tool_results = [
+        message["content"] for message in provider.calls[2] if message.get("role") == "tool"
+    ]
+    assert tool_results[-1] == "ERROR: missing permission: patch deployments/scale"
+    denied = next(entry for entry in run.journal if entry["event"] == "permission_denied")
+    assert denied["detail"] == "group=apps resource=deployments dropped=1"
+    payload = json.dumps(run.journal, sort_keys=True)
+    assert namespace not in payload
+    assert "namespace=-" not in payload
+    assert [entry for entry in run.journal if entry["event"] == "dialog_observed"] == []
+    assert [entry for entry in run.journal if entry["event"] == "mutation_started"] == []
+    assert run.audit == ()
+
+
+def test_hostile_audit_record_fields_are_dropped_without_leaking_or_mutating() -> None:
+    journal = ActionJournal()
+    records = (
+        {
+            "action": "scale",
+            "kind": '"deployments"',
+            "name": '"checkout-a"',
+            "context": '"eval"',
+            "outcome": "intent",
+        },
+    )
+    snapshot = deepcopy(records)
+    _journal_audit_records(journal, records)
+    assert records == snapshot
+    [entry] = journal.payload()
+    assert entry["detail"] == "dropped=3"
+    payload = json.dumps(entry, sort_keys=True)
+    assert '"deployments"' not in payload
+    assert '"checkout-a"' not in payload
+    assert '"eval"' not in payload
+    assert "kind=deployments" not in entry["detail"]
+    assert "name=checkout-a" not in entry["detail"]
+    assert "context=eval" not in entry["detail"]
 
 
 async def test_an_unsupported_request_states_the_limit_without_substituting_a_write(

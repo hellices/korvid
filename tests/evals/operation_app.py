@@ -62,9 +62,9 @@ from korvid.evals.operation_grader import (
 from korvid.evals.operation_journal import (
     ActionJournal,
     JournalTarget,
-    summarize,
     summarize_action,
     summarize_arguments,
+    summarize_untrusted,
 )
 from korvid.evals.operation_state import (
     AuditIntentProbe,
@@ -367,7 +367,7 @@ class _JournalingExecutor(RecordedExecution):
                 target=self._target,
                 approval=approval_from_result(outcome.text),
                 result="reported",
-                detail=summarize(tool=name, chars=len(outcome.text)),
+                detail=summarize_untrusted(tool=name, chars=len(outcome.text)),
             )
         elif effect in {"cluster_read", "external_read"}:
             self._note_read(name, outcome)
@@ -396,7 +396,7 @@ class _JournalingExecutor(RecordedExecution):
                 action=name,
                 target=self._target,
                 result="no_credit",
-                detail=summarize(tool=name, reason="not_a_target_document"),
+                detail=summarize_untrusted(tool=name, reason="not_a_target_document"),
             )
             return
         after = self._journal.has("mutation_finished")
@@ -409,7 +409,7 @@ class _JournalingExecutor(RecordedExecution):
             action=name,
             target=JournalTarget.of(target, uid=outcome.incarnation or target.uid),
             result="credited" if shows else "no_credit",
-            detail=summarize(tool=name, checkpoint=checkpoint, count=len(assertions)),
+            detail=summarize_untrusted(tool=name, checkpoint=checkpoint, count=len(assertions)),
             credit=shows,
         )
 
@@ -433,7 +433,9 @@ class _AnswerCapturingRuntime(AgentRuntime):
 
     async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
         self._journal.append(
-            event="turn_started", actor="app_internal", detail=summarize(chars=len(user_text))
+            event="turn_started",
+            actor="app_internal",
+            detail=summarize_untrusted(chars=len(user_text)),
         )
         buffer = ""
         try:
@@ -449,7 +451,7 @@ class _AnswerCapturingRuntime(AgentRuntime):
                 event="turn_finished",
                 actor="app_internal",
                 result="captured" if buffer else "empty",
-                detail=summarize(chars=len(buffer)),
+                detail=summarize_untrusted(chars=len(buffer)),
             )
 
 
@@ -497,7 +499,7 @@ class _ApprovalDriver:
 
     def _dialog_detail(self) -> str:
         target = self._journey.target
-        return summarize(
+        return summarize_untrusted(
             action=self._journey.goal,
             plural=target.plural,
             name=target.name,
@@ -529,7 +531,7 @@ class _ApprovalDriver:
             action="replace_target",
             target=JournalTarget.of(target, uid=uid),
             result="replaced" if replaced else "missing",
-            detail=summarize(uid=uid, reason="dialog_intervention"),
+            detail=summarize_untrusted(uid=uid, reason="dialog_intervention"),
         )
 
     async def handle(self, pilot: Any) -> None:
@@ -553,7 +555,7 @@ class _ApprovalDriver:
             event="dialog_preview_present" if previews else "dialog_preview_absent",
             actor="approval_driver",
             result="present" if previews else "absent",
-            detail=summarize(count=previews),
+            detail=summarize_untrusted(count=previews),
         )
         if not matched or self._remaining <= 0:
             self._journal.append(
@@ -643,7 +645,7 @@ def _make_get_manifest(
                 uid=uid,
             ),
             result="resolved" if uid else "no_uid",
-            detail=summarize(kind=meta.kind, name=name, namespace=namespace),
+            detail=summarize_untrusted(kind=meta.kind, name=name, namespace=namespace),
         )
         return manifest
 
@@ -666,8 +668,8 @@ def _make_check_permission(
                 actor="app_internal",
                 action=summarize_action(verb),
                 result="denied",
-                detail=summarize(
-                    group=group or "core", resource=resource, namespace=namespace or "-"
+                detail=summarize_untrusted(
+                    group=group or "core", resource=resource, namespace=namespace
                 ),
             )
             return False
@@ -699,7 +701,7 @@ def _select_target_row(app: KorvidApp, journey: OperationJourney, journal: Actio
             actor="fixture_actor",
             target=JournalTarget.of(journey.target),
             result="row_key",
-            detail=summarize(row_key=key),
+            detail=summarize_untrusted(row_key=key),
         )
         return True
     return False
@@ -726,7 +728,7 @@ def _select_neutral_row(app: KorvidApp, journey: OperationJourney, journal: Acti
             event="screen_context_seeded",
             actor="fixture_actor",
             result="row_key",
-            detail=summarize(row_key=key),
+            detail=summarize_untrusted(row_key=key),
         )
         return True
     raise AssertionError(
@@ -820,13 +822,17 @@ async def _run_turns(
                 label="fixture target row selected",
             )
         completed = journal.count("turn_finished")
-        journal.append(event="user_turn", actor="fixture_actor", detail=summarize(count=index + 1))
+        journal.append(
+            event="user_turn",
+            actor="fixture_actor",
+            detail=summarize_untrusted(count=index + 1),
+        )
         if index == 0:
             journal.append(
                 event="goal_received",
                 actor="fixture_actor",
                 action=journey.goal,
-                detail=summarize(chars=len(text)),
+                detail=summarize_untrusted(chars=len(text)),
             )
         app.post_message(AgentPromptSubmitted(text))
         await _drive_turn(
@@ -884,8 +890,10 @@ def _journal_audit_records(journal: ActionJournal, records: Sequence[dict[str, A
             actor="audit",
             action=summarize_action(str(record.get("action") or "")),
             result=_audit_result(str(record.get("outcome") or "")),
-            detail=summarize(
-                kind=str(record.get("kind") or ""), name=str(record.get("name") or "")
+            detail=summarize_untrusted(
+                kind=record.get("kind"),
+                name=record.get("name"),
+                context=record.get("context"),
             ),
         )
 
@@ -907,7 +915,7 @@ def _journal_grader_reads(
             actor="grader",
             target=JournalTarget.of(target),
             result="found" if found else "absent",
-            detail=summarize(path=assertion.path),
+            detail=summarize_untrusted(path=assertion.path),
         )
 
 
@@ -1057,7 +1065,7 @@ async def run_operation_journey(
         event="outcome_reported",
         actor="model_tool",
         result="captured" if answer else "empty",
-        detail=summarize(chars=len(answer)),
+        detail=summarize_untrusted(chars=len(answer)),
     )
     audit = _read_audit(audit_path)
     _journal_audit_records(journal, audit)

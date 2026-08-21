@@ -13,6 +13,7 @@ from korvid.evals.operation_journal import (
     summarize,
     summarize_action,
     summarize_arguments,
+    summarize_untrusted,
 )
 
 _TARGET = JournalTarget(
@@ -164,6 +165,23 @@ def test_summarize_still_strips_quotes_for_trusted_fields() -> None:
     assert (
         summarize(kind='"deployments"', name='"checkout-a"') == "kind=deployments name=checkout-a"
     )
+
+
+def test_summarize_untrusted_drops_hostile_and_reserved_fields_without_raising() -> None:
+    detail = summarize_untrusted(
+        kind='"deployments"',
+        name="checkout-a",
+        namespace='"shop-a"',
+        count=1,
+        tool="shadow",
+        dropped="7",
+        note="whatever the model wanted to say",
+        status=False,
+        chars=float("inf"),
+        resource={"uid": "x"},
+    )
+    assert detail == "name=checkout-a count=1 dropped=8"
+    ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
 
 
 @pytest.mark.parametrize(
