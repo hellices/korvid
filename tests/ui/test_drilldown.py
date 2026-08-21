@@ -1039,7 +1039,7 @@ async def test_cancelled_prewarm_releases_its_lease_and_watch() -> None:
             await drill
         await until(
             pilot,
-            lambda: not app._workspace_ctl.prewarm_leases,
+            lambda: not app._workspace_ctl._prewarm_leases,
             label="lease released",
         )
         assert ("replicasets", "default") not in app.watch_manager.active
@@ -1166,9 +1166,9 @@ async def test_navigation_teardown_honors_outstanding_prewarm_leases() -> None:
             lambda: app.current_kind == "replicasets" and table.row_count == 3,
             label="replicasets rendered",
         )
-        app._workspace_ctl.prewarm_leases[("replicasets", "default")] = (
-            1  # an in-flight drill's lease
-        )
+        await app._workspace_ctl.prewarm_view(
+            "replicasets", "default", lambda rows: True
+        )  # simulates an in-flight drill's lease
         await app.on_navigate_command(NavigateCommand("pods", None))
         await until(
             pilot,

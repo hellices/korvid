@@ -2040,20 +2040,11 @@ class KorvidApp(App[None]):
         if not isinstance(event.data_table, ResourceTable):
             return
         if self.current_kind != "pods":
-            if self._workspace_ctl.hierarchy_root_kind() is not None:
-                # Helm release / OLM Subscription / CSV: Enter opens the
-                # component hierarchy tree (issue #120).
+            # The hierarchy-open/drill-chain guard and the no-op-vs-consume
+            # decision both live on the controller (issue #120/#157): this
+            # handler stays a thin delegate over the row key.
+            if await self._workspace_ctl.handle_non_pods_row_selected(str(event.row_key.value)):
                 event.stop()
-                parts = str(event.row_key.value).split("/", 1)
-                if len(parts) == 2:
-                    self._workspace_ctl.open_hierarchy(parts[0], parts[1])
-                return
-            if drill_child(self._canonical_kind(self.current_kind)) is None:
-                # No drill chain for this kind: leave Enter unconsumed so
-                # future handlers (e.g. a default describe) can claim it.
-                return
-            event.stop()
-            await self._workspace_ctl.drill_down_selected(str(event.row_key.value))
             return
         event.stop()
         row_key = str(event.row_key.value)

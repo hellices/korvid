@@ -278,9 +278,13 @@ class WorkspaceController:
         self._logs = logs
         self._hints = hints
         self._config = config
-        # Late-binding getters: the composition root may swap the manifest and
-        # helm-component fetchers (a `:ctx` switch, or a test seam), so resolve
-        # them at each use rather than pinning the callable at construction.
+        # Late-binding getters, not plain callables: `get_helm_components` is
+        # an optional collaborator (None when helm support isn't wired), and
+        # tests monkeypatch `app._get_manifest`/`app._get_helm_components` in
+        # place on the already-constructed app (e.g. the `slow_components`
+        # seam in test_hierarchy_nav.py) — resolving at each call observes
+        # both, matching the established `HelmController`/`OperatorController`
+        # getter pattern.
         self._get_manifest = get_manifest
         self._get_helm_components = get_helm_components
         self._olm_alias_key = olm_alias_key
@@ -314,28 +318,9 @@ class WorkspaceController:
     # ------------------------------------------------------------------
 
     @property
-    def state(self) -> WorkspaceState:
-        """The workspace model this controller drives."""
-        return self._state
-
-    @property
     def nav_lock(self) -> asyncio.Lock:
         """The navigation serialization lock the `:ctx`/`:mcp`/write coordinators share."""
         return self._nav_lock
-
-    @property
-    def prewarm_leases(self) -> dict[tuple[str, str], int]:
-        """Live drill pre-warm lease counts per (kind, scope)."""
-        return self._prewarm_leases
-
-    @property
-    def jump_poll_attempts(self) -> int:
-        """Cursor-placement poll budget for hierarchy/relationship goto."""
-        return self._jump_poll_attempts
-
-    @jump_poll_attempts.setter
-    def jump_poll_attempts(self, value: int) -> None:
-        self._jump_poll_attempts = value
 
     @property
     def chord_pending(self) -> bool:
@@ -660,16 +645,38 @@ class WorkspaceController:
             return True
         return drill_child(self._view.canonical_kind(self._state.current_kind)) is not None
 
-    async def drill_down_selected(self, row_key: str) -> None:
-        """Keyboard Enter: push a drill level for the selected row."""
+    async def drill_down_selected(self, row_key: str) -> bool:
+        """Keyboard Enter: push a drill level for the selected row.
+
+        Returns whether the current kind has a drill-down chain at all -
+        False means Enter is a no-op and the caller should leave the
+        keypress unconsumed for a later handler.
+        """
         if drill_child(self._view.canonical_kind(self._state.current_kind)) is None:
-            return  # kind has no drill-down chain; Enter is a no-op
+            return False  # kind has no drill-down chain; Enter is a no-op
         parts = row_key.split("/", 1)
-        if len(parts) != 2:
-            return
-        error = await self.drill_into(parts[0], parts[1])
-        if error is not None:
-            self._ui.notify(error, severity="warning")
+        if len(parts) == 2:
+            error = await self.drill_into(parts[0], parts[1])
+            if error is not None:
+                self._ui.notify(error, severity="warning")
+        return True
+
+    async def handle_non_pods_row_selected(self, row_key: str) -> bool:
+        """Enter on a non-pods row: open the hierarchy tree or push a drill
+        level (issue #120/#157).
+
+        Returns whether the caller should stop the event - False leaves an
+        undrillable kind's Enter for a later handler (e.g. a default
+        describe) instead of silently swallowing it.
+        """
+        if self.hierarchy_root_kind() is not None:
+            # Helm release / OLM Subscription / CSV: Enter opens the
+            # component hierarchy tree (issue #120).
+            parts = row_key.split("/", 1)
+            if len(parts) == 2:
+                self.open_hierarchy(parts[0], parts[1])
+            return True
+        return await self.drill_down_selected(row_key)
 
     async def prewarm_view(
         self, kind: str, scope: str, ready: Callable[[list[Summary]], bool]

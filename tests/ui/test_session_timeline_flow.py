@@ -156,7 +156,7 @@ async def test_context_epoch_guard_discards_stale_modal_navigation() -> None:
 
 async def test_timeline_navigation_failure_renders_event_name_literally() -> None:
     app = make_app([_pod("web")], session_timeline=SessionTimeline(8, 4096))
-    app._workspace_ctl.jump_poll_attempts = 1
+    app._workspace_ctl._jump_poll_attempts = 1  # shrink the give-up window for the test
     async with app.run_test() as pilot:
         await until(
             pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pods visible"

@@ -257,6 +257,22 @@ class FakeSurface(WorkspaceSurface):
         return [c[0] for c in self.calls]
 
 
+@dataclasses.dataclass
+class FakeKeyEvent:
+    """Minimal `KeyEvent` stand-in for `handle_pane_chord`: records the
+    stop/prevent-default calls the swallow behavior depends on."""
+
+    key: str
+    stopped: bool = False
+    prevented: bool = False
+
+    def stop(self, stop: bool = True) -> None:
+        self.stopped = stop
+
+    def prevent_default(self, prevent: bool = True) -> None:
+        self.prevented = prevent
+
+
 class FakeContext(ContextGuard):
     def __init__(self) -> None:
         self._epoch = 0
@@ -528,6 +544,38 @@ async def test_collapse_split_removes_second_pane_widget() -> None:
     assert b.surface.removed == ["pane-1"]
 
 
+async def test_handle_pane_chord_valid_key_runs_action_and_resets() -> None:
+    """The second chord key `v` splits the pane and disarms the chord."""
+    b = _make(kind="pods", scope="default")
+    arm = FakeKeyEvent("ctrl+w")
+    await b.ctl.handle_pane_chord(arm)
+    assert b.ctl.chord_pending is True
+    assert arm.stopped
+    assert arm.prevented
+
+    action = FakeKeyEvent("v")
+    await b.ctl.handle_pane_chord(action)
+    assert b.state.is_split  # the mapped action ran
+    assert b.ctl.chord_pending is False  # the chord resets after handling
+    assert action.stopped
+    assert action.prevented
+
+
+async def test_handle_pane_chord_unmapped_key_resets_without_action() -> None:
+    """An unmapped second key still swallows the keypress and disarms - it
+    must never fall through to the table's normal binding (issue #48)."""
+    b = _make(kind="pods", scope="default")
+    await b.ctl.handle_pane_chord(FakeKeyEvent("ctrl+w"))
+    assert b.ctl.chord_pending is True
+
+    stray = FakeKeyEvent("x")
+    await b.ctl.handle_pane_chord(stray)
+    assert not b.state.is_split  # no action ran for an unmapped key
+    assert b.ctl.chord_pending is False  # still swallowed and reset
+    assert stray.stopped
+    assert stray.prevented
+
+
 # ---------------------------------------------------------------------------
 # 3. Drill prewarm lease acquire/release + watch cleanup
 # ---------------------------------------------------------------------------
@@ -536,7 +584,7 @@ async def test_collapse_split_removes_second_pane_widget() -> None:
 async def test_prewarm_acquires_lease_and_starts_watch() -> None:
     b = _make(kind="deployments", scope="default")
     await b.ctl.prewarm_view("replicasets", "default", lambda rows: True)
-    assert b.ctl.prewarm_leases[("replicasets", "default")] == 1
+    assert b.ctl._prewarm_leases[("replicasets", "default")] == 1
     assert ("replicasets", "default") in b.watch.started
 
 
@@ -544,13 +592,15 @@ async def test_stop_watch_if_unused_reaps_when_last_lease() -> None:
     b = _make(kind="deployments", scope="default")
     await b.ctl.prewarm_view("replicasets", "default", lambda rows: True)
     await b.ctl.stop_watch_if_unused("replicasets", "default")
-    assert ("replicasets", "default") not in b.ctl.prewarm_leases
+    assert ("replicasets", "default") not in b.ctl._prewarm_leases
     assert ("replicasets", "default") in b.watch.stopped
 
 
 async def test_stop_watch_keeps_stream_for_displayed_pane() -> None:
     b = _make(kind="replicasets", scope="default")
-    b.ctl.prewarm_leases[("replicasets", "default")] = 1
+    # Acquire a real lease (an always-true `ready` returns on the first
+    # check, so this completes without waiting on the timeout).
+    await b.ctl.prewarm_view("replicasets", "default", lambda rows: True)
     await b.ctl.stop_watch_if_unused("replicasets", "default")
     # a pane displays replicasets/default, so the stream is not reaped
     assert ("replicasets", "default") not in b.watch.stopped

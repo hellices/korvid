@@ -861,7 +861,7 @@ async def test_jump_notifies_when_object_never_appears() -> None:
     silently - the user gets told instead of staring at a wrong cursor."""
     components = {"web": [ComponentRef(kind="Deployment", name="ghost")]}
     app, _ = make_app(_HELM_DATA, components=components)
-    app._workspace_ctl.jump_poll_attempts = 3
+    app._workspace_ctl._jump_poll_attempts = 3  # shrink the give-up window for the test
     notices: list[str] = []
     original = app.notify
 
