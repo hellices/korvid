@@ -1,0 +1,235 @@
+/*
+ * korvid landing page visual polish.
+ *
+ * Scope: custom properties, the amber-on-charcoal hero, the responsive
+ * product demo, the feature grid, keyboard-focus visibility, reduced-motion
+ * handling, and comfortable reading widths for the new landing content.
+ * Everything here is additive to the Material for MkDocs theme already
+ * configured in mkdocs.yml (palette: scheme slate, primary black, accent
+ * amber) — no JavaScript, no external assets, no bundled fonts.
+ */
+
+:root {
+  --korvid-charcoal: #12151a;
+  --korvid-charcoal-raised: #1b1f26;
+  --korvid-charcoal-border: #2a2f38;
+  --korvid-amber: #f5a623;
+  --korvid-amber-bright: #ffcf6e;
+  --korvid-ink: #e7e9ee;
+  --korvid-ink-dim: #aab0bd;
+  --korvid-radius: 0.5rem;
+  --korvid-gap: 1.5rem;
+  --korvid-measure: 42rem;
+  --korvid-content-width: 72rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Hero                                                                 */
+/* ------------------------------------------------------------------ */
+
+.md-typeset .hero {
+  background: var(--korvid-charcoal);
+  color: var(--korvid-ink);
+  border-radius: var(--korvid-radius);
+  padding: 3rem 2rem;
+  margin: 0 0 2rem;
+  max-width: var(--korvid-content-width);
+  margin-inline: auto;
+}
+
+.md-typeset .hero .eyebrow {
+  color: var(--korvid-amber);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  margin: 0 0 0.75rem;
+}
+
+.md-typeset .hero h1 {
+  color: var(--korvid-ink);
+  font-size: 2.5rem;
+  line-height: 1.15;
+  margin: 0 0 1rem;
+  max-width: var(--korvid-measure);
+}
+
+.md-typeset .hero .hero-copy {
+  color: var(--korvid-ink-dim);
+  font-size: 1.05rem;
+  line-height: 1.6;
+  max-width: var(--korvid-measure);
+  margin: 0 0 1.75rem;
+}
+
+.md-typeset .hero .hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.md-typeset .hero .hero-actions .md-button {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.md-typeset .hero .hero-actions .md-button:hover {
+  transform: translateY(-1px);
+}
+
+/* The site palette's `primary: black` makes Material fall back to the
+   link color for `.md-button--primary`; restate the hero's two buttons in
+   the amber/charcoal brand pair explicitly so the hero reads as amber-on-
+   charcoal rather than borrowing the docs' default link blue. */
+.md-typeset .hero .md-button--primary {
+  background-color: var(--korvid-amber);
+  border-color: var(--korvid-amber);
+  color: var(--korvid-charcoal);
+}
+
+.md-typeset .hero .md-button--primary:hover {
+  background-color: var(--korvid-amber-bright);
+  border-color: var(--korvid-amber-bright);
+  color: var(--korvid-charcoal);
+}
+
+.md-typeset .hero .md-button:not(.md-button--primary) {
+  color: var(--korvid-amber);
+  border-color: var(--korvid-amber);
+}
+
+.md-typeset .hero .md-button:not(.md-button--primary):hover {
+  background-color: var(--korvid-charcoal-raised);
+  color: var(--korvid-amber-bright);
+  border-color: var(--korvid-amber-bright);
+}
+
+.md-typeset .hero .install-command {
+  display: inline-block;
+  background: var(--korvid-charcoal-raised);
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+  padding: 0.5rem 1rem;
+}
+
+.md-typeset .hero .install-command code {
+  background: none;
+  color: var(--korvid-amber-bright);
+  font-size: 0.95rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Product demo — responsive two-column layout above 960px             */
+/* ------------------------------------------------------------------ */
+
+.md-typeset .product-demo {
+  max-width: var(--korvid-content-width);
+  margin: 0 auto 2.5rem;
+  padding: 0;
+}
+
+.md-typeset .product-demo img {
+  width: 100%;
+  border-radius: var(--korvid-radius);
+  border: 1px solid var(--korvid-charcoal-border);
+  display: block;
+}
+
+.md-typeset .product-demo figcaption {
+  color: var(--korvid-ink-dim);
+  font-size: 0.9rem;
+  margin-top: 0.75rem;
+}
+
+@media (min-width: 960px) {
+  .md-typeset .product-demo {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    column-gap: var(--korvid-gap);
+    align-items: center;
+  }
+
+  .md-typeset .product-demo figcaption {
+    margin-top: 0;
+    align-self: center;
+    border-left: 2px solid var(--korvid-amber);
+    padding-left: 1rem;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Feature grid — three cards                                          */
+/* ------------------------------------------------------------------ */
+
+.md-typeset .feature-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--korvid-gap);
+  max-width: var(--korvid-content-width);
+  margin: 0 auto 2rem;
+}
+
+@media (min-width: 720px) {
+  .md-typeset .feature-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.md-typeset .feature-grid article {
+  background: var(--korvid-charcoal-raised);
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+  padding: 1.5rem;
+}
+
+.md-typeset .feature-grid article span {
+  color: var(--korvid-amber);
+  font-weight: 700;
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+}
+
+.md-typeset .feature-grid article h3 {
+  margin: 0.5rem 0;
+}
+
+.md-typeset .feature-grid article p {
+  color: var(--korvid-ink-dim);
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Readable widths for the landing page's prose sections               */
+/* ------------------------------------------------------------------ */
+
+.md-typeset .hero ~ h2,
+.md-typeset .hero ~ p,
+.md-typeset .hero ~ ul {
+  max-width: var(--korvid-content-width);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* ------------------------------------------------------------------ */
+/* Accessibility: visible keyboard focus                               */
+/* ------------------------------------------------------------------ */
+
+.md-typeset .hero a:focus-visible,
+.md-typeset .feature-grid article:focus-visible,
+.md-typeset .product-demo:focus-visible {
+  outline: 3px solid var(--korvid-amber);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Accessibility: respect reduced-motion preference                    */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  .md-typeset .hero .hero-actions .md-button {
+    transition: none;
+  }
+
+  .md-typeset .hero .hero-actions .md-button:hover {
+    transform: none;
+  }
+}
