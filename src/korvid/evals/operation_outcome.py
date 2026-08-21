@@ -115,7 +115,6 @@ _PHRASES: dict[str, tuple[str, ...]] = {
         "still starting",
     ),
     "accepted": (
-        "approved",
         "accepted",
         "submitted",
         "sent to the api",

@@ -126,6 +126,7 @@ _TARGET_KEYS = frozenset({"context", "namespace", "group", "kind", "plural", "na
 _REQUEST_KEYS = frozenset({"action", "replicas"})
 _ASSERTION_KEYS = frozenset({"resource", "path", "operator", "expected", "provisional"})
 _CLUSTER_KEYS = frozenset({"objects", "events", "logs", "forbidden", "reconcile_status"})
+_READ_DENIAL_KEYS = frozenset({"kind", "namespace", "name", "subresource"})
 _RBAC_KEYS = frozenset({"denied"})
 _DENIAL_KEYS = frozenset({"verb", "resource", "subresource", "namespace"})
 _INTERVENTION_KEYS = frozenset({"replace_target"})
@@ -490,11 +491,13 @@ def _cluster(raw: Any, label: str) -> OperationCluster:
         raise ValueError(f"{label}.forbidden entries must be mappings")
     checked_forbidden: list[dict[str, str]] = []
     for index, rule in enumerate(forbidden_reads):
+        rule_label = f"{label}.forbidden[{index}]"
+        _reject_unknown_keys(rule, _READ_DENIAL_KEYS, rule_label)
         checked_rule: dict[str, str] = {}
         for key, value in rule.items():
             if not isinstance(key, str) or not isinstance(value, str):
                 field = key if isinstance(key, str) else "<key>"
-                raise ValueError(f"{label}.forbidden[{index}].{field} must be a string")
+                raise ValueError(f"{rule_label}.{field} must be a string")
             checked_rule[key] = value
         checked_forbidden.append(checked_rule)
     reconcile = raw.get("reconcile_status", True)

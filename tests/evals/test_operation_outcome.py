@@ -54,6 +54,11 @@ def test_conflicting_positive_and_negative_classes_are_ambiguous() -> None:
     assert set(result.matched) == {"completed", "failed"}
 
 
+def test_user_approval_followed_by_an_api_failure_is_failed() -> None:
+    answer = "You approved it, but the API failed with a conflict."
+    assert classify_operation_outcome(answer).outcome == "failed"
+
+
 def test_precedence_resolves_non_conflicting_overlaps() -> None:
     result = classify_operation_outcome("The API accepted the patch; the rollout is in progress.")
     assert result.outcome == "in_progress"

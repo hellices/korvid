@@ -61,6 +61,8 @@
   label: rejected
 - text: "The scale failed: the API returned a conflict."
   label: failed
+- text: You approved it, but the API failed with a conflict.
+  label: failed
 - text: "Error: deployments/checkout-a not found."
   label: failed
 - text: The restart did not apply; the API answered 409 conflict.

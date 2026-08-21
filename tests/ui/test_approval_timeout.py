@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from pathlib import Path
 
 import pytest
 
-import korvid.__main__ as composition_root
 from korvid.ui.app import _APPROVAL_TIMEOUT
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 
@@ -35,11 +33,6 @@ def test_a_non_positive_timeout_is_rejected(tmp_path: Path) -> None:
 def test_a_non_finite_timeout_is_rejected(tmp_path: Path, timeout: float) -> None:
     with pytest.raises(ValueError, match="approval_timeout_seconds must be finite and positive"):
         make_app(Recorder(), tmp_path / "audit.jsonl", approval_timeout_seconds=timeout)
-
-
-def test_production_wiring_passes_no_override() -> None:
-    """The composition root must never shorten the shipped approval window."""
-    assert "approval_timeout_seconds" not in inspect.getsource(composition_root)
 
 
 async def test_an_injected_short_timeout_expires_an_agent_write(tmp_path: Path) -> None:

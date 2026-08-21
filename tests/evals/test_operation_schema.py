@@ -133,6 +133,13 @@ def test_optional_read_denial_fields_must_be_strings(tmp_path: Path) -> None:
         load_operation_journey(_write(tmp_path, data))
 
 
+def test_unknown_read_denial_keys_are_rejected(tmp_path: Path) -> None:
+    data = _minimal()
+    data["cluster"]["forbidden"] = [{"knd": "deployments"}]
+    with pytest.raises(ValueError, match=r"cluster\.forbidden\[0\].*unknown keys: \['knd'\]"):
+        load_operation_journey(_write(tmp_path, data))
+
+
 def test_journey_id_must_be_a_safe_slug(tmp_path: Path) -> None:
     data = _minimal()
     data["id"] = "../../outside"

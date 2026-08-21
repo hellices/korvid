@@ -252,6 +252,24 @@ def test_a_sub_second_approval_timeout_is_a_usage_error(tmp_path: Path) -> None:
     assert code == 2
 
 
+@pytest.mark.parametrize("timeout", ["nan", "inf"])
+def test_a_non_finite_approval_timeout_is_a_usage_error(tmp_path: Path, timeout: str) -> None:
+    artifacts = tmp_path / "artifacts"
+    code = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--scripted",
+            "--approval-timeout",
+            timeout,
+            "--artifacts",
+            str(artifacts),
+        ]
+    )
+    assert code == 2
+    assert not artifacts.exists()
+
+
 def test_an_expiry_journey_uses_the_shortest_supported_window() -> None:
     """The expiry fixture waits out its whole window, so the default would
     burn `--approval-timeout` seconds per repetition to prove nothing extra."""

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import subprocess
 import sys
@@ -234,7 +235,7 @@ def _validated_inputs(
             "--seeds requires a live provider; the deterministic scripts are written "
             "against the template instances"
         )
-    if args.approval_timeout < MIN_APPROVAL_TIMEOUT:
+    if not math.isfinite(args.approval_timeout) or args.approval_timeout < MIN_APPROVAL_TIMEOUT:
         raise ValueError(
             f"--approval-timeout must be at least {MIN_APPROVAL_TIMEOUT}s; a shorter "
             "window can expire between two 0.05s polls"
