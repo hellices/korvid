@@ -7,8 +7,11 @@ keywords that carry the security contract - `action`, `meta`, `op_factory`,
 `epoch` - are then checked by mypy at every call site and in every fake,
 instead of being erased by an ellipsis.
 
-The single implementation lives on `KorvidApp`, which owns the confirm
-dialog, the `_run_write` worker, and the fail-closed intent audit.
+The single implementation is `WriteCoordinator` (`ui/write_coordinator.py`),
+which owns the confirm dialog, the audited execution path, and the fail-closed
+intent audit. It inherits this ABC directly - it is a plain class, so no
+adapter stands between the interface controllers call and the code that
+enforces it.
 """
 
 from __future__ import annotations

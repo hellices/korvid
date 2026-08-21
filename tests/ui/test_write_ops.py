@@ -479,7 +479,7 @@ async def test_y_queued_during_stalled_check_cannot_approve(
     the user never saw the operation it would approve."""
     from textual import events
 
-    monkeypatch.setattr("korvid.ui.app._PERMISSION_CHECK_TIMEOUT", 0.1)
+    monkeypatch.setattr("korvid.ui.write_coordinator._PERMISSION_CHECK_TIMEOUT", 0.1)
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl", permitted=True)
 
@@ -1668,7 +1668,7 @@ async def test_blocked_audit_never_invokes_op_factory(tmp_path: Path) -> None:
     audit_path.mkdir()  # directory makes appends fail → intent blocked
     app = make_app(Recorder(), audit_path)
     async with app.run_test():
-        result = await app._run_write("delete", _PODS_META, "default", "web-1", factory)
+        result = await app._writes.run("delete", _PODS_META, "default", "web-1", factory)
     assert "blocked" in result
     assert factory_calls == [], "factory must not be called when audit intent fails"
 
@@ -1729,7 +1729,7 @@ async def test_cancelled_before_factory_leaks_no_coroutine(tmp_path: Path) -> No
 
     async with app.run_test() as pilot:
         task = asyncio.create_task(
-            app._run_write("delete", _PODS_META, "default", "web-1", factory)
+            app._writes.run("delete", _PODS_META, "default", "web-1", factory)
         )
         try:
             await until(pilot, entered.is_set, label="audit entered")
@@ -1776,7 +1776,7 @@ async def test_run_write_records_timeline_after_intent_and_success_audit(tmp_pat
         return None
 
     async with app.run_test():
-        result = await app._run_write("delete", _PODS_META, "default", "web-1", lambda: op())
+        result = await app._writes.run("delete", _PODS_META, "default", "web-1", lambda: op())
     assert result == "done"
     assert _write_records(timeline) == [("delete", "intent"), ("delete", "success")]
     entry = timeline.snapshot(epoch=0, source=TimelineSource.WRITE, resource=None).entries[0]
@@ -1803,7 +1803,7 @@ async def test_timeline_failure_does_not_replace_durable_write_audit(tmp_path: P
         ran = True
 
     async with app.run_test():
-        result = await app._run_write("delete", _PODS_META, "default", "web-1", lambda: op())
+        result = await app._writes.run("delete", _PODS_META, "default", "web-1", lambda: op())
         assert result == "done"
         assert ran is True
         assert any("Timeline skipped write entry" in item.message for item in app._notifications)
@@ -1833,7 +1833,9 @@ async def test_write_timeline_uses_qualified_alias_when_bare_plural_collides(
         return None
 
     async with app.run_test():
-        result = await app._run_write("delete", _OLM_SUBS_META, "default", "database", lambda: op())
+        result = await app._writes.run(
+            "delete", _OLM_SUBS_META, "default", "database", lambda: op()
+        )
     assert result == "done"
     entry = timeline.snapshot(epoch=0, source=TimelineSource.WRITE, resource=None).entries[0]
     assert entry.resource is not None
@@ -1880,7 +1882,7 @@ async def test_blocked_intent_does_not_record_write_timeline(tmp_path: Path) -> 
 
     app = make_app(Recorder(), audit_path, session_timeline=timeline)
     async with app.run_test():
-        result = await app._run_write("delete", _PODS_META, "default", "web-1", lambda: op())
+        result = await app._writes.run("delete", _PODS_META, "default", "web-1", lambda: op())
     assert "blocked" in result
     assert timeline.snapshot(epoch=None, source=TimelineSource.WRITE, resource=None).entries == ()
 
@@ -1892,7 +1894,7 @@ async def test_failed_write_records_the_error_outcome_it_audited(tmp_path: Path)
     app = make_app(Recorder(fail_status=403), tmp_path / "audit.jsonl", session_timeline=timeline)
 
     async with app.run_test():
-        result = await app._run_write(
+        result = await app._writes.run(
             "delete",
             _PODS_META,
             "default",

@@ -383,8 +383,11 @@ async def test_switch_refused_while_cluster_write_in_flight() -> None:
     env = _CtxEnv()
     app = env.app
     async with app.run_test() as pilot:
-        app._active_cluster_writes = 1
+        # Take the reservation the way every write flow does, through the
+        # coordinator that owns the count `:ctx` consults.
+        release = app._writes.reserve_write()
         try:
+            assert app._writes.active_writes() == 1
             app.post_message(SwitchContextCommand("ctx-b"))
             await until(
                 pilot,
@@ -393,7 +396,7 @@ async def test_switch_refused_while_cluster_write_in_flight() -> None:
             )
             assert env.probe_calls == []
         finally:
-            app._active_cluster_writes = 0
+            release()
 
 
 async def test_keybinding_write_refused_while_switching() -> None:
@@ -404,7 +407,9 @@ async def test_keybinding_write_refused_while_switching() -> None:
     async with app.run_test() as pilot:
         app._ctx_switching = True
         try:
-            ok = await app._precheck_keybinding_write("delete", _PODS_META, "default", "pod-a")
+            ok = await app._writes.precheck_keybinding_write(
+                "delete", _PODS_META, "default", "pod-a"
+            )
             assert ok is False
             await until(
                 pilot,
@@ -421,23 +426,20 @@ async def test_write_slot_reserved_before_worker_starts() -> None:
     """The mutation slot is claimed when the coroutine is constructed (at
     approval time), not when the worker starts — a `:ctx` queued in between
     must already see the write as in flight."""
-    from korvid.ui.app import _tracks_cluster_write
-
     env = _CtxEnv()
     app = env.app
     started = asyncio.Event()
 
-    @_tracks_cluster_write
-    async def fake_write(self: KorvidApp) -> None:
+    async def fake_write() -> None:
         await started.wait()
 
     async with app.run_test():
-        coro = fake_write(app)
-        assert app._active_cluster_writes == 1  # reserved synchronously
+        coro = app._writes.reserved(fake_write)
+        assert app._writes.active_writes() == 1  # reserved synchronously
         task = asyncio.create_task(coro)
         started.set()
         await task
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
 
 
 async def test_agent_prompt_refused_while_switching() -> None:
@@ -587,7 +589,7 @@ async def test_keybinding_write_aborted_when_context_changed_during_precheck() -
 
     async with app.run_test() as pilot:
         app._check_permission = permission_check_during_switch
-        ok = await app._precheck_keybinding_write("delete", _PODS_META, "default", "pod-a")
+        ok = await app._writes.precheck_keybinding_write("delete", _PODS_META, "default", "pod-a")
         assert ok is False
         await until(
             pilot,
@@ -602,22 +604,19 @@ async def test_write_slot_released_when_coroutine_never_runs() -> None:
     and block every future `:ctx` switch."""
     import gc
 
-    from korvid.ui.app import _tracks_cluster_write
-
     env = _CtxEnv()
     app = env.app
 
-    @_tracks_cluster_write
-    async def fake_write(self: KorvidApp) -> None:  # pragma: no cover - never runs
+    async def fake_write() -> None:  # pragma: no cover - never runs
         raise AssertionError("must not start")
 
     async with app.run_test():
-        coro = fake_write(app)
-        assert app._active_cluster_writes == 1
+        coro = app._writes.reserved(fake_write)
+        assert app._writes.active_writes() == 1
         coro.close()  # unstarted coroutine: finally inside never executes
         del coro
         gc.collect()
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
 
 
 async def test_write_slot_released_by_close_without_waiting_for_collection() -> None:
@@ -628,21 +627,18 @@ async def test_write_slot_released_by_close_without_waiting_for_collection() -> 
     not refcount — would otherwise hold the reservation and block every
     later `:ctx` switch for the session's lifetime.
     """
-    from korvid.ui.app import _tracks_cluster_write
-
     env = _CtxEnv()
     app = env.app
 
-    @_tracks_cluster_write
-    async def fake_write(self: KorvidApp) -> None:  # pragma: no cover - never runs
+    async def fake_write() -> None:  # pragma: no cover - never runs
         raise AssertionError("must not start")
 
     async with app.run_test():
-        coro = fake_write(app)
-        assert app._active_cluster_writes == 1
+        coro = app._writes.reserved(fake_write)
+        assert app._writes.active_writes() == 1
         coro.close()
         # Deliberately still referenced and no gc.collect().
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert coro is not None
 
 
@@ -1211,11 +1207,11 @@ async def test_switch_adopts_protection_and_clears_on_switch_back() -> None:
     app = env.app
     async with app.run_test() as pilot:
         await _first_pod_visible(env, pilot, "pod-a")
-        assert app._protected_context is None
+        assert app._writes.protected_context is None
         app.post_message(SwitchContextCommand("ctx-b"))
         await until(
             pilot,
-            lambda: app._protected_context == "ctx-b",
+            lambda: app._writes.protected_context == "ctx-b",
             label="protection adopted",
         )
         status = app.query_one(StatusBar)
@@ -1235,7 +1231,7 @@ async def test_switch_adopts_protection_and_clears_on_switch_back() -> None:
         app.post_message(SwitchContextCommand("ctx-a"))
         await until(
             pilot,
-            lambda: app._protected_context is None,
+            lambda: app._writes.protected_context is None,
             label="protection cleared",
         )
         assert "PROTECTED" not in str(app.query_one(StatusBar).render())

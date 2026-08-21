@@ -123,6 +123,9 @@ class FakeUi(UiSurface):
     ) -> None:  # pragma: no cover
         callback(*args)
 
+    def call_later(self, callback: Callable[..., None], *args: Any) -> None:  # pragma: no cover
+        callback(*args)
+
     def progress(self, label: str) -> contextlib.AbstractContextManager[None]:
         return contextlib.nullcontext()
 

@@ -11,11 +11,11 @@ touch.
 KorvidApp  (ui/app.py)
 │
 │  owns: Textual composition and message translation, screens and modals,
-│         the write-approval perimeter, run_worker ownership, the audited
-│         execution path, and the `:ctx`-switch coordinator
+│         run_worker ownership, and the `:ctx`-switch coordinator
 │
 │  reached through: WriteGate, ViewState, UiSurface
 │
+├── WriteCoordinator    (ui/write_coordinator.py)    the write security perimeter
 ├── HelmController      (ui/helm_controller.py)      install/upgrade/rollback/uninstall
 ├── OperatorController  (ui/operator_controller.py)  OLM subscribe/approve/uninstall
 ├── ForwardController   (ui/forward_controller.py)   port-forward sessions
@@ -226,9 +226,11 @@ So the boundaries that matter are named:
 
 - **`WriteGate`** (`ui/write_gate.py`) — approval, revalidation, the
   fail-closed audit precondition, and the context epoch. One implementation,
-  `AppWriteGate`, adapting the app. Approval has two typed entry points,
-  `confirm` and `confirm_interactive`; they differ in who records the intent
-  audit, which is spelled out below.
+  `WriteCoordinator` (`ui/write_coordinator.py`), which *is* the perimeter
+  rather than an adapter over one: it is a plain class, so it inherits the
+  ABC directly. Approval has two typed entry points, `confirm` and
+  `confirm_interactive`; they differ in who records the intent audit, which
+  is spelled out below.
 - **`ViewState`** (`ui/view_state.py`) — what the user is currently looking
   at: the focused kind and scope, alias resolution, the selected row, and a
   `resources(kind, scope)` query. Read-only structurally, not just by
@@ -273,27 +275,43 @@ started before the switch keeps running against the cluster it captured.
 Controllers that outlive an await revalidate through
 `WriteGate.context_intact` or the epoch they captured.
 
-`AppWriteGate` is an adapter rather than the app inheriting `WriteGate`
-because Textual's `App` metaclass conflicts with `ABCMeta` — the same reason
-`AppUIBridge` exists.
+`AppViewState`, `AppUiSurface`, `AppWorkspaceSurface` and `AppContextGuard`
+are adapters rather than the app inheriting the ABCs, because Textual's `App`
+metaclass conflicts with `ABCMeta` — the same reason `AppUIBridge` exists.
+`WriteCoordinator` has no such constraint, so it implements `WriteGate`
+itself: there is no adapter between the interface controllers call and the
+code that enforces it.
 
-## What stays on the app
+## The write security perimeter
 
-These are deliberately *not* distributed into controllers, because each one
-must have exactly one implementation:
+`WriteCoordinator` (`ui/write_coordinator.py`) owns the single implementation
+of the ordering every cluster mutation passes through, and the perimeter
+state that ordering depends on:
 
-| Concern | Why it stays |
+| Owned | Why it is here and nowhere else |
 |---|---|
-| `_push_write_confirmation` | The approval gate for a write that is an API call. Agent writes and user writes enter here and nowhere else. Reached through `WriteGate.confirm`. |
-| `_push_interactive_confirmation` | The approval gate for a write whose approved form is an interactive subprocess. Reached through `WriteGate.confirm_interactive`. |
-| `_write_context_intact` | Revalidation after an awaited gap, including the `:ctx` epoch check. Reached through `WriteGate.context_intact`. |
-| `_run_write` | Audit-before-mutation, fail-closed. Never called by a controller. |
-| `run_worker` ownership | Cancellation and exclusivity belong to the app that owns the event loop. |
+| `confirm` | The approval gate for a write that is an API call. Agent writes, controller writes and keybinding writes enter here and nowhere else. |
+| `confirm_interactive` | The approval gate for a write whose approved form is an interactive subprocess. |
+| `confirm_screen` | Every approval dialog, so the protected-context layer (issue #83) can never be forgotten — the coordinator owns that marker and re-adopts it on each `:ctx` switch. |
+| `context_intact` / `identity_intact` / `scale_identity_intact` / `uid_intact_after_fetch` | Revalidation after an awaited gap: the `:ctx` epoch, the screen stack, the selection, the origin pane and its scope, the captured uid, and (for a scale) the captured replica count. |
+| `write_target` / `write_origin` / `current_replicas` | Resolving what a keybinding write is aimed at, before the flow's first await. |
+| `permitted` / `precheck_keybinding_write` | The SubjectAccessReview pre-check and its one-shot fail-open warning. |
+| `audit_write` | The one chokepoint where a write reaches the audit log — and, only after that durable append returned, the session timeline. |
+| `run` / `run_shielded` | Audit-before-mutation, fail-closed, under the reservation. |
+| `reserve_write` / `reserved` / `active_writes()` | The in-flight cluster-write count `:ctx` switching consults, reserved **synchronously** where the coroutine is constructed. |
+| `dry_run_preview` / `impact_preview` | Display support with their own deadlines; they fail open and can never approve, execute or reserve a write. |
+
+`KorvidApp` keeps the Textual action/message entry points that *raise* these
+flows, `run_worker` ownership (cancellation and exclusivity belong to the app
+that owns the event loop), and the `:ctx`-switch coordinator that consults
+`active_writes()`. It holds no duplicate of the ordering and no proxy back
+into it: `AppWriteGate` is gone, and controllers receive `self._writes`
+directly.
 
 A controller composes an operation *factory* and hands it to the gate. The
 ordering is the invariant, not the location of the helm/kubectl call: a
-declined dialog constructs nothing, and the app awaits the factory from its
-own worker only after the intent audit record has persisted.
+declined dialog constructs nothing, and the coordinator awaits the factory
+from a supervised worker only after the intent audit record has persisted.
 
 ### Two approval contracts, and where the audit lives
 
@@ -305,7 +323,8 @@ so it can record everything before anything happens.
 debug` fallback and `kubectl debug node/` — cannot honour that contract. Their
 approved form is a subprocess that suspends the app, and the facts worth
 auditing only exist once it has started: the pod kubectl actually created, its
-uid, and the session's exit outcome. `_run_write` cannot know any of them.
+uid, and the session's exit outcome. `WriteCoordinator.run` cannot know any
+of them.
 
 So the split is explicit rather than accidental:
 
@@ -313,8 +332,8 @@ So the split is explicit rather than accidental:
 |---|---|---|
 | dialog | gate | gate |
 | epoch recheck after the dialog | gate | gate |
-| write reservation | gate (`_run_write`) | the flow's `@_tracks_cluster_write` coroutine |
-| fail-closed intent audit | gate (`_run_write`) | **the flow** |
+| write reservation | gate (`WriteCoordinator.run`) | the flow's own `reserve_write()` coroutine |
+| fail-closed intent audit | gate (`WriteCoordinator.run`) | **the flow** |
 | outcome audit | — | the flow |
 
 The invariant is unchanged — no approved write reaches a cluster before an
@@ -372,6 +391,12 @@ tests added before the move where the behaviour is not already pinned.
    construction and thin action/message delegates, and the `:ctx` coordinator
    calls the controller's `quiesce_for_context_switch`/`reset_view_after_switch`
    reset API under the shared `nav_lock`.
+10. ~~The write security perimeter~~ — done (#187); `WriteCoordinator`
+    (`ui/write_coordinator.py`) owns approval, epoch/identity revalidation,
+    the synchronous write reservation, the fail-closed intent audit, audited
+    execution, the dry-run/impact previews, and the protected-context marker.
+    It implements `WriteGate` directly, so `AppWriteGate` is gone and the app
+    keeps only the action/message entry points that raise a write flow.
 
 Issue #238 showed that logs and describe were technically extractable without
 introducing a new pane-composition seam, and issue #245 kept describe as a

@@ -10,8 +10,9 @@ the store, and the user moves the selection constantly, so a controller that
 cached any of this would act on a stale view.
 
 `AppViewState` on `KorvidApp` is the single implementation, an adapter for
-the same reason `AppUIBridge` and `AppWriteGate` are - Textual's `App`
-metaclass conflicts with `ABCMeta`.
+the same reason `AppUIBridge` is - Textual's `App` metaclass conflicts
+with `ABCMeta`. (`WriteGate` needs no adapter: `WriteCoordinator` is a plain
+class and implements it directly.)
 """
 
 from __future__ import annotations

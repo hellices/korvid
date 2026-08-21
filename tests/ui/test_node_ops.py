@@ -1360,7 +1360,7 @@ async def test_drain_context_switch_during_plan_refuses_confirmation(
             label="drain cancelled notification",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1385,7 +1385,7 @@ async def test_drain_focus_change_during_graph_load_refuses_confirmation(
             label="drain cancelled notification",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1410,7 +1410,7 @@ async def test_drain_scope_change_during_graph_load_refuses_confirmation(
             label="drain cancelled notification",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1436,7 +1436,7 @@ async def test_drain_uid_change_during_graph_load_refuses_confirmation(
             label="drain cancelled notification",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1468,7 +1468,7 @@ async def test_drain_uid_change_in_confirmation_dispatches_nothing(
             label="drain cancelled after uid drift in confirmation",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1493,7 +1493,7 @@ async def test_drain_context_switch_during_graph_load_refuses_confirmation(
             label="drain cancelled after context switch during graph",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1516,7 +1516,7 @@ async def test_cancelled_drain_graph_load_dispatches_nothing(tmp_path: Path) -> 
                 await task
             assert lister.cancelled.is_set()
             assert not isinstance(app.screen, ConfirmScreen)
-            assert app._active_cluster_writes == 0
+            assert app._writes.active_writes() == 0
             assert not any(call[0] == "cordon" for call in rec.calls)
             assert not any(call[0] == "evict" for call in rec.calls)
             assert not audit_path.exists()

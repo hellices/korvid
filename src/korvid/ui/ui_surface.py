@@ -11,15 +11,16 @@ controller that needs more than this is reaching for app internals, which is
 the thing the decomposition is trying to stop.
 
 `AppUiSurface` on `KorvidApp` is the single implementation, an adapter for
-the same reason `AppUIBridge` and `AppWriteGate` are - Textual's `App`
-metaclass conflicts with `ABCMeta`.
+the same reason `AppUIBridge` is - Textual's `App` metaclass conflicts
+with `ABCMeta`. (`WriteGate` needs no adapter: `WriteCoordinator` is a plain
+class and implements it directly.)
 """
 
 from __future__ import annotations
 
 import contextlib
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, TypeVar
 
 from textual.await_complete import AwaitComplete
@@ -72,7 +73,7 @@ class UiSurface(ABC):
     @abstractmethod
     def run_worker(
         self,
-        work: Coroutine[Any, Any, Any] | Callable[[], Any],
+        work: Awaitable[Any] | Callable[[], Any],
         *,
         exclusive: bool = False,
         group: str = "default",
@@ -122,6 +123,17 @@ class UiSurface(ABC):
 
         Interactive subprocesses are driven off-loop; touching the UI from
         that thread directly is a data race.
+        """
+
+    @abstractmethod
+    def call_later(self, callback: Callable[..., None], *args: Any) -> None:
+        """Run *callback* on the next message-pump iteration.
+
+        The seam a modal's result callback needs: Textual invokes it
+        *before* it pops the dismissed screen, so a re-validation that
+        counts stacked screens must not run inline - it would see the
+        confirmation the user just answered and read as "another dialog
+        opened".
         """
 
     @abstractmethod

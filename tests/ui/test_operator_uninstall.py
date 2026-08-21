@@ -260,11 +260,11 @@ async def test_apply_uninstall_reserves_the_cluster_write_slot_synchronously(
             csv_uid=None,
         )
         try:
-            assert app._active_cluster_writes == 1  # reserved before the worker starts
+            assert app._writes.active_writes() == 1  # reserved before the worker starts
             await coro
         finally:
             coro.close()  # keep a failed assert from leaking the coroutine
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
 
 
 async def test_installed_csv_advancing_mid_dialog_aborts_the_uninstall(tmp_path: Path) -> None:
@@ -440,11 +440,11 @@ async def test_gate_run_reserves_the_cluster_write_slot_synchronously(
 
         coro = app._olm._gate.run("operator-install", SUB_META, "operators", "x", op)
         try:
-            assert app._active_cluster_writes == 1, "reserved before the worker starts"
+            assert app._writes.active_writes() == 1, "reserved before the worker starts"
             await coro
         finally:
             coro.close()  # keep a failed assert from leaking the coroutine
-        assert app._active_cluster_writes == 0, "the reservation outlived the write"
+        assert app._writes.active_writes() == 0, "the reservation outlived the write"
 
 
 async def test_uninstall_write_slot_released_when_coroutine_never_runs(
@@ -475,12 +475,12 @@ async def test_uninstall_write_slot_released_when_coroutine_never_runs(
             csv_name="",
             csv_uid=None,
         )
-        assert app._active_cluster_writes == 1
+        assert app._writes.active_writes() == 1
         coro.close()  # unstarted coroutine: the body's finally never executes
         # Deliberately still referenced and not collected: `close()` alone
         # must release, or a caller holding the closed coroutine wedges
         # every future `:ctx` switch (#237).
-        assert app._active_cluster_writes == 0, "the reservation leaked"
+        assert app._writes.active_writes() == 0, "the reservation leaked"
         del coro
         gc.collect()
-        assert app._active_cluster_writes == 0, "the reservation leaked"
+        assert app._writes.active_writes() == 0, "the reservation leaked"

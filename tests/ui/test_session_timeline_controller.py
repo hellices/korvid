@@ -117,6 +117,9 @@ class FakeUiSurface(UiSurface):
     def call_from_thread(self, callback: Callable[..., Any], *args: Any) -> None:
         pass  # pragma: no cover
 
+    def call_later(self, callback: Callable[..., None], *args: Any) -> None:
+        callback(*args)  # pragma: no cover
+
     def progress(self, label: str) -> contextlib.AbstractContextManager[None]:
         raise NotImplementedError  # pragma: no cover
 

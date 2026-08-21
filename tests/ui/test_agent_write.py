@@ -146,7 +146,7 @@ async def test_stalled_permission_check_times_out_fail_open(
 ) -> None:
     """A hung authorization endpoint must never hang the agent turn: the
     pre-check is bounded and fails open into the normal approval gate."""
-    monkeypatch.setattr("korvid.ui.app._PERMISSION_CHECK_TIMEOUT", 0.1)
+    monkeypatch.setattr("korvid.ui.write_coordinator._PERMISSION_CHECK_TIMEOUT", 0.1)
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl", permitted=True)
 

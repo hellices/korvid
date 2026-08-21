@@ -253,7 +253,7 @@ class BlockingRelationshipLister:
     async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         self.calls.append((meta.plural, namespace))
         if self.app is not None:
-            self.reservations_during_load.append(self.app._active_cluster_writes)
+            self.reservations_during_load.append(self.app._writes.active_writes())
         self.entered.set()
         await self.release.wait()
         if meta.plural == "pods":
@@ -359,7 +359,7 @@ async def test_resize_graph_unavailable_keeps_local_notes_and_writes_nothing(
 
     relationship_lister: Callable[[ResourceMeta, str | None], Awaitable[list[GenericSummary]]]
     if mode == "timeout":
-        monkeypatch.setattr("korvid.ui.app._IMPACT_TIMEOUT", 0.01)
+        monkeypatch.setattr("korvid.ui.write_coordinator._IMPACT_TIMEOUT", 0.01)
         blocker = BlockingRelationshipLister()
         relationship_lister = blocker
     else:
@@ -473,7 +473,7 @@ async def test_cancelled_resize_impact_load_writes_nothing(tmp_path: Path) -> No
             assert len(app.screen_stack) == 1
             assert lister.reservations_during_load
             assert all(value == 0 for value in lister.reservations_during_load)
-            assert app._active_cluster_writes == 0
+            assert app._writes.active_writes() == 0
             assert recorder.calls == []
             assert not audit_path.exists()
         finally:
@@ -511,7 +511,7 @@ async def test_resize_focus_change_during_impact_load_writes_nothing(tmp_path: P
             )
             assert app._pane is not origin
             assert not isinstance(app.screen, ConfirmScreen)
-            assert app._active_cluster_writes == 0
+            assert app._writes.active_writes() == 0
             assert recorder.calls == []
             assert not audit_path.exists()
         finally:
@@ -545,7 +545,7 @@ async def test_resize_origin_scope_change_during_impact_load_writes_nothing(
             )
             assert app._pane is origin
             assert not isinstance(app.screen, ConfirmScreen)
-            assert app._active_cluster_writes == 0
+            assert app._writes.active_writes() == 0
             assert recorder.calls == []
             assert not audit_path.exists()
         finally:
