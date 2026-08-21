@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import contextlib
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, Literal, TypeVar
 
 from textual.await_complete import AwaitComplete
@@ -48,6 +48,7 @@ class UiSurface(ABC):
         title: str = "",
         severity: Severity = "information",
         timeout: float | None = None,
+        markup: bool = True,
     ) -> None:
         """Show a toast. The only way a controller talks to the user directly."""
 
@@ -76,6 +77,7 @@ class UiSurface(ABC):
         exclusive: bool = False,
         group: str = "default",
         name: str = "",
+        exit_on_error: bool = True,
         thread: bool = False,
     ) -> Worker[Any]:
         """Run work off the message pump.
@@ -90,6 +92,10 @@ class UiSurface(ABC):
         context switch must revalidate through `WriteGate.context_intact`
         or the epoch it captured - the surface will not do it for you.
         """
+
+    @abstractmethod
+    def cancel_workers(self, group: str) -> Awaitable[None]:
+        """Cancel every worker in *group* and wait for them to settle."""
 
     @abstractmethod
     def suspend(self) -> contextlib.AbstractContextManager[None]:

@@ -9380,8 +9380,9 @@ class AppUiSurface(UiSurface):
         title: str = "",
         severity: Severity = "information",
         timeout: float | None = None,
+        markup: bool = True,
     ) -> None:
-        self._app.notify(message, title=title, severity=severity, timeout=timeout)
+        self._app.notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
 
     def push_screen(
         self,
@@ -9397,11 +9398,22 @@ class AppUiSurface(UiSurface):
         exclusive: bool = False,
         group: str = "default",
         name: str = "",
+        exit_on_error: bool = True,
         thread: bool = False,
     ) -> Worker[Any]:
         return self._app.run_worker(
-            work, exclusive=exclusive, group=group, name=name, thread=thread
+            work,
+            exclusive=exclusive,
+            group=group,
+            name=name,
+            exit_on_error=exit_on_error,
+            thread=thread,
         )
+
+    async def cancel_workers(self, group: str) -> None:
+        for worker in self._app.workers.cancel_group(self._app, group):
+            with contextlib.suppress(WorkerError):
+                await worker.wait()
 
     def suspend(self) -> contextlib.AbstractContextManager[None]:
         return self._app.suspend()
