@@ -110,7 +110,6 @@ _DETAIL_KEYS = frozenset(JOURNAL_DETAIL_KEYS)
 _RESULTS = frozenset(JOURNAL_RESULTS)
 _SUMMARY_VALUE = re.compile(r"[A-Za-z0-9._:/@=+-]{1,120}")
 _UNKNOWN_TOOL = "unknown_tool"
-_RESERVED_UNTRUSTED_KEYS = frozenset({"tool", "dropped"})
 
 
 def _summary_text(key: str, value: Any, *, strip_quotes: bool) -> str:
@@ -141,11 +140,13 @@ def summarize(**fields: Any) -> str:
     return " ".join(parts)
 
 
-def _project_untrusted_fields(fields: Iterable[tuple[str, object]]) -> tuple[list[str], int]:
+def _project_untrusted_fields(
+    fields: Iterable[tuple[str, object]], *, reserved_keys: frozenset[str]
+) -> tuple[list[str], int]:
     parts: list[str] = []
     dropped = 0
     for key, value in fields:
-        if key not in _DETAIL_KEYS or key in _RESERVED_UNTRUSTED_KEYS:
+        if key not in _DETAIL_KEYS or key in reserved_keys:
             dropped += 1
             continue
         try:
@@ -160,9 +161,8 @@ def _project_untrusted_fields(fields: Iterable[tuple[str, object]]) -> tuple[lis
 def summarize_untrusted(**fields: object) -> str:
     """Best-effort journal detail for untrusted inputs; never raises."""
 
-    parts, dropped = _project_untrusted_fields(fields.items())
-    if dropped:
-        parts.append(f"dropped={dropped}")
+    parts, dropped = _project_untrusted_fields(fields.items(), reserved_keys=frozenset({"dropped"}))
+    parts.append(f"dropped={dropped}")
     return " ".join(parts)
 
 
@@ -183,7 +183,9 @@ def summarize_arguments(tool: str, arguments: Mapping[str, Any]) -> str:
         parts.append(f"tool={_summary_text('tool', tool, strip_quotes=False)}")
     except ValueError:
         dropped += 1
-    arg_parts, arg_dropped = _project_untrusted_fields(sorted(arguments.items()))
+    arg_parts, arg_dropped = _project_untrusted_fields(
+        sorted(arguments.items()), reserved_keys=frozenset({"tool", "dropped"})
+    )
     parts.extend(arg_parts)
     parts.append(f"dropped={dropped + arg_dropped}")
     return " ".join(parts)

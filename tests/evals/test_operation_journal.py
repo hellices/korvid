@@ -140,6 +140,17 @@ def test_a_raw_tool_result_may_not_be_journaled() -> None:
         )
 
 
+def test_summarize_untrusted_keeps_bounded_fields_and_reports_zero_drops() -> None:
+    assert (
+        summarize_untrusted(
+            tool="get_resource",
+            checkpoint="precondition_read",
+            count=1,
+        )
+        == "tool=get_resource checkpoint=precondition_read count=1 dropped=0"
+    )
+
+
 def test_raw_tool_arguments_may_not_be_journaled() -> None:
     journal = ActionJournal()
     with pytest.raises(ValueError, match="journal detail must be an allowlisted"):
@@ -173,14 +184,14 @@ def test_summarize_untrusted_drops_hostile_and_reserved_fields_without_raising()
         name="checkout-a",
         namespace='"shop-a"',
         count=1,
-        tool="shadow",
+        tool="get_resource",
         dropped="7",
         note="whatever the model wanted to say",
         status=False,
         chars=float("inf"),
         resource={"uid": "x"},
     )
-    assert detail == "name=checkout-a count=1 dropped=8"
+    assert detail == "name=checkout-a count=1 tool=get_resource dropped=7"
     ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
 
 
@@ -212,11 +223,12 @@ def test_summarize_arguments_keeps_only_allowlisted_keys_and_counts_the_rest() -
             "name": "checkout-a",
             "namespace": "shop-a",
             "replicas": 3,
+            "tool": "shadow",
             "note": "whatever the model wanted to say",
         },
     )
     assert detail == (
-        "tool=scale_resource kind=deployments name=checkout-a namespace=shop-a replicas=3 dropped=1"
+        "tool=scale_resource kind=deployments name=checkout-a namespace=shop-a replicas=3 dropped=2"
     )
     ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
 

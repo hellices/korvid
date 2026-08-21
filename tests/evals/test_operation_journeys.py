@@ -216,6 +216,27 @@ async def test_the_approval_comes_from_the_driver_keystroke_only(tmp_path: Path)
     assert [entry["approval"] for entry in reported] == ["approved"]
 
 
+@pytest.mark.parametrize("journey_id", POSITIVE_JOURNEYS)
+async def test_positive_journey_artifact_details_keep_tool_and_zero_drops(
+    journey_id: str, tmp_path: Path
+) -> None:
+    run = await run_scripted_journey(journey_id, tmp_path)
+    reads = [
+        entry
+        for entry in run.journal
+        if entry["event"] in {"precondition_read", "postcondition_read"}
+    ]
+    assert reads != []
+    assert all(entry["detail"].startswith(f"tool={entry['action']} ") for entry in reads)
+    assert all("checkpoint=" in entry["detail"] and "count=" in entry["detail"] for entry in reads)
+    assert all(entry["detail"].endswith("dropped=0") for entry in reads)
+    approvals = [entry for entry in run.journal if entry["event"] == "approval_reported"]
+    assert approvals != []
+    assert all(entry["detail"].startswith(f"tool={entry['action']} ") for entry in approvals)
+    assert all("chars=" in entry["detail"] for entry in approvals)
+    assert all(entry["detail"].endswith("dropped=0") for entry in approvals)
+
+
 async def test_the_dialog_shows_the_injected_write_ops_preview(tmp_path: Path) -> None:
     run = await run_scripted_journey("scale-deployment-up", tmp_path)
     previews = [entry for entry in run.journal if entry["event"].startswith("dialog_preview")]
@@ -277,7 +298,7 @@ async def test_the_journal_artifact_carries_summaries_not_payloads(tmp_path: Pat
     assert all("dropped=" in entry["detail"] for entry in calls)
     reported = [entry for entry in run.journal if entry["event"] == "outcome_reported"]
     assert [entry["result"] for entry in reported] == ["captured"]
-    assert [entry["detail"] for entry in reported] == [f"chars={len(run.answer)}"]
+    assert [entry["detail"] for entry in reported] == [f"chars={len(run.answer)} dropped=0"]
 
 
 async def test_the_restart_journey_stamps_the_pod_template(tmp_path: Path) -> None:
@@ -307,7 +328,7 @@ async def test_the_target_row_is_selected_by_its_namespace_slash_name_row_key(
     run = await run_scripted_journey("scale-deployment-up", tmp_path)
     selections = [entry for entry in run.journal if entry["event"] == "screen_target_selected"]
     assert [entry["actor"] for entry in selections] == ["fixture_actor"]
-    assert [entry["detail"] for entry in selections] == ["row_key=shop-a/checkout-a"]
+    assert [entry["detail"] for entry in selections] == ["row_key=shop-a/checkout-a dropped=0"]
     assert [entry["result"] for entry in selections] == ["row_key"]
 
 
@@ -534,7 +555,7 @@ async def test_an_ambiguous_journeys_first_turn_does_not_preselect_the_answer(
         provider_factory=lambda: provider,
     )
     seeded = [entry for entry in run.journal if entry["event"] == "screen_context_seeded"]
-    assert [entry["detail"] for entry in seeded] == ["row_key=shop-a/api"]
+    assert [entry["detail"] for entry in seeded] == ["row_key=shop-a/api dropped=0"]
     first_prompt = "\n".join(
         str(message["content"]) for message in provider.calls[0] if message.get("role") == "user"
     )
@@ -571,7 +592,7 @@ async def test_an_rbac_refusal_never_reaches_a_dialog_or_the_audit_log(tmp_path:
     run = await run_scripted_journey("scale-rbac-denied", tmp_path)
     denied = next(entry for entry in run.journal if entry["event"] == "permission_denied")
     assert denied["action"] == "patch"
-    assert denied["detail"] == "group=apps resource=deployments namespace=shop-b"
+    assert denied["detail"] == "group=apps resource=deployments namespace=shop-b dropped=0"
     assert [entry for entry in run.journal if entry["event"] == "dialog_observed"] == []
     assert [entry for entry in run.journal if entry["event"] == "mutation_started"] == []
     assert run.audit == ()
