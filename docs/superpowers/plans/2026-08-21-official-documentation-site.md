@@ -225,7 +225,7 @@ audited fail-closed. Secret values are masked before model calls, and
 
 - [ ] **Step 2: Create the install guide**
 
-Create `docs/getting-started.md` with supported Python/OS requirements, Homebrew and `uv tool` install commands, the base/agent/MCP/all extras table, the first `korvid` invocation, a ten-key quick reference, and links to `tui.md`, `agent.md`, `mcp.md`, and `airgap.md`. State that the current release is `0.2.0` (matching `pyproject.toml`'s published version and the `v0.2.0` release notes).
+Create `docs/getting-started.md` with supported Python/OS requirements, Homebrew and `uv tool` install commands, the base/agent/MCP/all extras table, the first `korvid` invocation, a ten-key quick reference, and links to `tui.md`, `agent.md`, `mcp.md`, and `airgap.md`. State that the current published release is `0.1.2` and that `0.2.0` is the in-repo feature release awaiting PyPI publication; frame all `0.2.0` commands as release-candidate material not yet on PyPI, and include the Git fallback install command from README for readers wanting current main.
 
 - [ ] **Step 3: Add the template, mark, and responsive visual system**
 

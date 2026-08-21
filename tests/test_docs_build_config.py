@@ -82,21 +82,97 @@ def test_mkdocs_config_does_not_downgrade_link_validation() -> None:
     )
 
 
-def test_getting_started_install_version_matches_pyproject() -> None:
-    """`getting-started.md`'s current install version must equal `project.version`."""
+def test_getting_started_version_consistent_with_readme_publication_state() -> None:
+    """Cross-check getting-started.md against README's publication marker and Git fallback.
+
+    README can contain the marker ``Until `<version>` is published on PyPI`` to
+    signal that the in-repo source version has not yet been pushed to PyPI.
+
+    **While that marker is present** (unpublished state):
+    - getting-started.md must *not* claim that version is "the current published
+      release" — doing so misleads users into pinning a version that doesn't exist
+      on PyPI yet.
+    - getting-started.md must include the exact Git fallback install command from
+      README so users can install from source in the meantime.
+    - Pinned `==<version>` install commands in getting-started.md must use the
+      last *actually published* version (the one not covered by the marker), not
+      the in-repo version awaiting publication.
+
+    **Once the marker is removed** (published state):
+    - getting-started.md must declare the project version as the current
+      published release.
+    - Pinned commands must reference the project version.
+    """
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     project_version = pyproject["project"]["version"]
 
+    readme = (ROOT / "README.md").read_text()
     getting_started = (ROOT / "docs" / "getting-started.md").read_text()
-    match = re.search(
-        r"## Current release\s*\n\s*\*\*`([^`]+)`\*\* is the current published release",
-        getting_started,
+
+    # Detect the README's "not yet published" marker, e.g.:
+    #   Until `0.2.0` is published on PyPI, install the reviewed `main` source instead:
+    unpublished_match = re.search(
+        r"Until `([^`]+)` is published on PyPI",
+        readme,
     )
-    assert match is not None, (
-        "getting-started.md must state the current published release version "
-        "under a '## Current release' heading"
+
+    # Extract the Git fallback command from README (the canonical source of truth)
+    git_fallback_match = re.search(
+        r"uv tool install '(korvid\[all\] @ git\+[^']+)'",
+        readme,
     )
-    assert match.group(1) == project_version, (
-        f"getting-started.md advertises {match.group(1)!r} as current, but "
-        f"pyproject.toml's project.version is {project_version!r}"
-    )
+
+    if unpublished_match is not None:
+        unpublished_version = unpublished_match.group(1)
+        # The guide must NOT present the unpublished version as already published
+        false_published_pattern = re.search(
+            rf"\*\*`{re.escape(unpublished_version)}`\*\* is the current published release",
+            getting_started,
+        )
+        assert false_published_pattern is None, (
+            f"getting-started.md claims {unpublished_version!r} is 'the current "
+            f"published release', but README's publication marker says it is not yet "
+            f"on PyPI ('Until `{unpublished_version}` is published on PyPI'). "
+            "Update getting-started.md to use the last published version in pinned "
+            "commands and include the Git fallback for current-main installs."
+        )
+        # The guide must include the Git fallback so users can reach current main
+        assert git_fallback_match is not None, (
+            "README contains 'Until `...` is published on PyPI' but no "
+            "uv tool install '...@ git+...' fallback command was found in README — "
+            "README itself is inconsistent."
+        )
+        git_fallback_spec = git_fallback_match.group(1)
+        assert git_fallback_spec in getting_started, (
+            f"README's Git fallback install spec {git_fallback_spec!r} must appear "
+            "in getting-started.md so readers installing current main know the "
+            "correct command while the PyPI release is pending."
+        )
+        # Pinned commands in getting-started.md must NOT use the unpublished version
+        pinned_unpublished = re.search(
+            rf"=={re.escape(unpublished_version)}(?:['\"]|$)",
+            getting_started,
+            re.MULTILINE,
+        )
+        assert pinned_unpublished is None, (
+            f"getting-started.md contains pinned install commands for "
+            f"{unpublished_version!r} (e.g. `korvid[all]=={unpublished_version}`), "
+            f"but README says this version is not yet on PyPI. Use the last published "
+            "version in pinned commands and add the Git fallback for current main."
+        )
+    else:
+        # Publication marker removed — guide must advertise the project version
+        published_match = re.search(
+            r"## Current release\s*\n\s*\*\*`([^`]+)`\*\* is the current published release",
+            getting_started,
+        )
+        assert published_match is not None, (
+            "README's 'Until ... is published on PyPI' marker has been removed, "
+            "meaning the project version is now on PyPI. getting-started.md must "
+            "state the current published release version under a '## Current release' heading."
+        )
+        assert published_match.group(1) == project_version, (
+            f"getting-started.md advertises {published_match.group(1)!r} as current, "
+            f"but pyproject.toml's project.version is {project_version!r}. "
+            "Sync getting-started.md with the published project version."
+        )
