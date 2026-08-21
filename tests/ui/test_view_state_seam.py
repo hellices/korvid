@@ -183,7 +183,7 @@ def test_app_ui_surface_forwards_untrusted_markup_and_worker_error_policy() -> N
         calls.append(("worker", kwargs.get("exit_on_error")))
         return object()
 
-    app.notify = notify_spy  # type: ignore[assignment,method-assign]  # spy
+    app.notify = notify_spy  # type: ignore[method-assign]  # spy
     app.run_worker = run_worker_spy  # type: ignore[assignment,method-assign]  # spy
 
     surface.notify("cluster text", markup=False)

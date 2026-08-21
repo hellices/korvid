@@ -206,7 +206,7 @@ def make_controller(
     controller = SessionTimelineController(
         ui=ui,
         view=view,
-        watch_manager=wm,  # type: ignore[arg-type]  # test-only duck-type
+        watch_manager=wm,
         timeline=timeline,
         get_epoch=lambda: epoch,
         epoch_crossed=lambda ep: epoch_crossed,
@@ -438,9 +438,9 @@ async def test_warning_loop_stops_on_permanent_denial() -> None:
 
     timeline = SessionTimeline(8, 4096)
     controller, _, ui = make_controller(timeline=timeline, watch_warning_events=_forbidden_watch)
-    controller.TIMELINE_EVENT_RETRY_SECONDS = 0.0  # type: ignore[misc]  # test override
+    controller.TIMELINE_EVENT_RETRY_SECONDS = 0.0
 
-    await controller._run_warning_watch()  # type: ignore[attr-defined]  # internal method
+    await controller._run_warning_watch()
 
     assert calls == 1  # tried exactly once; no retry on permanent denial
     assert any(n.severity == "warning" for n in ui.notifications)
@@ -454,10 +454,10 @@ async def test_warning_loop_gives_up_after_max_failures() -> None:
 
     timeline = SessionTimeline(8, 4096)
     controller, _, ui = make_controller(timeline=timeline, watch_warning_events=_failing_watch)
-    controller.TIMELINE_EVENT_RETRY_SECONDS = 0.0  # type: ignore[misc]  # test override
+    controller.TIMELINE_EVENT_RETRY_SECONDS = 0.0
     max_fail = controller.TIMELINE_EVENT_MAX_FAILURES
 
-    await controller._run_warning_watch()  # type: ignore[attr-defined]  # internal method
+    await controller._run_warning_watch()
 
     error_notes = [n for n in ui.notifications if n.severity == "error"]
     assert len(error_notes) == 1
@@ -474,7 +474,7 @@ async def test_warning_loop_propagates_cancellation() -> None:
     controller, _, _ = make_controller(timeline=timeline, watch_warning_events=_cancelled_watch)
 
     with pytest.raises(asyncio.CancelledError, match=r"^$"):
-        await controller._run_warning_watch()  # type: ignore[attr-defined]
+        await controller._run_warning_watch()
 
 
 @pytest.mark.asyncio
@@ -494,15 +494,15 @@ async def test_warning_loop_stops_when_epoch_changes_mid_stream() -> None:
     controller = SessionTimelineController(
         ui=ui,
         view=view,
-        watch_manager=wm,  # type: ignore[arg-type]
+        watch_manager=wm,
         timeline=timeline,
         get_epoch=lambda: current_epoch[0],
         epoch_crossed=lambda ep: False,
         watch_warning_events=_watch_one_event,
     )
-    controller.TIMELINE_EVENT_RETRY_SECONDS = 0.0  # type: ignore[misc]
+    controller.TIMELINE_EVENT_RETRY_SECONDS = 0.0
 
-    await controller._run_warning_watch()  # type: ignore[attr-defined]
+    await controller._run_warning_watch()
 
     snapshot = timeline.snapshot(epoch=0, source=None, resource=None)
     assert snapshot.entries == ()
