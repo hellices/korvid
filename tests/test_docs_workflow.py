@@ -10,6 +10,7 @@ Pages-deploy permissions it never uses as excessive).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -108,6 +109,41 @@ def test_build_job_has_only_read_permissions_and_runs_the_docs_build() -> None:
     )
 
 
+def test_configure_pages_runs_in_deploy_where_pages_permission_exists() -> None:
+    """`actions/configure-pages` must run where `pages: write` is granted.
+
+    The action calls the Pages `GET /repos/{owner}/{repo}/pages` endpoint,
+    which needs `pages: write` (or at least page metadata read) on the
+    workflow's token. The build job only has `contents: read`, so a
+    `configure-pages` step placed there fails there whenever Pages has not
+    yet been switched to the GitHub Actions source — contradicting
+    docs/dev/README.md's claim that "the workflow's build job still succeeds
+    but the deploy job fails". Moving the step to the top of `deploy` (which
+    already carries `pages: write` for `deploy-pages`) makes that claim true
+    and keeps `build`'s permissions minimal.
+    """
+    config = _load()
+    build = config["jobs"]["build"]
+    deploy = config["jobs"]["deploy"]
+
+    build_uses = {step["uses"].partition("@")[0] for step in build["steps"] if "uses" in step}
+    assert "actions/configure-pages" not in build_uses, (
+        "actions/configure-pages must not run in the build job: build only has "
+        "contents:read, and the action needs pages:write to call GetPages"
+    )
+
+    all_uses = _all_step_uses(config)
+    configure_pages_uses = [ref for ref in all_uses if ref.startswith("actions/configure-pages@")]
+    assert len(configure_pages_uses) == 1, "configure-pages must run exactly once in the workflow"
+
+    deploy_uses = [step["uses"] for step in deploy["steps"] if "uses" in step]
+    assert deploy_uses, "deploy job must have at least one 'uses' step"
+    assert deploy_uses[0].startswith("actions/configure-pages@"), (
+        "configure-pages must be the first step in deploy, before deploy-pages, "
+        "so Pages is configured in the job that actually holds pages:write"
+    )
+
+
 def test_site_upload_only_happens_on_push_to_main() -> None:
     config = _load()
     build = config["jobs"]["build"]
@@ -139,9 +175,14 @@ def test_deploy_job_is_main_only_needs_build_and_is_least_privilege() -> None:
     assert deploy["environment"]["url"] == "${{ steps.deployment.outputs.page_url }}"
 
     deploy_steps = deploy["steps"]
-    assert len(deploy_steps) == 1
-    assert deploy_steps[0]["uses"].startswith("actions/deploy-pages@")
-    assert deploy_steps[0]["id"] == "deployment"
+    assert len(deploy_steps) == 2, (
+        "deploy must have exactly two steps: configure-pages, then deploy-pages"
+    )
+    assert deploy_steps[0]["uses"].startswith("actions/configure-pages@"), (
+        "configure-pages must run first, in the job that holds pages:write"
+    )
+    assert deploy_steps[1]["uses"].startswith("actions/deploy-pages@")
+    assert deploy_steps[1]["id"] == "deployment"
 
 
 def test_workflow_level_permissions_are_read_only() -> None:
@@ -173,32 +214,46 @@ def test_contributor_docs_explain_how_the_site_is_published() -> None:
     """Publishing is a merge, not a deploy script — and it needs one repo setting."""
     section = _publishing_section()
     lowered = section.lower()
-    assert "no server" in lowered or "no hosting" in lowered, (
+    # Markdown hard-wraps prose across source lines, so a substring check on
+    # the raw text is one reflow away from splitting a phrase across a
+    # newline (e.g. "do\nnot deploy"). Collapsing all whitespace runs
+    # (including newlines) to a single space makes phrase checks robust to
+    # how the paragraph happens to wrap.
+    normalized = " ".join(lowered.split())
+    assert "no server" in normalized or "no hosting" in normalized, (
         "the section must say that no server has to be run or provisioned"
     )
-    assert "settings" in lowered, (
+    assert "settings" in normalized, (
         "the one-time enablement path (Settings -> Pages) must be spelled out"
     )
-    assert "pages" in lowered, (
+    assert "pages" in normalized, (
         "the one-time enablement path (Settings -> Pages) must be spelled out"
     )
-    assert "github actions" in lowered, (
+    assert "github actions" in normalized, (
         "Pages must be switched from the default branch source to the GitHub "
         "Actions source, or the workflow's deploy job fails"
     )
     assert SITE_URL in section, "the section must name the published URL"
-    assert "main" in lowered, "the section must state that merging to main is what publishes"
-    assert "merg" in lowered, "the section must state that merging to main is what publishes"
-    assert "pull request" in lowered, (
+    # "main" alone would trivially match the workflow link's "/blob/main/"
+    # segment (checked elsewhere in this file) without the prose ever
+    # stating that *merging* to main is the publishing trigger, so assert
+    # the two appear together as a clause rather than as two independent
+    # substrings.
+    assert re.search(r"merg\w*[^.]*\bto\s+`?main`?\b", normalized), (
+        "the section must state, in prose, that merging to `main` is what "
+        "publishes the site — not merely contain the word 'main' via the "
+        "workflow link"
+    )
+    assert "pull request" in normalized, (
         "the section must state that pull-request builds validate but never deploy"
     )
-    assert "not deploy" in lowered, (
+    assert "not deploy" in normalized, (
         "the section must state that pull-request builds validate but never deploy"
     )
-    assert "custom domain" in lowered, (
+    assert "custom domain" in normalized, (
         "a custom domain is deliberately deferred; say so instead of leaving it open"
     )
-    assert "optional" in lowered, (
+    assert "optional" in normalized, (
         "a custom domain is deliberately deferred; say so instead of leaving it open"
     )
 

@@ -51,18 +51,18 @@ boundary.
 <div class="feature-grid">
   <article><span>01</span><h3>Drive it yourself</h3><p>Browse, filter, follow relationships, and run guarded operations straight from the keyboard — the same resource view, evidence, and safety gate every other actor shares.</p></article>
   <article><span>02</span><h3>Delegate to the agent</h3><p>An embedded agent reads the same evidence you see, cites it, and drives korvid on your behalf. Its writes still cross the same confirmation gate as yours.</p></article>
-  <article><span>03</span><h3>Connect over MCP</h3><p>Give VS Code, Claude Code, Cursor, or Zed bounded reads of the same cluster state and evidence. Writes remain proposals for a human to confirm.</p></article>
+  <article><span>03</span><h3>Connect over MCP</h3><p>When enabled, give VS Code, Claude Code, Cursor, or Zed bounded reads of the same cluster state and evidence. Write proposals stay opt-in and always need a human to confirm.</p></article>
 </div>
 
 ## Sharp tools. Human hands.
 
 Every mutation requires a fresh keystroke confirmation — whether you
 triggered it directly, the embedded agent proposed it after reading the
-evidence, or an MCP client submitted a request. MCP writes are always
-proposals, never executed automatically. Whoever initiates it, the write
-converges on the same in-TUI confirmation and the same fail-closed audit
-path. Secret values are masked before model calls, and `--readonly` removes
-the write path entirely.
+evidence, or an MCP client submitted a request when MCP is enabled. MCP
+write proposals are opt-in and never executed automatically. Whoever
+initiates it, the write converges on the same in-TUI confirmation and the
+same fail-closed audit path. Secret values are masked before model calls,
+and `--readonly` removes the write path entirely.
 
 [Read the safety model](ops.md){ .md-button .korvid-button } [Inspect the threat model](threat-model.md){ .md-button .korvid-button }
 

@@ -49,6 +49,23 @@ def _css() -> str:
     return EXTRA_CSS.read_text()
 
 
+def _product_model_intro() -> str:
+    """Return the prose between the product-model heading and the feature grid.
+
+    Scoping shared-state assertions to this paragraph (rather than the whole
+    of `docs/index.md`) matters because "evidence", "navigation", "approval",
+    and "audit" all appear elsewhere on the page too (the safety section and
+    the flight-path list). An unscoped search would keep passing even if a
+    future edit dropped the shared-state claim from *this* intro specifically,
+    as long as the words survived somewhere else on the page.
+    """
+    index = _index()
+    heading = "## One operational experience. Three ways to drive it."
+    start = index.index(heading)
+    end = index.index('<div class="feature-grid">', start)
+    return index[start:end]
+
+
 def _strip_css_comments(css: str) -> str:
     """Remove `/* … */` comments so prose can never be read as a selector.
 
@@ -353,17 +370,21 @@ def test_landing_names_what_the_three_surfaces_actually_share() -> None:
 
     A vague 'works together' line would be marketing. Naming the four shared
     things is checkable, and it is what the architecture actually guarantees.
+    This is scoped to the product-model intro paragraph itself (not the whole
+    page — see `_product_model_intro`) so the assertion cannot pass on the
+    strength of these same words appearing in an unrelated section instead.
     """
-    index = _index()
-    assert "Different surfaces. One operational state." in index, (
+    intro = _product_model_intro()
+    assert "Different surfaces. One operational state." in intro, (
         "the section needs a line that separates surface from state, so the page "
         "never implies the three actors see identical screens"
     )
-    lowered = index.lower()
+    lowered = intro.lower()
     for shared in ("evidence", "navigation", "approval", "audit"):
         assert shared in lowered, (
-            f"the shared-state line must name {shared!r} explicitly rather than "
-            "claiming a vague unity"
+            f"the product-model intro must name {shared!r} explicitly rather than "
+            "claiming a vague unity, and rather than relying on the word "
+            "appearing only in some other section of the page"
         )
 
 
@@ -414,12 +435,27 @@ def test_landing_never_claims_the_surfaces_look_the_same() -> None:
 
     An MCP client renders korvid's data in the editor's own chat UI. Claiming
     the surfaces are identical would be false, so the page must not say it.
+
+    Banning the bare word "identical" would also forbid the page from ever
+    stating the *true* negation ("...without implying identical screens or
+    interfaces"), which is exactly the disclaimer this design is built
+    around (see the design doc's own phrasing). So only the overclaim
+    itself — "same"/"identical" bound to screen(s)/UI/interface(s) — is
+    banned, and a negation cue immediately before the match (e.g. "not",
+    "never", "no", "without implying") makes it an allowed truthful
+    negation rather than a violation.
     """
     lowered = _index().lower()
-    for overclaim in ("identical", "same screen", "same ui", "same interface"):
-        assert overclaim not in lowered, (
-            f"{overclaim!r} overclaims: the three actors share korvid's operational "
-            "state and safety boundary, not their literal screens"
+    negation_cues = ("not ", "never ", "no ", "without implying ", "isn't ", "aren't ")
+    overclaim = re.compile(r"(same|identical)\s+(screens?|uis?|interfaces?)")
+    for match in overclaim.finditer(lowered):
+        preceding = lowered[max(0, match.start() - 40) : match.start()]
+        if any(preceding.endswith(cue) for cue in negation_cues):
+            continue
+        raise AssertionError(
+            f"{match.group(0)!r} overclaims: the three actors share korvid's "
+            "operational state and safety boundary, not their literal screens "
+            "(and this occurrence is not preceded by a negation cue)"
         )
 
 
@@ -427,14 +463,30 @@ def test_hero_terminal_motif_reinforces_the_three_actors() -> None:
     """The cockpit motif carries the convergence idea with no new markup weight."""
     index = _index()
     panel_start = index.index('class="hero-panel"')
-    panel = index[panel_start : index.index("</aside>", panel_start)]
-    bar = panel[panel.index('class="hero-panel__bar"') : panel.index("</div>")]
+    aside_close = index.index("</aside>", panel_start)
+    panel = index[panel_start:aside_close]
+
+    bar_start = panel.index('class="hero-panel__bar"')
+    # Search for the closing tag *from* bar_start, not from the start of the
+    # panel: an unanchored `panel.index("</div>")` happens to find the right
+    # tag today only because no earlier `<div>` exists before the bar, which
+    # is a coincidence of the current markup rather than something this test
+    # should rely on.
+    bar_close = panel.index("</div>", bar_start)
+    bar = panel[bar_start:bar_close]
+
     lowered = bar.lower()
-    for actor in ("you", "agent", "mcp"):
-        assert actor in lowered, (
-            f"the terminal status line should name {actor!r}, reinforcing that all "
-            "three actors drive one session"
-        )
+    # Word-boundary, in-order matching: a bare substring check for "you"
+    # would also match inside "your" (or "youtube", etc.), so it could pass
+    # even if the actual actor token were replaced by something else that
+    # merely contains the substring. Assert the literal, ordered sequence of
+    # actor tokens instead.
+    actor_sequence = re.compile(r"\byou\b.*\bagent\b.*\bmcp\b", re.DOTALL)
+    assert actor_sequence.search(lowered), (
+        "the terminal status line must name all three actors, in order, as "
+        "whole words — 'you', then 'agent', then 'mcp' — reinforcing that "
+        "all three actors drive one session"
+    )
     assert "<img" not in bar, "the reinforcement must stay text-in-CSS-chrome, not a new asset"
     assert "svg" not in lowered, "the reinforcement must stay text-in-CSS-chrome, not a new asset"
 
@@ -460,6 +512,10 @@ def test_stylesheet_declares_no_inert_content_width_abstraction() -> None:
     )
 
 
+# --- 6. historical plan/design docs must not be a reproducible source of ----
+# --- stale copy once the shipped positioning changes -------------------------
+
+
 def test_design_document_records_the_agentic_ui_positioning() -> None:
     """The committed design doc must describe the same product model as the site."""
     design = (
@@ -473,4 +529,31 @@ def test_design_document_records_the_agentic_ui_positioning() -> None:
     assert "surface" in lowered
     assert "proposal" in lowered, (
         "the design document must keep the factual limit that MCP writes are proposals"
+    )
+
+
+def test_plan_document_records_the_agentic_ui_positioning() -> None:
+    """The historical plan's embedded landing snippet must not be stale copy.
+
+    `docs/superpowers/plans/2026-08-21-official-documentation-site.md` embeds
+    the Task 2 landing markdown verbatim as an executable example. That
+    snippet still read "## One cockpit. Three ways in." after `docs/index.md`
+    was reframed around one agentic operational experience, so a future
+    contributor treating the plan as the authoritative recipe would
+    reproduce the pre-reframe positioning. This is the plan-side twin of
+    `test_landing_frames_one_experience_rather_than_three_separate_products`
+    above: the same heading must hold in both places.
+    """
+    plan = (
+        ROOT / "docs" / "superpowers" / "plans" / "2026-08-21-official-documentation-site.md"
+    ).read_text()
+    assert "## One cockpit. Three ways in." not in plan, (
+        "the plan's embedded landing-content example still reads as three "
+        "separate products bolted together; it must match docs/index.md's "
+        "shipped 'one operational experience' positioning, or the plan is a "
+        "reproducible source of stale copy"
+    )
+    assert "## One operational experience. Three ways to drive it." in plan, (
+        "the plan's embedded landing-content example must carry the same "
+        "product-model heading docs/index.md ships"
     )

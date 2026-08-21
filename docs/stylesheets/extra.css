@@ -336,7 +336,7 @@
 /* ------------------------------------------------------------------ */
 
 .md-typeset .product-demo {
-  margin: 0 auto 2.5rem;
+  margin: 0 0 2.5rem;
   padding: 0;
 }
 
@@ -377,7 +377,7 @@
   display: grid;
   grid-template-columns: 1fr;
   gap: var(--korvid-gap);
-  margin: 0 auto 2rem;
+  margin: 0 0 2rem;
 }
 
 @media (min-width: 720px) {
@@ -426,7 +426,6 @@
   display: grid;
   gap: 1.25rem;
   width: 100%;
-  margin-inline: auto;
   /* Material's default `.md-copyright` margin is replaced above, so the
      inline padding has to be restated or the footer runs into the viewport
      edge on a phone. */
@@ -500,17 +499,6 @@
 .md-footer .korvid-footer__meta a {
   text-decoration: underline;
   text-underline-offset: 0.2em;
-}
-
-/* ------------------------------------------------------------------ */
-/* Readable widths for the landing page's prose sections               */
-/* ------------------------------------------------------------------ */
-
-.md-typeset .hero ~ h2,
-.md-typeset .hero ~ p,
-.md-typeset .hero ~ ul {
-  margin-left: auto;
-  margin-right: auto;
 }
 
 /* ------------------------------------------------------------------ */
