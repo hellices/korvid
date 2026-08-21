@@ -178,9 +178,12 @@ and a focused stylesheet. The initial site does not add a custom JavaScript
 application bundle. Documentation pages retain conventional readable layouts
 and navigation even though the landing page is more expressive.
 
-Mermaid diagrams render through a pinned client-side Mermaid asset configured
-by MkDocs. The site must preserve the architecture diagrams already embedded in
-the overview and architecture documents.
+Material's built-in privacy plugin downloads Mermaid's runtime during the
+documentation build and rewrites pages to serve that generated vendor asset
+locally. Generated local/vendor assets are allowed; browser runtime requests to
+third-party asset hosts are not. No custom JavaScript or manually configured
+Mermaid pin is added. The site must preserve the architecture diagrams already
+embedded in the overview and architecture documents.
 
 ## Failure handling
 

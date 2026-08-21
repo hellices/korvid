@@ -283,8 +283,15 @@ def test_hero_panel_is_not_a_second_copy_of_the_demo_asset() -> None:
 # --- the whole page stays original, asset-light, and script-free -------------
 
 
-def test_landing_page_ships_no_javascript_and_no_external_assets() -> None:
-    """The site is HTML/CSS/SVG only: no scripts, no CDN fonts, no trackers."""
+def test_landing_customizations_add_no_scripts_or_remote_assets() -> None:
+    """Korvid's own landing sources add no scripts or remote CSS assets.
+
+    Material itself emits JavaScript and can integrate Mermaid. The actual
+    browser-runtime invariant is pinned in `test_docs_build_config.py` through
+    `theme.font: false` and Material's privacy plugin, then verified against
+    the built site. This source check is intentionally limited to korvid's
+    customizations.
+    """
     sources = [
         _index(),
         _css(),
@@ -297,9 +304,6 @@ def test_landing_page_ships_no_javascript_and_no_external_assets() -> None:
     css = _css()
     external_urls = re.findall(r"url\((['\"]?)(https?:)?//", css)
     assert not external_urls, "extra.css must not pull in remote assets"
-    for source in sources:
-        for host in ("fonts.googleapis.com", "cdn.jsdelivr.net", "unpkg.com", "google-analytics"):
-            assert host not in source, f"the docs site must not reference {host}"
 
 
 def test_local_assets_referenced_by_the_landing_page_exist() -> None:
@@ -406,6 +410,9 @@ def test_feature_cards_are_ways_to_drive_korvid_not_three_feature_silos() -> Non
         "the cards must tie back to the shared operational state rather than "
         "describing three disconnected features"
     )
+    assert "when enabled" in body or "opt-in" in body, (
+        "the MCP card must not imply the optional MCP server is always enabled"
+    )
 
 
 def test_safety_section_converges_every_actor_on_one_write_path() -> None:
@@ -427,6 +434,9 @@ def test_safety_section_converges_every_actor_on_one_write_path() -> None:
     assert "proposal" in lowered, (
         "MCP writes are proposals, never executed writes — the page must stay "
         "factually precise about that"
+    )
+    assert "when mcp is enabled" in lowered or "opt-in" in lowered, (
+        "the landing page must not imply the optional MCP server is always enabled"
     )
 
 
@@ -557,3 +567,24 @@ def test_plan_document_records_the_agentic_ui_positioning() -> None:
         "the plan's embedded landing-content example must carry the same "
         "product-model heading docs/index.md ships"
     )
+
+
+def test_design_and_css_describe_build_localized_runtime_assets_truthfully() -> None:
+    """Generated vendor assets are allowed; third-party browser requests are not."""
+    design = (
+        ROOT / "docs" / "superpowers" / "specs" / "2026-08-21-documentation-site-design.md"
+    ).read_text()
+    lowered = design.lower()
+    assert "pinned client-side mermaid asset" not in lowered, (
+        "Material/privacy manages Mermaid; the design must not claim a manually "
+        "configured pin that does not exist"
+    )
+    assert "privacy" in lowered
+    assert "build" in lowered
+    assert "local" in lowered
+    assert "browser" in lowered
+    assert "third-party" in lowered
+
+    css_intro = " ".join("\n".join(_css().splitlines()[:12]).lower().split())
+    assert "generated local/vendor assets are allowed" in css_intro
+    assert "browser runtime third-party requests are not" in css_intro

@@ -6,8 +6,9 @@
  * keyboard-focus visibility, reduced-motion handling, and comfortable
  * reading widths for the new landing content. Everything here is additive
  * to the Material for MkDocs theme already configured in mkdocs.yml
- * (palette: scheme slate, primary black, accent amber) — no JavaScript, no
- * external assets, no bundled fonts.
+ * (palette: scheme slate, primary black, accent amber) — no custom JavaScript
+ * or custom fonts. Generated local/vendor assets are allowed.
+ * Browser runtime third-party requests are not.
  */
 
 :root {

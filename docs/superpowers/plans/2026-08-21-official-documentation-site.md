@@ -45,11 +45,14 @@ repo_name: hellices/korvid
 docs_dir: docs
 site_dir: site
 strict: true
+exclude_docs: |
+  overrides/
 
 theme:
   name: material
   custom_dir: docs/overrides
   language: en
+  font: false
   logo: assets/korvid-mark.svg
   favicon: assets/korvid-mark.svg
   features:
@@ -90,6 +93,7 @@ nav:
       - Contributor docs: dev/README.md
       - Quality gates: dev/quality-gates.md
       - Release notes:
+          - v0.3.0: release-notes/v0.3.0.md
           - v0.2.0: release-notes/v0.2.0.md
           - v0.1.2: release-notes/v0.1.2.md
 
@@ -112,6 +116,11 @@ markdown_extensions:
 
 plugins:
   - search
+  - privacy:
+      assets: true
+      assets_fetch: true
+      assets_expr_map:
+        .js: '(?P<url>https://unpkg\.com/[^"'']+)'
 
 extra_css:
   - stylesheets/extra.css
@@ -236,7 +245,7 @@ and `--readonly` removes the write path entirely.
 
 - [ ] **Step 2: Create the install guide**
 
-Create `docs/getting-started.md` with supported Python/OS requirements, Homebrew and `uv tool` install commands, the base/agent/MCP/all extras table, the first `korvid` invocation, a ten-key quick reference, and links to `tui.md`, `agent.md`, `mcp.md`, and `airgap.md`. State that the current published release is `0.1.2` and that `0.2.0` is the in-repo feature release awaiting PyPI publication; frame all `0.2.0` commands as release-candidate material not yet on PyPI, and include the Git fallback install command from README for readers wanting current main.
+Create `docs/getting-started.md` with supported Python/OS requirements, Homebrew and `uv tool` install commands, the base/agent/MCP/all extras table, the first `korvid` invocation, a ten-key quick reference, and links to `tui.md`, `agent.md`, `mcp.md`, and `airgap.md`. State that the current published release is `0.3.0`, pin intentionally versioned install and upgrade commands to `0.3.0`, present the live `brew install hellices/korvid/korvid` route, and retain the Git fallback install command from README for readers wanting unreleased `main`.
 
 - [ ] **Step 3: Add the template, mark, and responsive visual system**
 
@@ -312,7 +321,8 @@ The build job has `contents: read`, runs `uv sync --locked --group docs`, then
 `make docs-build`, and uploads `site/` only on pushes to `main`. The deploy job
 also runs only on pushes to `main`, needs the build job, has
 `pages: write`/`id-token: write`, uses the `github-pages` environment, and sets
-its URL from the deploy step output.
+its URL from the deploy step output. `configure-pages` is the deploy job's first
+step under `pages: write`; `deploy-pages` follows it.
 
 Before the first deployment can succeed, a repository admin must enable Pages
 once, out-of-band from this workflow: **Settings -> Pages -> Build and

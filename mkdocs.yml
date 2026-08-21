@@ -6,11 +6,14 @@ repo_name: hellices/korvid
 docs_dir: docs
 site_dir: site
 strict: true
+exclude_docs: |
+  overrides/
 
 theme:
   name: material
   custom_dir: docs/overrides
   language: en
+  font: false
   logo: assets/korvid-mark.svg
   favicon: assets/korvid-mark.svg
   features:
@@ -51,6 +54,7 @@ nav:
       - Contributor docs: dev/README.md
       - Quality gates: dev/quality-gates.md
       - Release notes:
+          - v0.3.0: release-notes/v0.3.0.md
           - v0.2.0: release-notes/v0.2.0.md
           - v0.1.2: release-notes/v0.1.2.md
 
@@ -73,6 +77,11 @@ markdown_extensions:
 
 plugins:
   - search
+  - privacy:
+      assets: true
+      assets_fetch: true
+      assets_expr_map:
+        .js: '(?P<url>https://unpkg\.com/[^"'']+)'
 
 extra_css:
   - stylesheets/extra.css

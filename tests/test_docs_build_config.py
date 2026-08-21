@@ -10,8 +10,8 @@ be accidentally committed.
 Finally, ensures `mkdocs.yml` never downgrades `validation.links.not_found`
 below its strict-mode-visible default (which would let genuinely broken
 internal doc links pass `mkdocs build --strict` silently), and that
-`docs/getting-started.md` always advertises the same install version as
-`pyproject.toml`'s `project.version`.
+`docs/getting-started.md` follows the repository's current release and
+Homebrew guidance without reaching out to PyPI or the tap during tests.
 """
 
 from __future__ import annotations
@@ -90,100 +90,135 @@ def test_mkdocs_config_does_not_downgrade_link_validation() -> None:
     )
 
 
-def test_getting_started_version_consistent_with_readme_publication_state() -> None:
-    """Cross-check getting-started.md against README's publication marker and Git fallback.
-
-    README can contain the marker ``Until `<version>` is published on PyPI`` to
-    signal that the in-repo source version has not yet been pushed to PyPI.
-
-    **While that marker is present** (unpublished state):
-    - getting-started.md must *not* claim that version is "the current published
-      release" — doing so misleads users into pinning a version that doesn't exist
-      on PyPI yet.
-    - getting-started.md must include the exact Git fallback install command from
-      README so users can install from source in the meantime.
-    - Pinned `==<version>` install commands in getting-started.md must use the
-      last *actually published* version (the one not covered by the marker), not
-      the in-repo version awaiting publication.
-
-    **Once the marker is removed** (published state):
-    - getting-started.md must declare the project version as the current
-      published release.
-    - Pinned commands must reference the project version.
-    """
+def test_getting_started_matches_current_project_and_readme_release() -> None:
+    """The offline release sources must agree on every intentionally pinned install."""
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     project_version = pyproject["project"]["version"]
-
     readme = (ROOT / "README.md").read_text()
     getting_started = (ROOT / "docs" / "getting-started.md").read_text()
 
-    # Detect the README's "not yet published" marker, e.g.:
-    #   Until `0.2.0` is published on PyPI, install the reviewed `main` source instead:
-    unpublished_match = re.search(
-        r"Until `([^`]+)` is published on PyPI",
+    readme_install = re.search(
+        r"uv tool install 'korvid\[all\]==([^']+)'",
         readme,
     )
-
-    # Extract the Git fallback command from README (the canonical source of truth)
-    git_fallback_match = re.search(
-        r"uv tool install '(korvid\[all\] @ git\+[^']+)'",
-        readme,
+    assert readme_install is not None, "README must expose a pinned full install"
+    assert readme_install.group(1) == project_version, (
+        "README's primary pinned install must match pyproject.toml's project.version"
     )
 
-    if unpublished_match is not None:
-        unpublished_version = unpublished_match.group(1)
-        # The guide must NOT present the unpublished version as already published
-        false_published_pattern = re.search(
-            rf"\*\*`{re.escape(unpublished_version)}`\*\* is the current published release",
-            getting_started,
+    published_match = re.search(
+        r"## Current release\s*\n\s*\*\*`([^`]+)`\*\* is the current published release",
+        getting_started,
+    )
+    assert published_match is not None, "getting-started.md must name the current published release"
+    assert published_match.group(1) == project_version, (
+        f"getting-started.md advertises {published_match.group(1)!r} as current, "
+        f"but pyproject.toml's project.version is {project_version!r}"
+    )
+
+    pinned_versions = set(re.findall(r"\bkorvid(?:\[[^\]]+\])?==(\d+\.\d+\.\d+)", getting_started))
+    assert pinned_versions == {project_version}, (
+        "every intentionally pinned getting-started command must use the current "
+        f"project release {project_version}; found {sorted(pinned_versions)}"
+    )
+    assert f"release-notes/v{project_version}.md" in getting_started
+    assert "awaiting publication" not in getting_started.lower()
+
+
+def test_getting_started_cannot_call_homebrew_unpublished_when_readme_installs_it() -> None:
+    """README's live brew route and the guide's Homebrew section cannot contradict."""
+    readme = (ROOT / "README.md").read_text()
+    getting_started = (ROOT / "docs" / "getting-started.md").read_text()
+    command = "brew install hellices/korvid/korvid"
+    assert command in readme, "README is the offline repository source for the brew route"
+    assert command in getting_started
+
+    section = getting_started.split("### Homebrew (macOS and Linux)", 1)[1]
+    section = section.split("\n### ", 1)[0]
+    normalized = " ".join(section.lower().split())
+    for stale_claim in (
+        "tap is unpublished",
+        "tap is unavailable",
+        "once the homebrew tap is published",
+        "awaiting publication",
+    ):
+        assert stale_claim not in normalized, (
+            f"getting-started.md exposes the README's working brew command but still says "
+            f"{stale_claim!r}"
         )
-        assert false_published_pattern is None, (
-            f"getting-started.md claims {unpublished_version!r} is 'the current "
-            f"published release', but README's publication marker says it is not yet "
-            f"on PyPI ('Until `{unpublished_version}` is published on PyPI'). "
-            "Update getting-started.md to use the last published version in pinned "
-            "commands and include the Git fallback for current-main installs."
-        )
-        # The guide must include the Git fallback so users can reach current main
-        assert git_fallback_match is not None, (
-            "README contains 'Until `...` is published on PyPI' but no "
-            "uv tool install '...@ git+...' fallback command was found in README — "
-            "README itself is inconsistent."
-        )
-        git_fallback_spec = git_fallback_match.group(1)
-        assert git_fallback_spec in getting_started, (
-            f"README's Git fallback install spec {git_fallback_spec!r} must appear "
-            "in getting-started.md so readers installing current main know the "
-            "correct command while the PyPI release is pending."
-        )
-        # Pinned commands in getting-started.md must NOT use the unpublished version
-        pinned_unpublished = re.search(
-            rf"=={re.escape(unpublished_version)}(?:['\"]|$)",
-            getting_started,
-            re.MULTILINE,
-        )
-        assert pinned_unpublished is None, (
-            f"getting-started.md contains pinned install commands for "
-            f"{unpublished_version!r} (e.g. `korvid[all]=={unpublished_version}`), "
-            f"but README says this version is not yet on PyPI. Use the last published "
-            "version in pinned commands and add the Git fallback for current main."
-        )
-    else:
-        # Publication marker removed — guide must advertise the project version
-        published_match = re.search(
-            r"## Current release\s*\n\s*\*\*`([^`]+)`\*\* is the current published release",
-            getting_started,
-        )
-        assert published_match is not None, (
-            "README's 'Until ... is published on PyPI' marker has been removed, "
-            "meaning the project version is now on PyPI. getting-started.md must "
-            "state the current published release version under a '## Current release' heading."
-        )
-        assert published_match.group(1) == project_version, (
-            f"getting-started.md advertises {published_match.group(1)!r} as current, "
-            f"but pyproject.toml's project.version is {project_version!r}. "
-            "Sync getting-started.md with the published project version."
-        )
+
+
+def _plugin_options(config: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """Return a configured plugin's options, using `{}` for its short form."""
+    plugins = config.get("plugins")
+    assert isinstance(plugins, list), "mkdocs.yml must declare its plugins as a list"
+    for plugin in plugins:
+        if plugin == name:
+            return {}
+        if isinstance(plugin, dict) and name in plugin:
+            options = plugin[name]
+            assert isinstance(options, dict), f"{name} plugin options must be a mapping"
+            return options
+    return None
+
+
+def test_mkdocs_disables_remote_fonts_and_localizes_external_assets() -> None:
+    """Visitors must not fetch Google fonts or Mermaid from third-party hosts."""
+    config = _load_mkdocs_config()
+    theme = config.get("theme")
+    assert isinstance(theme, dict), "mkdocs.yml must configure a theme"
+    assert theme.get("font") is False, (
+        "theme.font must be false so Material does not emit fonts.googleapis.com "
+        "or fonts.gstatic.com runtime requests"
+    )
+    privacy = _plugin_options(config, "privacy")
+    assert privacy is not None, (
+        "Material's privacy plugin must download external Mermaid assets at build "
+        "time and serve them locally"
+    )
+    assert privacy.get("assets", True) is True
+    assert privacy.get("assets_fetch", True) is True
+    expressions = privacy.get("assets_expr_map")
+    assert isinstance(expressions, dict), (
+        "privacy.assets_expr_map must cover Material's extensionless unpkg "
+        "ResizeObserver fallback as well as its .js Mermaid URL"
+    )
+    javascript_expression = expressions.get(".js")
+    assert isinstance(javascript_expression, str)
+    resize_url = "https://unpkg.com/resize-observer-polyfill"
+    match = re.search(javascript_expression, f'"{resize_url}"')
+    assert match is not None, (
+        "the privacy plugin's JavaScript expression must localize Material's "
+        "extensionless ResizeObserver fallback instead of leaving an executable "
+        "unpkg runtime URL in the built bundle"
+    )
+    assert match.group("url") == resize_url
+
+
+def test_mkdocs_excludes_override_sources_but_keeps_theme_customization() -> None:
+    """Jinja sources stay out of site/ while remaining available to Material."""
+    config = _load_mkdocs_config()
+    excluded = config.get("exclude_docs")
+    assert isinstance(excluded, str), "mkdocs.yml must exclude docs/overrides from output"
+    excluded_paths = {line.strip().rstrip("/") for line in excluded.splitlines() if line.strip()}
+    assert "overrides" in excluded_paths, (
+        "docs/overrides must be excluded or MkDocs copies the raw Jinja sources to site/overrides/"
+    )
+
+    theme = config.get("theme")
+    assert isinstance(theme, dict)
+    assert theme.get("custom_dir") == "docs/overrides"
+    assert (ROOT / "docs" / "overrides" / "home.html").is_file()
+    assert (ROOT / "docs" / "overrides" / "partials" / "copyright.html").is_file()
+
+
+def test_current_release_notes_are_in_navigation() -> None:
+    """The current project release must be discoverable in the site navigation."""
+    config = _load_mkdocs_config()
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    nav_text = repr(config.get("nav"))
+    expected = f"release-notes/v{version}.md"
+    assert expected in nav_text, f"mkdocs nav must include the current release notes: {expected}"
 
 
 def test_theme_custom_dir_resolves_to_the_overrides_directory() -> None:

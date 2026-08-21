@@ -281,13 +281,17 @@ def test_publishing_section_links_the_workflow_in_a_strict_build_safe_way() -> N
 
 def test_design_document_records_the_one_time_pages_enablement() -> None:
     """The committed design doc must not imply the workflow is sufficient alone."""
-    design = DESIGN_DOC.read_text().lower()
-    assert "source: github actions" in design, (
+    design = " ".join(DESIGN_DOC.read_text().lower().split())
+    enablement = re.search(
+        r"before the workflow can deploy for the first time[^.]*"
+        r"enable pages once:[^.]*source: github actions",
+        design,
+    )
+    assert enablement is not None, (
         "the design document's rollout section must record the exact one-time "
         "repository setting (Settings -> Pages -> Build and deployment -> "
         "Source: GitHub Actions); without it the deploy job fails on first run"
     )
-    assert "once" in design, "the setting is a one-time admin action; say so"
 
 
 def test_plan_records_the_one_time_pages_enablement_step() -> None:
@@ -297,4 +301,13 @@ def test_plan_records_the_one_time_pages_enablement_step() -> None:
         "the plan's deployment task must include the one-time repository setting "
         "(Settings -> Pages -> Build and deployment -> Source: GitHub Actions), "
         "otherwise a clean run of the plan produces a workflow that cannot deploy"
+    )
+
+
+def test_plan_places_configure_pages_first_in_the_privileged_deploy_job() -> None:
+    """The executable plan must reproduce the workflow's least-privilege ordering."""
+    plan = " ".join(PLAN_DOC.read_text().lower().replace("`", "").split())
+    assert "configure-pages is the deploy job's first step" in plan, (
+        "Task 3 must say configure-pages runs first in deploy, where pages: write "
+        "exists; an action pin alone does not preserve that ordering"
     )
