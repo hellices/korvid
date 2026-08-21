@@ -221,6 +221,14 @@ def _validated_inputs(
         journeys = _selected(load_operation_journeys(args.operations), args.only)
     except KeyError as exc:
         raise ValueError(str(exc)) from exc
+    if args.scripted:
+        missing_scripts = sorted(
+            journey.id for journey in journeys if journey.id not in OPERATION_SCRIPTS
+        )
+        if missing_scripts:
+            raise ValueError(
+                f"scripted mode requires OPERATION_SCRIPTS entries for: {missing_scripts}"
+            )
     return seeds, _instances(journeys, seeds)
 
 

@@ -138,6 +138,42 @@ def test_an_unknown_journey_id_is_reported(tmp_path: Path) -> None:
     assert code == 2
 
 
+def test_a_custom_fixture_pack_without_a_script_is_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    operations_dir = tmp_path / "operations"
+    operations_dir.mkdir()
+    custom_journey_id = "custom-scale-deployment-up"
+    source = bundled_operations_dir() / "scale-deployment-up.yaml"
+    (operations_dir / f"{custom_journey_id}.yaml").write_text(
+        source.read_text().replace("id: scale-deployment-up", f"id: {custom_journey_id}", 1)
+    )
+    payload_path = tmp_path / "out.json"
+    artifacts_dir = tmp_path / "artifacts"
+
+    code = main(
+        [
+            "--operations",
+            str(operations_dir),
+            "--only",
+            custom_journey_id,
+            "--scripted",
+            "--json",
+            str(payload_path),
+            "--artifacts",
+            str(artifacts_dir),
+        ]
+    )
+
+    assert code == 2
+    stderr = capsys.readouterr().err
+    assert "error: scripted mode requires OPERATION_SCRIPTS entries for:" in stderr
+    assert custom_journey_id in stderr
+    assert "Traceback" not in stderr
+    assert not payload_path.exists()
+    assert not artifacts_dir.exists()
+
+
 def test_a_non_positive_repetition_count_is_a_usage_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
