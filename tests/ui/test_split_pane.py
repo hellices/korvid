@@ -290,16 +290,15 @@ async def test_navigation_lands_in_initiating_pane_after_focus_switch() -> None:
         await _first_render(app, pilot)
         await _split(app, pilot)  # focused: pane 2
         # _navigate_locked only closes the log pane when the initiating pane
-        # owns it - mark it as the owner so the seam below actually runs.
-        app._log_pane_owner = app._panes[1]
+        # owns it - intercept the ownership-close seam so it actually runs.
         flipped = False
 
-        async def flip_focus_mid_navigation() -> None:
+        async def flip_focus_mid_navigation(pane: object) -> None:
             nonlocal flipped
             flipped = True
             app._focused_pane = 0  # the user switches panes during the await
 
-        app._close_log_pane = flip_focus_mid_navigation  # type: ignore[method-assign]  # test seam
+        app._logs.close_if_owned_by = flip_focus_mid_navigation  # type: ignore[method-assign]  # test seam
         await app.on_navigate_command(NavigateCommand("deployments", None))
         assert flipped  # the focus switch really happened mid-navigation
         assert app._panes[1].kind == "deployments"  # initiating pane transitioned
@@ -589,7 +588,7 @@ async def test_other_pane_navigation_keeps_log_stream() -> None:
     app = make_app([_pod("api-1")], extra_data={"deployments": [_deploy("web")]})
     async with app.run_test() as pilot:
         await _first_render(app, pilot)
-        await app._open_log_pane("default", [("api-1", "app")])  # pane 1 owns the logs
+        await app._logs.open_pane("default", [("api-1", "app")])  # pane 1 owns the logs
         assert app.query_one(LogPane).display
         await _split(app, pilot)  # focus moves to pane 2
         await _type_command(pilot, "deploy")
@@ -613,7 +612,7 @@ async def test_closing_log_owner_pane_closes_log_stream() -> None:
     async with app.run_test() as pilot:
         await _first_render(app, pilot)
         await _split(app, pilot)  # focus: pane 2
-        await app._open_log_pane("default", [("api-1", "app")])  # pane 2 owns the logs
+        await app._logs.open_pane("default", [("api-1", "app")])  # pane 2 owns the logs
         assert app.query_one(LogPane).display
         await pilot.press("ctrl+w", "q")  # close pane 2 (the owner)
         await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")

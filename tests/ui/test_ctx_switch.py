@@ -1145,7 +1145,7 @@ async def test_switch_closes_live_log_pane() -> None:
             label="config context updated",
         )
         assert app.query_one(LogPane).display is False
-        assert not app._log_tasks
+        assert not app._logs.tasks
 
 
 async def test_logs_refused_during_switch_via_ctx_flow() -> None:
@@ -1187,7 +1187,7 @@ async def test_logs_refused_during_switch_via_ctx_flow() -> None:
                 label="logs refusal notification",
             )
             assert app.query_one(LogPane).display is False
-            assert not app._log_tasks
+            assert not app._logs.tasks
         finally:
             gate.set()
         await until(

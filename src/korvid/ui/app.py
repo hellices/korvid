@@ -25,7 +25,6 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from types import MappingProxyType
@@ -66,8 +65,6 @@ from korvid.core.errors import explain_api_error
 from korvid.core.filters import ResourceFilter, parse_filter
 from korvid.core.impact import ImpactAction, summarize_impact
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
-from korvid.core.logbuffer import LogBuffer
-from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import (
     OWNER_CHAIN_PLURALS,
@@ -125,6 +122,7 @@ from korvid.ui.forward_controller import ForwardController
 from korvid.ui.helm_controller import HelmController
 from korvid.ui.hints import EventsFetcher, HintController, pod_needs_hint
 from korvid.ui.impact_preview import render_impact_lines, render_unavailable_lines
+from korvid.ui.log_controller import LogController
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -199,11 +197,6 @@ logger = logging.getLogger(__name__)
 #: How often the app polls the forward registry for dead kubectl processes.
 _FORWARD_POLL_SECONDS = 2.0
 
-_MAX_MULTI_STREAM_PODS = 8
-# ``l`` accumulates side-by-side pod logs; beyond 4 pods each panel gets too
-# small to read — comparing >4 replicas is what ``L`` (multi-stream) is for.
-_MAX_LOG_PODS = 4
-_MAX_RECONNECT_ATTEMPTS = 5
 #: Seconds an agent-requested approval dialog stays open before it counts as
 #: a denial - an unanswered dialog must never hang the agent turn forever.
 _APPROVAL_TIMEOUT = 120.0
@@ -388,51 +381,6 @@ def _tracks_cluster_write(
     wrapper.__name__ = method.__name__
     wrapper.__qualname__ = method.__qualname__
     return wrapper
-
-
-class _ReplayFilter:
-    """Drops tail lines replayed by the API after a reconnect.
-
-    Every (re)connection returns the last ~tail_lines existing lines before
-    following.  The cursor is (last displayed timestamp, count of displayed
-    lines carrying that exact timestamp) rather than a bare ``<=`` timestamp
-    comparison, so *new* lines that happen to share the last displayed
-    timestamp (kubelet is nanosecond-precise but parsing truncates to
-    microseconds) are not lost across a reconnect.
-    """
-
-    def __init__(self) -> None:
-        self._last_ts: datetime | None = None
-        self._last_ts_count = 0
-        self._resume_ts: datetime | None = None
-        self._remaining = 0
-
-    def start_connection(self) -> None:
-        """Snapshot the cursor; replayed lines up to it will be dropped."""
-        self._resume_ts = self._last_ts
-        self._remaining = self._last_ts_count
-
-    def is_replayed(self, line: LogLine) -> bool:
-        ts = line.timestamp
-        if ts is None or self._resume_ts is None:
-            return False
-        if ts < self._resume_ts:
-            return True
-        if ts == self._resume_ts and self._remaining > 0:
-            self._remaining -= 1
-            return True
-        return False
-
-    def record(self, line: LogLine) -> None:
-        """Advance the cursor past a line that was just displayed."""
-        ts = line.timestamp
-        if ts is None:
-            return
-        if ts == self._last_ts:
-            self._last_ts_count += 1
-        else:
-            self._last_ts = ts
-            self._last_ts_count = 1
 
 
 class _RelationshipLister:
@@ -1021,22 +969,9 @@ class KorvidApp(App[None]):
         #: Active sort per view kind (issue #37): the choice survives watch
         #: updates (every render re-applies it) and switching views restores
         #: each kind's own sort. Lives in PaneState (see `_sorts` property).
-        self._log_tasks: set[asyncio.Task[None]] = set()
-        self._log_buffer: LogBuffer | None = None
-        self._log_error: bool = False
-        self._current_log_triples: list[tuple[str, str, str]] = []
-        self._log_pane_gen: int = 0
-        self._current_log_force_prefix: bool = False
-        self._log_pane_mode: str = ""
-        #: Pane whose selection opened the log pane: only that pane's
-        #: navigation (or close) tears the stream down - the split workflow
-        #: is watching one pane while tailing logs from the other.
-        self._log_pane_owner: PaneState | None = None
-        self._reconnect_sleep: float = 1.0
         self._ns_prefetch_task: asyncio.Task[None] | None = None
         self._ctx_prefetch_task: asyncio.Task[None] | None = None
         self._splash_shown_at: float = monotonic()
-        self._log_buffer_max_lines: int = config.log_buffer_lines
         # Kinds with a table render already queued — coalesces the per-object
         # notifications of a LIST seed into a single rebuild (see _on_store_update).
         self._render_pending: set[str] = set()
@@ -1064,6 +999,28 @@ class KorvidApp(App[None]):
             set_timer=self.set_timer,
             ctx_epoch=lambda: self._ctx_epoch,
             ctx_crossed=self._ctx_switch_crossed,
+        )
+        #: Log subsystem ownership (issue #187): the controller owns the stream
+        #: tasks, display buffer, reconnect/error flags, selected triples, pane
+        #: generation, pane mode and pane owner, plus the open/stream/display
+        #: workflows. The app keeps only the Textual action/message entry points
+        #: as thin delegates; widget access and app state arrive as callables.
+        self._logs = LogController(
+            ui=AppUiSurface(self),
+            get_log_pane=lambda: self._log_pane,
+            get_stream_logs=lambda: self._stream_logs,
+            pod_containers=self._get_pod_containers,
+            selected_ns_name=self._selected_ns_name,
+            visible_pod_keys=lambda: [
+                str(row.key.value) for row in self._focused_table().ordered_rows
+            ],
+            current_kind=lambda: self.current_kind,
+            focused_pane=lambda: self._pane,
+            ctx_epoch=lambda: self._ctx_epoch,
+            ctx_switch_crossed=self._ctx_switch_crossed,
+            ctx_reads_allowed=self._ctx_reads_allowed,
+            refresh_bindings=self.refresh_bindings,
+            buffer_max_lines=config.log_buffer_lines,
         )
 
     # -- Focused-pane delegation (issue #48): the pane list is the single
@@ -1614,10 +1571,9 @@ class KorvidApp(App[None]):
         new_kind = view if view is not None else pane.kind
         new_scope = namespace if namespace is not None else pane.scope
         if new_kind != pane.kind or new_scope != pane.scope:
-            if self._log_pane_owner is pane:
-                # Only the owning pane's navigation closes the logs: the
-                # other pane must keep its stream (issue #48 workflow).
-                await self._close_log_pane()
+            # Only the owning pane's navigation closes the logs: the other
+            # pane must keep its stream (issue #48 workflow).
+            await self._logs.close_if_owned_by(pane)
             old = (pane.kind, pane.scope)
             # Another pane may still be watching the old (kind, scope):
             # stopping it would freeze that pane's view (issue #48).
@@ -2048,7 +2004,7 @@ class KorvidApp(App[None]):
         connection), then session state that would otherwise leak old-cluster
         rows, breadcrumbs, or hints into the new one.
         """
-        await self._close_log_pane()
+        await self._logs.close()
         self._describe_pane.hide()
         # Every pane's kind/scope/filter/drill describes the old cluster: a
         # surviving second pane would keep stale-but-actionable rows on
@@ -2378,7 +2334,7 @@ class KorvidApp(App[None]):
                 if self._stream_logs is None:
                     self.notify("Log streaming unavailable", severity="warning")
                     return
-                self.run_worker(self._open_log_pane(namespace, [(name, container)]))
+                self.run_worker(self._logs.open_pane(namespace, [(name, container)]))
 
         await self.push_screen(ContainersScreen(name, rows), _on_pick)
 
@@ -4109,7 +4065,7 @@ class KorvidApp(App[None]):
             return
         log_pane = self._log_pane
         if log_pane.display:
-            await self._close_log_pane()
+            await self._logs.close()
             event.stop()
             return
         popped = await self._pop_drill()
@@ -4220,10 +4176,9 @@ class KorvidApp(App[None]):
             closing = self._panes.pop(self._focused_pane)
             remaining = self._panes[0]
             self._focused_pane = 0
-            if self._log_pane_owner is closing:
-                # The pane whose selection drove the stream is gone: don't
-                # leave orphaned logs pinned over the survivor's view.
-                await self._close_log_pane()
+            # The pane whose selection drove the stream is gone: don't leave
+            # orphaned logs pinned over the survivor's view.
+            await self._logs.close_if_owned_by(closing)
             if (closing.kind, closing.scope) != (remaining.kind, remaining.scope):
                 await self.watch_manager.stop(closing.kind, closing.scope)
             # The survivor keeps its own table widget - and with it the
@@ -4293,142 +4248,12 @@ class KorvidApp(App[None]):
             self._focused_table().focus()
 
     async def action_logs(self) -> None:
-        """Open logs for the selected pod, or toggle it in/out of the pane (``l``).
-
-        With the pane already open in live mode, ``l`` on another pod adds its
-        containers side-by-side (max ``_MAX_LOG_PODS`` pods); ``l`` on a pod
-        already shown removes it (closing the pane when it was the last one).
-        Adding/removing reopens the streams, so panels restart at the last
-        ~200 tailed lines.
-        """
-        if self.current_kind != "pods":
-            self.notify("Logs are only available for pods", severity="warning")
-            return
-        if not self._ctx_reads_allowed():
-            return
-        epoch = self._ctx_epoch
-
-        log_pane = self._log_pane
-        if log_pane.display and self._log_pane_mode != "l":
-            # L (multi-stream) and p (previous) modes don't accumulate.
-            await self._close_log_pane()
-            return
-
-        if self._stream_logs is None:
-            self.notify("Log streaming unavailable", severity="warning")
-            return
-
-        ns, name = self._selected_ns_name()
-        if ns is None or name is None:
-            return
-
-        if log_pane.display:
-            await self._toggle_log_pod(ns, name, epoch)
-            return
-
-        self._log_pane_mode = "l"
-        triples = self._pod_triples(ns, name)
-        await self._open_log_pane(
-            ns, [(pod, ctr) for _, pod, ctr in triples], triples=triples, epoch=epoch
-        )
-
-    def _pod_triples(self, namespace: str, name: str) -> list[tuple[str, str, str]]:
-        """Return (ns, pod, container) triples for one pod (one per container)."""
-        containers = self._get_pod_containers(namespace, name)
-        if containers:
-            return [(namespace, name, ctr) for ctr in containers]
-        return [(namespace, name, "")]
-
-    async def _toggle_log_pod(self, namespace: str, name: str, epoch: int) -> None:
-        """Add or remove *namespace/name* from the accumulated live-log panels."""
-        existing = list(self._current_log_triples)
-        pods: list[tuple[str, str]] = []
-        for t_ns, t_pod, _ in existing:
-            if (t_ns, t_pod) not in pods:
-                pods.append((t_ns, t_pod))
-
-        if (namespace, name) in pods:
-            triples = [t for t in existing if (t[0], t[1]) != (namespace, name)]
-            if not triples:
-                await self._close_log_pane()
-                return
-        else:
-            if len(pods) >= _MAX_LOG_PODS:
-                self.notify(
-                    f"Log pane caps at {_MAX_LOG_PODS} pods — Esc closes all",
-                    severity="warning",
-                )
-                return
-            triples = existing + self._pod_triples(namespace, name)
-            if len(triples) > MAX_PANELS:
-                self.notify(
-                    f"Panel cap is {MAX_PANELS} containers — cannot add {name}",
-                    severity="warning",
-                )
-                return
-
-        await self._cancel_log_tasks()
-        sources = [(pod, ctr) for _, pod, ctr in triples]
-        await self._open_log_pane(triples[0][0], sources, triples=triples, epoch=epoch)
+        """Open logs for the selected pod, or toggle it in/out of the pane (``l``)."""
+        await self._logs.action_logs()
 
     async def action_logs_multi(self) -> None:
         """Stream all filtered pods' containers (``L`` binding); cap at 8."""
-        if self.current_kind != "pods":
-            self.notify("Logs are only available for pods", severity="warning")
-            return
-        if not self._ctx_reads_allowed():
-            return
-        epoch = self._ctx_epoch
-
-        if self._stream_logs is None:
-            self.notify("Log streaming unavailable", severity="warning")
-            return
-
-        table = self._focused_table()
-        if table.row_count == 0:
-            self.notify("No resource selected", severity="warning")
-            return
-
-        triples = self._build_multi_stream_triples(table)
-        if not triples:
-            self.notify("No pods to stream", severity="warning")
-            return
-
-        if self._log_pane.display:
-            await self._close_log_pane()
-
-        self._log_pane_mode = "L"
-        ns0 = triples[0][0]
-        await self._open_log_pane(
-            ns0,
-            [(pod, ctr) for _, pod, ctr in triples],
-            triples=triples,
-            force_prefix=True,
-            epoch=epoch,
-        )
-
-    def _build_multi_stream_triples(self, table: ResourceTable) -> list[tuple[str, str, str]]:
-        """Collect (namespace, pod, container) triples for all visible pods; cap at 8."""
-        ordered = table.ordered_rows
-        pod_keys = [str(row.key.value) for row in ordered]
-        total = len(pod_keys)
-        if total > _MAX_MULTI_STREAM_PODS:
-            pod_keys = pod_keys[:_MAX_MULTI_STREAM_PODS]
-            self.notify(f"Streaming first {_MAX_MULTI_STREAM_PODS} of {total} matching pods")
-
-        triples: list[tuple[str, str, str]] = []
-        for pod_key in pod_keys:
-            parts = pod_key.split("/", 1)
-            if len(parts) != 2:
-                continue
-            ns, name = parts[0], parts[1]
-            containers = self._get_pod_containers(ns, name)
-            if containers:
-                for ctr in containers:
-                    triples.append((ns, name, ctr))
-            else:
-                triples.append((ns, name, ""))
-        return triples
+        await self._logs.action_logs_multi()
 
     def _selected_ns_name(self) -> tuple[str | None, str | None]:
         """Return (namespace, name) of the currently selected row or (None, None) + warn."""
@@ -6283,259 +6108,6 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
 
-    async def _open_log_pane(
-        self,
-        namespace: str,
-        sources: list[tuple[str, str]],
-        triples: list[tuple[str, str, str]] | None = None,
-        force_prefix: bool = False,
-        previous: bool = False,
-        epoch: int | None = None,
-    ) -> None:
-        """Show log pane and spawn one streaming task per (pod, container).
-
-        *epoch* is the `_ctx_epoch` captured when the user triggered the
-        action; when a :ctx switch started or completed since (issue #84),
-        the open is dropped — the streams would attach to the new cluster
-        while labeled with the old selection. Callers without an awaited
-        gap (epoch=None) are still refused while a switch is in flight.
-        """
-        if self._ctx_switch_crossed(self._ctx_epoch if epoch is None else epoch):
-            self.notify(
-                "Log streaming cancelled - the kube context changed",
-                severity="warning",
-            )
-            return
-        self._log_pane_gen += 1
-        # Resolve triples before saving so _current_log_triples is always complete.
-        if triples is None:
-            triples = [(namespace, pod, ctr) for pod, ctr in sources]
-
-        # LogPane silently ignores sources beyond MAX_PANELS; enforce the same
-        # cap here so no stream task is ever spawned without a panel to feed.
-        if len(triples) > MAX_PANELS:
-            self.notify(
-                f"Showing first {MAX_PANELS} of {len(triples)} containers",
-                severity="warning",
-            )
-            triples = triples[:MAX_PANELS]
-            sources = sources[:MAX_PANELS]
-
-        self._current_log_triples = list(triples)
-        self._current_log_force_prefix = force_prefix
-        self._log_pane_owner = self._pane
-
-        log_pane = self._log_pane
-        self._log_buffer = LogBuffer(self._log_buffer_max_lines)
-        log_pane.open(sources, force_prefix=force_prefix, log_buffer=self._log_buffer)
-        # The pane controls (f/w/t/Ctrl-S/p) gate on pane visibility: tell
-        # the footer legend the pane just appeared (issue #114).
-        self.refresh_bindings()
-
-        if previous:
-            log_pane.write_banner("\u2500\u2500 previous container logs \u2500\u2500")
-
-        log_pane.set_state("streaming")
-
-        # Defensive: callers cancel+gather before re-opening, but never let a
-        # stale task survive the set replacement below.
-        for stale in self._log_tasks:
-            stale.cancel()
-        self._log_tasks = set()
-        self._log_error = False
-
-        for ns, pod, container in triples:
-            task: asyncio.Task[None] = asyncio.create_task(
-                self._spawn_log_stream(ns, pod, container, previous=previous)
-            )
-            self._log_tasks.add(task)
-
-    async def _spawn_log_stream(
-        self, namespace: str, pod: str, container: str, *, previous: bool = False
-    ) -> None:
-        """Delegate to the appropriate streaming coroutine based on follow flag."""
-        stream_logs = self._stream_logs
-        if stream_logs is None:
-            return
-        if previous:
-            await self._previous_log_stream(namespace, pod, container, stream_logs)
-        else:
-            await self._live_log_stream(namespace, pod, container, stream_logs)
-
-    async def _live_log_stream(
-        self,
-        namespace: str,
-        pod: str,
-        container: str,
-        stream_logs: Callable[..., AsyncIterator[LogLine]],
-    ) -> None:
-        """Retry loop for live (follow=True) streams.
-
-        Retries up to ``_MAX_RECONNECT_ATTEMPTS`` times on transient errors or
-        unexpected EOF.  ApiStatusError and CancelledError are never retried.
-        Each (re)connection replays the last ~tail_lines existing lines;
-        ``_ReplayFilter`` drops the ones already displayed so reconnects
-        don't duplicate output.
-        """
-        log_pane = self._log_pane
-        current = asyncio.current_task()
-        consecutive_failures = 0
-        replay = _ReplayFilter()
-
-        while True:
-            replay.start_connection()
-            try:
-                async for line in stream_logs(
-                    namespace, pod, container, previous=False, follow=True
-                ):
-                    if replay.is_replayed(line):
-                        continue  # replayed tail line already shown pre-reconnect
-                    replay.record(line)
-                    self._mark_stream_healthy(log_pane, consecutive_failures)
-                    consecutive_failures = 0
-                    log_pane.feed(line)
-                    self._buffer_line(log_pane, line)
-            except ApiStatusError as exc:
-                self._handle_stream_api_error(log_pane, current, namespace, exc)
-                return
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # Transient (network hiccup, rotation EOF); logged so
-                # programming bugs aren't silently disguised as reconnects.
-                logger.debug(
-                    "log stream for %s/%s failed; will reconnect", pod, container, exc_info=True
-                )
-
-            if not log_pane.display:
-                # Pane was closed while the stream was suspended; exit quietly.
-                self._discard_task(current)
-                return
-            consecutive_failures += 1
-            if not await self._pause_before_reconnect(log_pane, current, consecutive_failures):
-                return
-
-    def _mark_stream_healthy(self, log_pane: LogPane, consecutive_failures: int) -> None:
-        """Restore the streaming indicator after a successful reconnect."""
-        if consecutive_failures > 0 and not self._log_error:
-            log_pane.set_state("streaming")
-
-    async def _pause_before_reconnect(
-        self,
-        log_pane: LogPane,
-        current: asyncio.Task[None] | None,
-        consecutive_failures: int,
-    ) -> bool:
-        """Sleep before the next attempt; False when retries are exhausted."""
-        if consecutive_failures > _MAX_RECONNECT_ATTEMPTS or self._log_error:
-            if not self._log_error:
-                self.notify(
-                    f"log stream lost after {_MAX_RECONNECT_ATTEMPTS} reconnect attempts",
-                    title="Log stream error",
-                    severity="error",
-                )
-                self._log_error = True
-                log_pane.set_state("error")
-            self._discard_task(current)
-            return False
-        log_pane.set_state("reconnecting")
-        await asyncio.sleep(self._reconnect_sleep)
-        return True
-
-    async def _previous_log_stream(
-        self,
-        namespace: str,
-        pod: str,
-        container: str,
-        stream_logs: Callable[..., AsyncIterator[LogLine]],
-    ) -> None:
-        """One-shot previous-container-log stream (follow=False, no reconnect)."""
-        log_pane = self._log_pane
-        current = asyncio.current_task()
-        try:
-            async for line in stream_logs(namespace, pod, container, previous=True, follow=False):
-                log_pane.feed(line)
-                self._buffer_line(log_pane, line)
-        except ApiStatusError as exc:
-            self._handle_stream_api_error(log_pane, current, namespace, exc)
-            return
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Unlike live streams there is no reconnect: surface the failure.
-            self._discard_task(current)
-            if log_pane.display and not self._log_error:
-                self._log_error = True
-                self.notify(
-                    "previous logs stream failed",
-                    title="Log stream error",
-                    severity="error",
-                )
-                log_pane.set_state("error")
-            return
-        self._discard_task(current)
-        if self._all_streams_ended():
-            log_pane.set_state("ended")
-
-    def _handle_stream_api_error(
-        self,
-        log_pane: LogPane,
-        current: asyncio.Task[None] | None,
-        namespace: str,
-        exc: ApiStatusError,
-    ) -> None:
-        """Notify the user of an API error and put the stream into error state."""
-        if not log_pane.display:
-            self._discard_task(current)
-            return
-        msg = explain_api_error(exc.status, exc.reason, "pods", namespace)
-        self.notify(msg, title="Log stream error", severity="error")
-        self._log_error = True
-        log_pane.set_state("error")
-        self._discard_task(current)
-
-    def _all_streams_ended(self) -> bool:
-        """True when every spawned stream task has finished without an error."""
-        return not self._log_tasks and not self._log_error
-
-    def _discard_task(self, current: asyncio.Task[None] | None) -> None:
-        """Remove *current* from the live task set (no-op if None or absent)."""
-        if current is not None:
-            self._log_tasks.discard(current)
-
-    def _buffer_line(self, log_pane: LogPane, line: LogLine) -> None:
-        """Append *line* to the shared buffer; show overflow banner on first overflow."""
-        if self._log_buffer is None:
-            return
-        was_full = self._log_buffer.overflowed
-        self._log_buffer.append(line)
-        if not was_full and self._log_buffer.overflowed:
-            log_pane.show_overflow_banner()
-
-    async def _cancel_log_tasks(self) -> None:
-        """Cancel and await stream tasks without hiding the pane (reopen path)."""
-        tasks = list(self._log_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._log_tasks.clear()
-        self._log_buffer = None
-        self._log_error = False
-
-    async def _close_log_pane(self) -> None:
-        """Cancel all stream tasks and hide the log pane."""
-        self._log_pane_gen += 1
-        await self._cancel_log_tasks()
-        self._current_log_triples = []
-        self._current_log_force_prefix = False
-        self._log_pane_mode = ""
-        self._log_pane_owner = None
-        with contextlib.suppress(Exception):
-            self._log_pane.close()
-        # The pane controls gate on pane visibility (issue #114).
-        self.refresh_bindings()
-
     def _on_bindings_updated(self, _screen: object) -> None:
         self._refresh_top_bar()
 
@@ -6716,67 +6288,23 @@ class KorvidApp(App[None]):
 
     async def action_log_format(self) -> None:
         """Toggle JSON/raw formatting and re-render the buffer (``f`` key)."""
-        self._toggle_log_display(LogPane.toggle_format)
+        await self._logs.action_log_format()
 
     async def action_log_wrap(self) -> None:
         """Toggle line wrapping and re-render the buffer (``w`` key)."""
-        self._toggle_log_display(LogPane.toggle_wrap)
+        await self._logs.action_log_wrap()
 
     async def action_log_timestamps(self) -> None:
         """Toggle the timestamp prefix and re-render the buffer (``t`` key)."""
-        self._toggle_log_display(LogPane.toggle_timestamps)
-
-    def _toggle_log_display(self, toggle: Callable[[LogPane], None]) -> None:
-        """Shared path for display toggles: flip the setting, replay the buffer.
-
-        ``LogPane.replay`` restores contextual banners (previous-logs,
-        overflow), so every toggle must funnel through here instead of
-        clearing panels ad hoc.
-        """
-        log_pane = self._log_pane
-        if not log_pane.display:
-            return
-        toggle(log_pane)
-        if self._log_buffer is not None:
-            log_pane.replay(self._log_buffer.lines())
+        await self._logs.action_log_timestamps()
 
     def action_log_save(self) -> None:
         """Save the current log buffer to a generated file (``ctrl+s``)."""
-        log_pane = self._log_pane
-        if not log_pane.display or self._log_buffer is None:
-            return
-        lines = self._log_buffer.lines()
-        if not lines:
-            self.notify("Log buffer is empty — nothing to save", severity="warning")
-            return
-        try:
-            path = export_log_lines(lines, default_log_export_dir())
-        except OSError as exc:
-            self.notify(f"Failed to save logs: {exc}", severity="error")
-            return
-        self.notify(f"Logs saved to {path}")
+        self._logs.action_log_save()
 
     async def action_log_previous(self) -> None:
         """Re-open the same streams in previous-container-log mode (``p`` key)."""
-        log_pane = self._log_pane
-        if not log_pane.display:
-            return
-        if not self._current_log_triples:
-            return
-        if not self._ctx_reads_allowed():
-            return
-        epoch = self._ctx_epoch
-        triples = list(self._current_log_triples)
-        force_prefix = self._current_log_force_prefix
-        sources = [(pod, ctr) for _, pod, ctr in triples]
-        # Cancel live tasks without hiding the pane.
-        await self._cancel_log_tasks()
-        self._log_pane_mode = "p"
-        # Re-open with previous=True (clears RichLog, writes banner, spawns tasks).
-        ns0 = triples[0][0]
-        await self._open_log_pane(
-            ns0, sources, triples=triples, force_prefix=force_prefix, previous=True, epoch=epoch
-        )
+        await self._logs.action_log_previous()
 
     def action_log_search_next(self) -> None:
         """Advance to the next search hit (``n`` key)."""
@@ -6784,9 +6312,7 @@ class KorvidApp(App[None]):
         if describe_pane.display:
             describe_pane.search_next()
             return
-        log_pane = self._log_pane
-        if log_pane.display:
-            log_pane.search_next()
+        self._logs.search_next()
 
     def action_log_search_prev(self) -> None:
         """Previous search hit in an open pane; sort by name otherwise (``N``)."""
@@ -6794,9 +6320,7 @@ class KorvidApp(App[None]):
         if describe_pane.display:
             describe_pane.search_prev()
             return
-        log_pane = self._log_pane
-        if log_pane.display:
-            log_pane.search_prev()
+        if self._logs.search_prev():
             return
         self._toggle_sort("name")
 
@@ -7446,7 +6970,7 @@ class KorvidApp(App[None]):
     ) -> list[tuple[str, str, str]] | str:
         """The (ns, pod, container) triples to stream, or an "ERROR: ..."."""
         if not known:
-            # Validate before _cancel_log_tasks: a hallucinated pod name
+            # Validate before cancel_tasks: a hallucinated pod name
             # must not tear down the streams the user is watching.
             return f"ERROR: pod {namespace}/{pod} not found (check the name and namespace)"
         if container:
@@ -7476,13 +7000,13 @@ class KorvidApp(App[None]):
             )
         if self._stream_logs is None:
             return "ERROR: log streaming unavailable in this session"
-        pane_gen = self._log_pane_gen
+        pane_gen = self._logs.pane_gen
         try:
             known = await self._agent_pod_triples(namespace, pod)
             triples = self._agent_log_targets(known, namespace, pod, container)
             if isinstance(triples, str):
                 return triples
-            if pane_gen != self._log_pane_gen:
+            if pane_gen != self._logs.pane_gen:
                 # The user (or another turn) changed the log pane while we were
                 # resolving containers — user keystrokes take priority.
                 return (
@@ -7497,21 +7021,20 @@ class KorvidApp(App[None]):
                     "ERROR: an approval dialog is open — the user is deciding; "
                     "wait for their decision before opening logs"
                 )
-            await self._cancel_log_tasks()
-            if pane_gen != self._log_pane_gen:
+            await self._logs.cancel_tasks()
+            if pane_gen != self._logs.pane_gen:
                 # Recheck after the cancel await: a user pane change landing
                 # in that window still wins.
                 return (
                     "ERROR: the log pane changed while preparing the streams "
                     "(user action takes priority) — retry if still needed"
                 )
-            self._log_pane_mode = "l"
-            await self._open_log_pane(namespace, [(p, c) for _, p, c in triples], triples=triples)
+            await self._logs.open_agent_logs(namespace, triples)
         except Exception as exc:
             return f"ERROR: {exc}"
         target = f"{namespace}/{pod}" + (f" [{container}]" if container else "")
         self._mark_agent_action(f"logs → {target}")
-        # _open_log_pane caps at MAX_PANELS; tell the model which subset is
+        # open_pane caps at MAX_PANELS; tell the model which subset is
         # actually visible so it never assumes every container is on screen.
         truncated = ""
         if len(triples) > MAX_PANELS:
@@ -8739,13 +8262,7 @@ class KorvidApp(App[None]):
         if self._ctx_prefetch_task is not None:
             self._ctx_prefetch_task.cancel()
         await self._settle_agent_task()
-        tasks = list(self._log_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            with contextlib.suppress(Exception):
-                await asyncio.gather(*tasks, return_exceptions=True)
-        self._log_tasks.clear()
+        await self._logs.shutdown()
         if self._metrics is not None:
             await self._metrics.stop()
         if self._forwards is not None:

@@ -26,6 +26,7 @@ KorvidApp  (ui/app.py)
 │                       (ui/session_timeline_controller.py)  timeline producers and modal navigation
 ├── RelationshipSnapshotLoader
 │                       (ui/relationship_controller.py)  bounded read-only graph LISTs
+├── LogController        (ui/log_controller.py)          log stream tasks, buffer, pane lifecycle
 └── ...
 ```
 
@@ -57,6 +58,46 @@ the controller shape, deliberately:
 Because it holds no worker and no app reference, it needs none of the seams
 below; it is included here so the inventory of what lives in `ui/` stays
 complete.
+
+### The log controller owns its own stream tasks
+
+`LogController` (issue #187) owns the log subsystem's mutable state — the
+live stream tasks, the shared display buffer, the reconnect/error flags, the
+selected `(namespace, pod, container)` triples, the log-pane generation
+counter, the pane display mode (`""`/`l`/`L`/`p`), and which workspace pane
+owns the pane — together with the workflows that drive them: the `l`/`L`
+open/toggle actions, the live and previous-log stream lifecycles with the
+reconnect policy, and the display actions (`f`/`w`/`t`/`Ctrl-S`/`p`/`n`/`N`).
+`KorvidApp` keeps only the Textual `action_*`/`agent_open_logs` entry points
+as one-line delegates.
+
+It differs from the shape above in two deliberate ways:
+
+- **It supervises raw `asyncio.Task`s, not `run_worker` workers.** One task
+  per panel, cancelled and reaped by the controller on reopen (`cancel_tasks`),
+  close (`close`), and app teardown (`shutdown`, called from `on_unmount`).
+  The fan-out and reconnect bookkeeping (which task ended, whether all streams
+  ended, first-overflow banner) is simpler when the controller manages the set
+  directly, and the streams must inherit the app context the `AppUIBridge`
+  dispatch installs — spawning them as workers would not preserve that. This
+  is the one place `UiSurface.run_worker`'s supervision is traded for direct
+  ownership.
+- **It reaches the pane through a narrow `LogPaneView` accessor, not
+  `ViewState`.** The concrete `LogPane` widget stays mounted by Textual
+  composition; the controller drives only `open`/`close`/`feed`/`replay`/
+  `set_state`/banner/search/toggle through a structural `Protocol`, so its
+  non-widget logic is unit-tested against a fake pane with no running app.
+  Everything else — the selected pod, the visible rows, the container list,
+  the focused-pane token used for split ownership, the context epoch and its
+  guards, and the footer refresh — arrives as constructor-injected callables
+  read at call time, so a `:ctx` retarget of `stream_logs` is observed. It
+  takes `UiSurface` only for `notify`; approvals never apply because log
+  streaming is a read.
+
+`agent_open_logs` stays on the app: it owns the agent-priority checks (screen
+stack, approval dialog) and the stale-generation guards that read
+`LogController.pane_gen` around `cancel_tasks`, then calls `open_agent_logs`
+once those clear.
 
 ### Why interfaces and not callables
 
@@ -194,10 +235,16 @@ tests added before the move where the behaviour is not already pinned.
 6. ~~Session timeline producers and modal lifecycle~~ — done (the
    post-#187 timeline extraction); `SessionTimelineController` owns the
    watch-delta sink, the Warning-event feed, and the goto/navigate flow
+7. ~~Log streams, buffer, and pane lifecycle~~ — done;
+   `LogController` owns the stream tasks, display buffer, reconnect/error
+   flags, selected triples, pane generation, pane mode, and pane owner, plus
+   the `l`/`L` open-toggle, live/previous stream lifecycles, and the display
+   actions. The app keeps the Textual entry points as thin delegates.
 
 Issue #238 showed that logs and describe were technically extractable without
 introducing a new pane-composition seam, and issue #245 kept describe as a
-deliberate low-ROI non-extraction. `SessionTimelineController` now owns the
-timeline-specific boundary; context retargeting stays in `KorvidApp` because
-it is tied to the app's epoch management, selected-row capture, and
-navigation worker ordering.
+deliberate low-ROI non-extraction. Logs are now extracted through the narrow
+`LogPaneView` accessor (above); describe stays on the app for the same
+low-ROI reason. `SessionTimelineController` owns the timeline-specific
+boundary; context retargeting stays in `KorvidApp` because it is tied to the
+app's epoch management, selected-row capture, and navigation worker ordering.

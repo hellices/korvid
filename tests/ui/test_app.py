@@ -683,7 +683,7 @@ async def test_log_reconnect_flaky_stream() -> None:
             await asyncio.sleep(1000)  # stay alive until cancelled
 
     app = _make_log_app(_flaky)
-    app._reconnect_sleep = 0.0
+    app._logs.reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
         await until(
@@ -708,15 +708,15 @@ async def test_log_reconnect_flaky_stream() -> None:
             pilot,
             lambda: (
                 call_count == 2
-                and app._log_buffer is not None
-                and len(app._log_buffer.lines()) == 4
+                and app._logs.buffer is not None
+                and len(app._logs.buffer.lines()) == 4
                 and log_pane._state == "\u25cf streaming"
             ),
             label="reconnected stream resumed",
         )
         assert call_count == 2
-        assert app._log_buffer is not None
-        assert len(app._log_buffer.lines()) == 4
+        assert app._logs.buffer is not None
+        assert len(app._logs.buffer.lines()) == 4
         assert log_pane._state == "\u25cf streaming"
 
 
@@ -742,7 +742,7 @@ async def test_log_reconnect_exhausted_shows_error() -> None:
         yield  # make it an async generator
 
     app = _make_log_app(_always_fail)
-    app._reconnect_sleep = 0.0
+    app._logs.reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
         await until(
@@ -788,7 +788,7 @@ async def test_log_reconnect_api_error_no_retry() -> None:
         yield  # make it an async generator
 
     app = _make_log_app(_api_error)
-    app._reconnect_sleep = 0.0
+    app._logs.reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
         await until(
@@ -837,7 +837,7 @@ async def test_log_previous_no_reconnect() -> None:
         yield LogLine(pod=pod, container=ctr, text="prev-line2")
 
     app = _make_log_app(_stream)
-    app._reconnect_sleep = 0.0
+    app._logs.reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
         await until(
@@ -878,8 +878,8 @@ async def test_log_overflow_banner_shown_once() -> None:
         await asyncio.sleep(1000)  # stay alive until cancelled
 
     app = _make_log_app(_five_lines)
-    app._reconnect_sleep = 0.0
-    app._log_buffer_max_lines = 3  # small cap so overflow fires on line 4
+    app._logs.reconnect_sleep = 0.0
+    app._logs.buffer_max_lines = 3  # small cap so overflow fires on line 4
 
     async with app.run_test() as pilot:
         await until(
@@ -904,18 +904,18 @@ async def test_log_overflow_banner_shown_once() -> None:
         await until(
             pilot,
             lambda: (
-                app._log_buffer is not None
-                and app._log_buffer.overflowed
-                and len(app._log_buffer.lines()) == 3
+                app._logs.buffer is not None
+                and app._logs.buffer.overflowed
+                and len(app._logs.buffer.lines()) == 3
                 and banner_calls == 1
             ),
             label="overflow banner shown",
         )
 
         # Buffer should be overflowed and capped at max_lines.
-        assert app._log_buffer is not None
-        assert app._log_buffer.overflowed
-        assert len(app._log_buffer.lines()) == 3
+        assert app._logs.buffer is not None
+        assert app._logs.buffer.overflowed
+        assert len(app._logs.buffer.lines()) == 3
         # Banner fires exactly once per session even though 2 lines overflowed.
         assert banner_calls == 1
 
@@ -938,7 +938,7 @@ async def test_log_cancel_during_reconnect_sleep_no_error() -> None:
         yield  # make it an async generator
 
     app = _make_log_app(_always_fail)
-    app._reconnect_sleep = 100.0  # long sleep so task is sleeping when we close
+    app._logs.reconnect_sleep = 100.0  # long sleep so task is sleeping when we close
 
     async with app.run_test() as pilot:
         await until(

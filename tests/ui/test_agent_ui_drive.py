@@ -293,7 +293,7 @@ async def test_agent_open_logs_resolves_containers_from_manifest() -> None:
         out = await app.agent_open_logs("other-pod", "elsewhere")
         await pilot.pause()
         assert not out.startswith("ERROR:")
-        containers = {c for _, _, c in app._current_log_triples}
+        containers = {c for _, _, c in app._logs.current_triples}
         assert containers == {"main", "sidecar"}
 
 
@@ -313,13 +313,13 @@ async def test_agent_open_logs_unknown_pod_errors_without_disturbing_pane() -> N
         await app.agent_open_logs("web-1", "default")
         await pilot.pause()
         assert app.query_one(LogPane).display is True
-        before = list(app._current_log_triples)
+        before = list(app._logs.current_triples)
 
         out = await app.agent_open_logs("ghost", "default")
         await pilot.pause()
         assert out.startswith("ERROR:")
         assert "ghost" in out
-        assert app._current_log_triples == before
+        assert app._logs.current_triples == before
 
 
 async def test_agent_open_logs_yields_to_user_log_action_during_lookup() -> None:
@@ -339,14 +339,14 @@ async def test_agent_open_logs_yields_to_user_log_action_during_lookup() -> None
         task = asyncio.create_task(app.agent_open_logs("web-1", "default"))
         await asyncio.sleep(0.02)
         # User opens logs for web-2 while the agent's manifest lookup is pending.
-        await app._open_log_pane(
+        await app._logs.open_pane(
             "default", [("web-2", "main")], triples=[("default", "web-2", "main")]
         )
         release.set()
         out = await task
         await pilot.pause()
         assert out.startswith("ERROR:")
-        assert ("default", "web-2", "main") in app._current_log_triples
+        assert ("default", "web-2", "main") in app._logs.current_triples
 
 
 async def test_agent_navigate_all_namespace_maps_to_all_scope() -> None:
@@ -485,20 +485,20 @@ async def test_agent_open_logs_rechecks_pane_gen_after_cancel() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        orig_cancel = app._cancel_log_tasks
+        orig_cancel = app._logs.cancel_tasks
 
         async def cancel_then_user_opens() -> None:
             await orig_cancel()
-            app._cancel_log_tasks = orig_cancel  # type: ignore[method-assign]  # restoring the original bound method after the one-shot intercept
-            await app._open_log_pane(
+            app._logs.cancel_tasks = orig_cancel  # type: ignore[method-assign]  # restoring the original bound method after the one-shot intercept
+            await app._logs.open_pane(
                 "default", [("web-2", "main")], triples=[("default", "web-2", "main")]
             )
 
-        app._cancel_log_tasks = cancel_then_user_opens  # type: ignore[method-assign]  # simulating a user pane change inside the agent's cancel window
+        app._logs.cancel_tasks = cancel_then_user_opens  # type: ignore[method-assign]  # simulating a user pane change inside the agent's cancel window
         out = await app.agent_open_logs("web-1", "default")
         await pilot.pause()
         assert out.startswith("ERROR:")
-        assert ("default", "web-2", "main") in app._current_log_triples
+        assert ("default", "web-2", "main") in app._logs.current_triples
 
 
 async def test_agent_open_describe_shares_screen_when_panel_visible() -> None:
@@ -566,7 +566,7 @@ async def test_agent_open_logs_accepts_init_container() -> None:
         out = await app.agent_open_logs("web-1", "default", "setup")
         await pilot.pause()
         assert not out.startswith("ERROR:")
-        assert ("default", "web-1", "setup") in app._current_log_triples
+        assert ("default", "web-1", "setup") in app._logs.current_triples
 
 
 async def test_agent_open_logs_all_includes_init_and_ephemeral() -> None:
@@ -581,9 +581,9 @@ async def test_agent_open_logs_all_includes_init_and_ephemeral() -> None:
         out = await app.agent_open_logs("web-1", "default")
         await pilot.pause()
         assert not out.startswith("ERROR:")
-        assert ("default", "web-1", "main") in app._current_log_triples
-        assert ("default", "web-1", "setup") in app._current_log_triples
-        assert ("default", "web-1", "debugger") in app._current_log_triples
+        assert ("default", "web-1", "main") in app._logs.current_triples
+        assert ("default", "web-1", "setup") in app._logs.current_triples
+        assert ("default", "web-1", "debugger") in app._logs.current_triples
 
 
 async def test_navigation_closes_shared_describe_pane() -> None:

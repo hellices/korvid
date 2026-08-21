@@ -385,11 +385,11 @@ async def test_L_caps_at_8_pods_and_notifies() -> None:
         await pilot.press("shift+l")
         await until(
             pilot,
-            lambda: len(app._log_tasks) == 8 and any("8" in n.message for n in app._notifications),
+            lambda: len(app._logs.tasks) == 8 and any("8" in n.message for n in app._notifications),
             label="multi-stream cap enforced",
         )
         # Only 8 tasks should be running
-        assert len(app._log_tasks) <= 8
+        assert len(app._logs.tasks) <= 8
         # Notification about capping
         msgs = [n.message for n in app._notifications]
         assert any("8" in m for m in msgs)
@@ -503,14 +503,14 @@ async def test_L_single_pod_always_shows_prefix() -> None:
 
 
 async def test_error_task_discarded_state_stays_error() -> None:
-    """One container errors, other ends naturally: state=error, _log_tasks empty."""
+    """One container errors, other ends naturally: state=error, _logs.tasks empty."""
     error = ApiStatusError(403, "Forbidden")
     mixed = MixedFakeStream(error_containers={"sidecar"}, error=error)
     app = make_app(
         [_pod("myapp", containers=("main", "sidecar"))],
         stream_logs=mixed,
     )
-    app._reconnect_sleep = 0.0  # speed up reconnect cycle in test
+    app._logs.reconnect_sleep = 0.0  # speed up reconnect cycle in test
     async with app.run_test() as pilot:
         await _pod_row_ready(app, pilot)
         await pilot.press("l")
@@ -518,7 +518,7 @@ async def test_error_task_discarded_state_stays_error() -> None:
             pilot,
             lambda: (
                 "error" in str(app.query_one(LogPane).query_one("#log-header").render())
-                and not app._log_tasks
+                and not app._logs.tasks
             ),
             label="error state settled",
         )
@@ -528,7 +528,7 @@ async def test_error_task_discarded_state_stays_error() -> None:
         assert "error" in header_text
         assert "ended" not in header_text
         # No task leak: all tasks must have been discarded
-        assert len(app._log_tasks) == 0
+        assert len(app._logs.tasks) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +547,7 @@ async def test_L_on_non_pods_kind_is_inert_no_tasks() -> None:
         await pilot.press("shift+l")
         await pilot.pause(0.05)
         assert not any("pod" in n.message.lower() for n in app._notifications)
-        assert len(app._log_tasks) == 0
+        assert len(app._logs.tasks) == 0
         await app.action_logs_multi()
         await until(
             pilot,
@@ -555,7 +555,7 @@ async def test_L_on_non_pods_kind_is_inert_no_tasks() -> None:
             label="direct multi-log warning shown",
         )
         assert any("pod" in n.message.lower() for n in app._notifications)
-        assert len(app._log_tasks) == 0
+        assert len(app._logs.tasks) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -582,11 +582,11 @@ async def test_L_reopen_cancels_old_tasks_new_stream_opens() -> None:
         await pilot.press("shift+l")
         await until(
             pilot,
-            lambda: app.query_one(LogPane).display and len(app._log_tasks) > 0,
+            lambda: app.query_one(LogPane).display and len(app._logs.tasks) > 0,
             label="initial multi-stream opened",
         )
         assert app.query_one(LogPane).display is True
-        first_tasks = set(app._log_tasks)
+        first_tasks = set(app._logs.tasks)
         # Press Shift+L again to re-open
         await pilot.press("shift+l")
         await until(
@@ -594,7 +594,7 @@ async def test_L_reopen_cancels_old_tasks_new_stream_opens() -> None:
             lambda: (
                 app.query_one(LogPane).display
                 and all(task.done() for task in first_tasks)
-                and len(app._log_tasks) > 0
+                and len(app._logs.tasks) > 0
             ),
             label="multi-stream reopened",
         )
@@ -603,7 +603,7 @@ async def test_L_reopen_cancels_old_tasks_new_stream_opens() -> None:
         for t in first_tasks:
             assert t.done()
         # New tasks are running
-        assert len(app._log_tasks) > 0
+        assert len(app._logs.tasks) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -941,13 +941,13 @@ async def test_p_unexpected_error_sets_error_state() -> None:
         await pilot.press("p")
         await until(
             pilot,
-            lambda: "error" in app.query_one(LogPane)._state and not app._log_tasks,
+            lambda: "error" in app.query_one(LogPane)._state and not app._logs.tasks,
             label="previous-log error surfaced",
         )
 
         log_pane = app.query_one(LogPane)
         assert "error" in log_pane._state
-        assert not app._log_tasks  # failed task must be discarded
+        assert not app._logs.tasks  # failed task must be discarded
         assert any("Log stream error" in (n.title or "") for n in app._notifications)
 
 
@@ -956,7 +956,7 @@ async def test_open_bounds_richlog_to_buffer_capacity() -> None:
     from textual.widgets import RichLog
 
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=FakeStream())
-    app._log_buffer_max_lines = 10
+    app._logs.buffer_max_lines = 10
     async with app.run_test() as pilot:
         await _pod_row_ready(app, pilot)
         await pilot.press("l")
@@ -1056,11 +1056,11 @@ async def test_l_removing_last_pod_closes_pane() -> None:
         await pilot.press("l")
         await until(
             pilot,
-            lambda: not app.query_one(LogPane).display and not app._log_tasks,
+            lambda: not app.query_one(LogPane).display and not app._logs.tasks,
             label="last pod removal closed pane",
         )
         assert app.query_one(LogPane).display is False
-        assert not app._log_tasks
+        assert not app._logs.tasks
 
 
 async def test_l_caps_accumulation_at_4_pods() -> None:
@@ -1171,7 +1171,7 @@ async def test_reconnect_drops_replayed_tail_lines() -> None:
     """Lines at or before the last displayed timestamp are dropped on reconnect."""
     fake = ReconnectingFakeStream()
     app = make_app([_pod("app-a", containers=("main",))], stream_logs=fake)
-    app._reconnect_sleep = 0.0
+    app._logs.reconnect_sleep = 0.0
     async with app.run_test() as pilot:
         await _pod_row_ready(app, pilot)
         await pilot.press("l")
@@ -1221,7 +1221,7 @@ async def test_reconnect_keeps_new_line_with_equal_timestamp() -> None:
     """A new line sharing the last displayed timestamp survives a reconnect."""
     fake = SameTimestampReconnectStream()
     app = make_app([_pod("app-a", containers=("main",))], stream_logs=fake)
-    app._reconnect_sleep = 0.0
+    app._logs.reconnect_sleep = 0.0
     async with app.run_test() as pilot:
         await _pod_row_ready(app, pilot)
         await pilot.press("l")
@@ -1254,11 +1254,11 @@ async def test_open_log_pane_caps_spawned_streams_at_max_panels() -> None:
         await pilot.press("l")
         await until(
             pilot,
-            lambda: len(app._log_tasks) == MAX_PANELS and len(_panel_texts(app)) == MAX_PANELS,
+            lambda: len(app._logs.tasks) == MAX_PANELS and len(_panel_texts(app)) == MAX_PANELS,
             label="spawned streams capped",
         )
-        assert len(app._log_tasks) == MAX_PANELS
-        assert len(app._current_log_triples) == MAX_PANELS
+        assert len(app._logs.tasks) == MAX_PANELS
+        assert len(app._logs.current_triples) == MAX_PANELS
         panels = _panel_texts(app)
         assert len(panels) == MAX_PANELS
         msgs = [n.message for n in app._notifications]
@@ -1719,7 +1719,7 @@ async def test_previous_logs_refused_while_context_switching() -> None:
         await pilot.press("l")
         await until(
             pilot,
-            lambda: app.query_one(LogPane).display and app._log_tasks,
+            lambda: app.query_one(LogPane).display and app._logs.tasks,
             label="log pane streaming",
         )
         app._ctx_switching = True
@@ -1728,13 +1728,13 @@ async def test_previous_logs_refused_while_context_switching() -> None:
             await until(pilot, lambda: _refusal_notified(app), label="refusal notification")
         finally:
             app._ctx_switching = False
-        assert app._log_pane_mode == "l"  # previous mode never engaged
+        assert app._logs.mode == "l"  # previous mode never engaged
 
 
 async def test_previous_logs_dropped_when_epoch_moves_in_awaited_gap() -> None:
     """A :ctx switch crossing the awaited gap inside `p` (between the epoch
     capture and the pane re-open) must drop the open — this exercises the
-    action-level epoch threading, not just the `_open_log_pane` check
+    action-level epoch threading, not just the `open_pane` check
     (issue #84)."""
     fake = FakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
@@ -1743,13 +1743,13 @@ async def test_previous_logs_dropped_when_epoch_moves_in_awaited_gap() -> None:
         await pilot.press("l")
         await until(
             pilot,
-            lambda: app.query_one(LogPane).display and app._log_tasks,
+            lambda: app.query_one(LogPane).display and app._logs.tasks,
             label="log pane streaming",
         )
 
-        # Hold action_log_previous inside its _cancel_log_tasks await, bump
+        # Hold action_log_previous inside its cancel_tasks await, bump
         # the epoch as a completed switch would, then release the action.
-        real_cancel = app._cancel_log_tasks
+        real_cancel = app._logs.cancel_tasks
         entered = asyncio.Event()
         release = asyncio.Event()
 
@@ -1758,7 +1758,7 @@ async def test_previous_logs_dropped_when_epoch_moves_in_awaited_gap() -> None:
             await release.wait()
             await real_cancel()
 
-        app._cancel_log_tasks = blocked_cancel  # type: ignore[method-assign]
+        app._logs.cancel_tasks = blocked_cancel  # type: ignore[method-assign]
         try:
             action = asyncio.create_task(app.action_log_previous())
             await until(pilot, entered.is_set, label="action blocked in cancel")
@@ -1766,8 +1766,8 @@ async def test_previous_logs_dropped_when_epoch_moves_in_awaited_gap() -> None:
             release.set()
             await action
         finally:
-            app._cancel_log_tasks = real_cancel  # type: ignore[method-assign]
+            app._logs.cancel_tasks = real_cancel  # type: ignore[method-assign]
 
-        assert not app._log_tasks  # no previous-log streams were spawned
+        assert not app._logs.tasks  # no previous-log streams were spawned
         msgs = [n.message for n in app._notifications]
         assert any("kube context changed" in m for m in msgs)
