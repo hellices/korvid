@@ -22,7 +22,6 @@
   --korvid-radius: 0.5rem;
   --korvid-gap: 1.5rem;
   --korvid-measure: 42rem;
-  --korvid-content-width: 72rem;
 }
 
 /* ------------------------------------------------------------------ */
@@ -40,8 +39,6 @@
   border-radius: var(--korvid-radius);
   padding: 3rem 2rem;
   margin: 0 0 2rem;
-  max-width: var(--korvid-content-width);
-  margin-inline: auto;
 }
 
 .md-typeset .hero .hero-copy-column {
@@ -339,7 +336,6 @@
 /* ------------------------------------------------------------------ */
 
 .md-typeset .product-demo {
-  max-width: var(--korvid-content-width);
   margin: 0 auto 2.5rem;
   padding: 0;
 }
@@ -381,7 +377,6 @@
   display: grid;
   grid-template-columns: 1fr;
   gap: var(--korvid-gap);
-  max-width: var(--korvid-content-width);
   margin: 0 auto 2rem;
 }
 
@@ -431,7 +426,6 @@
   display: grid;
   gap: 1.25rem;
   width: 100%;
-  max-width: var(--korvid-content-width);
   margin-inline: auto;
   /* Material's default `.md-copyright` margin is replaced above, so the
      inline padding has to be restated or the footer runs into the viewport
@@ -515,7 +509,6 @@
 .md-typeset .hero ~ h2,
 .md-typeset .hero ~ p,
 .md-typeset .hero ~ ul {
-  max-width: var(--korvid-content-width);
   margin-left: auto;
   margin-right: auto;
 }

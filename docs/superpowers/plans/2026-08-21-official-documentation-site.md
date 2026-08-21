@@ -303,6 +303,14 @@ also runs only on pushes to `main`, needs the build job, has
 `pages: write`/`id-token: write`, uses the `github-pages` environment, and sets
 its URL from the deploy step output.
 
+Before the first deployment can succeed, a repository admin must enable Pages
+once, out-of-band from this workflow: **Settings -> Pages -> Build and
+deployment -> Source: GitHub Actions.** This one-time setting has no code
+representation; record it here so a clean run of this plan does not end with
+a deploy job that fails because Pages is still on its default source. No
+server or hosting infrastructure is otherwise required — GitHub Pages serves
+the built static site.
+
 - [ ] **Step 3: Validate links, metadata, and workflow**
 
 Run:

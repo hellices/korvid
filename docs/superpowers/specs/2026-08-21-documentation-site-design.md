@@ -55,8 +55,13 @@ The page tells a deliberate story:
 
 1. korvid is a keyboard-first cockpit for a Kubernetes cluster;
 2. the TUI is useful without AI;
-3. optional agent and MCP surfaces add diagnosis and external integration;
-4. writes remain human-approved and fail-closed audited; and
+3. korvid is one operational experience — one operational state, evidence
+   trail, and navigation model — that a human operator, the embedded agent,
+   and an external MCP client each drive as a different surface, without
+   claiming their screens or interfaces are identical;
+4. every write, whoever initiates it, converges on the same human approval
+   and fail-closed audit boundary — MCP-submitted writes are always
+   proposals, never executed automatically; and
 5. the reader can install immediately or enter the task-oriented guides.
 
 Primary navigation is organized by user intent:
@@ -132,6 +137,12 @@ A dedicated GitHub Pages workflow:
 - uses GitHub's Pages environment and concurrency controls; and
 - never executes untrusted documentation code or needs a repository secret.
 
+Before the workflow can deploy for the first time, a repository admin must
+enable Pages once: **Settings -> Pages -> Build and deployment -> Source: GitHub Actions.**
+Until that one-time setting is made, the deploy job fails even though the
+build job succeeds; no server or hosting infrastructure is otherwise
+operated by the project.
+
 The existing CI remains responsible for documentation-to-code contract tests.
 The Pages workflow adds rendering and link/configuration validation rather than
 replacing those checks.
@@ -151,7 +162,11 @@ actions: start the guide or view the project on GitHub.
 
 Below the hero:
 
-- a three-part product model presents cockpit, embedded agent, and MCP;
+- a three-part product model presents one operational experience driven by
+  three surfaces — direct operation, delegation to the embedded agent, and
+  connection over MCP — that share the same operational state, evidence,
+  navigation model, and approval/audit boundary without implying identical
+  screens or interfaces;
 - a safety section makes approval, masking, and fail-closed auditing visible
   before users have to search for the threat model;
 - the demo is shown at a readable width rather than treated as decoration; and

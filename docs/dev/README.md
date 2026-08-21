@@ -33,3 +33,24 @@ design document states the original intent.
 
 If you are looking for how to *use* korvid, start at the
 [project README](https://github.com/hellices/korvid/blob/main/README.md).
+
+## Publishing the documentation site
+
+Publishing is a merge, not a deploy script: no server or hosting
+infrastructure is provisioned or operated for the site. GitHub Pages serves
+the static build produced by
+[`.github/workflows/docs.yml`](https://github.com/hellices/korvid/blob/main/.github/workflows/docs.yml).
+
+Before the very first deployment, a repository admin must enable Pages
+**once**: **Settings -> Pages -> Build and deployment -> Source: GitHub Actions.**
+Until that one-time setting is made, the workflow's build job still
+succeeds but the deploy job fails.
+
+After that one-time setup, merging documentation-site changes to `main`
+triggers the workflow and publishes <https://hellices.github.io/korvid/>.
+Pull request builds validate the site (strict build, link checks) but do
+not deploy it — only a push to `main` runs the deploy job.
+
+A custom domain is optional and deliberately deferred: adopting one later
+only requires `site_url`, Pages settings, DNS, and a `CNAME` file, not a
+content migration.

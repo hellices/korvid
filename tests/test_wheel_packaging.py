@@ -53,18 +53,42 @@ def _pyproject() -> dict[str, object]:
     return tomllib.loads((ROOT / "pyproject.toml").read_text())
 
 
-def _wheel_target() -> dict[str, object]:
-    hatch = _pyproject().get("tool", {})
+def _hatch_build() -> dict[str, object]:
+    """Return the shared `[tool.hatch.build]` table (empty if unset)."""
+    tool = _pyproject().get("tool", {})
+    assert isinstance(tool, dict)
+    hatch = tool.get("hatch", {})
     assert isinstance(hatch, dict)
-    build = hatch.get("hatch", {})
+    build = hatch.get("build", {})
     assert isinstance(build, dict)
-    targets = build.get("build", {})
+    return build
+
+
+def _wheel_target() -> dict[str, object]:
+    targets = _hatch_build().get("targets", {})
     assert isinstance(targets, dict)
-    wheel = targets.get("targets", {})
-    assert isinstance(wheel, dict)
-    target = wheel.get("wheel", {})
+    target = targets.get("wheel", {})
     assert isinstance(target, dict)
     return target
+
+
+def _assert_no_docs_injection(table: dict[str, object], where: str) -> None:
+    """Fail if any file-injecting key in `table` mentions documentation-site paths.
+
+    Args:
+        table: A hatch build table (`[tool.hatch.build]` or a target's table).
+        where: The table's dotted name, used in the failure message.
+    """
+    for key in FILE_INJECTING_KEYS:
+        value = table.get(key)
+        if value is None:
+            continue
+        rendered = str(value).lower()
+        for token in DOCS_ONLY_TOKENS:
+            assert token not in rendered, (
+                f"[{where}].{key} = {value!r} would pull {token!r} into the wheel; "
+                "the wheel ships code only"
+            )
 
 
 def test_wheel_ships_only_the_korvid_package() -> None:
@@ -77,17 +101,39 @@ def test_wheel_ships_only_the_korvid_package() -> None:
 
 def test_wheel_target_does_not_force_extra_files_into_the_artifact() -> None:
     """No hatch key may inject docs, site output, CSS, SVG, or mkdocs.yml."""
-    target = _wheel_target()
-    for key in FILE_INJECTING_KEYS:
-        value = target.get(key)
-        if value is None:
-            continue
-        rendered = str(value).lower()
-        for token in DOCS_ONLY_TOKENS:
-            assert token not in rendered, (
-                f"[tool.hatch.build.targets.wheel].{key} = {value!r} would pull "
-                f"{token!r} into the wheel; the wheel ships code only"
-            )
+    _assert_no_docs_injection(_wheel_target(), "tool.hatch.build.targets.wheel")
+
+
+def test_shared_build_config_does_not_force_extra_files_into_the_artifact() -> None:
+    """The wheel also inherits `[tool.hatch.build]`, so it needs the same scan.
+
+    Hatchling merges the shared `[tool.hatch.build]` table into every target.
+    An `include = ["docs"]` there would ship the documentation site in the
+    wheel even though `[tool.hatch.build.targets.wheel]` looked untouched —
+    which is exactly the edit a reader of the wheel-target test alone would
+    believe was safe.
+    """
+    _assert_no_docs_injection(_hatch_build(), "tool.hatch.build")
+
+
+def test_no_build_hook_can_smuggle_the_documentation_site_into_the_wheel() -> None:
+    """Build hooks run arbitrary code at build time and may add any file.
+
+    A hook (`[tool.hatch.build.hooks.*]` or
+    `[tool.hatch.build.targets.wheel.hooks.*]`) can copy `site/` into the
+    artifact, so no static key scan can prove the wheel is clean while one is
+    configured. korvid's wheel is a plain `packages` copy; keep it that way.
+    """
+    for table, where in (
+        (_hatch_build(), "tool.hatch.build"),
+        (_wheel_target(), "tool.hatch.build.targets.wheel"),
+    ):
+        hooks = table.get("hooks")
+        assert hooks is None, (
+            f"[{where}.hooks] is configured ({hooks!r}); a build hook can inject the "
+            "documentation site into the wheel, so the source-config invariants in "
+            "this module would no longer prove anything"
+        )
 
 
 def test_mkdocs_is_never_a_runtime_or_extra_requirement() -> None:

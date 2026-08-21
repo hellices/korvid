@@ -147,3 +147,99 @@ def test_deploy_job_is_main_only_needs_build_and_is_least_privilege() -> None:
 def test_workflow_level_permissions_are_read_only() -> None:
     config = _load()
     assert config.get("permissions") == {"contents": "read"}
+
+
+DEV_README = ROOT / "docs" / "dev" / "README.md"
+DESIGN_DOC = ROOT / "docs" / "superpowers" / "specs" / "2026-08-21-documentation-site-design.md"
+PLAN_DOC = ROOT / "docs" / "superpowers" / "plans" / "2026-08-21-official-documentation-site.md"
+WORKFLOW_LINK = "https://github.com/hellices/korvid/blob/main/.github/workflows/docs.yml"
+SITE_URL = "https://hellices.github.io/korvid/"
+
+
+def _publishing_section() -> str:
+    """Return the contributor docs' publishing section, or fail loudly."""
+    text = DEV_README.read_text()
+    heading = "## Publishing the documentation site"
+    assert heading in text, (
+        "docs/dev/README.md must explain how the site reaches "
+        f"{SITE_URL} — the workflow alone does not tell a maintainer that "
+        "Pages must be switched to the GitHub Actions source once"
+    )
+    section = text.split(heading, 1)[1]
+    return section.split("\n## ", 1)[0]
+
+
+def test_contributor_docs_explain_how_the_site_is_published() -> None:
+    """Publishing is a merge, not a deploy script — and it needs one repo setting."""
+    section = _publishing_section()
+    lowered = section.lower()
+    assert "no server" in lowered or "no hosting" in lowered, (
+        "the section must say that no server has to be run or provisioned"
+    )
+    assert "settings" in lowered, (
+        "the one-time enablement path (Settings -> Pages) must be spelled out"
+    )
+    assert "pages" in lowered, (
+        "the one-time enablement path (Settings -> Pages) must be spelled out"
+    )
+    assert "github actions" in lowered, (
+        "Pages must be switched from the default branch source to the GitHub "
+        "Actions source, or the workflow's deploy job fails"
+    )
+    assert SITE_URL in section, "the section must name the published URL"
+    assert "main" in lowered, "the section must state that merging to main is what publishes"
+    assert "merg" in lowered, "the section must state that merging to main is what publishes"
+    assert "pull request" in lowered, (
+        "the section must state that pull-request builds validate but never deploy"
+    )
+    assert "not deploy" in lowered, (
+        "the section must state that pull-request builds validate but never deploy"
+    )
+    assert "custom domain" in lowered, (
+        "a custom domain is deliberately deferred; say so instead of leaving it open"
+    )
+    assert "optional" in lowered, (
+        "a custom domain is deliberately deferred; say so instead of leaving it open"
+    )
+
+
+def test_publishing_section_links_the_workflow_in_a_strict_build_safe_way() -> None:
+    """A repo-relative `../../.github/...` link would fail `mkdocs build --strict`.
+
+    `docs/dev/README.md` is a built page, and MkDocs validates internal links
+    against files inside `docs/`. The workflow lives outside the docs tree, so
+    it must be linked absolutely on GitHub.
+    """
+    section = _publishing_section()
+    assert WORKFLOW_LINK in section, (
+        f"link the workflow as {WORKFLOW_LINK}; a docs-relative path to "
+        ".github/workflows/docs.yml is not a documentation file and would break "
+        "the strict build"
+    )
+    assert "](../../.github" not in section, (
+        "a relative link outside docs/ fails MkDocs' internal-link validation"
+    )
+    assert "](.github" not in section, (
+        "a relative link outside docs/ fails MkDocs' internal-link validation"
+    )
+
+
+def test_design_document_records_the_one_time_pages_enablement() -> None:
+    """The committed design doc must not imply the workflow is sufficient alone."""
+    design = DESIGN_DOC.read_text().lower()
+    assert "source: github actions" in design, (
+        "the design document's rollout section must record the exact one-time "
+        "repository setting (Settings -> Pages -> Build and deployment -> "
+        "Source: GitHub Actions); without it the deploy job fails on first run"
+    )
+    assert "once" in design, "the setting is a one-time admin action; say so"
+
+
+def test_plan_records_the_one_time_pages_enablement_step() -> None:
+    """The implementation plan must carry the same one-time enablement step."""
+    plan = PLAN_DOC.read_text().lower()
+    assert "source: github actions" in plan, (
+        "the plan's deployment task must include the one-time repository setting "
+        "(Settings -> Pages -> Build and deployment -> Source: GitHub Actions), "
+        "otherwise a clean run of the plan produces a workflow that cannot deploy"
+    )

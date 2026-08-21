@@ -184,3 +184,33 @@ def test_getting_started_version_consistent_with_readme_publication_state() -> N
             f"but pyproject.toml's project.version is {project_version!r}. "
             "Sync getting-started.md with the published project version."
         )
+
+
+def test_theme_custom_dir_resolves_to_the_overrides_directory() -> None:
+    """`theme.custom_dir` must point at the directory that holds korvid's partials.
+
+    The korvid footer is a `partials/copyright.html` override. MkDocs only
+    picks it up when `theme.custom_dir` resolves — relative to `mkdocs.yml` —
+    to the directory containing it. A renamed or mistyped `custom_dir` builds
+    cleanly and silently restores the bare Material footer, so the wiring is
+    pinned here rather than left to a human noticing the footer changed.
+    """
+    config = _load_mkdocs_config()
+    theme = config.get("theme")
+    assert isinstance(theme, dict), "mkdocs.yml must configure a theme"
+    custom_dir = theme.get("custom_dir")
+    assert isinstance(custom_dir, str), (
+        "theme.custom_dir must be set, or the korvid template overrides are ignored"
+    )
+    assert custom_dir, "theme.custom_dir must be set, or the korvid template overrides are ignored"
+
+    # MkDocs resolves `custom_dir` relative to the config file's directory.
+    resolved = (ROOT / custom_dir).resolve()
+    assert resolved.is_dir(), f"theme.custom_dir points at {custom_dir!r}, which does not exist"
+    assert (resolved / "partials" / "copyright.html").is_file(), (
+        f"{custom_dir}/partials/copyright.html must exist: it is the override that "
+        "replaces Material's default footer with korvid's"
+    )
+    assert (resolved / "home.html").is_file(), (
+        f"{custom_dir}/home.html must exist: docs/index.md selects it via `template:`"
+    )

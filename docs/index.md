@@ -20,7 +20,7 @@ hide:
   <aside class="hero-panel" aria-label="korvid key legend">
     <div class="hero-panel__bar" aria-hidden="true">
       <span class="hero-panel__lights"></span>
-      <span class="hero-panel__title">korvid — ctx:(current) ns:shop</span>
+      <span class="hero-panel__title">korvid — you · agent · mcp — ctx:(current) ns:shop</span>
     </div>
     <dl class="hero-panel__keys">
       <dt><kbd>:</kbd></dt><dd>command bar — <span class="hero-panel__literal">pods</span>, <span class="hero-panel__literal">ns shop</span>, <span class="hero-panel__literal">helm</span></dd>
@@ -39,19 +39,30 @@ hide:
   <figcaption>The cockpit works with your kubeconfig alone. AI is optional.</figcaption>
 </figure>
 
-## One cockpit. Three ways in.
+## One operational experience. Three ways to drive it.
+
+Korvid runs one session: one resource cache, one evidence trail, one
+approval gate. **Different surfaces. One operational state.** A human
+operator's keyboard, the embedded agent's tool calls, and an external MCP
+client's requests all read the same navigation model and the same evidence,
+and every write — however it starts — crosses the same approval and audit
+boundary.
 
 <div class="feature-grid">
-  <article><span>01</span><h3>Keyboard-first TUI</h3><p>Watch any resource, filter instantly, follow relationships, merge logs, and run guarded operations without memorizing kubectl flag order.</p></article>
-  <article><span>02</span><h3>Agent inside</h3><p>An optional agent sees the active view and selection, reads evidence, cites it, and drives the real interface instead of chatting beside it.</p></article>
-  <article><span>03</span><h3>MCP outside</h3><p>Give VS Code, Claude Code, Cursor, or Zed bounded cluster reads and visible UI follow mode. Writes remain proposals for a human.</p></article>
+  <article><span>01</span><h3>Drive it yourself</h3><p>Browse, filter, follow relationships, and run guarded operations straight from the keyboard — the same resource view, evidence, and safety gate every other actor shares.</p></article>
+  <article><span>02</span><h3>Delegate to the agent</h3><p>An embedded agent reads the same evidence you see, cites it, and drives korvid on your behalf. Its writes still cross the same confirmation gate as yours.</p></article>
+  <article><span>03</span><h3>Connect over MCP</h3><p>Give VS Code, Claude Code, Cursor, or Zed bounded reads of the same cluster state and evidence. Writes remain proposals for a human to confirm.</p></article>
 </div>
 
 ## Sharp tools. Human hands.
 
-Every mutation requires a fresh keystroke confirmation. Executed writes are
-audited fail-closed. Secret values are masked before model calls, and
-`--readonly` removes the write path entirely.
+Every mutation requires a fresh keystroke confirmation — whether you
+triggered it directly, the embedded agent proposed it after reading the
+evidence, or an MCP client submitted a request. MCP writes are always
+proposals, never executed automatically. Whoever initiates it, the write
+converges on the same in-TUI confirmation and the same fail-closed audit
+path. Secret values are masked before model calls, and `--readonly` removes
+the write path entirely.
 
 [Read the safety model](ops.md){ .md-button .korvid-button } [Inspect the threat model](threat-model.md){ .md-button .korvid-button }
 

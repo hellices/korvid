@@ -49,6 +49,25 @@ def _css() -> str:
     return EXTRA_CSS.read_text()
 
 
+def _strip_css_comments(css: str) -> str:
+    """Remove `/* … */` comments so prose can never be read as a selector.
+
+    The stylesheet documents each fix in a comment directly above the rule it
+    explains, and those comments quote selectors and declarations verbatim. A
+    naive text search would therefore match the *explanation* instead of the
+    rule, and a test could pass on a stylesheet whose real declaration had
+    been deleted.
+
+    Args:
+        css: Full stylesheet text.
+
+    Returns:
+        The same text with every comment replaced by a single space, so
+        neighbouring tokens cannot be accidentally joined.
+    """
+    return re.sub(r"/\*.*?\*/", " ", css, flags=re.DOTALL)
+
+
 def _rule(css: str, selector: str) -> str:
     """Return the declaration block of the first rule whose selector list matches.
 
@@ -59,10 +78,11 @@ def _rule(css: str, selector: str) -> str:
     Returns:
         The text between `{` and the matching `}` for that rule.
     """
-    index = css.index(selector)
-    open_brace = css.index("{", index)
-    close_brace = css.index("}", open_brace)
-    return css[open_brace + 1 : close_brace]
+    stripped = _strip_css_comments(css)
+    index = stripped.index(selector)
+    open_brace = stripped.index("{", index)
+    close_brace = stripped.index("}", open_brace)
+    return stripped[open_brace + 1 : close_brace]
 
 
 # --- 1. the install command never breaks mid-token ---------------------------
@@ -282,3 +302,175 @@ def test_reduced_motion_is_respected_for_every_animated_landing_element() -> Non
     reduce_block = css[reduce_start:]
     assert "transition: none" in reduce_block
     assert "transform: none" in reduce_block
+
+
+# --- the rule helper must read rules, never the prose that explains them -----
+
+
+def test_rule_helper_ignores_selectors_that_only_appear_in_a_comment() -> None:
+    """A commented-out or merely *described* rule must not satisfy a rule assertion.
+
+    `extra.css` explains every fix in a comment above the rule it applies, and
+    those comments quote selectors and declarations verbatim. Without comment
+    stripping, `_rule` could return the first *comment* that mentions a
+    selector, so a stylesheet that had lost the real declaration would still
+    pass.
+    """
+    css = """
+    /* .fake-selector { word-break: break-word; } explains the bug */
+    .fake-selector {
+      word-break: normal;
+    }
+    """
+    block = _rule(css, ".fake-selector")
+    assert "word-break: normal" in block, "the helper must return the real rule's block"
+    assert "break-word" not in block, "the helper must not return a comment's contents"
+
+
+# --- 4. one operational experience, three surfaces that drive it ------------
+
+
+def test_landing_frames_one_experience_rather_than_three_separate_products() -> None:
+    """The product model section must not read as three unrelated entry points.
+
+    Korvid is a single agentic Kubernetes UI. A human operator, the embedded
+    agent, and an external MCP-connected assistant are *actors* driving one
+    operational experience, not three products bolted together, so the
+    heading must say so.
+    """
+    index = _index()
+    assert "## One cockpit. Three ways in." not in index, (
+        "'three ways in' reads as three doors into three things; the site sells "
+        "one operational experience with three ways to drive it"
+    )
+    assert "## One operational experience. Three ways to drive it." in index, (
+        "the product-model heading must name the single experience the three surfaces share"
+    )
+
+
+def test_landing_names_what_the_three_surfaces_actually_share() -> None:
+    """The claim must be specific: state, evidence, navigation, and the safety gate.
+
+    A vague 'works together' line would be marketing. Naming the four shared
+    things is checkable, and it is what the architecture actually guarantees.
+    """
+    index = _index()
+    assert "Different surfaces. One operational state." in index, (
+        "the section needs a line that separates surface from state, so the page "
+        "never implies the three actors see identical screens"
+    )
+    lowered = index.lower()
+    for shared in ("evidence", "navigation", "approval", "audit"):
+        assert shared in lowered, (
+            f"the shared-state line must name {shared!r} explicitly rather than "
+            "claiming a vague unity"
+        )
+
+
+def test_feature_cards_are_ways_to_drive_korvid_not_three_feature_silos() -> None:
+    """Each card must describe an actor driving the shared experience."""
+    index = _index()
+    grid_start = index.index('<div class="feature-grid">')
+    grid = index[grid_start : index.index("</div>", grid_start)]
+    headings = re.findall(r"<h3>(.*?)</h3>", grid)
+    assert len(headings) == 3, "the product model still has exactly three surfaces"
+    joined = " ".join(headings).lower()
+    assert "yourself" in joined or "you drive" in joined or "direct" in joined, (
+        "the first card is the human operator driving korvid directly"
+    )
+    assert "delegate" in joined, "the second card is delegation to the embedded agent"
+    assert "mcp" in joined, "the third card is connecting an external assistant over MCP"
+    body = grid.lower()
+    assert "same" in body, (
+        "the cards must tie back to the shared operational state rather than "
+        "describing three disconnected features"
+    )
+
+
+def test_safety_section_converges_every_actor_on_one_write_path() -> None:
+    """Whoever initiates a write, the gate and the audit path are the same one."""
+    index = _index()
+    section_start = index.index("## Sharp tools. Human hands.")
+    section = index[section_start : index.index("[Read the safety model]", section_start)]
+    lowered = section.lower()
+    assert "agent" in lowered, (
+        "the safety paragraph must name the actors it is making a claim about"
+    )
+    assert "mcp" in lowered, "the safety paragraph must name the actors it is making a claim about"
+    assert "same" in lowered, (
+        "the point of the paragraph is convergence: one confirmation path, one "
+        "audit path, regardless of which actor initiated the operation"
+    )
+    assert "confirmation" in lowered or "confirm" in lowered
+    assert "fail-closed" in lowered, "the audit path must still be described as fail-closed"
+    assert "proposal" in lowered, (
+        "MCP writes are proposals, never executed writes — the page must stay "
+        "factually precise about that"
+    )
+
+
+def test_landing_never_claims_the_surfaces_look_the_same() -> None:
+    """Shared state is a true claim; identical screens is not.
+
+    An MCP client renders korvid's data in the editor's own chat UI. Claiming
+    the surfaces are identical would be false, so the page must not say it.
+    """
+    lowered = _index().lower()
+    for overclaim in ("identical", "same screen", "same ui", "same interface"):
+        assert overclaim not in lowered, (
+            f"{overclaim!r} overclaims: the three actors share korvid's operational "
+            "state and safety boundary, not their literal screens"
+        )
+
+
+def test_hero_terminal_motif_reinforces_the_three_actors() -> None:
+    """The cockpit motif carries the convergence idea with no new markup weight."""
+    index = _index()
+    panel_start = index.index('class="hero-panel"')
+    panel = index[panel_start : index.index("</aside>", panel_start)]
+    bar = panel[panel.index('class="hero-panel__bar"') : panel.index("</div>")]
+    lowered = bar.lower()
+    for actor in ("you", "agent", "mcp"):
+        assert actor in lowered, (
+            f"the terminal status line should name {actor!r}, reinforcing that all "
+            "three actors drive one session"
+        )
+    assert "<img" not in bar, "the reinforcement must stay text-in-CSS-chrome, not a new asset"
+    assert "svg" not in lowered, "the reinforcement must stay text-in-CSS-chrome, not a new asset"
+
+
+# --- 5. every declared value must actually take effect ----------------------
+
+
+def test_stylesheet_declares_no_inert_content_width_abstraction() -> None:
+    """A custom property that never binds is worse than no abstraction at all.
+
+    `--korvid-content-width: 72rem` resolved to 1440px (Material sets the root
+    font size to 125%), while Material caps `.md-content__inner` at
+    `61rem` = 1220px. Every `max-width: var(--korvid-content-width)` was
+    therefore dead weight: editing it changed nothing until it dropped below
+    the theme's own cap, so the stylesheet documented a landing width the site
+    did not have.
+    """
+    css = _css()
+    assert "--korvid-content-width" not in css, (
+        "remove the inert width variable (or widen the landing grid so it binds); "
+        "a value that only takes effect below the theme's own cap misleads the "
+        "next editor"
+    )
+
+
+def test_design_document_records_the_agentic_ui_positioning() -> None:
+    """The committed design doc must describe the same product model as the site."""
+    design = (
+        ROOT / "docs" / "superpowers" / "specs" / "2026-08-21-documentation-site-design.md"
+    ).read_text()
+    lowered = design.lower()
+    assert "one operational experience" in lowered, (
+        "the design document still describes the landing page as three separate "
+        "product parts; it must match the shipped agentic-UI positioning"
+    )
+    assert "surface" in lowered
+    assert "proposal" in lowered, (
+        "the design document must keep the factual limit that MCP writes are proposals"
+    )
