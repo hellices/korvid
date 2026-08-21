@@ -38,7 +38,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +57,7 @@ from korvid.evals.fake_kube import builtin_aliases
 from korvid.evals.operation import OperationJourney, OperationTarget, StateAssertion
 from korvid.evals.operation_grader import (
     OperationGrade,
+    evaluate_assertion,
     evaluate_assertion_document,
     grade_operation,
 )
@@ -1002,18 +1003,18 @@ def _journal_grader_reads(
 ) -> None:
     for assertion in journey.postconditions:
         target = assertion.target
-        found, _value = state.read(
+        result = evaluate_assertion(state, assertion)
+        live_uid = state.uid_of(
             group=target.group,
             kind=target.kind,
             namespace=target.namespace,
             name=target.name,
-            path=assertion.path,
         )
         journal.append(
             event="grader_read",
             actor="grader",
-            target=JournalTarget.of(target),
-            result="found" if found else "absent",
+            target=replace(JournalTarget.of(target), uid=live_uid),
+            result="found" if result.found else "absent",
             detail=summarize_untrusted(path=assertion.path),
         )
 

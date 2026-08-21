@@ -29,7 +29,13 @@ from typing import Any
 from uuid import uuid4
 
 from korvid.agent.profiles import PromptOverrides, build_profile
-from korvid.evals.__main__ import prompt_fingerprint
+from korvid.evals.__main__ import (
+    PROBE_TIMEOUT_SECONDS,
+    capture_serving,
+    httpx_fetch,
+    prompt_fingerprint,
+    warn_if_unpinned,
+)
 from korvid.evals.operation import (
     OPERATION_SCHEMA_VERSION,
     OperationJourney,
@@ -329,6 +335,20 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     run_id, run_dir = _create_run_dir(args.artifacts)
     records = asyncio.run(_run(args, pairs, run_id=run_id, run_dir=run_dir))
+    serving = None
+    if not args.scripted:
+        serving = asyncio.run(
+            capture_serving(
+                os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),
+                os.environ.get("KORVID_EVAL_MODEL", "").strip(),
+                fetch=httpx_fetch(
+                    api_key=os.environ.get("KORVID_EVAL_API_KEY", "").strip(),
+                    timeout_seconds=PROBE_TIMEOUT_SECONDS,
+                ),
+                warmup=False,
+            )
+        )
+        warn_if_unpinned(serving)
     profile = build_profile(
         args.profile, readonly=False, resize_supported=False, overrides=PromptOverrides()
     )
@@ -344,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
             "run_id": run_id,
             "artifact_base": str(args.artifacts),
             "artifact_dir": str(run_dir),
+            **({"serving": serving} if serving is not None else {}),
         },
         "runs": records,
     }

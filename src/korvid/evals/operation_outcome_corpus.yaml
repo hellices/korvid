@@ -143,3 +143,33 @@
   label: unknown
 - text: The deployment was not, due to an API timeout, successfully restarted.
   label: unknown
+- text: The operation hasn't completed.
+  label: unknown
+- text: The operation hasn’t completed.
+  label: unknown
+- text: I haven't completed the deployment.
+  label: unknown
+- text: The system can't complete the deployment.
+  label: unknown
+- text: The operation wouldn't complete.
+  label: unknown
+- text: The operation shouldn't be complete.
+  label: unknown
+- text: The operation mustn't be marked complete.
+  label: unknown
+- text: I don't consider the operation complete.
+  label: unknown
+- text: The deployments aren't complete.
+  label: unknown
+- text: The replicas weren't confirmed.
+  label: unknown
+- text: The operation hadn't completed.
+  label: unknown
+- text: The operation needn't be marked complete.
+  label: unknown
+- text: The operation mightn't be complete.
+  label: unknown
+- text: The operation shan't be marked complete.
+  label: unknown
+- text: The operation oughtn't be considered complete.
+  label: unknown

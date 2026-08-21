@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from korvid.evals.operation import bundled_operations_dir, load_operation_journeys
 
+from . import operation_campaign
 from .operation_app import MIN_APPROVAL_TIMEOUT
 from .operation_campaign import _korvid_revision, _seeds, approval_timeout_for, main
 
@@ -52,6 +54,50 @@ def test_a_scripted_campaign_writes_a_provenance_stamped_artifact(tmp_path: Path
     assert run["journal"]
     assert run["audit"]
     assert markdown_path.read_text().startswith("| journey |")
+
+
+def test_a_live_campaign_records_the_serving_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    serving = {"model": "operator-model", "unavailable": []}
+
+    async def fake_capture_serving(
+        base_url: str,
+        model: str,
+        **_kwargs: object,
+    ) -> dict[str, Any]:
+        assert (base_url, model) == ("https://models.example/v1", "operator-model")
+        return serving
+
+    async def fake_run(*_args: object, **_kwargs: object) -> list[dict[str, Any]]:
+        return []
+
+    monkeypatch.setenv("KORVID_EVAL_BASE_URL", "https://models.example/v1")
+    monkeypatch.setenv("KORVID_EVAL_MODEL", "operator-model")
+    monkeypatch.setattr(
+        operation_campaign,
+        "capture_serving",
+        fake_capture_serving,
+        raising=False,
+    )
+    monkeypatch.setattr(operation_campaign, "_run", fake_run)
+    payload_path = tmp_path / "operations.json"
+
+    code = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--reps",
+            "1",
+            "--json",
+            str(payload_path),
+            "--artifacts",
+            str(tmp_path / "artifacts"),
+        ]
+    )
+
+    assert code == 0
+    assert json.loads(payload_path.read_text())["meta"]["serving"] == serving
 
 
 def test_seeded_generation_is_rejected_in_scripted_mode(tmp_path: Path) -> None:

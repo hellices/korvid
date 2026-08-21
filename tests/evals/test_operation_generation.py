@@ -48,6 +48,21 @@ def test_exhausted_namespace_pool_uses_a_noncolliding_fallback(
     assert first.target.namespace not in used
 
 
+@pytest.mark.parametrize(
+    ("template_id", "seed"),
+    [
+        ("a" * 63, 1),
+        ("scale-deployment-up", int("9" * 300)),
+    ],
+)
+def test_generated_instance_id_fails_before_exceeding_the_schema_limit(
+    template_id: str, seed: int
+) -> None:
+    template = replace(_TEMPLATES["scale-deployment-up"], id=template_id)
+    with pytest.raises(ValueError, match="generated instance id must be at most 63 characters"):
+        generate_instance(template, seed)
+
+
 def test_the_instance_stays_internally_consistent() -> None:
     instance, record = generate_instance(_TEMPLATES["scale-deployment-up"], 3)
     target = instance.target

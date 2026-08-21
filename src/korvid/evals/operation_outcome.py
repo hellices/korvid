@@ -167,13 +167,9 @@ _NEGATORS = (
     "nothing",
     "none",
     "neither",
-    "couldn't",
-    "didn't",
-    "doesn't",
-    "isn't",
-    "wasn't",
-    "won't",
 )
+_APOSTROPHE_TRANSLATION = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'"})
+_CONTRACTED_NEGATOR = re.compile(r"(?<!\w)[a-z]+n't(?!\w)")
 
 #: Sentence terminators plus the contrast conjunctions and the colon that
 #: introduce a new claim. A negator on one side must not reach the other.
@@ -215,14 +211,16 @@ _UNCERTAIN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_word(word) for word in
 
 
 def _clauses(answer: str) -> tuple[str, ...]:
-    lowered = " ".join(answer.lower().split())
+    lowered = " ".join(answer.translate(_APOSTROPHE_TRANSLATION).lower().split())
     return tuple(part.strip() for part in _CLAUSE_SPLIT.split(lowered) if part.strip())
 
 
 def _negated_before(clause: str, start: int) -> bool:
     window = clause[:start].split()[-_NEGATION_WINDOW:]
     text = " ".join(window)
-    return any(pattern.search(text) for pattern in _NEGATOR_PATTERNS)
+    return any(pattern.search(text) for pattern in _NEGATOR_PATTERNS) or bool(
+        _CONTRACTED_NEGATOR.search(text)
+    )
 
 
 def _hedged(clause: str) -> bool:
@@ -294,7 +292,7 @@ def load_outcome_corpus(path: Path | None = None) -> tuple[CorpusEntry, ...]:
     """
 
     source = bundled_outcome_corpus_path() if path is None else path
-    raw: Any = yaml.safe_load(source.read_text())
+    raw: Any = yaml.safe_load(source.read_text(encoding="utf-8"))
     if not isinstance(raw, list) or not raw:
         raise ValueError(f"{source.name}: corpus must be a non-empty list")
     allowed = set(OUTCOME_PRECEDENCE) | {"ambiguous", "unknown"}

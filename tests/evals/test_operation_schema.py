@@ -102,6 +102,20 @@ def test_a_minimal_operation_journey_loads_with_typed_target_identity(tmp_path: 
     assert journey.dialog_intervention is None
 
 
+def test_operation_fixture_is_read_as_utf8(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = _minimal()
+    data["turns"] = ["shop-a의 checkout-a를 3개로 확장해."]
+    path = _write(tmp_path, data)
+    original_read_text = Path.read_text
+
+    def checked_read_text(file: Path, *args: Any, **kwargs: Any) -> str:
+        assert kwargs.get("encoding") == "utf-8"
+        return original_read_text(file, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", checked_read_text)
+    assert load_operation_journey(path).turns == tuple(data["turns"])
+
+
 def test_target_plural_must_match_a_supported_canonical_resource(tmp_path: Path) -> None:
     data = _minimal()
     data["operation"]["target"]["plural"] = "deploymentz"

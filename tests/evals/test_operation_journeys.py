@@ -896,6 +896,14 @@ async def test_the_replacement_read_after_the_swap_earns_no_state_credit(
     assert all(entry["result"] == "no_credit" for entry in skipped)
 
 
+async def test_the_grader_journals_the_live_replacement_identity(tmp_path: Path) -> None:
+    run = await run_scripted_journey("scale-same-name-replacement", tmp_path)
+    reads = [entry for entry in run.journal if entry["event"] == "grader_read"]
+    assert len(reads) == 1
+    assert reads[0]["target"]["uid"] == "deployment-checkout-a-2"
+    assert reads[0]["result"] == "absent"
+
+
 async def test_a_listing_is_journaled_but_never_earns_state_credit(tmp_path: Path) -> None:
     """The ambiguity journey opens with `list_resources`: not a target
     document, so no credit — the write still waits for the `get_resource`

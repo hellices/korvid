@@ -163,6 +163,11 @@ def generate_instance(
         reproduces the same instance, byte for byte.
     """
 
+    instance_id = f"{template.id}-s{seed}"
+    if len(instance_id) > 63:
+        raise ValueError(
+            "generated instance id must be at most 63 characters; use a shorter template id or seed"
+        )
     rng = random.Random(seed)
     old = template.target
     used = {
@@ -181,7 +186,7 @@ def generate_instance(
     )
     instance = replace(
         template,
-        id=f"{template.id}-s{seed}",
+        id=instance_id,
         target=target,
         preconditions=_moved_assertions(template.preconditions, old, namespace, name),
         postconditions=_moved_assertions(template.postconditions, old, namespace, name),
