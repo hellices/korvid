@@ -1838,7 +1838,11 @@ async def test_write_timeline_uses_qualified_alias_when_bare_plural_collides(
     entry = timeline.snapshot(epoch=0, source=TimelineSource.WRITE, resource=None).entries[0]
     assert entry.resource is not None
     assert entry.resource.kind_alias == "subscriptions.operators.coreos.com"
-    app._record_timeline_watch_event(
+    # Drive the watch delta through the installed sink itself - the
+    # controller's `record_watch_event` (issue #282 Task 3) - rather than a
+    # removed app-private method.
+    assert app.watch_manager.on_event is not None
+    app.watch_manager.on_event(
         "sub",
         "default",
         "ADDED",

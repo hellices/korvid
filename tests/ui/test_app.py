@@ -1428,6 +1428,17 @@ async def test_watch_deltas_are_inert_without_a_timeline() -> None:
         assert app.watch_manager.on_event is None
 
 
+async def test_timeline_startup_installs_the_controllers_watch_sink() -> None:
+    """Startup wires `WatchManager.on_event` to the `SessionTimelineController`
+    itself (issue #282 Task 3), not to an app-owned method that merely
+    forwards to it - so the sink survives however the controller later
+    chooses to implement it."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=8192)
+    app = make_app([_pod("web-1")], session_timeline=timeline)
+    async with app.run_test():
+        assert app.watch_manager.on_event == app._timeline.record_watch_event
+
+
 async def test_warning_watch_redacts_before_timeline_storage() -> None:
     """Warning-event text is cluster-controlled: credentials must be masked
     and newlines flattened before anything is retained."""
@@ -1469,7 +1480,7 @@ async def test_warning_watch_reconnects_after_a_normal_stream_end() -> None:
             await hold.wait()
 
     app = make_app([_pod("web-1")], session_timeline=timeline, watch_warning_events=warnings)
-    app.TIMELINE_EVENT_RETRY_SECONDS = 0.0
+    app._timeline.TIMELINE_EVENT_RETRY_SECONDS = 0.0
     async with app.run_test() as pilot:
         await until(pilot, lambda: len(calls) >= 2, label="stream reconnected")
         notes = [
@@ -1495,7 +1506,7 @@ async def test_warning_watch_stops_visibly_on_a_deterministic_denial() -> None:
         yield {}  # pragma: no cover - makes the callable an async generator
 
     app = make_app([_pod("web-1")], session_timeline=timeline, watch_warning_events=warnings)
-    app.TIMELINE_EVENT_RETRY_SECONDS = 0.0
+    app._timeline.TIMELINE_EVENT_RETRY_SECONDS = 0.0
     async with app.run_test() as pilot:
         await until(
             pilot,
@@ -1519,7 +1530,7 @@ async def test_warning_watch_failure_never_stops_resource_watches() -> None:
         yield {}  # pragma: no cover - makes the callable an async generator
 
     app = make_app([_pod("web-1")], session_timeline=timeline, watch_warning_events=warnings)
-    app.TIMELINE_EVENT_RETRY_SECONDS = 0.0
+    app._timeline.TIMELINE_EVENT_RETRY_SECONDS = 0.0
     async with app.run_test() as pilot:
         await until(
             pilot,
@@ -1528,7 +1539,7 @@ async def test_warning_watch_failure_never_stops_resource_watches() -> None:
             ),
             label="feed gave up",
         )
-        assert len(calls) == app.TIMELINE_EVENT_MAX_FAILURES
+        assert len(calls) == app._timeline.TIMELINE_EVENT_MAX_FAILURES
         assert app.query_one(ResourceTable).row_count == 1
         assert [pod.name for pod in app.store.get("pods", app.current_scope)] == ["web-1"]
 
