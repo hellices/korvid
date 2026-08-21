@@ -1424,7 +1424,9 @@ def test_pypi_metadata_gives_the_project_page_its_sidebar_links() -> None:
     assert urls["Source"] == repo
     assert urls["Issues"] == f"{repo}/issues"
     assert urls["Release notes"] == f"{repo}/releases"
-    assert urls["Documentation"] == f"{repo}/blob/main/docs/tui.md"
+    # The hosted MkDocs site (Task 3) supersedes a single docs/tui.md blob
+    # link as the project's canonical Documentation entry point.
+    assert urls["Documentation"] == "https://hellices.github.io/korvid/"
     assert urls["Security"] == f"{repo}/blob/main/SECURITY.md"
 
 

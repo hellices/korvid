@@ -1,0 +1,149 @@
+"""Structural invariants for the least-privilege GitHub Pages docs workflow.
+
+`.github/workflows/docs.yml` builds the MkDocs site on every pull request and
+push to `main`, but only *deploys* to GitHub Pages from `main`. Deployment
+needs `pages: write` and `id-token: write`; the build step that just runs
+`make docs-build` needs neither, so the two must live in separate jobs with
+separate, minimal permission blocks (`zizmor` flags a job holding
+Pages-deploy permissions it never uses as excessive).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, cast
+
+import yaml
+
+ROOT = Path(__file__).parent.parent
+WORKFLOW = ROOT / ".github" / "workflows" / "docs.yml"
+
+PATH_FILTERS = {
+    "docs/**",
+    "mkdocs.yml",
+    "pyproject.toml",
+    "uv.lock",
+    "Makefile",
+    ".github/workflows/docs.yml",
+}
+
+PINNED_ACTIONS = {
+    "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "astral-sh/setup-uv": "c771a70e6277c0a99b617c7a806ffedaca235ff9",
+    "actions/configure-pages": "983d7736d9b0ae728b81ab479565c72886d7745b",
+    "actions/upload-pages-artifact": "7b1f4a764d45c48632c6b24a0339c27f5614fb0b",
+    "actions/deploy-pages": "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+}
+
+
+def _load() -> dict[str, Any]:
+    assert WORKFLOW.exists(), f"{WORKFLOW} must exist"
+    text = WORKFLOW.read_text()
+    config: dict[str, Any] = yaml.safe_load(text)
+    return config
+
+
+def _on_section(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the `on:` trigger mapping.
+
+    PyYAML's default (non-1.2) resolver treats the unquoted scalar `on` as
+    the boolean `True`, so a bare `on:` key in the workflow parses to the key
+    `True`, not `"on"`. `cast` sidesteps the invariant-dict mismatch between
+    the declared `dict[str, Any]` and a lookup keyed by a bool.
+    """
+    raw = cast("dict[object, Any]", config)
+    value = raw.get("on", raw.get(True))
+    assert isinstance(value, dict), "workflow must define an 'on' trigger section"
+    return value
+
+
+def _all_step_uses(config: dict[str, Any]) -> list[str]:
+    uses: list[str] = []
+    for job in config["jobs"].values():
+        for step in job.get("steps", []):
+            if "uses" in step:
+                uses.append(step["uses"])
+    return uses
+
+
+def test_triggers_on_pull_request_and_push_to_main_with_path_filters() -> None:
+    config = _load()
+    on = _on_section(config)
+    assert "pull_request" in on
+    assert set(on["pull_request"].get("paths", [])) == PATH_FILTERS
+
+    assert "push" in on
+    assert on["push"].get("branches") == ["main"]
+    assert set(on["push"].get("paths", [])) == PATH_FILTERS
+
+
+def test_every_action_is_pinned_to_the_expected_full_commit_sha() -> None:
+    config = _load()
+    uses = _all_step_uses(config)
+    assert uses, "workflow must have at least one 'uses' step"
+    for ref in uses:
+        repo, _, pinned = ref.partition("@")
+        assert repo in PINNED_ACTIONS, f"unexpected action {repo!r}; update PINNED_ACTIONS"
+        assert pinned == PINNED_ACTIONS[repo], (
+            f"{repo} must be pinned to {PINNED_ACTIONS[repo]}, found {pinned}"
+        )
+        assert len(pinned) == 40, f"{repo} must be pinned to a full 40-character commit SHA"
+
+    # Every action in the expected set must actually be used somewhere.
+    used_repos = {ref.partition("@")[0] for ref in uses}
+    assert used_repos == set(PINNED_ACTIONS), "workflow must use exactly the expected actions"
+
+
+def test_build_job_has_only_read_permissions_and_runs_the_docs_build() -> None:
+    config = _load()
+    build = config["jobs"]["build"]
+    assert build["permissions"] == {"contents": "read"}
+
+    run_steps = [step["run"] for step in build["steps"] if "run" in step]
+    assert any("uv sync --locked" in run and "--group docs" in run for run in run_steps), (
+        "build job must run 'uv sync --locked --group docs'"
+    )
+    assert any(run.strip() == "make docs-build" for run in run_steps), (
+        "build job must run 'make docs-build'"
+    )
+
+
+def test_site_upload_only_happens_on_push_to_main() -> None:
+    config = _load()
+    build = config["jobs"]["build"]
+    upload_steps = [
+        step
+        for step in build["steps"]
+        if step.get("uses", "").startswith("actions/upload-pages-artifact@")
+    ]
+    assert len(upload_steps) == 1, "build job must upload the site exactly once"
+    condition = upload_steps[0].get("if", "")
+    assert "github.ref == 'refs/heads/main'" in condition
+    assert "github.event_name == 'push'" in condition
+
+
+def test_deploy_job_is_main_only_needs_build_and_is_least_privilege() -> None:
+    config = _load()
+    deploy = config["jobs"]["deploy"]
+
+    condition = deploy.get("if", "")
+    assert "github.event_name == 'push'" in condition
+    assert "github.ref == 'refs/heads/main'" in condition
+
+    needs = deploy["needs"]
+    assert needs == "build" or needs == ["build"]
+
+    assert deploy["permissions"] == {"pages": "write", "id-token": "write"}
+
+    assert deploy["environment"]["name"] == "github-pages"
+    assert deploy["environment"]["url"] == "${{ steps.deployment.outputs.page_url }}"
+
+    deploy_steps = deploy["steps"]
+    assert len(deploy_steps) == 1
+    assert deploy_steps[0]["uses"].startswith("actions/deploy-pages@")
+    assert deploy_steps[0]["id"] == "deployment"
+
+
+def test_workflow_level_permissions_are_read_only() -> None:
+    config = _load()
+    assert config.get("permissions") == {"contents": "read"}

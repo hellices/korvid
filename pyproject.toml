@@ -45,7 +45,7 @@ Homepage = "https://github.com/hellices/korvid"
 Source = "https://github.com/hellices/korvid"
 Issues = "https://github.com/hellices/korvid/issues"
 "Release notes" = "https://github.com/hellices/korvid/releases"
-Documentation = "https://github.com/hellices/korvid/blob/main/docs/tui.md"
+Documentation = "https://hellices.github.io/korvid/"
 Security = "https://github.com/hellices/korvid/blob/main/SECURITY.md"
 
 [project.optional-dependencies]

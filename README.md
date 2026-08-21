@@ -12,6 +12,8 @@ and proposes writes **you** approve.
 
 *Recorded against canned demo data — see [docs/demo](https://github.com/hellices/korvid/tree/main/docs/demo) to regenerate or run it yourself.*
 
+📖 **[Documentation](https://hellices.github.io/korvid/)**
+
 ## Why korvid
 
 **A keyboard-first cockpit.** Navigate any resource kind with `:` commands,
@@ -109,61 +111,61 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
 
 ## Features
 
-- **[What korvid is](https://github.com/hellices/korvid/blob/main/docs/overview.md)** — the shape of the thing in two
+- **[What korvid is](https://hellices.github.io/korvid/overview/)** — the shape of the thing in two
   diagrams: a cockpit that works on its own, an agent you can add, and an
   MCP surface that lets your editor's assistant see the cluster. Start here
   if you are deciding whether korvid fits.
-- **[Keybindings](https://github.com/hellices/korvid/blob/main/docs/keybindings.md)** — every key by context, plus
+- **[Keybindings](https://hellices.github.io/korvid/keybindings/)** — every key by context, plus
   remapping via `keybindings:` config.
-- **[Browsing the cluster](https://github.com/hellices/korvid/blob/main/docs/tui.md)** — custom columns from labels /
+- **[Browsing the cluster](https://hellices.github.io/korvid/tui/)** — custom columns from labels /
   annotations / jsonpath, live pod metrics, ops hints for troubled pods,
   split workspace, the log viewer (multi-pod merge, JSON highlighting,
   search, save), explicit namespace scope with RBAC-aware denials,
   probe-first context switching, and the bounded, read-only session
   timeline of watch/event/context/write history.
-- **[Operations and safety](https://github.com/hellices/korvid/blob/main/docs/ops.md)** — the safety model (keystroke
+- **[Operations and safety](https://hellices.github.io/korvid/ops/)** — the safety model (keystroke
   approval + fail-closed audit on every write, with best-effort SSAR
   pre-checks and dry-run previews), read-only
   mode, protected contexts, node cordon / drain with PDB-aware impact
   plans, port-forwarding with liveness tracking, file transfer over the
   exec API, distroless debug fallback, and node shells.
-- **[Resource relationships](https://github.com/hellices/korvid/blob/main/docs/resource-relationships.md)** — press `g`
+- **[Resource relationships](https://hellices.github.io/korvid/resource-relationships/)** — press `g`
   on a selected resource for its dependencies and dependents (owner refs,
   selectors, config/volume mounts, routing backends, storage bindings),
   bounded transitive expansion with cycle-safe traversal, per-source RBAC/
   availability coverage with an incomplete-graph warning, exact Gateway
   `ReferenceGrant` cross-namespace authorization, and a metadata-only
   extraction that never retains a Secret's value.
-- **[Helm and operators](https://github.com/hellices/korvid/blob/main/docs/helm-operators.md)** — a release browser that
+- **[Helm and operators](https://hellices.github.io/korvid/helm-operators/)** — a release browser that
   needs no helm binary, search-first chart install / upgrade / rollback /
   uninstall wizards with dry-run previews, chart repo management, and the
   OLM operator catalog with approval-gated installs and uninstalls.
-- **[AI agent](https://github.com/hellices/korvid/blob/main/docs/agent.md)** — screen-context awareness, UI-driving
+- **[AI agent](https://hellices.github.io/korvid/agent/)** — screen-context awareness, UI-driving
   tools, `diagnose_pod`, cloud-provider awareness (AKS / EKS / GKE),
   provider setup (`:ai` wizard), capability profiles for small local
   models, and an eval harness that grades diagnosis quality.
-- **[Provider plugins](https://github.com/hellices/korvid/blob/main/docs/provider-plugins.md)** — the API-v1 contract for
+- **[Provider plugins](https://hellices.github.io/korvid/provider-plugins/)** — the API-v1 contract for
   third-party LLM adapters, selected-only loading, exact event and option
   limits, and guidance on when a plugin is warranted instead of an
   OpenAI-compatible endpoint.
-- **[Observability connectors](https://github.com/hellices/korvid/blob/main/docs/observability.md)** — bounded read-only
+- **[Observability connectors](https://hellices.github.io/korvid/observability/)** — bounded read-only
   Prometheus and Loki investigation: a fixed signal catalogue rather than
   free-form queries, enforced window/size/timeout/concurrency limits,
   credentials named but never stored, and TLS verification that cannot be
   turned off.
-- **[MCP server](https://github.com/hellices/korvid/blob/main/docs/mcp.md)** — expose korvid's read and UI-drive tools
+- **[MCP server](https://hellices.github.io/korvid/mcp/)** — expose korvid's read and UI-drive tools
   to VS Code, Claude Code, Cursor, or Zed; write tools are never exposed.
   An opt-in proposal flow lets external agents queue writes that execute
   only after your keystroke in the TUI.
-- **[Air-gapped operation](https://github.com/hellices/korvid/blob/main/docs/airgap.md)** — internal LLM/Helm/OLM/image
+- **[Air-gapped operation](https://hellices.github.io/korvid/airgap/)** — internal LLM/Helm/OLM/image
   endpoints, corporate CA trust (`network.ca_bundle`, Helm `--ca-file`),
   responsibility boundaries, and a readiness checklist.
-- **[Performance and scale](https://github.com/hellices/korvid/blob/main/docs/performance.md)** — the measured envelope
+- **[Performance and scale](https://hellices.github.io/korvid/performance/)** — the measured envelope
   (1,000 pods at 24 watch events/second for 31 minutes against a real
   cluster), which budgets pass and which miss, which cursor-input figures were
   withdrawn as invalid measurements, and the corrected 30-second live
   smoke evidence and its remaining qualification limits.
-- **[Threat model](https://github.com/hellices/korvid/blob/main/docs/threat-model.md)** — exactly what crosses the
+- **[Threat model](https://hellices.github.io/korvid/threat-model/)** — exactly what crosses the
   embedded-provider boundary, what is redacted, the MCP and plugin trust
   boundaries, and the residual risks that are not mitigated. See
   [`SECURITY.md`](https://github.com/hellices/korvid/blob/main/SECURITY.md) to report a vulnerability privately.
