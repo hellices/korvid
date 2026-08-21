@@ -123,6 +123,36 @@ def test_target_plural_must_match_a_supported_canonical_resource(tmp_path: Path)
         load_operation_journey(_write(tmp_path, data))
 
 
+def test_cluster_rejects_duplicate_logical_object_identity(tmp_path: Path) -> None:
+    data = _minimal()
+    duplicate = dict(data["cluster"]["objects"][0])
+    duplicate["metadata"] = dict(duplicate["metadata"])
+    duplicate["metadata"]["uid"] = "deployment-checkout-a-replacement"
+    data["cluster"]["objects"].append(duplicate)
+    with pytest.raises(ValueError, match="duplicate logical object identity"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+def test_cluster_metadata_must_be_a_mapping(tmp_path: Path) -> None:
+    data = _minimal()
+    data["cluster"]["objects"][0]["metadata"] = "bad"
+    with pytest.raises(ValueError, match="object metadata must be a mapping"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+def test_slice_a_rejects_a_cross_resource_assertion(tmp_path: Path) -> None:
+    data = _minimal()
+    data["operation"]["postconditions"][0]["resource"] = {
+        **data["operation"]["target"],
+        "kind": "ReplicaSet",
+        "plural": "replicasets",
+        "name": "checkout-a-rs",
+        "uid": "replicaset-checkout-a",
+    }
+    with pytest.raises(ValueError, match="cross-resource assertions are not supported in Slice A"):
+        load_operation_journey(_write(tmp_path, data))
+
+
 def test_schema_v2_loads_a_typed_scale_request(tmp_path: Path) -> None:
     data = _minimal()
     journey = load_operation_journey(_write(tmp_path, data))
@@ -250,7 +280,7 @@ def test_the_exact_target_must_exist_once_in_cluster_objects(tmp_path: Path) -> 
 def test_the_exact_target_cannot_be_duplicated_in_cluster_objects(tmp_path: Path) -> None:
     data = _minimal()
     data["cluster"]["objects"].append(dict(data["cluster"]["objects"][0]))
-    with pytest.raises(ValueError, match="cluster must contain the exact operation target once"):
+    with pytest.raises(ValueError, match="duplicate logical object identity"):
         load_operation_journey(_write(tmp_path, data))
 
 

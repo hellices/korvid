@@ -70,14 +70,18 @@ def _rename(text: str, old: str, new: str) -> str:
 def _retarget(
     target: OperationTarget, old: OperationTarget, namespace: str, name: str
 ) -> OperationTarget:
-    """Move a target that points at the template's object; leave others."""
+    """Apply the same independent identity substitutions as fixture objects."""
 
-    if (target.namespace, target.name) != (old.namespace, old.name):
-        return target
-    return replace(target, namespace=namespace, name=name)
+    return replace(
+        target,
+        namespace=namespace if target.namespace == old.namespace else target.namespace,
+        name=name if target.name == old.name else target.name,
+    )
 
 
-def _distractor(template: OperationJourney, namespace: str, index: int) -> dict[str, Any]:
+def _distractor(
+    template: OperationJourney, namespace: str, name: str, index: int
+) -> dict[str, Any]:
     target = template.target
     source = next(
         manifest
@@ -90,9 +94,9 @@ def _distractor(template: OperationJourney, namespace: str, index: int) -> dict[
     metadata = item.setdefault("metadata", {})
     metadata.update(
         {
-            "name": f"idle-{index}",
+            "name": name,
             "namespace": namespace,
-            "uid": f"{target.kind.lower()}-idle-{index}-{namespace}",
+            "uid": f"{target.kind.lower()}-{name}-{namespace}",
             "generation": 1,
             "resourceVersion": f"90{index}0",
             "creationTimestamp": "2026-07-27T00:30:00Z",
@@ -100,6 +104,21 @@ def _distractor(template: OperationJourney, namespace: str, index: int) -> dict[
         }
     )
     return item
+
+
+def _distractor_name(objects: list[dict[str, Any]], namespace: str, index: int) -> str:
+    used = {
+        str((manifest.get("metadata") or {}).get("name") or "")
+        for manifest in objects
+        if str((manifest.get("metadata") or {}).get("namespace") or "") == namespace
+    }
+    base = f"idle-{index}"
+    candidate = base
+    suffix = 1
+    while candidate in used:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate
 
 
 def _moved_objects(
@@ -153,6 +172,25 @@ def _generated_namespace(rng: random.Random, used: set[str]) -> str:
     return candidate
 
 
+def _generated_name(rng: random.Random, template: OperationJourney) -> str:
+    old = template.target
+    used = {
+        str((manifest.get("metadata") or {}).get("name") or "")
+        for manifest in template.cluster.objects
+    }
+    start = rng.randrange(len(_NAME_SUFFIXES))
+    for offset in range(len(_NAME_SUFFIXES)):
+        suffix = _NAME_SUFFIXES[(start + offset) % len(_NAME_SUFFIXES)]
+        candidate = f"{old.name}-{suffix}"
+        if candidate not in used:
+            return candidate
+    base = old.name[:244].rstrip("-") or "object"
+    while True:
+        candidate = f"{base}-{rng.getrandbits(32):08x}"
+        if candidate not in used:
+            return candidate
+
+
 def generate_instance(
     template: OperationJourney, seed: int
 ) -> tuple[OperationJourney, GenerationRecord]:
@@ -175,10 +213,12 @@ def generate_instance(
         for manifest in template.cluster.objects
     }
     namespace = _generated_namespace(rng, used)
-    name = f"{old.name}-{rng.choice(_NAME_SUFFIXES)}"
+    name = _generated_name(rng, template)
     count = rng.randint(0, _MAX_DISTRACTORS)
     objects = list(_moved_objects(template, namespace, name))
-    objects.extend(_distractor(template, namespace, index) for index in range(1, count + 1))
+    for index in range(1, count + 1):
+        distractor_name = _distractor_name(objects, namespace, index)
+        objects.append(_distractor(template, namespace, distractor_name, index))
     rng.shuffle(objects)
     target = replace(old, namespace=namespace, name=name)
     turns = tuple(

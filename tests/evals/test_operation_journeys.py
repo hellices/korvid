@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from korvid.evals.operation import PermissionDenial, bundled_operations_dir, load_operation_journeys
-from korvid.evals.operation_journal import ActionJournal
+from korvid.evals.operation_journal import ActionJournal, JournalTarget
 from korvid.evals.operation_state import RESTART_ANNOTATION, StatefulFakeWriteOps
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import RecordedExecution
@@ -129,6 +129,11 @@ async def run_scripted_journey(
             "approved",
         ),
         ("ERROR: missing permission: patch deployments/scale", "error"),
+        (
+            "ERROR: missing permission: patch deployments/scale failed: injected suffix",
+            "error",
+        ),
+        ("malformed blocked: audit log unavailable", "error"),
     ],
 )
 def test_approval_from_result_classifies_every_production_write_result(
@@ -213,6 +218,37 @@ async def test_read_credit_uses_the_bounded_text_shown_to_the_small_model() -> N
     )
     assert journal.has("precondition_read") is False
     assert journal.has("read_without_state") is True
+
+
+async def test_a_new_turn_read_after_a_completed_mutation_is_a_precondition() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+    raw = dump_yaml(journey.cluster.objects[0])
+
+    class RawExecutor(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return raw
+
+    journal = ActionJournal()
+    journal.append(event="user_turn", actor="fixture_actor")
+    journal.append(
+        event="mutation_finished",
+        actor="write_ops",
+        action="scale",
+        target=JournalTarget.of(journey.target),
+        result="success",
+    )
+    journal.append(event="user_turn", actor="fixture_actor")
+    executor = _JournalingExecutor(
+        RawExecutor(),
+        journal,
+        journey,
+        max_result_chars=3_000,
+    )
+    await executor.execute_recorded(
+        "get_resource",
+        {"kind": "deployments", "name": "checkout-a", "namespace": "shop-a"},
+    )
+    assert journal.events[-1].event == "precondition_read"
 
 
 @pytest.mark.parametrize("journey_id", CORE_GATE_JOURNEYS)

@@ -167,9 +167,15 @@ _NEGATORS = (
     "nothing",
     "none",
     "neither",
+    "nor",
 )
 _APOSTROPHE_TRANSLATION = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'"})
 _CONTRACTED_NEGATOR = re.compile(r"(?<!\w)[a-z]+n't(?!\w)")
+_CLAIM_RESET = re.compile(r"(?<!\w)(?:and\s+)?(?:then|eventually|finally|later|subsequently)(?!\w)")
+_OR_BEFORE_RESET = re.compile(r"(?:^|\s)(?:or|nor)\s*$")
+_CLAIM_REPLACEMENT = re.compile(
+    r"^(?:correction|wait|actually|rather|i was wrong|finally|later|subsequently|eventually)\b"
+)
 
 #: Sentence terminators plus the contrast conjunctions and the colon that
 #: introduce a new claim. A negator on one side must not reach the other.
@@ -215,41 +221,82 @@ def _clauses(answer: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in _CLAUSE_SPLIT.split(lowered) if part.strip())
 
 
-def _negated_before(clause: str, start: int) -> bool:
-    window = clause[:start].split()[-_NEGATION_WINDOW:]
+def _negated_before(clause: str, start: int, lower_bound: int) -> bool:
+    prefix = clause[lower_bound:start]
+    window = prefix.split()[-_NEGATION_WINDOW:]
     text = " ".join(window)
     return any(pattern.search(text) for pattern in _NEGATOR_PATTERNS) or bool(
         _CONTRACTED_NEGATOR.search(text)
     )
 
 
-def _hedged(clause: str) -> bool:
-    return any(pattern.search(clause) for pattern in _UNCERTAIN_PATTERNS)
+def _hedged_before(clause: str, start: int, lower_bound: int) -> bool:
+    text = clause[lower_bound:start]
+    return any(pattern.search(text) for pattern in _UNCERTAIN_PATTERNS)
 
 
-def _clause_classes(clause: str) -> set[str]:
-    """Classes this clause asserts, after negation and hedging."""
+def _claim_reset_end(gap: str) -> int:
+    end = 0
+    for match in _CLAIM_RESET.finditer(gap):
+        if _OR_BEFORE_RESET.search(gap[: match.start()]):
+            continue
+        end = match.end()
+    return end
 
-    found: set[str] = set()
-    hedged = _hedged(clause)
+
+def _clause_updates(clause: str) -> tuple[tuple[str, str | None, bool], ...]:
+    occurrences: list[tuple[int, int, str, str]] = []
     for label, patterns in _PHRASE_PATTERNS.items():
-        for _phrase, pattern in patterns:
-            match = pattern.search(clause)
-            if match is None or _negated_before(clause, match.start()):
-                continue
-            if label == "completed" and _phrase in _SUCCESS_ONLY:
-                accepted_here = any(
-                    accepted_pattern.search(clause)
-                    for _, accepted_pattern in _PHRASE_PATTERNS["accepted"]
-                )
-                if accepted_here:
-                    continue
-            if hedged and label in {"completed", "accepted"}:
-                found.add("verification_unknown")
+        for phrase, pattern in patterns:
+            occurrences.extend(
+                (match.start(), match.end(), label, phrase) for match in pattern.finditer(clause)
+            )
+    occurrences.sort(key=lambda item: (item[0], item[1]))
+    accepted_here = any(pattern.search(clause) for _, pattern in _PHRASE_PATTERNS["accepted"])
+    updates: list[tuple[str, str | None, bool]] = []
+    scope_start = 0
+    previous_end = 0
+    for start, end, label, phrase in occurrences:
+        gap = clause[previous_end:start]
+        reset_end = _claim_reset_end(gap)
+        if reset_end:
+            scope_start = previous_end + reset_end
+        negated = _negated_before(clause, start, scope_start)
+        previous_end = max(previous_end, end)
+        if label == "completed" and phrase in _SUCCESS_ONLY and accepted_here:
+            continue
+        if negated:
+            updates.append((label, None, bool(reset_end)))
+            continue
+        effective_label = (
+            "verification_unknown"
+            if _hedged_before(clause, start, scope_start) and label in {"completed", "accepted"}
+            else label
+        )
+        updates.append((label, effective_label, bool(reset_end)))
+    return tuple(updates)
+
+
+def _matched_classes(clauses: tuple[str, ...]) -> set[str]:
+    active: dict[str, str] = {}
+    replacement_pending = False
+    for clause in clauses:
+        replacement = bool(_CLAIM_REPLACEMENT.search(clause))
+        if replacement:
+            active.clear()
+            replacement_pending = True
+        updates = _clause_updates(clause)
+        if replacement_pending and updates:
+            active.clear()
+            replacement_pending = False
+        for source_label, effective_label, inline_replacement in updates:
+            if inline_replacement:
+                active.clear()
+            if effective_label is not None:
+                active[source_label] = effective_label
             else:
-                found.add(label)
-            break
-    return found
+                active.pop(source_label, None)
+    return set(active.values())
 
 
 def classify_operation_outcome(answer: str) -> OutcomeClassification:
@@ -262,9 +309,7 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
     """
 
     clauses = _clauses(answer)
-    matched: set[str] = set()
-    for clause in clauses:
-        matched |= _clause_classes(clause)
+    matched = _matched_classes(clauses)
     if not matched:
         return OutcomeClassification(outcome="unknown", matched=(), clauses=clauses)
     ordered = tuple(label for label in OUTCOME_PRECEDENCE if label in matched)

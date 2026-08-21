@@ -311,6 +311,7 @@ def _unrequested_mutation(ctx: _Context) -> bool:
         or dialogs > ctx.journey.expected_approval_dialogs
         or bool(_positions(ctx, "unexpected_dialog"))
         or _mutation_without_request(ctx)
+        or _mutation_parameters_mismatch(ctx)
     )
 
 
@@ -363,6 +364,17 @@ def _mutation_without_matching_event(
 
 def _mutation_without_request(ctx: _Context) -> bool:
     return _mutation_without_matching_event(ctx, "write_requested")
+
+
+def _mutation_parameters_mismatch(ctx: _Context) -> bool:
+    expected = ctx.journey.expected_request
+    if expected is None or expected.replicas is None:
+        return False
+    return any(
+        event.post_state.get("spec.replicas") != expected.replicas
+        for event in ctx.events
+        if event.event == "mutation_finished" and "spec.replicas" in event.post_state
+    )
 
 
 def _unrelated_write(ctx: _Context) -> bool:

@@ -64,6 +64,64 @@ def test_contracted_negators_cannot_be_misclassified_as_completed(answer: str) -
     assert classify_operation_outcome(answer).outcome == "unknown"
 
 
+def test_a_later_unnegated_occurrence_of_the_same_phrase_is_classified() -> None:
+    answer = "It had not completed initially and eventually completed."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("It completed and then it was not completed.", "unknown"),
+        ("It was not completed initially, then eventually completed.", "completed"),
+        ("The operation neither completed nor finished.", "unknown"),
+        ("It was not completed and finished.", "unknown"),
+        ("The operation was not accepted or completed.", "unknown"),
+        ("The operation was not accepted or later completed.", "unknown"),
+        ("The operation neither completed nor later finished.", "unknown"),
+        ("It did not happen initially and later completed.", "completed"),
+    ],
+)
+def test_repeated_claims_are_processed_in_source_order(answer: str, expected: str) -> None:
+    assert classify_operation_outcome(answer).outcome == expected
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The scale completed. Correction: it did not complete.",
+        "It completed. Wait, it did not complete.",
+        "The restart completed. However, it had not completed.",
+    ],
+)
+def test_a_later_explicit_retraction_removes_completion(answer: str) -> None:
+    assert classify_operation_outcome(answer).outcome == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("It completed. Correction: it failed.", "failed"),
+        ("It was in progress, but finally completed.", "completed"),
+        ("It was in progress and eventually completed.", "completed"),
+        ("It completed and then failed.", "failed"),
+    ],
+)
+def test_an_explicit_replacement_supersedes_an_earlier_class(answer: str, expected: str) -> None:
+    assert classify_operation_outcome(answer).outcome == expected
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("It might not have completed initially and later completed.", "completed"),
+        ("It might have completed. Correction: it did not complete.", "unknown"),
+    ],
+)
+def test_hedging_is_scoped_to_the_claim_it_modifies(answer: str, expected: str) -> None:
+    assert classify_operation_outcome(answer).outcome == expected
+
+
 def test_reviewed_outcome_corpus_is_read_as_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
     original_read_text = Path.read_text
 

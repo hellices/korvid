@@ -365,6 +365,8 @@ def _assertion(raw: Any, default_target: OperationTarget, label: str) -> StateAs
         )
     resource = raw.get("resource")
     target = default_target if resource is None else _target(resource, f"{label}.resource")
+    if target != default_target:
+        raise ValueError(f"{label}: cross-resource assertions are not supported in Slice A")
     return StateAssertion(
         target=target,
         path=path,
@@ -483,6 +485,24 @@ def _denials(raw: Any, label: str) -> tuple[PermissionDenial, ...]:
     return tuple(rules)
 
 
+def _reject_duplicate_object_identities(objects: tuple[dict[str, Any], ...], label: str) -> None:
+    identities: set[tuple[str, str, str, str]] = set()
+    for manifest in objects:
+        metadata = manifest.get("metadata")
+        if not isinstance(metadata, Mapping):
+            raise ValueError(f"{label}: object metadata must be a mapping")
+        api_version = str(manifest.get("apiVersion") or "")
+        identity = (
+            api_version.rpartition("/")[0] if "/" in api_version else "",
+            str(manifest.get("kind") or ""),
+            str(metadata.get("namespace") or ""),
+            str(metadata.get("name") or ""),
+        )
+        if identity in identities:
+            raise ValueError(f"{label}: duplicate logical object identity {identity!r}")
+        identities.add(identity)
+
+
 def _cluster(raw: Any, label: str) -> OperationCluster:
     if not isinstance(raw, dict):
         raise ValueError(f"{label} must be a mapping")
@@ -493,6 +513,7 @@ def _cluster(raw: Any, label: str) -> OperationCluster:
     _reject_future_timestamps(events, f"{label}: events")
     if not objects:
         raise ValueError(f"{label} needs at least one object: an operation needs a target")
+    _reject_duplicate_object_identities(objects, label)
     forbidden_reads = raw.get("forbidden") or []
     if not isinstance(forbidden_reads, list):
         raise ValueError(f"{label}.forbidden must be a list of read-denial rules")

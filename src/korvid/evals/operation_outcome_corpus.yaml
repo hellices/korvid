@@ -173,3 +173,27 @@
   label: unknown
 - text: The operation oughtn't be considered complete.
   label: unknown
+- text: It had not completed initially and eventually completed.
+  label: completed
+- text: "The scale completed. Correction: it did not complete."
+  label: unknown
+- text: "It completed. Wait, it did not complete."
+  label: unknown
+- text: "The restart completed. However, it had not completed."
+  label: unknown
+- text: It might not have completed initially and later completed.
+  label: completed
+- text: "It might have completed. Correction: it did not complete."
+  label: unknown
+- text: The operation was not accepted or completed.
+  label: unknown
+- text: The operation neither completed nor later finished.
+  label: unknown
+- text: "It completed. Correction: it failed."
+  label: failed
+- text: "It was in progress, but finally completed."
+  label: completed
+- text: It was in progress and eventually completed.
+  label: completed
+- text: It completed and then failed.
+  label: failed

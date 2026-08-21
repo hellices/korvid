@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -98,6 +99,7 @@ __all__ = [
 
 _ALIASES = builtin_aliases()
 _APPROVAL_KEYS = {"approved": "y", "denied": "ctrl+n"}
+_APPROVED_ERROR = re.compile(r"ERROR: \S+ \S+ (?:blocked|failed): ")
 #: The shortest approval window the harness accepts. `until` polls at
 #: 0.05s and `_await_user_approval` re-checks its remaining budget right
 #: after `push_screen`, so a sub-second window can be created and expired
@@ -266,13 +268,20 @@ def approval_from_result(result: str) -> str:
         return "denied"
     if result.startswith("not approved:") and "expired" in result:
         return "expired"
-    if " blocked: " in result:
-        # `_run_write_inner` could not persist the audit intent and refused
-        # to mutate. The approval still happened.
-        return "approved"
-    if " failed: " in result:
+    if _APPROVED_ERROR.match(result):
+        # `_run_write_inner` either blocked the mutation at the audit gate or
+        # the approved API call failed. The approval still happened.
         return "approved"
     return "error"
+
+
+def _mutation_finished_in_current_turn(journal: ActionJournal) -> bool:
+    for event in reversed(journal.events):
+        if event.event == "user_turn":
+            return False
+        if event.event == "mutation_finished":
+            return True
+    return False
 
 
 def _read_document(text: str) -> dict[str, Any] | None:
@@ -462,7 +471,7 @@ class _JournalingExecutor(RecordedExecution):
                 detail=summarize_untrusted(tool=name, reason="not_a_target_document"),
             )
             return
-        after = self._journal.has("mutation_finished")
+        after = _mutation_finished_in_current_turn(self._journal)
         assertions = self._journey.postconditions if after else self._journey.preconditions
         shows = _shows_state(document, assertions)
         checkpoint = "postcondition_read" if after else "precondition_read"

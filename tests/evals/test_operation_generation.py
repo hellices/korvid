@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 
 import pytest
@@ -46,6 +47,104 @@ def test_exhausted_namespace_pool_uses_a_noncolliding_fallback(
     }
     assert first.target.namespace == second.target.namespace
     assert first.target.namespace not in used
+
+
+def test_assertion_identity_dimensions_follow_generated_objects_independently() -> None:
+    template = _TEMPLATES["scale-deployment-up"]
+    same_name = replace(
+        template.preconditions[0],
+        target=replace(template.target, namespace="shop-b"),
+    )
+    same_namespace = replace(
+        template.preconditions[0],
+        target=replace(template.target, name="inventory"),
+    )
+    instance, _ = generate_instance(
+        replace(template, preconditions=(same_name, same_namespace)),
+        7,
+    )
+    generated_same_name, generated_same_namespace = instance.preconditions
+    assert generated_same_name.target.namespace == "shop-b"
+    assert generated_same_name.target.name == instance.target.name
+    assert generated_same_namespace.target.namespace == instance.target.namespace
+    assert generated_same_namespace.target.name == "inventory"
+
+
+def test_generated_target_name_does_not_collide_with_an_existing_peer() -> None:
+    template = _TEMPLATES["scale-deployment-up"]
+    peer = deepcopy(template.cluster.objects[0])
+    peer["metadata"] = {
+        **peer["metadata"],
+        "name": f"{template.target.name}-blue",
+        "uid": "deployment-existing-blue",
+    }
+    custom = replace(
+        template,
+        cluster=replace(template.cluster, objects=(*template.cluster.objects, peer)),
+    )
+    instance, _ = generate_instance(custom, 2)
+    identities = [
+        (
+            manifest["apiVersion"],
+            manifest["kind"],
+            manifest["metadata"]["namespace"],
+            manifest["metadata"]["name"],
+        )
+        for manifest in instance.cluster.objects
+    ]
+    assert len(identities) == len(set(identities))
+
+
+def test_generated_name_is_unique_in_every_renamed_namespace() -> None:
+    template = _TEMPLATES["scale-ambiguous-namespace"]
+    peer = deepcopy(template.cluster.objects[0])
+    peer["metadata"] = {
+        **peer["metadata"],
+        "name": f"{template.target.name}-green",
+        "namespace": "shop-a",
+        "uid": "deployment-existing-green",
+    }
+    custom = replace(
+        template,
+        cluster=replace(template.cluster, objects=(*template.cluster.objects, peer)),
+    )
+    instance, _ = generate_instance(custom, 2)
+    identities = [
+        (
+            manifest["apiVersion"],
+            manifest["kind"],
+            manifest["metadata"]["namespace"],
+            manifest["metadata"]["name"],
+        )
+        for manifest in instance.cluster.objects
+    ]
+    assert len(identities) == len(set(identities))
+
+
+def test_generated_distractor_name_does_not_collide_with_an_existing_peer() -> None:
+    template = _TEMPLATES["scale-statefulset-down"]
+    peer = deepcopy(template.cluster.objects[0])
+    peer["metadata"] = {
+        **peer["metadata"],
+        "name": "idle-1",
+        "uid": "statefulset-existing-idle-1",
+    }
+    custom = replace(
+        template,
+        cluster=replace(template.cluster, objects=(*template.cluster.objects, peer)),
+    )
+    instance, record = generate_instance(custom, 0)
+    assert record.distractors > 0
+    identities = [
+        (
+            manifest["apiVersion"],
+            manifest["kind"],
+            manifest["metadata"]["namespace"],
+            manifest["metadata"]["name"],
+        )
+        for manifest in instance.cluster.objects
+    ]
+    assert len(identities) == len(set(identities))
 
 
 @pytest.mark.parametrize(
