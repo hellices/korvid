@@ -63,6 +63,7 @@ from korvid.evals.operation_journal import (
     ActionJournal,
     JournalTarget,
     summarize,
+    summarize_action,
     summarize_arguments,
 )
 from korvid.evals.operation_state import (
@@ -344,7 +345,7 @@ class _JournalingExecutor(RecordedExecution):
         self._journal.append(
             event="tool_call",
             actor="model_tool",
-            action=name,
+            action=summarize_action(name),
             detail=summarize_arguments(name, arguments),
         )
         if effect == "cluster_write":
@@ -663,7 +664,7 @@ def _make_check_permission(
             journal.append(
                 event="permission_denied",
                 actor="app_internal",
-                action=f"{verb} {resource}",
+                action=summarize_action(f"{verb} {resource}"),
                 result="denied",
                 detail=summarize(
                     group=group or "core", resource=resource, namespace=namespace or "-"
@@ -881,7 +882,7 @@ def _journal_audit_records(journal: ActionJournal, records: Sequence[dict[str, A
         journal.append(
             event="audit_record",
             actor="audit",
-            action=str(record.get("action") or ""),
+            action=summarize_action(str(record.get("action") or "")),
             result=_audit_result(str(record.get("outcome") or "")),
             detail=summarize(
                 kind=str(record.get("kind") or ""), name=str(record.get("name") or "")

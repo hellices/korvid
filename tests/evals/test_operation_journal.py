@@ -11,6 +11,7 @@ from korvid.evals.operation_journal import (
     ActionJournal,
     JournalTarget,
     summarize,
+    summarize_action,
     summarize_arguments,
 )
 
@@ -159,6 +160,24 @@ def test_summarize_rejects_empty_summary_values() -> None:
         summarize(kind="")
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "scale resource",
+        "mañana",
+        "n" * 121,
+        "secret/password!",
+    ],
+)
+def test_summarize_action_is_total_and_bounded(value: str) -> None:
+    assert summarize_action(value) == "unknown_tool"
+
+
+def test_summarize_action_preserves_a_bounded_token() -> None:
+    assert summarize_action("scale_resource") == "scale_resource"
+
+
 def test_summarize_arguments_keeps_only_allowlisted_keys_and_counts_the_rest() -> None:
     detail = summarize_arguments(
         "scale_resource",
@@ -189,6 +208,19 @@ def test_summarize_arguments_drops_bool_and_empty_values() -> None:
     assert detail == "tool=scale_resource name=checkout-a replicas=3 dropped=2"
 
 
+def test_summarize_arguments_counts_a_dropped_tool_name_and_argument_keys() -> None:
+    detail = summarize_arguments(
+        "delete resource",
+        {
+            "kind": "deployments",
+            "name": "checkout-a",
+            "tool": "shadow",
+            "note": "whatever the model wanted to say",
+        },
+    )
+    assert detail == "kind=deployments name=checkout-a dropped=3"
+
+
 @pytest.mark.parametrize(
     "tool",
     [
@@ -209,6 +241,12 @@ def test_summarize_arguments_drops_invalid_tool_names(tool: str) -> None:
     assert detail == "kind=deployments name=checkout-a dropped=1"
     assert "tool=" not in detail
     ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
+
+
+def test_append_rejects_a_non_bounded_action() -> None:
+    journal = ActionJournal()
+    with pytest.raises(ValueError, match="journal action must be a bounded summary token"):
+        journal.append(event="tool_call", actor="model_tool", action="delete resource")
 
 
 @pytest.mark.parametrize(

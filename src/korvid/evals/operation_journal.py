@@ -28,6 +28,7 @@ __all__ = [
     "JournalEvent",
     "JournalTarget",
     "summarize",
+    "summarize_action",
     "summarize_arguments",
 ]
 
@@ -106,6 +107,7 @@ _SCALARS = (str, int, float, bool)
 _DETAIL_KEYS = frozenset(JOURNAL_DETAIL_KEYS)
 _RESULTS = frozenset(JOURNAL_RESULTS)
 _SUMMARY_VALUE = re.compile(r"[A-Za-z0-9._:/@=+-]{1,120}")
+_UNKNOWN_TOOL = "unknown_tool"
 
 
 def _summary_text(key: str, value: Any) -> str:
@@ -130,6 +132,14 @@ def summarize(**fields: Any) -> str:
             continue
         parts.append(f"{key}={_summary_text(key, value)}")
     return " ".join(parts)
+
+
+def summarize_action(value: str) -> str:
+    """Return a bounded tool/action token or a safe fallback."""
+
+    if isinstance(value, str) and _SUMMARY_VALUE.fullmatch(value):
+        return value
+    return _UNKNOWN_TOOL
 
 
 def summarize_arguments(tool: str, arguments: Mapping[str, Any]) -> str:
@@ -236,6 +246,14 @@ def _checked_detail(detail: str) -> str:
     return detail
 
 
+def _checked_action(action: str) -> str:
+    if not action:
+        return ""
+    if not _SUMMARY_VALUE.fullmatch(action):
+        raise ValueError(f"journal action must be a bounded summary token: {action!r}")
+    return action
+
+
 class ActionJournal:
     """Append-only event log. Nothing removes or rewrites an entry."""
 
@@ -274,7 +292,7 @@ class ActionJournal:
             sequence=len(self._events) + 1,
             event=event,
             actor=actor,
-            action=action,
+            action=_checked_action(action),
             target=target,
             approval=approval,
             pre_state=_checked_state(pre_state, target),
