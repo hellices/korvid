@@ -8,6 +8,7 @@ Every journey runs the real `KorvidApp`, the real `AgentRuntime`, the real
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -395,7 +396,8 @@ async def test_the_harness_writes_a_real_audit_file(tmp_path: Path) -> None:
     assert [line["outcome"] for line in lines] == ["intent", "success"]
     assert {line["context"] for line in lines} == {"eval"}
     # 0600 is enforced by the production appender, not by the harness.
-    assert audit_path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert audit_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_the_development_pack_holds_twelve_templates() -> None:
