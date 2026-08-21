@@ -16,6 +16,8 @@ KorvidApp  (ui/app.py)
 │  reached through: WriteGate, ViewState, UiSurface
 │
 ├── WriteCoordinator    (ui/write_coordinator.py)    the write security perimeter
+├── ResourceWriteController
+│                       (ui/resource_write_controller.py)  delete/restart/edit/scale/resize/cordon/drain
 ├── HelmController      (ui/helm_controller.py)      install/upgrade/rollback/uninstall
 ├── OperatorController  (ui/operator_controller.py)  OLM subscribe/approve/uninstall
 ├── ForwardController   (ui/forward_controller.py)   port-forward sessions
@@ -313,6 +315,46 @@ ordering is the invariant, not the location of the helm/kubectl call: a
 declined dialog constructs nothing, and the coordinator awaits the factory
 from a supervised worker only after the intent audit record has persisted.
 
+### The workflows sit above it, and cannot route around it
+
+`ResourceWriteController` (`ui/resource_write_controller.py`) owns the flows a
+keybinding raises against the selected row — delete (including the helm and
+OLM redirects), rollout restart, the `$EDITOR` round-trip, scale, in-place pod
+resize, cordon/uncordon and drain — plus the drain's own lifecycle state
+(`_drain_worker`, `_drain_node`), because pressing the drain key again must
+find and cancel the worker it started.
+
+It owns *composition*, not security. It holds a `WriteOps` handle for exactly
+two read-only purposes — server-side dry-run previews and the drain plan — and
+otherwise only builds the operation *factories* `WriteCoordinator.confirm`
+constructs after approval. Every approval, revalidation, reservation, audit
+record and mutation is the coordinator's. `KorvidApp` keeps
+`action_delete_resource`, `action_rollout_restart`, `action_edit_resource`,
+`action_scale_resource`, `action_resize_pod`, `action_cordon_node`,
+`action_uncordon_node` and `action_drain_node` as one-line delegates, and
+shares two of the controller's helpers — `node_target` (with `ShellController`)
+and `edit_in_external_editor` (with `HelmController`) — so neither grows a
+second copy.
+
+`tests/ui/test_resource_write_controller.py` drives every flow against a real
+`WriteCoordinator` over fake Textual and view surfaces, so "the workflow
+cannot bypass the perimeter" is observed rather than asserted: a broken audit
+sink blocks the mutation, a declined dialog constructs no operation factory,
+and each approved flow's mutation count matches its `WriteCoordinator.run`
+count.
+
+### One write, one reservation
+
+`reserve_write()` is available to a flow that needs the count held *before* the
+coordinator's own `run` takes it — the worker hand-off, and any awaited gap
+between approval and the mutation. The operator uninstall is the one flow that
+needs it (its post-approval staleness re-fetch is such a gap). It does not
+stack the two: it releases its prelude reservation at the point `run` builds
+its coroutine, and because both `run`'s reservation and the release are
+synchronous, no event-loop iteration — and therefore no `:ctx` switch — fits
+between them. Exclusion is continuous and the in-flight count during a
+mutation is exactly one.
+
 ### Two approval contracts, and where the audit lives
 
 `confirm` covers the ordinary case: the gate audits the intent, fail-closed,
@@ -397,6 +439,14 @@ tests added before the move where the behaviour is not already pinned.
     execution, the dry-run/impact previews, and the protected-context marker.
     It implements `WriteGate` directly, so `AppWriteGate` is gone and the app
     keeps only the action/message entry points that raise a write flow.
+11. ~~Resource and node write workflows~~ — done (#187);
+    `ResourceWriteController` (`ui/resource_write_controller.py`) owns delete,
+    rollout restart, the editor round-trip, scale, in-place pod resize,
+    cordon/uncordon and drain, together with the drain worker/target state and
+    the workload-eligibility identities (`RESTARTABLE`, `SCALABLE`). It is
+    backed exclusively by `WriteCoordinator`; the app keeps thin action
+    delegates and re-exports the eligibility sets for `_ACTION_VIEWS` and the
+    agent write ops.
 
 Issue #238 showed that logs and describe were technically extractable without
 introducing a new pane-composition seam, and issue #245 kept describe as a

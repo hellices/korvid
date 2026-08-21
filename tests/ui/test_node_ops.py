@@ -578,8 +578,8 @@ async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: P
             label="wrong-node cancel warning shown",
         )
         assert "cancelled" not in (audit_path.read_text() if audit_path.exists() else "")
-        assert app._drain_worker is not None
-        assert app._drain_worker.is_running
+        assert app._resource_writes.drain_worker is not None
+        assert app._resource_writes.drain_worker.is_running
         rec.release_evictions.set()
         await until(
             pilot,

@@ -546,6 +546,11 @@ async def test_declined_dialog_never_runs_the_approval_guard(tmp_path: Path) -> 
     env = make_env(tmp_path)
     rec = Recorder()
     guard_calls: list[int] = []
+
+    def guard() -> bool:
+        guard_calls.append(1)
+        return True
+
     await env.coordinator.confirm(
         "Scale pods/web-1?",
         "PATCH pods/web-1/scale",
@@ -554,7 +559,7 @@ async def test_declined_dialog_never_runs_the_approval_guard(tmp_path: Path) -> 
         namespace="default",
         name="web-1",
         op_factory=rec.factory,
-        approval_guard=lambda: bool(guard_calls.append(1)),
+        approval_guard=guard,
     )
     env.ui.answer(False)
     env.ui.flush_deferred()
@@ -767,7 +772,20 @@ async def test_timeline_records_only_after_the_durable_audit_succeeded(tmp_path:
 
 
 async def test_timeline_failure_never_replaces_the_durable_audit(tmp_path: Path) -> None:
-    """The timeline is non-authoritative: its failure must not fail a write."""
+    """The durable append happens first, and stands whatever the mirror does.
+
+    The intent record is on disk even though the timeline raised, and the
+    mutation factory was never built. Note what this does *not* claim: the
+    perimeter has no `try` around `record_write`, so a raising
+    `TimelineWrites` propagates here, and inside `run` it would be reported
+    as a failed intent audit and block the write. That is safe because the
+    only production implementation is
+    `SessionTimelineController.record_write`, which is a non-raising
+    boundary by construction — it returns early with no timeline wired, and
+    routes the append through `_append_timeline`, which logs and notifies
+    instead of raising. The invariant pinned here is the *ordering*: the
+    timeline can never leave a record the audit log does not have.
+    """
     env = make_env(tmp_path)
 
     def explode(**kwargs: Any) -> None:

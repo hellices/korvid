@@ -509,6 +509,11 @@ class OperatorController:
         confirmation callback hands the result to `run_worker`, which starts
         it a loop iteration later - and a `:ctx` queued in that gap has to
         see the write already in flight (issue #36).
+
+        This reservation covers only the span *before* the perimeter takes
+        its own: the worker hand-off and the staleness re-fetch. It is
+        released at the point `WriteGate.run` reserves the mutation, so the
+        two never overlap - see `_apply_uninstall_locked`.
         """
         release = self._gate.reserve_write()
 
@@ -524,6 +529,7 @@ class OperatorController:
                     csv_meta=csv_meta,
                     csv_name=csv_name,
                     csv_uid=csv_uid,
+                    release=release,
                 )
             finally:
                 release()
@@ -549,8 +555,20 @@ class OperatorController:
         csv_meta: ResourceMeta | None,
         csv_name: str,
         csv_uid: str | None,
+        release: Callable[[], None],
     ) -> None:
-        """The uninstall itself, with the in-flight reservation already held."""
+        """The uninstall itself, holding the pre-mutation reservation until
+        the perimeter takes its own.
+
+        `release` ends the reservation `_operator_apply_uninstall` took for
+        the worker hand-off and the staleness re-fetch. It is called
+        *after* `WriteGate.run` has built its coroutine - `run` reserves
+        synchronously, and so does this release, so no event-loop iteration
+        (and therefore no `:ctx` switch) fits between the two. The exclusion
+        is continuous, and the in-flight count during the mutation is
+        exactly one: holding both would make the uninstall the only write in
+        korvid that reserves twice, with two independent releases to leak.
+        """
         if await self._subscription_target_stale(fetch_kind, ns, name, uid, csv_name):
             self._ui.notify(
                 f"uninstall {name} aborted: the subscription changed while"
@@ -558,7 +576,7 @@ class OperatorController:
                 severity="warning",
             )
             return
-        outcome = await self._gate.run(
+        write = self._gate.run(
             "uninstall",
             sub_meta,
             ns,
@@ -566,6 +584,8 @@ class OperatorController:
             lambda: ops.delete_object(sub_meta, ns, name, uid=uid),
             detail=f"csv={csv_name or '-'}",
         )
+        release()
+        outcome = await write
         if outcome != "done" or csv_meta is None or not csv_name:
             return
         await self._gate.run(

@@ -9,11 +9,8 @@ import dataclasses
 import functools
 import json
 import logging
-import os
 import shlex
 import shutil
-import subprocess
-import tempfile
 import time
 from collections.abc import (
     AsyncIterator,
@@ -24,7 +21,6 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from pathlib import Path
 from time import monotonic
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -35,9 +31,8 @@ if TYPE_CHECKING:
     # only when the [agent] extra is installed and wired.
     from korvid.agent.runtime import AgentRuntime
 
-import yaml
 from rich.text import Text
-from textual.app import App, ComposeResult, ScreenStackError, SuspendNotSupported
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.await_complete import AwaitComplete
 from textual.binding import Binding
 from textual.containers import Horizontal
@@ -82,7 +77,6 @@ from korvid.k8s.components import (
     ComponentRef,
 )
 from korvid.k8s.discovery import PODS_META, ResourceMeta
-from korvid.k8s.drain import DrainPlan
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import (
     HELM_RELEASES_META,
@@ -136,13 +130,15 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 from korvid.ui.navigation import NavigationStack
-from korvid.ui.node_impact_preview import (
-    compose_node_maintenance_lines,
-    render_node_maintenance_lines,
-)
 from korvid.ui.operator_controller import OperatorController
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader
 from korvid.ui.resize_impact_preview import compose_resize_impact_lines
+from korvid.ui.resource_write_controller import (
+    RESTARTABLE,
+    SCALABLE,
+    ResourceWriteController,
+    resize_summary,
+)
 from korvid.ui.session_timeline_controller import (
     TIMELINE_EVENT_GROUP,
     TIMELINE_NAVIGATION_GROUP,
@@ -187,7 +183,6 @@ from korvid.ui.workspace_controller import (
 from korvid.ui.workspace_state import PaneState, WorkspaceState
 from korvid.ui.write_coordinator import (
     WriteCoordinator,
-    WriteOrigin,
     canonical_meta_kind,
     gvr_label,
     write_locus,
@@ -212,41 +207,6 @@ _APPROVAL_TIMEOUT = 120.0
 #: have their own budget - the pre-check they use lives with the perimeter
 #: that owns it (`write_coordinator._PERMISSION_CHECK_TIMEOUT`).
 _PERMISSION_CHECK_TIMEOUT = 10.0
-
-
-def _yaml_equal(a: object, b: object) -> bool:
-    """Type-sensitive structural equality for parsed YAML documents.
-    Python's ``==`` conflates YAML booleans and integers (``True == 1``),
-    and comparing ``yaml.safe_dump`` output is not canonical either: shared
-    nodes are emitted as anchors/aliases, so an aliased-but-equal document
-    would falsely report a change. Compare recursively instead, requiring
-    identical scalar types (including mapping keys)."""
-    if type(a) is not type(b):
-        return False
-    if isinstance(a, dict) and isinstance(b, dict):
-        if len(a) != len(b):
-            return False
-        # Fast path for the overwhelmingly common case of string-keyed
-        # mappings: direct lookup is O(n), and str-to-str comparison has
-        # no cross-type conflation. Kubernetes objects can be large (a
-        # ConfigMap may carry thousands of data keys), so the structural
-        # scan below must not run on every comparison.
-        if all(isinstance(k, str) for k in a) and all(isinstance(k, str) for k in b):
-            return all(key in b and _yaml_equal(value, b[key]) for key, value in a.items())
-        # Unusual YAML key types: key lookup would conflate True/1 the same
-        # way == does, so match key/value pairs structurally. Quadratic,
-        # but such mappings are rare and rejected upstream for manifests.
-        b_items = list(b.items())
-        return all(
-            any(
-                _yaml_equal(a_key, b_key) and _yaml_equal(a_value, b_value)
-                for b_key, b_value in b_items
-            )
-            for a_key, a_value in a.items()
-        )
-    if isinstance(a, list) and isinstance(b, list):
-        return len(a) == len(b) and all(_yaml_equal(x, y) for x, y in zip(a, b, strict=True))
-    return a == b
 
 
 #: Upper bound on the pre-approval uid lookup: a stalled API server must
@@ -655,10 +615,6 @@ class KorvidApp(App[None]):
         #: pods/resize subresource discovered on the connected cluster
         #: (1.35 GA); gates the R keybinding and the resize agent tool.
         self._pod_resize_supported = pod_resize_supported
-        #: the in-flight drain worker, if any - pressing the drain key again
-        #: cancels it (evictions stop; the node stays cordoned).
-        self._drain_worker: Worker[None] | None = None
-        self._drain_node: str | None = None
         #: status-bar progress labels keyed by owner (drain, helm preview):
         #: concurrent operations must not clear each other's feedback.
         self._progress_labels: dict[str, str] = {}
@@ -731,14 +687,33 @@ class KorvidApp(App[None]):
             offer_pull_retry=self._offer_pull_retry,
         )
         # Drain execution (issue #97 U3d): the controller owns the approved
-        # drain's cordon/evict/wait/audit lifecycle; keybinding routing, the
-        # press-again-to-cancel semantics and the approval dialog stay here.
-        # audit_write is late-binding so tests that patch the app's method
-        # keep working.
+        # drain's cordon/evict/wait/audit lifecycle. Keybinding routing, the
+        # press-again-to-cancel semantics and the approval dialog belong to
+        # `ResourceWriteController` below, which owns the worker handle.
         self._drain = DrainController(
             notify=self.notify,
             audit_write=self._writes.audit_write,
             set_progress=functools.partial(self._set_progress, "drain"),
+        )
+        #: Resource and node write workflows (issue #187): delete, rollout
+        #: restart, the editor round-trip, scale, in-place pod resize,
+        #: cordon/uncordon and drain - plus the drain's worker/target state.
+        #: It composes those flows out of `WriteCoordinator` and holds no
+        #: mutation path around it; the app keeps only the Textual action
+        #: handlers as thin delegates.
+        self._resource_writes = ResourceWriteController(
+            writes=self._writes,
+            view=AppViewState(self),
+            ui=AppUiSurface(self),
+            drain=self._drain,
+            write_ops=lambda: self._write_ops,
+            get_manifest=lambda: self._get_manifest,
+            edit_text=lambda: self._edit_text,
+            managed_note=self._managed_note,
+            managed_note_from=self._managed_note_from,
+            pod_resize_supported=lambda: self._pod_resize_supported,
+            helm_uninstall=self._helm_uninstall_start,
+            operators=self._olm,
         )
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -3126,15 +3101,13 @@ class KorvidApp(App[None]):
     # -- Write operations (issue #16): every path goes through a ConfirmScreen
     # -- confirmed only by a user keystroke; executed writes are audited.
 
-    #: Workload eligibility is keyed on (group, plural): a custom-group CRD
-    #: whose plural collides with a built-in (e.g. 'deployments') must never
-    #: be treated as an apps/* workload.
-    _RESTARTABLE: ClassVar[frozenset[tuple[str, str]]] = frozenset(
-        {("apps", "deployments"), ("apps", "statefulsets"), ("apps", "daemonsets")}
-    )
-    _SCALABLE: ClassVar[frozenset[tuple[str, str]]] = frozenset(
-        {("apps", "deployments"), ("apps", "replicasets"), ("apps", "statefulsets")}
-    )
+    #: Workload eligibility, owned by `ResourceWriteController` (the flows
+    #: that enforce it) and re-exported here because `_ACTION_VIEWS` and the
+    #: agent write ops gate the same identities. Keyed on (group, plural): a
+    #: custom-group CRD whose plural collides with a built-in (e.g.
+    #: 'deployments') must never be treated as an apps/* workload.
+    _RESTARTABLE: ClassVar[frozenset[tuple[str, str]]] = RESTARTABLE
+    _SCALABLE: ClassVar[frozenset[tuple[str, str]]] = SCALABLE
 
     def _selected_uid(self, ns: str | None, name: str) -> str | None:
         """Uid of the selected row's object from the store, binding an
@@ -3147,794 +3120,45 @@ class KorvidApp(App[None]):
         return None
 
     async def action_delete_resource(self) -> None:
-        """Ctrl-D: delete the selected resource behind a layered confirmation
-        (cluster-scoped kinds require typing the resource name). On the helm
-        release browser the key means `helm uninstall` (issue #117) - helm
-        must remove the release's own bookkeeping, a raw Secret delete would
-        orphan the deployed resources."""
-        current = self.aliases.get(self._canonical_kind(self.current_kind))
-        if current is not None and (current.group, current.plural) == (
-            HELM_RELEASES_META.group,
-            HELM_RELEASES_META.plural,
-        ):
-            self._helm_uninstall_start()
-            return
-        ops = self._write_ops
-        if ops is None:
-            self.notify("Delete unavailable in this session", severity="warning")
-            return
-        target = self._writes.write_target()
-        if target is None:
-            return
-        meta, ns, name, uid = target
-        if (meta.group, meta.plural) == (OPERATORS_GROUP, "subscriptions"):
-            # An OLM Subscription: deleting it alone leaves the operator
-            # running (the CSV stays) - offer the full uninstall instead.
-            await self._olm.uninstall(
-                meta,
-                ns,
-                name,
-                uid,
-                fetch_kind=self._canonical_kind(self.current_kind),
-                ctx=(meta, ns, name),
-            )
-            return
-        if (meta.group, meta.plural) == (
-            OPERATORS_GROUP,
-            "clusterserviceversions",
-        ) and await self._olm.csv_uninstall_redirect(meta, ns, name):
-            return
-        epoch = self._ctx_epoch
-        # Captured with the target: view state is mutable across the awaits
-        # below, and the banner must describe the row the user acted on.
-        kind_alias = self._canonical_kind(self.current_kind)
-        # Which pane raised this, and on which scope: the snapshot below is
-        # scoped from here, and the gate after it refuses if focus moved to
-        # another pane - even one whose cursor is on the same object.
-        origin = self._writes.write_origin()
-        if not await self._writes.precheck_keybinding_write("delete", meta, ns, name):
-            return
-        preview = await self._writes.dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
-        note = await self._managed_note(kind_alias, ns, name)
-        if not self._writes.context_intact(
-            "delete", meta, ns, name, phase="the dry-run preview", epoch=epoch
-        ):
-            return
-        # The snapshot is another awaited gap: a `:ctx` switch, a moved
-        # selection, a re-focused or re-scoped pane, or a same-named
-        # replacement during it must abort before a dialog describes the row
-        # the user is no longer on (issue #283).
-        impact = await self._writes.impact_preview(
-            ImpactAction.DELETE, meta, ns, name, uid, origin=origin
-        )
-        if not self._writes.identity_intact(
-            "delete", meta, ns, name, uid, phase="the impact summary", epoch=epoch, origin=origin
-        ):
-            return
-        operation = f"DELETE {gvr_label(meta)}/{name}{write_locus(ns)}"
-        require = None if meta.namespaced else name
-        await self._writes.confirm(
-            f"Delete {gvr_label(meta)}/{name}?",
-            operation,
-            action="delete",
-            meta=meta,
-            namespace=ns,
-            name=name,
-            op_factory=lambda: ops.delete_object(meta, ns, name, uid=uid),
-            require_name=require,
-            preview=preview,
-            managed_note=note,
-            impact_lines=impact,
-        )
+        """Ctrl-D: delete the selected resource (issue #16)."""
+        await self._resource_writes.delete()
 
     async def action_rollout_restart(self) -> None:
         """r: rolling restart of the selected deployment/statefulset/daemonset."""
-        ops = self._write_ops
-        if ops is None:
-            self.notify("Rollout restart unavailable in this session", severity="warning")
-            return
-        target = self._writes.write_target()
-        if target is None:
-            return
-        meta, ns, name, uid = target
-        if (meta.group, meta.plural) not in self._RESTARTABLE:
-            self.notify(f"rollout restart does not apply to {gvr_label(meta)}", severity="warning")
-            return
-        epoch = self._ctx_epoch
-        # Captured with the target — see action_delete_resource.
-        kind_alias = self._canonical_kind(self.current_kind)
-        origin = self._writes.write_origin()
-        if not await self._writes.precheck_keybinding_write("rollout_restart", meta, ns, name):
-            return
-        # One stamp per approval: the previewed request and the executed
-        # write are byte-identical (exact-replay guarantee).
-        stamp = restart_stamp()
-        preview = await self._writes.dry_run_preview(
-            ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=stamp)
-        )
-        note = await self._managed_note(kind_alias, ns, name)
-        if not self._writes.context_intact(
-            "rollout_restart", meta, ns, name, phase="the dry-run preview", epoch=epoch
-        ):
-            return
-        # Same awaited-gap revalidation as delete - see action_delete_resource.
-        impact = await self._writes.impact_preview(
-            ImpactAction.ROLLOUT_RESTART, meta, ns, name, uid, origin=origin
-        )
-        if not self._writes.identity_intact(
-            "rollout_restart",
-            meta,
-            ns,
-            name,
-            uid,
-            phase="the impact summary",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-
-        await self._writes.confirm(
-            f"Rollout restart {gvr_label(meta)}/{name}?",
-            f"PATCH {gvr_label(meta)}/{name} pod template (restartedAt annotation)"
-            f"{write_locus(ns)}",
-            action="rollout_restart",
-            meta=meta,
-            namespace=ns,
-            name=name,
-            op_factory=lambda: ops.rollout_restart_with_stamp(
-                meta, ns, name, uid=uid, restarted_at=stamp
-            ),
-            preview=preview,
-            managed_note=note,
-            impact_lines=impact,
-        )
-
-    async def _fetch_manifest_for_edit(
-        self,
-        label: str,
-        meta: ResourceMeta,
-        ns: str | None,
-        name: str,
-        epoch: int,
-    ) -> dict[str, Any] | None:
-        """Fetch the manifest for an edit; None (with a notification) aborts.
-        The fetch is another awaited round-trip: a selection change while it
-        was in flight must abort before the editor opens for a stale target,
-        not merely discard the completed edit afterwards."""
-        if self._get_manifest is None:
-            return None
-        try:
-            manifest = await self._get_manifest(self._canonical_kind(self.current_kind), ns, name)
-        except Exception as exc:
-            self.notify(f"edit {label} failed: {exc}", severity="error")
-            return None
-        if not self._writes.context_intact(
-            "edit", meta, ns, name, phase="the manifest fetch", epoch=epoch
-        ):
-            return None
-        # managedFields is server-side bookkeeping noise; kubectl edit hides
-        # it too. resourceVersion stays so concurrent modifications 409.
-        metadata = manifest.get("metadata")
-        if isinstance(metadata, dict):
-            metadata.pop("managedFields", None)
-        return manifest
+        await self._resource_writes.rollout_restart()
 
     async def action_edit_resource(self) -> None:
         """e: open the selected resource's manifest in $EDITOR and PUT the
         edited version back (kubectl edit parity)."""
-        ops = self._write_ops
-        if ops is None or self._get_manifest is None:
-            self.notify("Edit unavailable in this session", severity="warning")
-            return
-        target = self._writes.write_target()
-        if target is None:
-            return
-        meta, ns, name, uid = target
-        epoch = self._ctx_epoch
-        if not await self._writes.precheck_keybinding_write("edit", meta, ns, name):
-            return
-        label = f"{gvr_label(meta)}/{name}"
-        manifest = await self._fetch_manifest_for_edit(label, meta, ns, name, epoch=epoch)
-        if manifest is None:
-            return
-        original_text = yaml.safe_dump(manifest, sort_keys=False)
-        edit = self._edit_text or self._edit_in_external_editor
-        edited = self._parse_edited_manifest(
-            label, manifest, original_text, await edit(original_text)
-        )
-        if edited is None:
-            return
-        # The editor round-trip is arbitrarily long: re-validate that the
-        # same row is still selected before pushing the confirmation.
-        if not self._writes.context_intact(
-            "edit", meta, ns, name, phase="the editor session", epoch=epoch
-        ):
-            return
-        detail = self._edit_detail(manifest, edited)
-        # The pre-edit manifest is already in hand — the banner costs at
-        # most the owner-chain walk. That walk is another awaited gap:
-        # re-validate the selection after it, like every other pre-dialog
-        # await, before pushing the confirmation.
-        note = await self._managed_note_from(manifest, ns)
-        if not self._writes.context_intact(
-            "edit", meta, ns, name, phase="the ownership lookup", epoch=epoch
-        ):
-            return
-        await self._writes.confirm(
-            f"Apply edited {label}?",
-            # Issue #21: the approval dialog summarizes the change, not
-            # just the target and verb.
-            f"PUT {label}{write_locus(ns)} - {detail}",
-            action="edit",
-            meta=meta,
-            namespace=ns,
-            name=name,
-            op_factory=lambda: ops.replace_object(meta, ns, name, edited, uid=uid),
-            detail=detail,
-            managed_note=note,
-        )
-
-    def _parse_edited_manifest(
-        self,
-        label: str,
-        original: dict[str, Any],
-        original_text: str,
-        edited_text: str | None,
-    ) -> dict[str, Any] | None:
-        """Validate the editor output; None (with a notification) aborts the
-        edit. Re-injects the fetched resourceVersion if the user deleted it -
-        an unversioned PUT would silently clobber concurrent changes."""
-        if edited_text is None:
-            self.notify(f"edit {label} cancelled", severity="warning")
-            return None
-        if edited_text == original_text:
-            self.notify(f"edit {label}: no changes", severity="information")
-            return None
-        try:
-            parsed = yaml.safe_load(edited_text)
-        except yaml.YAMLError as exc:
-            self.notify(f"edit {label} aborted: invalid YAML: {exc}", severity="error")
-            return None
-        if not isinstance(parsed, dict):
-            self.notify(f"edit {label} aborted: not a mapping", severity="error")
-            return None
-        if any(not isinstance(key, str) for key in parsed):
-            # YAML legally allows non-string mapping keys, but a manifest
-            # never has them and the change summary sorts keys together.
-            self.notify(f"edit {label} aborted: non-string top-level key", severity="error")
-            return None
-        # Restore the fetched resourceVersion *before* the semantic no-op
-        # comparison: an edit that only deleted it is still "no changes",
-        # and `metadata: null` must not defeat the restore - an unversioned
-        # PUT would silently clobber concurrent changes.
-        original_meta = original.get("metadata")
-        rv = original_meta.get("resourceVersion") if isinstance(original_meta, dict) else None
-        if rv is not None:
-            parsed_meta = parsed.get("metadata")
-            if not isinstance(parsed_meta, dict):
-                parsed_meta = {}
-                parsed["metadata"] = parsed_meta
-            # Not setdefault: a blank `resourceVersion:` loads as None - the
-            # key is present but the PUT would still be unversioned.
-            edited_rv = parsed_meta.get("resourceVersion")
-            if not (isinstance(edited_rv, str) and edited_rv):
-                parsed_meta["resourceVersion"] = rv
-        if _yaml_equal(parsed, original):
-            self.notify(f"edit {label}: no changes", severity="information")
-            return None
-        return parsed
-
-    @staticmethod
-    def _edit_detail(original: dict[str, Any], edited: dict[str, Any]) -> str:
-        """Audit detail: which top-level sections changed. Key presence is
-        checked separately (dict.get returns None for both an absent key and
-        a present null key) and values compare YAML-canonically."""
-        changed = sorted(
-            key
-            for key in set(original) | set(edited)
-            if (key in original) != (key in edited)
-            or not _yaml_equal(original.get(key), edited.get(key))
-        )
-        return "changed: " + ", ".join(changed)
-
-    async def _edit_in_external_editor(self, text: str) -> str | None:
-        """Suspend the TUI and open $VISUAL/$EDITOR (vi fallback) on a temp
-        file; None cancels. Invocation and I/O failures (missing executable,
-        malformed quoting, temp-dir exhaustion, undecodable editor output)
-        abort with a notification instead of an unhandled action error. The
-        blocking call runs in a thread so background tasks keep running
-        while the editor is open."""
-        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-        try:
-            fd, tmp = tempfile.mkstemp(suffix=".yaml", prefix="korvid-edit-")
-        except OSError as exc:
-            self.notify(f"edit temp file failed: {exc}", severity="error")
-            return None
-        try:
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    fh.write(text)
-                argv = shlex.split(editor)
-                if not argv:
-                    # A whitespace-only $VISUAL/$EDITOR passes the fallback
-                    # expression but yields no executable to run.
-                    raise ValueError("empty editor command")
-                argv.append(tmp)
-                with self.suspend():
-                    code = await asyncio.to_thread(subprocess.call, argv)
-            except SuspendNotSupported:
-                # Windows and other non-suspending drivers: cancel with a
-                # notification instead of an unhandled action error.
-                self.notify(
-                    "edit unavailable: this environment does not support"
-                    " suspending the TUI for an external editor",
-                    severity="error",
-                )
-                return None
-            except (OSError, ValueError) as exc:
-                self.notify(f"editor {editor!r} failed: {exc}", severity="error")
-                return None
-            self.refresh()
-            if code != 0:
-                return None
-            try:
-                # Explicit UTF-8: a locale mismatch or binary editor output
-                # raises UnicodeDecodeError (a ValueError, not an OSError).
-                return Path(tmp).read_text(encoding="utf-8")
-            except (OSError, ValueError) as exc:
-                self.notify(f"editor result unreadable: {exc}", severity="error")
-                return None
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
+        await self._resource_writes.edit()
 
     async def action_scale_resource(self) -> None:
-        """S: scale the selected deployment/replicaset/statefulset (prompt, then confirm)."""
-        ops = self._write_ops
-        if ops is None:
-            self.notify("Scale unavailable in this session", severity="warning")
-            return
-        target = self._writes.write_target()
-        if target is None:
-            return
-        meta, ns, name, uid = target
-        if (meta.group, meta.plural) not in self._SCALABLE:
-            self.notify(f"scale does not apply to {gvr_label(meta)}", severity="warning")
-            return
-        # Captured with the target — see action_delete_resource. The pane
-        # and its scope are pinned here, before the permission round trip
-        # and before the count prompt: everything after this reads
-        # "whichever pane is focused now", and the scale-down snapshot below
-        # must cover the pane the user actually raised the write from.
-        origin = self._writes.write_origin()
-        epoch = self._ctx_epoch
-        kind_alias = self._canonical_kind(self.current_kind)
-        # Read before the RBAC await, from the row the target was taken
-        # from: the decrease decision must be about that incarnation, not
-        # about whatever the store holds once the prompt closes.
-        current = self._writes.current_replicas(ns, name)
-        if not await self._writes.precheck_keybinding_write("scale", meta, ns, name):
-            return
-        if not self._writes.scale_identity_intact(
-            meta,
-            ns,
-            name,
-            uid,
-            current,
-            phase="the permission check",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-
-        def _on_replicas(replicas: int | None) -> None:
-            if replicas is None:
-                return
-            # The dry-run round trip must not run inside a screen callback:
-            # a worker fetches the preview, revalidates, then confirms.
-            self.run_worker(
-                self._confirm_scale(
-                    meta,
-                    ns,
-                    name,
-                    uid,
-                    current,
-                    replicas,
-                    epoch,
-                    kind_alias,
-                    origin,
-                )
-            )
-
-        await self.push_screen(
-            ReplicasPrompt(f"{gvr_label(meta)}/{name}", current=current), _on_replicas
-        )
-
-    async def _confirm_scale(
-        self,
-        meta: ResourceMeta,
-        ns: str | None,
-        name: str,
-        uid: str | None,
-        current: int | None,
-        replicas: int,
-        epoch: int,
-        kind_alias: str,
-        origin: WriteOrigin,
-    ) -> None:
-        """Dry-run preview + approval dialog for a scale, after the replica
-        count is known. Revalidates the selection after the preview round
-        trip: keystrokes during the await must never land on a confirmation
-        for a different row. `kind_alias` was captured with the target — the
-        banner must describe the row the user acted on, not the current view.
-
-        A *known decrease* additionally loads the advisory blast radius
-        (issue #295); a scale-up, a no-op, or a row with no readable desired
-        count has no tested scale-down semantics and gets no section and no
-        LIST fan-out. That fan-out is the *only* part of the pre-#295 flow
-        those shapes keep: the identity gating below is stronger for every
-        scale, decrease or not, because it now revalidates the captured uid,
-        the origin pane, that pane's scope and the captured replica count
-        where the flow previously rechecked only kind, namespace, name and
-        the context epoch. `current` is part of what is revalidated because
-        it is what makes this request a decrease at all: it decides whether
-        the blast radius is loaded and it is the number the approval line
-        reads `replicas <old> -> <new>` from.
-
-        The dialog this pushes is itself an awaited gap, and the longest
-        one, so the same gate is handed to `WriteCoordinator.confirm` as its
-        `approval_guard` and runs once more on approval - see there for why
-        it is deferred rather than run inside the result callback."""
-        ops = self._write_ops
-        if ops is None:
-            return
-        # The count prompt is the flow's own awaited gap, and the one a user
-        # can hold open indefinitely: gate before the dry-run round trip, so
-        # a selection, pane, scope, context or replica-count change made
-        # while the modal was up costs no API call at all.
-        if not self._writes.scale_identity_intact(
-            meta,
-            ns,
-            name,
-            uid,
-            current,
-            phase="the replica count prompt",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-        preview = await self._writes.dry_run_preview(
-            ops.preview_scale(meta, ns, name, replicas, uid=uid)
-        )
-        note = await self._managed_note(kind_alias, ns, name)
-        # Gate before the snapshot, not only after it. The count prompt and
-        # this dry-run round trip are two awaited gaps of their own, and the
-        # snapshot is a LIST fan-out across every source in the catalog:
-        # once the selection, the pane, its scope, the context or the count
-        # the request was classified against has drifted the flow is already
-        # doomed, so korvid must not spend that fan-out (nor scope it to a
-        # pane the user has left).
-        if not self._writes.scale_identity_intact(
-            meta,
-            ns,
-            name,
-            uid,
-            current,
-            phase="the dry-run preview",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-        is_scale_down = self._writes.is_scale_down(current, replicas)
-        # The snapshot is another awaited gap — see action_delete_resource.
-        impact = (
-            await self._writes.impact_preview(
-                ImpactAction.SCALE_DOWN,
-                meta,
-                ns,
-                name,
-                uid,
-                origin=origin,
-            )
-            if is_scale_down
-            else None
-        )
-        if is_scale_down and not self._writes.scale_identity_intact(
-            meta,
-            ns,
-            name,
-            uid,
-            current,
-            phase="the impact summary",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-
-        shown = "?" if current is None else current
-        await self._writes.confirm(
-            f"Scale {gvr_label(meta)}/{name}?",
-            f"PATCH {gvr_label(meta)}/{name}/scale: replicas {shown} -> {replicas}"
-            f"{write_locus(ns)}",
-            action="scale",
-            meta=meta,
-            namespace=ns,
-            name=name,
-            op_factory=lambda: ops.scale_object(meta, ns, name, replicas, uid=uid),
-            detail=f"replicas -> {replicas}",
-            preview=preview,
-            managed_note=note,
-            impact_lines=impact,
-            # The dialog is the flow's last - and longest - awaited gap: it
-            # stays up until the user answers. Everything the gates above
-            # compared can move while it does, and `current` in particular
-            # is what the operation line the user is reading says the object
-            # is changing *from*. So the approval is re-validated against
-            # the same captured values once more, after the modal is gone
-            # and before any worker, reservation, audit record or operation
-            # exists.
-            approval_guard=lambda: self._writes.scale_identity_intact(
-                meta,
-                ns,
-                name,
-                uid,
-                current,
-                phase="the confirmation dialog",
-                epoch=epoch,
-                origin=origin,
-            ),
-        )
-
-    def _resize_pod_target(
-        self,
-    ) -> tuple[WriteOps, ResourceMeta, str | None, str, str | None] | None:
-        ops = self._write_ops
-        if ops is None:
-            self.notify("Resize unavailable in this session", severity="warning")
-            return None
-        target = self._writes.write_target()
-        if target is None:
-            return None
-        meta, ns, name, uid = target
-        if (meta.group, meta.plural) != ("", "pods"):
-            self.notify(f"resize does not apply to {gvr_label(meta)}", severity="warning")
-            return None
-        if not self._pod_resize_supported:
-            self.notify(
-                "This cluster does not expose pods/resize (requires Kubernetes 1.35+)",
-                severity="warning",
-            )
-            return None
-        return ops, meta, ns, name, uid
+        """S: scale the selected deployment/replicaset/statefulset."""
+        await self._resource_writes.scale()
 
     async def action_resize_pod(self) -> None:
-        """R: in-place resize of the selected pod (prompt, then confirm).
+        """R: in-place resize of the selected pod (pods/resize, 1.35 GA)."""
+        await self._resource_writes.resize_pod()
 
-        Only offered on the pods view and only when discovery found the
-        pods/resize subresource (Kubernetes 1.35 GA)."""
-        target = self._resize_pod_target()
-        if target is None:
-            return
-        _, meta, ns, name, uid = target
-        epoch = self._ctx_epoch
-        origin = self._writes.write_origin()
-        if not await self._writes.precheck_keybinding_write("resize", meta, ns, name):
-            return
-        if not self._writes.identity_intact(
-            "resize",
-            meta,
-            ns,
-            name,
-            uid,
-            phase="the permission check",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-        fetched = await self._pod_container_resources(ns, name)
-        if fetched is None:
-            return
-        containers, pod_manifest = fetched
-        if not self._writes.uid_intact_after_fetch(pod_manifest, ns, name, uid):
-            self.notify(
-                f"resize {gvr_label(meta)}/{name} cancelled -"
-                " the pod changed during the manifest fetch",
-                severity="warning",
-            )
-            return
-        if not self._writes.identity_intact(
-            "resize",
-            meta,
-            ns,
-            name,
-            uid,
-            phase="the manifest fetch",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
+    async def _edit_in_external_editor(self, text: str) -> str | None:
+        """Suspend the TUI and open $VISUAL/$EDITOR on *text*.
 
-        def _on_resources(resources: dict[str, dict[str, dict[str, str]]] | None) -> None:
-            if not resources:
-                return
-            # The dry-run round trip must not run inside a screen callback:
-            # a worker fetches the preview, revalidates, then confirms.
-            self.run_worker(
-                self._confirm_resize(
-                    meta,
-                    ns,
-                    name,
-                    uid,
-                    resources,
-                    epoch,
-                    pod_manifest,
-                    origin,
-                )
-            )
-
-        await self.push_screen(
-            ResizePrompt(f"{gvr_label(meta)}/{name}", containers=containers), _on_resources
-        )
-
-    async def _pod_container_resources(
-        self, ns: str | None, name: str
-    ) -> tuple[list[tuple[str, dict[str, dict[str, str]]]], dict[str, Any]] | None:
-        """Current per-container requests/limits from the live manifest, in
-        spec order, to prefill the resize prompt — plus the manifest itself,
-        so the ownership banner can reuse the snapshot instead of a second
-        GET. None (with a notification) when the manifest cannot be
-        fetched."""
-        if self._get_manifest is None:
-            self.notify("Resize unavailable: no manifest source", severity="warning")
-            return None
-        try:
-            manifest = await self._get_manifest("pods", ns, name)
-        except Exception as exc:
-            self.notify(f"Could not fetch pod manifest: {exc}", severity="error")
-            return None
-        containers: list[tuple[str, dict[str, dict[str, str]]]] = []
-        for spec in manifest.get("spec", {}).get("containers", []):
-            resources = {
-                section: dict(values)
-                for section, values in spec.get("resources", {}).items()
-                if section in ("requests", "limits") and isinstance(values, dict)
-            }
-            containers.append((str(spec.get("name", "")), resources))
-        if not containers:
-            self.notify("Pod manifest lists no containers", severity="warning")
-            return None
-        return containers, manifest
-
-    @staticmethod
-    def _resize_summary(resources: dict[str, dict[str, dict[str, str]]]) -> str:
-        """One-line 'app: requests.cpu=200m, limits.memory=1Gi; ...' summary
-        shown in the approval dialog and recorded in the audit detail."""
-        parts = []
-        for container, sections in resources.items():
-            changes = ", ".join(
-                f"{section}.{quantity}={value}"
-                for section, values in sections.items()
-                for quantity, value in values.items()
-            )
-            parts.append(f"{container}: {changes}")
-        return "; ".join(parts)
-
-    async def _confirm_resize(
-        self,
-        meta: ResourceMeta,
-        ns: str | None,
-        name: str,
-        uid: str | None,
-        resources: dict[str, dict[str, dict[str, str]]],
-        epoch: int,
-        pod_manifest: dict[str, Any],
-        origin: WriteOrigin,
-    ) -> None:
-        """Dry-run preview + approval dialog for an in-place pod resize.
-        Revalidates the selection after the preview round trip: keystrokes
-        during the await must never land on a confirmation for a different
-        row. `pod_manifest` is the snapshot the prompt was prefilled from —
-        the banner reuses it instead of refetching the same object."""
-        ops = self._write_ops
-        if ops is None:
-            return
-        namespace = ns or ""
-        if not self._writes.identity_intact(
-            "resize",
-            meta,
-            ns,
-            name,
-            uid,
-            phase="the resize prompt",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-        preview = await self._writes.dry_run_preview(
-            ops.preview_resize(namespace, name, resources, uid=uid)
-        )
-        note = await self._managed_note_from(pod_manifest, ns)
-        if not self._writes.identity_intact(
-            "resize",
-            meta,
-            ns,
-            name,
-            uid,
-            phase="the dry-run preview",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-        context = classify_pod_resize(pod_manifest, resources)
-        graph_lines = await self._writes.impact_preview(
-            ImpactAction.POD_RESIZE,
-            meta,
-            ns,
-            name,
-            uid,
-            origin=origin,
-        )
-        impact_lines = compose_resize_impact_lines(graph_lines, context)
-        if not self._writes.identity_intact(
-            "resize",
-            meta,
-            ns,
-            name,
-            uid,
-            phase="the impact preview",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-        summary = self._resize_summary(resources)
-        await self._writes.confirm(
-            f"Apply in-place pod resize to pods/{name}?",
-            f"PATCH pods/{name}/resize: {summary}{write_locus(ns)}",
-            action="resize",
-            meta=meta,
-            namespace=ns,
-            name=name,
-            op_factory=lambda: ops.resize_pod(namespace, name, resources, uid=uid),
-            detail=summary,
-            preview=preview,
-            managed_note=note,
-            impact_lines=impact_lines,
-            approval_guard=lambda: self._writes.identity_intact(
-                "resize",
-                meta,
-                ns,
-                name,
-                uid,
-                phase="the confirmation dialog",
-                epoch=epoch,
-                origin=origin,
-            ),
-        )
+        The helm chart-values editor shares the resource-write controller's
+        implementation rather than carrying a second one.
+        """
+        return await self._resource_writes.edit_in_external_editor(text)
 
     def _node_target(self, action: str) -> tuple[WriteOps, ResourceMeta, str, str | None] | None:
-        """Resolve the selected node for a node op, or None (with a
-        notification) when writes are disabled, nothing is selected, or the
-        current view is not the nodes view."""
-        ops = self._write_ops
-        if ops is None:
-            self.notify(f"{action} unavailable in this session", severity="warning")
-            return None
-        target = self._writes.write_target()
-        if target is None:
-            return None
-        meta, _, name, uid = target
-        if (meta.group, meta.plural) != ("", "nodes"):
-            self.notify(f"{action} does not apply to {gvr_label(meta)}", severity="warning")
-            return None
-        return ops, meta, name, uid
+        """The selected node for a node op; `ShellController` shares it."""
+        return self._resource_writes.node_target(action)
 
     async def action_cordon_node(self) -> None:
         """c: mark the selected node unschedulable (kubectl cordon parity)."""
-        await self._cordon_action(unschedulable=True)
+        await self._resource_writes.cordon()
 
     async def action_uncordon_node(self) -> None:
         """u: mark the selected node schedulable again (kubectl uncordon)."""
-        await self._cordon_action(unschedulable=False)
+        await self._resource_writes.uncordon()
 
     def _helm_view_guard(self, meta: ResourceMeta, what: str) -> bool:
         """`check_action` gates only key dispatch (issue #114); a direct
@@ -4026,187 +3250,11 @@ class KorvidApp(App[None]):
             group="helm-write",
         )
 
-    async def _cordon_action(self, *, unschedulable: bool) -> None:
-        """Shared cordon/uncordon flow: SSAR pre-check, dry-run preview,
-        approval dialog, audited write (issue #40)."""
-        action = "cordon" if unschedulable else "uncordon"
-        resolved = self._node_target(action)
-        if resolved is None:
-            return
-        ops, meta, name, uid = resolved
-        worker = self._drain_worker
-        if worker is not None and worker.is_running and name == self._drain_node:
-            # Uncordoning (or re-cordoning) mid-drain would let new pods
-            # schedule behind the drain's back; the drain owns the node's
-            # schedulable state until it finishes or is cancelled.
-            self.notify(
-                f"nodes/{name} is being drained - cancel the drain first",
-                severity="warning",
-            )
-            return
-        epoch = self._ctx_epoch
-        origin = self._writes.write_origin()
-        if not await self._writes.precheck_keybinding_write(action, meta, None, name):
-            return
-        if not self._writes.identity_intact(
-            action,
-            meta,
-            None,
-            name,
-            uid,
-            phase="the permission check",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-        preview = await self._writes.dry_run_preview(
-            ops.preview_cordon(name, unschedulable, uid=uid)
-        )
-        if not self._writes.identity_intact(
-            action,
-            meta,
-            None,
-            name,
-            uid,
-            phase="the dry-run preview",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-        impact_action = ImpactAction.CORDON_NODE if unschedulable else ImpactAction.UNCORDON_NODE
-        flag = "true" if unschedulable else "false"
-        await self._writes.confirm(
-            f"{action.capitalize()} nodes/{name}?",
-            f"PATCH nodes/{name} spec.unschedulable={flag}",
-            action=action,
-            meta=meta,
-            namespace=None,
-            name=name,
-            op_factory=lambda: ops.cordon_node(name, unschedulable, uid=uid),
-            detail=f"spec.unschedulable={flag}",
-            preview=preview,
-            impact_lines=render_node_maintenance_lines(impact_action),
-            approval_guard=lambda: self._writes.identity_intact(
-                action,
-                meta,
-                None,
-                name,
-                uid,
-                phase="the confirmation dialog",
-                epoch=epoch,
-                origin=origin,
-            ),
-        )
-
     async def action_drain_node(self) -> None:
         """shift+d: drain the selected node behind a typed-name approval
-        showing the PDB-aware impact plan (issue #40). Pressing the key
-        again while a drain is running cancels it: no further evictions are
-        issued and the node stays cordoned."""
-        worker = self._drain_worker
-        if worker is not None and worker.is_running:
-            _, selected = self._selected_ns_name()
-            kind_meta = self.aliases.get(self._canonical_kind(self.current_kind))
-            on_nodes = kind_meta is not None and (kind_meta.group, kind_meta.plural) == (
-                "",
-                "nodes",
-            )
-            if self._drain_node is not None and (not on_nodes or selected != self._drain_node):
-                # Cancelling is a targeted act: another node (or a same-named
-                # row in another view - the binding is global) being selected
-                # must not silently kill the running drain (issue #40 review).
-                self.notify(
-                    f"drain of nodes/{self._drain_node} in progress"
-                    " - press the drain key on it to cancel",
-                    severity="warning",
-                )
-                return
-            worker.cancel()
-            return
-        resolved = self._node_target("drain")
-        if resolved is None:
-            return
-        ops, meta, name, uid = resolved
-        epoch = self._ctx_epoch
-        origin = self._writes.write_origin()
-        if not await self._writes.precheck_keybinding_write("drain", meta, None, name):
-            return
-        try:
-            plan = await ops.drain_plan(name)
-        except Exception as exc:
-            self.notify(
-                f"drain nodes/{name} aborted: could not compute the impact plan: {exc}",
-                severity="error",
-            )
-            return
-        if not self._writes.identity_intact(
-            "drain",
-            meta,
-            None,
-            name,
-            uid,
-            phase="the drain plan",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-
-        graph_lines = await self._writes.impact_preview(
-            ImpactAction.DRAIN_NODE,
-            meta,
-            None,
-            name,
-            uid,
-            origin=origin,
-        )
-        impact_lines = compose_node_maintenance_lines(
-            graph_lines,
-            ImpactAction.DRAIN_NODE,
-        )
-        if not self._writes.identity_intact(
-            "drain",
-            meta,
-            None,
-            name,
-            uid,
-            phase="the impact preview",
-            epoch=epoch,
-            origin=origin,
-        ):
-            return
-
-        def _done(confirmed: bool | None) -> None:
-            if not confirmed or not self._writes.identity_intact(
-                "drain",
-                meta,
-                None,
-                name,
-                uid,
-                phase="the confirmation dialog",
-                epoch=epoch,
-                origin=origin,
-            ):
-                return
-            self._drain_node = name
-            self._drain_worker = self.run_worker(
-                self._writes.reserved(lambda: self._run_drain(ops, meta, name, uid, plan))
-            )
-
-        blocked_now = sum(1 for t in plan.targets if t.pdb_blocked is not None)
-        note = f"; {blocked_now} currently PDB-blocked" if blocked_now else ""
-        await self.push_screen(
-            self._writes.confirm_screen(
-                f"Drain nodes/{name}?",
-                f"Cordon nodes/{name}, then attempt eviction of {len(plan.targets)} pods"
-                f" via the Eviction API{note}"
-                " (press the drain key again to cancel mid-drain)",
-                require_name=name,
-                preview=plan.preview_lines(),
-                preview_title="drain impact plan:",
-                impact_lines=impact_lines,
-            ),
-            _done,
-        )
+        (issue #40). Pressing the key again on it cancels the running drain.
+        """
+        await self._resource_writes.drain_node()
 
     def _set_progress(self, owner: str, label: str) -> None:
         """Publish transient progress on the status bar, scoped to its
@@ -4233,30 +3281,6 @@ class KorvidApp(App[None]):
             yield
         finally:
             self._set_progress(owner, "")
-
-    async def _run_drain(
-        self,
-        ops: WriteOps,
-        meta: ResourceMeta,
-        name: str,
-        uid: str | None,
-        plan: DrainPlan,
-    ) -> None:
-        """Delegate the approved drain to the controller (issue #97 U3d).
-
-        `action_drain_node` wraps this in `WriteCoordinator.reserved` (so the
-        drain is counted against `:ctx` switching from the moment the
-        coroutine is built) and keeps worker ownership, because pressing the
-        drain key again must be able to cancel it.
-        """
-        try:
-            await self._drain.run(ops, meta, name, uid, plan)
-        finally:
-            # Last: while the worker is finalizing (outcome audit/notify)
-            # the targeted-cancel guard must still see its node.
-            self._drain_node = None
-
-    # -- Node shell (issue #46): privileged debug shell via kubectl debug node/
 
     async def action_operator_install(self) -> None:
         """I: on the operator catalog, install the selected package (wizard,
@@ -6089,7 +5113,7 @@ class KorvidApp(App[None]):
         if not resources:
             return "ERROR: resize requires a non-empty 'resources' argument"
         namespace = ns or ""
-        summary = self._resize_summary(resources)
+        summary = resize_summary(resources)
         return (
             meta,
             ns,

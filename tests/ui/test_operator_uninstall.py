@@ -4,6 +4,7 @@ installed CSV, with OLM garbage-collecting the operator's own Deployment and
 RBAC. CRDs and custom resources are never touched. Ctrl+d on a CSV whose
 Subscription is known redirects to the same full flow."""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -484,3 +485,62 @@ async def test_uninstall_write_slot_released_when_coroutine_never_runs(
         del coro
         gc.collect()
         assert app._writes.active_writes() == 0, "the reservation leaked"
+
+
+async def test_uninstall_holds_exactly_one_write_reservation_during_the_mutation(
+    tmp_path: Path,
+) -> None:
+    """The uninstall reserves the gap *before* the audited write, then hands
+    that reservation to `WriteCoordinator.run` — it must not hold a second
+    one alongside it.
+
+    A doubled count is not cosmetic. `:ctx` switching consults it, the two
+    releases are independent, and the perimeter's own `run` is the one that
+    owns the mutation's slot; a wrapper that keeps a parallel `+1` across
+    the same span is a second, unaudited reservation path. Removing it must
+    not open a hole either: the staleness re-fetch between the approval and
+    the first delete is a mutation-relevant awaited gap, so the count must
+    never fall to zero there.
+    """
+    observed_during_mutation: list[int] = []
+    fetches: list[tuple[str, int]] = []
+    gate = asyncio.Event()
+
+    class CountingRecorder(Recorder):
+        async def delete_object(
+            self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+        ) -> None:
+            observed_during_mutation.append(app._writes.active_writes())
+            await super().delete_object(meta, namespace, name, uid=uid)
+
+    ops = CountingRecorder()
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        {"cert-manager": _SUB_MANIFEST, "cert-manager.v1.14.4": _CSV_MANIFEST},
+        tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+    real_get_manifest = app._get_manifest
+    assert real_get_manifest is not None
+
+    async def counting_get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        fetches.append((kind, app._writes.active_writes()))
+        if len(fetches) == 3:
+            # The post-approval staleness re-check: hold it open so the
+            # exclusion covering this gap can be observed while it is live.
+            await gate.wait()
+        return await real_get_manifest(kind, namespace, name)
+
+    app._get_manifest = counting_get_manifest
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        await pilot.press("y")
+        await until(pilot, lambda: len(fetches) == 3, label="staleness re-check in flight")
+        assert fetches[2][1] == 1, "the pre-mutation gap must stay excluded, exactly once"
+        gate.set()
+        await until(pilot, lambda: len(ops.calls) == 2, label="both deletes ran")
+        assert observed_during_mutation == [1, 1], "the mutation must reserve exactly one write"
+        await until(pilot, lambda: app._writes.active_writes() == 0, label="reservation released")

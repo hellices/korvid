@@ -37,7 +37,8 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.writes import WriteOps
-from korvid.ui.app import KorvidApp, _yaml_equal
+from korvid.ui.app import KorvidApp
+from korvid.ui.resource_write_controller import _yaml_equal
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 
