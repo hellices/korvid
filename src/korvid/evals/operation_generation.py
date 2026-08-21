@@ -140,6 +140,19 @@ def _moved_denials(
     )
 
 
+def _generated_namespace(rng: random.Random, used: set[str]) -> str:
+    pool = [candidate for candidate in _NAMESPACE_POOL if candidate not in used]
+    if pool:
+        return rng.choice(pool)
+    base = f"korvid-eval-{rng.getrandbits(48):012x}"
+    candidate = base
+    suffix = 1
+    while candidate in used:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate
+
+
 def generate_instance(
     template: OperationJourney, seed: int
 ) -> tuple[OperationJourney, GenerationRecord]:
@@ -156,8 +169,7 @@ def generate_instance(
         str((manifest.get("metadata") or {}).get("namespace") or "")
         for manifest in template.cluster.objects
     }
-    pool = [candidate for candidate in _NAMESPACE_POOL if candidate not in used]
-    namespace = rng.choice(pool)
+    namespace = _generated_namespace(rng, used)
     name = f"{old.name}-{rng.choice(_NAME_SUFFIXES)}"
     count = rng.randint(0, _MAX_DISTRACTORS)
     objects = list(_moved_objects(template, namespace, name))

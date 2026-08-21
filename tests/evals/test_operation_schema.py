@@ -102,6 +102,13 @@ def test_a_minimal_operation_journey_loads_with_typed_target_identity(tmp_path: 
     assert journey.dialog_intervention is None
 
 
+def test_target_plural_must_match_a_supported_canonical_resource(tmp_path: Path) -> None:
+    data = _minimal()
+    data["operation"]["target"]["plural"] = "deploymentz"
+    with pytest.raises(ValueError, match="supported canonical resource"):
+        load_operation_journey(_write(tmp_path, data))
+
+
 def test_schema_v2_loads_a_typed_scale_request(tmp_path: Path) -> None:
     data = _minimal()
     journey = load_operation_journey(_write(tmp_path, data))

@@ -22,6 +22,7 @@ from typing import Any
 
 import yaml
 
+from korvid.evals.fake_kube import builtin_aliases
 from korvid.evals.scenario import (
     ContainerLogs,
     _logs,
@@ -97,6 +98,9 @@ ASSERTION_OPERATORS = frozenset({"equals", "not_equals", "exists", "absent", "gr
 #: The terminal report classes a fixture may declare as its expectation.
 OUTCOME_CLASSES = frozenset(
     {"rejected", "failed", "accepted", "in_progress", "completed", "verification_unknown"}
+)
+_SUPPORTED_TARGETS = frozenset(
+    (meta.group, meta.kind, meta.plural) for meta in builtin_aliases().values()
 )
 
 _VALUE_OPERATORS = frozenset({"equals", "not_equals", "greater_than"})
@@ -321,6 +325,11 @@ def _target(raw: Any, label: str) -> OperationTarget:
     if "/" in str(raw["name"]) or "/" in str(raw["namespace"]):
         raise ValueError(
             f"{label}: target identity is typed; 'namespace/name' composites are rejected"
+        )
+    resource = (str(raw["group"]), str(raw["kind"]), str(raw["plural"]))
+    if resource not in _SUPPORTED_TARGETS:
+        raise ValueError(
+            f"{label}: group, kind, and plural must identify a supported canonical resource"
         )
     return OperationTarget(
         context=str(raw["context"]),

@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+import korvid.evals.operation_generation as operation_generation
 from korvid.evals.operation import (
     OPERATION_SCHEMA_VERSION,
     bundled_operations_dir,
@@ -30,6 +31,21 @@ def test_different_seeds_move_the_target_identity() -> None:
         second.target.namespace,
         second.target.name,
     )
+
+
+def test_exhausted_namespace_pool_uses_a_noncolliding_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    template = _TEMPLATES["scale-deployment-up"]
+    monkeypatch.setattr(operation_generation, "_NAMESPACE_POOL", (template.target.namespace,))
+    first, _ = generate_instance(template, 7)
+    second, _ = generate_instance(template, 7)
+    used = {
+        str((manifest.get("metadata") or {}).get("namespace") or "")
+        for manifest in template.cluster.objects
+    }
+    assert first.target.namespace == second.target.namespace
+    assert first.target.namespace not in used
 
 
 def test_the_instance_stays_internally_consistent() -> None:
