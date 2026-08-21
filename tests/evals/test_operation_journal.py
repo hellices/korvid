@@ -208,17 +208,18 @@ def test_summarize_arguments_drops_bool_and_empty_values() -> None:
     assert detail == "tool=scale_resource name=checkout-a replicas=3 dropped=2"
 
 
-def test_summarize_arguments_counts_a_dropped_tool_name_and_argument_keys() -> None:
+def test_summarize_arguments_counts_reserved_tool_and_dropped_keys() -> None:
     detail = summarize_arguments(
         "delete resource",
         {
             "kind": "deployments",
             "name": "checkout-a",
             "tool": "shadow",
+            "dropped": "7",
             "note": "whatever the model wanted to say",
         },
     )
-    assert detail == "kind=deployments name=checkout-a dropped=3"
+    assert detail == "kind=deployments name=checkout-a dropped=4"
 
 
 @pytest.mark.parametrize(

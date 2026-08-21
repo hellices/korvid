@@ -664,7 +664,7 @@ def _make_check_permission(
             journal.append(
                 event="permission_denied",
                 actor="app_internal",
-                action=summarize_action(f"{verb} {resource}"),
+                action=summarize_action(verb),
                 result="denied",
                 detail=summarize(
                     group=group or "core", resource=resource, namespace=namespace or "-"

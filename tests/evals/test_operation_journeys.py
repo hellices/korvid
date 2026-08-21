@@ -552,7 +552,9 @@ async def test_a_name_collision_cannot_flip_a_target_initial_selection(tmp_path:
 
 async def test_an_rbac_refusal_never_reaches_a_dialog_or_the_audit_log(tmp_path: Path) -> None:
     run = await run_scripted_journey("scale-rbac-denied", tmp_path)
-    assert [entry for entry in run.journal if entry["event"] == "permission_denied"] != []
+    denied = next(entry for entry in run.journal if entry["event"] == "permission_denied")
+    assert denied["action"] == "patch"
+    assert denied["detail"] == "group=apps resource=deployments namespace=shop-b"
     assert [entry for entry in run.journal if entry["event"] == "dialog_observed"] == []
     assert [entry for entry in run.journal if entry["event"] == "mutation_started"] == []
     assert run.audit == ()

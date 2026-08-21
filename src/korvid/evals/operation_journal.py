@@ -153,7 +153,7 @@ def summarize_arguments(tool: str, arguments: Mapping[str, Any]) -> str:
         tool_value = None
         dropped += 1
     for key, value in sorted(arguments.items()):
-        if key not in _DETAIL_KEYS or key == "tool":
+        if key not in _DETAIL_KEYS or key in {"tool", "dropped"}:
             dropped += 1
             continue
         if isinstance(value, bool) or not isinstance(value, _SCALARS):
