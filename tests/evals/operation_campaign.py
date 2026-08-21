@@ -334,7 +334,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     run_id, run_dir = _create_run_dir(args.artifacts)
-    records = asyncio.run(_run(args, pairs, run_id=run_id, run_dir=run_dir))
     serving = None
     if not args.scripted:
         serving = asyncio.run(
@@ -349,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         warn_if_unpinned(serving)
+    records = asyncio.run(_run(args, pairs, run_id=run_id, run_dir=run_dir))
     profile = build_profile(
         args.profile, readonly=False, resize_supported=False, overrides=PromptOverrides()
     )

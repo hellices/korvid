@@ -373,7 +373,7 @@ def _mutation_parameters_mismatch(ctx: _Context) -> bool:
     return any(
         event.post_state.get("spec.replicas") != expected.replicas
         for event in ctx.events
-        if event.event == "mutation_finished" and "spec.replicas" in event.post_state
+        if event.event == "mutation_finished"
     )
 
 

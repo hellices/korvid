@@ -60,16 +60,19 @@ def test_a_live_campaign_records_the_serving_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     serving = {"model": "operator-model", "unavailable": []}
+    calls: list[str] = []
 
     async def fake_capture_serving(
         base_url: str,
         model: str,
         **_kwargs: object,
     ) -> dict[str, Any]:
+        calls.append("capture")
         assert (base_url, model) == ("https://models.example/v1", "operator-model")
         return serving
 
     async def fake_run(*_args: object, **_kwargs: object) -> list[dict[str, Any]]:
+        calls.append("run")
         return []
 
     monkeypatch.setenv("KORVID_EVAL_BASE_URL", "https://models.example/v1")
@@ -97,6 +100,7 @@ def test_a_live_campaign_records_the_serving_environment(
     )
 
     assert code == 0
+    assert calls == ["capture", "run"]
     assert json.loads(payload_path.read_text())["meta"]["serving"] == serving
 
 

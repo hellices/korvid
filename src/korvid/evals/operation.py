@@ -457,7 +457,8 @@ def _denials(raw: Any, label: str) -> tuple[PermissionDenial, ...]:
     if not isinstance(raw, dict):
         raise ValueError(f"{label} must be a mapping")
     _reject_unknown_keys(raw, _RBAC_KEYS, label)
-    entries = raw.get("denied") or []
+    denied = raw.get("denied")
+    entries = [] if denied is None else denied
     if not isinstance(entries, list):
         raise ValueError(f"{label}.denied must be a list of rule mappings")
     rules: list[PermissionDenial] = []
@@ -514,7 +515,8 @@ def _cluster(raw: Any, label: str) -> OperationCluster:
     if not objects:
         raise ValueError(f"{label} needs at least one object: an operation needs a target")
     _reject_duplicate_object_identities(objects, label)
-    forbidden_reads = raw.get("forbidden") or []
+    forbidden = raw.get("forbidden")
+    forbidden_reads = [] if forbidden is None else forbidden
     if not isinstance(forbidden_reads, list):
         raise ValueError(f"{label}.forbidden must be a list of read-denial rules")
     if not all(isinstance(rule, dict) for rule in forbidden_reads):

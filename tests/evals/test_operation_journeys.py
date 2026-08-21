@@ -12,13 +12,17 @@ import os
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from korvid.evals.operation import PermissionDenial, bundled_operations_dir, load_operation_journeys
 from korvid.evals.operation_journal import ActionJournal, JournalTarget
-from korvid.evals.operation_state import RESTART_ANNOTATION, StatefulFakeWriteOps
+from korvid.evals.operation_state import (
+    RESTART_ANNOTATION,
+    StatefulFakeKubeClient,
+    StatefulFakeWriteOps,
+)
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import RecordedExecution
 from korvid.tools.structured import dump_yaml
@@ -27,11 +31,15 @@ from .operation_app import (
     _APPROVAL_KEYS,
     MIN_APPROVAL_TIMEOUT,
     OperationRun,
+    _ApprovalDriver,
     _journal_audit_records,
     _JournalingExecutor,
     _make_check_permission,
+    _make_get_manifest,
+    _make_watch_source,
     _read_audit,
     _shows_state,
+    _write_request_target,
     approval_from_result,
     run_operation_journey,
 )
@@ -145,6 +153,59 @@ def test_approval_from_result_classifies_every_production_write_result(
     the *user's decision* is what the grader compares against the driver's
     observation, and the audit rules are what catch the blocked write."""
     assert approval_from_result(result) == expected
+
+
+async def test_expired_dialog_closure_between_poll_and_handle_is_observed() -> None:
+    class ClosedApp:
+        screen = object()
+
+    journal = ActionJournal()
+    driver = _ApprovalDriver(
+        cast(Any, ClosedApp()),
+        _JOURNEYS["restart-approval-expired"],
+        journal,
+        cast(Any, None),
+        expiry_timeout=MIN_APPROVAL_TIMEOUT,
+    )
+    await driver.handle(cast(Any, None))
+    assert [event.event for event in journal.events] == [
+        "dialog_closed_before_decision",
+        "approval_observed",
+    ]
+    assert journal.events[-1].approval == "expired"
+
+
+async def test_harness_resource_aliases_are_normalized_consistently() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+    kube = StatefulFakeKubeClient(journey.cluster)
+    journal = ActionJournal()
+    get_manifest = _make_get_manifest(kube, journal, journey)
+    manifest = await get_manifest(" Deployment ", journey.target.namespace, journey.target.name)
+    assert manifest["metadata"]["uid"] == journey.target.uid
+
+    source = _make_watch_source(kube)
+    stream = source(" DEPLOYMENTS ", journey.target.namespace)
+    event, summary = await anext(stream)
+    assert event == "ADDED"
+    assert summary.name == journey.target.name
+
+
+def test_write_target_projection_matches_production_normalization() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+    target = _write_request_target(
+        journey,
+        {
+            "kind": " Deployment ",
+            "namespace": f" {journey.target.namespace} ",
+            "name": f" {journey.target.name} ",
+        },
+    )
+    assert target is not None
+    assert (target.kind, target.namespace, target.name) == (
+        journey.target.kind,
+        journey.target.namespace,
+        journey.target.name,
+    )
 
 
 async def test_a_sub_second_approval_window_is_refused(tmp_path: Path) -> None:

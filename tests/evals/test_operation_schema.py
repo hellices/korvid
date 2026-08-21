@@ -185,6 +185,22 @@ def test_optional_rbac_fields_must_be_strings(tmp_path: Path, key: str) -> None:
         load_operation_journey(_write(tmp_path, data))
 
 
+@pytest.mark.parametrize("value", [False, 0, {}])
+def test_rbac_denials_reject_malformed_falsy_values(tmp_path: Path, value: object) -> None:
+    data = _minimal()
+    data["rbac"]["denied"] = value
+    with pytest.raises(ValueError, match=r"rbac\.denied must be a list"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+@pytest.mark.parametrize("value", [False, 0, {}])
+def test_read_denials_reject_malformed_falsy_values(tmp_path: Path, value: object) -> None:
+    data = _minimal()
+    data["cluster"]["forbidden"] = value
+    with pytest.raises(ValueError, match=r"cluster\.forbidden must be a list"):
+        load_operation_journey(_write(tmp_path, data))
+
+
 def test_optional_read_denial_fields_must_be_strings(tmp_path: Path) -> None:
     data = _minimal()
     data["cluster"]["forbidden"] = [{"kind": "deployments", "namespace": False}]

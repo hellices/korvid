@@ -78,6 +78,7 @@ from korvid.evals.operation_state import (
     parse_audit_records,
 )
 from korvid.evals.runner import _CountingProvider
+from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import manifest_uid
 from korvid.tools.executor import RecordedExecution, ToolExecutor, ToolOutcome, UIBridge
 from korvid.tools.registry import TOOLS_BY_NAME
@@ -344,12 +345,19 @@ def _shows_state(document: Mapping[str, Any], assertions: Sequence[StateAssertio
 
 def _safe_argument(arguments: Mapping[str, Any], key: str) -> str | None:
     """Project one untrusted argument through the journal's token policy."""
-    detail = summarize_untrusted(**{key: arguments.get(key)})
+    value = arguments.get(key)
+    if key in {"kind", "name", "namespace"} and isinstance(value, str):
+        value = value.strip()
+    detail = summarize_untrusted(**{key: value})
     prefix = f"{key}="
     suffix = " dropped=0"
     if not detail.startswith(prefix) or not detail.endswith(suffix):
         return None
     return detail[len(prefix) : -len(suffix)]
+
+
+def _alias(kind: str) -> ResourceMeta | None:
+    return _ALIASES.get(kind.strip().lower())
 
 
 def _write_request_target(
@@ -358,7 +366,7 @@ def _write_request_target(
     kind = _safe_argument(arguments, "kind")
     name = _safe_argument(arguments, "name")
     namespace = _safe_argument(arguments, "namespace")
-    meta = _ALIASES.get(kind.lower()) if kind is not None else None
+    meta = _alias(kind) if kind is not None else None
     if meta is None or name is None or namespace is None:
         return None
     return JournalTarget(
@@ -619,7 +627,24 @@ class _ApprovalDriver:
 
     async def handle(self, pilot: Any) -> None:
         screen = self._app.screen
-        assert isinstance(screen, ConfirmScreen)
+        if not isinstance(screen, ConfirmScreen):
+            expired = self._journey.approval == "expired"
+            self._journal.append(
+                event="dialog_closed_before_decision",
+                actor="approval_driver",
+                result="expired" if expired else "error",
+            )
+            if expired:
+                self._remaining -= 1
+                self._journal.append(
+                    event="approval_observed",
+                    actor="approval_driver",
+                    action=self._journey.goal,
+                    target=JournalTarget.of(self._journey.target),
+                    approval="expired",
+                    result="no_keystroke",
+                )
+            return
         # `render()`, not `renderable`: Textual 8's `Static` exposes its
         # content that way, and it is what every other `tests/ui/` dialog
         # assertion reads.
@@ -697,7 +722,7 @@ def _make_watch_source(
     kube: StatefulFakeKubeClient,
 ) -> Callable[[str, str], AsyncIterator[tuple[str, Summary]]]:
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        meta = _ALIASES.get(kind)
+        meta = _alias(kind)
         if meta is not None:
             namespace = None if scope == ALL_NAMESPACES else scope
             for summary in await kube.list_objects(meta, namespace):
@@ -714,7 +739,7 @@ def _make_get_manifest(
     kube: StatefulFakeKubeClient, journal: ActionJournal, journey: OperationJourney
 ) -> Callable[[str, str | None, str], Awaitable[dict[str, Any]]]:
     async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
-        meta = _ALIASES.get(kind)
+        meta = _alias(kind)
         if meta is None:
             raise ValueError(f"Unknown resource kind: {kind!r}")
         manifest = await kube.get_object(meta, namespace, name)
