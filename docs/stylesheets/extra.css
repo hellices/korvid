@@ -1,17 +1,19 @@
 /*
  * korvid landing page visual polish.
  *
- * Scope: custom properties, the amber-on-charcoal hero, the responsive
- * product demo, the feature grid, keyboard-focus visibility, reduced-motion
- * handling, and comfortable reading widths for the new landing content.
- * Everything here is additive to the Material for MkDocs theme already
- * configured in mkdocs.yml (palette: scheme slate, primary black, accent
- * amber) — no JavaScript, no external assets, no bundled fonts.
+ * Scope: custom properties, the amber-on-charcoal hero and its cockpit
+ * panel, the responsive product demo, the feature grid, the site footer,
+ * keyboard-focus visibility, reduced-motion handling, and comfortable
+ * reading widths for the new landing content. Everything here is additive
+ * to the Material for MkDocs theme already configured in mkdocs.yml
+ * (palette: scheme slate, primary black, accent amber) — no JavaScript, no
+ * external assets, no bundled fonts.
  */
 
 :root {
   --korvid-charcoal: #12151a;
   --korvid-charcoal-raised: #1b1f26;
+  --korvid-charcoal-sunken: #0d1014;
   --korvid-charcoal-border: #2a2f38;
   --korvid-amber: #f5a623;
   --korvid-amber-bright: #ffcf6e;
@@ -28,13 +30,22 @@
 /* ------------------------------------------------------------------ */
 
 .md-typeset .hero {
-  background: var(--korvid-charcoal);
+  /* The amber wash is anchored to the top-right corner, where the cockpit
+     panel sits, so the panel reads as lit rather than pasted on. */
+  background:
+    radial-gradient(115% 130% at 100% 0%, rgba(245, 166, 35, 0.09), transparent 58%),
+    var(--korvid-charcoal);
+  border: 1px solid var(--korvid-charcoal-border);
   color: var(--korvid-ink);
   border-radius: var(--korvid-radius);
   padding: 3rem 2rem;
   margin: 0 0 2rem;
   max-width: var(--korvid-content-width);
   margin-inline: auto;
+}
+
+.md-typeset .hero .hero-copy-column {
+  max-width: var(--korvid-measure);
 }
 
 .md-typeset .hero .eyebrow {
@@ -103,18 +114,224 @@
   border-color: var(--korvid-amber-bright);
 }
 
+/* The same amber outline for the in-page calls to action further down the
+   landing page, which would otherwise inherit the docs' default link blue
+   and read as a different product. */
+.md-typeset .korvid-button {
+  color: var(--korvid-amber);
+  border-color: var(--korvid-amber);
+}
+
+.md-typeset .korvid-button:hover,
+.md-typeset .korvid-button:focus {
+  background-color: var(--korvid-amber);
+  border-color: var(--korvid-amber);
+  color: var(--korvid-charcoal);
+}
+
+/* ------------------------------------------------------------------ */
+/* Hero: the install command never breaks mid-token                     */
+/* ------------------------------------------------------------------ */
+
+/* `brew install hellices/korvid/korvid` used to render as
+   `brew install` / `hellices/korvid/ko` / `rvid` on a 390px viewport —
+   Material's `.md-typeset code { word-break: break-word }` broke the token
+   itself, so neither visible line was a runnable command. Wrapping is
+   restored to token boundaries only: the command may fall onto a second
+   line at the space, never inside a path. If even one token is wider than
+   the hero (below roughly 340px), the container scrolls rather than
+   overflows — which makes it a scrollable region, hence the `tabindex="0"`
+   and accessible name in the markup and the focus ring further below. */
 .md-typeset .hero .install-command {
-  display: inline-block;
-  background: var(--korvid-charcoal-raised);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  background: var(--korvid-charcoal-sunken);
   border: 1px solid var(--korvid-charcoal-border);
   border-radius: var(--korvid-radius);
-  padding: 0.5rem 1rem;
+  padding: 0.55rem 0.9rem;
+}
+
+.md-typeset .hero .install-command__prompt {
+  color: var(--korvid-amber);
+  font-family: var(--md-code-font-family, monospace);
+  font-size: 0.95rem;
+  flex: none;
+  user-select: none;
 }
 
 .md-typeset .hero .install-command code {
   background: none;
   color: var(--korvid-amber-bright);
   font-size: 0.95rem;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+/* ------------------------------------------------------------------ */
+/* Hero: the cockpit panel that balances the copy                       */
+/* ------------------------------------------------------------------ */
+
+/* Original korvid motif, drawn entirely in CSS: a small terminal frame
+   carrying real keys from keybindings.md. It exists because the hero was
+   840px of prose inside a 1188px panel at desktop widths — the fix is
+   content, not more padding. */
+.md-typeset .hero .hero-panel {
+  margin: 2.5rem 0 0;
+  background: var(--korvid-charcoal-raised);
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+  overflow: hidden;
+}
+
+.md-typeset .hero .hero-panel__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  background: var(--korvid-charcoal-sunken);
+  border-bottom: 1px solid var(--korvid-charcoal-border);
+}
+
+/* One lit lamp and two dark ones, drawn with box-shadow so the terminal
+   chrome costs no extra markup. */
+.md-typeset .hero .hero-panel__lights {
+  flex: none;
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-right: 1.35rem;
+  border-radius: 50%;
+  background: var(--korvid-amber);
+  box-shadow:
+    0.7rem 0 0 var(--korvid-charcoal-border),
+    1.4rem 0 0 var(--korvid-charcoal-border);
+}
+
+.md-typeset .hero .hero-panel__title {
+  color: var(--korvid-ink-dim);
+  font-family: var(--md-code-font-family, monospace);
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.md-typeset .hero .hero-panel__keys {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.6rem 0.9rem;
+  margin: 0;
+  padding: 1.1rem 1rem;
+}
+
+.md-typeset .hero .hero-panel__keys dt,
+.md-typeset .hero .hero-panel__keys dd {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.md-typeset .hero .hero-panel__keys dd {
+  color: var(--korvid-ink-dim);
+}
+
+.md-typeset .hero .hero-panel__literal {
+  color: var(--korvid-ink);
+  font-family: var(--md-code-font-family, monospace);
+}
+
+.md-typeset .hero .hero-panel kbd {
+  background: var(--korvid-charcoal-sunken);
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: 0.25rem;
+  box-shadow: none;
+  color: var(--korvid-amber-bright);
+  font-size: 0.72rem;
+  padding: 0.1rem 0.4rem;
+  white-space: nowrap;
+}
+
+.md-typeset .hero .hero-panel__note {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  border-top: 1px solid var(--korvid-charcoal-border);
+  color: var(--korvid-ink-dim);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+/* Two columns only once there is room for both without squeezing either:
+   below this the hero keeps the single-column stack that already works on
+   phones and small tablets. */
+@media (min-width: 1000px) {
+  .md-typeset .hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    column-gap: 3rem;
+    align-items: center;
+    padding: 3.5rem 3rem;
+  }
+
+  .md-typeset .hero .hero-panel {
+    margin-top: 0;
+  }
+}
+
+/* Narrow viewports: reclaim horizontal room so the install command fits
+   without scrolling at all, and drop the display headline a step. */
+@media (max-width: 599px) {
+  .md-typeset .hero {
+    padding: 2rem 1.25rem;
+  }
+
+  .md-typeset .hero h1 {
+    font-size: 2rem;
+  }
+
+  .md-typeset .hero .install-command {
+    padding: 0.5rem 0.7rem;
+  }
+
+  /* Small enough that the longest token, `hellices/korvid/korvid`, fits on
+     one line inside a 390px viewport — the command then wraps only at the
+     space, and the scroll fallback stays unused. */
+  .md-typeset .hero .install-command__prompt,
+  .md-typeset .hero .install-command code {
+    font-size: 0.78rem;
+  }
+
+  /* The legend is a supporting note on a phone, not the headline: tighten
+     it so it does not out-weigh the copy it exists to balance. */
+  .md-typeset .hero .hero-panel__bar {
+    padding: 0.55rem 0.8rem;
+  }
+
+  .md-typeset .hero .hero-panel__title {
+    font-size: 0.62rem;
+  }
+
+  .md-typeset .hero .hero-panel__keys {
+    padding: 0.9rem 0.85rem;
+    gap: 0.55rem 0.75rem;
+  }
+
+  .md-typeset .hero .hero-panel__keys dt,
+  .md-typeset .hero .hero-panel__keys dd {
+    font-size: 0.72rem;
+  }
+
+  .md-typeset .hero .hero-panel__note {
+    padding: 0.75rem 0.85rem;
+    font-size: 0.68rem;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -198,6 +415,100 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Footer — korvid identity instead of the bare theme default          */
+/* ------------------------------------------------------------------ */
+
+/* The default footer meta was a single "Made with Material for MkDocs"
+   line, which reads as an unfinished page rather than the end of a
+   product site. The `partials/copyright.html` override supplies korvid's
+   own mark, tagline, destinations and license; this styles it — and keeps
+   the theme attribution, which stays in the markup. */
+.md-footer-meta {
+  background-color: var(--korvid-charcoal);
+}
+
+.md-footer .korvid-footer {
+  display: grid;
+  gap: 1.25rem;
+  width: 100%;
+  max-width: var(--korvid-content-width);
+  margin-inline: auto;
+  /* Material's default `.md-copyright` margin is replaced above, so the
+     inline padding has to be restated or the footer runs into the viewport
+     edge on a phone. */
+  padding: 1.75rem 0.8rem;
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+
+@media (min-width: 720px) {
+  .md-footer .korvid-footer {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 2.5rem;
+  }
+
+  .md-footer .korvid-footer__meta {
+    grid-column: 1 / -1;
+  }
+}
+
+.md-footer .korvid-footer__identity {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.md-footer .korvid-footer__mark {
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+  opacity: 0.85;
+}
+
+.md-footer .korvid-footer__name {
+  margin: 0;
+  color: var(--korvid-ink);
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.md-footer .korvid-footer__tagline {
+  margin: 0;
+  color: var(--korvid-ink-dim);
+}
+
+.md-footer .korvid-footer__links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.35rem;
+}
+
+.md-footer .korvid-footer a {
+  color: var(--korvid-ink-dim);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.md-footer .korvid-footer a:hover,
+.md-footer .korvid-footer a:focus-visible {
+  color: var(--korvid-amber-bright);
+}
+
+.md-footer .korvid-footer__meta {
+  margin: 0;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--korvid-charcoal-border);
+  color: var(--korvid-ink-dim);
+}
+
+.md-footer .korvid-footer__meta a {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+/* ------------------------------------------------------------------ */
 /* Readable widths for the landing page's prose sections               */
 /* ------------------------------------------------------------------ */
 
@@ -214,8 +525,10 @@
 /* ------------------------------------------------------------------ */
 
 .md-typeset .hero a:focus-visible,
+.md-typeset .hero .install-command:focus-visible,
 .md-typeset .feature-grid article:focus-visible,
-.md-typeset .product-demo:focus-visible {
+.md-typeset .product-demo:focus-visible,
+.md-footer .korvid-footer a:focus-visible {
   outline: 3px solid var(--korvid-amber);
   outline-offset: 2px;
 }
@@ -225,7 +538,8 @@
 /* ------------------------------------------------------------------ */
 
 @media (prefers-reduced-motion: reduce) {
-  .md-typeset .hero .hero-actions .md-button {
+  .md-typeset .hero .hero-actions .md-button,
+  .md-footer .korvid-footer a {
     transition: none;
   }
 

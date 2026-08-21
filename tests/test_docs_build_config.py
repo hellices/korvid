@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -50,21 +51,28 @@ def test_gitignore_excludes_site_dir() -> None:
     )
 
 
-def _load_mkdocs_config() -> dict[str, object]:
+def _load_mkdocs_config() -> dict[str, Any]:
     """Parse `mkdocs.yml`, tolerating its `!!python/name:...` custom tag.
 
     `SafeLoader` refuses arbitrary Python-object tags. This config only uses
     one (`pymdownx.superfences`'s code-format callable), which the tests
     below don't need to resolve, so map it to an inert placeholder string.
+
+    Returns:
+        The parsed mapping.
     """
 
     class _TolerantLoader(yaml.SafeLoader):
         pass
 
-    _TolerantLoader.add_multi_constructor(
+    # PyYAML's stubs leave `add_multi_constructor` unannotated, so mypy
+    # --strict rejects the call rather than the code.
+    _TolerantLoader.add_multi_constructor(  # type: ignore[no-untyped-call]  # untyped in types-PyYAML
         "tag:yaml.org,2002:python/name:", lambda loader, suffix, node: suffix
     )
-    return yaml.load((ROOT / "mkdocs.yml").read_text(), Loader=_TolerantLoader)
+    config = yaml.load((ROOT / "mkdocs.yml").read_text(), Loader=_TolerantLoader)
+    assert isinstance(config, dict), "mkdocs.yml must parse to a mapping"
+    return config
 
 
 def test_mkdocs_config_does_not_downgrade_link_validation() -> None:

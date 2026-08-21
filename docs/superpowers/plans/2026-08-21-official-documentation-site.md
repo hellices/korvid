@@ -328,29 +328,32 @@ git commit -m "ci: publish official documentation site"
 
 **Files:**
 - Modify only files from Tasks 1–3 if browser verification exposes a defect.
+- Create: `docs/overrides/partials/copyright.html` (footer defect)
+- Create: `tests/test_docs_landing_design.py`
+- Create: `tests/test_wheel_packaging.py`
 
 **Interfaces:**
 - Consumes: Locally rendered `site/` output.
 - Produces: Evidence that the implementation meets the visual, responsive, search, navigation, and content requirements.
 
-- [ ] **Step 1: Start a local server**
+- [x] **Step 1: Start a local server**
 
 Run `uv run --frozen --group docs mkdocs serve --dev-addr 127.0.0.1:8765` as a detached
 background server and verify `curl --fail http://127.0.0.1:8765/`.
 
-- [ ] **Step 2: Verify desktop rendering**
+- [x] **Step 2: Verify desktop rendering**
 
 Open `http://127.0.0.1:8765/` at 1440×1000. Confirm the hero, install command,
 demo, feature cards, safety statement, and flight-path links are visible;
 confirm no horizontal overflow and no broken image.
 
-- [ ] **Step 3: Verify narrow rendering and search**
+- [x] **Step 3: Verify narrow rendering and search**
 
 Resize to 390×844. Confirm actions and cards stack, navigation opens, body text
 remains readable, and keyboard focus is visible. Search for `fail-closed` and
 confirm a safety-related result appears.
 
-- [ ] **Step 4: Run final repository checks**
+- [x] **Step 4: Run final repository checks**
 
 Run:
 
@@ -364,13 +367,44 @@ git diff --check
 Expected: all commands pass. Stop the local server and remove the generated
 `site/` directory if MkDocs did not clean it.
 
-- [ ] **Step 5: Commit any acceptance fixes**
+**Behind a mirror, prefix every command with `UV_FROZEN=1`.** The `mypy`
+pre-commit hook runs bare `uv run mypy`, which re-resolves and rewrites
+`uv.lock` to private-index URLs; `UV_FROZEN=1` keeps the lock untouched
+and the `no-private-index-in-lock` hook green.
+
+- [x] **Step 5: Prove the wheel ships code only, not the docs site**
+
+The site added `docs/`, `mkdocs.yml`, `docs/stylesheets/`, `docs/overrides/`
+and a `docs` dependency group. None of it may reach the published artifact.
+Reproducible proof:
+
+```bash
+UV_FROZEN=1 uv build --wheel --out-dir .wheel-proof
+uv run --frozen python - <<'PY'
+import pathlib, zipfile
+wheel = next(pathlib.Path(".wheel-proof").glob("*.whl"))
+with zipfile.ZipFile(wheel) as zf:
+    names = zf.namelist()
+    print("stray:", [n for n in names if not n.startswith(("korvid/", "korvid-"))])
+    meta = zf.read(next(n for n in names if n.endswith(".dist-info/METADATA"))).decode()
+print("mkdocs:", [line for line in meta.splitlines() if "mkdocs" in line.lower()])
+PY
+rm -rf .wheel-proof
+```
+
+Expected: `stray: []` and `mkdocs: []`. `UV_FROZEN=1` is mandatory — a bare
+`uv build` re-locks. The always-on source invariants behind this proof live
+in `tests/test_wheel_packaging.py`.
+
+- [x] **Step 6: Commit any acceptance fixes**
 
 If browser verification required changes, commit only those files:
 
 ```bash
-git add mkdocs.yml docs/index.md docs/getting-started.md \
-  docs/overrides/home.html docs/assets/korvid-mark.svg \
-  docs/stylesheets/extra.css
+git add docs/index.md docs/stylesheets/extra.css \
+  docs/overrides/partials/copyright.html \
+  tests/test_docs_landing_design.py tests/test_wheel_packaging.py \
+  tests/test_docs_build_config.py \
+  docs/superpowers/plans/2026-08-21-official-documentation-site.md
 git commit -m "fix: polish documentation site rendering"
 ```
