@@ -46,6 +46,7 @@ from textual.widgets import Static
 from yaml import YAMLError, safe_load
 
 from korvid.agent.events import AgentEvent, TextDelta, ToolCallFinished
+from korvid.agent.outbound import sanitize_recorded_tool_result
 from korvid.agent.profiles import build_profile
 from korvid.agent.runtime import AgentRuntime
 from korvid.core.audit import AuditLog
@@ -370,12 +371,18 @@ class _JournalingExecutor(RecordedExecution):
     """The real `ToolExecutor`, with model-side journal attribution."""
 
     def __init__(
-        self, executor: RecordedExecution, journal: ActionJournal, journey: OperationJourney
+        self,
+        executor: RecordedExecution,
+        journal: ActionJournal,
+        journey: OperationJourney,
+        *,
+        max_result_chars: int | None,
     ) -> None:
         self._executor = executor
         self._journal = journal
         self._journey = journey
         self._target = JournalTarget.of(journey.target)
+        self._max_result_chars = max_result_chars
         self.tool_calls = 0
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
@@ -417,10 +424,18 @@ class _JournalingExecutor(RecordedExecution):
                 detail=summarize_untrusted(tool=name, chars=len(outcome.text)),
             )
         elif effect in {"cluster_read", "external_read"}:
-            self._note_read(name, outcome)
+            visible_text, _records = sanitize_recorded_tool_result(
+                name,
+                outcome.text,
+                outcome.redactions,
+                max_chars=self._max_result_chars,
+                error=outcome.error,
+                result_format=definition.result_format if definition is not None else None,
+            )
+            self._note_read(name, outcome, visible_text)
         return outcome
 
-    def _note_read(self, name: str, outcome: ToolOutcome) -> None:
+    def _note_read(self, name: str, outcome: ToolOutcome, visible_text: str) -> None:
         """Journal a model read and decide whether it earns state credit.
 
         Credit needs *parsed evidence about this object*: a `get_resource`
@@ -434,7 +449,7 @@ class _JournalingExecutor(RecordedExecution):
         """
         target = self._journey.target
         document = (
-            _read_document(outcome.text) if name == _STATE_READ_TOOL and not outcome.error else None
+            _read_document(visible_text) if name == _STATE_READ_TOOL and not outcome.error else None
         )
         if document is None or not _is_target_document(document, target, outcome.incarnation):
             self._journal.append(
@@ -1073,7 +1088,12 @@ async def run_operation_journey(
     profile = build_profile(profile_name, readonly=False, resize_supported=False)
     raw_provider = provider_factory()
     provider = _CountingProvider(raw_provider)
-    executor = _JournalingExecutor(ToolExecutor(kube, _ALIASES, ui=ui_proxy), journal, journey)
+    executor = _JournalingExecutor(
+        ToolExecutor(kube, _ALIASES, ui=ui_proxy),
+        journal,
+        journey,
+        max_result_chars=profile.max_result_chars,
+    )
     runtime = _AnswerCapturingRuntime(
         provider,
         executor,

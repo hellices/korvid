@@ -19,12 +19,15 @@ from korvid.evals.operation import PermissionDenial, bundled_operations_dir, loa
 from korvid.evals.operation_journal import ActionJournal
 from korvid.evals.operation_state import RESTART_ANNOTATION, StatefulFakeWriteOps
 from korvid.evals.scripted import ScriptedProvider
+from korvid.tools.executor import RecordedExecution
+from korvid.tools.structured import dump_yaml
 
 from .operation_app import (
     _APPROVAL_KEYS,
     MIN_APPROVAL_TIMEOUT,
     OperationRun,
     _journal_audit_records,
+    _JournalingExecutor,
     _make_check_permission,
     _read_audit,
     _shows_state,
@@ -179,6 +182,36 @@ async def test_resolution_precedes_inspection_and_proposal(tmp_path: Path) -> No
     assert events.index("goal_received") < events.index("target_resolved")
     assert events.index("target_resolved") < events.index("precondition_read")
     assert events.index("precondition_read") < events.index("write_requested")
+
+
+async def test_read_credit_uses_the_bounded_text_shown_to_the_small_model() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+    manifest = deepcopy(journey.cluster.objects[0])
+    original_spec = manifest["spec"]
+    manifest["spec"] = {
+        **{f"noise-{index}": "x" * 200 for index in range(20)},
+        **original_spec,
+    }
+    raw = dump_yaml(manifest)
+    assert 3_000 < len(raw) < 8_000
+
+    class RawExecutor(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return raw
+
+    journal = ActionJournal()
+    executor = _JournalingExecutor(
+        RawExecutor(),
+        journal,
+        journey,
+        max_result_chars=3_000,
+    )
+    await executor.execute_recorded(
+        "get_resource",
+        {"kind": "deployments", "name": "checkout-a", "namespace": "shop-a"},
+    )
+    assert journal.has("precondition_read") is False
+    assert journal.has("read_without_state") is True
 
 
 @pytest.mark.parametrize("journey_id", CORE_GATE_JOURNEYS)

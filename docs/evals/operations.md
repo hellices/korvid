@@ -92,8 +92,9 @@ Every boundary is recorded with an actor:
 | `grader` | the final authoritative read |
 
 Only a `model_tool` `get_resource` earns state credit, and only when its
-sanitized YAML parses and its `apiVersion`/`kind`/`namespace`/`name` (and
-reported UID) match the assertion target. During Slice A, provisional
+sanitized YAML, after the runtime's exact profile result cap, parses and its
+`apiVersion`/`kind`/`namespace`/`name` (and reported UID) match the assertion
+target. During Slice A, provisional
 assertions require the complete walked path to be observable but do not
 require the fake value to satisfy the operator; Slice B calibration promotes
 corrected assertions before values affect model scores. A listing, an

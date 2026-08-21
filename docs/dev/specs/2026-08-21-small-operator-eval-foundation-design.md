@@ -471,7 +471,8 @@ and diagnostics but never earn model credit.
 
 For Slice A, state credit requires a `get_resource` record whose group/kind,
 namespace, name, and UID match the assertion target. Its sanitized YAML result
-must parse successfully; the grader walks the complete assertion path and
+after the runtime's exact profile result cap must parse successfully; the
+grader walks the complete assertion path and
 applies the same typed operator used for authoritative state grading. A leaf
 substring such as `replicas: 3` earns no credit by itself.
 
