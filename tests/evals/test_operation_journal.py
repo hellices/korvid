@@ -189,6 +189,29 @@ def test_summarize_arguments_drops_bool_and_empty_values() -> None:
     assert detail == "tool=scale_resource name=checkout-a replicas=3 dropped=2"
 
 
+@pytest.mark.parametrize(
+    "namespace",
+    [
+        "shop-a ",
+        "shop-a(canary)",
+        "n" * 121,
+        "shop-a,shop-b",
+    ],
+)
+def test_summarize_arguments_drops_invalid_namespace_tokens(namespace: str) -> None:
+    detail = summarize_arguments(
+        "delete_resource",
+        {
+            "kind": "deployments",
+            "name": "checkout-a",
+            "namespace": namespace,
+        },
+    )
+    assert detail == "tool=delete_resource kind=deployments name=checkout-a dropped=1"
+    assert namespace not in detail
+    ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
+
+
 def test_the_result_and_detail_vocabularies_are_pinned() -> None:
     assert "success" in JOURNAL_RESULTS
     assert "" in JOURNAL_RESULTS

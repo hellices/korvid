@@ -108,6 +108,17 @@ _RESULTS = frozenset(JOURNAL_RESULTS)
 _SUMMARY_VALUE = re.compile(r"[A-Za-z0-9._:/@=+-]{1,120}")
 
 
+def _summary_text(key: str, value: Any) -> str:
+    """Normalized summary token for one trusted field value."""
+
+    if isinstance(value, bool) or not isinstance(value, _SCALARS):
+        raise ValueError(f"journal detail values must be scalars: {key!r}")
+    text = str(value).replace('"', "")
+    if not _SUMMARY_VALUE.fullmatch(text):
+        raise ValueError(f"journal detail value is not a bounded summary token: {key!r}")
+    return text
+
+
 def summarize(**fields: Any) -> str:
     """Build a journal `detail` from allowlisted fields."""
 
@@ -117,30 +128,34 @@ def summarize(**fields: Any) -> str:
             raise ValueError(f"journal detail key is not allowlisted: {key!r}")
         if value is None:
             continue
-        if isinstance(value, bool) or not isinstance(value, _SCALARS):
-            raise ValueError(f"journal detail values must be scalars: {key!r}")
-        text = str(value).replace('"', "")
-        if not _SUMMARY_VALUE.fullmatch(text):
-            raise ValueError(f"journal detail value is not a bounded summary token: {key!r}")
-        parts.append(f"{key}={text}")
+        parts.append(f"{key}={_summary_text(key, value)}")
     return " ".join(parts)
 
 
 def summarize_arguments(tool: str, arguments: Mapping[str, Any]) -> str:
-    """Project raw tool arguments onto the detail allowlist."""
+    """Project raw tool arguments onto the detail allowlist best-effort."""
 
-    kept = {
-        key: value
-        for key, value in sorted(arguments.items())
-        if key in _DETAIL_KEYS
-        and key != "tool"
-        and isinstance(value, _SCALARS)
-        and not isinstance(value, bool)
-        and (not isinstance(value, str) or value)
-    }
+    kept: dict[str, Any] = {}
+    dropped = 0
+    for key, value in sorted(arguments.items()):
+        if key not in _DETAIL_KEYS or key == "tool":
+            dropped += 1
+            continue
+        if isinstance(value, bool) or not isinstance(value, _SCALARS):
+            dropped += 1
+            continue
+        if isinstance(value, str) and not value:
+            dropped += 1
+            continue
+        try:
+            _summary_text(key, value)
+        except ValueError:
+            dropped += 1
+            continue
+        kept[key] = value
     fields: dict[str, Any] = {"tool": tool}
     fields.update(kept)
-    fields["dropped"] = len(arguments) - len(kept)
+    fields["dropped"] = dropped
     return summarize(**fields)
 
 

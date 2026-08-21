@@ -392,6 +392,54 @@ async def test_a_no_op_never_opens_an_approval_dialog(tmp_path: Path) -> None:
     assert run.audit == ()
 
 
+async def test_a_malformed_delete_call_still_reaches_the_real_executor(tmp_path: Path) -> None:
+    provider = _PromptSpy(
+        [
+            [
+                {
+                    "type": "tool_call",
+                    "id": "call-1",
+                    "name": "delete_resource",
+                    "arguments": json.dumps(
+                        {"kind": "deployments", "name": "api", "namespace": " "},
+                        sort_keys=True,
+                    ),
+                },
+                {"type": "usage", "input_tokens": 200, "output_tokens": 20},
+            ],
+            [
+                {
+                    "type": "text_delta",
+                    "text": "The invalid delete was rejected and nothing changed.",
+                },
+                {"type": "usage", "input_tokens": 200, "output_tokens": 20},
+            ],
+        ]
+    )
+    run = await run_operation_journey(
+        _JOURNEYS["restart-denied"],
+        audit_path=tmp_path / "audit.jsonl",
+        provider_factory=lambda: provider,
+    )
+    tool_results = [
+        message["content"] for message in provider.calls[1] if message.get("role") == "tool"
+    ]
+    assert tool_results == [
+        "ERROR: kind 'deployments' is namespaced - provide the 'namespace' argument"
+    ]
+    tool_events = [entry for entry in run.journal if entry["event"] == "tool_call"]
+    write_events = [entry for entry in run.journal if entry["event"] == "write_requested"]
+    assert [entry["detail"] for entry in tool_events] == [
+        "tool=delete_resource kind=deployments name=api dropped=1"
+    ]
+    assert [entry["detail"] for entry in write_events] == [
+        "tool=delete_resource kind=deployments name=api dropped=1"
+    ]
+    assert all("namespace" not in entry["detail"] for entry in (*tool_events, *write_events))
+    assert [entry for entry in run.journal if entry["event"] == "mutation_started"] == []
+    assert run.audit == ()
+
+
 async def test_an_ambiguous_prompt_writes_only_after_the_user_names_the_namespace(
     tmp_path: Path,
 ) -> None:
