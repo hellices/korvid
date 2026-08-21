@@ -772,7 +772,7 @@ async def test_drill_prewarm_skips_the_wait_when_the_watch_is_live() -> None:
         )
         await pilot.press("ctrl+w")
         await pilot.press("v")  # split: both panes on deployments
-        await until(pilot, lambda: len(app._panes) == 2, label="split pane opened")
+        await until(pilot, lambda: len(app._workspace.panes) == 2, label="split pane opened")
         second = app.query_one("#pane-1", ResourceTable)
         await _navigate(pilot, "replicasets")  # focused pane -> rs watch live
         await until(
@@ -954,7 +954,7 @@ async def test_pane_closed_during_prewarm_reports_abandonment() -> None:
         await _navigate(pilot, "deployments")
         await pilot.press("ctrl+w")
         await pilot.press("v")  # split so a pane *can* close
-        await until(pilot, lambda: len(app._panes) == 2, label="split pane opened")
+        await until(pilot, lambda: len(app._workspace.panes) == 2, label="split pane opened")
         drill = asyncio.create_task(app._drill_into("default", "web"))
         await until(
             pilot,

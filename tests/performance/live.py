@@ -1331,8 +1331,16 @@ def _ui_scenarios(scoped_namespace: str) -> tuple[_UIScenario, ...]:
         _UIScenario(
             "split_pane",
             (
-                _UIStep(("ctrl+w", "v"), "second pane open", lambda app: len(app._panes) == 2),
-                _UIStep(("ctrl+w", "q"), "back to one pane", lambda app: len(app._panes) == 1),
+                _UIStep(
+                    ("ctrl+w", "v"),
+                    "second pane open",
+                    lambda app: app._workspace.pane_count == 2,
+                ),
+                _UIStep(
+                    ("ctrl+w", "q"),
+                    "back to one pane",
+                    lambda app: app._workspace.pane_count == 1,
+                ),
             ),
         ),
         _UIScenario(

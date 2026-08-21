@@ -1255,8 +1255,8 @@ async def test_switch_collapses_split_workspace() -> None:
         app.post_message(SwitchContextCommand("ctx-b"))
         await until(pilot, lambda: app.config.kube_context == "ctx-b", label="switched")
         await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")
-        assert len(app._panes) == 1
-        assert app._focused_pane == 0
+        assert len(app._workspace.panes) == 1
+        assert app._workspace.focused_index == 0
         assert app.current_kind == "pods"
         await _first_pod_visible(env, pilot, "pod-b")
 

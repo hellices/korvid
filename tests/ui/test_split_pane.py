@@ -60,7 +60,7 @@ async def test_new_pane_is_focused_and_receives_commands() -> None:
         )
         first = app.query_one("#pane-0", ResourceTable)
         assert first.row_count == 1  # api-1 pod untouched
-        assert app._panes[0].kind == "pods"
+        assert app._workspace.panes[0].kind == "pods"
 
 
 async def test_focus_switch_routes_commands_to_other_pane() -> None:
@@ -74,15 +74,15 @@ async def test_focus_switch_routes_commands_to_other_pane() -> None:
         await until(pilot, lambda: app.current_kind == "deployments", label="pane 2 on deploys")
         await pilot.press("ctrl+w", "w")
         await until(pilot, lambda: app.current_kind == "pods", label="focus back on pane 1")
-        assert app._focused_pane == 0
+        assert app._workspace.focused_index == 0
         await _type_command(pilot, "deploy all")
         await until(
             pilot,
-            lambda: app._panes[0].kind == "deployments",
+            lambda: app._workspace.panes[0].kind == "deployments",
             label="pane 1 switched",
         )
-        assert app._panes[1].kind == "deployments"
-        assert app._panes[1].scope == "default"  # pane 2 untouched by pane 1 nav
+        assert app._workspace.panes[1].kind == "deployments"
+        assert app._workspace.panes[1].scope == "default"  # pane 2 untouched by pane 1 nav
         assert app.current_scope == "*"
 
 
@@ -114,7 +114,7 @@ async def test_close_returns_to_single_view_keeping_other_pane() -> None:
         await pilot.press("ctrl+w", "q")
         await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="back to one pane")
         assert app.current_kind == "pods"  # surviving pane 1 view
-        assert len(app._panes) == 1
+        assert len(app._workspace.panes) == 1
 
 
 async def test_closing_first_pane_moves_second_into_place() -> None:
@@ -241,7 +241,7 @@ async def test_split_clones_active_filter() -> None:
         first = app.query_one("#pane-0", ResourceTable)
         await until(pilot, lambda: first.row_count == 1, label="pane 1 filtered")
         await _split(app, pilot)
-        assert app._panes[1].filter_pattern == "check"
+        assert app._workspace.panes[1].filter_pattern == "check"
         second = app.query_one("#pane-1", ResourceTable)
         await until(pilot, lambda: second.row_count == 1, label="clone starts filtered")
 
@@ -257,9 +257,11 @@ async def test_split_clones_drill_stack_independently() -> None:
         level = DrillLevel("deployments", "web", "default", "dep-1", "pods")
         app._drill.push(level)
         await _split(app, pilot)
-        assert app._panes[1].drill.breadcrumb() == app._panes[0].drill.breadcrumb()
-        app._panes[1].drill.pop()
-        assert app._panes[0].drill.active  # source stack untouched
+        assert (
+            app._workspace.panes[1].drill.breadcrumb() == app._workspace.panes[0].drill.breadcrumb()
+        )
+        app._workspace.panes[1].drill.pop()
+        assert app._workspace.panes[0].drill.active  # source stack untouched
 
 
 async def test_closing_first_pane_keeps_survivors_cursor() -> None:
@@ -296,13 +298,13 @@ async def test_navigation_lands_in_initiating_pane_after_focus_switch() -> None:
         async def flip_focus_mid_navigation(pane: object) -> None:
             nonlocal flipped
             flipped = True
-            app._focused_pane = 0  # the user switches panes during the await
+            app._workspace.focus_index(0)  # the user switches panes during the await
 
         app._logs.close_if_owned_by = flip_focus_mid_navigation  # type: ignore[method-assign]  # test seam
         await app.on_navigate_command(NavigateCommand("deployments", None))
         assert flipped  # the focus switch really happened mid-navigation
-        assert app._panes[1].kind == "deployments"  # initiating pane transitioned
-        assert app._panes[0].kind == "pods"  # newly focused pane untouched
+        assert app._workspace.panes[1].kind == "deployments"  # initiating pane transitioned
+        assert app._workspace.panes[0].kind == "pods"  # newly focused pane untouched
 
 
 async def test_metrics_polling_follows_pod_pane_not_just_focused() -> None:
@@ -366,7 +368,7 @@ async def test_chord_does_not_arm_while_an_input_is_focused() -> None:
         await _first_render(app, pilot)
         await pilot.press("colon")
         await pilot.press("ctrl+w")
-        assert app._pane_chord_pending is False
+        assert app._workspace.chord_pending is False
         await pilot.press("escape")  # close the bar
         # The next key must reach its normal binding (open the filter bar),
         # not be swallowed by a stranded chord prefix.
@@ -394,12 +396,12 @@ async def test_split_serializes_with_navigation_lock() -> None:
             for _ in range(10):
                 await asyncio.sleep(0)
             assert not task.done()
-            assert len(app._panes) == 1  # blocked behind the nav lock
+            assert len(app._workspace.panes) == 1  # blocked behind the nav lock
         finally:
             app._nav_lock.release()
         await task
         await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="split completed")
-        assert len(app._panes) == 2
+        assert len(app._workspace.panes) == 2
         # Flush the new pane's render/highlight messages before teardown.
         second = app.query(ResourceTable).last()
         await until(pilot, lambda: second.row_count == 1, label="clone rendered")
@@ -425,7 +427,7 @@ async def test_filtering_one_pane_does_not_reset_other_panes_cursor() -> None:
         await pilot.press("enter")
         await until(
             pilot,
-            lambda: app._panes[0].filter_pattern == "api",
+            lambda: app._workspace.panes[0].filter_pattern == "api",
             label="pane 1 filter applied",
         )
         assert second.cursor_row == 1  # pane 2 untouched by pane 1's filter
@@ -545,10 +547,10 @@ async def test_focus_change_disarms_pending_chord() -> None:
         await _first_render(app, pilot)
         await _split(app, pilot)
         await pilot.press("ctrl+w")
-        assert app._pane_chord_pending is True
+        assert app._workspace.chord_pending is True
         app.query_one("#pane-0", ResourceTable).focus()  # simulate a click
         await pilot.pause()
-        assert app._pane_chord_pending is False
+        assert app._workspace.chord_pending is False
         await pilot.press("v")  # must not be chord-swallowed into a split
         await pilot.pause()
         assert len(app.query(ResourceTable)) == 2
@@ -575,7 +577,7 @@ async def test_concurrent_closes_do_not_underflow_pane_list() -> None:
         await first
         await second  # without the re-check this raises IndexError
         await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")
-        assert len(app._panes) == 1
+        assert len(app._workspace.panes) == 1
         await pilot.pause()
 
 
@@ -638,7 +640,7 @@ async def test_sorting_applies_to_focused_pane_only() -> None:
             label="focused pane sorted ascending",
         )
         assert [first.get_row_at(i)[0] for i in range(3)] == before
-        assert app._panes[0].sorts == {}  # pane 1 carries no sort state
+        assert app._workspace.panes[0].sorts == {}  # pane 1 carries no sort state
 
 
 async def test_pane_focus_switch_reevaluates_hint() -> None:
@@ -700,7 +702,9 @@ async def test_navigation_queued_behind_lock_lands_in_initiating_pane() -> None:
     async with app.run_test() as pilot:
         await _first_render(app, pilot)
         await _split(app, pilot)  # focused: pane index 1
-        app._panes[1].drill.push(DrillLevel("deployments", "web", "default", "dep-1", "pods"))
+        app._workspace.panes[1].drill.push(
+            DrillLevel("deployments", "web", "default", "dep-1", "pods")
+        )
         release = asyncio.Event()
 
         async def hold() -> None:
@@ -713,13 +717,13 @@ async def test_navigation_queued_behind_lock_lands_in_initiating_pane() -> None:
         nav = asyncio.create_task(app.on_navigate_command(NavigateCommand("deployments", None)))
         for _ in range(10):
             await asyncio.sleep(0)
-        app._focused_pane = 0  # the user flips focus while nav waits for the lock
+        app._workspace.focus_index(0)  # the user flips focus while nav waits for the lock
         release.set()
         await nav
         await holder
-        assert app._panes[1].kind == "deployments"  # initiating pane transitioned
-        assert not app._panes[1].drill.active  # and its stack was the one cleared
-        assert app._panes[0].kind == "pods"  # newly focused pane untouched
+        assert app._workspace.panes[1].kind == "deployments"  # initiating pane transitioned
+        assert not app._workspace.panes[1].drill.active  # and its stack was the one cleared
+        assert app._workspace.panes[0].kind == "pods"  # newly focused pane untouched
 
 
 async def test_drill_pop_queued_behind_lock_pops_initiating_pane() -> None:
@@ -733,7 +737,7 @@ async def test_drill_pop_queued_behind_lock_pops_initiating_pane() -> None:
     async with app.run_test() as pilot:
         await _first_render(app, pilot)
         await _split(app, pilot)  # focused: pane index 1
-        for pane in app._panes:
+        for pane in app._workspace.panes:
             pane.drill.push(DrillLevel("deployments", "web", "default", "dep-1", "pods"))
             pane.kind = "pods"
         release = asyncio.Event()
@@ -748,9 +752,9 @@ async def test_drill_pop_queued_behind_lock_pops_initiating_pane() -> None:
         pop = asyncio.create_task(app._pop_drill())
         for _ in range(10):
             await asyncio.sleep(0)
-        app._focused_pane = 0  # focus flips while the pop waits for the lock
+        app._workspace.focus_index(0)  # focus flips while the pop waits for the lock
         release.set()
         assert await pop is True
         await holder
-        assert not app._panes[1].drill.active  # initiating pane popped
-        assert app._panes[0].drill.active  # other pane's stack untouched
+        assert not app._workspace.panes[1].drill.active  # initiating pane popped
+        assert app._workspace.panes[0].drill.active  # other pane's stack untouched

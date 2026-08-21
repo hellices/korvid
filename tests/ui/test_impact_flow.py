@@ -1561,7 +1561,9 @@ async def _prod_origin_beside_an_all_namespaces_pane(app: KorvidApp, pilot: Any)
     await _pane_to_view(pilot, "deploy all", "pane-1", expect="prod")
     assert str(app.query_one("#pane-1", ResourceTable).get_row_at(0)[1]) == "web"
     await pilot.press("ctrl+w", "w")
-    await until(pilot, lambda: app._focused_pane == 0, label="focus back on the prod pane")
+    await until(
+        pilot, lambda: app._workspace.focused_index == 0, label="focus back on the prod pane"
+    )
     assert app.current_scope == "prod"
 
 

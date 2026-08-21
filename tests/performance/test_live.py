@@ -3243,7 +3243,11 @@ class _InertApp:
         self._sorts: dict[str, object] = {}
         self.current_scope = ALL_NAMESPACES
         self.screen = object()
-        self._panes = [object()]
+
+        class _Workspace:
+            pane_count = 1
+
+        self._workspace = _Workspace()
 
         class _Pane:
             display = False

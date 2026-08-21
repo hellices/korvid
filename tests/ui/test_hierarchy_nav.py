@@ -395,11 +395,11 @@ async def test_hierarchy_return_is_scoped_to_the_initiating_pane() -> None:
         await pilot.press("escape")  # pane 1 shows the same kind - must not hijack
         await pilot.pause()
         assert not isinstance(app.screen, HierarchyScreen)
-        assert app._panes[1].kind == "deployments"  # pane 1 was not navigated away
+        assert app._workspace.panes[1].kind == "deployments"  # pane 1 was not navigated away
         await pilot.press("ctrl+w", "w")  # focus back to the initiating pane 0
         await pilot.press("escape")
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree reopened")
-        assert app._panes[0].kind == "helmreleases"
+        assert app._workspace.panes[0].kind == "helmreleases"
 
 
 async def test_a_jump_in_one_pane_does_not_erase_the_other_panes_return() -> None:
@@ -430,13 +430,15 @@ async def test_a_jump_in_one_pane_does_not_erase_the_other_panes_return() -> Non
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree 2 open")
         await pilot.press("down")
         await pilot.press("enter")  # pane 1 jumps too
-        await until(pilot, lambda: app._panes[1].kind == "deployments", label="pane 1 jumped")
+        await until(
+            pilot, lambda: app._workspace.panes[1].kind == "deployments", label="pane 1 jumped"
+        )
         await pilot.press("ctrl+w", "w")  # back to pane 0
         await pilot.press("escape")
         await until(
             pilot, lambda: isinstance(app.screen, HierarchyScreen), label="pane 0 tree reopened"
         )
-        assert app._panes[0].kind == "helmreleases"
+        assert app._workspace.panes[0].kind == "helmreleases"
 
 
 async def test_return_origin_is_captured_at_tree_open_not_at_dismissal() -> None:

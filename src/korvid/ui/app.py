@@ -184,6 +184,7 @@ from korvid.ui.widgets.status_bar import StatusBar
 from korvid.ui.widgets.telepresence_screen import TelepresenceScreen
 from korvid.ui.widgets.top_bar import KeyEntry, TopBar
 from korvid.ui.widgets.transfer_screen import TransferProgressScreen, TransferScreen
+from korvid.ui.workspace_state import HierarchyReturn, PaneState, WorkspaceState
 from korvid.ui.write_gate import ReservedWrite, WriteGate
 
 _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
@@ -307,27 +308,6 @@ class ContextSwitchResult:
     protected_context: str | None = None
 
 
-@dataclasses.dataclass(frozen=True)
-class _HierarchyReturn:
-    """The way back to a hierarchy tree after a goto jump (issue #135).
-
-    Captured when a tree node's Enter navigates away: Escape on the jump
-    target (with no drill level left to pop) rebuilds the tree over the
-    origin view, cursor on the picked node. Lives on the pane that jumped
-    (`PaneState.hierarchy_return`) — panes neither see nor clear each
-    other's returns. One-shot: consumed or dropped on first eligible use,
-    and abandoned when its pane explicitly navigates away."""
-
-    origin_view: str  # canonical kind alias the tree was opened over
-    origin_scope: str  # that pane's namespace scope at pick time
-    title: str
-    refs: list[ComponentRef]
-    namespace: str
-    tree_scope: str  # store-lookup scope the tree was built with
-    picked: tuple[str, str, str]  # (kind alias, namespace, name) of the node
-    epoch: int
-
-
 _WriteParams = ParamSpec("_WriteParams")
 _WriteResult = TypeVar("_WriteResult")
 
@@ -399,48 +379,6 @@ class _RelationshipLister:
         self, meta: ResourceMeta, namespace: str | None
     ) -> Sequence[SummaryLike]:
         return await self._list_objects(meta, namespace)
-
-
-class PaneState:
-    """One workspace pane's independent view state (issue #48).
-
-    The app keeps one of these per pane; `current_kind` and friends
-    delegate to the focused pane, so every existing action and command
-    naturally targets the pane the user is working in.
-    """
-
-    def __init__(self, kind: str, scope: str, table_id: str = "pane-0") -> None:
-        self.kind = kind
-        self.scope = scope
-        self.table_id = table_id  # the ResourceTable widget this pane renders into
-        self.filter_pattern = ""
-        self.resource_filter: ResourceFilter = parse_filter("")
-        self.drill = NavigationStack()
-        #: Monotonic navigation counter: every _navigate_locked call on this
-        #: pane advances it, including same-target ones. A drill pre-warm
-        #: (issue #157) captures it before waiting and revalidates under the
-        #: lock - a `:view deployments` while already on deployments is
-        #: still the newer command and must not be overridden.
-        self.nav_gen = 0
-        #: Pending way back to a hierarchy tree a goto jump navigated away
-        #: from (issue #135); consumed by Escape in this pane. View state
-        #: like the drill stack - never shared across panes.
-        self.hierarchy_return: _HierarchyReturn | None = None
-        #: Per-kind sort state - view state like the filter, so it belongs
-        #: to the pane: sorting one pane must not reorder the other.
-        self.sorts: dict[str, SortSpec] = {}
-
-    def clone(self, table_id: str) -> PaneState:
-        """A split starts as a clone of the focused view: same kind, scope,
-        filter and drill position - with independent state from then on.
-        A pending hierarchy return is deliberately not cloned: it is a
-        one-shot ticket back to one tree, not repeatable view state."""
-        pane = PaneState(self.kind, self.scope, table_id)
-        pane.filter_pattern = self.filter_pattern
-        pane.resource_filter = parse_filter(self.filter_pattern)
-        pane.drill = self.drill.copy()
-        pane.sorts = dict(self.sorts)
-        return pane
 
 
 @dataclasses.dataclass(frozen=True)
@@ -625,8 +563,9 @@ class KorvidApp(App[None]):
         border: round $panel;
     }
     /* A class, not `:focus`: the accent border marks the command-routing
-       target (`_focused_pane`), which must stay visible while an Input
-       (command/filter bar, agent panel) owns keyboard focus. */
+       target (the focused pane; see `WorkspaceState.focused_index`), which must
+       stay visible while an Input (command/filter bar, agent panel) owns
+       keyboard focus. */
     ResourceTable.split-pane.focused-pane {
         border: round $accent;
     }
@@ -949,20 +888,13 @@ class KorvidApp(App[None]):
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)
         )
-        # Workspace panes (issue #48): each holds an independent view
-        # (kind/scope/filter/drill); `current_kind` & co. delegate to the
-        # focused pane so commands and keybindings target it naturally.
-        self._panes: list[PaneState] = [PaneState("pods", config.namespace or "default")]
-        self._focused_pane: int = 0
-        #: Monotonic id source for split-pane table widgets: a survivor keeps
-        #: its widget (and cursor/scroll state) when the other pane closes,
-        #: so ids must stay unique across split/close cycles.
-        self._pane_counter: int = 0
+        # Workspace model (issue #48): the panes, focus, table-id counter and
+        # the `ctrl+w` chord flag live in one pure owner; `current_kind` & co.
+        # delegate to the focused pane so commands and keybindings target it.
+        self._workspace = WorkspaceState("pods", config.namespace or "default")
         #: Scope the metrics poller currently serves (None = stopped); a
         #: restart drops collected data, so equal targets are skipped.
         self._metrics_target: tuple[str | None] | None = None
-        #: `ctrl+w` pressed, waiting for the chord's second key (v/w/q).
-        self._pane_chord_pending: bool = False
         #: Validated `keybindings:` overrides (action → key), applied via the
         #: keymap in on_mount; the help overlay renders these keys (issue #35).
         self._keybinding_overrides: dict[str, str] = {}
@@ -1023,60 +955,60 @@ class KorvidApp(App[None]):
             buffer_max_lines=config.log_buffer_lines,
         )
 
-    # -- Focused-pane delegation (issue #48): the pane list is the single
-    # source of view state; these properties keep the whole action surface
-    # (and tests) working against "the view the user is focused on".
+    # -- Focused-pane delegation (issue #48): `WorkspaceState` owns the pane
+    # list and the focused-view state; these properties keep the whole action
+    # surface (and tests) working against "the view the user is focused on".
 
     @property
     def _pane(self) -> PaneState:
-        return self._panes[self._focused_pane]
+        return self._workspace.focused
 
     @property
     def current_kind(self) -> str:
-        return self._pane.kind
+        return self._workspace.current_kind
 
     @current_kind.setter
     def current_kind(self, value: str) -> None:
-        self._pane.kind = value
+        self._workspace.current_kind = value
         # The footer legend is view-scoped (issue #114): Textual cannot see
         # internal kind switches, so prompt it to re-evaluate check_action.
         self.refresh_bindings()
 
     @property
     def current_scope(self) -> str:
-        return self._pane.scope
+        return self._workspace.current_scope
 
     @current_scope.setter
     def current_scope(self, value: str) -> None:
-        self._pane.scope = value
+        self._workspace.current_scope = value
 
     @property
     def filter_pattern(self) -> str:
-        return self._pane.filter_pattern
+        return self._workspace.filter_pattern
 
     @filter_pattern.setter
     def filter_pattern(self, value: str) -> None:
-        self._pane.filter_pattern = value
+        self._workspace.filter_pattern = value
 
     @property
     def _resource_filter(self) -> ResourceFilter:
         """Parsed form of filter_pattern (issue #44); single matcher shared
         by the table render and the agent's view of "what the user sees"."""
-        return self._pane.resource_filter
+        return self._workspace.resource_filter
 
     @_resource_filter.setter
     def _resource_filter(self, value: ResourceFilter) -> None:
-        self._pane.resource_filter = value
+        self._workspace.resource_filter = value
 
     @property
     def _sorts(self) -> dict[str, SortSpec]:
         """Per-kind sort state of the focused pane (view state, issue #37)."""
-        return self._pane.sorts
+        return self._workspace.sorts
 
     @property
     def _drill(self) -> NavigationStack:
         """Drill-down levels (deploy -> rs -> pods) of the focused pane."""
-        return self._pane.drill
+        return self._workspace.drill
 
     @property
     def agent_runtime(self) -> AgentRuntime | None:
@@ -1365,14 +1297,14 @@ class KorvidApp(App[None]):
         """
         # First store notification: replace the startup splash with real content.
         self._dismiss_splash()
-        for pane in self._panes:
+        for pane in self._workspace.panes:
             if pane.kind != kind or (only is not None and pane is not only):
                 continue
             try:
                 table = self.query_one(f"#{pane.table_id}", ResourceTable)
             except NoMatches:
                 return  # shutdown race: a queued render after widgets are removed
-            self._render_pane(kind, pane, table, empty_state=len(self._panes) == 1)
+            self._render_pane(kind, pane, table, empty_state=self._workspace.pane_count == 1)
 
     def _render_pane(
         self, kind: str, pane: PaneState, table: ResourceTable, *, empty_state: bool
@@ -1548,7 +1480,7 @@ class KorvidApp(App[None]):
         # stack at call time) must land in the pane that initiated it.
         pane = self._pane
         async with self._nav_lock:
-            if pane not in self._panes:
+            if not self._workspace.contains(pane):
                 return  # the initiating pane was closed while queued
             if drill_op is not None:
                 drill_op()
@@ -1577,7 +1509,7 @@ class KorvidApp(App[None]):
             old = (pane.kind, pane.scope)
             # Another pane may still be watching the old (kind, scope):
             # stopping it would freeze that pane's view (issue #48).
-            others = {(p.kind, p.scope) for p in self._panes if p is not pane}
+            others = {(p.kind, p.scope) for p in self._workspace.panes if p is not pane}
             if old not in others and self._prewarm_leases.get(old, 0) == 0:
                 # An outstanding drill pre-warm lease keeps the stream alive
                 # (issue #157): killing it here would force that drill's own
@@ -1604,7 +1536,7 @@ class KorvidApp(App[None]):
         """
         if self._metrics is None:
             return
-        scopes = {p.scope for p in self._panes if p.kind == "pods"}
+        scopes = {p.scope for p in self._workspace.panes if p.kind == "pods"}
         if not scopes:
             if self._metrics_target is not None:
                 self._metrics_target = None
@@ -2427,7 +2359,10 @@ class KorvidApp(App[None]):
         # navigation awaiting stop()) leaves the pane tuple unchanged while
         # the stream is already gone - skipping then would recreate the
         # empty flash. Require the watch itself.
-        if any((p.kind, p.scope) == key for p in self._panes) and key in self.watch_manager.active:
+        if (
+            any((p.kind, p.scope) == key for p in self._workspace.panes)
+            and key in self.watch_manager.active
+        ):
             return
         await self.watch_manager.start(kind, scope)
         deadline = monotonic() + self.DRILL_PREWARM_TIMEOUT
@@ -2448,7 +2383,7 @@ class KorvidApp(App[None]):
             self._prewarm_leases[key] = remaining
             return
         self._prewarm_leases.pop(key, None)
-        if all((p.kind, p.scope) != key for p in self._panes):
+        if all((p.kind, p.scope) != key for p in self._workspace.panes):
             await self.watch_manager.stop(kind, scope)
 
     async def _drill_into(self, namespace: str, name: str) -> str | None:
@@ -2508,7 +2443,7 @@ class KorvidApp(App[None]):
                 lambda rows: any(owned_by(r, uid) for r in rows),
             )
             async with self._nav_lock:
-                if pane not in self._panes:
+                if not self._workspace.contains(pane):
                     # An accurate outcome (review on #160): a None here reads
                     # as success to agent_drill_down, which would report a
                     # drill that never happened.
@@ -2574,7 +2509,7 @@ class KorvidApp(App[None]):
         try:
             await self._prewarm_view(peeked.parent_kind, prewarm_scope, ready)
             async with self._nav_lock:
-                if pane not in self._panes:
+                if not self._workspace.contains(pane):
                     return False  # the initiating pane was closed while queued
                 if (
                     (pane.kind, pane.scope) != origin
@@ -2676,7 +2611,7 @@ class KorvidApp(App[None]):
                 # target reopens this tree over the view it was opened from.
                 title, refs, namespace, scope = ctx
                 origin_pane, origin_view, origin_scope = origin
-                origin_pane.hierarchy_return = _HierarchyReturn(
+                origin_pane.hierarchy_return = HierarchyReturn(
                     origin_view=origin_view,
                     origin_scope=origin_scope,
                     title=title,
@@ -4040,7 +3975,7 @@ class KorvidApp(App[None]):
     async def on_key(self, event: Key) -> None:
         """Pane chords (`ctrl+w` v/w/q) and Escape (closes describe/log
         panes, then pops one drill-down level)."""
-        if self._pane_chord_pending or event.key == "ctrl+w":
+        if self._workspace.chord_pending or event.key == "ctrl+w":
             await self._handle_pane_chord(event)
             return
         if event.key != "escape":
@@ -4087,18 +4022,18 @@ class KorvidApp(App[None]):
         """`ctrl+w` chord state machine: the prefix always swallows the next
         key - an unmapped second key must not fall through to normal
         handling (q would quit)."""
-        if not self._pane_chord_pending:
+        if not self._workspace.chord_pending:
             # Arm only while a table is focused: with an Input (command/
             # filter bar) focused the second key never reaches App.on_key,
             # which would orphan the pending flag and silently swallow the
             # next table keypress after the bar closes.
             if not isinstance(self.focused, ResourceTable):
                 return
-            self._pane_chord_pending = True
+            self._workspace.chord_pending = True
             event.stop()
             event.prevent_default()
             return
-        self._pane_chord_pending = False
+        self._workspace.chord_pending = False
         event.stop()
         event.prevent_default()
         if event.key == "v":
@@ -4110,24 +4045,20 @@ class KorvidApp(App[None]):
 
     async def _split_pane(self) -> None:
         """`ctrl+w v`: clone the focused view into a second pane and focus it."""
-        if len(self._panes) >= 2:
+        if self._workspace.is_split:
             self.notify("workspace is already split - ctrl+w q closes a pane", severity="warning")
             return
         # The pane list and watch lifecycle are also mutated by navigation:
         # take the same lock so a concurrent `:view`/`:ns` transition never
         # interleaves with the split's pane snapshot and watch start.
         async with self._nav_lock:
-            if len(self._panes) >= 2:
+            if self._workspace.is_split:
                 return  # lost the race to another split
-            source = self._pane
-            self._pane_counter += 1
-            pane = source.clone(f"pane-{self._pane_counter}")
+            pane = self._workspace.split()
             table = ResourceTable(id=pane.table_id)
             await self.query_one("#workspace", Horizontal).mount(table)
             for pane_table in self.query(ResourceTable):
                 pane_table.add_class("split-pane")
-            self._panes.append(pane)
-            self._focused_pane = 1
             # start() is idempotent - the clone usually shares the source's watch.
             await self.watch_manager.start(pane.kind, pane.scope)
         # A single-pane empty-state overlay must not linger over the split;
@@ -4143,14 +4074,17 @@ class KorvidApp(App[None]):
     def _update_pane_focus_classes(self) -> None:
         """Mark the command-routing target with `focused-pane`. A class, not
         `:focus`: opening the command/filter bar or agent panel moves keyboard
-        focus to an Input, but `_focused_pane` still decides where the command
+        focus to an Input, but the focused pane still decides where the command
         goes - the indicator must not vanish at that moment."""
-        for index, pane in enumerate(self._panes):
+        for index, pane in enumerate(self._workspace.panes):
             try:
                 table = self.query_one(f"#{pane.table_id}", ResourceTable)
             except NoMatches:
                 continue
-            table.set_class(len(self._panes) > 1 and index == self._focused_pane, "focused-pane")
+            table.set_class(
+                self._workspace.is_split and index == self._workspace.focused_index,
+                "focused-pane",
+            )
         # Every focused-pane change funnels through here; the panes may show
         # different kinds, so the view-scoped footer legend must follow the
         # focus (issue #114).
@@ -4158,9 +4092,9 @@ class KorvidApp(App[None]):
 
     def _focus_other_pane(self) -> None:
         """`ctrl+w w`: move focus (commands, filters, keybindings) across."""
-        if len(self._panes) < 2:
+        if not self._workspace.is_split:
             return
-        self._focused_pane = 1 - self._focused_pane
+        self._workspace.focus_other()
         self._update_pane_focus_classes()
         self._focused_table().focus()
         self._hints.refresh_for_focus()
@@ -4168,14 +4102,13 @@ class KorvidApp(App[None]):
 
     async def _close_focused_pane(self) -> None:
         """`ctrl+w q`: back to the single view; the other pane survives."""
-        if len(self._panes) < 2:
+        if not self._workspace.is_split:
             return
         async with self._nav_lock:
-            if len(self._panes) < 2:
+            if not self._workspace.is_split:
                 return  # lost the race to another close
-            closing = self._panes.pop(self._focused_pane)
-            remaining = self._panes[0]
-            self._focused_pane = 0
+            closed = self._workspace.close_focused()
+            closing, remaining = closed.closing, closed.remaining
             # The pane whose selection drove the stream is gone: don't leave
             # orphaned logs pinned over the survivor's view.
             await self._logs.close_if_owned_by(closing)
@@ -4205,13 +4138,11 @@ class KorvidApp(App[None]):
         and table widget. The survivor is pane 0; the switch resets its
         kind/scope/filter afterwards, so which pane survives is cosmetic.
         """
-        if len(self._panes) < 2:
+        collapsed = self._workspace.collapse()
+        if collapsed is None:
             return
-        closing = self._panes.pop(1)
-        self._focused_pane = 0
-        remaining = self._panes[0]
-        await self.query_one(f"#{closing.table_id}", ResourceTable).remove()
-        self.query_one(f"#{remaining.table_id}", ResourceTable).remove_class("split-pane")
+        await self.query_one(f"#{collapsed.closing.table_id}", ResourceTable).remove()
+        self.query_one(f"#{collapsed.remaining.table_id}", ResourceTable).remove_class("split-pane")
         self._update_pane_focus_classes()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
@@ -4219,18 +4150,14 @@ class KorvidApp(App[None]):
         focus change also disarms a pending `ctrl+w` chord: the second key
         would go to the newly focused widget, leaving the flag set to
         swallow a later table keypress."""
-        self._pane_chord_pending = False
+        self._workspace.chord_pending = False
         widget = event.widget
-        if not isinstance(widget, ResourceTable):
+        if not isinstance(widget, ResourceTable) or widget.id is None:
             return
-        for index, pane in enumerate(self._panes):
-            if pane.table_id == widget.id:
-                if index != self._focused_pane:
-                    self._focused_pane = index
-                    self._update_pane_focus_classes()
-                    self._hints.refresh_for_focus()
-                    self._refresh_status()
-                return
+        if self._workspace.focus_by_table_id(widget.id):
+            self._update_pane_focus_classes()
+            self._hints.refresh_for_focus()
+            self._refresh_status()
 
     def on_descendant_blur(self, event: DescendantBlur) -> None:
         """Overlay widgets (command/filter bars, describe/log panes) hide
@@ -6429,7 +6356,11 @@ class KorvidApp(App[None]):
             # Strip only the active-sort arrow: custom column names may
             # legitimately contain spaces.
             column = choice.removesuffix(" ▲").removesuffix(" ▼")
-            if pane in self._panes and pane.kind == kind and column in self._sortable_columns(kind):
+            if (
+                self._workspace.contains(pane)
+                and pane.kind == kind
+                and column in self._sortable_columns(kind)
+            ):
                 self._apply_sort_column(column, pane=pane)
 
         self.push_screen(PickScreen(f"Sort {kind} by:", options), _picked)
@@ -6442,7 +6373,7 @@ class KorvidApp(App[None]):
         if not isinstance(event.data_table, ResourceTable):
             return
         event.stop()
-        pane = next((p for p in self._panes if p.table_id == event.data_table.id), None)
+        pane = next((p for p in self._workspace.panes if p.table_id == event.data_table.id), None)
         if pane is None:
             return  # a table without a live pane (mid-teardown)
         # Labels may carry the ▲/▼ decoration of the active sort.
@@ -6720,8 +6651,8 @@ class KorvidApp(App[None]):
         if selected_ns:
             context += f" selected_ns={selected_ns}"
         context += f" filter={self.filter_pattern or '-'}"
-        if len(self._panes) == 2:
-            other = self._panes[1 - self._focused_pane]
+        if self._workspace.is_split:
+            other = self._workspace.panes[1 - self._workspace.focused_index]
             context += f" other_pane={other.kind} other_scope={other.scope}"
         return context
 
@@ -8519,13 +8450,13 @@ class AppViewState(ViewState):
         self._app = app
 
     def current_kind(self) -> str:
-        return self._app.current_kind
+        return self._app._workspace.current_kind
 
     def current_scope(self) -> str:
-        return self._app.current_scope
+        return self._app._workspace.current_scope
 
     def current_namespace(self) -> str:
-        return self._app.current_namespace
+        return self._app._workspace.current_namespace
 
     def canonical_kind(self, kind: str) -> str:
         return self._app._canonical_kind(kind)

@@ -31,10 +31,11 @@ from korvid.k8s.relationship_facts import (
     TargetReference,
 )
 from korvid.k8s.writes import WriteOps
-from korvid.ui.app import KorvidApp, PaneState
+from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
+from korvid.ui.workspace_state import PaneState
 
 from .waits import until
 
@@ -1137,9 +1138,9 @@ class _FocusSwitchDuringGraphLister:
             # different identity) so origin.pane is not self._app._pane — the
             # same effect as the user focusing a different pane, but without
             # a second ResourceTable widget in the DOM.
-            current = self._app._panes[0]
+            current = self._app._workspace.panes[0]
             replacement = PaneState(current.kind, current.scope, current.table_id)
-            self._app._panes[0] = replacement
+            self._app._workspace._panes[0] = replacement
         if meta.plural == "nodes":
             return [
                 GenericSummary(
@@ -1176,7 +1177,7 @@ class _ScopeChangeDuringGraphLister:
     async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
         self.calls.append((meta.plural, namespace))
         if self._app is not None and meta.plural == "nodes":
-            self._app._panes[0].scope = "other-namespace"
+            self._app._workspace.panes[0].scope = "other-namespace"
         if meta.plural == "nodes":
             return [
                 GenericSummary(

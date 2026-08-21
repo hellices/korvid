@@ -27,6 +27,7 @@ KorvidApp  (ui/app.py)
 ├── RelationshipSnapshotLoader
 │                       (ui/relationship_controller.py)  bounded read-only graph LISTs
 ├── LogController        (ui/log_controller.py)          log stream tasks, buffer, pane lifecycle
+├── WorkspaceState       (ui/workspace_state.py)         split-pane collection, focus, and view state
 └── ...
 ```
 
@@ -98,6 +99,42 @@ It differs from the shape above in two deliberate ways:
 stack, approval dialog) and the stale-generation guards that read
 `LogController.pane_gen` around `cancel_tasks`, then calls `open_agent_logs`
 once those clear.
+
+### WorkspaceState owns the split-workspace state
+
+`WorkspaceState` (`ui/workspace_state.py`, issue #48) owns the mutable state of
+the split workspace: the pane collection (`PaneState` objects), the focused-pane
+index, the monotonic table-id counter that names each `ResourceTable`, the
+`ctrl+w` chord-pending flag, and — through the focused pane — the view state the
+whole app reads (`current_kind`, `current_scope`, `current_namespace`,
+`filter_pattern`, the `ResourceFilter`, per-kind `sorts`, and the `drill`
+`NavigationStack`). It also owns the *pure transitions* over that state:
+`split`, `focus_other`/`focus_index`/`focus_by_table_id`, `close_focused`, and
+`collapse`, each returning the panes affected so the app can mount or unmount the
+matching widget.
+
+It is not a controller. It has no Textual import, no worker, and none of the
+`WriteGate`/`ViewState`/`UiSurface` seams — it is a pure-Python state object plus
+its transitions, unit-tested directly in `tests/ui/test_workspace_state.py` with
+no running app. The division of labour with `KorvidApp` is deliberate:
+
+- **`WorkspaceState` decides, `KorvidApp` renders.** The transitions mutate only
+  in-memory state and never touch the DOM; the app calls them inside its
+  `_nav_lock` and then mounts/unmounts the `ResourceTable` widget for the pane
+  the transition reports. Because the transition is total and side-effect-free,
+  the app never has to reconstruct "which pane changed" from widget state.
+- **The raw fields are private to the owner.** `KorvidApp` no longer holds
+  `_panes`, `_focused_pane`, `_pane_counter`, or `_pane_chord_pending`, and
+  keeps **no** compatibility proxy for them — reaching pane state means going
+  through `self._workspace`. The action surface the rest of the app already used
+  (`_pane`, `current_kind`/`current_scope`, `filter_pattern`, `_resource_filter`,
+  `_sorts`, `_drill`) is retained as thin delegation properties that read and
+  write straight through the workspace, and `AppViewState` reads
+  kind/scope/namespace from it directly.
+- **Shared discovery state stays on the app.** The alias map (`aliases`) is a
+  live dict created in `__main__.py` and mutated by background discovery
+  workers, so it is not workspace-owned; moving it would be cosmetic delegation,
+  not ownership, and it stays where the workers can reach it.
 
 ### Why interfaces and not callables
 
@@ -240,6 +277,12 @@ tests added before the move where the behaviour is not already pinned.
    flags, selected triples, pane generation, pane mode, and pane owner, plus
    the `l`/`L` open-toggle, live/previous stream lifecycles, and the display
    actions. The app keeps the Textual entry points as thin delegates.
+8. ~~Split-workspace state~~ — done (#48); `WorkspaceState`
+   (`ui/workspace_state.py`) owns the pane collection, focused-pane index,
+   table-id counter, `ctrl+w` chord flag, and the focused pane's view state,
+   together with the pure `split`/`focus`/`close`/`collapse` transitions. The
+   app mounts and unmounts the `ResourceTable` widgets and keeps the view-state
+   accessors as delegation properties; it holds no raw pane fields.
 
 Issue #238 showed that logs and describe were technically extractable without
 introducing a new pane-composition seam, and issue #245 kept describe as a
