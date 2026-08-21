@@ -22,9 +22,11 @@ KorvidApp  (ui/app.py)
 ├── ShellController     (ui/shell_controller.py)     pod exec, debug fallback, node shell
 ├── TransferController  (ui/transfer.py)             post-approval file transfer
 ├── DebugController     (ui/debug.py)                gated kubectl debug runs
+├── SessionTimelineController
+│                       (ui/session_timeline_controller.py)  timeline producers and modal navigation
 ├── RelationshipSnapshotLoader
 │                       (ui/relationship_controller.py)  bounded read-only graph LISTs
-└── ...                                              further extractions pending
+└── ...
 ```
 
 Controllers do **not** import `app.py`. Dependencies arrive in the
@@ -175,7 +177,7 @@ Dependency getters are read at call time, not captured at construction:
 for the first reason, and wraps the editor entry points in lambdas for the
 third.
 
-## Extraction order
+## Completed extraction record
 
 Least coupled first, one responsibility per change, with characterization
 tests added before the move where the behaviour is not already pinned.
@@ -187,24 +189,9 @@ tests added before the move where the behaviour is not already pinned.
 4. ~~Port-forward~~ — done (#187)
 5. ~~Shell / debug / node shell~~ — done (#187)
 
-Stopping here is a proposal, not a completed criterion. #187 as written
-asks for `app.py` at most 5,000 lines; it is 7,885. Classifying all of
-`KorvidApp` shows that target cannot be met without also moving
-navigation and pane composition, which the same issue says stay on the
-app — extracting every remaining candidate lands at ~5,700.
-
-The argument for stopping is that the property worth having is coupling,
-not line count, and that property is already achieved. Measuring the
-remaining areas against the seams:
-
-- **logs** and **describe** reach into pane composition (`_pane`,
-  `_describe_pane`, `_focused_table`, `query_one`). Extracting them behind
-  the current seams would relocate that coupling rather than remove it;
-  they need a pane seam first, or they should stay.
-- **agent + MCP** needs 64 distinct app attributes. At that level an
-  extraction is a rewrite, and the approval perimeter is exactly where a
-  rewrite is least welcome.
-
-Navigation, scope and pane lifecycle stay on the app: composing panes and
-owning the focused view *is* the app's job, so moving it would relocate the
-coupling rather than remove it.
+Issue #238 showed that logs and describe were technically extractable without
+introducing a new pane-composition seam, and issue #245 kept describe as a
+deliberate low-ROI non-extraction. `SessionTimelineController` now owns the
+timeline-specific boundary; context retargeting stays in `KorvidApp` because
+it is tied to the app's epoch management, selected-row capture, and
+navigation worker ordering.
