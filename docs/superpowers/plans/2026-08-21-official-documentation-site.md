@@ -124,10 +124,10 @@ Add `docs-build` and `docs-serve` to `.PHONY`, then add:
 
 ```make
 docs-build:
-	uv run --group docs mkdocs build --strict
+	uv run --frozen --group docs mkdocs build --strict
 
 docs-serve:
-	uv run --group docs mkdocs serve
+	uv run --frozen --group docs mkdocs serve
 ```
 
 - [ ] **Step 3: Lock only against public PyPI**
@@ -335,7 +335,7 @@ git commit -m "ci: publish official documentation site"
 
 - [ ] **Step 1: Start a local server**
 
-Run `uv run --group docs mkdocs serve --dev-addr 127.0.0.1:8765` as a detached
+Run `uv run --frozen --group docs mkdocs serve --dev-addr 127.0.0.1:8765` as a detached
 background server and verify `curl --fail http://127.0.0.1:8765/`.
 
 - [ ] **Step 2: Verify desktop rendering**

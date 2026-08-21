@@ -113,8 +113,8 @@ The repository exposes:
 
 ```sh
 uv sync --frozen --group docs
-uv run --group docs mkdocs serve
-uv run --group docs mkdocs build --strict
+uv run --frozen --group docs mkdocs serve
+uv run --frozen --group docs mkdocs build --strict
 ```
 
 `mkdocs build --strict` is the documentation quality gate. Warnings such as a

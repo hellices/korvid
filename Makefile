@@ -16,7 +16,7 @@ check: lint typecheck test
 	uv run tach check
 
 docs-build:
-	uv run --group docs mkdocs build --strict
+	uv run --frozen --group docs mkdocs build --strict
 
 docs-serve:
-	uv run --group docs mkdocs serve
+	uv run --frozen --group docs mkdocs serve
