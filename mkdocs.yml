@@ -76,14 +76,3 @@ plugins:
 
 extra_css:
   - stylesheets/extra.css
-
-# Several canonical docs (docs/agent.md, docs/mcp.md, docs/dev/README.md, ...)
-# deliberately link to repo-root files (README.md, SECURITY.md, tests/, deploy/)
-# that live outside docs_dir and are rendered by GitHub, not by this site.
-# `not_found` defaults to `warn`, which --strict escalates to a build failure;
-# downgrade it to `info` (matching the built-in `unrecognized_links` default)
-# so those intentional cross-repo references stay visible in the build log
-# without blocking the strict gate.
-validation:
-  links:
-    not_found: info

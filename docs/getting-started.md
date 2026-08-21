@@ -16,13 +16,11 @@ environment rather than whatever Python happens to be active. `uv` and
 
 ## Current release
 
-**`0.1.2`** is the current published release and the version installed by
-the commands below. A `0.2.0` release is in progress — it adds the
-relationship graph, session timeline, Prometheus/Loki tooling, MCP 2.0
-support, and Homebrew distribution described elsewhere in these docs — but
-until it is tagged and published, treat any `0.2.0` install command as
-release-candidate material, not something to run yet. Watch the
-[release notes](release-notes/v0.2.0.md) for the publish announcement.
+**`0.2.0`** is the current published release and the version installed by
+the commands below. It adds the relationship graph, session timeline,
+Prometheus/Loki tooling, MCP 2.0 support, and Homebrew distribution
+described elsewhere in these docs. See the
+[release notes](release-notes/v0.2.0.md) for the full changelog.
 
 ## Install
 
@@ -41,7 +39,7 @@ The formula deliberately excludes the MCP HTTP server — install with `uv` or
 ### `uv tool` (recommended cross-platform)
 
 ```sh
-uv tool install 'korvid[all]==0.1.2'
+uv tool install 'korvid[all]==0.2.0'
 korvid
 ```
 
@@ -51,7 +49,7 @@ macOS and most enterprise Linux where the system Python predates 3.11.
 ### `pipx`
 
 ```sh
-pipx install 'korvid[all]==0.1.2'
+pipx install 'korvid[all]==0.2.0'
 korvid
 ```
 
@@ -62,11 +60,11 @@ or both:
 
 | Install | Adds |
 | --- | --- |
-| `korvid==0.1.2` | The keyboard-first TUI only — no agent, no MCP server |
-| `korvid[agent]==0.1.2` | The embedded agent (`Ctrl-A`, `:ai`, `:model`) |
-| `korvid[mcp]==0.1.2` | The MCP server (`korvid --mcp`) |
-| `korvid[all]==0.1.2` | Both agent and MCP — the recommended first install |
-| `korvid[all,entra]==0.1.2` | Everything above, plus Entra ID auth for Azure OpenAI |
+| `korvid==0.2.0` | The keyboard-first TUI only — no agent, no MCP server |
+| `korvid[agent]==0.2.0` | The embedded agent (`Ctrl-A`, `:ai`, `:model`) |
+| `korvid[mcp]==0.2.0` | The MCP server (`korvid --mcp`) |
+| `korvid[all]==0.2.0` | Both agent and MCP — the recommended first install |
+| `korvid[all,entra]==0.2.0` | Everything above, plus Entra ID auth for Azure OpenAI |
 
 Extras do not expand in place: if you installed `korvid` alone and later want
 the agent, reinstall with the full extra set you want rather than layering

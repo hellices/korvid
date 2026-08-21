@@ -32,4 +32,4 @@ design document states the original intent.
   agent capabilities.
 
 If you are looking for how to *use* korvid, start at the
-[project README](../../README.md).
+[project README](https://github.com/hellices/korvid/blob/main/README.md).
