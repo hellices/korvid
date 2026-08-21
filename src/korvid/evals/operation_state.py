@@ -52,6 +52,8 @@ RESTART_ANNOTATION = "kubectl.kubernetes.io/restartedAt"
 _SCALABLE_KINDS = frozenset({"Deployment", "StatefulSet"})
 _RESTARTABLE_KINDS = frozenset({"Deployment", "StatefulSet", "DaemonSet"})
 _FAKE = "operation eval fake"
+_POD = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
+_NODE = ResourceMeta("Node", "nodes", "", "v1", False, ("no",))
 
 
 @dataclass(frozen=True)
@@ -613,13 +615,27 @@ class StatefulFakeWriteOps(WriteOps):
         *,
         uid: str | None = None,
     ) -> None:
-        raise ApiStatusError(405, f"{_FAKE}: pod resize is not supported")
+        self._unsupported(
+            "resize", _POD, namespace, name, uid, 405, f"{_FAKE}: pod resize is not supported"
+        )
 
     async def cordon_node(self, name: str, unschedulable: bool, *, uid: str | None = None) -> None:
-        raise ApiStatusError(405, f"{_FAKE}: cordon/uncordon is not supported")
+        self._unsupported(
+            "cordon", _NODE, None, name, uid, 405, f"{_FAKE}: cordon/uncordon is not supported"
+        )
 
     async def evict_pod(self, namespace: str, name: str, *, uid: str | None = None) -> None:
-        raise ApiStatusError(405, f"{_FAKE}: pod eviction is not supported")
+        self._unsupported(
+            "evict", _POD, namespace, name, uid, 405, f"{_FAKE}: pod eviction is not supported"
+        )
 
     async def drain_plan(self, node_name: str) -> DrainPlan:
-        raise ApiStatusError(405, f"{_FAKE}: drain planning is not supported")
+        self._unsupported(
+            "drain_plan",
+            _NODE,
+            None,
+            node_name,
+            None,
+            405,
+            f"{_FAKE}: drain planning is not supported",
+        )

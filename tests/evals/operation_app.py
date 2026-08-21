@@ -359,6 +359,13 @@ def _write_request_target(
     )
 
 
+def _write_request_state(action: str, arguments: Mapping[str, Any]) -> dict[str, int]:
+    replicas = arguments.get("replicas")
+    if action != "scale" or isinstance(replicas, bool) or not isinstance(replicas, int):
+        return {}
+    return {"spec.replicas": replicas}
+
+
 class _JournalingExecutor(RecordedExecution):
     """The real `ToolExecutor`, with model-side journal attribution."""
 
@@ -394,6 +401,7 @@ class _JournalingExecutor(RecordedExecution):
                 actor="model_tool",
                 action=action,
                 target=request_target,
+                post_state=_write_request_state(action, arguments),
                 result="requested",
                 detail=summarize_arguments(name, arguments),
             )
@@ -900,7 +908,17 @@ class OperationRun:
 def _read_audit(audit_path: Path) -> tuple[dict[str, Any], ...]:
     if not audit_path.exists():
         return ()
-    return tuple(json.loads(line) for line in audit_path.read_text().splitlines() if line.strip())
+    records: list[dict[str, Any]] = []
+    for line in audit_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return tuple(records)
 
 
 def _audit_result(outcome: str) -> str:

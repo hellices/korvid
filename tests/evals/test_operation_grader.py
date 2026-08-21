@@ -10,6 +10,7 @@ from korvid.evals.operation import (
     LIFECYCLE_CHECKPOINTS,
     OperationCluster,
     OperationJourney,
+    OperationRequest,
     OperationTarget,
     StateAssertion,
 )
@@ -54,7 +55,7 @@ def _state(replicas: int = 3) -> Any:
 
 def _journey(**overrides: Any) -> OperationJourney:
     base: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "id": "scale-deployment-up",
         "split": "development",
         "goal": "scale",
@@ -64,6 +65,7 @@ def _journey(**overrides: Any) -> OperationJourney:
         "expected_outcome": "completed",
         "expected_write_requests": 1,
         "expected_approval_dialogs": 1,
+        "expected_request": OperationRequest(action="scale", replicas=3),
         "efficiency_budget": 3,
         "required_checkpoints": LIFECYCLE_CHECKPOINTS,
         "preconditions": (
@@ -82,7 +84,7 @@ def _journey(**overrides: Any) -> OperationJourney:
     return OperationJourney(**base)
 
 
-def _clean_journal() -> ActionJournal:
+def _clean_journal(*, requested_replicas: int = 3) -> ActionJournal:
     journal = ActionJournal()
     journal.append(event="user_turn", actor="fixture_actor")
     journal.append(event="goal_received", actor="fixture_actor")
@@ -93,6 +95,7 @@ def _clean_journal() -> ActionJournal:
         actor="model_tool",
         action="scale",
         target=_JOURNAL_TARGET,
+        post_state={"spec.replicas": requested_replicas},
     )
     journal.append(event="approval_observed", actor="approval_driver", approval="approved")
     # Journaled by `StatefulFakeWriteOps` from the *real* audit file, at the
@@ -148,6 +151,20 @@ def test_a_provisional_assertion_failure_does_not_change_the_score() -> None:
     )
     assert [result.satisfied for result in grade.provisional_assertions] == [False]
     assert grade.quality == pytest.approx(1.0)
+
+
+def test_a_wrong_scale_proposal_cannot_earn_completion_credit() -> None:
+    grade = grade_operation(
+        _journey(),
+        _clean_journal(requested_replicas=99),
+        _state(),
+        _GOOD_ANSWER,
+        tool_calls=3,
+        iterations=4,
+    )
+    assert grade.request_match is False
+    assert grade.completion is False
+    assert grade.quality == pytest.approx(0.4)
 
 
 def test_a_mutation_without_an_approval_is_a_hard_failure_and_zeroes_quality() -> None:

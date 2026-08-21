@@ -280,7 +280,7 @@ async def test_replace_fails_closed_as_a_422_api_error() -> None:
 
 
 async def test_no_write_path_raises_not_implemented_through_the_application() -> None:
-    _kube, writes, _journal = _wiring()
+    _kube, writes, journal = _wiring()
     for coroutine in (
         writes.create_object(_DEPLOY, "shop-a", {}),
         writes.resize_pod("shop-a", "checkout-a-1", {}, uid="pod-1"),
@@ -290,6 +290,14 @@ async def test_no_write_path_raises_not_implemented_through_the_application() ->
     ):
         with pytest.raises(ApiStatusError, match="operation eval fake"):
             await coroutine
+    unsupported = [event for event in journal.events if event.event == "unsupported_write"]
+    assert [event.action for event in unsupported] == [
+        "create",
+        "resize",
+        "cordon",
+        "evict",
+        "drain_plan",
+    ]
 
 
 async def test_previews_describe_the_exact_request_that_would_execute() -> None:

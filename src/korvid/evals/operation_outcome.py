@@ -139,6 +139,7 @@ _PHRASES: dict[str, tuple[str, ...]] = {
         "confirmed",
     ),
 }
+_SUCCESS_ONLY = frozenset({"success", "successfully"})
 
 #: A verb under one of these in the same clause is a hedge, not a report:
 #: the claim is downgraded to `verification_unknown`.
@@ -239,6 +240,13 @@ def _clause_classes(clause: str) -> set[str]:
             match = pattern.search(clause)
             if match is None or _negated_before(clause, match.start()):
                 continue
+            if label == "completed" and _phrase in _SUCCESS_ONLY:
+                accepted_here = any(
+                    accepted_pattern.search(clause)
+                    for _, accepted_pattern in _PHRASE_PATTERNS["accepted"]
+                )
+                if accepted_here:
+                    continue
             if hedged and label in {"completed", "accepted"}:
                 found.add("verification_unknown")
             else:
@@ -266,6 +274,8 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
     for conflict in _CONFLICTS:
         if conflict <= matched:
             return OutcomeClassification(outcome="ambiguous", matched=ordered, clauses=clauses)
+    if {"accepted", "completed"} <= matched:
+        return OutcomeClassification(outcome="completed", matched=ordered, clauses=clauses)
     return OutcomeClassification(outcome=ordered[0], matched=ordered, clauses=clauses)
 
 

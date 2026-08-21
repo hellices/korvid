@@ -27,8 +27,14 @@ def test_an_injected_timeout_replaces_the_default(tmp_path: Path) -> None:
 
 
 def test_a_non_positive_timeout_is_rejected(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="approval_timeout_seconds must be positive"):
+    with pytest.raises(ValueError, match="approval_timeout_seconds must be finite and positive"):
         make_app(Recorder(), tmp_path / "audit.jsonl", approval_timeout_seconds=0.0)
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf")])
+def test_a_non_finite_timeout_is_rejected(tmp_path: Path, timeout: float) -> None:
+    with pytest.raises(ValueError, match="approval_timeout_seconds must be finite and positive"):
+        make_app(Recorder(), tmp_path / "audit.jsonl", approval_timeout_seconds=timeout)
 
 
 def test_production_wiring_passes_no_override() -> None:

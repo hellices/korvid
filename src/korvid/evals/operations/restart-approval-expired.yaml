@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: restart-approval-expired
 split: development
 operation:
@@ -16,6 +16,8 @@ operation:
   expected_outcome: rejected
   expected_write_requests: 1
   expected_approval_dialogs: 1
+  expected_request:
+    action: rollout_restart
   efficiency_budget: 2
   required_checkpoints:
     - goal_received

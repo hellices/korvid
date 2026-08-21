@@ -234,7 +234,7 @@ Operation journeys are separate from diagnostic `Scenario` and
 their own versioned schema.
 
 ```yaml
-schema_version: 1
+schema_version: 2
 id: scale-deployment-up
 split: development
 operation:
@@ -248,6 +248,9 @@ operation:
     plural: deployments
     name: checkout-a
     uid: deployment-checkout-a
+  expected_request:
+    action: scale
+    replicas: 3
   preconditions:
     spec.replicas: 2
   approval:
@@ -266,6 +269,15 @@ user: Scale checkout-a in shop-a from 2 to 3 replicas.
 
 The target records group, kind, plural, namespace, name, and UID separately.
 No combined `namespace/name` string is accepted as target identity.
+The loader requires that exact identity to occur once in `cluster.objects`.
+The journey ID is a lowercase DNS-style slug because campaign artifacts use
+it as a filename component.
+
+`expected_request` is null when no write is expected. Otherwise it declares
+the exact action and its typed operation parameters. Slice A records scale
+replicas in the redacted journal and requires the proposal to match this
+field before awarding completion credit, including refusal and UID-conflict
+journeys whose provisional post-state remains unchanged.
 
 `initial_selection` is either:
 
@@ -273,8 +285,9 @@ No combined `namespace/name` string is accepted as target identity.
 - `neutral`: select a declared distractor whose name differs from the target,
   withholding the ambiguous target namespace until the user clarifies it.
 
-A `neutral` fixture is invalid without at least one distractor object. The
-driver never infers this behavior from user-text substrings.
+A `neutral` fixture is invalid without at least one differently named,
+namespaced distractor of the target's group and kind. The driver never
+infers this behavior from user-text substrings.
 
 The only Slice A dialog intervention is declarative:
 

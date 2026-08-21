@@ -9,7 +9,10 @@ the real approval gate, produced an audit intent before the mutation, and
 then verified the result against an authoritative read.
 
 Fixtures live in `src/korvid/evals/operations/` under a versioned schema
-(`schema_version: 1`). The development pack holds twelve templates; all
+(`schema_version: 2`). Each fixture declares the exact expected write
+proposal (`action` and, for scale, `replicas`); matching the target but
+requesting the wrong change cannot earn completion credit. The development
+pack holds twelve templates; all
 twelve run deterministically in CI, and the seven marked **core** are the
 required core gate the design names (templates 1, 3, 6, 7, 9, 10, 11):
 
@@ -89,14 +92,15 @@ Every boundary is recorded with an actor:
 | `grader` | the final authoritative read |
 
 Only a `model_tool` `get_resource` earns state credit, and only when its
-sanitized YAML parses, its `apiVersion`/`kind`/`namespace`/`name` (and
-reported UID) match the assertion target, and the *walked* assertion path
-satisfies the same typed operator the grader applies to authoritative
-state. A listing, an unparsable or size-elided result, a failed call, or a
-read of a same-named replacement is journaled and earns nothing — a leaf
-such as `replicas: 3` appearing under `status` is not an observation of
-`spec.replicas`. The app's own reads, the dry-run preview, and the
-grader's read never earn model credit at all.
+sanitized YAML parses and its `apiVersion`/`kind`/`namespace`/`name` (and
+reported UID) match the assertion target. During Slice A, provisional
+assertions require the complete walked path to be observable but do not
+require the fake value to satisfy the operator; Slice B calibration promotes
+corrected assertions before values affect model scores. A listing, an
+unparsable or size-elided result, a failed call, or a read of a same-named
+replacement is journaled and earns nothing — a leaf such as `replicas: 3`
+appearing under `status` is not an observation of `spec.replicas`. The app's
+own reads, the dry-run preview, and the grader's read never earn model credit.
 
 The journal is a published artifact, so it stores summaries rather than
 payloads. `result` is a token from a closed status vocabulary

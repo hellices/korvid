@@ -26,6 +26,7 @@ from .operation_app import (
     OperationRun,
     _journal_audit_records,
     _make_check_permission,
+    _read_audit,
     _shows_state,
     approval_from_result,
     run_operation_journey,
@@ -741,6 +742,17 @@ def test_hostile_audit_record_fields_are_dropped_without_leaking_or_mutating() -
     assert "kind=deployments" not in entry["detail"]
     assert "name=checkout-a" not in entry["detail"]
     assert "context=eval" not in entry["detail"]
+
+
+def test_a_torn_final_audit_record_does_not_erase_completed_records(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    path.write_text(
+        '{"action":"scale","kind":"deployments","group":"apps","outcome":"intent"}\n'
+        '{"action":"scale"'
+    )
+    assert _read_audit(path) == (
+        {"action": "scale", "kind": "deployments", "group": "apps", "outcome": "intent"},
+    )
 
 
 async def test_an_unsupported_request_states_the_limit_without_substituting_a_write(

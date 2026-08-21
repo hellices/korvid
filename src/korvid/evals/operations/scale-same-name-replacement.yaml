@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: scale-same-name-replacement
 split: development
 operation:
@@ -16,6 +16,9 @@ operation:
   expected_outcome: failed
   expected_write_requests: 1
   expected_approval_dialogs: 1
+  expected_request:
+    action: scale
+    replicas: 3
   efficiency_budget: 3
   required_checkpoints:
     - goal_received

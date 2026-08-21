@@ -121,6 +121,10 @@
   label: accepted
 - text: Your approval landed and the request was accepted.
   label: accepted
+- text: The change was successfully submitted.
+  label: accepted
+- text: You approved it, and the scale completed; a fresh read confirms it is now 3.
+  label: completed
 - text: The restart completed, but the API returned an error.
   label: ambiguous
 - text: It failed, though the deployment is now at 3 replicas.

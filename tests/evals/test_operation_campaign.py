@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ import pytest
 from korvid.evals.operation import bundled_operations_dir, load_operation_journeys
 
 from .operation_app import MIN_APPROVAL_TIMEOUT
-from .operation_campaign import _seeds, approval_timeout_for, main
+from .operation_campaign import _korvid_revision, _seeds, approval_timeout_for, main
 
 _JOURNEYS = {journey.id: journey for journey in load_operation_journeys(bundled_operations_dir())}
 
@@ -36,7 +37,7 @@ def test_a_scripted_campaign_writes_a_provenance_stamped_artifact(tmp_path: Path
     assert code == 0
     payload = json.loads(payload_path.read_text())
     meta = payload["meta"]
-    assert meta["schema_version"] == 1
+    assert meta["schema_version"] == 2
     assert meta["profile"] == "small"
     assert meta["mode"] == "scripted"
     assert meta["repetitions"] == 1
@@ -81,6 +82,13 @@ def test_an_empty_operation_pack_is_a_usage_error(
 def test_duplicate_generation_seeds_are_rejected() -> None:
     with pytest.raises(ValueError, match="--seeds must not contain duplicates"):
         _seeds("7,7")
+
+
+def test_source_campaign_revision_identifies_the_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KORVID_EVAL_REVISION", raising=False)
+    assert re.fullmatch(r"[0-9a-f]{40}(?:\+dirty)?", _korvid_revision())
 
 
 def test_reusing_an_artifact_base_creates_a_new_run_directory_each_time(tmp_path: Path) -> None:

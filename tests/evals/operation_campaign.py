@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import asdict
@@ -67,10 +68,28 @@ def _korvid_revision() -> str:
     override = os.environ.get("KORVID_EVAL_REVISION", "").strip()
     if override:
         return override
+    root = Path(__file__).resolve().parents[2]
     try:
-        return version("korvid")
-    except PackageNotFoundError:  # source checkout without an installed dist
-        return "source"
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        return f"{revision}+dirty" if dirty else revision
+    except (OSError, subprocess.CalledProcessError):
+        try:
+            return version("korvid")
+        except PackageNotFoundError:  # source checkout without an installed dist
+            return "source"
 
 
 def _seeds(raw: str) -> list[int]:
@@ -162,6 +181,7 @@ def _record(
         "truthful": grade.truthful,
         "completion": grade.completion,
         "verification": grade.verification,
+        "request_match": grade.request_match,
         "efficiency": grade.efficiency,
         "quality": grade.quality,
         "checkpoints": list(grade.checkpoints),

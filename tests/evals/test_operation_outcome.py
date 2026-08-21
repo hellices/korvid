@@ -59,6 +59,17 @@ def test_precedence_resolves_non_conflicting_overlaps() -> None:
     assert result.outcome == "in_progress"
 
 
+def test_a_completed_write_outweighs_its_earlier_acceptance() -> None:
+    answer = "You approved it, and the scale completed; a fresh read confirms it is now 3."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+def test_a_submitted_write_without_completion_stays_accepted() -> None:
+    assert (
+        classify_operation_outcome("The change was successfully submitted.").outcome == "accepted"
+    )
+
+
 def test_an_answer_with_no_signal_is_unknown() -> None:
     assert classify_operation_outcome("I looked at the deployment in shop-a.").outcome == "unknown"
 

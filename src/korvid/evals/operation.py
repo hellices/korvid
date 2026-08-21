@@ -44,6 +44,7 @@ __all__ = [
     "DialogIntervention",
     "OperationCluster",
     "OperationJourney",
+    "OperationRequest",
     "OperationTarget",
     "PermissionDenial",
     "ReplaceTarget",
@@ -57,7 +58,7 @@ __all__ = [
 
 #: Bumped whenever a loaded field changes meaning. A fixture written for a
 #: different version is rejected rather than silently reinterpreted.
-OPERATION_SCHEMA_VERSION = 1
+OPERATION_SCHEMA_VERSION = 2
 
 #: The observable boundaries a journey may require, in lifecycle order.
 LIFECYCLE_CHECKPOINTS: tuple[str, ...] = (
@@ -112,6 +113,7 @@ _OPERATION_KEYS = frozenset(
         "expected_outcome",
         "expected_write_requests",
         "expected_approval_dialogs",
+        "expected_request",
         "efficiency_budget",
         "required_checkpoints",
         "preconditions",
@@ -121,6 +123,7 @@ _OPERATION_KEYS = frozenset(
     }
 )
 _TARGET_KEYS = frozenset({"context", "namespace", "group", "kind", "plural", "name", "uid"})
+_REQUEST_KEYS = frozenset({"action", "replicas"})
 _ASSERTION_KEYS = frozenset({"resource", "path", "operator", "expected", "provisional"})
 _CLUSTER_KEYS = frozenset({"objects", "events", "logs", "forbidden", "reconcile_status"})
 _RBAC_KEYS = frozenset({"denied"})
@@ -129,6 +132,7 @@ _INTERVENTION_KEYS = frozenset({"replace_target"})
 _REPLACE_TARGET_KEYS = frozenset({"uid"})
 
 _PATH_SEGMENT = re.compile(r'"([^"]+)"|([^.]+)')
+_JOURNEY_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
 def split_path(path: str) -> tuple[str, ...]:
@@ -222,6 +226,14 @@ class PermissionDenial:
 
 
 @dataclass(frozen=True)
+class OperationRequest:
+    """The exact write proposal the journey expects from the model."""
+
+    action: str
+    replicas: int | None = None
+
+
+@dataclass(frozen=True)
 class ReplaceTarget:
     """A same-name replacement of the journey target, by its new uid.
 
@@ -277,6 +289,7 @@ class OperationJourney:
     expected_write_requests: int
     #: Approval dialogs the fixture expects to surface.
     expected_approval_dialogs: int
+    expected_request: OperationRequest | None
     #: Model tool calls at or below which efficiency scores 1.0.
     efficiency_budget: int
     required_checkpoints: tuple[str, ...]
@@ -444,13 +457,17 @@ def _denials(raw: Any, label: str) -> tuple[PermissionDenial, ...]:
         for key in ("verb", "resource"):
             if not isinstance(item.get(key), str) or not str(item[key]).strip():
                 raise ValueError(f"{item_label}.{key} must be a non-empty string")
+        for key in ("subresource", "namespace"):
+            value = item.get(key)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"{item_label}.{key} must be a string or null")
         namespace = item.get("namespace")
         rules.append(
             PermissionDenial(
-                verb=str(item["verb"]),
-                resource=str(item["resource"]),
-                subresource=str(item.get("subresource") or ""),
-                namespace=None if namespace is None else str(namespace),
+                verb=item["verb"],
+                resource=item["resource"],
+                subresource=item.get("subresource") or "",
+                namespace=namespace,
             )
         )
     return tuple(rules)
@@ -471,6 +488,15 @@ def _cluster(raw: Any, label: str) -> OperationCluster:
         raise ValueError(f"{label}.forbidden must be a list of read-denial rules")
     if not all(isinstance(rule, dict) for rule in forbidden_reads):
         raise ValueError(f"{label}.forbidden entries must be mappings")
+    checked_forbidden: list[dict[str, str]] = []
+    for index, rule in enumerate(forbidden_reads):
+        checked_rule: dict[str, str] = {}
+        for key, value in rule.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                field = key if isinstance(key, str) else "<key>"
+                raise ValueError(f"{label}.forbidden[{index}].{field} must be a string")
+            checked_rule[key] = value
+        checked_forbidden.append(checked_rule)
     reconcile = raw.get("reconcile_status", True)
     if not isinstance(reconcile, bool):
         raise ValueError(f"{label}.reconcile_status must be a boolean")
@@ -478,7 +504,7 @@ def _cluster(raw: Any, label: str) -> OperationCluster:
         objects=objects,
         events=events,
         logs=_logs(raw.get("logs")),
-        forbidden=tuple({str(k): str(v) for k, v in rule.items()} for rule in forbidden_reads),
+        forbidden=tuple(checked_forbidden),
         reconcile_status=reconcile,
     )
 
@@ -486,9 +512,9 @@ def _cluster(raw: Any, label: str) -> OperationCluster:
 def _initial_selection(
     raw: Any, target: OperationTarget, cluster: OperationCluster, label: str
 ) -> str:
-    if raw not in INITIAL_SELECTIONS:
+    if not isinstance(raw, str) or raw not in INITIAL_SELECTIONS:
         raise ValueError(f"{label} must be one of {sorted(INITIAL_SELECTIONS)}")
-    selection = str(raw)
+    selection = raw
     if selection == "target":
         return selection
     for manifest in cluster.objects:
@@ -497,11 +523,23 @@ def _initial_selection(
             continue
         namespace = metadata.get("namespace")
         name = metadata.get("name")
-        if isinstance(namespace, str) and namespace.strip() and name != target.name:
+        api_version = manifest.get("apiVersion")
+        group = (
+            api_version.rpartition("/")[0]
+            if isinstance(api_version, str) and "/" in api_version
+            else ""
+        )
+        if (
+            group == target.group
+            and manifest.get("kind") == target.kind
+            and isinstance(namespace, str)
+            and namespace.strip()
+            and name != target.name
+        ):
             return selection
     raise ValueError(
         f"{label}: neutral initial_selection requires at least one namespaced distractor "
-        "object with a different name from the target"
+        "object with a different name matching the target group and kind"
     )
 
 
@@ -509,6 +547,51 @@ def _positive_int(raw: Any, label: str, *, minimum: int = 0) -> int:
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < minimum:
         raise ValueError(f"{label} must be an integer >= {minimum}")
     return raw
+
+
+def _expected_request(raw: Any, goal: str, requests: int, label: str) -> OperationRequest | None:
+    if requests == 0:
+        if raw is not None:
+            raise ValueError(f"{label} must be null when no write request is expected")
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{label} must be a mapping when a write request is expected")
+    _reject_unknown_keys(raw, _REQUEST_KEYS, label)
+    action = raw.get("action")
+    if action != goal:
+        raise ValueError(f"{label}.action must match operation.goal {goal!r}")
+    replicas = raw.get("replicas")
+    if goal == "scale":
+        replicas = _positive_int(replicas, f"{label}.replicas")
+    elif "replicas" in raw:
+        raise ValueError(f"{label}.replicas is valid only for scale requests")
+    return OperationRequest(action=action, replicas=replicas)
+
+
+def _journey_id(data: dict[str, Any], label: str) -> str:
+    value = _require_str(data, "id")
+    if _JOURNEY_ID.fullmatch(value) is None:
+        raise ValueError(f"{label}.id must be a lowercase DNS-style slug")
+    return value
+
+
+def _target_count(cluster: OperationCluster, target: OperationTarget) -> int:
+    matches = 0
+    for manifest in cluster.objects:
+        metadata = manifest.get("metadata")
+        api_version = manifest.get("apiVersion")
+        if not isinstance(metadata, Mapping) or not isinstance(api_version, str):
+            continue
+        group = api_version.rpartition("/")[0] if "/" in api_version else ""
+        if (
+            group,
+            manifest.get("kind"),
+            metadata.get("namespace"),
+            metadata.get("name"),
+            metadata.get("uid"),
+        ) == (target.group, target.kind, target.namespace, target.name, target.uid):
+            matches += 1
+    return matches
 
 
 def _operation(raw: Any, label: str) -> dict[str, Any]:
@@ -559,9 +642,11 @@ def load_operation_journey(path: Path) -> OperationJourney:
             f"{path.name}: expected_approval_dialogs cannot exceed expected_write_requests"
         )
     cluster = _cluster(data.get("cluster"), f"{path.name}: cluster")
+    if _target_count(cluster, target) != 1:
+        raise ValueError(f"{path.name}: cluster must contain the exact operation target once")
     return OperationJourney(
         schema_version=OPERATION_SCHEMA_VERSION,
-        id=_require_str(data, "id"),
+        id=_journey_id(data, f"{path.name}: journey"),
         split=str(data["split"]),
         goal=str(operation["goal"]),
         initial_selection=_initial_selection(
@@ -575,6 +660,12 @@ def load_operation_journey(path: Path) -> OperationJourney:
         expected_outcome=str(operation["expected_outcome"]),
         expected_write_requests=requests,
         expected_approval_dialogs=dialogs,
+        expected_request=_expected_request(
+            operation["expected_request"],
+            operation["goal"],
+            requests,
+            f"{path.name}: expected_request",
+        ),
         efficiency_budget=_positive_int(
             operation["efficiency_budget"], f"{path.name}: efficiency_budget", minimum=1
         ),

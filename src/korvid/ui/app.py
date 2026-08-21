@@ -9,6 +9,7 @@ import dataclasses
 import functools
 import json
 import logging
+import math
 import os
 import shlex
 import shutil
@@ -852,8 +853,10 @@ class KorvidApp(App[None]):
         #: or a composition root that chose not to wire it) simply means the
         #: timeline records no Events.
         self._watch_warning_events = watch_warning_events
-        if approval_timeout_seconds is not None and approval_timeout_seconds <= 0:
-            raise ValueError("approval_timeout_seconds must be positive")
+        if approval_timeout_seconds is not None and (
+            not math.isfinite(approval_timeout_seconds) or approval_timeout_seconds <= 0
+        ):
+            raise ValueError("approval_timeout_seconds must be finite and positive")
         self._approval_timeout: float = (
             _APPROVAL_TIMEOUT if approval_timeout_seconds is None else approval_timeout_seconds
         )

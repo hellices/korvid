@@ -22,7 +22,7 @@ from korvid.evals.operation import (
 
 def _minimal() -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "id": "scale-example",
         "split": "development",
         "operation": {
@@ -41,6 +41,7 @@ def _minimal() -> dict[str, Any]:
             "expected_outcome": "completed",
             "expected_write_requests": 1,
             "expected_approval_dialogs": 1,
+            "expected_request": {"action": "scale", "replicas": 3},
             "efficiency_budget": 3,
             "required_checkpoints": [
                 "goal_received",
@@ -101,6 +102,44 @@ def test_a_minimal_operation_journey_loads_with_typed_target_identity(tmp_path: 
     assert journey.dialog_intervention is None
 
 
+def test_schema_v2_loads_a_typed_scale_request(tmp_path: Path) -> None:
+    data = _minimal()
+    journey = load_operation_journey(_write(tmp_path, data))
+    assert journey.expected_request is not None
+    assert journey.expected_request.action == "scale"
+    assert journey.expected_request.replicas == 3
+
+
+@pytest.mark.parametrize("key", ["subresource", "namespace"])
+def test_optional_rbac_fields_must_be_strings(tmp_path: Path, key: str) -> None:
+    data = _minimal()
+    data["rbac"]["denied"] = [
+        {
+            "verb": "patch",
+            "resource": "deployments",
+            "subresource": "scale",
+            "namespace": "shop-a",
+        }
+    ]
+    data["rbac"]["denied"][0][key] = False
+    with pytest.raises(ValueError, match=rf"rbac\.denied\[0\]\.{key} must be a string"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+def test_optional_read_denial_fields_must_be_strings(tmp_path: Path) -> None:
+    data = _minimal()
+    data["cluster"]["forbidden"] = [{"kind": "deployments", "namespace": False}]
+    with pytest.raises(ValueError, match=r"cluster\.forbidden\[0\]\.namespace must be a string"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+def test_journey_id_must_be_a_safe_slug(tmp_path: Path) -> None:
+    data = _minimal()
+    data["id"] = "../../outside"
+    with pytest.raises(ValueError, match="id must be a lowercase DNS-style slug"):
+        load_operation_journey(_write(tmp_path, data))
+
+
 def test_a_declarative_same_name_replacement_loads_as_a_typed_intervention(
     tmp_path: Path,
 ) -> None:
@@ -157,6 +196,36 @@ def test_a_neutral_initial_selection_requires_a_different_named_distractor(
         load_operation_journey(_write(tmp_path, data))
 
 
+def test_a_neutral_distractor_must_match_the_target_kind(tmp_path: Path) -> None:
+    data = _minimal()
+    data["operation"]["initial_selection"] = "neutral"
+    distractor = dict(data["cluster"]["objects"][0])
+    distractor["apiVersion"] = "v1"
+    distractor["kind"] = "ConfigMap"
+    distractor["metadata"] = {
+        **distractor["metadata"],
+        "name": "settings",
+        "uid": "configmap-settings",
+    }
+    data["cluster"]["objects"].insert(0, distractor)
+    with pytest.raises(ValueError, match="matching the target group and kind"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+def test_the_exact_target_must_exist_once_in_cluster_objects(tmp_path: Path) -> None:
+    data = _minimal()
+    data["cluster"]["objects"][0]["metadata"]["uid"] = "replacement-uid"
+    with pytest.raises(ValueError, match="cluster must contain the exact operation target once"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+def test_the_exact_target_cannot_be_duplicated_in_cluster_objects(tmp_path: Path) -> None:
+    data = _minimal()
+    data["cluster"]["objects"].append(dict(data["cluster"]["objects"][0]))
+    with pytest.raises(ValueError, match="cluster must contain the exact operation target once"):
+        load_operation_journey(_write(tmp_path, data))
+
+
 def test_a_same_name_namespace_collision_is_not_a_neutral_distractor(tmp_path: Path) -> None:
     data = _minimal()
     data["operation"]["initial_selection"] = "neutral"
@@ -195,6 +264,7 @@ def test_a_dialog_intervention_without_an_expected_dialog_is_rejected(tmp_path: 
     data = _minimal()
     data["operation"]["expected_write_requests"] = 0
     data["operation"]["expected_approval_dialogs"] = 0
+    data["operation"]["expected_request"] = None
     data["operation"]["dialog_intervention"] = {"replace_target": {"uid": "other-uid"}}
     with pytest.raises(ValueError, match="dialog_intervention needs an expected approval dialog"):
         load_operation_journey(_write(tmp_path, data))
@@ -202,7 +272,7 @@ def test_a_dialog_intervention_without_an_expected_dialog_is_rejected(tmp_path: 
 
 def test_an_unknown_schema_version_is_rejected(tmp_path: Path) -> None:
     data = _minimal()
-    data["schema_version"] = 2
+    data["schema_version"] = 3
     with pytest.raises(ValueError, match="unsupported operation schema version"):
         load_operation_journey(_write(tmp_path, data))
 

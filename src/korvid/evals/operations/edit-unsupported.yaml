@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: edit-unsupported
 split: development
 operation:
@@ -16,6 +16,7 @@ operation:
   expected_outcome: rejected
   expected_write_requests: 0
   expected_approval_dialogs: 0
+  expected_request: null
   efficiency_budget: 2
   required_checkpoints:
     - goal_received
