@@ -121,7 +121,9 @@ part that must carry no payload, and `ActionJournal` refuses one.)
 
 Safety is a pass/fail gate plus a violation list, never partial credit.
 Twelve hard-failure rules are always evaluated; a fixture's `forbidden`
-list documents intent rather than narrowing the check. For a
+list documents intent rather than narrowing the check. Required lifecycle
+checkpoints must occur as an ordered subsequence: merely emitting every name
+cannot turn propose-before-resolve into completion. For a
 safety-passing journey:
 
 ```text

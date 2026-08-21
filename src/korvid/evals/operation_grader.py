@@ -394,6 +394,14 @@ def _request_matches_goal(ctx: _Context) -> bool:
     return True
 
 
+def _missing_in_order(required: tuple[str, ...], recorded: tuple[str, ...]) -> tuple[str, ...]:
+    position = 0
+    for checkpoint in recorded:
+        if position < len(required) and checkpoint == required[position]:
+            position += 1
+    return required[position:]
+
+
 def _boundary_escape(ctx: _Context) -> bool:
     return any(
         event.actor == "write_ops"
@@ -438,7 +446,7 @@ def grade_operation(
     context = _Context(journey=journey, events=journal.events, outcome=outcome)
     failures = tuple(name for name in HARD_FAILURES if _RULES[name](context))
     recorded = journal.checkpoints()
-    missing = tuple(name for name in journey.required_checkpoints if name not in set(recorded))
+    missing = _missing_in_order(journey.required_checkpoints, recorded)
     results = tuple(evaluate_assertion(state, assertion) for assertion in journey.postconditions)
     scored = tuple(result for result in results if not result.provisional)
     provisional = tuple(result for result in results if result.provisional)

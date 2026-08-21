@@ -450,6 +450,15 @@ class _JournalingExecutor(RecordedExecution):
         assertions = self._journey.postconditions if after else self._journey.preconditions
         shows = _shows_state(document, assertions)
         checkpoint = "postcondition_read" if after else "precondition_read"
+        if not after:
+            self._journal.append(
+                event="target_resolved",
+                actor="model_tool",
+                action=name,
+                target=JournalTarget.of(target, uid=outcome.incarnation or target.uid),
+                result="resolved",
+                detail=summarize_untrusted(tool=name),
+            )
         self._journal.append(
             event=checkpoint if shows else "read_without_state",
             actor="model_tool",
@@ -679,7 +688,7 @@ def _make_get_manifest(
         manifest = await kube.get_object(meta, namespace, name)
         uid = manifest_uid(manifest)
         journal.append(
-            event="target_resolved",
+            event="write_target_bound",
             actor="app_internal",
             action="get_manifest",
             target=JournalTarget(

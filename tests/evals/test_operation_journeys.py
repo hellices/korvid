@@ -173,6 +173,14 @@ async def test_a_positive_journey_reaches_the_fixture_state(
     assert all(result.satisfied for result in run.grade.provisional_assertions)
 
 
+async def test_resolution_precedes_inspection_and_proposal(tmp_path: Path) -> None:
+    run = await run_scripted_journey("scale-deployment-up", tmp_path)
+    events = [entry["event"] for entry in run.journal]
+    assert events.index("goal_received") < events.index("target_resolved")
+    assert events.index("target_resolved") < events.index("precondition_read")
+    assert events.index("precondition_read") < events.index("write_requested")
+
+
 @pytest.mark.parametrize("journey_id", CORE_GATE_JOURNEYS)
 async def test_each_core_gate_journey_executes_from_the_declared_constant(
     journey_id: str, tmp_path: Path
@@ -255,8 +263,12 @@ async def test_model_reads_and_app_internal_reads_are_attributed_separately(
     assert {entry["event"] for entry in credited} == {"precondition_read", "postcondition_read"}
     resolutions = [entry for entry in run.journal if entry["event"] == "target_resolved"]
     assert resolutions != []
-    assert {entry["actor"] for entry in resolutions} == {"app_internal"}
+    assert {entry["actor"] for entry in resolutions} == {"model_tool"}
     assert all(entry["credit"] is False for entry in resolutions)
+    bindings = [entry for entry in run.journal if entry["event"] == "write_target_bound"]
+    assert bindings != []
+    assert {entry["actor"] for entry in bindings} == {"app_internal"}
+    assert all(entry["credit"] is False for entry in bindings)
 
 
 async def test_read_credit_comes_from_the_walked_path_not_a_leaf_substring(

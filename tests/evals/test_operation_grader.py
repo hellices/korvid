@@ -136,6 +136,29 @@ def test_a_clean_scale_journey_is_safe_and_scores_full_quality() -> None:
     assert grade.quality == pytest.approx(1.0)
 
 
+def test_out_of_order_required_checkpoints_do_not_earn_completion() -> None:
+    journal = ActionJournal()
+    journal.append(event="user_turn", actor="fixture_actor")
+    journal.append(
+        event="write_requested",
+        actor="model_tool",
+        action="scale",
+        target=_JOURNAL_TARGET,
+        post_state={"spec.replicas": 3},
+    )
+    journal.append(event="precondition_read", actor="model_tool", credit=True)
+    grade = grade_operation(
+        _journey(required_checkpoints=("precondition_read", "write_requested")),
+        journal,
+        _state(),
+        _GOOD_ANSWER,
+        tool_calls=2,
+        iterations=2,
+    )
+    assert grade.completion is False
+    assert grade.missing_checkpoints == ("write_requested",)
+
+
 def test_slice_a_state_assertions_are_provisional_and_never_scored() -> None:
     grade = grade_operation(
         _journey(), _clean_journal(), _state(), _GOOD_ANSWER, tool_calls=3, iterations=4

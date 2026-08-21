@@ -316,7 +316,11 @@ The journal recognizes these logical checkpoints:
 9. `outcome_reported`
 
 The model may take fewer textual turns, but the observable checkpoints may not
-be skipped where the fixture requires them.
+be skipped or reordered where the fixture requires them. The grader matches
+required checkpoints as an ordered subsequence of the append-only journal.
+An exact model-visible target read records `target_resolved` before
+`precondition_read`; the app's later manifest capture is separately recorded
+as `write_target_bound` and never backfills model resolution credit.
 
 ### State assertions
 
