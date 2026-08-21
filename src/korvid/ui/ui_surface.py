@@ -86,8 +86,14 @@ class UiSurface(ABC):
         `asyncio` tasks that nothing supervises: app workers are cancelled
         on shutdown and are visible to the test pilot.
 
-        A `:ctx` switch is *not* a cancellation point. It cancels only the
-        `hint-events` group; every other worker keeps running against the
+        A `:ctx` switch is not one blanket cancellation point: the app's
+        context-switch teardown cancels exactly the groups it knows hold a
+        stale-cluster connection, by name - `hint-events`, `relationships`,
+        and `timeline-warning-events` - and `cancel_workers` is the seam a
+        controller uses to do the same for a group it owns, the way
+        `SessionTimelineController.stop` cancels `timeline-warning-events`.
+        A worker in any other group (for example the timeline navigation
+        worker) is not touched by the switch and keeps running against the
         cluster it was started for. A controller whose work outlives a
         context switch must revalidate through `WriteGate.context_intact`
         or the epoch it captured - the surface will not do it for you.

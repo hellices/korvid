@@ -10,8 +10,10 @@
 - opening `SessionTimelineScreen` and translating its goto result into a
   navigation worker, with an epoch guard that discards stale results.
 
-It calls only `UiSurface` and `ViewState` — no Textual imports, no direct
-app state — so it is fully testable without a running app.
+It calls only `UiSurface` and `ViewState`, and constructs `SessionTimelineScreen`
+to hand to `push_screen` — no direct Textual API use; the screen is only ever
+constructed and pushed, never driven (no widget queries, no reading its
+Textual state) — so it is fully testable without a running app.
 """
 
 from __future__ import annotations
@@ -94,7 +96,7 @@ class SessionTimelineController:
         epoch_crossed: Callable[[int], bool],
         watch_warning_events: (Callable[[str | None], AsyncIterator[dict[str, Any]]] | None) = None,
         selected_resource: Callable[[], TimelineResourceRef | None] | None = None,
-        navigate: Callable[[str, str, str, int], Coroutine[Any, Any, None]] | None = None,
+        navigate: Callable[[str, str, str, int], Coroutine[Any, Any, None]],
     ) -> None:
         self._ui = ui
         self._view = view
@@ -123,6 +125,13 @@ class SessionTimelineController:
 
     async def stop(self) -> None:
         """Cancel the Warning-event feed and wait for it to settle."""
+        # Only the Warning-event group is cancelled here: it holds a watch
+        # connection scoped to the old cluster, which must not outlive the
+        # switch. The navigation group (TIMELINE_NAVIGATION_GROUP) is left
+        # alone because `_on_timeline_result`'s navigate callback
+        # (`_jump_to_object`) re-checks its own epoch before touching
+        # anything, so an in-flight goto is already safe to let finish or
+        # self-abort rather than being torn down here too.
         await self._ui.cancel_workers(TIMELINE_EVENT_GROUP)
 
     def start_warning_watch(self) -> None:
@@ -268,14 +277,12 @@ class SessionTimelineController:
             )
             return
         _, kind_alias, namespace, name = result
-        navigate = self._navigate
-        if navigate is not None:
-            self._ui.run_worker(
-                navigate(kind_alias, namespace, name, epoch),
-                exclusive=True,
-                group=TIMELINE_NAVIGATION_GROUP,
-                exit_on_error=False,
-            )
+        self._ui.run_worker(
+            self._navigate(kind_alias, namespace, name, epoch),
+            exclusive=True,
+            group=TIMELINE_NAVIGATION_GROUP,
+            exit_on_error=False,
+        )
 
     # ------------------------------------------------------------------
     # Warning-event feed internals

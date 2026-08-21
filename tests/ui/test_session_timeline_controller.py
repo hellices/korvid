@@ -12,12 +12,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-from collections.abc import AsyncIterator, Callable, Mapping
-from typing import Any
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+from typing import Any, Literal
 
 import pytest
 
 from korvid.core.session_timeline import (
+    AppendResult,
     SessionTimeline,
     TimelineResourceRef,
     TimelineSource,
@@ -49,13 +50,19 @@ class _Notification:
 class FakeUiSurface(UiSurface):
     """Minimal UiSurface that records every call a controller makes."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, close_worker_coroutines: bool = True) -> None:
         self.notifications: list[_Notification] = []
         self.workers: list[Any] = []  # stores the coroutine/callable passed to run_worker
         self.worker_groups: list[tuple[str, bool]] = []  # (group, exit_on_error)
         self.cancelled_groups: list[str] = []
         self.screens: list[Any] = []
         self.screen_callback: Callable[[Any], None] | None = None
+        # Tests that need to actually run the submitted worker (e.g. to
+        # assert what a navigation coroutine was called with) set this
+        # False and await the captured coroutine themselves; every other
+        # test keeps the default so an unawaited coroutine never survives
+        # to trip `filterwarnings = ["error"]` in a later test.
+        self._close_worker_coroutines = close_worker_coroutines
 
     def notify(
         self,
@@ -90,7 +97,7 @@ class FakeUiSurface(UiSurface):
         # Close bare coroutines immediately to prevent RuntimeWarning about
         # unawaited coroutines — sync tests that only check group metadata
         # don't need to run the work.
-        if asyncio.iscoroutine(work):
+        if asyncio.iscoroutine(work) and self._close_worker_coroutines:
             work.close()
             self.workers.append(None)
         else:
@@ -184,10 +191,46 @@ class _FakeWatchManager:
 
 
 # ---------------------------------------------------------------------------
+# Fake timeline that raises
+# ---------------------------------------------------------------------------
+
+
+class _ExplodingTimeline(SessionTimeline):
+    """A `SessionTimeline` whose `append_context_switch` always raises.
+
+    Exercises `_append_timeline`'s own exception handler — a producer
+    call that raises must become a visible, non-fatal notification rather
+    than propagating out of a watch/context-switch/write call site that
+    must never raise.
+    """
+
+    def append_context_switch(
+        self,
+        *,
+        epoch: int,
+        phase: Literal["started", "completed", "failed"],
+        from_context: str | None,
+        to_context: str | None,
+        note: str = "",
+    ) -> AppendResult:
+        raise RuntimeError("simulated timeline failure")
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
 _PODS_ALIASES = build_alias_map([PODS_META])
+
+
+async def _default_navigate(kind_alias: str, namespace: str, name: str, epoch: int) -> None:
+    """Stand-in for the app's real navigate callback.
+
+    `navigate` is a required constructor argument (the app always wires
+    one), so every test factory needs a value even when the test does not
+    care what navigation happens.
+    """
+    return None
 
 
 def make_controller(
@@ -197,10 +240,11 @@ def make_controller(
     epoch_crossed: bool = False,
     watch_warning_events: Callable[[str | None], AsyncIterator[dict[str, Any]]] | None = None,
     selected_resource: Callable[[], TimelineResourceRef | None] | None = None,
-    navigate: Callable[[str, str, str, int], Any] | None = None,
+    navigate: Callable[[str, str, str, int], Coroutine[Any, Any, None]] = _default_navigate,
     alias_map: dict[str, ResourceMeta] | None = None,
+    close_worker_coroutines: bool = True,
 ) -> tuple[SessionTimelineController, _FakeWatchManager, FakeUiSurface]:
-    ui = FakeUiSurface()
+    ui = FakeUiSurface(close_worker_coroutines=close_worker_coroutines)
     view = FakeViewState(alias_map if alias_map is not None else dict(_PODS_ALIASES))
     wm: _FakeWatchManager = _FakeWatchManager()
     controller = SessionTimelineController(
@@ -215,6 +259,26 @@ def make_controller(
         navigate=navigate,
     )
     return controller, wm, ui
+
+
+# ---------------------------------------------------------------------------
+# Constructor contract
+# ---------------------------------------------------------------------------
+
+
+def test_navigate_callback_is_a_required_constructor_argument() -> None:
+    """`navigate` has no default: a controller built without it is a
+    construction error, not a silently-inert modal (the app always wires
+    one; only a broken caller would omit it)."""
+    with pytest.raises(TypeError, match="navigate"):
+        SessionTimelineController(  # type: ignore[call-arg]
+            ui=FakeUiSurface(),
+            view=FakeViewState(dict(_PODS_ALIASES)),
+            watch_manager=_FakeWatchManager(),
+            timeline=None,
+            get_epoch=lambda: 0,
+            epoch_crossed=lambda epoch: False,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +386,50 @@ def test_record_context_switch_noop_without_timeline() -> None:
     assert ui.notifications == []
 
 
+def test_record_write_notifies_on_refused_append() -> None:
+    """An entry too large for `max_bytes` is refused by `SessionTimeline`
+    (`AppendResult.accepted=False`, a diagnostic string) — the controller
+    must surface that refusal, not drop the write silently."""
+    tiny_timeline = SessionTimeline(max_entries=8, max_bytes=1)
+    controller, _, ui = make_controller(timeline=tiny_timeline, epoch=1)
+
+    controller.record_write(
+        epoch=1,
+        action="delete",
+        kind_alias="deployments",
+        display_kind="Deployment",
+        namespace="default",
+        name="api",
+        outcome="success",
+    )
+
+    warning_notes = [n for n in ui.notifications if n.severity == "warning"]
+    assert len(warning_notes) == 1
+    assert "write entry" in warning_notes[0].message
+    # The diagnostic string embeds a byte-count computed from redacted
+    # user/cluster data — markup=False so it is never parsed as console
+    # markup.
+    assert warning_notes[0].markup is False
+
+
+def test_record_context_switch_notifies_when_append_raises() -> None:
+    """A producer call whose `append_*` raises must not propagate: the
+    controller's `_append_timeline` catches it and turns it into a visible
+    warning instead of breaking the watch/context-switch call site."""
+    controller, _, ui = make_controller(timeline=_ExplodingTimeline(8, 4096), epoch=0)
+
+    controller.record_context_switch(epoch=0, phase="started", from_context="old", to_context="new")
+
+    warning_notes = [n for n in ui.notifications if n.severity == "warning"]
+    assert len(warning_notes) == 1
+    assert "context switch" in warning_notes[0].message
+    assert "internal timeline error" in warning_notes[0].message
+    # The message is a fixed literal, but every timeline diagnostic is
+    # markup=False on principle - none of them should ever be interpreted
+    # as console markup.
+    assert warning_notes[0].markup is False
+
+
 def test_record_write_appends_entry() -> None:
     timeline = SessionTimeline(8, 4096)
     controller, _, _ = make_controller(timeline=timeline, epoch=1)
@@ -359,7 +467,8 @@ def test_open_notifies_when_no_timeline() -> None:
     assert ui.screens == []
 
 
-def test_open_result_invokes_navigate_when_epoch_current() -> None:
+@pytest.mark.asyncio
+async def test_open_result_invokes_navigate_when_epoch_current() -> None:
     navigated: list[tuple[str, str, str, int]] = []
 
     async def _nav(kind_alias: str, namespace: str, name: str, epoch: int) -> None:
@@ -367,7 +476,11 @@ def test_open_result_invokes_navigate_when_epoch_current() -> None:
 
     timeline = SessionTimeline(8, 4096)
     controller, _, ui = make_controller(
-        timeline=timeline, epoch=5, epoch_crossed=False, navigate=_nav
+        timeline=timeline,
+        epoch=5,
+        epoch_crossed=False,
+        navigate=_nav,
+        close_worker_coroutines=False,
     )
 
     controller.open()
@@ -378,6 +491,10 @@ def test_open_result_invokes_navigate_when_epoch_current() -> None:
     # navigate coroutine is submitted as a worker
     assert len(ui.workers) == 1
     assert ui.worker_groups[0] == (TIMELINE_NAVIGATION_GROUP, False)
+    navigation_coroutine = ui.workers[0]
+    assert navigation_coroutine is not None
+    await navigation_coroutine
+    assert navigated == [("pods", "default", "api", 5)]
 
 
 def test_open_result_is_ignored_on_none_result() -> None:
@@ -443,7 +560,12 @@ async def test_warning_loop_stops_on_permanent_denial() -> None:
     await controller._run_warning_watch()
 
     assert calls == 1  # tried exactly once; no retry on permanent denial
-    assert any(n.severity == "warning" for n in ui.notifications)
+    warning_notes = [n for n in ui.notifications if n.severity == "warning"]
+    assert len(warning_notes) == 1
+    # The denial notification carries a cluster-controlled API reason string
+    # (via `explain_api_error`) — markup=False so it can never be
+    # interpreted as Textual console markup.
+    assert warning_notes[0].markup is False
 
 
 @pytest.mark.asyncio
@@ -462,6 +584,10 @@ async def test_warning_loop_gives_up_after_max_failures() -> None:
     error_notes = [n for n in ui.notifications if n.severity == "error"]
     assert len(error_notes) == 1
     assert str(max_fail) in error_notes[0].message
+    # The failure count is baked into an f-string notification — markup=False
+    # keeps it literal even though this particular value is not
+    # cluster-controlled, matching every other diagnostic this feed emits.
+    assert error_notes[0].markup is False
 
 
 @pytest.mark.asyncio
@@ -499,6 +625,7 @@ async def test_warning_loop_stops_when_epoch_changes_mid_stream() -> None:
         get_epoch=lambda: current_epoch[0],
         epoch_crossed=lambda ep: False,
         watch_warning_events=_watch_one_event,
+        navigate=_default_navigate,
     )
     controller.TIMELINE_EVENT_RETRY_SECONDS = 0.0
 

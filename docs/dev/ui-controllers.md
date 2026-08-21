@@ -95,9 +95,9 @@ So the boundaries that matter are named:
   `default_namespace()`, which is all any controller uses. Implemented by
   `AppViewState`.
 - **`UiSurface`** (`ui/ui_surface.py`) — the Textual capabilities a
-  controller may use: `notify`, `push_screen`, `run_worker`, `progress` and
-  screen inspection, plus the terminal capabilities an interactive child
-  process needs (`suspend`, `refresh`, `call_from_thread`).
+  controller may use: `notify`, `push_screen`, `run_worker`, `cancel_workers`,
+  `progress` and screen inspection, plus the terminal capabilities an
+  interactive child process needs (`suspend`, `refresh`, `call_from_thread`).
   `push_screen` is generic over the screen's result type,
   so a callback written for a different screen is a type error; `notify`
   takes the `Literal` severity Textual accepts rather than a bare `str`;
@@ -108,10 +108,13 @@ So the boundaries that matter are named:
   Implemented by `AppUiSurface`.
 
 `UiSurface.run_worker` gives supervision, not context safety: a `:ctx`
-switch cancels only the `hint-events` and `relationships` groups, so a
-worker in any other group that was started before the switch keeps running
-against the cluster it captured. Controllers that outlive an await
-revalidate through `WriteGate.context_intact` or the epoch they captured.
+switch cancels the groups it knows hold a stale-cluster connection, by
+name - `hint-events`, `relationships`, and `timeline-warning-events` (the
+last through `SessionTimelineController.stop`, which calls
+`UiSurface.cancel_workers`) - so a worker in any other group that was
+started before the switch keeps running against the cluster it captured.
+Controllers that outlive an await revalidate through
+`WriteGate.context_intact` or the epoch they captured.
 
 `AppWriteGate` is an adapter rather than the app inheriting `WriteGate`
 because Textual's `App` metaclass conflicts with `ABCMeta` — the same reason
@@ -188,6 +191,9 @@ tests added before the move where the behaviour is not already pinned.
    this is what dropped `HelmController` from 21 dependencies to 6
 4. ~~Port-forward~~ — done (#187)
 5. ~~Shell / debug / node shell~~ — done (#187)
+6. ~~Session timeline producers and modal lifecycle~~ — done (the
+   post-#187 timeline extraction); `SessionTimelineController` owns the
+   watch-delta sink, the Warning-event feed, and the goto/navigate flow
 
 Issue #238 showed that logs and describe were technically extractable without
 introducing a new pane-composition seam, and issue #245 kept describe as a
