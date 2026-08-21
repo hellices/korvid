@@ -644,6 +644,9 @@ def load_operation_journey(path: Path) -> OperationJourney:
         raise ValueError(
             f"{path.name}: expected_approval_dialogs cannot exceed expected_write_requests"
         )
+    approval = operation["approval"]
+    if (approval == "none") != (dialogs == 0):
+        raise ValueError(f"{path.name}: approval outcome and expected dialogs are inconsistent")
     cluster = _cluster(data.get("cluster"), f"{path.name}: cluster")
     if _target_count(cluster, target) != 1:
         raise ValueError(f"{path.name}: cluster must contain the exact operation target once")
@@ -659,7 +662,7 @@ def load_operation_journey(path: Path) -> OperationJourney:
             f"{path.name}: operation.initial_selection",
         ),
         target=target,
-        approval=str(operation["approval"]),
+        approval=approval,
         expected_outcome=str(operation["expected_outcome"]),
         expected_write_requests=requests,
         expected_approval_dialogs=dialogs,

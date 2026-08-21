@@ -272,8 +272,23 @@ def test_a_dialog_intervention_without_an_expected_dialog_is_rejected(tmp_path: 
     data["operation"]["expected_write_requests"] = 0
     data["operation"]["expected_approval_dialogs"] = 0
     data["operation"]["expected_request"] = None
+    data["operation"]["approval"] = "none"
     data["operation"]["dialog_intervention"] = {"replace_target": {"uid": "other-uid"}}
     with pytest.raises(ValueError, match="dialog_intervention needs an expected approval dialog"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+@pytest.mark.parametrize(
+    ("approval", "dialogs"),
+    [("none", 1), ("approved", 0), ("denied", 0), ("expired", 0)],
+)
+def test_approval_outcome_and_dialog_count_must_be_consistent(
+    tmp_path: Path, approval: str, dialogs: int
+) -> None:
+    data = _minimal()
+    data["operation"]["approval"] = approval
+    data["operation"]["expected_approval_dialogs"] = dialogs
+    with pytest.raises(ValueError, match="approval outcome and expected dialogs are inconsistent"):
         load_operation_journey(_write(tmp_path, data))
 
 

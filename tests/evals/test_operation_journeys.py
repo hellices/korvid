@@ -795,9 +795,13 @@ def test_a_torn_final_audit_record_does_not_erase_completed_records(tmp_path: Pa
         '{"action":"scale","kind":"deployments","group":"apps","outcome":"intent"}\n'
         '{"action":"scale"'
     )
-    assert _read_audit(path) == (
+    journal = ActionJournal()
+    assert _read_audit(path, journal=journal) == (
         {"action": "scale", "kind": "deployments", "group": "apps", "outcome": "intent"},
     )
+    malformed = [event for event in journal.events if event.event == "audit_unparsable"]
+    assert len(malformed) == 1
+    assert malformed[0].detail == "count=1 dropped=0"
 
 
 def test_audit_artifacts_are_read_with_explicit_utf8() -> None:

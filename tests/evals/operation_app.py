@@ -672,7 +672,12 @@ class _ApprovalDriver:
             approval=approval,
             result="keystroke",
         )
-        await pilot.press(_APPROVAL_KEYS[approval])
+        key = _APPROVAL_KEYS.get(approval)
+        if key is None:
+            raise AssertionError(
+                f"{self._journey.id}: approval={approval!r} cannot answer an approval dialog"
+            )
+        await pilot.press(key)
         await until(pilot, self._closed, label="approval dialog closed")
 
 
@@ -929,19 +934,32 @@ class OperationRun:
     wall_time_s: float
 
 
-def _read_audit(audit_path: Path) -> tuple[dict[str, Any], ...]:
+def _read_audit(
+    audit_path: Path, *, journal: ActionJournal | None = None
+) -> tuple[dict[str, Any], ...]:
     if not audit_path.exists():
         return ()
     records: list[dict[str, Any]] = []
+    malformed = 0
     for line in audit_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
+            malformed += 1
             continue
         if isinstance(record, dict):
             records.append(record)
+        else:
+            malformed += 1
+    if malformed and journal is not None:
+        journal.append(
+            event="audit_unparsable",
+            actor="audit",
+            result="error",
+            detail=summarize_untrusted(count=malformed),
+        )
     return tuple(records)
 
 
@@ -1153,7 +1171,7 @@ async def run_operation_journey(
         result="captured" if answer else "empty",
         detail=summarize_untrusted(chars=len(answer)),
     )
-    audit = _read_audit(audit_path)
+    audit = _read_audit(audit_path, journal=journal)
     _journal_audit_records(journal, audit)
     _journal_grader_reads(journal, kube.state, journey)
     grade = grade_operation(
