@@ -39,18 +39,38 @@ def symlink_or_skip(link: Path, target: Path) -> None:
         raise
 
 
-def _action_uses(value: object, action: str) -> Iterator[Mapping[object, object]]:
-    if isinstance(value, Mapping):
+def _matching_action_uses(values: object, action: str) -> Iterator[Mapping[object, object]]:
+    if not isinstance(values, list):
+        return
+    for value in values:
+        if not isinstance(value, Mapping):
+            continue
         uses = value.get("uses")
-        if isinstance(uses, str):
-            used_action, _, _ = uses.partition("@")
-            if used_action.casefold() == action.casefold():
-                yield value
-        for child in value.values():
-            yield from _action_uses(child, action)
-    elif isinstance(value, list):
-        for child in value:
-            yield from _action_uses(child, action)
+        if isinstance(uses, str) and uses.partition("@")[0].casefold() == action.casefold():
+            yield value
+
+
+def _job_action_uses(
+    job: Mapping[object, object], action: str
+) -> Iterator[Mapping[object, object]]:
+    yield from _matching_action_uses([job], action)
+    yield from _matching_action_uses(job.get("steps"), action)
+
+
+def _action_uses(workflow: object, action: str) -> Iterator[Mapping[object, object]]:
+    if isinstance(workflow, list):
+        yield from _matching_action_uses(workflow, action)
+        return
+    if not isinstance(workflow, Mapping):
+        return
+    jobs = workflow.get("jobs")
+    if not isinstance(jobs, Mapping):
+        yield from _job_action_uses(workflow, action)
+        return
+    for job in jobs.values():
+        if not isinstance(job, Mapping):
+            continue
+        yield from _job_action_uses(job, action)
 
 
 def _assert_pinned_refs(uses: tuple[Mapping[object, object], ...], action: str) -> tuple[str, ...]:

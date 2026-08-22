@@ -159,6 +159,19 @@ def test_find_action_refs_ignores_unrelated_matching_text() -> None:
     assert platform_helpers.find_action_refs(workflow, "astral-sh/setup-uv") == ()
 
 
+def test_find_action_refs_ignores_unrelated_uses_keys() -> None:
+    workflow = """
+    jobs:
+      build:
+        env:
+          uses: astral-sh/setup-uv@v10
+        steps:
+          - run: echo no setup action
+    """
+
+    assert platform_helpers.find_action_refs(workflow, "astral-sh/setup-uv") == ()
+
+
 def test_all_setup_uv_workflow_steps_are_pinned_to_one_revision() -> None:
     action = "astral-sh/setup-uv"
     refs: list[str] = []
