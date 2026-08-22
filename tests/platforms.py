@@ -61,6 +61,12 @@ def _assert_pinned_refs(uses: tuple[Mapping[object, object], ...], action: str) 
     return refs
 
 
+def find_action_refs(workflow_text: str, action: str) -> tuple[str, ...]:
+    """Return revisions from structurally matched action use-sites."""
+    uses = _action_uses(yaml.safe_load(workflow_text), action)
+    return tuple(str(use["uses"]).partition("@")[2] for use in uses)
+
+
 def assert_pinned_action_refs(workflow_text: str, action: str) -> tuple[str, ...]:
     """Require action use-sites pinned to lowercase full commit SHAs."""
     uses = tuple(_action_uses(yaml.safe_load(workflow_text), action))

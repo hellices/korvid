@@ -147,13 +147,25 @@ def test_assert_pinned_action_version_rejects_unrelated_matching_text() -> None:
         platform_helpers.assert_pinned_action_version(workflow, "astral-sh/setup-uv", "0.10.9")
 
 
+def test_find_action_refs_ignores_unrelated_matching_text() -> None:
+    workflow = """
+    # astral-sh/setup-uv is intentionally not used here.
+    jobs:
+      build:
+        steps:
+          - run: echo astral-sh/setup-uv
+    """
+
+    assert platform_helpers.find_action_refs(workflow, "astral-sh/setup-uv") == ()
+
+
 def test_all_setup_uv_workflow_steps_are_pinned_to_one_revision() -> None:
     action = "astral-sh/setup-uv"
     refs: list[str] = []
     matched_workflows: list[Path] = []
     for path in _workflow_files():
         workflow = read_text_utf8(path)
-        if action.casefold() not in workflow.casefold():
+        if not platform_helpers.find_action_refs(workflow, action):
             continue
         matched_workflows.append(path)
         refs.extend(platform_helpers.assert_pinned_action_refs(workflow, action))
