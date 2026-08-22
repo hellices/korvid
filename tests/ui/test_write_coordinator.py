@@ -60,6 +60,7 @@ class FakeUi(UiSurface):
 
     def __init__(self) -> None:
         self.notifications: list[tuple[str, str]] = []
+        self.notification_markup: list[bool] = []
         self.screens: list[tuple[Screen[Any], Callable[[Any], None] | None]] = []
         self._screen_changed = asyncio.Event()
         self.workers: list[asyncio.Task[Any]] = []
@@ -76,6 +77,7 @@ class FakeUi(UiSurface):
         markup: bool = True,
     ) -> None:
         self.notifications.append((message, severity))
+        self.notification_markup.append(markup)
 
     def push_screen(
         self,

@@ -173,10 +173,11 @@ def test_malformed_operators_command_is_not_explained_as_a_missing_catalog() -> 
 
 def test_an_unknown_command_is_reported_verbatim() -> None:
     h = Harness()
-    h.router.route("frobnicate everything")
+    h.router.route("frobnicate [bold]everything[/bold]")
     message = h.ui.messages()[0]
-    assert "frobnicate everything" in message
+    assert "frobnicate [bold]everything[/bold]" in message
     assert "CRD not installed?" in message
+    assert h.ui.notification_markup == [False]
 
 
 def test_an_empty_command_is_reported_not_routed() -> None:

@@ -117,4 +117,5 @@ class CommandRouter:
             f"Unknown resource or command: {text}"
             " — not found in this cluster's API (CRD not installed?)",
             severity="warning",
+            markup=False,
         )
