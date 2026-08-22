@@ -43,7 +43,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked --group docs
-      - run: make docs-build
+      - run: uv run --frozen --group docs mkdocs build --strict
       # Only main's build is ever deployed; a PR build exists to prove the
       # site still builds `--strict`, not to produce a Pages artifact.
       - if: github.event_name == 'push' && github.ref == 'refs/heads/main'

@@ -104,8 +104,14 @@ def test_build_job_has_only_read_permissions_and_runs_the_docs_build() -> None:
     assert any("uv sync --locked" in run and "--group docs" in run for run in run_steps), (
         "build job must run 'uv sync --locked --group docs'"
     )
-    assert any(run.strip() == "make docs-build" for run in run_steps), (
-        "build job must run 'make docs-build'"
+    assert any(
+        run.strip() == "uv run --frozen --group docs mkdocs build --strict" for run in run_steps
+    ), (
+        "the runner image does not guarantee make; build docs directly with the "
+        "same frozen strict MkDocs command as the Makefile target"
+    )
+    assert all("make " not in run for run in run_steps), (
+        "the docs workflow must not depend on make being installed on the runner"
     )
 
 
