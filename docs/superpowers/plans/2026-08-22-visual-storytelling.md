@@ -1801,8 +1801,8 @@ Insert before `## Opening the view` in `docs/resource-relationships.md`:
 
 ```html
 <figure class="docs-visual">
-  <img src="../assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a synthetic Pod dependency on a ConfigMap">
-  <figcaption>The two panes separate dependencies from dependents; every row preserves relation direction, confidence, state, and source field.</figcaption>
+  <img src="../assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen listing a synthetic Pod's declared ConfigMap dependency and the Service that selects it">
+  <figcaption>The two sections separate dependencies from dependents; every row preserves relation direction, confidence, state, and source field.</figcaption>
 </figure>
 ```
 
@@ -1813,11 +1813,21 @@ Add to `docs/stylesheets/extra.css`:
 ```css
 .md-typeset .docs-visual,
 .md-typeset .docs-storyboard {
+  display: block;
+  width: 100%;
   margin: 2rem 0;
   padding: 1rem;
   background: var(--korvid-charcoal-raised);
   border: 1px solid var(--korvid-charcoal-border);
   border-radius: var(--korvid-radius);
+  text-align: left;
+}
+
+.md-typeset .docs-storyboard figure {
+  display: block;
+  width: 100%;
+  margin: 0;
+  text-align: left;
 }
 
 .md-typeset .docs-visual img,
@@ -1831,9 +1841,11 @@ Add to `docs/stylesheets/extra.css`:
 
 .md-typeset .docs-visual figcaption,
 .md-typeset .docs-storyboard figcaption {
-  margin-top: 0.8rem;
+  max-width: none;
+  margin: 0.8rem 0 0;
   color: var(--korvid-ink-dim);
   font-size: 0.8rem;
+  font-style: normal;
 }
 
 .md-typeset .docs-visual__stage {
@@ -1998,26 +2010,37 @@ Expected: `200` for every URL, matching
 
 - [ ] **Step 5: Verify the no-JavaScript fallback**
 
-Temporarily move only the built controller, serve the already-built `site/`
-directory directly, inspect the root URLs, then restore it:
+Serve the already-built `site/` directory directly and load it with browser
+scripting genuinely **disabled** — not merely with the controller missing:
 
 ```bash
-mv site/assets/javascripts/visual-storytelling.js \
-  site/assets/javascripts/visual-storytelling.js.disabled
 python3 -m http.server 8766 --bind 127.0.0.1 --directory site
 ```
 
-In the browser, verify `http://127.0.0.1:8766/`, `/tui/`, `/agent/`, and
-`/mcp/` render the built fallback correctly: all three scenes are visible in
-document order and every guide link works. Stop the server, then restore the
-exact file:
+Removing or renaming `site/assets/javascripts/visual-storytelling.js` is
+**not** a substitute. Scripting stays enabled in that case, so the UA
+stylesheet's `@media (scripting) { noscript { display: none !important } }`
+keeps both `<noscript>` posters hidden and a verifier sees two posterless
+black boxes rather than the fallback the page actually ships.
 
-```bash
-mv site/assets/javascripts/visual-storytelling.js.disabled \
-  site/assets/javascripts/visual-storytelling.js
-```
+Disable JavaScript for `127.0.0.1` (Chrome DevTools ⇒ Settings ⇒ Debugger ⇒
+"Disable JavaScript", or Site settings ⇒ JavaScript ⇒ Block; Firefox
+`javascript.enabled=false` in `about:config`) and reload
+`http://127.0.0.1:8766/`, `/tui/`, `/agent/`, and `/mcp/`. Verify:
 
-Do not commit anything under `site/`.
+1. the scene tab strip is **not rendered** — without the controller its tabs
+   switch nothing, so `[data-scene-switcher]:not([data-enhanced]) .scene-tabs`
+   must hide it;
+2. all three scene panels are visible at once, in document order;
+3. both `<noscript>` posters (`agent-poster.png`, `mcp-poster.png`) actually
+   render an image, and each carries `loading="lazy"` so the below-fold
+   fallback still defers its own bytes;
+4. the concept-page figures and their captions render, and every guide link
+   (`tui/`, `agent/`, `mcp/`, and the mosaic's full-resolution capture links)
+   navigates correctly.
+
+Re-enable JavaScript and stop the server afterwards. Do not commit anything
+under `site/`.
 
 - [ ] **Step 6: Perform responsive and keyboard browser verification**
 

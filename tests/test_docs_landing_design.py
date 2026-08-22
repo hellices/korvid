@@ -489,7 +489,9 @@ def test_deferred_scene_posters_keep_a_local_no_javascript_image() -> None:
 
     `<noscript>` content is parsed as text — never as DOM — while scripting
     is enabled, so this fallback costs the enhanced rendering nothing and
-    cannot double-fetch a poster the controller will promote.
+    cannot double-fetch a poster the controller will promote. With scripting
+    off all three panels render at once, so both fallbacks sit below the
+    fold and must defer their own bytes exactly like the mosaic captures do.
     """
     switcher = _scene_switcher()
     fallbacks = re.findall(r"<noscript>(.*?)</noscript>", switcher, re.DOTALL)
@@ -500,6 +502,10 @@ def test_deferred_scene_posters_keep_a_local_no_javascript_image() -> None:
         assert match is not None, f"the fallback must be one described local image: {fallback!r}"
         source = match.group(1)
         assert source.startswith("assets/"), "no-JS fallbacks must stay local, never remote"
+        assert 'loading="lazy"' in fallback, (
+            "a no-JavaScript fallback poster renders below the fold, so it must "
+            f"defer its own bytes like every other below-fold capture: {fallback!r}"
+        )
         assets.append(source)
     assert sorted(assets) == [
         "assets/scenes/agent-poster.png",
@@ -677,6 +683,44 @@ def test_concept_visual_containers_keep_the_full_content_width() -> None:
         )
 
 
+def test_visual_storytelling_plan_snippets_match_the_shipped_sources() -> None:
+    """The plan embeds its markup and CSS verbatim, so drift reproduces old defects.
+
+    `docs/superpowers/plans/2026-08-22-visual-storytelling.md` is written as
+    an executable recipe. Its relationship-figure snippet still carried the
+    pre-recapture alt naming only the ConfigMap dependency, and its
+    `docs-visual` CSS predates the Material `figure`/`figcaption` overrides —
+    a contributor following it would reintroduce both.
+    """
+    plan = (
+        ROOT / "docs" / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
+    ).read_text(encoding="utf-8")
+    relationships = (DOCS / "resource-relationships.md").read_text(encoding="utf-8")
+
+    shipped_alt = re.search(r'relationship-graph\.png"[^>]*alt="([^"]+)"', relationships)
+    assert shipped_alt is not None
+    assert "dependency" in shipped_alt.group(1).lower()
+    assert "service" in shipped_alt.group(1).lower(), (
+        "the shipped capture proves a dependency and a dependent; its alt must say so"
+    )
+    assert f'alt="{shipped_alt.group(1)}"' in plan, (
+        "the plan's relationship snippet must carry the alt the page ships, not the "
+        f"pre-recapture one; expected {shipped_alt.group(1)!r}"
+    )
+
+    shipped_caption = re.search(r"<figcaption>(The two [^<]+)</figcaption>", relationships)
+    assert shipped_caption is not None
+    assert shipped_caption.group(1) in plan, (
+        "the plan's relationship snippet must carry the shipped caption"
+    )
+
+    for declaration in ("text-align: left", "max-width: none", "font-style: normal"):
+        assert declaration in plan, (
+            f"the plan's core-visual CSS must include `{declaration}`, or following it "
+            "reintroduces Material's centred italic caption defaults"
+        )
+
+
 def test_scene_tabs_stay_hidden_until_the_controller_enhances_the_switcher() -> None:
     """Without the controller the tab strip is inert, so it must not render.
 
@@ -792,6 +836,12 @@ def test_every_evidence_capture_links_to_its_full_resolution_asset() -> None:
     text to about 4px. Wrapping the image in a plain link to the asset
     itself keeps the evidence checkable without a lightbox, a framework, or
     any additional runtime code.
+
+    The link must not carry its own `aria-label`: an accessible name on the
+    `<a>` wins over the nested `<img alt>`, so a generic "open the
+    full-resolution … capture" label would replace the one description that
+    actually carries the evidence for a screen-reader visitor. The image's
+    alt names the link instead.
     """
     mosaic = _section('<section class="evidence-mosaic"', "</section>")
     cards = re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.DOTALL)
@@ -800,15 +850,22 @@ def test_every_evidence_capture_links_to_its_full_resolution_asset() -> None:
         image = re.search(r'<img src="(assets/scenes/[^"]+)"', card)
         assert image is not None
         link = re.search(
-            r'<a class="evidence-card__full" href="([^"]+)" aria-label="([^"]+)">\s*<img',
+            r'<a class="evidence-card__full" href="([^"]+)"([^>]*)>\s*<img[^>]*alt="([^"]+)"',
             card,
         )
         assert link is not None, (
             f"the capture in this tile must be a link to its own full-resolution "
-            f"asset with an accessible label: {card[:120]!r}"
+            f"asset: {card[:120]!r}"
         )
         assert link.group(1) == image.group(1), "the link must open the very asset the tile renders"
-        assert "full-resolution" in link.group(2).lower()
+        assert "aria-label" not in link.group(2), (
+            "the link must let its nested image's descriptive alt be the accessible "
+            f"name instead of overriding it: {link.group(0)[:160]!r}"
+        )
+        assert len(link.group(3).split()) >= 8, (
+            "that alt is now the link's accessible name, so it has to describe the "
+            f"capture, not label a control: {link.group(3)!r}"
+        )
 
 
 def test_landing_provenance_matches_every_captures_real_source() -> None:
