@@ -271,9 +271,11 @@ visible keyboard focus, reduced-motion handling, and standard readable
 documentation widths. Vendor Material 9.7.7's
 `assets/javascripts/bundle.d7400e89.min.js` at the same docs asset path,
 plus Mermaid `11.17.0` and ResizeObserver `1.5.1` under
-`docs/assets/javascripts/vendor/`. Patch the bundle to load
-`/korvid/assets/javascripts/vendor/mermaid-11.17.0.min.js` and
-`/korvid/assets/javascripts/vendor/resize-observer-polyfill-1.5.1.js`.
+`docs/assets/javascripts/vendor/`. Patch the bundle to resolve
+`assets/javascripts/vendor/mermaid-11.17.0.min.js` and
+`assets/javascripts/vendor/resize-observer-polyfill-1.5.1.js` against
+Material's `__md_scope`, so repository paths and custom domains need no bundle
+rewrite.
 Pin all three reviewed files with SHA-256 regression tests.
 
 - [ ] **Step 4: Run the green build**

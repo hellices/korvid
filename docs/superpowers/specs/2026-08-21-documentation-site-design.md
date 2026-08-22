@@ -187,7 +187,8 @@ The Material bundle, Mermaid `11.17.0`, and ResizeObserver fallback `1.5.1`
 are vendored under `docs/assets/javascripts/`; checksum tests guard all three
 reviewed files. The bundle loads only site-local paths, and Material's privacy
 plugin has external fetching disabled, so clean builds require no executable
-CDN content.
+CDN content. Vendor URLs resolve against Material's `__md_scope` rather than a
+hard-coded repository path, preserving repository renames and custom domains.
 The docs dependency pins Material `9.7.7` exactly, and that pin must move
 atomically with the hashed bundle override.
 Generated local/vendor assets are allowed; browser

@@ -19,8 +19,9 @@ from __future__ import annotations
 import hashlib
 import re
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -83,11 +84,11 @@ def _load_mkdocs_config() -> dict[str, Any]:
     class _TolerantLoader(yaml.SafeLoader):
         pass
 
-    # PyYAML's stubs leave `add_multi_constructor` unannotated, so mypy
-    # --strict rejects the call rather than the code.
-    _TolerantLoader.add_multi_constructor(  # type: ignore[no-untyped-call]  # untyped in types-PyYAML
-        "tag:yaml.org,2002:python/name:", lambda loader, suffix, node: suffix
+    add_multi_constructor = cast(
+        "Callable[[str, Callable[[Any, str, Any], object]], None]",
+        _TolerantLoader.add_multi_constructor,
     )
+    add_multi_constructor("tag:yaml.org,2002:python/name:", lambda loader, suffix, node: suffix)
     config = yaml.load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"), Loader=_TolerantLoader)
     assert isinstance(config, dict), "mkdocs.yml must parse to a mapping"
     return config
@@ -261,11 +262,15 @@ def test_material_bundle_uses_checksum_pinned_local_vendor_assets() -> None:
         "docs must override Material's bundle with the reviewed URL-pinned copy"
     )
     bundle = MATERIAL_BUNDLE.read_bytes()
-    assert b"/korvid/assets/javascripts/vendor/mermaid-11.17.0.min.js" in bundle
-    assert b"/korvid/assets/javascripts/vendor/resize-observer-polyfill-1.5.1.js" in bundle
+    assert b'new URL("assets/javascripts/vendor/mermaid-11.17.0.min.js",__md_scope).href' in bundle
+    assert (
+        b'new URL("assets/javascripts/vendor/resize-observer-polyfill-1.5.1.js",'
+        b"__md_scope).href" in bundle
+    )
+    assert b"/korvid/assets/javascripts/vendor/" not in bundle
     assert b"https://unpkg.com/" not in bundle
     assert hashlib.sha256(bundle).hexdigest() == (
-        "8d19bf0dbf054795b645c35a5020561b0a83c3245c9707612266d234d4131eec"
+        "1c6de1ec928cbec390682d3ba17e617828eb391d8e0f9a5b718e31617b824b2c"
     ), "the reviewed Material bundle override must not drift without an explicit update"
     assert hashlib.sha256(MERMAID_VENDOR.read_bytes()).hexdigest() == (
         "8d8e0eec56d3a83b4b3c87f42050845546dee93ebe1875d2117c12e6947c0cb3"
