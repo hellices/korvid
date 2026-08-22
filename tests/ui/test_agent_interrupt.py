@@ -588,7 +588,9 @@ async def test_repeated_cancels_never_kill_an_approved_write(tmp_path: Any) -> N
     rec = SlowRecorder()
     audit_path = tmp_path / "audit.jsonl"
     probe = ShieldProbe(asyncio.shield)
-    with patch("korvid.ui.app.asyncio.shield", new=probe.shield):
+    # Patched on the module that owns the shielded write loop: the app no
+    # longer runs one itself, `WriteCoordinator` does.
+    with patch("korvid.ui.write_coordinator.asyncio.shield", new=probe.shield):
         app = make_write_app(rec, audit_path)
         async with app.run_test() as pilot:
             _expand_panel(app)

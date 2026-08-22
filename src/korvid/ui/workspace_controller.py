@@ -34,6 +34,7 @@ holds `KorvidApp`, so every flow here is exercised without a running app.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import logging
 from abc import ABC, abstractmethod
@@ -44,8 +45,10 @@ from typing import Any, Protocol
 from rich.text import Text
 
 from korvid.core.config import KorvidConfig, ViewConfig
+from korvid.core.errors import explain_api_error
 from korvid.core.filters import parse_filter
 from korvid.core.relationships import GraphResource
+from korvid.core.session_timeline import TimelineResourceRef
 from korvid.core.sorting import SORT_COLUMNS, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.k8s.components import (
@@ -79,6 +82,18 @@ HIERARCHY_GROUP = "hierarchy"
 #: Header label -> builtin sort column (issue #138): the reverse of the
 #: table's ▲/▼ decoration map, for header-click sorting.
 _HEADER_SORT_COLUMNS = {"NAME": "name", "AGE": "age", "CPU": "cpu", "MEM": "mem"}
+
+#: Bound on the SSAR round trip behind the all-namespaces guard: a wedged
+#: authorization endpoint must not hold the `0` key hostage. Deliberately a
+#: local copy of the write perimeter's budget — the two gates are unrelated.
+_PERMISSION_CHECK_TIMEOUT = 10.0
+
+#: `(verb, plural, namespace, name, group, subresource) -> allowed`, the
+#: SelfSubjectAccessReview probe the all-namespaces guard runs.
+PermissionCheck = Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
+
+#: The kubeconfig-scoped namespace listing behind `:ns` and the picker.
+ListNamespaces = Callable[[], Awaitable[list[str]]]
 
 
 class WorkspaceSurface(ABC):
@@ -157,6 +172,23 @@ class WorkspaceSurface(ABC):
     @abstractmethod
     def update_hierarchy_tree(self, root: Any) -> None:
         """Replace the open hierarchy tree's nodes with *root*."""
+
+    @abstractmethod
+    def set_namespace_words(self, names: list[str]) -> None:
+        """Publish *names* as the command bar's `:ns` completions."""
+
+    @abstractmethod
+    def open_namespace_picker(self, names: list[str]) -> None:
+        """Open the inline namespace picker over *names*."""
+
+    @abstractmethod
+    def cursor_row_key(self) -> str | None:
+        """The focused table's cursor row key, or None when there is no row.
+
+        Silent by contract, unlike `ViewState.selected_ns_name`: the flows
+        that read it (the timeline pin) open with or without a selection, so
+        "nothing selected" must not raise a toast the user did not ask for.
+        """
 
 
 class ContextGuard(ABC):
@@ -264,7 +296,8 @@ class WorkspaceController:
         ],
         olm_alias_key: Callable[[str], str | None],
         describe_named: Callable[[str, str, str], Coroutine[Any, Any, None]],
-        cluster_list_permitted: Callable[[], Awaitable[bool]],
+        check_permission: Callable[[], PermissionCheck | None],
+        list_namespaces: Callable[[], ListNamespaces | None],
     ) -> None:
         self._state = state
         self._store = store
@@ -289,7 +322,8 @@ class WorkspaceController:
         self._get_helm_components = get_helm_components
         self._olm_alias_key = olm_alias_key
         self._describe_named = describe_named
-        self._cluster_list_permitted = cluster_list_permitted
+        self._check_permission = check_permission
+        self._list_namespaces = list_namespaces
         # Serializes view/scope switches: keyboard NavigateCommands and the
         # agent's navigate tool share this handler, which yields while
         # stopping/starting watches — interleaving would corrupt state. The
@@ -312,6 +346,10 @@ class WorkspaceController:
         #: Scope the metrics poller currently serves (None = stopped); a
         #: restart drops collected data, so equal targets are skipped.
         self._metrics_target: tuple[str | None] | None = None
+        #: The background task warming the `:ns` completion words. Owned
+        #: here so a `:ctx` switch can reap an old-cluster listing before it
+        #: overwrites the new cluster's completions.
+        self._ns_prefetch_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # Exposed workspace-only state (owned here, read by the coordinators)
@@ -479,10 +517,156 @@ class WorkspaceController:
         if self._state.current_scope == ALL_NAMESPACES:
             new_scope = self._config().namespace or "default"
         else:
-            if not await self._cluster_list_permitted():
+            if not await self.cluster_list_permitted():
                 return  # notified inside; stay in the current namespace
             new_scope = ALL_NAMESPACES
         await self.navigate_command(None, new_scope)
+
+    async def cluster_list_permitted(self) -> bool:
+        """All-namespaces guard (issue #108): a forbidden cluster-wide LIST
+        would only loop error cards — SSAR-check first and stay put with an
+        inline notice instead. Checked fresh on every `0` press so a later
+        RBAC grant is observed; SSAR failures pass through (fail-open; the
+        watch reports real errors on its own)."""
+        check_permission = self._check_permission()
+        if check_permission is None:
+            return True
+        meta = self._view.aliases().get(self._state.current_kind)
+        if meta is None:
+            return True  # unknown kind: the watch reports its own error
+        if meta.synthetic:
+            if meta.backing is None:
+                return True  # nothing to probe
+            plural, group = meta.backing  # e.g. helm views LIST Secrets
+        else:
+            plural, group = meta.plural, meta.group
+        try:
+            allowed = await asyncio.wait_for(
+                check_permission("list", plural, "", None, group, ""),
+                timeout=_PERMISSION_CHECK_TIMEOUT,
+            )
+        except Exception:
+            logger.debug("cluster-wide list pre-check failed; allowing", exc_info=True)
+            return True
+        if not allowed:
+            self._ui.notify(
+                f"Cluster-wide {plural} list forbidden — staying in"
+                f" {self._state.current_scope!r}. Press 0 again after access is"
+                " granted, or switch namespaces with `:ns <name>`.",
+                severity="warning",
+            )
+        return allowed
+
+    # ------------------------------------------------------------------
+    # Namespace listing: the picker and the completion prefetch (issue #108)
+    # ------------------------------------------------------------------
+
+    async def show_namespace_picker(self) -> None:
+        """List the visible namespaces and open the inline picker over them."""
+        list_namespaces = self._list_namespaces()
+        if list_namespaces is None:
+            self._ui.notify("Namespace listing unavailable", severity="warning")
+            return
+        # The listing would race the client swap and could return either
+        # cluster's namespaces — refuse up front.
+        if not self._context.reads_allowed():
+            return
+        epoch = self._context.epoch()
+        try:
+            namespaces = await list_namespaces()
+        except ApiStatusError as exc:  # API failures get the actionable mapping (§5-5)
+            if self._context.crossed(epoch):
+                return  # a stale old-cluster error is not worth surfacing
+            self._notify_namespace_list_error(exc)
+            return
+        except Exception as exc:  # surface any other listing failure to the user
+            if self._context.crossed(epoch):
+                return
+            self._ui.notify(str(exc), title="Failed to list namespaces", severity="error")
+            return
+        if self._context.crossed(epoch):
+            # The listing awaited through a :ctx switch: opening the picker
+            # now would offer old-cluster namespaces to the new session.
+            self._ui.notify(
+                "Namespace picker cancelled - the kube context changed",
+                severity="warning",
+            )
+            return
+        if not namespaces:
+            self._ui.notify("No namespaces visible (check RBAC)", severity="warning")
+            return
+        self._surface.set_namespace_words(namespaces)
+        self._surface.open_namespace_picker(namespaces)
+
+    def _notify_namespace_list_error(self, exc: ApiStatusError) -> None:
+        """403 is an authorization boundary (issue #108): show one concise
+        permission notice pointing at `:ns <name>` free-text entry — never
+        manufacture a namespace list from configuration."""
+        msg = explain_api_error(exc.status, exc.reason, "namespaces", None)
+        if exc.status == 403:
+            msg += " Switch directly with `:ns <name>`."
+        self._ui.notify(msg, title="Failed to list namespaces", severity="error")
+
+    def start_namespace_prefetch(self) -> None:
+        """Warm the command-bar namespace completions in the background."""
+        list_namespaces = self._list_namespaces()
+        if list_namespaces is None:
+            return
+
+        async def _fetch() -> None:
+            try:
+                namespaces = await list_namespaces()
+            except Exception:
+                logger.debug("namespace prefetch for completion failed", exc_info=True)
+                return
+            self._surface.set_namespace_words(namespaces)
+
+        self._ns_prefetch_task = asyncio.create_task(_fetch())
+
+    def clear_namespace_words(self) -> None:
+        """Drop the loaded completions — after a `:ctx` switch they name the
+        old cluster's namespaces."""
+        self._surface.set_namespace_words([])
+
+    async def cancel_namespace_prefetch(self) -> None:
+        """Cancel and reap an in-flight prefetch (`:ctx` teardown, unmount).
+
+        Reaped rather than abandoned: an old-cluster listing that landed
+        after the new cluster's would overwrite its completions.
+        """
+        task = self._ns_prefetch_task
+        if task is None:
+            return
+        self._ns_prefetch_task = None
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    def selected_timeline_resource(self) -> TimelineResourceRef | None:
+        """The exact resource under the cursor when `T` is pressed, captured
+        once so the timeline's `r` toggle keeps pinning it even as the
+        table underneath changes (issue #282). Unlike the relationship
+        root, this never notifies: the timeline opens with or without a
+        selection, so an empty, unselected, or synthetic view just means `r`
+        has nothing to toggle - the modal's own status line says so, not a
+        warning toast the user didn't ask for."""
+        meta = self._view.aliases().get(self._state.current_kind)
+        if meta is None or meta.synthetic:
+            return None
+        row_key = self._surface.cursor_row_key()
+        if row_key is None:
+            return None
+        parts = row_key.split("/", 1)
+        if len(parts) != 2:
+            return None
+        namespace, name = parts
+        return TimelineResourceRef(
+            kind_alias=self._view.canonical_kind(self._state.current_kind),
+            display_kind=meta.kind,
+            namespace=namespace,
+            name=name,
+            uid=self._view.selected_uid(namespace or None, name),
+        )
 
     async def favorite_namespace(self, index: int) -> None:
         """Jump to `favorite_namespaces[index-1]` (issue #108, keys 1-9).

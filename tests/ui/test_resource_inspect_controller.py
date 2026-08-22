@@ -16,13 +16,16 @@ mounted widgets (the row cursor and the hint strip).
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from collections.abc import AsyncIterator, Callable
+from typing import Any, get_type_hints
 
 from korvid.core.audit import AuditLog
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.logs import LogLine
 from korvid.k8s.models import ContainerTrouble, PodSummary
 from korvid.ui.hints import EventsFetcher
+from korvid.ui.log_controller import StreamLogsFn
 from korvid.ui.resource_inspect_controller import InspectSurface, ResourceInspectController
 from korvid.ui.widgets.containers_screen import ContainersScreen
 from korvid.ui.widgets.describe_screen import DescribeScreen
@@ -30,6 +33,14 @@ from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.secret_screen import SecretScreen
 
 from .test_write_coordinator import FakeContext, FakeUi, FakeView
+
+
+async def _fake_stream_logs(*args: Any, **kwargs: Any) -> AsyncIterator[LogLine]:
+    """A log source with the shared stream signature; never iterated here -
+    the container pick only checks that a source exists."""
+    return
+    yield  # pragma: no cover - makes this an async generator
+
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _SVC_META = ResourceMeta("Service", "services", "", "v1", True, ("svc",))
@@ -195,7 +206,7 @@ class Harness:
             logs=lambda: self.logs,
             get_manifest=lambda: self._get_manifest if get_manifest else None,
             get_events=lambda: self.events,
-            stream_logs=lambda: object() if stream_logs else None,
+            stream_logs=lambda: _fake_stream_logs if stream_logs else None,
             target_uid=self._target_uid,
             audit=lambda: audit,
             provider_hint=lambda: provider_hint,
@@ -511,3 +522,16 @@ async def test_pod_uid_unchanged_fails_open_when_the_uid_is_unknown() -> None:
 async def test_provider_footer_is_none_without_a_detected_provider() -> None:
     h = Harness()
     assert h.controller.provider_footer(_LB_SERVICE_MANIFEST) is None
+
+
+# ---------------------------------------------------------------------------
+# The log-stream port is typed, not `Any`
+# ---------------------------------------------------------------------------
+
+
+def test_the_log_stream_port_carries_the_shared_stream_signature() -> None:
+    """`Any` here would let a mistyped log source through silently: the pick
+    hands whatever this returns to `LogController`, which calls it with the
+    stream signature. The port names that signature."""
+    hints = get_type_hints(ResourceInspectController.__init__)
+    assert hints["stream_logs"] == Callable[[], StreamLogsFn | None]

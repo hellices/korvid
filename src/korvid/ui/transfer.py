@@ -45,6 +45,7 @@ from korvid.core.transfer import (
     upload as transfer_upload,
 )
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.models import PodSummary
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.pick_screen import PickScreen
@@ -90,7 +91,10 @@ class TransferController:
             [], Callable[..., contextlib.AbstractAsyncContextManager[Any]] | None
         ],
         audit: Callable[[], AuditLog | None],
-        pod_containers: Callable[[str, str], tuple[str, ...]],
+        #: One lookup, not two: the container list and the uid precondition
+        #: must describe the same pod incarnation, so both are read off the
+        #: single `PodSummary` this returns (None once the row is gone).
+        find_pod: Callable[[str, str], PodSummary | None],
         target_uid: Callable[[str, str | None, str], Awaitable[str | None]],
         pod_uid_unchanged: Callable[..., Awaitable[bool]],
     ) -> None:
@@ -100,7 +104,7 @@ class TransferController:
         self._screens = screens
         self._open_pod_exec = open_pod_exec
         self._audit = audit
-        self._pod_containers = pod_containers
+        self._find_pod = find_pod
         self._target_uid = target_uid
         self._pod_uid_unchanged = pod_uid_unchanged
         self._task: asyncio.Task[int] | None = None
@@ -139,6 +143,9 @@ class TransferController:
         addresses the pod by namespace/name only, so the uid captured here
         is re-verified right before streaming - a same-named replacement
         created while the dialogs are open must never receive the bytes.
+        Containers and uid come from one `PodSummary` lookup: a row with no
+        pods-view summary yields no containers *and* no uid, never a uid
+        borrowed from some other object with the same name.
         """
         if self._view.current_kind() != "pods":
             self._ui.notify("File transfer is only available for pods", severity="warning")
@@ -155,8 +162,12 @@ class TransferController:
         namespace, name = self._view.selected_ns_name()
         if namespace is None or name is None:
             return
-        containers = self._pod_containers(namespace, name)
-        uid = self._view.selected_uid(namespace, name)
+        # One store lookup for both facts: the exec API addresses the pod by
+        # namespace/name only, so the uid re-verified before streaming has to
+        # be the uid of the very summary the container list came from.
+        summary = self._find_pod(namespace, name)
+        containers = summary.containers if summary is not None else ()
+        uid = (summary.uid or None) if summary is not None else None
         if len(containers) > 1:
 
             def _on_pick(container: str | None) -> None:

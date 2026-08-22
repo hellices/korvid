@@ -23,12 +23,14 @@ from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.k8s.components import ComponentRef
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary
 from korvid.ui.ui_surface import Severity, UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.workspace_controller import (
     RELATIONSHIP_GROUP,
     ContextGuard,
+    PermissionCheck,
     WorkspaceController,
     WorkspaceSurface,
 )
@@ -40,6 +42,7 @@ from korvid.ui.workspace_state import PaneState, WorkspaceState
 
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
 _RS_META = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True)
+_SYNTHETIC_META = ResourceMeta("HelmRelease", "helmreleases", "", "v1", True, synthetic=True)
 _ALIASES = build_alias_map([PODS_META, _DEPLOY_META, _RS_META])
 
 
@@ -198,6 +201,18 @@ class FakeSurface(WorkspaceSurface):
         self.focus_row_result = True
         self._hierarchy_open = False
         self.hierarchy_trees: list[Any] = []
+        self.namespace_words: list[list[str]] = []
+        self.opened_pickers: list[list[str]] = []
+        self.row_key: str | None = None
+
+    def set_namespace_words(self, names: list[str]) -> None:
+        self.namespace_words.append(list(names))
+
+    def open_namespace_picker(self, names: list[str]) -> None:
+        self.opened_pickers.append(list(names))
+
+    def cursor_row_key(self) -> str | None:
+        return self.row_key
 
     def render_table(self, kind: str, *, only: PaneState | None = None) -> None:
         self.calls.append(("render", kind))
@@ -383,7 +398,8 @@ def _make(
     get_manifest: Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None = None,
     get_helm_components: Callable[[str, str], Awaitable[list[ComponentRef]]] | None = None,
     describe_named: Callable[[str, str, str], Coroutine[Any, Any, None]] | None = None,
-    cluster_list_permitted: Callable[[], Awaitable[bool]] | None = None,
+    check_permission: PermissionCheck | None = None,
+    list_namespaces: Callable[[], Awaitable[list[str]]] | None = None,
     loader: FakeLoader | None = None,
 ) -> _Bundle:
     state = WorkspaceState(kind, scope)
@@ -398,9 +414,6 @@ def _make(
     hints = FakeHints()
     loader = loader if loader is not None else FakeLoader()
     cfg = config if config is not None else KorvidConfig()
-
-    async def _permit() -> bool:
-        return True
 
     async def _describe(kind_: str, ns: str, name: str) -> None:  # pragma: no cover
         return None
@@ -422,7 +435,8 @@ def _make(
         get_helm_components=lambda: get_helm_components,
         olm_alias_key=lambda plural: None,
         describe_named=describe_named or _describe,
-        cluster_list_permitted=cluster_list_permitted or _permit,
+        check_permission=lambda: check_permission,
+        list_namespaces=lambda: list_namespaces,
     )
     return _Bundle(
         ctl, state, store, ui, surface, view, context, watch, metrics, logs, hints, loader
@@ -815,3 +829,253 @@ async def test_metrics_poller_targets_pods_scope() -> None:
     b = _make(kind="pods", scope="default")
     await b.ctl.sync_metrics_poller()
     assert b.metrics.started == [None] or b.metrics.started == ["default"]
+
+
+# ---------------------------------------------------------------------------
+# Cluster-wide list permission gate (issue #108)
+# ---------------------------------------------------------------------------
+
+
+async def test_cluster_list_permitted_without_a_checker_allows() -> None:
+    b = _make(kind="pods", scope="default", check_permission=None)
+    assert await b.ctl.cluster_list_permitted() is True
+
+
+async def test_cluster_list_permitted_probes_the_current_kind() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def _check(
+        verb: str, plural: str, ns: str, name: str | None, group: str, sub: str
+    ) -> bool:
+        calls.append((verb, plural, group))
+        return True
+
+    b = _make(kind="deployments", scope="default", check_permission=_check)
+    assert await b.ctl.cluster_list_permitted() is True
+    assert calls == [("list", "deployments", "apps")]
+
+
+async def test_cluster_list_permitted_probes_the_backing_kind_of_a_synthetic_view() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def _check(
+        verb: str, plural: str, ns: str, name: str | None, group: str, sub: str
+    ) -> bool:
+        calls.append((verb, plural, group))
+        return True
+
+    b = _make(kind="pods", scope="default", check_permission=_check)
+    b.view.aliases_map["helmreleases"] = dataclasses.replace(
+        _SYNTHETIC_META, backing=("secrets", "")
+    )
+    b.state.focused.kind = "helmreleases"
+    assert await b.ctl.cluster_list_permitted() is True
+    assert calls == [("list", "secrets", "")]
+
+
+async def test_a_synthetic_view_without_a_backing_kind_is_never_probed() -> None:
+    async def _check(*_args: Any) -> bool:  # pragma: no cover - must not run
+        raise AssertionError("nothing to probe")
+
+    b = _make(kind="pods", scope="default", check_permission=_check)
+    b.view.aliases_map["helmrevisions"] = _SYNTHETIC_META
+    b.state.focused.kind = "helmrevisions"
+    assert await b.ctl.cluster_list_permitted() is True
+
+
+async def test_an_unknown_kind_is_allowed_so_the_watch_reports_its_own_error() -> None:
+    async def _check(*_args: Any) -> bool:  # pragma: no cover - must not run
+        raise AssertionError("unknown kind must not be probed")
+
+    b = _make(kind="widgets", scope="default", check_permission=_check)
+    assert await b.ctl.cluster_list_permitted() is True
+
+
+async def test_a_forbidden_cluster_list_notifies_and_stays_put() -> None:
+    async def _check(*_args: Any) -> bool:
+        return False
+
+    b = _make(kind="pods", scope="default", check_permission=_check)
+    assert await b.ctl.cluster_list_permitted() is False
+    assert len(b.ui.notes) == 1
+    assert b.ui.notes[-1].severity == "warning"
+    assert "forbidden" in b.ui.notes[-1].message
+
+
+async def test_a_failing_permission_check_fails_open() -> None:
+    async def _check(*_args: Any) -> bool:
+        raise RuntimeError("SSAR unavailable")
+
+    b = _make(kind="pods", scope="default", check_permission=_check)
+    assert await b.ctl.cluster_list_permitted() is True
+    assert b.ui.notes == []
+
+
+# ---------------------------------------------------------------------------
+# Namespace picker + completion prefetch (issue #108)
+# ---------------------------------------------------------------------------
+
+
+async def test_the_namespace_picker_opens_with_the_listed_namespaces() -> None:
+    async def _list() -> list[str]:
+        return ["default", "kube-system"]
+
+    b = _make(list_namespaces=_list)
+    await b.ctl.show_namespace_picker()
+    assert b.surface.namespace_words == [["default", "kube-system"]]
+    assert b.surface.opened_pickers == [["default", "kube-system"]]
+
+
+async def test_the_namespace_picker_reports_when_listing_is_unavailable() -> None:
+    b = _make(list_namespaces=None)
+    await b.ctl.show_namespace_picker()
+    assert b.surface.opened_pickers == []
+    assert b.ui.notes[-1].message == "Namespace listing unavailable"
+
+
+async def test_the_namespace_picker_refuses_to_list_during_a_switch() -> None:
+    async def _list() -> list[str]:  # pragma: no cover - must not run
+        raise AssertionError("listing raced the client swap")
+
+    b = _make(list_namespaces=_list)
+    b.context.reads = False
+    await b.ctl.show_namespace_picker()
+    assert b.surface.opened_pickers == []
+
+
+async def test_a_forbidden_namespace_list_explains_the_direct_switch() -> None:
+    async def _list() -> list[str]:
+        raise ApiStatusError(403, "Forbidden")
+
+    b = _make(list_namespaces=_list)
+    await b.ctl.show_namespace_picker()
+    assert b.surface.opened_pickers == []
+    assert "`:ns <name>`" in b.ui.notes[-1].message
+    assert b.ui.notes[-1].severity == "error"
+
+
+async def test_a_stale_api_error_from_the_old_cluster_is_not_surfaced() -> None:
+    holder: dict[str, _Bundle] = {}
+
+    async def _list() -> list[str]:
+        holder["b"].context._epoch += 1
+        raise ApiStatusError(403, "Forbidden")
+
+    b = _make(list_namespaces=_list)
+    holder["b"] = b
+    await b.ctl.show_namespace_picker()
+    assert b.ui.notes == []
+
+
+async def test_any_other_listing_failure_is_surfaced() -> None:
+    async def _list() -> list[str]:
+        raise RuntimeError("boom")
+
+    b = _make(list_namespaces=_list)
+    await b.ctl.show_namespace_picker()
+    assert b.ui.notes[-1].severity == "error"
+    assert "boom" in b.ui.notes[-1].message
+
+
+async def test_a_listing_that_awaited_through_a_switch_cancels_the_picker() -> None:
+    holder: dict[str, _Bundle] = {}
+
+    async def _list() -> list[str]:
+        holder["b"].context._epoch += 1
+        return ["default"]
+
+    b = _make(list_namespaces=_list)
+    holder["b"] = b
+    await b.ctl.show_namespace_picker()
+    assert b.surface.opened_pickers == []
+    assert "kube context changed" in b.ui.notes[-1].message
+
+
+async def test_an_empty_namespace_list_warns_about_rbac() -> None:
+    async def _list() -> list[str]:
+        return []
+
+    b = _make(list_namespaces=_list)
+    await b.ctl.show_namespace_picker()
+    assert b.surface.opened_pickers == []
+    assert "RBAC" in b.ui.notes[-1].message
+
+
+async def test_the_prefetch_warms_the_completion_words() -> None:
+    async def _list() -> list[str]:
+        return ["alpha"]
+
+    b = _make(list_namespaces=_list)
+    b.ctl.start_namespace_prefetch()
+    await asyncio.sleep(0)  # let the task run to completion
+    await b.ctl.cancel_namespace_prefetch()
+    assert b.surface.namespace_words == [["alpha"]]
+
+
+async def test_the_prefetch_is_skipped_without_a_lister() -> None:
+    b = _make(list_namespaces=None)
+    b.ctl.start_namespace_prefetch()
+    await b.ctl.cancel_namespace_prefetch()
+    assert b.surface.namespace_words == []
+
+
+async def test_a_cancelled_prefetch_never_publishes_old_cluster_words() -> None:
+    started = asyncio.Event()
+
+    async def _list() -> list[str]:
+        started.set()
+        await asyncio.sleep(60)
+        return ["stale"]  # pragma: no cover - cancelled first
+
+    b = _make(list_namespaces=_list)
+    b.ctl.start_namespace_prefetch()
+    await started.wait()
+    await b.ctl.cancel_namespace_prefetch()
+    assert b.surface.namespace_words == []
+
+
+async def test_a_failing_prefetch_is_swallowed() -> None:
+    async def _list() -> list[str]:
+        raise RuntimeError("no cluster")
+
+    b = _make(list_namespaces=_list)
+    b.ctl.start_namespace_prefetch()
+    await asyncio.sleep(0)  # let the task run to completion
+    await b.ctl.cancel_namespace_prefetch()
+    assert b.surface.namespace_words == []
+
+
+# ---------------------------------------------------------------------------
+# Selected timeline resource (issue #282)
+# ---------------------------------------------------------------------------
+
+
+async def test_the_selected_timeline_resource_describes_the_row_under_the_cursor() -> None:
+    b = _make(kind="pods", scope="default")
+    b.surface.row_key = "team/web-1"
+    b.view.uid = "uid-1"
+    ref = b.ctl.selected_timeline_resource()
+    assert ref is not None
+    assert (ref.kind_alias, ref.display_kind) == ("pods", "Pod")
+    assert (ref.namespace, ref.name, ref.uid) == ("team", "web-1", "uid-1")
+
+
+async def test_a_synthetic_view_has_no_timeline_resource() -> None:
+    b = _make(kind="pods", scope="default")
+    b.view.aliases_map["helmreleases"] = _SYNTHETIC_META
+    b.state.focused.kind = "helmreleases"
+    b.surface.row_key = "team/web-1"
+    assert b.ctl.selected_timeline_resource() is None
+
+
+async def test_an_unselected_table_has_no_timeline_resource_and_never_notifies() -> None:
+    b = _make(kind="pods", scope="default")
+    b.surface.row_key = None
+    assert b.ctl.selected_timeline_resource() is None
+    assert b.ui.notes == []
+
+
+async def test_a_row_key_without_a_namespace_has_no_timeline_resource() -> None:
+    b = _make(kind="pods", scope="default")
+    b.surface.row_key = "web-1"
+    assert b.ctl.selected_timeline_resource() is None

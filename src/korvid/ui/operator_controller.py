@@ -33,6 +33,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import manifest_uid
 from korvid.k8s.olm import (
     OPERATORS_GROUP,
+    PACKAGES_GROUP,
     PackageInstallFacts,
     build_subscription,
     package_install_facts,
@@ -81,6 +82,7 @@ class OperatorController:
         confirm_screen: Callable[..., Any],
         uid_intact_after_fetch: Callable[..., bool],
         precheck_keybinding_write: Callable[..., Any],
+        write_target: Callable[[], tuple[ResourceMeta, str | None, str, str | None] | None],
     ) -> None:
         self._gate = gate
         self._view = view
@@ -90,6 +92,30 @@ class OperatorController:
         self._confirm_screen = confirm_screen
         self._uid_intact_after_fetch = uid_intact_after_fetch
         self._precheck_keybinding_write = precheck_keybinding_write
+        self._write_target = write_target
+
+    async def install_selected(self) -> None:
+        """`I`: on the operator catalog, install the selected package (wizard,
+        then approval with the full Subscription manifest); on InstallPlans,
+        approve a pending manual plan. Everything offered comes from the
+        cluster's own catalog objects - no hardcoded operator knowledge."""
+        if self._write_ops() is None:
+            self._ui.notify("Install unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name, uid = target
+        if (meta.group, meta.plural) == (PACKAGES_GROUP, "packagemanifests"):
+            await self.install(meta, ns, name, uid)
+        elif (meta.group, meta.plural) == (OPERATORS_GROUP, "installplans"):
+            await self.approve_plan(meta, ns, name, uid)
+        else:
+            self._ui.notify(
+                f"Install/Approve does not apply to {self._view.gvr_label(meta)}"
+                " (use it on packagemanifests or installplans)",
+                severity="warning",
+            )
 
     async def install(
         self, pkg_meta: ResourceMeta, ns: str | None, name: str, uid: str | None

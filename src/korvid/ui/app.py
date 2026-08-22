@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import dataclasses
 import functools
-import logging
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -44,11 +42,6 @@ from korvid.agent.events import AgentEvent
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
-from korvid.core.debugimage import (
-    FALLBACK_IMAGE,
-    same_image_ref,
-)
-from korvid.core.errors import explain_api_error
 from korvid.core.filters import ResourceFilter
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.mcp import MCPControllerBase
@@ -56,7 +49,7 @@ from korvid.core.portforward import (
     ForwardRegistry,
 )
 from korvid.core.relationships import SummaryLike
-from korvid.core.session_timeline import SessionTimeline, TimelineResourceRef
+from korvid.core.session_timeline import SessionTimeline
 from korvid.core.sorting import SortSpec
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -64,7 +57,6 @@ from korvid.k8s.components import (
     ComponentRef,
 )
 from korvid.k8s.discovery import PODS_META, ResourceMeta
-from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import (
     HELM_RELEASES_META,
     HELM_REVISIONS_META,
@@ -98,7 +90,7 @@ from korvid.ui.context_switch_coordinator import (
     ContextSwitchResult,
     SessionConfiguration,
 )
-from korvid.ui.debug import DebugController
+from korvid.ui.debug import DebugController, DebugSettings
 from korvid.ui.drain import DrainController
 from korvid.ui.forward_controller import ForwardController
 from korvid.ui.helm_controller import HelmController
@@ -184,22 +176,8 @@ _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
     "pod": PODS_META,
 }
 
-logger = logging.getLogger(__name__)
-
 #: How often the app polls the forward registry for dead kubectl processes.
 _FORWARD_POLL_SECONDS = 2.0
-
-#: Upper bound on the all-namespaces LIST SubjectAccessReview probe: a
-#: stalled authorization endpoint must never hang the `0` keypress. Writes
-#: have their own budget - the pre-check they use lives with the perimeter
-#: that owns it (`write_coordinator._PERMISSION_CHECK_TIMEOUT`).
-_PERMISSION_CHECK_TIMEOUT = 10.0
-
-
-#: Upper bound on a helm preview (issue #31): `helm ... --dry-run` shells out
-#: and may pull the chart from a repo, so it gets more budget than an API
-#: server dry-run - still bounded, the approval dialog is never wedged.
-_HELM_PREVIEW_TIMEOUT = 20.0
 
 #: A rendered chart can run to thousands of lines; the approval dialog shows
 #: at most this many so the operation summary stays reviewable.
@@ -489,7 +467,7 @@ class KorvidApp(App[None]):
             get_epoch=self._ctx.epoch,
             epoch_crossed=self._ctx.crossed,
             watch_warning_events=watch_warning_events,
-            selected_resource=self._selected_timeline_resource,
+            selected_resource=lambda: self._workspace_ctl.selected_timeline_resource(),
             navigate=lambda kind, namespace, name, epoch: self._workspace_ctl.jump_to_object(
                 kind, namespace, name, epoch=epoch
             ),
@@ -612,7 +590,7 @@ class KorvidApp(App[None]):
             screens=AppTransferScreens(self),
             open_pod_exec=lambda: self._open_pod_exec,
             audit=lambda: self._audit,
-            pod_containers=self._inspect.pod_containers,
+            find_pod=self._inspect.find_pod,
             target_uid=lambda kind, ns, name: self._target_uid(kind, ns, name),
             pod_uid_unchanged=self._inspect.pod_uid_unchanged,
         )
@@ -629,6 +607,7 @@ class KorvidApp(App[None]):
             confirm_screen=self._writes.confirm_screen,
             uid_intact_after_fetch=self._writes.uid_intact_after_fetch,
             precheck_keybinding_write=self._writes.precheck_keybinding_write,
+            write_target=self._writes.write_target,
         )
         #: helm write workflows (issue #187): the controller owns the wizard,
         #: preview and command construction; the approval gate, context
@@ -639,25 +618,33 @@ class KorvidApp(App[None]):
             gate=self._writes,
             view=self._view,
             ui=AppUiSurface(self),
-            # Late-binding, like DebugController's suspend/refresh: the editor
-            # entry points are patched per test, so binding the bound method
-            # at construction would freeze whatever existed then.
+            # Late-binding for the same reason as everywhere else: the
+            # workspace controller is constructed after this one.
+            navigation=lambda: self._workspace_ctl,
+            # Late-binding, like the other controllers' app callables: the
+            # editor entry points are patched per test, so binding the bound
+            # method at construction would freeze whatever existed then.
             edit_in_external_editor=lambda *a, **k: self._edit_in_external_editor(*a, **k),
             edit_text=lambda: self._edit_text,
         )
-        # Debug-fallback execution (issue #97 U3c): the controller owns the
-        # gated, audited kubectl debug run; dialogs, RBAC pre-check and
-        # run_worker ownership stay here. suspend/refresh are late-binding so
-        # tests that patch the app's methods keep working.
+        # Debug-fallback execution (issue #97 U3c / Deep Task 10): the
+        # controller owns the gated, audited kubectl debug run *and* the
+        # image-pull retry offer. The initial image picker, the RBAC
+        # pre-check and the first approval stay with `ShellController`.
         self._debug = DebugController(
-            notify=self.notify,
+            ui=AppUiSurface(self),
             audit=lambda: self._audit,
             readonly=lambda: self.config.readonly,
-            kube_context=lambda: self.config.kube_context,
+            settings=lambda: DebugSettings(
+                kube_context=self.config.kube_context,
+                default_image=self.config.debug_default_image,
+                images=self.config.debug_images,
+            ),
             pod_uid_unchanged=self._inspect.pod_uid_unchanged,
-            suspend=lambda: self.suspend(),
-            refresh=lambda: self.refresh(),
-            offer_pull_retry=self._offer_pull_retry,
+            confirm_screen=self._writes.confirm_screen,
+            # Late-binding: the retry reruns through `ShellController`, which
+            # keeps the write decorator and the tests patch per case.
+            run_debug=lambda: self._shell.run_debug,
         )
         # Drain execution (issue #97 U3d): the controller owns the approved
         # drain's cordon/evict/wait/audit lifecycle. Keybinding routing, the
@@ -685,7 +672,7 @@ class KorvidApp(App[None]):
             managed_note=self._managed_note,
             managed_note_from=self._managed_note_from,
             pod_resize_supported=lambda: self._pod_resize_supported,
-            helm_uninstall=self._helm_uninstall_start,
+            helm_uninstall=lambda: self._helm_ctl.uninstall_selected(),
             operators=self._olm,
         )
         self.aliases: dict[str, ResourceMeta] = (
@@ -705,7 +692,6 @@ class KorvidApp(App[None]):
         #: Active sort per view kind (issue #37): the choice survives watch
         #: updates (every render re-applies it) and switching views restores
         #: each kind's own sort. Lives in PaneState (see `_sorts` property).
-        self._ns_prefetch_task: asyncio.Task[None] | None = None
         self._splash_shown_at: float = monotonic()
         # Hint-strip lifecycle (issue #97 U3b): the controller owns the event
         # cache and the parked-cursor refresh timer; widget access and worker
@@ -770,7 +756,8 @@ class KorvidApp(App[None]):
             get_helm_components=lambda: self._get_helm_components,
             olm_alias_key=self._olm.alias_key,
             describe_named=self._inspect.describe_named,
-            cluster_list_permitted=self._cluster_list_permitted,
+            check_permission=lambda: self._check_permission,
+            list_namespaces=lambda: self._list_namespaces,
         )
         #: External MCP write proposals (issue #110 / Deep Task 7): the
         #: controller owns the store, the submit/get/cancel intake, the
@@ -1100,7 +1087,7 @@ class KorvidApp(App[None]):
             # Liveness is the point of tracked forwards (issue #38): a toast
             # must fire when one breaks even while :pf is closed.
             self.set_interval(_FORWARD_POLL_SECONDS, self._forward.poll)
-        self._prefetch_namespaces()
+        self._workspace_ctl.start_namespace_prefetch()
         # Kubeconfig contexts feed the `:ctx` completion; the coordinator owns
         # that prefetch task and reaps it on unmount.
         self._ctx.start()
@@ -1181,21 +1168,6 @@ class KorvidApp(App[None]):
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
         self._workspace_ctl.on_resources_updated(message.kind)
-
-    def _prefetch_namespaces(self) -> None:
-        """Warm the command-bar namespace completions in the background."""
-        if self._list_namespaces is None:
-            return
-
-        async def _fetch() -> None:
-            try:
-                namespaces = await self._list_namespaces()  # type: ignore[misc]
-            except Exception:
-                logger.debug("namespace prefetch for completion failed", exc_info=True)
-                return
-            self._command_bar.namespace_words = namespaces
-
-        self._ns_prefetch_task = asyncio.create_task(_fetch())
 
     def _render_table(self, kind: str, *, only: PaneState | None = None) -> None:
         """Single choke point: every pane showing `kind` re-renders, and the
@@ -1323,83 +1295,10 @@ class KorvidApp(App[None]):
         """Jump to `favorite_namespaces[index-1]` (issue #108, keys 1-9)."""
         await self._workspace_ctl.favorite_namespace(index)
 
-    async def _cluster_list_permitted(self) -> bool:
-        """All-namespaces guard (issue #108): a forbidden cluster-wide LIST
-        would only loop error cards — SSAR-check first and stay put with an
-        inline notice instead. Checked fresh on every `0` press so a later
-        RBAC grant is observed; SSAR failures pass through (fail-open; the
-        watch reports real errors on its own)."""
-        if self._check_permission is None:
-            return True
-        meta = self.aliases.get(self.current_kind)
-        if meta is None:
-            return True  # unknown kind: the watch reports its own error
-        if meta.synthetic:
-            if meta.backing is None:
-                return True  # nothing to probe
-            plural, group = meta.backing  # e.g. helm views LIST Secrets
-        else:
-            plural, group = meta.plural, meta.group
-        try:
-            allowed = await asyncio.wait_for(
-                self._check_permission("list", plural, "", None, group, ""),
-                timeout=_PERMISSION_CHECK_TIMEOUT,
-            )
-        except Exception:
-            logger.debug("cluster-wide list pre-check failed; allowing", exc_info=True)
-            return True
-        if not allowed:
-            self.notify(
-                f"Cluster-wide {plural} list forbidden — staying in"
-                f" {self.current_scope!r}. Press 0 again after access is"
-                " granted, or switch namespaces with `:ns <name>`.",
-                severity="warning",
-            )
-        return allowed
-
     async def on_show_namespace_picker(self, message: ShowNamespacePicker) -> None:
-        if self._list_namespaces is None:
-            self.notify("Namespace listing unavailable", severity="warning")
-            return
-        # The listing would race the client swap and could return either
-        # cluster's namespaces — refuse up front.
-        if not self._ctx.reads_allowed():
-            return
-        epoch = self._ctx.epoch()
-        try:
-            namespaces = await self._list_namespaces()
-        except ApiStatusError as exc:  # API failures get the actionable mapping (§5-5)
-            if self._ctx.crossed(epoch):
-                return  # a stale old-cluster error is not worth surfacing
-            self._handle_namespace_list_error(exc)
-            return
-        except Exception as exc:  # surface any other listing failure to the user
-            if self._ctx.crossed(epoch):
-                return
-            self.notify(str(exc), title="Failed to list namespaces", severity="error")
-            return
-        if self._ctx.crossed(epoch):
-            # The listing awaited through a :ctx switch: opening the picker
-            # now would offer old-cluster namespaces to the new session.
-            self.notify(
-                "Namespace picker cancelled - the kube context changed",
-                severity="warning",
-            )
-            return
-        if not namespaces:
-            self.notify("No namespaces visible (check RBAC)", severity="warning")
-            return
-        self._command_bar.namespace_words = namespaces
-        self._namespace_picker.open(namespaces)
-
-    def _handle_namespace_list_error(self, exc: ApiStatusError) -> None:
-        """403 is an authorization boundary (issue #108): show one concise
-        permission notice pointing at `:ns <name>` free-text entry — never
-        manufacture a namespace list from configuration."""
-        msg = explain_api_error(exc.status, exc.reason, "namespaces", None)
-        if exc.status == 403:
-            msg += " Switch directly with `:ns <name>`."
-        self.notify(msg, title="Failed to list namespaces", severity="error")
+        """The listing, its permission mapping, the `:ctx` staleness guards
+        and the picker open belong to `WorkspaceController`."""
+        await self._workspace_ctl.show_namespace_picker()
 
     # ------------------------------------------------------------------
     # `:ctx` — runtime context switching (issue #36)
@@ -1523,36 +1422,6 @@ class KorvidApp(App[None]):
             markup=False,
         )
 
-    def _selected_timeline_resource(self) -> TimelineResourceRef | None:
-        """The exact resource under the cursor when `T` is pressed, captured
-        once so the timeline's `r` toggle keeps pinning it even as the
-        table underneath changes (issue #282). Unlike
-        `_selected_relationship_root`, this never `notify`s: the timeline
-        opens with or without a selection, so an empty, unselected, or
-        synthetic view just means `r` has nothing to toggle - the modal's
-        own status line says so, not a warning toast the user didn't ask for."""
-        meta = self.aliases.get(self.current_kind)
-        if meta is None or meta.synthetic:
-            return None
-        table = self._focused_table()
-        if table.row_count == 0:
-            return None
-        row_index = table.cursor_row
-        ordered = table.ordered_rows
-        if row_index >= len(ordered):
-            return None
-        parts = str(ordered[row_index].key.value).split("/", 1)
-        if len(parts) != 2:
-            return None
-        namespace, name = parts
-        return TimelineResourceRef(
-            kind_alias=self._canonical_kind(self.current_kind),
-            display_kind=meta.kind,
-            namespace=namespace,
-            name=name,
-            uid=self._view.selected_uid(namespace or None, name),
-        )
-
     def action_timeline(self) -> None:
         """Open the read-only session timeline (issue #282 Task 4).
 
@@ -1610,52 +1479,6 @@ class KorvidApp(App[None]):
     def on_transfer_cancel_requested(self, message: TransferCancelRequested) -> None:
         message.stop()
         self._transfer.cancel()
-
-    def _offer_pull_retry(
-        self,
-        namespace: str,
-        name: str,
-        container: str | None,
-        approved_uid: str | None,
-        image: str,
-        reason: str,
-    ) -> None:
-        """Offer an immediate retry with the fallback image after a pull failure.
-
-        Air-gapped guard: when `debug.images` is configured without a
-        `debug.default_image`, no public busybox is offered - notify only.
-        """
-        if self.config.debug_images is not None and not self.config.debug_default_image:
-            fallback = None
-        else:
-            fallback = self.config.debug_default_image or FALLBACK_IMAGE
-        target = f"{name}/{container}" if container else name
-        # Equivalent references (untagged vs :latest) would retry the very
-        # image that just failed - and each retry permanently adds another
-        # ephemeral container entry to the pod spec.
-        if fallback is None or same_image_ref(fallback, image) or len(self.screen_stack) > 1:
-            self.notify(
-                f"kubectl debug: image pull failed for {image} ({reason})",
-                severity="error",
-            )
-            return
-
-        def _on_choice(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(
-                    self._shell.run_debug(namespace, name, container, approved_uid, fallback)
-                )
-
-        self.push_screen(
-            self._writes.confirm_screen(
-                f"Image pull failed for {image} ({reason})",
-                f"Retry kubectl debug on {target}{write_locus(namespace)} with"
-                f" {fallback}? Note: the failed ephemeral container entry cannot be"
-                " removed from the pod spec; the retry attaches an additional"
-                " container.",
-            ),
-            _on_choice,
-        )
 
     async def on_key(self, event: Key) -> None:
         """Pane chords (`ctrl+w` v/w/q) and Escape (closes describe/log
@@ -1799,95 +1622,25 @@ class KorvidApp(App[None]):
         """u: mark the selected node schedulable again (kubectl uncordon)."""
         await self._resource_writes.uncordon()
 
-    def _helm_view_guard(self, meta: ResourceMeta, what: str) -> bool:
-        """`check_action` gates only key dispatch (issue #114); a direct
-        action call must not trust the focused row of an unrelated view as a
-        Helm release/revision name and open a write flow with it."""
-        current = self.aliases.get(self._canonical_kind(self.current_kind))
-        if current is not None and (current.group, current.plural) == (meta.group, meta.plural):
-            return True
-        self.notify(f"{what} is only available on the {meta.plural} view", severity="warning")
-        return False
+    # -- Helm writes (issue #31 / #117): `HelmController` owns the view
+    # -- guard, the target capture, the previews and the audited mutations;
+    # -- these are the Textual entry points Textual resolves on the app.
 
     def action_helm_install(self) -> None:
-        """i on the helm browser: start the chart install wizard (issue #31).
-        Synchronous: the picker must open with the keypress, before any
-        buffered navigation input could change the view the namespace is
-        derived from."""
-        if not self._helm_view_guard(HELM_RELEASES_META, "Helm install"):
-            return
+        """i on the helm browser: start the chart install wizard."""
         self._helm_ctl.install()
 
     def action_helm_upgrade(self) -> None:
-        """u on the helm browser: upgrade the selected release (issue #31).
-        Synchronous: the picker opens with the keypress; buffered cursor
-        keys must not retarget the upgrade."""
-        if not self._helm_view_guard(HELM_RELEASES_META, "Helm upgrade"):
-            return
+        """u on the helm browser: upgrade the selected release."""
         self._helm_ctl.upgrade()
 
     async def action_helm_history(self) -> None:
-        """h on the helm release browser: the flat revision drill-down.
-        Revision history moved off Enter when Enter became the hierarchy
-        tree (issue #120); rollback keeps working from the revisions view."""
-        if not self._helm_view_guard(HELM_RELEASES_META, "Helm history"):
-            return
-        namespace, name = self._view.selected_ns_name()
-        if namespace is None or name is None:
-            return
-        error = await self._workspace_ctl.drill_into(namespace, name)
-        if error is not None:
-            self.notify(error, severity="warning")
+        """h on the helm release browser: the flat revision drill-down."""
+        await self._helm_ctl.history()
 
     def action_helm_rollback(self) -> None:
-        """r on the helm revision drill-down: roll the release back to the
-        selected revision (issue #31). Target captured synchronously with
-        the keypress; only the slow preview + confirmation run in a worker
-        (the diff render can block for up to _HELM_PREVIEW_TIMEOUT and must
-        not freeze the message pump, or the status-bar progress could never
-        paint)."""
-        if not self._helm_view_guard(HELM_REVISIONS_META, "Helm rollback"):
-            return
-        helm = self._helm_ctl.gate()
-        if helm is None:
-            return
-        epoch = self._ctx.epoch()
-        ns, name = self._view.selected_ns_name()
-        if name is None:
-            return
-        row = self._helm_ctl.revision_row(ns, name)
-        if row is None:
-            self.notify("no helm revision selected", severity="warning")
-            return
-        namespace = ns or row.namespace
-        self.run_worker(
-            self._helm_ctl.rollback(helm, row, ns, name, namespace, epoch),
-            exclusive=True,
-            group="helm-write",
-        )
-
-    def _helm_uninstall_start(self) -> None:
-        """Ctrl+D on the helm release browser: uninstall the selected release
-        (issue #117). Target captured synchronously with the keypress; the
-        slow dry-run preview + confirmation run in a worker, exactly like
-        rollback."""
-        helm = self._helm_ctl.gate()
-        if helm is None:
-            return
-        epoch = self._ctx.epoch()
-        ns, name = self._view.selected_ns_name()
-        if name is None:
-            return
-        row = self._helm_ctl.release_row(ns, name)
-        if row is None:
-            self.notify("no helm release selected", severity="warning")
-            return
-        namespace = ns or row.namespace
-        self.run_worker(
-            self._helm_ctl.uninstall(helm, row, ns, name, namespace, epoch),
-            exclusive=True,
-            group="helm-write",
-        )
+        """r on the helm revision drill-down: roll the release back."""
+        self._helm_ctl.rollback_selected()
 
     async def action_drain_node(self) -> None:
         """shift+d: drain the selected node behind a typed-name approval
@@ -1922,27 +1675,12 @@ class KorvidApp(App[None]):
             self._set_progress(owner, "")
 
     async def action_operator_install(self) -> None:
-        """I: on the operator catalog, install the selected package (wizard,
-        then approval with the full Subscription manifest); on InstallPlans,
-        approve a pending manual plan. Everything offered comes from the
-        cluster's own catalog objects - no hardcoded operator knowledge."""
-        if self._write_ops is None:
-            self.notify("Install unavailable in this session", severity="warning")
-            return
-        target = self._writes.write_target()
-        if target is None:
-            return
-        meta, ns, name, uid = target
-        if (meta.group, meta.plural) == (PACKAGES_GROUP, "packagemanifests"):
-            await self._olm.install(meta, ns, name, uid)
-        elif (meta.group, meta.plural) == (OPERATORS_GROUP, "installplans"):
-            await self._olm.approve_plan(meta, ns, name, uid)
-        else:
-            self.notify(
-                f"Install/Approve does not apply to {gvr_label(meta)}"
-                " (use it on packagemanifests or installplans)",
-                severity="warning",
-            )
+        """I: install a catalog package or approve a pending InstallPlan.
+
+        Textual resolves `action_*` on the app; the routing, the refusals
+        and both flows belong to `OperatorController`.
+        """
+        await self._olm.install_selected()
 
     def _on_bindings_updated(self, _screen: object) -> None:
         self._refresh_top_bar()
@@ -2294,8 +2032,9 @@ class KorvidApp(App[None]):
         # controller closes the store first so an in-flight submission cannot
         # land after its final audited sweep.
         await self._proposals.shutdown()
-        if self._ns_prefetch_task is not None:
-            self._ns_prefetch_task.cancel()
+        # The `:ns` completion prefetch belongs to the workspace controller;
+        # this cancels and reaps it, exactly as the `:ctx` teardown does.
+        await self._workspace_ctl.cancel_namespace_prefetch()
         # The `:ctx` completion prefetch belongs to the switch coordinator;
         # this is the narrow lifecycle call that cancels and reaps it.
         await self._ctx.shutdown()
@@ -2743,21 +2482,6 @@ class AppContextSurface(ContextSurface):
     def set_context_words(self, names: list[str]) -> None:
         self._app._command_bar.context_words = names
 
-    def clear_namespace_words(self) -> None:
-        self._app._command_bar.namespace_words = []
-
-    async def cancel_namespace_prefetch(self) -> None:
-        task = self._app._ns_prefetch_task
-        if task is None:
-            return
-        self._app._ns_prefetch_task = None
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-    def start_namespace_prefetch(self) -> None:
-        self._app._prefetch_namespaces()
-
     def cancel_worker_group(self, group: str) -> None:
         self._app.workers.cancel_group(self._app, group)
 
@@ -2861,6 +2585,21 @@ class AppWorkspaceSurface(WorkspaceSurface):
 
     def hide_describe(self) -> None:
         self._app._describe_pane.hide()
+
+    def set_namespace_words(self, names: list[str]) -> None:
+        self._app._command_bar.namespace_words = names
+
+    def open_namespace_picker(self, names: list[str]) -> None:
+        self._app._namespace_picker.open(names)
+
+    def cursor_row_key(self) -> str | None:
+        table = self._app._focused_table()
+        if table.row_count == 0:
+            return None
+        ordered = table.ordered_rows
+        if table.cursor_row >= len(ordered):
+            return None
+        return str(ordered[table.cursor_row].key.value)
 
     def refresh_status(self) -> None:
         self._app._refresh_status()

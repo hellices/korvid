@@ -18,18 +18,18 @@ KorvidApp  (ui/app.py)
 ├── WriteCoordinator    (ui/write_coordinator.py)    the write security perimeter
 ├── ResourceWriteController
 │                       (ui/resource_write_controller.py)  delete/restart/edit/scale/resize/cordon/drain
-├── HelmController      (ui/helm_controller.py)      install/upgrade/rollback/uninstall
-├── OperatorController  (ui/operator_controller.py)  OLM subscribe/approve/uninstall
+├── HelmController      (ui/helm_controller.py)      view guard, install/upgrade/history/rollback/uninstall
+├── OperatorController  (ui/operator_controller.py)  OLM install routing, subscribe/approve/uninstall
 ├── ForwardController   (ui/forward_controller.py)   the shift+f dialog and port-forward sessions
 ├── ShellController     (ui/shell_controller.py)     pod exec, debug fallback, node shell
 ├── TransferController  (ui/transfer.py)             the ctrl+t journey: dialogs, approval, stream
-├── DebugController     (ui/debug.py)                gated kubectl debug runs
+├── DebugController     (ui/debug.py)                gated kubectl debug runs and the pull-retry offer
 ├── SessionTimelineController
 │                       (ui/session_timeline_controller.py)  timeline producers and modal navigation
 ├── RelationshipSnapshotLoader
 │                       (ui/relationship_controller.py)  bounded read-only graph LISTs
 ├── LogController        (ui/log_controller.py)          log stream tasks, buffer, pane lifecycle
-├── WorkspaceController  (ui/workspace_controller.py)    navigation, drill, hierarchy, relationship, and pane flows
+├── WorkspaceController  (ui/workspace_controller.py)    navigation, drill, hierarchy, relationship, pane, and namespace-listing flows
 ├── WorkspaceState       (ui/workspace_state.py)         split-pane collection, focus, and view state
 ├── AgentUiController    (ui/agent_ui_controller.py)     agent session, turn tasks, UI bridge reads, agent writes
 ├── ProposalController   (ui/proposal_controller.py)     external MCP write proposals: intake, review, execution, expiry
@@ -178,7 +178,15 @@ they mutate:
   `focus_other_pane`, `close_focused_pane`, and the context-switch
   `collapse_split`, with the focus-class, hint, status and binding refreshes;
 - **the shared goto** — `jump_to_object`, reused by the hierarchy, relationship
-  and timeline flows.
+  and timeline flows;
+- **namespace listing** — `cluster_list_permitted` (the SSAR pre-check the
+  all-namespaces toggle runs), `show_namespace_picker` with its API-error
+  mapping and `:ctx`-staleness guards, and the `:ns` completion prefetch task
+  (`start_namespace_prefetch`/`cancel_namespace_prefetch`/
+  `clear_namespace_words`) the switch transaction drives on this controller
+  rather than through an app adapter;
+- **the timeline selection** — `selected_timeline_resource`, the silent
+  cursor-row read the `T` modal pins its `r` toggle to.
 
 The **workspace-only mutable state** moved with the workflows: `_nav_lock`, the
 drill `_prewarm_leases`, the open tree's `_hierarchy_ctx` rebuild inputs, the
@@ -196,10 +204,11 @@ with no running app:
   inspection — the same surface every other controller uses;
 - **`WorkspaceSurface`** (`AppWorkspaceSurface`) for the workspace widgets the
   app still owns: rendering a pane, mounting/removing a pane table, the
-  focus-class and empty-state refreshes, the describe-pane dismissal, and the
-  open hierarchy tree. The controller constructs the `HierarchyScreen`/
-  `RelationshipScreen` and pushes them through `UiSurface`, but never queries an
-  arbitrary widget;
+  focus-class and empty-state refreshes, the describe-pane dismissal, the open
+  hierarchy tree, the `:ns` completion words, the inline namespace picker, and
+  the silent `cursor_row_key` read. The controller constructs the
+  `HierarchyScreen`/`RelationshipScreen` and pushes them through `UiSurface`,
+  but never queries an arbitrary widget;
 - **`ContextGuard`** (`ContextSwitchCoordinator`) for the `:ctx` epoch, the
   in-flight flag, and the stream-read guard it revalidates against across every
   awaited gap. `crossed(epoch)` is the old `_ctx_switch_crossed`.
@@ -297,8 +306,8 @@ So the boundaries that matter are named:
   describe pane. Implemented by `AppAgentScreens`.
 - **`AgentProposals`** (`ui/agent_ui_controller.py`) — the three external
   write-proposal tool calls, and nothing else about proposals. Implemented by
-  `AppProposalOps`, which still holds the store, review loop and execution
-  path (their own extraction is next).
+  `ProposalController`, which owns the store, the review loop and the
+  execution path directly — there is no app adapter in between.
 - **`BridgeDispatch`** (`ui/bridge_dispatch.py`) — where a foreign `UIBridge`
   coroutine is allowed to run. `AppContextDispatch` owns the app-context
   snapshot and the in-flight dispatch set: the app activates it on mount and
@@ -316,8 +325,9 @@ Controllers that outlive an await revalidate through
 `WriteGate.context_intact` or the epoch they captured.
 
 `AppViewState`, `AppUiSurface`, `AppWorkspaceSurface`, `AppContextSurface`,
-`AppSessionConfiguration`, `AppAgentPanel`, `AppAgentScreens` and
-`AppProposalOps` are adapters rather
+`AppSessionConfiguration`, `AppAgentPanel`, `AppAgentScreens`,
+`AppProposalScreens`, `AppInspectSurface` and `AppTransferScreens` are
+adapters rather
 than the app inheriting the ABCs, because Textual's `App` metaclass conflicts
 with `ABCMeta` — the same reason `AppUIBridge` exists.
 `WriteCoordinator` has no such constraint, so it implements `WriteGate`
@@ -663,6 +673,35 @@ tests added before the move where the behaviour is not already pinned.
     Selection reads (`selected_ns_name`, `selected_uid`) moved onto
     `AppViewState`, which is where the interface already declared them; the
     app holds one `self._view` and no longer implements them.
+
+16. ~~The remaining feature workflows with natural owners~~ — done (#187);
+    each move went to the owner that already held the surrounding state, and
+    the app kept only the Textual entry point:
+    - `WorkspaceController` gained the namespace-listing half of the
+      workspace: `cluster_list_permitted` (the SSAR pre-check behind the
+      all-namespaces toggle, taking `check_permission` directly instead of an
+      app callback), `show_namespace_picker` with its 403 mapping and
+      `:ctx`-staleness guards, the `:ns` completion prefetch task, and
+      `selected_timeline_resource`. The prefetch/clear/reprime steps of the
+      `:ctx` transaction now run on this controller through `SwitchWorkspace`
+      rather than through `ContextSurface`, so the task and the completion
+      words have exactly one owner.
+    - `DebugController` gained `offer_pull_retry`: the air-gap guard, the
+      equivalent-reference guard, the screen-depth guard, the approval dialog
+      and the rerun on the fallback image. It took `UiSurface` in place of the
+      `notify`/`suspend`/`refresh` callables and a `DebugSettings` snapshot in
+      place of the bare `kube_context` getter.
+    - `HelmController` gained the view guard every helm key needs, the target
+      capture that used to sit in the app's actions (`rollback_selected`,
+      `uninstall_selected`), and the revision-history drill (`history`), which
+      it performs through the narrow `HelmNavigation` port, late-bound to the
+      navigation owner. `HELM_WRITE_GROUP` moved with the workers that use it.
+    - `OperatorController` gained `install_selected`: the write-client check,
+      the `write_target` capture and the packagemanifests/installplans routing
+      behind the `I` key.
+    - `TransferController` reads its target from one `PodSummary` lookup
+      (`find_pod`), so the container list and the uid precondition always
+      describe the same incarnation.
 
 Issue #238 showed that logs and describe were technically extractable without
 introducing a new pane-composition seam, and issue #245 kept describe as a

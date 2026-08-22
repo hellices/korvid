@@ -38,6 +38,7 @@ from korvid.core.errors import explain_api_error
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import ContainerTrouble, PodSummary
 from korvid.ui.hints import EventsFetcher, pod_needs_hint
+from korvid.ui.log_controller import StreamLogsFn
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
@@ -111,7 +112,7 @@ class ResourceInspectController:
             [], Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None
         ],
         get_events: Callable[[], EventsFetcher | None],
-        stream_logs: Callable[[], Any | None],
+        stream_logs: Callable[[], StreamLogsFn | None],
         target_uid: Callable[[str, str | None, str], Awaitable[str | None]],
         audit: Callable[[], AuditLog | None],
         provider_hint: Callable[[], str | None],

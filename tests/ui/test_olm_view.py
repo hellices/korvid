@@ -733,3 +733,79 @@ async def test_install_permission_precheck_omits_object_name(tmp_path: Path) -> 
         await pilot.press("enter")
         await until(pilot, lambda: bool(checks), label="permission pre-check ran")
         assert checks[0] == ("create", "subscriptions", "")
+
+
+# ---------------------------------------------------------------------------
+# Ownership: the install/approve entry point lives on OperatorController
+# ---------------------------------------------------------------------------
+
+
+async def test_the_controller_routes_the_install_key_to_the_package_wizard(
+    tmp_path: Path,
+) -> None:
+    """`I` on a PackageManifest row opens the subscription wizard; the
+    routing decision belongs to the OLM owner, not the app."""
+    rec = Recorder()
+    app = make_app(
+        {"packagemanifests": [_package("cert-manager")]},
+        manifests={"cert-manager": _pkg_manifest("cert-manager")},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=rec,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "operators", "packagemanifests")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="package listed")
+        await app._olm.install_selected()
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, OperatorInstallPrompt),
+            label="install wizard",
+        )
+        assert rec.calls == []
+
+
+async def test_the_controller_explains_the_install_key_on_an_unrelated_view(
+    tmp_path: Path,
+) -> None:
+    rec = Recorder()
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=rec,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="subscription listed")
+        await app._olm.install_selected()
+        await until(
+            pilot,
+            lambda: any("does not apply" in str(n.message) for n in app._notifications),
+            label="warned",
+        )
+        assert rec.calls == []
+
+
+async def test_the_controller_refuses_the_install_key_without_write_ops(
+    tmp_path: Path,
+) -> None:
+    """No write client wired means no install path at all — the refusal is
+    the controller's, and it never reaches the approval gate."""
+    app = make_app(
+        {"packagemanifests": [_package("cert-manager")]},
+        audit_path=tmp_path / "audit.jsonl",
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "operators", "packagemanifests")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="package listed")
+        await app._olm.install_selected()
+        await until(
+            pilot,
+            lambda: any(
+                "Install unavailable in this session" in str(n.message) for n in app._notifications
+            ),
+            label="warned",
+        )
+        assert len(app.screen_stack) == 1

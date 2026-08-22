@@ -1198,9 +1198,9 @@ async def test_proposal_calls_are_delegated_to_the_proposal_port(env: Env) -> No
 def test_the_controller_module_imports_nothing_from_the_app_module() -> None:
     """The module must never import `korvid.ui.app` or name `KorvidApp` in code.
 
-    An import/name check, and no more than that: the ports the app binds at
+    An import/name check, and no more than that: some ports the app binds at
     runtime *are* app-backed adapters (`AppAgentPanel`, `AppAgentScreens`,
-    `AppProposalOps`, …). What this pins is that the controller depends on
+    `AppUiSurface`, …). What this pins is that the controller depends on
     the port interfaces, never on the app module or an app type it names
     itself — prose in docstrings is free to explain where it came from.
     """

@@ -11,8 +11,9 @@ used to live directly on `KorvidApp`:
 - the switch epoch and the in-flight claim every other flow revalidates
   against — this class *is* the session's single `ContextGuard`;
 - the kubeconfig listing, the pre-switch auth probe and the connection swap;
-- the `:ctx` picker, its completion prefetch task, and the picker's
-  display-label mapping;
+- the `:ctx` picker, its kubeconfig-context completion prefetch task, and
+  the picker's display-label mapping (the `:ns` completion prefetch belongs
+  to `WorkspaceController`, which the transaction drives directly);
 - the no-op check, the pre-probe guards, and the blocker set (busy agent,
   reserved write, open dialog, open namespace picker);
 - the embedded MCP quiesce, whose failure aborts the switch untouched;
@@ -133,22 +134,6 @@ class ContextSurface(ABC):
         """Publish the kubeconfig contexts as `:ctx` completions."""
 
     @abstractmethod
-    def clear_namespace_words(self) -> None:
-        """Drop the loaded namespace completions — they are old-cluster names."""
-
-    @abstractmethod
-    async def cancel_namespace_prefetch(self) -> None:
-        """Cancel and reap an in-flight namespace prefetch.
-
-        An old-cluster prefetch that landed after the new cluster's would
-        overwrite its completions, so it is reaped rather than abandoned.
-        """
-
-    @abstractmethod
-    def start_namespace_prefetch(self) -> None:
-        """Warm the namespace completions again for the applied cluster."""
-
-    @abstractmethod
     def cancel_worker_group(self, group: str) -> None:
         """Cancel an app worker group *without* waiting for it to settle.
 
@@ -220,6 +205,12 @@ class SwitchWorkspace(Protocol):
     def reset_view_after_switch(self) -> None: ...
 
     async def sync_metrics_poller(self) -> None: ...
+
+    def clear_namespace_words(self) -> None: ...
+
+    async def cancel_namespace_prefetch(self) -> None: ...
+
+    def start_namespace_prefetch(self) -> None: ...
 
 
 class SwitchWatches(Protocol):
@@ -406,6 +397,14 @@ class ContextSwitchCoordinator(ContextGuard):
         if list_contexts is None:
             return
 
+        # No error boundary here on purpose. The wired collaborator is
+        # `k8s.client.list_context_names`, which is total by contract: an
+        # unreadable or malformed kubeconfig yields `([], None)` rather than
+        # raising (pinned by
+        # `tests/k8s/test_client.py::test_list_context_names_unreadable_returns_empty`).
+        # No specific exception type is documented for it, and a blanket
+        # `except Exception` would swallow programming errors here — and in
+        # `shutdown`, which reaps this task — instead of surfacing them.
         async def _fetch() -> None:
             names, _active = await asyncio.to_thread(list_contexts)
             self._surface.set_context_words(names)
@@ -586,7 +585,7 @@ class ContextSwitchCoordinator(ContextGuard):
             await self._workspace().sync_metrics_poller()
         self._surface.resources_updated(self._view.current_kind())
         self._surface.refresh_status()
-        self._surface.start_namespace_prefetch()
+        self._workspace().start_namespace_prefetch()
         self._surface.refresh_completions()
         if applied == name:
             self._ui.notify(f"Switched to context {name} (ns: {self._view.current_scope()})")
@@ -696,10 +695,12 @@ class ContextSwitchCoordinator(ContextGuard):
         await self._workspace().quiesce_for_context_switch()
         # An old-cluster namespace prefetch still in flight could land after
         # the new cluster's and overwrite its completions — cancel it first.
-        await self._surface.cancel_namespace_prefetch()
+        # Both steps run on the workspace controller: it owns the prefetch
+        # task and the `:ns` completion words.
+        await self._workspace().cancel_namespace_prefetch()
         # Completions that already loaded are old-cluster names — drop them
         # now so they aren't offered while (or if) the new prefetch fails.
-        self._surface.clear_namespace_words()
+        self._workspace().clear_namespace_words()
         await self._watches.stop_all()
         registry = self._registry()
         if registry is not None:

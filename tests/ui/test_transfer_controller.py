@@ -25,6 +25,7 @@ import pytest
 from korvid.core.audit import AuditLog
 from korvid.core.transfer import RemoteEntry, TransferError, TransferSpec
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.models import PodSummary
 from korvid.ui.transfer import TransferController, TransferScreens
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.pick_screen import PickScreen
@@ -33,6 +34,28 @@ from korvid.ui.widgets.transfer_screen import TransferScreen
 from .test_write_coordinator import FakeView, make_env
 
 SUCCESS = json.dumps({"metadata": {}, "status": "Success"}).encode()
+
+#: Sentinel: "build the PodSummary the other arguments describe". `None` is
+#: a meaningful value (the row has no pods-view summary at all).
+_MISSING_POD: Any = object()
+
+
+def _pod(
+    selected: tuple[str | None, str | None], containers: tuple[str, ...], uid: str | None
+) -> PodSummary | None:
+    namespace, name = selected
+    if name is None:
+        return None
+    return PodSummary(
+        name=name,
+        namespace=namespace or "",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node="worker-1",
+        containers=containers,
+        uid=uid or "",
+    )
 
 
 class FakeScreens(TransferScreens):
@@ -110,7 +133,7 @@ class Harness:
             screens=self.screens,
             open_pod_exec=lambda: self._opener,  # type: ignore[arg-type,return-value]  # duck-typed fake
             audit=lambda: self._audit,
-            pod_containers=lambda ns, name: ("app",),
+            find_pod=lambda ns, name: _pod(("default", name), ("app",), "uid-1"),
             target_uid=self._target_uid,
             pod_uid_unchanged=self._uid_unchanged,
         )
@@ -293,11 +316,13 @@ class FlowHarness:
         current_uid: str | None = "uid-1",
         uid_error: BaseException | None = None,
         entries: list[RemoteEntry] | None = None,
+        pod: PodSummary | None = _MISSING_POD,
     ) -> None:
         self.env = make_env(
             tmp_path,
             view=FakeView(kind=kind, selected=selected, uid=uid, readonly=readonly),
         )
+        self.pod = _pod(selected, containers, uid) if pod is _MISSING_POD else pod
         self.ui = self.env.ui
         self.screens = FakeScreens()
         self.containers = containers
@@ -318,7 +343,7 @@ class FlowHarness:
             screens=self.screens,
             open_pod_exec=lambda: self.opener,  # type: ignore[arg-type,return-value]  # duck-typed fake
             audit=lambda: self.env.audit,
-            pod_containers=lambda ns, name: self.containers,
+            find_pod=lambda ns, name: self.pod,
             target_uid=self._target_uid,
             pod_uid_unchanged=self._uid_unchanged,
         )
@@ -552,3 +577,40 @@ def _fake_list_remote_dir(entries: list[RemoteEntry]) -> Any:
         return entries
 
     return _list
+
+
+# ---------------------------------------------------------------------------
+# One lookup: containers and the uid precondition describe the same object
+# ---------------------------------------------------------------------------
+
+
+async def test_the_transfer_target_comes_from_a_single_pod_summary_lookup(
+    tmp_path: Path,
+) -> None:
+    """Regression: the containers and the uid precondition must be read off
+    one `PodSummary`. Deriving them from two independent lookups let a row
+    with no pods-view summary still bind the transfer to a uid the container
+    list never saw."""
+    h = FlowHarness(tmp_path, pod=None, uid="uid-of-another-summary")
+    h.controller.start()
+    h.answer(_spec(tmp_path))
+    await h.ui.settle()
+    assert h.ran == [("default", "api-1", None, _spec(tmp_path), None)]
+
+
+async def test_the_transfer_uid_is_the_selected_pods_own(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, uid="uid-1")
+    h.controller.start()
+    h.answer(_spec(tmp_path))
+    await h.ui.settle()
+    assert h.ran == [("default", "api-1", "app", _spec(tmp_path), "uid-1")]
+
+
+async def test_a_pod_summary_without_a_uid_carries_no_precondition(tmp_path: Path) -> None:
+    """An empty uid is "unknown", not an identity: it must not be passed on
+    as a precondition string."""
+    h = FlowHarness(tmp_path, uid=None)
+    h.controller.start()
+    h.answer(_spec(tmp_path))
+    await h.ui.settle()
+    assert h.ran == [("default", "api-1", "app", _spec(tmp_path), None)]

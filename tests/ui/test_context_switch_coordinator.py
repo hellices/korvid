@@ -65,7 +65,6 @@ class FakeSurface(ContextSurface):
         self.requested: list[str] = []
         self.picker_open = False
         self.context_words: list[str] = []
-        self.namespace_words: list[str] = ["team-old"]
 
     def request_switch(self, name: str) -> None:
         self.requested.append(name)
@@ -78,16 +77,6 @@ class FakeSurface(ContextSurface):
 
     def set_context_words(self, names: list[str]) -> None:
         self.context_words = list(names)
-
-    def clear_namespace_words(self) -> None:
-        self.namespace_words = []
-        self._log("ns-words-cleared")
-
-    async def cancel_namespace_prefetch(self) -> None:
-        self._log("ns-prefetch-cancelled")
-
-    def start_namespace_prefetch(self) -> None:
-        self._log("ns-prefetch-started")
 
     def cancel_worker_group(self, group: str) -> None:
         self._log(f"workers-cancelled:{group}")
@@ -134,10 +123,21 @@ class FakeWorkspace:
         self._view = view
         self._session = session
         self._lock = asyncio.Lock()
+        self.namespace_words: list[str] = ["team-old"]
 
     @property
     def nav_lock(self) -> asyncio.Lock:
         return self._lock
+
+    def clear_namespace_words(self) -> None:
+        self.namespace_words = []
+        self._log("ns-words-cleared")
+
+    async def cancel_namespace_prefetch(self) -> None:
+        self._log("ns-prefetch-cancelled")
+
+    def start_namespace_prefetch(self) -> None:
+        self._log("ns-prefetch-started")
 
     async def quiesce_for_context_switch(self) -> None:
         self._log("workspace-quiesce")
@@ -829,9 +829,22 @@ async def test_old_cluster_namespace_completions_are_dropped_then_reprimed(
 ) -> None:
     env = Env(tmp_path)
     await env.switch()
-    assert env.surface.namespace_words == []
+    assert env.workspace.namespace_words == []
     assert env.log.index("ns-prefetch-cancelled") < env.log.index("ns-words-cleared")
     assert env.log.index("ns-words-cleared") < env.log.index("ns-prefetch-started")
+
+
+async def test_the_namespace_completion_lifecycle_is_driven_through_its_owner(
+    tmp_path: Path,
+) -> None:
+    """The workspace controller owns the prefetch task and the `:ns` words,
+    so the switch drives them on that collaborator - not through an app
+    adapter that would give a second owner of the same state."""
+    env = Env(tmp_path)
+    await env.switch()
+    for step in ("ns-prefetch-cancelled", "ns-words-cleared", "ns-prefetch-started"):
+        assert env.log.has(step)
+    assert not hasattr(env.surface, "start_namespace_prefetch")
 
 
 async def test_stopped_forwards_are_reported_to_the_operator(tmp_path: Path) -> None:

@@ -991,3 +991,35 @@ def test_ports_are_abstract() -> None:
     for port in (ProposalScreens, ReviewTasks, ProposalEvents):
         with pytest.raises(TypeError, match="abstract"):
             port()  # type: ignore[abstract]  # the port must not be instantiable
+
+
+def test_the_controller_module_imports_nothing_from_the_app_module() -> None:
+    """The module must never import `korvid.ui.app` or name `KorvidApp`.
+
+    An import/name check, and no more than that. Three of the ports this
+    controller is handed *are* app-backed adapters at runtime
+    (`AppProposalScreens`, `AppReviewTasks`, `AppProposalEvents`) — that is
+    fine and deliberate. What this pins is the direction of the dependency:
+    the controller is written against the port interfaces declared here, so
+    the app can be replaced by a fake without touching this module.
+    """
+    import ast
+
+    source = Path("src/korvid/ui/proposal_controller.py").read_text()
+    tree = ast.parse(source)
+    imported: list[str] = []
+    referenced: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imported.append(node.module)
+            imported.extend(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.Name):
+            referenced.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            referenced.append(node.attr)
+    assert "korvid.ui.app" not in imported
+    assert not any(module.startswith("korvid.ui.app.") for module in imported)
+    assert not any(name.endswith("KorvidApp") for name in imported)
+    assert "KorvidApp" not in referenced
