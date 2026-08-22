@@ -38,6 +38,7 @@ OVERRIDES = DOCS / "overrides"
 COPYRIGHT_PARTIAL = OVERRIDES / "partials" / "copyright.html"
 MARK = DOCS / "assets" / "korvid-mark.svg"
 DEMO_README = DOCS / "demo" / "README.md"
+STORYTELLING_JS = DOCS / "assets" / "javascripts" / "visual-storytelling.js"
 
 MATERIAL_ATTRIBUTION = "https://squidfunk.github.io/mkdocs-material/"
 
@@ -88,6 +89,36 @@ def _rule(css: str, selector: str) -> str:
     open_brace = stripped.index("{", index)
     close_brace = stripped.index("}", open_brace)
     return stripped[open_brace + 1 : close_brace]
+
+
+def _media_blocks(css: str, query: str) -> list[str]:
+    """Return the brace-balanced body of every `@media <query> { … }` block.
+
+    Args:
+        css: Full stylesheet text.
+        query: The exact at-rule prelude, e.g.
+            `"@media (prefers-reduced-motion: reduce)"`.
+
+    Returns:
+        One string per matching block, containing only that block's own
+        nested rules.
+    """
+    stripped = _strip_css_comments(css)
+    blocks: list[str] = []
+    for match in re.finditer(re.escape(query) + r"\s*\{", stripped):
+        opening = match.end() - 1
+        depth = 0
+        for position in range(opening, len(stripped)):
+            if stripped[position] == "{":
+                depth += 1
+            elif stripped[position] == "}":
+                depth -= 1
+                if depth == 0:
+                    blocks.append(stripped[opening + 1 : position])
+                    break
+        else:  # pragma: no cover - only reachable on malformed CSS
+            raise AssertionError(f"unterminated {query} block in extra.css")
+    return blocks
 
 
 def _section(opening: str, closing: str) -> str:
@@ -346,12 +377,27 @@ def test_local_assets_referenced_by_the_landing_page_exist() -> None:
 
 
 def test_reduced_motion_is_respected_for_every_animated_landing_element() -> None:
-    """Anything that transitions or transforms must be neutralised under reduce."""
-    css = _css()
-    reduce_start = css.index("@media (prefers-reduced-motion: reduce)")
-    reduce_block = css[reduce_start:]
-    assert "transition: none" in reduce_block
-    assert "transform: none" in reduce_block
+    """Anything that transitions or transforms must be neutralised under reduce.
+
+    This reads the balanced `@media (prefers-reduced-motion: reduce)` blocks
+    themselves. An earlier version sliced from the first reduce query to the
+    end of the file, so every later rule in the stylesheet counted as
+    "reduced-motion CSS" — including ordinary footer `transition` values,
+    which would have satisfied the assertions on their own.
+    """
+    blocks = _media_blocks(_css(), "@media (prefers-reduced-motion: reduce)")
+    assert blocks, "the stylesheet must neutralise motion under a reduce preference"
+    declarations = " ".join(" ".join(block.split()) for block in blocks)
+    assert "transition: none" in declarations
+    assert "transform: none" in declarations
+    assert "transform: translate(" not in declarations, (
+        "a reduce block that restates the element's own base transform changes "
+        "nothing; drop the no-op rather than pad the block"
+    )
+    for block in blocks:
+        assert "none" in block, (
+            f"every reduce block must actually switch motion off; found: {block!r}"
+        )
 
 
 # --- the rule helper must read rules, never the prose that explains them -----
@@ -453,6 +499,59 @@ def test_write_path_stage_grid_targets_the_ordered_list_specificity() -> None:
     css = _strip_css_comments(raw_css)
     assert css.count(".md-typeset ol.write-path__stages {") == 2
     assert ".md-typeset .write-path__stages {" not in css
+
+
+def test_evidence_figures_reserve_the_full_card_width_before_images_load() -> None:
+    """Material's `figure { width: fit-content }` must lose to a real override.
+
+    The mosaic images are `loading="lazy"`, so until each one decodes the
+    `<figure>` has nothing but its `<figcaption>` to shrink-wrap to.
+    Material for MkDocs ships `.md-typeset figure { width: fit-content }`,
+    which won against the branch's `margin`-only reset and let every tile
+    render at caption width and then jump 2-6x on load. The override has to
+    restate the box itself — the declarations, not a comment describing
+    them, are what the browser cascade sees.
+    """
+    block = _rule(_css(), ".md-typeset .evidence-card figure")
+    for declaration in ("width: 100%", "display: block", "margin: 0"):
+        assert declaration in block, (
+            f"`.md-typeset .evidence-card figure` must declare `{declaration}` so an "
+            "unloaded lazy figure still reserves its card's box; found: "
+            f"{' '.join(block.split())!r}"
+        )
+
+
+def test_scene_tabs_stay_hidden_until_the_controller_enhances_the_switcher() -> None:
+    """Without the controller the tab strip is inert, so it must not render.
+
+    The tabs only switch panels when `visual-storytelling.js` runs. With the
+    script blocked, all three panels are already visible in document order,
+    so a visible tab strip would offer two controls that do nothing, keep a
+    hard-coded `tabindex="-1"`, and advertise `aria-selected="true"` on one
+    of three simultaneously rendered panels. The controller sets
+    `data-enhanced` on the switcher; the stylesheet consumes it.
+    """
+    css = _strip_css_comments(_css())
+    selector = ".md-typeset [data-scene-switcher]:not([data-enhanced]) .scene-tabs"
+    assert selector in css, (
+        "the stylesheet must gate the tab strip on the controller's "
+        f"`data-enhanced` hook via `{selector}`"
+    )
+    assert "display: none" in _rule(_css(), selector)
+    script = STORYTELLING_JS.read_text(encoding="utf-8")
+    assert 'switcher.dataset.enhanced = "true"' in script, (
+        "the controller must set the hook the no-JS gate depends on"
+    )
+    switcher = _scene_switcher()
+    assert "data-scene-switcher" in switcher
+    assert "data-enhanced" not in switcher, (
+        "the enhancement hook must be applied by the controller at runtime, "
+        "never hard-coded into the source"
+    )
+    panels = re.findall(r'<article id="scene-([^"]+)"', switcher)
+    assert panels == ["direct", "agent", "mcp"], (
+        "every panel must stay in the source order the no-JS fallback reads"
+    )
 
 
 def test_landing_keeps_agent_masking_distinct_from_mcp_disclosure() -> None:

@@ -308,6 +308,15 @@
   padding: 0.25rem 0 0.75rem;
 }
 
+/* The tabs only do something once `visual-storytelling.js` has wired them,
+   and that controller announces itself by setting `data-enhanced` on the
+   switcher. Without it every panel is already rendered in document order,
+   so showing the strip would offer two dead controls and a selected state
+   that contradicts three visible panels. */
+.md-typeset [data-scene-switcher]:not([data-enhanced]) .scene-tabs {
+  display: none;
+}
+
 .md-typeset .scene-tabs button {
   flex: none;
   padding: 0.65rem 1rem;
@@ -519,7 +528,14 @@
   border-radius: var(--korvid-radius);
 }
 
+/* Material ships `.md-typeset figure { width: fit-content }`, which shrinks
+   an unloaded `loading="lazy"` figure down to its `<figcaption>` text and
+   makes every tile jump on load. Restate the box so the card's width is
+   reserved before the image decodes; the `width`/`height` attributes then
+   hold the height through the `aspect-ratio` rule below. */
 .md-typeset .evidence-card figure {
+  display: block;
+  width: 100%;
   margin: 0;
 }
 
@@ -683,12 +699,6 @@
   .md-typeset .docs-storyboard {
     grid-template-columns: minmax(0, 1.5fr) minmax(16rem, 0.5fr);
     align-items: start;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .md-typeset .docs-visual__pin {
-    transform: translate(-50%, -50%);
   }
 }
 

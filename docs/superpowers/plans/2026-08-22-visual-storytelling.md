@@ -1818,16 +1818,14 @@ Add to `docs/stylesheets/extra.css`:
     align-items: start;
   }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .md-typeset .docs-visual__pin {
-    transform: translate(-50%, -50%);
-  }
-}
 ```
 
-The reduced-motion rule intentionally preserves the static positioning
-transform; it is not an animation.
+The pins carry no animation, so there is no reduced-motion rule to write for
+them: restating their base `transform: translate(-50%, -50%)` inside
+`@media (prefers-reduced-motion: reduce)` changes nothing and only widens the
+block a reader (and
+`test_reduced_motion_is_respected_for_every_animated_landing_element`) has to
+scan.
 
 - [ ] **Step 10: Run selected-page, landing, and strict-build checks**
 
