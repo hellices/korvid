@@ -326,6 +326,8 @@ def _shows_state(document: Mapping[str, Any], assertions: Sequence[StateAssertio
     satisfaction controls read-checkpoint evidence used by safety,
     completion, and verification.
     """
+    if not assertions:
+        return False
     for assertion in assertions:
         result = evaluate_assertion_document(document, assertion)
         if not result.satisfied:

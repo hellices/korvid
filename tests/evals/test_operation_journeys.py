@@ -967,6 +967,10 @@ def test_provisional_absence_must_be_visible_in_the_model_read() -> None:
     assert _shows_state({"spec": {}}, (assertion,)) is True
 
 
+def test_empty_assertions_never_earn_model_read_credit() -> None:
+    assert _shows_state({"spec": {"replicas": 3}}, ()) is False
+
+
 async def test_a_missing_expected_preview_is_declined_without_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
