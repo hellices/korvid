@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import unquote, urlsplit
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).parent.parent
@@ -55,23 +56,67 @@ def _uses_directory_urls() -> bool:
     return value
 
 
+def _parse_exclude_docs(block: str) -> tuple[str, ...]:
+    """Docs-relative paths an `exclude_docs` block keeps out of the site.
+
+    MkDocs reads `exclude_docs` with gitignore syntax. This repository only
+    uses plain entries — a directory (`superpowers/`) or a single page
+    (`dev/scratch.md`) — and gitignore matches a slash-less entry as both a
+    file and a directory, so every entry is normalised to one path that
+    excludes itself and everything beneath it.
+
+    Anything using wildcard or negation syntax cannot be resolved to a
+    concrete docs path here. Such a line is rejected rather than dropped:
+    silently ignoring it would leave the published-page walk asserting on a
+    page MkDocs never builds.
+
+    Args:
+        block: The raw newline-separated `exclude_docs` value.
+
+    Returns:
+        One normalised docs-relative path per meaningful line.
+    """
+    entries: list[str] = []
+    for raw in block.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        is_pattern = line.startswith("!") or any(char in line for char in "*?[")
+        assert not is_pattern, (
+            f"exclude_docs entry {line!r} uses gitignore pattern syntax this walk "
+            "cannot resolve to a concrete docs path; teach `_parse_exclude_docs` "
+            "the pattern instead of letting the walk assert on an unpublished page"
+        )
+        entries.append(line.strip("/"))
+    return tuple(entries)
+
+
+def _is_published(relative: str, excluded: tuple[str, ...]) -> bool:
+    """Whether a docs-relative page survives the `exclude_docs` entries.
+
+    Args:
+        relative: A page path relative to `docs/`, e.g. `dev/README.md`.
+        excluded: Normalised entries from `_parse_exclude_docs`.
+
+    Returns:
+        `True` when no entry matches the page itself or one of its parents.
+    """
+    return not any(relative == entry or relative.startswith(f"{entry}/") for entry in excluded)
+
+
 def _excluded_prefixes() -> tuple[str, ...]:
-    """Directory prefixes `mkdocs.yml` keeps out of the published site."""
+    """Docs-relative paths `mkdocs.yml` keeps out of the published site."""
     excluded = _load_mkdocs_config().get("exclude_docs") or ""
     assert isinstance(excluded, str), "exclude_docs must stay a newline-separated block"
-    return tuple(
-        line.strip().rstrip("/") for line in excluded.splitlines() if line.strip().endswith("/")
-    )
+    return _parse_exclude_docs(excluded)
 
 
 def _public_markdown_sources() -> Iterator[Path]:
     """Every `docs/**/*.md` page MkDocs actually publishes."""
     excluded = _excluded_prefixes()
     for path in sorted(DOCS.rglob("*.md")):
-        relative = path.relative_to(DOCS).as_posix()
-        if any(relative == prefix or relative.startswith(f"{prefix}/") for prefix in excluded):
-            continue
-        yield path
+        if _is_published(path.relative_to(DOCS).as_posix(), excluded):
+            yield path
 
 
 def _built_directory_url(source: Path) -> str:
@@ -164,6 +209,49 @@ def test_raw_html_media_resolves_from_every_published_page_url() -> None:
             )
             checked += 1
     assert checked >= 13, f"the media walk must cover the storytelling assets, saw {checked}"
+
+
+def test_exclude_docs_honours_single_page_entries_not_just_directories() -> None:
+    """A file entry must remove that page from the walk, not be dropped.
+
+    `exclude_docs` is gitignore-style, so `dev/scratch.md` and a slash-less
+    `drafts` entry are both legitimate ways to unpublish content. Keeping
+    only lines that end in `/` silently published them here, and the walk
+    would then assert on raw HTML MkDocs never builds.
+    """
+    excluded = _parse_exclude_docs("overrides/\ndev/plans/\ndev/scratch.md\ndrafts\n\n# comment\n")
+    assert excluded == ("overrides", "dev/plans", "dev/scratch.md", "drafts")
+    assert not _is_published("dev/scratch.md", excluded), (
+        "a single-page exclude_docs entry must remove exactly that page"
+    )
+    assert not _is_published("drafts/idea.md", excluded), (
+        "a slash-less entry excludes the directory it names, as gitignore does"
+    )
+    assert not _is_published("dev/plans/2026-01-01-plan.md", excluded)
+    assert _is_published("dev/README.md", excluded), (
+        "excluding dev/scratch.md must not unpublish its siblings"
+    )
+    assert _is_published("dev/scratch.md.md", excluded), (
+        "prefix matching must respect path segments"
+    )
+
+
+def test_exclude_docs_rejects_patterns_the_walk_cannot_resolve() -> None:
+    """A glob or negation must fail loudly instead of being ignored."""
+    for pattern in ("dev/*.md", "!dev/keep.md", "dev/plan-?.md", "dev/[ab].md"):
+        with pytest.raises(AssertionError, match="gitignore pattern syntax"):
+            _parse_exclude_docs(f"overrides/\n{pattern}\n")
+
+
+def test_published_sources_match_the_committed_exclude_docs_block() -> None:
+    """The real config must keep producing the published set the walk asserts on."""
+    assert _excluded_prefixes() == ("overrides", "dev/plans", "superpowers")
+    published = {path.relative_to(DOCS).as_posix() for path in _public_markdown_sources()}
+    assert "index.md" in published
+    assert "tui.md" in published
+    assert not any(
+        page.startswith(("overrides/", "dev/plans/", "superpowers/")) for page in published
+    )
 
 
 def test_scoreboard_source_directories_use_strict_safe_github_urls() -> None:
