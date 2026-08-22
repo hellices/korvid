@@ -136,6 +136,18 @@ def test_pf_reaches_the_forward_owner() -> None:
     assert h.forwards.lists == 1
 
 
+def test_zero_argument_commands_reject_trailing_arguments() -> None:
+    h = Harness()
+    h.router.route("tp extra")
+    h.router.route("telepresence extra")
+    h.router.route("proposals extra")
+    h.router.route("pf stop")
+    assert h.integrations.telepresence == 0
+    assert h.proposals.reviews == 0
+    assert h.forwards.lists == 0
+    assert len(h.ui.notifications) == 4
+
+
 def test_operators_without_a_discovered_catalog_is_explained_by_its_owner() -> None:
     h = Harness(catalog_missing=True)
     h.router.route("operators")

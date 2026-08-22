@@ -102,13 +102,13 @@ class CommandRouter:
         if head == "mcp":
             self._integrations.handle_mcp_command(args)
             return
-        if head in {"tp", "telepresence"}:
+        if head in {"tp", "telepresence"} and not args:
             self._integrations.handle_telepresence_command()
             return
-        if head == "proposals":
+        if head == "proposals" and not args:
             self._proposals.open_review()
             return
-        if head == "pf":
+        if head == "pf" and not args:
             self._forwards.open_list()
             return
         if head == "operators" and len(args) <= 1 and self._operators.explain_missing_catalog():
