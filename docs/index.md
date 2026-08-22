@@ -107,9 +107,55 @@ hide:
   <p class="write-path__boundary">Embedded provider payloads are masked; MCP result disclosure is tool-specific. <a href="threat-model/">Inspect both boundaries.</a></p>
 </section>
 
-## Find your flight path
+<section class="evidence-mosaic" aria-labelledby="evidence-title">
+  <div class="section-heading">
+    <p class="eyebrow">PRODUCT EVIDENCE</p>
+    <h2 id="evidence-title">Built for the incident, not the screenshot.</h2>
+    <p>Each surface below is a real korvid view captured against synthetic cluster data.</p>
+  </div>
+  <div class="evidence-mosaic__grid">
+    <article class="evidence-card evidence-card--wide">
+      <figure><img src="assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table filtered to a crash-looping payment worker"><figcaption>Resource cockpit</figcaption></figure>
+      <p>Filter live resources and keep status, scope, and utilization in one keyboard path.</p>
+      <a href="tui/">Browse the cockpit</a>
+    </article>
+    <article class="evidence-card">
+      <figure><img src="assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a pod dependency on a ConfigMap"><figcaption>Relationship graph</figcaption></figure>
+      <p>Follow metadata-only dependencies without exposing Secret values.</p>
+      <a href="resource-relationships/">Follow relationships</a>
+    </article>
+    <article class="evidence-card">
+      <figure><img src="assets/scenes/merged-logs.png" width="1280" height="720" loading="lazy" alt="Korvid log pane following synthetic payment worker logs"><figcaption>Merged logs</figcaption></figure>
+      <p>Stream, merge, filter, and reconnect without leaving the selected workload.</p>
+      <a href="tui/#log-viewer">Read the log workflow</a>
+    </article>
+    <article class="evidence-card">
+      <figure><img src="assets/scenes/diagnosis.png" width="1280" height="720" loading="lazy" alt="Korvid describe view showing a synthetic failing pod and warning events"><figcaption>Operational evidence</figcaption></figure>
+      <p>Put manifests, warning events, and failure context beside the selected resource.</p>
+      <a href="tui/#ops-hints">Inspect diagnosis surfaces</a>
+    </article>
+    <article class="evidence-card">
+      <figure><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic failing payment worker with cited evidence"><figcaption>Agent with citations</figcaption></figure>
+      <p>Ask from the current screen and keep checkable evidence in the answer.</p>
+      <a href="agent/">Use the embedded agent</a>
+    </article>
+    <article class="evidence-card evidence-card--wide">
+      <figure><img src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="An external MCP client reading synthetic cluster data while korvid mirrors the navigation"><figcaption>MCP follow</figcaption></figure>
+      <p>Let an external assistant read bounded tools while korvid can mirror where it went.</p>
+      <a href="mcp/#follow-mode">Connect over MCP</a>
+    </article>
+  </div>
+</section>
 
-- **Operating a cluster?** Start with the [five-minute guide](getting-started.md), then keep the [key reference](keybindings.md) nearby.
-- **Adding AI?** Configure the [embedded agent](agent.md) or connect an [external MCP client](mcp.md).
-- **Evaluating production use?** Read [performance and scale](performance.md), [air-gapped operation](airgap.md), and the [threat model](threat-model.md).
-- **Contributing?** Begin with the [architecture](dev/specs/2026-08-12-korvid-architecture.md) and [quality gates](dev/quality-gates.md).
+<nav class="flight-paths" aria-labelledby="flight-paths-title">
+  <div class="section-heading">
+    <p class="eyebrow">CHOOSE A FLIGHT PATH</p>
+    <h2 id="flight-paths-title">Go from proof to practice.</h2>
+  </div>
+  <div class="flight-paths__grid">
+    <a href="getting-started/"><strong>Operate a cluster</strong><span>Install and take the five-minute route.</span></a>
+    <a href="agent/"><strong>Add the embedded agent</strong><span>Choose a provider and inspect its boundary.</span></a>
+    <a href="mcp/"><strong>Connect an MCP client</strong><span>Expose bounded reads and optional proposals.</span></a>
+    <a href="performance/"><strong>Evaluate production use</strong><span>Check scale, air-gap, and threat assumptions.</span></a>
+  </div>
+</nav>

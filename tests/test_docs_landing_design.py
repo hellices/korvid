@@ -432,6 +432,33 @@ def test_plan_preserves_the_mcp_disclosure_boundary() -> None:
     assert "secret values are masked before model calls" not in lowered
 
 
+def test_capability_mosaic_contains_six_real_linked_product_scenes() -> None:
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    cards = re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.DOTALL)
+    assert len(cards) == 6
+    for card in cards:
+        assert "<img" in card
+        assert 'loading="lazy"' in card
+        assert "<figcaption>" in card
+        assert re.search(r'href="[^"]+/(?:#[^"]+)?"', card)
+        paragraphs = re.findall(r"<p>(.*?)</p>", card, re.DOTALL)
+        assert len(paragraphs) == 1
+        assert len(re.sub(r"<[^>]+>", " ", paragraphs[0]).split()) <= 30
+
+
+def test_flight_paths_are_four_compact_user_destinations() -> None:
+    paths = _section('<nav class="flight-paths"', "</nav>")
+    for label, href in (
+        ("Operate a cluster", "getting-started/"),
+        ("Add the embedded agent", "agent/"),
+        ("Connect an MCP client", "mcp/"),
+        ("Evaluate production use", "performance/"),
+    ):
+        assert label in paths
+        assert f'href="{href}"' in paths
+    assert "Contributing?" not in paths
+
+
 def test_landing_never_claims_the_surfaces_look_the_same() -> None:
     """Shared state is a true claim; identical screens is not.
 
