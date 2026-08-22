@@ -35,7 +35,6 @@ from korvid.k8s.relationship_facts import (
     TargetReference,
 )
 from korvid.ui.app import EventsFetcher, KorvidApp
-from korvid.ui.messages import AgentPromptSubmitted
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
@@ -389,13 +388,11 @@ class DemoKorvidApp(KorvidApp):
     async def on_mount(self) -> None:
         await super().on_mount()
         if self._demo_scene == "agent":
+            # Auto-open and focus the real AgentPanel input shortly after
+            # mount so the recording tape can type the prompt itself and
+            # press Enter through the genuine Input/on_input_submitted
+            # path, instead of the harness synthesizing the submission.
             self.set_timer(0.2, self.action_toggle_agent)
-            self.set_timer(7.2, self._submit_agent_scene_prompt)
-
-    def _submit_agent_scene_prompt(self) -> None:
-        if not self._agent_panel_expanded():
-            self.action_toggle_agent()
-        self.on_agent_prompt_submitted(AgentPromptSubmitted("Why is the payment worker failing?"))
 
 
 async def list_relationship_objects(

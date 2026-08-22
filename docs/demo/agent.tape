@@ -10,8 +10,13 @@ Set Shell bash
 Hide
 Type "uv run python docs/demo/demo.py --scene agent"
 Enter
-Sleep 6s
+Sleep 20s
 Show
+# The demo harness already auto-opened and focused the real AgentPanel
+# `#agent-input` widget by this point; type straight into it and press
+# Enter through the genuine Input/on_input_submitted path.
+Type "Why is the payment worker failing?"
+Enter
 Sleep 8s
 Hide
 Type "q"

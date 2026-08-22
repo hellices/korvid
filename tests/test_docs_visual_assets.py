@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 SCENES = ROOT / "docs" / "assets" / "scenes"
 INSTRUCTIONS = ROOT / "docs" / "demo" / "visual-storytelling.md"
+AGENT_TAPE = ROOT / "docs" / "demo" / "agent.tape"
+DEMO_HARNESS = ROOT / "docs" / "demo" / "demo.py"
 
 PNG_ASSETS = {
     "cockpit-poster.png": (1280, 720, 720),
@@ -57,3 +59,31 @@ def test_storytelling_capture_instructions_name_every_generated_asset() -> None:
     assert "vhs docs/demo/agent.tape" in instructions
     assert "vhs docs/demo/relationships.tape" in instructions
     assert "docs/assets/mcp-follow-demo.gif" in instructions
+
+
+def test_agent_tape_types_the_real_prompt_and_presses_enter() -> None:
+    """The recording must type into the real AgentPanel input, not synthesize it.
+
+    `docs/demo/agent.tape` is the VHS script VHS itself executes; if it never
+    types the prompt and sends Enter, no keystrokes ever reach the real
+    `#agent-input` widget and the recording would just show a scripted
+    response with no evidence of a working input path.
+    """
+    tape = AGENT_TAPE.read_text(encoding="utf-8")
+    prompt_line_index = next(
+        i
+        for i, line in enumerate(tape.splitlines())
+        if 'Type "Why is the payment worker failing?"' in line
+    )
+    following_lines = tape.splitlines()[prompt_line_index + 1 :]
+    assert following_lines, "Enter must follow the typed prompt"
+    assert following_lines[0].strip() == "Enter"
+
+
+def test_demo_harness_never_synthesizes_the_agent_prompt_submission() -> None:
+    """The documentation-only harness may auto-open/focus the AgentPanel, but
+    it must drive the prompt through real keyboard input recorded by VHS —
+    never by calling the message handler or posting the message directly."""
+    source = DEMO_HARNESS.read_text(encoding="utf-8")
+    assert "AgentPromptSubmitted" not in source
+    assert "on_agent_prompt_submitted(" not in source

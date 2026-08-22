@@ -25,9 +25,11 @@ ffmpeg -y -ss 00:00:23 -i docs/assets/demo.mp4 -frames:v 1 \
 
 ## Embedded agent
 
-`docs/demo/agent.tape` records the real AgentPanel while the documentation-only
-`agent` scene in `docs/demo/demo.py` submits a deterministic prompt to
-`ScriptedAgentRuntime`.
+`docs/demo/agent.tape` records the real AgentPanel: the documentation-only
+`agent` scene in `docs/demo/demo.py` auto-opens and focuses the panel's real
+`#agent-input` widget after mount, then VHS types the prompt itself and
+presses Enter, submitting it through the genuine
+`Input`/`on_input_submitted` path to the deterministic `ScriptedAgentRuntime`.
 
 ```sh
 vhs docs/demo/agent.tape
