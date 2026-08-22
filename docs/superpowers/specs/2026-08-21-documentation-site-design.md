@@ -55,10 +55,11 @@ The page tells a deliberate story:
 
 1. korvid is a keyboard-first cockpit for a Kubernetes cluster;
 2. the TUI is useful without AI;
-3. korvid is one operational experience — one operational state, evidence
-   trail, and navigation model — that a human operator, the embedded agent,
-   and an external MCP client each drive as a different surface, without
-   claiming their screens or interfaces are identical;
+3. korvid is one operational experience anchored to the active cluster
+   context, navigation semantics, and safety boundary. The TUI is watch-backed
+   while embedded-agent and MCP tools can perform fresh reads, so their
+   snapshots can differ; each actor drives a different surface without
+   claiming identical screens or evidence snapshots;
 4. every write, whoever initiates it, converges on the same human approval
    and fail-closed audit boundary — MCP-submitted writes are always
    proposals, never executed automatically; and
@@ -167,9 +168,9 @@ Below the hero:
 
 - a three-part product model presents one operational experience driven by
   three surfaces — direct operation, delegation to the embedded agent, and
-  connection over MCP — that share the same operational state, evidence,
-  navigation model, and approval/audit boundary without implying identical
-  screens or interfaces;
+  connection over MCP — anchored to the same active context, navigation
+  semantics, and approval/audit boundary. It explicitly distinguishes the
+  TUI's watch-backed snapshot from fresh tool reads, whose snapshots can differ;
 - a safety section makes approval, masking, and fail-closed auditing visible
   before users have to search for the threat model;
 - the demo is shown at a readable width rather than treated as decoration; and
@@ -183,10 +184,13 @@ and navigation even though the landing page is more expressive.
 
 Material's built-in privacy plugin downloads Mermaid's runtime during the
 documentation build and rewrites pages to serve that generated vendor asset
-locally. Generated local/vendor assets are allowed; browser runtime requests to
-third-party asset hosts are not. No custom JavaScript or manually configured
-Mermaid pin is added. The site must preserve the architecture diagrams already
-embedded in the overview and architecture documents.
+locally. The Material bundle is vendored at its theme asset path only to pin
+its ResizeObserver fallback to immutable version `1.5.1`; a checksum test
+guards the reviewed bytes. Generated local/vendor assets are allowed; browser
+runtime requests to third-party asset hosts are not. No custom JavaScript
+application or manually configured Mermaid pin is added. The site must preserve
+the architecture diagrams already embedded in the overview and architecture
+documents.
 
 ## Failure handling
 

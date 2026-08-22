@@ -395,27 +395,18 @@ def test_landing_frames_one_experience_rather_than_three_separate_products() -> 
     )
 
 
-def test_landing_names_what_the_three_surfaces_actually_share() -> None:
-    """The claim must be specific: state, evidence, navigation, and the safety gate.
-
-    A vague 'works together' line would be marketing. Naming the four shared
-    things is checkable, and it is what the architecture actually guarantees.
-    This is scoped to the product-model intro paragraph itself (not the whole
-    page — see `_product_model_intro`) so the assertion cannot pass on the
-    strength of these same words appearing in an unrelated section instead.
-    """
+def test_landing_names_the_boundaries_the_three_surfaces_actually_share() -> None:
+    """Distinguish shared boundaries from independently timed cluster reads."""
     intro = _product_model_intro()
-    assert "Different surfaces. One operational state." in intro, (
-        "the section needs a line that separates surface from state, so the page "
-        "never implies the three actors see identical screens"
-    )
-    lowered = intro.lower()
-    for shared in ("evidence", "navigation", "approval", "audit"):
-        assert shared in lowered, (
-            f"the product-model intro must name {shared!r} explicitly rather than "
-            "claiming a vague unity, and rather than relying on the word "
-            "appearing only in some other section of the page"
-        )
+    lowered = " ".join(intro.lower().replace("*", "").split())
+    assert "different surfaces. shared context and safety." in lowered
+    for shared in ("active cluster context", "navigation", "approval", "audit"):
+        assert shared in lowered, f"the product-model intro must name {shared!r}"
+    assert "watch-backed" in lowered
+    assert "fresh reads" in lowered
+    assert "snapshots can differ" in lowered
+    for overclaim in ("one operational state", "one resource cache", "same evidence"):
+        assert overclaim not in lowered
 
 
 def test_feature_cards_are_ways_to_drive_korvid_not_three_feature_silos() -> None:
@@ -432,10 +423,9 @@ def test_feature_cards_are_ways_to_drive_korvid_not_three_feature_silos() -> Non
     assert "delegate" in joined, "the second card is delegation to the embedded agent"
     assert "mcp" in joined, "the third card is connecting an external assistant over MCP"
     body = grid.lower()
-    assert "same" in body, (
-        "the cards must tie back to the shared operational state rather than "
-        "describing three disconnected features"
-    )
+    assert "active context" in body
+    assert "safety" in body
+    assert "same evidence" not in body
     assert "when enabled" in body or "opt-in" in body, (
         "the MCP card must not imply the optional MCP server is always enabled"
     )
@@ -585,6 +575,11 @@ def test_design_document_records_the_agentic_ui_positioning() -> None:
     assert "proposal" in lowered, (
         "the design document must keep the factual limit that MCP writes are proposals"
     )
+    assert "watch-backed" in lowered
+    assert "fresh" in lowered
+    assert "snapshots can differ" in lowered
+    for overclaim in ("one operational state", "same operational state", "shared evidence"):
+        assert overclaim not in lowered
 
 
 def test_plan_document_records_the_agentic_ui_positioning() -> None:
@@ -612,6 +607,12 @@ def test_plan_document_records_the_agentic_ui_positioning() -> None:
         "the plan's embedded landing-content example must carry the same "
         "product-model heading docs/index.md ships"
     )
+    lowered = plan.lower()
+    assert "watch-backed" in lowered
+    assert "fresh reads" in lowered
+    assert "snapshots can differ" in lowered
+    for overclaim in ("one resource cache", "same evidence", "same operational state"):
+        assert overclaim not in lowered
 
 
 def test_design_and_css_describe_build_localized_runtime_assets_truthfully() -> None:

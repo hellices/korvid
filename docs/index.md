@@ -41,17 +41,16 @@ hide:
 
 ## One operational experience. Three ways to drive it.
 
-Korvid runs one session: one resource cache, one evidence trail, one
-approval gate. **Different surfaces. One operational state.** A human
-operator's keyboard, the embedded agent's tool calls, and an external MCP
-client's requests all read the same navigation model and the same evidence,
-and every write — however it starts — crosses the same approval and audit
-boundary.
+Korvid coordinates one operational experience around the active cluster
+context, navigation semantics, and approval/audit boundary. The TUI presents
+watch-backed snapshots while embedded-agent and MCP tools can perform fresh
+reads, so their snapshots can differ in time. **Different surfaces. Shared
+context and safety.**
 
 <div class="feature-grid">
-  <article><span>01</span><h3>Drive it yourself</h3><p>Browse, filter, follow relationships, and run guarded operations straight from the keyboard — the same resource view, evidence, and safety gate every other actor shares.</p></article>
-  <article><span>02</span><h3>Delegate to the agent</h3><p>An embedded agent reads the same evidence you see, cites it, and drives korvid on your behalf. Its writes still cross the same confirmation gate as yours.</p></article>
-  <article><span>03</span><h3>Connect over MCP</h3><p>When enabled, give VS Code, Claude Code, Cursor, or Zed bounded reads of the same cluster state and evidence. Write proposals stay opt-in and always need a human to confirm.</p></article>
+  <article><span>01</span><h3>Drive it yourself</h3><p>Browse, filter, follow relationships, and run guarded operations through the watch-backed TUI while staying within the active context and safety boundary.</p></article>
+  <article><span>02</span><h3>Delegate to the agent</h3><p>An embedded agent performs bounded fresh reads in the active context, cites its evidence, and drives korvid on your behalf. Its writes still cross the confirmation gate.</p></article>
+  <article><span>03</span><h3>Connect over MCP</h3><p>When enabled, give VS Code, Claude Code, Cursor, or Zed bounded fresh reads in the active context. Write proposals stay opt-in and always need a human to confirm.</p></article>
 </div>
 
 ## Sharp tools. Human hands.

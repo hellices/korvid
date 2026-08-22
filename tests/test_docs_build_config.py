@@ -16,6 +16,7 @@ Homebrew guidance without reaching out to PyPI or the tap during tests.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import tomllib
 from pathlib import Path
@@ -24,6 +25,7 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).parent.parent
+MATERIAL_BUNDLE = ROOT / "docs" / "assets" / "javascripts" / "bundle.d7400e89.min.js"
 
 
 def test_makefile_docs_build_uses_frozen() -> None:
@@ -239,6 +241,19 @@ def test_mkdocs_disables_remote_fonts_and_localizes_external_assets() -> None:
         "unpkg runtime URL in the built bundle"
     )
     assert match.group("url") == resize_url
+
+
+def test_material_bundle_pins_the_resize_observer_fallback() -> None:
+    """The localized fallback must be immutable before the privacy plugin fetches it."""
+    assert MATERIAL_BUNDLE.is_file(), (
+        "docs must override Material's bundle with the reviewed URL-pinned copy"
+    )
+    bundle = MATERIAL_BUNDLE.read_bytes()
+    assert b"https://unpkg.com/resize-observer-polyfill@1.5.1/dist/ResizeObserver.js" in bundle
+    assert b'"https://unpkg.com/resize-observer-polyfill"' not in bundle
+    assert hashlib.sha256(bundle).hexdigest() == (
+        "34cdcb4beeb2350814efd5345fd43cdd1f0170967004c29c160ad7fe44842c74"
+    ), "the reviewed Material bundle override must not drift without an explicit update"
 
 
 def test_mkdocs_excludes_override_sources_but_keeps_theme_customization() -> None:
