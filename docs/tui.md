@@ -5,6 +5,22 @@ metrics, ops hints, the split workspace, the log viewer, namespace scope,
 and context switching. Keys referenced here are listed in
 [keybindings.md](keybindings.md).
 
+<figure class="docs-visual docs-visual--annotated">
+  <div class="docs-visual__stage">
+    <img src="assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table filtered to a synthetic crash-looping payment worker">
+    <span class="docs-visual__pin" style="--x: 12%; --y: 8%;" aria-hidden="true">1</span>
+    <span class="docs-visual__pin" style="--x: 50%; --y: 20%;" aria-hidden="true">2</span>
+    <span class="docs-visual__pin" style="--x: 50%; --y: 92%;" aria-hidden="true">3</span>
+  </div>
+  <figcaption>
+    <ol>
+      <li><strong>Context and namespace</strong> stay visible while you navigate.</li>
+      <li><strong>Resource evidence</strong> is watch-backed and filterable in place.</li>
+      <li><strong>Effective keys</strong> follow the current view; <kbd>?</kbd> shows the complete set.</li>
+    </ol>
+  </figcaption>
+</figure>
+
 ## Custom columns
 
 Teams encode operational facts in labels, annotations, and spec fields —

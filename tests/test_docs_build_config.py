@@ -110,6 +110,24 @@ def test_mkdocs_config_does_not_downgrade_link_validation() -> None:
     )
 
 
+def test_core_concept_pages_each_have_their_selected_visual_evidence() -> None:
+    expected = {
+        "overview.md": ("```mermaid", "KORVID — product boundary"),
+        "tui.md": ('class="docs-visual docs-visual--annotated"', "cockpit-poster.png"),
+        "agent.md": ('class="docs-storyboard"', "agent-poster.png"),
+        "mcp.md": ("```mermaid", "External MCP client"),
+        "ops.md": ("```mermaid", "Audit append"),
+        "resource-relationships.md": (
+            'class="docs-visual"',
+            "relationship-graph.png",
+        ),
+    }
+    for relative, markers in expected.items():
+        source = (ROOT / "docs" / relative).read_text(encoding="utf-8")
+        for marker in markers:
+            assert marker in source, f"{relative} must contain {marker!r}"
+
+
 def test_getting_started_matches_current_project_and_readme_release() -> None:
     """The offline release sources must agree on every intentionally pinned install."""
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))

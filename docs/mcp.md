@@ -68,6 +68,28 @@ exposed (read-only plus opt-in write proposals), and that writes still
 require your keystroke — not what the connected client does with the data
 those tools return.
 
+```mermaid
+flowchart LR
+    CLIENT["External MCP client"]
+    READ["Bounded read tools"]
+    FOLLOW["Optional follow<br/>UI navigation only"]
+    PROPOSE["Opt-in write proposal"]
+    CONFIRM["In-TUI human confirmation"]
+    AUDIT["Fail-closed audit"]
+    KUBE[("Kubernetes API")]
+
+    CLIENT --> READ --> KUBE
+    READ -. successful read .-> FOLLOW
+    CLIENT -. disabled by default .-> PROPOSE --> CONFIRM --> AUDIT --> KUBE
+
+    style CONFIRM fill:#f5a623,color:#12151a,stroke:#ffcf6e
+    style AUDIT fill:#1b1f26,color:#e7e9ee,stroke:#f5a623
+```
+
+The external client owns its model/data boundary. Follow never changes the
+tool result, and a proposal never becomes a mutation until the TUI receives a
+fresh user keystroke and the audit append succeeds.
+
 The live endpoint is also published to
 `$XDG_STATE_HOME/korvid/mcp-endpoint.json` (defaulting to
 `~/.local/state/korvid/mcp-endpoint.json` when `XDG_STATE_HOME` is unset)

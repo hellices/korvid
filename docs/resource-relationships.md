@@ -12,6 +12,11 @@ environment variable value is ever retained in a relationship fact, the
 graph, or anything the screen renders. See [Secret safety](#secret-safety)
 below for what that guarantee does and does not cover.
 
+<figure class="docs-visual">
+  <img src="assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a synthetic Pod dependency on a ConfigMap">
+  <figcaption>The two panes separate dependencies from dependents; every row preserves relation direction, confidence, state, and source field.</figcaption>
+</figure>
+
 ## Opening the view
 
 With a resource selected in any discovered (non-synthetic) table, press `g`.

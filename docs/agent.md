@@ -54,6 +54,19 @@ dialog expires without executing anything.  Every executed write — yours or
 agent-requested — is recorded in the fail-closed
 [audit log](ops.md#the-safety-model).
 
+<section class="docs-storyboard" aria-labelledby="agent-storyboard-title">
+  <figure>
+    <img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic crash-looping payment worker with cited evidence">
+    <figcaption id="agent-storyboard-title">One prompt stays attached to the operational screen.</figcaption>
+  </figure>
+  <ol>
+    <li><strong>Context</strong><span>Current view, namespace, selection, and filter.</span></li>
+    <li><strong>Read</strong><span>Bounded tools gather manifests, events, logs, or diagnoses.</span></li>
+    <li><strong>Cite</strong><span>Evidence references remain selectable and validated.</span></li>
+    <li><strong>Drive</strong><span>Navigation can change; writes still stop at confirmation.</span></li>
+  </ol>
+</section>
+
 ## Stopping and correcting a turn
 
 The input stays enabled while the agent works.  Press `Ctrl-X` to stop the

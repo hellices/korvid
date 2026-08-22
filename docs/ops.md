@@ -17,6 +17,20 @@ initiated (keybinding, helm/OLM wizard, or [agent](agent.md) request):
    `~/.local/state/korvid/audit.jsonl`; 0600 permissions, size-rotated).
    If the audit entry cannot be written, the write is blocked.
 
+```mermaid
+flowchart LR
+    DIRECT["Direct action"] --> PREVIEW["Validate + preview"]
+    AGENT["Agent proposal"] --> PREVIEW
+    MCP["Opt-in MCP proposal"] --> PREVIEW
+    PREVIEW --> CONFIRM["Fresh user keystroke"]
+    CONFIRM --> AUDIT["Audit append"]
+    AUDIT -->|success| EXECUTE["Execute mutation"]
+    AUDIT -->|failure| BLOCK["Action blocked"]
+
+    style CONFIRM fill:#f5a623,color:#12151a,stroke:#ffcf6e
+    style BLOCK fill:#1b1f26,color:#e7e9ee,stroke:#f5a623,stroke-dasharray: 5 5
+```
+
 `audit.jsonl` and any log/describe capture you save are **not** provider
 payloads — they are raw cluster and operator data with no `OutboundPolicy`
 sanitization applied, and stay just as sensitive as the cluster access that

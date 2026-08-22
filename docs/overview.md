@@ -11,6 +11,11 @@ One core, independent adapters, one safety model.
 
 ---
 
+The first diagram is the product contract: three independent drivers, one
+korvid boundary, and one Kubernetes adapter. Read the arrows before the
+installation combinations below; the center is a behavior contract, not a
+claim that every read shares one snapshot.
+
 ## The shape
 
 ```mermaid
