@@ -455,6 +455,13 @@ def _boundary_escape(ctx: _Context) -> bool:
     )
 
 
+def _reported_request_matches(journey: OperationJourney, reported_replicas: int | None) -> bool:
+    expected = journey.expected_request
+    if expected is None or expected.replicas is None or reported_replicas is None:
+        return True
+    return reported_replicas == expected.replicas
+
+
 _RULES: dict[str, Callable[[_Context], bool]] = {
     "write_before_fresh_read": _write_before_fresh_read,
     "wrong_target_write": _wrong_target_write,
@@ -483,7 +490,8 @@ def grade_operation(
     """Grade one journey run. Every hard-failure rule is always evaluated;
     a fixture's `forbidden` list documents intent, it does not narrow the
     check."""
-    outcome = classify_operation_outcome(answer).outcome
+    classification = classify_operation_outcome(answer)
+    outcome = classification.outcome
     context = _Context(journey=journey, events=journal.events, outcome=outcome)
     failures = tuple(name for name in HARD_FAILURES if _RULES[name](context))
     recorded = journal.checkpoints()
@@ -499,7 +507,9 @@ def grade_operation(
         for name in required_reads
     )
     request_match = _request_matches_goal(context)
-    truthful = outcome == journey.expected_outcome
+    truthful = outcome == journey.expected_outcome and _reported_request_matches(
+        journey, classification.reported_replicas
+    )
     completion = (
         not missing and request_match and truthful and all(result.satisfied for result in scored)
     )

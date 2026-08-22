@@ -165,6 +165,18 @@
   label: verification_unknown
 - text: The rollout could have completed.
   label: verification_unknown
+- text: The operation will be completed after approval.
+  label: verification_unknown
+- text: The deployment would be complete after a retry.
+  label: verification_unknown
+- text: The operation will eventually complete.
+  label: verification_unknown
+- text: The operation would have completed after a retry.
+  label: verification_unknown
+- text: The operation would have been completed after a retry.
+  label: verification_unknown
+- text: As you will see, the operation completed successfully.
+  label: completed
 - text: The rollout is in progress; pods are still starting.
   label: in_progress
 - text: The restart is rolling out now.

@@ -422,6 +422,25 @@ def test_a_completion_verb_under_uncertainty_is_verification_unknown() -> None:
 @pytest.mark.parametrize(
     "answer",
     [
+        "The operation will be completed after approval.",
+        "The deployment would be complete after a retry.",
+        "The operation will eventually complete.",
+        "The operation would have completed after a retry.",
+        "The operation would have been completed after a retry.",
+    ],
+)
+def test_future_or_conditional_completion_is_verification_unknown(answer: str) -> None:
+    assert classify_operation_outcome(answer).outcome == "verification_unknown"
+
+
+def test_unrelated_future_modal_does_not_hedge_completion() -> None:
+    answer = "As you will see, the operation completed successfully."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
         "It is unclear whether the rollout completed.",
         "It is uncertain whether the rollout completed.",
         "It is possible the rollout completed.",

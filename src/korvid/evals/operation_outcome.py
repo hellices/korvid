@@ -97,6 +97,7 @@ _PHRASES: dict[str, tuple[str, ...]] = {
         "failed to verify",
         "failed to confirm",
         "failed to check",
+        "modal completion",
         "unable to verify",
         "unverified",
         "unconfirmed",
@@ -244,6 +245,11 @@ _SCALED_REPLICA_COUNT = re.compile(
     r"(?<!\w)scaled\b.*?\bto\s+(?:the\s+)?"
     r"(?:(?:desired|requested)\s+)?(\d+)\s+replicas?\b"
 )
+_PRESENT_REPLICA_COUNT = re.compile(
+    r"(?<!\w)(?:is now|are now|now at|already at)\s+"
+    r"(?:(?:at\s+)?(?:(?:the\s+)?(?:desired|requested)\s+)?(\d+)\s+replicas?|"
+    r"running\s+(?:the\s+)?requested\s+(\d+)\s+replicas?)\b"
+)
 _REQUESTED_REPLICA_COUNT = re.compile(r"(?<!\w)requested\s+(\d+)(?:\s+replicas?)?\b")
 
 #: Sentence terminators plus contrast boundaries that introduce a new
@@ -276,6 +282,7 @@ class OutcomeClassification:
     outcome: str
     matched: tuple[str, ...]
     clauses: tuple[str, ...]
+    reported_replicas: int | None = None
 
 
 @dataclass(frozen=True)
@@ -291,6 +298,12 @@ def _word(phrase: str) -> re.Pattern[str]:
 
 
 def _outcome_phrase(phrase: str) -> re.Pattern[str]:
+    if phrase == "modal completion":
+        return re.compile(
+            r"(?<!\w)(?:will|would)\s+"
+            r"(?:(?:eventually|possibly|probably)\s+)?"
+            r"(?:(?:be|have(?:\s+been)?)\s+)?(?:complete|completed)\b"
+        )
     recovery_guard = r"(?<!ceased )(?<!stopped )" if phrase == "failing" else ""
     verification_guard = r"(?!\s+to\s+(?:check|confirm|verify)\b)" if phrase == "failed" else ""
     base = (
@@ -531,17 +544,21 @@ def _updated_scale_intent(
     scaled_replicas: int | None,
     requested_replicas: int | None,
 ) -> tuple[int | None, int | None, bool, bool]:
-    scaled = _SCALED_REPLICA_COUNT.search(clause)
     preserve_negated_scale_completion = False
-    if scaled is not None:
-        count = int(scaled.group(1))
-        scaled_scope = _scope_start_for_position(clause, scaled.start())
-        if _negated_before(clause, scaled.start(), scaled_scope):
-            preserve_negated_scale_completion = scaled_replicas is None or count != scaled_replicas
+    reported_counts = [
+        *((match, True) for match in _SCALED_REPLICA_COUNT.finditer(clause)),
+        *((match, False) for match in _PRESENT_REPLICA_COUNT.finditer(clause)),
+    ]
+    for reported, is_scale_claim in sorted(reported_counts, key=lambda item: item[0].start()):
+        count = int(next(group for group in reported.groups() if group is not None))
+        scaled_scope = _scope_start_for_position(clause, reported.start())
+        if _negated_before(clause, reported.start(), scaled_scope):
+            preserve_negated_scale_completion = preserve_negated_scale_completion or (
+                is_scale_claim and (scaled_replicas is None or count != scaled_replicas)
+            )
         else:
             scaled_replicas = count
-    requested = _REQUESTED_REPLICA_COUNT.search(clause)
-    if requested is not None:
+    for requested in _REQUESTED_REPLICA_COUNT.finditer(clause):
         requested_scope = _scope_start_for_position(clause, requested.start())
         if not _negated_before(clause, requested.start(), requested_scope):
             requested_replicas = int(requested.group(1))
@@ -558,7 +575,7 @@ def _updated_scale_intent(
     )
 
 
-def _matched_classes(clauses: tuple[str, ...]) -> set[str]:
+def _matched_classes(clauses: tuple[str, ...]) -> tuple[set[str], int | None]:
     active: dict[str, str] = {}
     replacement_pending = False
     scaled_replicas: int | None = None
@@ -592,7 +609,7 @@ def _matched_classes(clauses: tuple[str, ...]) -> set[str]:
                 active.pop(source_label, None)
         if scale_mismatch:
             active.pop("completed", None)
-    return set(active.values())
+    return set(active.values()), scaled_replicas
 
 
 def classify_operation_outcome(answer: str) -> OutcomeClassification:
@@ -605,16 +622,36 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
     """
 
     clauses = _clauses(answer)
-    matched = _matched_classes(clauses)
+    matched, reported_replicas = _matched_classes(clauses)
     if not matched:
-        return OutcomeClassification(outcome="unknown", matched=(), clauses=clauses)
+        return OutcomeClassification(
+            outcome="unknown",
+            matched=(),
+            clauses=clauses,
+            reported_replicas=reported_replicas,
+        )
     ordered = tuple(label for label in OUTCOME_PRECEDENCE if label in matched)
     for conflict in _CONFLICTS:
         if conflict <= matched:
-            return OutcomeClassification(outcome="ambiguous", matched=ordered, clauses=clauses)
+            return OutcomeClassification(
+                outcome="ambiguous",
+                matched=ordered,
+                clauses=clauses,
+                reported_replicas=reported_replicas,
+            )
     if {"accepted", "completed"} <= matched:
-        return OutcomeClassification(outcome="completed", matched=ordered, clauses=clauses)
-    return OutcomeClassification(outcome=ordered[0], matched=ordered, clauses=clauses)
+        return OutcomeClassification(
+            outcome="completed",
+            matched=ordered,
+            clauses=clauses,
+            reported_replicas=reported_replicas,
+        )
+    return OutcomeClassification(
+        outcome=ordered[0],
+        matched=ordered,
+        clauses=clauses,
+        reported_replicas=reported_replicas,
+    )
 
 
 def bundled_outcome_corpus_path() -> Path:
