@@ -1206,7 +1206,8 @@ def test_the_controller_module_imports_nothing_from_the_app_module() -> None:
     """
     import ast
 
-    source = Path("src/korvid/ui/agent_ui_controller.py").read_text()
+    module_path = Path(__file__).parents[2] / "src" / "korvid" / "ui" / "agent_ui_controller.py"
+    source = module_path.read_text()
     tree = ast.parse(source)
     imported: list[str] = []
     referenced: list[str] = []

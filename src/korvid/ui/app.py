@@ -179,10 +179,6 @@ _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
 #: How often the app polls the forward registry for dead kubectl processes.
 _FORWARD_POLL_SECONDS = 2.0
 
-#: A rendered chart can run to thousands of lines; the approval dialog shows
-#: at most this many so the operation summary stays reviewable.
-_HELM_PREVIEW_MAX_LINES = 60
-
 
 class _RelationshipLister:
     """Adapts the injected `list_relationship_objects` callable to the
@@ -2592,7 +2588,7 @@ class AppWorkspaceSurface(WorkspaceSurface):
     def open_namespace_picker(self, names: list[str]) -> None:
         self._app._namespace_picker.open(names)
 
-    def cursor_row_key(self) -> str | None:
+    def focused_row_key(self) -> str | None:
         table = self._app._focused_table()
         if table.row_count == 0:
             return None

@@ -182,12 +182,19 @@ class WorkspaceSurface(ABC):
         """Open the inline namespace picker over *names*."""
 
     @abstractmethod
-    def cursor_row_key(self) -> str | None:
+    def focused_row_key(self) -> str | None:
         """The focused table's cursor row key, or None when there is no row.
 
         Silent by contract, unlike `ViewState.selected_ns_name`: the flows
         that read it (the timeline pin) open with or without a selection, so
         "nothing selected" must not raise a toast the user did not ask for.
+
+        Distinct from `InspectSurface.cursor_row_key`: this one is read
+        synchronously from a keybinding handler, so it assumes the focused
+        table is mounted and does not guard against a widget that has
+        since been torn down. `InspectSurface.cursor_row_key` is read from
+        background hint/describe flows that can outlive the widget and so
+        must tolerate it being gone.
         """
 
 
@@ -653,7 +660,7 @@ class WorkspaceController:
         meta = self._view.aliases().get(self._state.current_kind)
         if meta is None or meta.synthetic:
             return None
-        row_key = self._surface.cursor_row_key()
+        row_key = self._surface.focused_row_key()
         if row_key is None:
             return None
         parts = row_key.split("/", 1)

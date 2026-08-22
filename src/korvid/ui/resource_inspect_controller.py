@@ -68,7 +68,13 @@ class InspectSurface(ABC):
 
     @abstractmethod
     def cursor_row_key(self) -> str | None:
-        """Row key under the table cursor, or None (empty table / no cursor)."""
+        """Row key under the table cursor, or None (empty table / no cursor).
+
+        Distinct from `WorkspaceSurface.focused_row_key`: this one backs
+        background hint/describe flows that can be reached after the table
+        has been unmounted (a timer firing during teardown, for instance),
+        so implementations must tolerate the widget being gone rather than
+        assuming it is mounted."""
 
     @abstractmethod
     def show_trouble(

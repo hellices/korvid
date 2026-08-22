@@ -211,7 +211,7 @@ class FakeSurface(WorkspaceSurface):
     def open_namespace_picker(self, names: list[str]) -> None:
         self.opened_pickers.append(list(names))
 
-    def cursor_row_key(self) -> str | None:
+    def focused_row_key(self) -> str | None:
         return self.row_key
 
     def render_table(self, kind: str, *, only: PaneState | None = None) -> None:
