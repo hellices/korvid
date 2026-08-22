@@ -324,6 +324,27 @@ def test_current_release_notes_are_in_navigation() -> None:
     assert expected in nav_text, f"mkdocs nav must include the current release notes: {expected}"
 
 
+def test_release_notes_navigation_matches_every_release_file() -> None:
+    """A new release note must never be silently omitted from site navigation."""
+    config = _load_mkdocs_config()
+    nav = config.get("nav")
+    assert isinstance(nav, list)
+    project = next(item["Project"] for item in nav if isinstance(item, dict) and "Project" in item)
+    release_notes = next(
+        item["Release notes"]
+        for item in project
+        if isinstance(item, dict) and "Release notes" in item
+    )
+    configured = {
+        path for item in release_notes if isinstance(item, dict) for path in item.values()
+    }
+    sources = {
+        path.relative_to(ROOT / "docs").as_posix()
+        for path in (ROOT / "docs" / "release-notes").glob("*.md")
+    }
+    assert configured == sources
+
+
 def test_theme_custom_dir_resolves_to_the_overrides_directory() -> None:
     """`theme.custom_dir` must point at the directory that holds korvid's partials.
 
