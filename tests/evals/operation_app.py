@@ -885,6 +885,29 @@ def _turn_task_settled(app: KorvidApp) -> Callable[[], bool]:
     return settled
 
 
+async def _dismiss_dialog_after_turn(
+    app: KorvidApp,
+    pilot: Any,
+    journal: ActionJournal,
+    *,
+    turn_timeout: float,
+) -> None:
+    if not isinstance(app.screen, ConfirmScreen):
+        return
+    journal.append(
+        event="dialog_open_after_turn_end",
+        actor="approval_driver",
+        result="error",
+    )
+    await pilot.press(_APPROVAL_KEYS["denied"])
+    await until(
+        pilot,
+        lambda: not isinstance(app.screen, ConfirmScreen),
+        timeout=turn_timeout,
+        label="stale dialog dismissed",
+    )
+
+
 async def _drive_turn(
     app: KorvidApp,
     pilot: Any,
@@ -902,6 +925,7 @@ async def _drive_turn(
         await until(pilot, ready, timeout=turn_timeout, label="approval dialog or turn end")
         if isinstance(app.screen, ConfirmScreen):
             await driver.handle(pilot)
+    await _dismiss_dialog_after_turn(app, pilot, journal, turn_timeout=turn_timeout)
     await until(
         pilot,
         lambda: panel.status_text == "",

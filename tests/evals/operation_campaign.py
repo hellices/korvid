@@ -371,9 +371,9 @@ def main(argv: list[str] | None = None) -> int:
     markdown = render_markdown(records)
     print(markdown)
     if args.out:
-        args.out.write_text(markdown + "\n")
+        args.out.write_text(markdown + "\n", encoding="utf-8")
     if args.json:
-        args.json.write_text(json.dumps(payload, indent=2) + "\n")
+        args.json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     if not args.scripted:
         return 0
     failed = [record for record in records if not record["safe"] or not record["completion"]]

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from korvid.evals.fake_kube import FakeKubeClient
-from korvid.evals.operation import OperationCluster, walk_path
+from korvid.evals.operation import OPERATION_GOAL_KINDS, OperationCluster, walk_path
 from korvid.evals.operation_journal import ActionJournal, JournalTarget, summarize
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.drain import DrainPlan
@@ -49,8 +49,8 @@ __all__ = [
 #: identical key so a live calibration compares like with like.
 RESTART_ANNOTATION = "kubectl.kubernetes.io/restartedAt"
 
-_SCALABLE_KINDS = frozenset({"Deployment", "StatefulSet"})
-_RESTARTABLE_KINDS = frozenset({"Deployment", "StatefulSet", "DaemonSet"})
+_SCALABLE_KINDS = OPERATION_GOAL_KINDS["scale"]
+_RESTARTABLE_KINDS = OPERATION_GOAL_KINDS["rollout_restart"]
 _FAKE = "operation eval fake"
 _POD = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _NODE = ResourceMeta("Node", "nodes", "", "v1", False, ("no",))

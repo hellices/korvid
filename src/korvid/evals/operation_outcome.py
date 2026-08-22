@@ -176,6 +176,7 @@ _OR_BEFORE_RESET = re.compile(r"(?:^|\s)(?:or|nor)\s*$")
 _CLAIM_REPLACEMENT = re.compile(
     r"^(?:correction|wait|actually|rather|i was wrong|finally|later|subsequently|eventually)\b"
 )
+_STANDALONE_NEGATIVE = re.compile(r"^no(?:$|,\s*(?:it|that|this)\b)")
 
 #: Sentence terminators plus the contrast conjunctions and the colon that
 #: introduce a new claim. A negator on one side must not reach the other.
@@ -281,7 +282,7 @@ def _matched_classes(clauses: tuple[str, ...]) -> set[str]:
     active: dict[str, str] = {}
     replacement_pending = False
     for clause in clauses:
-        replacement = bool(_CLAIM_REPLACEMENT.search(clause))
+        replacement = bool(_CLAIM_REPLACEMENT.search(clause) or _STANDALONE_NEGATIVE.search(clause))
         if replacement:
             active.clear()
             replacement_pending = True

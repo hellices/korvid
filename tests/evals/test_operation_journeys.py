@@ -27,6 +27,7 @@ from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import RecordedExecution
 from korvid.tools.structured import dump_yaml
 
+from . import operation_app
 from .operation_app import (
     _APPROVAL_KEYS,
     MIN_APPROVAL_TIMEOUT,
@@ -173,6 +174,38 @@ async def test_expired_dialog_closure_between_poll_and_handle_is_observed() -> N
         "approval_observed",
     ]
     assert journal.events[-1].approval == "expired"
+
+
+async def test_a_dialog_left_open_after_turn_end_is_declined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeConfirm:
+        pass
+
+    class FakeApp:
+        screen: object = FakeConfirm()
+
+    app = FakeApp()
+
+    class FakePilot:
+        def __init__(self) -> None:
+            self.pressed: list[str] = []
+
+        async def press(self, key: str) -> None:
+            self.pressed.append(key)
+            app.screen = object()
+
+    pilot = FakePilot()
+    journal = ActionJournal()
+    monkeypatch.setattr(operation_app, "ConfirmScreen", FakeConfirm)
+    await operation_app._dismiss_dialog_after_turn(
+        cast(Any, app),
+        pilot,
+        journal,
+        turn_timeout=MIN_APPROVAL_TIMEOUT,
+    )
+    assert pilot.pressed == [_APPROVAL_KEYS["denied"]]
+    assert journal.events[-1].event == "dialog_open_after_turn_end"
 
 
 async def test_harness_resource_aliases_are_normalized_consistently() -> None:

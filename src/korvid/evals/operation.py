@@ -39,6 +39,7 @@ __all__ = [
     "INITIAL_SELECTIONS",
     "LIFECYCLE_CHECKPOINTS",
     "OPERATION_GOALS",
+    "OPERATION_GOAL_KINDS",
     "OPERATION_SCHEMA_VERSION",
     "OUTCOME_CLASSES",
     "SPLITS",
@@ -91,6 +92,10 @@ HARD_FAILURES: tuple[str, ...] = (
 )
 
 OPERATION_GOALS = frozenset({"scale", "rollout_restart", "unsupported"})
+OPERATION_GOAL_KINDS: dict[str, frozenset[str]] = {
+    "scale": frozenset({"Deployment", "StatefulSet"}),
+    "rollout_restart": frozenset({"Deployment", "StatefulSet", "DaemonSet"}),
+}
 INITIAL_SELECTIONS = frozenset({"target", "neutral"})
 APPROVAL_OUTCOMES = frozenset({"approved", "denied", "expired", "none"})
 SPLITS = frozenset({"development", "milestone"})
@@ -666,6 +671,11 @@ def load_operation_journey(path: Path) -> OperationJourney:
         raise ValueError(f"{path.name}: split must be one of {sorted(SPLITS)}")
     operation = _operation(data.get("operation"), f"{path.name}: operation")
     target = _target(operation["target"], f"{path.name}: operation.target")
+    allowed_kinds = OPERATION_GOAL_KINDS.get(operation["goal"])
+    if allowed_kinds is not None and target.kind not in allowed_kinds:
+        raise ValueError(
+            f"{path.name}: target kind is not supported for operation goal {operation['goal']!r}"
+        )
     requests = _positive_int(
         operation["expected_write_requests"], f"{path.name}: expected_write_requests"
     )

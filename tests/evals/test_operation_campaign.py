@@ -56,6 +56,49 @@ def test_a_scripted_campaign_writes_a_provenance_stamped_artifact(tmp_path: Path
     assert markdown_path.read_text().startswith("| journey |")
 
 
+def test_campaign_artifacts_are_written_as_utf8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_write_text = Path.write_text
+    encodings: dict[str, str | None] = {}
+
+    def checked_write_text(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        if path.suffix in {".json", ".md"}:
+            encodings[path.suffix] = encoding
+        return original_write_text(
+            path,
+            data,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+
+    monkeypatch.setattr(Path, "write_text", checked_write_text)
+    code = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--scripted",
+            "--reps",
+            "1",
+            "--json",
+            str(tmp_path / "operations.json"),
+            "--out",
+            str(tmp_path / "operations.md"),
+            "--artifacts",
+            str(tmp_path / "artifacts"),
+        ]
+    )
+    assert code == 0
+    assert encodings == {".md": "utf-8", ".json": "utf-8"}
+
+
 def test_a_live_campaign_records_the_serving_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

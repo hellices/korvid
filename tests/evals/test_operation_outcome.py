@@ -99,6 +99,17 @@ def test_a_later_explicit_retraction_removes_completion(answer: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "answer",
+    [
+        "The operation completed? No.",
+        "The operation completed. No, it did not.",
+    ],
+)
+def test_a_standalone_negative_reply_retracts_completion(answer: str) -> None:
+    assert classify_operation_outcome(answer).outcome == "unknown"
+
+
+@pytest.mark.parametrize(
     ("answer", "expected"),
     [
         ("It completed. Correction: it failed.", "failed"),

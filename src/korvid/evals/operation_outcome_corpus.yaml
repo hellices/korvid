@@ -197,3 +197,7 @@
   label: completed
 - text: It completed and then failed.
   label: failed
+- text: "The operation completed? No."
+  label: unknown
+- text: "The operation completed. No, it did not."
+  label: unknown

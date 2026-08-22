@@ -161,6 +161,30 @@ def test_unsupported_goal_cannot_expect_a_write_request(tmp_path: Path) -> None:
         load_operation_journey(_write(tmp_path, data))
 
 
+@pytest.mark.parametrize(
+    ("goal", "kind", "plural"),
+    [
+        ("scale", "DaemonSet", "daemonsets"),
+        ("rollout_restart", "Service", "services"),
+    ],
+)
+def test_goal_target_kind_must_be_executable(
+    tmp_path: Path, goal: str, kind: str, plural: str
+) -> None:
+    data = _minimal()
+    data["operation"]["goal"] = goal
+    group = "" if kind == "Service" else "apps"
+    data["operation"]["target"].update({"group": group, "kind": kind, "plural": plural})
+    data["cluster"]["objects"][0]["apiVersion"] = "v1" if not group else f"{group}/v1"
+    data["cluster"]["objects"][0]["kind"] = kind
+    data["operation"]["preconditions"] = []
+    data["operation"]["postconditions"] = []
+    if goal == "rollout_restart":
+        data["operation"]["expected_request"] = {"action": goal}
+    with pytest.raises(ValueError, match="target kind is not supported for operation goal"):
+        load_operation_journey(_write(tmp_path, data))
+
+
 def test_schema_v2_loads_a_typed_scale_request(tmp_path: Path) -> None:
     data = _minimal()
     journey = load_operation_journey(_write(tmp_path, data))
