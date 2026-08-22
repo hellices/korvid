@@ -91,13 +91,33 @@ ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/relationship-demo.mp4 \
 ## MCP follow
 
 `docs/assets/mcp-follow-demo.gif` was recorded against the disposable local
-cluster documented by its repository design and test contract. The site uses
-a controllable MP4 and a poster derived from the reviewed GIF:
+cluster documented by its repository design and test contract. Its right-hand
+pane is a third-party MCP client, and that window carries session details
+which have nothing to do with korvid: a startup banner and tool inventory
+above the exchange, and the client's working **directory** and branch, its
+**token** spend and its **model** name below it. The site therefore does not
+publish the raw frame.
+
+The published clip is a deterministic reframe of the same reviewed recording:
+its frames 36–83 (the four seconds in which korvid follows the client from
+the pod table to the log stream to the Helm releases), with the client pane's
+two off-topic bands cleared to that pane's own `#111111` background. Nothing
+inside the retained band — the operator's prompt, `list_resources`,
+`get_logs`, `helm_list_releases`, the summary — and nothing in korvid's own
+pane is altered or moved, so the follow evidence stays exactly as recorded.
+
+The poster is frame 9 of that clip: the external client's full prompt and its
+first two tool calls beside korvid's own `agent logs → shop/payment-worker-…`
+follow toast and its `⇄MCP on :7878 ·follow` status line.
 
 ```sh
 ffmpeg -y -i docs/assets/mcp-follow-demo.gif -an -movflags +faststart \
-  -pix_fmt yuv420p -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' \
+  -pix_fmt yuv420p -crf 20 \
+  -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2,trim=start_frame=36:end_frame=84,setpts=PTS-STARTPTS,drawbox=x=1000:y=22:w=280:h=320:color=0x111111:t=fill,drawbox=x=1000:y=578:w=280:h=132:color=0x111111:t=fill' \
   docs/assets/scenes/mcp-follow-demo.mp4
-ffmpeg -y -ss 00:00:06 -i docs/assets/scenes/mcp-follow-demo.mp4 \
+ffmpeg -y -i docs/assets/scenes/mcp-follow-demo.mp4 -vf "select='eq(n\,9)'" \
   -frames:v 1 docs/assets/scenes/mcp-poster.png
 ```
+
+`tests/test_docs_visual_assets.py` decodes the poster and fails if either
+cleared band regains legible content — or if the retained band loses it.

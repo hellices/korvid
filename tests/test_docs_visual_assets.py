@@ -6,7 +6,8 @@ import asyncio
 import importlib.util
 import struct
 import sys
-from collections.abc import Sequence
+import zlib
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from types import ModuleType
 
@@ -32,7 +33,7 @@ DEMO_ROOT = GraphResource(
 PNG_ASSETS = {
     "cockpit-poster.png": (1280, 720, 720),
     "agent-poster.png": (1280, 720, 720),
-    "mcp-poster.png": (1280, 690, 730),
+    "mcp-poster.png": (1280, 710, 710),
     "relationship-graph.png": (1280, 720, 720),
     "diagnosis.png": (1280, 720, 720),
     "merged-logs.png": (1280, 720, 720),
@@ -43,11 +44,110 @@ MP4_ASSETS = {
     "relationship-demo.mp4",
 }
 
+#: The MCP capture is a two-pane recording: korvid on the left of the divider
+#: at x=999, the external MCP client on the right.
+MCP_CLIENT_PANE = (1000, 1280)
+#: Rows of the client pane the sanitising `drawbox` pass clears. Everything
+#: outside the client's own prompt-and-tool-call exchange belongs to that
+#: third-party session (its startup banner and tool inventory above, its
+#: working directory, branch, token spend and model name below) and is
+#: unrelated to what korvid does.
+MCP_CLEARED_BANDS = ((22, 342), (578, 710))
+#: The rows that must keep carrying the evidence, so a future "fix" cannot
+#: satisfy the contract by blanking the whole pane.
+MCP_EVIDENCE_BAND = (342, 578)
+
 
 def _png_size(path: Path) -> tuple[int, int]:
     payload = path.read_bytes()
     assert payload[:8] == b"\x89PNG\r\n\x1a\n"
     return struct.unpack(">II", payload[16:24])
+
+
+def _png_chunks(payload: bytes) -> Iterator[tuple[bytes, bytes]]:
+    """Yield `(type, data)` for every chunk in a PNG stream."""
+    cursor = 8
+    while cursor < len(payload):
+        (length,) = struct.unpack(">I", payload[cursor : cursor + 4])
+        kind = payload[cursor + 4 : cursor + 8]
+        yield kind, payload[cursor + 8 : cursor + 8 + length]
+        cursor += 12 + length
+
+
+def _paeth(left: int, above: int, upper_left: int) -> int:
+    estimate = left + above - upper_left
+    distances = (abs(estimate - left), abs(estimate - above), abs(estimate - upper_left))
+    if distances[0] <= distances[1] and distances[0] <= distances[2]:
+        return left
+    return above if distances[1] <= distances[2] else upper_left
+
+
+def _unfilter(kind: int, line: bytearray, previous: bytes, stride: int) -> bytearray:
+    """Reverse one PNG scanline filter in place (RFC 2083 section 6)."""
+    for index in range(len(line)):
+        left = line[index - stride] if index >= stride else 0
+        above = previous[index]
+        upper_left = previous[index - stride] if index >= stride else 0
+        if kind == 1:
+            line[index] = (line[index] + left) & 0xFF
+        elif kind == 2:
+            line[index] = (line[index] + above) & 0xFF
+        elif kind == 3:
+            line[index] = (line[index] + (left + above) // 2) & 0xFF
+        elif kind == 4:
+            line[index] = (line[index] + _paeth(left, above, upper_left)) & 0xFF
+        elif kind != 0:
+            raise AssertionError(f"unsupported PNG filter type {kind}")
+    return line
+
+
+def _decode_png_rgb(path: Path) -> tuple[int, int, list[bytearray]]:
+    """Decode a non-interlaced 8-bit RGB/RGBA PNG into scanlines.
+
+    The repository ships no image dependency, and these captures are the
+    product's own evidence, so the few lines of PNG plumbing live here
+    rather than in the runtime.
+
+    Args:
+        path: A PNG file written by the capture pipeline.
+
+    Returns:
+        `(width, height, rows)` where each row holds `width * channels`
+        bytes.
+    """
+    payload = path.read_bytes()
+    assert payload[:8] == b"\x89PNG\r\n\x1a\n", f"{path} is not a PNG"
+    chunks = dict[bytes, bytes]()
+    data = bytearray()
+    for kind, body in _png_chunks(payload):
+        if kind == b"IDAT":
+            data += body
+        else:
+            chunks[kind] = body
+    width, height, depth, colour, _, _, interlace = struct.unpack(">IIBBBBB", chunks[b"IHDR"])
+    assert (depth, interlace) == (8, 0), f"{path} must be 8-bit non-interlaced"
+    assert colour in (2, 6), f"{path} must be RGB or RGBA, found colour type {colour}"
+    stride = 3 if colour == 2 else 4
+    raw = zlib.decompress(bytes(data))
+    rows: list[bytearray] = []
+    previous = bytes(width * stride)
+    for index in range(height):
+        start = index * (width * stride + 1)
+        line = bytearray(raw[start + 1 : start + 1 + width * stride])
+        row = _unfilter(raw[start], line, previous, stride)
+        rows.append(row)
+        previous = bytes(row)
+    return width, height, rows
+
+
+def _band_deviation(rows: list[bytearray], top: int, bottom: int, channels: int) -> int:
+    """Largest per-channel distance from `#111111` inside the client pane."""
+    left, right = MCP_CLIENT_PANE
+    worst = 0
+    for row in rows[top:bottom]:
+        for value in row[left * channels : right * channels]:
+            worst = max(worst, abs(value - 0x11))
+    return worst
 
 
 def _demo_harness() -> ModuleType:
@@ -115,6 +215,58 @@ def test_storytelling_capture_instructions_name_every_generated_asset() -> None:
     assert "vhs docs/demo/agent.tape" in instructions
     assert "vhs docs/demo/relationships.tape" in instructions
     assert "docs/assets/mcp-follow-demo.gif" in instructions
+
+
+def test_mcp_landing_media_carries_no_third_party_session_internals() -> None:
+    """The MCP tile publishes an unrelated assistant's window; only its work may ship.
+
+    The recording's right-hand pane is a third-party MCP client. Its own
+    session chrome — the startup banner and tool inventory above the
+    exchange, and the working directory, branch, token spend and model name
+    below it — has nothing to do with korvid, but the landing page promotes
+    this frame to a scene poster and an evidence tile. The capture pipeline
+    clears exactly those two bands, so they must hold nothing but the pane's
+    own `#111111` background (codec noise aside), while the band between
+    them must still carry the client's prompt and tool calls: a blank pane
+    would prove nothing.
+    """
+    width, height, rows = _decode_png_rgb(SCENES / "mcp-poster.png")
+    assert (width, height) == (1280, 710)
+    channels = len(rows[0]) // width
+
+    for top, bottom in MCP_CLEARED_BANDS:
+        deviation = _band_deviation(rows, top, bottom, channels)
+        assert deviation <= 16, (
+            f"rows {top}-{bottom} of the external client's pane must be cleared to its "
+            f"background; found a pixel {deviation} off #111111, which is legible "
+            "content, not codec noise"
+        )
+
+    evidence = _band_deviation(rows, *MCP_EVIDENCE_BAND, channels)
+    assert evidence > 100, (
+        "the retained band must still show the external client's prompt and tool "
+        f"calls; peak contrast {evidence} means the pane was blanked instead of framed"
+    )
+
+
+def test_mcp_capture_instructions_document_the_sanitising_pass() -> None:
+    """The published command must reproduce the sanitised asset exactly."""
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    mcp = instructions[instructions.index("## MCP follow") :]
+    for fragment in (
+        "trim=start_frame=36:end_frame=84",
+        "drawbox=x=1000:y=22:w=280:h=320",
+        "drawbox=x=1000:y=578:w=280:h=132",
+        "select='eq(n\\,9)'",
+    ):
+        assert fragment in mcp, f"the MCP capture recipe must publish `{fragment}`"
+    lowered = mcp.lower()
+    assert "follow" in lowered
+    for reason in ("model", "token", "directory"):
+        assert reason in lowered, (
+            "the recipe must say which third-party session details the cleared bands "
+            f"remove; {reason!r} is missing"
+        )
 
 
 def test_agent_tape_types_the_real_prompt_and_presses_enter() -> None:
