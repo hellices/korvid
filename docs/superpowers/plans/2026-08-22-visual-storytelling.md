@@ -1908,24 +1908,32 @@ assets.
 Run:
 
 ```bash
-rg -n '(<script[^>]+src|<link[^>]+href|<(img|video)[^>]+(src|poster))="https?://' site
+rg -n '<script[^>]+src="https?://' site
+rg -n '<img[^>]+src="https?://' site
+rg -n '<video[^>]+(src|poster)="https?://' site
+rg -n '<link[^>]+rel="(?:stylesheet|preload|modulepreload)"[^>]+href="https?://' site
+rg -n "url\\((['\"]?)https?://" site -g '*.css'
 ```
 
-Expected: no matches. Ordinary clickable links to GitHub and external
-documentation are allowed; executable and media asset URLs are not.
+Expected: no matches (each command should exit 1). Ordinary clickable links
+to GitHub and external documentation are allowed; executable, media, style,
+and built CSS asset URLs are not.
 
 - [ ] **Step 5: Verify the no-JavaScript fallback**
 
-Temporarily move only the built controller, inspect, then restore it:
+Temporarily move only the built controller, serve the already-built `site/`
+directory directly, inspect the root URLs, then restore it:
 
 ```bash
 mv site/assets/javascripts/visual-storytelling.js \
   site/assets/javascripts/visual-storytelling.js.disabled
-uv run --frozen --group docs mkdocs serve -a 127.0.0.1:8765
+python3 -m http.server 8766 --bind 127.0.0.1 --directory site
 ```
 
-In the browser, verify all three scenes are visible in document order and
-every guide link works. Stop the server, then restore the exact file:
+In the browser, verify `http://127.0.0.1:8766/`, `/tui/`, `/agent/`, and
+`/mcp/` render the built fallback correctly: all three scenes are visible in
+document order and every guide link works. Stop the server, then restore the
+exact file:
 
 ```bash
 mv site/assets/javascripts/visual-storytelling.js.disabled \

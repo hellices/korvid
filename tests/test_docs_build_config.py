@@ -330,9 +330,7 @@ def test_material_bundle_checkout_preserves_reviewed_bytes() -> None:
 
 def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
     config = _load_mkdocs_config()
-    assert config.get("extra_javascript") == [
-        "assets/javascripts/visual-storytelling.js"
-    ]
+    assert config.get("extra_javascript") == ["assets/javascripts/visual-storytelling.js"]
     assert VISUAL_STORYTELLING.is_file()
     assert hashlib.sha256(VISUAL_STORYTELLING.read_bytes()).hexdigest() == (
         "bf2abf3e16c1b1997445f1966e36eea88363b7c0ac495ca8dd912a7ae1609f8f"
