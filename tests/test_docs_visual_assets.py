@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import struct
 import sys
@@ -16,8 +17,10 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader, graph_source_metas
 
 ROOT = Path(__file__).parent.parent
+DOCS = ROOT / "docs"
 SCENES = ROOT / "docs" / "assets" / "scenes"
 INSTRUCTIONS = ROOT / "docs" / "demo" / "visual-storytelling.md"
+LANDING = DOCS / "index.md"
 AGENT_TAPE = ROOT / "docs" / "demo" / "agent.tape"
 DEMO_HARNESS = ROOT / "docs" / "demo" / "demo.py"
 
@@ -217,6 +220,49 @@ def test_storytelling_capture_instructions_name_every_generated_asset() -> None:
     assert "docs/assets/mcp-follow-demo.gif" in instructions
 
 
+def test_mcp_capture_instructions_distinguish_public_landing_media_from_the_served_source_gif() -> (
+    None
+):
+    """The raw reviewed GIF is a source asset, not the landing page's evidence.
+
+    MkDocs still publishes `docs/assets/**` as static assets, so keeping the
+    checked-in GIF for README/source provenance is not the same claim as a
+    visitor-facing page embedding it. The instructions must say that
+    distinction plainly, and the landing sources must keep using only the
+    sanitised derived MP4/poster pair.
+    """
+    mcp = INSTRUCTIONS.read_text(encoding="utf-8").split("## MCP follow", 1)[1]
+    normalized_mcp = " ".join(mcp.split())
+    landing = LANDING.read_text(encoding="utf-8")
+    public_pages = [
+        path
+        for path in DOCS.rglob("*.md")
+        if "demo" not in path.parts and "superpowers" not in path.parts
+    ]
+    embeds = [
+        str(path.relative_to(ROOT))
+        for path in public_pages
+        if "mcp-follow-demo.gif" in path.read_text(encoding="utf-8")
+    ]
+
+    assert (
+        "No official-site page embeds or uses the unredacted GIF as visitor-facing "
+        "evidence." in normalized_mcp
+    )
+    assert "MkDocs still serves it at `assets/mcp-follow-demo.gif`." in normalized_mcp
+    assert (
+        "Sanitizing or re-recording that pre-existing README/source asset is a separate follow-up."
+    ) in normalized_mcp
+    assert "The landing page uses only the sanitized derived MP4/poster." in normalized_mcp
+    assert not embeds, (
+        "no official-site page should embed the raw MCP GIF as visitor-facing evidence; "
+        f"found references in {embeds}"
+    )
+    assert "mcp-follow-demo.gif" not in landing
+    assert 'src="assets/scenes/mcp-follow-demo.mp4"' in landing
+    assert "assets/scenes/mcp-poster.png" in landing
+
+
 def test_mcp_landing_media_carries_no_third_party_session_internals() -> None:
     """The MCP tile publishes an unrelated assistant's window; only its work may ship.
 
@@ -267,6 +313,15 @@ def test_mcp_capture_instructions_document_the_sanitising_pass() -> None:
             "the recipe must say which third-party session details the cleared bands "
             f"remove; {reason!r} is missing"
         )
+
+
+def test_mcp_follow_demo_mp4_sha256_matches_the_reviewed_sanitized_bytes() -> None:
+    digest = hashlib.sha256((SCENES / "mcp-follow-demo.mp4").read_bytes()).hexdigest()
+    assert digest == "48a11a419d66b1732526387783abe25335484435e0fe51b9f83188de0d60a0f8", (
+        "docs/assets/scenes/mcp-follow-demo.mp4 is a privacy-sensitive re-encode; "
+        "review any byte change explicitly alongside the redaction recipe in "
+        "docs/demo/visual-storytelling.md before updating this SHA-256 pin"
+    )
 
 
 def test_agent_tape_types_the_real_prompt_and_presses_enter() -> None:

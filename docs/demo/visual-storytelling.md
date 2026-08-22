@@ -95,8 +95,12 @@ cluster documented by its repository design and test contract. Its right-hand
 pane is a third-party MCP client, and that window carries session details
 which have nothing to do with korvid: a startup banner and tool inventory
 above the exchange, and the client's working **directory** and branch, its
-**token** spend and its **model** name below it. The site therefore does not
-publish the raw frame.
+**token** spend and its **model** name below it. No official-site page embeds
+or uses the unredacted GIF as visitor-facing evidence. Because the GIF remains
+a checked-in source asset under `docs/assets`, MkDocs still serves it at
+`assets/mcp-follow-demo.gif`. Sanitizing or re-recording that pre-existing
+README/source asset is a separate follow-up. The landing page uses only the
+sanitized derived MP4/poster.
 
 The published clip is a deterministic reframe of the same reviewed recording:
 its frames 36–83 (the four seconds in which korvid follows the client from
