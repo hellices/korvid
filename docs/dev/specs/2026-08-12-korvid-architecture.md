@@ -16,7 +16,7 @@ deciding whether a change is safe. If you want the *concept* rather than the
 construction — what korvid is, and how installing an extra changes what it can
 do — read [`docs/overview.md`](../../overview.md), which stays true across
 refactors that will date this document. If you want to *use* korvid, read the
-[README](../../../README.md). If you want the AI data boundary specifically,
+[README](https://github.com/hellices/korvid/blob/main/README.md). If you want the AI data boundary specifically,
 read [`docs/threat-model.md`](../../threat-model.md), which goes deeper on
 that one seam than this overview does.
 

@@ -274,7 +274,7 @@ Rules that follow:
   leaves it unpinned. `max_context_length` carries the native maximum for
   context;
 - **pin the serving deployment to a released tag.**
-  [`deploy/eval/ollama.yaml`](../../deploy/eval/ollama.yaml) is the checked-in
+  [`deploy/eval/ollama.yaml`](https://github.com/hellices/korvid/blob/main/deploy/eval/ollama.yaml) is the checked-in
   manifest and a test rejects `:latest`. A floating tag makes the recorded
   version a coincidence rather than a decision;
 - the block is **omitted entirely** in artifacts written before this capture
