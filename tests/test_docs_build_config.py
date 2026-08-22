@@ -26,6 +26,10 @@ import yaml
 
 ROOT = Path(__file__).parent.parent
 MATERIAL_BUNDLE = ROOT / "docs" / "assets" / "javascripts" / "bundle.d7400e89.min.js"
+MERMAID_VENDOR = ROOT / "docs" / "assets" / "javascripts" / "vendor" / "mermaid-11.17.0.min.js"
+RESIZE_OBSERVER_VENDOR = (
+    ROOT / "docs" / "assets" / "javascripts" / "vendor" / "resize-observer-polyfill-1.5.1.js"
+)
 
 
 def test_makefile_docs_build_uses_frozen() -> None:
@@ -233,8 +237,8 @@ def _plugin_options(config: dict[str, Any], name: str) -> dict[str, Any] | None:
     return None
 
 
-def test_mkdocs_disables_remote_fonts_and_localizes_external_assets() -> None:
-    """Visitors must not fetch Google fonts or Mermaid from third-party hosts."""
+def test_mkdocs_disables_remote_fonts_and_external_asset_fetches() -> None:
+    """Builds and visitors must not fetch executable assets from third parties."""
     config = _load_mkdocs_config()
     theme = config.get("theme")
     assert isinstance(theme, dict), "mkdocs.yml must configure a theme"
@@ -248,43 +252,34 @@ def test_mkdocs_disables_remote_fonts_and_localizes_external_assets() -> None:
         "time and serve them locally"
     )
     assert privacy.get("assets", True) is True
-    assert privacy.get("assets_fetch", True) is True
-    expressions = privacy.get("assets_expr_map")
-    assert isinstance(expressions, dict), (
-        "privacy.assets_expr_map must cover Material's extensionless unpkg "
-        "ResizeObserver fallback as well as its .js Mermaid URL"
-    )
-    javascript_expression = expressions.get(".js")
-    assert isinstance(javascript_expression, str)
-    resize_url = "https://unpkg.com/resize-observer-polyfill"
-    match = re.search(javascript_expression, f'"{resize_url}"')
-    assert match is not None, (
-        "the privacy plugin's JavaScript expression must localize Material's "
-        "extensionless ResizeObserver fallback instead of leaving an executable "
-        "unpkg runtime URL in the built bundle"
-    )
-    assert match.group("url") == resize_url
+    assert privacy.get("assets_fetch", True) is False
 
 
-def test_material_bundle_pins_the_resize_observer_fallback() -> None:
-    """The localized fallback must be immutable before the privacy plugin fetches it."""
+def test_material_bundle_uses_checksum_pinned_local_vendor_assets() -> None:
+    """The Material bundle and both dynamically loaded scripts are immutable."""
     assert MATERIAL_BUNDLE.is_file(), (
         "docs must override Material's bundle with the reviewed URL-pinned copy"
     )
     bundle = MATERIAL_BUNDLE.read_bytes()
-    assert b"https://unpkg.com/resize-observer-polyfill@1.5.1/dist/ResizeObserver.js" in bundle
-    assert b"https://unpkg.com/mermaid@11.17.0/dist/mermaid.min.js" in bundle
-    assert b'"https://unpkg.com/resize-observer-polyfill"' not in bundle
-    assert b"https://unpkg.com/mermaid@11/dist/mermaid.min.js" not in bundle
+    assert b"/korvid/assets/javascripts/vendor/mermaid-11.17.0.min.js" in bundle
+    assert b"/korvid/assets/javascripts/vendor/resize-observer-polyfill-1.5.1.js" in bundle
+    assert b"https://unpkg.com/" not in bundle
     assert hashlib.sha256(bundle).hexdigest() == (
-        "72f6ab94668b5cebcf2dfaf0517d9e412ee3c117ce180db9b44bb77a7504eb9c"
+        "8d19bf0dbf054795b645c35a5020561b0a83c3245c9707612266d234d4131eec"
     ), "the reviewed Material bundle override must not drift without an explicit update"
+    assert hashlib.sha256(MERMAID_VENDOR.read_bytes()).hexdigest() == (
+        "8d8e0eec56d3a83b4b3c87f42050845546dee93ebe1875d2117c12e6947c0cb3"
+    )
+    assert hashlib.sha256(RESIZE_OBSERVER_VENDOR.read_bytes()).hexdigest() == (
+        "2290b5c60e0cdc62851fb687800237273ac53797595b1b133860c4f1386de378"
+    )
 
 
 def test_material_bundle_checkout_preserves_reviewed_bytes() -> None:
     """Git must not rewrite the checksum-pinned JavaScript to CRLF on Windows."""
     attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
     assert "docs/assets/javascripts/bundle.d7400e89.min.js -text" in attributes
+    assert "docs/assets/javascripts/vendor/*.js -text" in attributes
 
 
 def test_mkdocs_excludes_override_sources_but_keeps_theme_customization() -> None:

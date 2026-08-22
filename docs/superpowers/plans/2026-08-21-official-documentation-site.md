@@ -120,9 +120,7 @@ plugins:
   - search
   - privacy:
       assets: true
-      assets_fetch: true
-      assets_expr_map:
-        .js: '(?P<url>https://unpkg\.com/[^"'']+)'
+      assets_fetch: false
 
 extra_css:
   - stylesheets/extra.css
@@ -272,11 +270,11 @@ hero, responsive two-column demo layout above 960px, a three-card feature grid,
 visible keyboard focus, reduced-motion handling, and standard readable
 documentation widths. Vendor Material 9.7.7's
 `assets/javascripts/bundle.d7400e89.min.js` at the same docs asset path,
-pinning Mermaid to
-`https://unpkg.com/mermaid@11.17.0/dist/mermaid.min.js` and replacing the
-extensionless ResizeObserver fallback with
-`https://unpkg.com/resize-observer-polyfill@1.5.1/dist/ResizeObserver.js`.
-Pin the reviewed bundle bytes with a SHA-256 regression test.
+plus Mermaid `11.17.0` and ResizeObserver `1.5.1` under
+`docs/assets/javascripts/vendor/`. Patch the bundle to load
+`/korvid/assets/javascripts/vendor/mermaid-11.17.0.min.js` and
+`/korvid/assets/javascripts/vendor/resize-observer-polyfill-1.5.1.js`.
+Pin all three reviewed files with SHA-256 regression tests.
 
 - [ ] **Step 4: Run the green build**
 
@@ -327,8 +325,9 @@ path filters for `docs/**`, `mkdocs.yml`, `pyproject.toml`, `uv.lock`,
 - `actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b`
 - `actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e`
 
-The build job runs on `ubuntu-latest` with `contents: read`, uses uv version
-`0.10.9`, runs `uv sync --locked --group docs`, then
+The build job runs on `ubuntu-latest` with a 10-minute timeout and
+`contents: read`, uses uv version `0.10.9`, runs
+`uv sync --locked --group docs`, then
 `uv run --frozen --group docs mkdocs build --strict`, and uploads `site/` only
 on pushes to `main`. The deploy job also runs only on pushes to `main`, needs the build job, has
 `pages: write`/`id-token: write`, uses the `github-pages` environment, and sets

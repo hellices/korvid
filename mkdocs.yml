@@ -81,9 +81,7 @@ plugins:
   - search
   - privacy:
       assets: true
-      assets_fetch: true
-      assets_expr_map:
-        .js: '(?P<url>https://unpkg\.com/[^"'']+)'
+      assets_fetch: false
 
 extra_css:
   - stylesheets/extra.css

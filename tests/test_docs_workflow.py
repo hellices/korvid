@@ -102,6 +102,7 @@ def test_build_job_has_only_read_permissions_and_runs_the_docs_build() -> None:
         "pull-request-controlled dependencies and MkDocs plugins must run on an "
         "ephemeral GitHub-hosted runner, not persistent shared infrastructure"
     )
+    assert build["timeout-minutes"] == 10
     assert build["permissions"] == {"contents": "read"}
 
     run_steps = [step["run"] for step in build["steps"] if "run" in step]

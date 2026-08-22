@@ -183,11 +183,11 @@ and a focused stylesheet. The initial site does not add a custom JavaScript
 application bundle. Documentation pages retain conventional readable layouts
 and navigation even though the landing page is more expressive.
 
-Material's built-in privacy plugin downloads Mermaid's runtime during the
-documentation build and rewrites pages to serve that generated vendor asset
-locally. The Material bundle is vendored at its theme asset path only to pin
-Mermaid to immutable version `11.17.0` and its ResizeObserver fallback to
-immutable version `1.5.1`; a checksum test guards the reviewed bytes.
+The Material bundle, Mermaid `11.17.0`, and ResizeObserver fallback `1.5.1`
+are vendored under `docs/assets/javascripts/`; checksum tests guard all three
+reviewed files. The bundle loads only site-local paths, and Material's privacy
+plugin has external fetching disabled, so clean builds require no executable
+CDN content.
 The docs dependency pins Material `9.7.7` exactly, and that pin must move
 atomically with the hashed bundle override.
 Generated local/vendor assets are allowed; browser
