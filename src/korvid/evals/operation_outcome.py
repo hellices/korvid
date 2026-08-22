@@ -128,6 +128,7 @@ _PHRASES: dict[str, tuple[str, ...]] = {
         "successful",
         "successfully",
         "success",
+        "succeeded",
         "is now",
         "are now",
         "now at",
@@ -182,6 +183,10 @@ _APOSTROPHE_TRANSLATION = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc":
 _CONTRACTED_NEGATOR = re.compile(r"(?<!\w)[a-z]+n't(?!\w)")
 _CLAIM_RESET = re.compile(r"(?<!\w)(?:and\s+)?(?:then|eventually|finally|later|subsequently)(?!\w)")
 _OR_BEFORE_RESET = re.compile(r"(?:^|\s)(?:or|nor)\s*$")
+_COORDINATED_SUBJECT = re.compile(
+    r"(?:,\s*)?\band\s+(?=(?:(?:a|an|the|this|that|these|those)\s+\w+|"
+    r"(?:he|i|it|she|they|we|you)\b))"
+)
 _CLAIM_REPLACEMENT = re.compile(
     r"^(?:correction|wait|actually|rather|i was wrong|finally|later|subsequently|eventually)\b"
 )
@@ -380,6 +385,13 @@ def _claim_reset_end(gap: str) -> int:
     return end
 
 
+def _coordination_scope_end(gap: str) -> int:
+    end = 0
+    for match in _COORDINATED_SUBJECT.finditer(gap):
+        end = max(end, match.end())
+    return end
+
+
 def _scoped_occurrences(
     clause: str,
 ) -> list[tuple[int, int, str, str, int, int, bool]]:
@@ -389,8 +401,9 @@ def _scoped_occurrences(
     for start, end, label, phrase in _phrase_occurrences(clause):
         gap = clause[previous_end:start]
         reset_end = _claim_reset_end(gap)
-        if reset_end:
-            scope_start = previous_end + reset_end
+        scope_end = max(reset_end, _coordination_scope_end(gap))
+        if scope_end:
+            scope_start = previous_end + scope_end
         negated = _negated_before(clause, start, scope_start)
         scoped.append((start, end, label, phrase, reset_end, scope_start, negated))
         previous_end = max(previous_end, end)

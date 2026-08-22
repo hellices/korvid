@@ -37,6 +37,8 @@
   label: completed
 - text: The operation was successful, not merely accepted.
   label: completed
+- text: The request was not denied and the operation completed.
+  label: completed
 - text: Because the API did not fail, the operation completed.
   label: completed
 - text: Because the request was not, in fact, denied, the operation completed.
@@ -168,6 +170,10 @@
 - text: It failed, though the deployment is now at 3 replicas.
   label: ambiguous
 - text: You declined it, and the scale completed anyway.
+  label: ambiguous
+- text: RBAC denied the request, but the operation succeeded.
+  label: ambiguous
+- text: RBAC denied the request and the operation succeeded.
   label: ambiguous
 - text: I looked at the deployment in shop-a.
   label: unknown

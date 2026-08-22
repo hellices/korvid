@@ -164,6 +164,21 @@ def test_a_successful_but_unaccepted_operation_is_completed() -> None:
     assert classify_operation_outcome(answer).outcome == "completed"
 
 
+def test_succeeded_is_a_completion_claim_even_after_rejection() -> None:
+    answer = "RBAC denied the request, but the operation succeeded."
+    assert classify_operation_outcome(answer).outcome == "ambiguous"
+
+
+def test_coordination_resets_negation_for_an_independent_predicate() -> None:
+    answer = "The request was not denied and the operation completed."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+def test_coordination_does_not_replace_an_earlier_conflicting_claim() -> None:
+    answer = "RBAC denied the request and the operation succeeded."
+    assert classify_operation_outcome(answer).outcome == "ambiguous"
+
+
 @pytest.mark.parametrize(
     "answer",
     [
