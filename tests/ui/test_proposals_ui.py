@@ -735,7 +735,7 @@ async def test_mcp_on_when_already_running_keeps_pending_proposals(tmp_path: Pat
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
-        app._handle_mcp_command(["on"])
+        app.integrations.handle_mcp_command(["on"])
         await until(pilot, lambda: not any(w.is_running for w in app.workers))
         found = store.get(pid)
     assert found is not None
@@ -799,7 +799,7 @@ async def test_mcp_on_never_expires_the_new_runs_first_proposal(tmp_path: Path) 
             client_name="",
             client_version="",
         )
-        app._handle_mcp_command(["on"])
+        app.integrations.handle_mcp_command(["on"])
         await until(pilot, lambda: not any(w.is_running for w in app.workers))
         pending = store.pending()
         assert [p.session_id for p in pending] == ["sess-new"]
@@ -815,7 +815,7 @@ async def test_mcp_off_expires_pending_proposals(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
-        app._handle_mcp_command(["off"])
+        app.integrations.handle_mcp_command(["off"])
         await until(pilot, lambda: (f := store.get(pid)) is not None and f[1] != "pending")
         found = store.get(pid)
     assert found is not None
@@ -1082,7 +1082,7 @@ async def test_mcp_off_that_times_out_still_expires_pending_proposals(tmp_path: 
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
-        app._handle_mcp_command(["off"])
+        app.integrations.handle_mcp_command(["off"])
         await until(pilot, lambda: (f := store.get(pid)) is not None and f[1] != "pending")
         found = store.get(pid)
     assert found is not None
@@ -1097,7 +1097,7 @@ async def test_mcp_off_sweeps_again_after_a_late_shutdown(tmp_path: Path) -> Non
     mcp.late_submit = store
     app = make_app(Recorder(), tmp_path / "a.jsonl", store, mcp=mcp)
     async with app.run_test() as pilot:
-        app._handle_mcp_command(["off"])
+        app.integrations.handle_mcp_command(["off"])
         await until(pilot, lambda: not mcp.running and store.pending() == [])
         assert store.pending() == []
 
@@ -1140,7 +1140,7 @@ async def test_a_restart_racing_the_late_shutdown_keeps_new_run_proposals(
     mcp.late_submit = store
     app = make_app(Recorder(), tmp_path / "a.jsonl", store, mcp=mcp)
     async with app.run_test() as pilot:
-        app._handle_mcp_command(["off"])
+        app.integrations.handle_mcp_command(["off"])
         await until(pilot, lambda: mcp.running and len(store.pending()) > 0)
         # Wait for the off-worker (and its final sweep decision) to finish.
         await until(pilot, lambda: all(w.is_finished for w in app.workers))
@@ -1172,7 +1172,7 @@ async def test_a_run_dying_during_the_stop_sweep_still_gets_the_follow_up_sweep(
             await orig(proposal, state, reason)
 
         app._proposals._audit_outcome = gated  # type: ignore[method-assign]  # holding the sweep's audit in flight to race the dying run
-        app._handle_mcp_command(["off"])
+        app.integrations.handle_mcp_command(["off"])
         await asyncio.wait_for(entered.wait(), timeout=5)
         # While the sweep's audit is in flight: the old run finishes dying
         # and its last in-flight submission lands.

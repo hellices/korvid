@@ -402,7 +402,9 @@ class TestContextEpochGuard:
 
         app = make_app([_pod("api-1")], open_pod_exec=flipping)
         async with app.run_test():
-            lister = app._remote_lister("default", "api-1", "app", uid=None, epoch=app._ctx.epoch())
+            lister = app._transfer.remote_lister(
+                "default", "api-1", "app", uid=None, epoch=app._ctx.epoch()
+            )
             assert lister is not None
             with pytest.raises(TransferError, match="context changed"):
                 await lister("/")
@@ -449,7 +451,7 @@ class TestPodUidGuard:
             get_manifest=get_manifest,
         )
         async with app.run_test():
-            lister = app._remote_lister(
+            lister = app._transfer.remote_lister(
                 "default", "api-1", "app", uid="uid-approved", epoch=app._ctx.epoch()
             )
             assert lister is not None
@@ -471,7 +473,7 @@ class TestPodUidGuard:
             get_manifest=get_manifest,
         )
         async with app.run_test():
-            lister = app._remote_lister(
+            lister = app._transfer.remote_lister(
                 "default", "api-1", "app", uid="uid-approved", epoch=app._ctx.epoch()
             )
             assert lister is not None
@@ -495,7 +497,7 @@ class TestPodUidGuard:
             get_manifest=get_manifest,
         )
         async with app.run_test():
-            lister = app._remote_lister(
+            lister = app._transfer.remote_lister(
                 "default", "api-1", "app", uid="uid-approved", epoch=app._ctx.epoch()
             )
             assert lister is not None

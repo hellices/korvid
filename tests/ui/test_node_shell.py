@@ -189,7 +189,7 @@ def _node_shell_env(run_fake, call_exit: int = 0, call_error: Exception | None =
         return call_exit
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", side_effect=fake_call),
         patch("subprocess.run", side_effect=run_fake),
         patch.object(KorvidApp, "suspend", side_effect=lambda: _noop_cm()),
@@ -880,7 +880,7 @@ async def test_suspend_not_supported_refuses_gracefully_and_cleans_up(
         yield
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", side_effect=fake_call),
         patch("subprocess.run", side_effect=run_fake),
         patch.object(KorvidApp, "suspend", side_effect=raising_suspend),

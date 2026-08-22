@@ -131,7 +131,7 @@ async def test_tp_opens_the_status_panel() -> None:
     )
     app = make_app(telepresence=tp)
     async with app.run_test() as pilot:
-        app._handle_telepresence_command()
+        app.integrations.handle_telepresence_command()
         await until(
             pilot,
             lambda: isinstance(app.screen, TelepresenceScreen),
@@ -153,7 +153,7 @@ async def test_tp_queries_intercepts_when_connected() -> None:
     )
     app = make_app(telepresence=tp)
     async with app.run_test() as pilot:
-        app._handle_telepresence_command()
+        app.integrations.handle_telepresence_command()
         await until(
             pilot,
             lambda: isinstance(app.screen, TelepresenceScreen),
@@ -169,7 +169,7 @@ async def test_tp_queries_intercepts_when_connected() -> None:
 async def test_tp_without_the_binary_notifies() -> None:
     app = make_app(telepresence=None)
     async with app.run_test() as pilot:
-        app._handle_telepresence_command()
+        app.integrations.handle_telepresence_command()
         await until(
             pilot,
             lambda: any("telepresence" in n.message for n in app._notifications),
@@ -187,7 +187,7 @@ async def test_tp_cli_failure_is_a_notification_not_a_crash() -> None:
 
     app = make_app(telepresence=ExplodingTP())
     async with app.run_test() as pilot:
-        app._handle_telepresence_command()
+        app.integrations.handle_telepresence_command()
         await until(
             pilot,
             lambda: any("connector refused" in n.message for n in app._notifications),
@@ -210,13 +210,13 @@ async def test_install_hint_fires_once_when_manager_detected() -> None:
 
     app = make_app(telepresence=None, probe=probe)
     async with app.run_test() as pilot:
-        await app._maybe_hint_telepresence()
+        await app.integrations.maybe_hint_telepresence()
         await until(
             pilot,
             lambda: any("traffic-manager detected" in n.message for n in app._notifications),
             label="hint shown",
         )
-        await app._maybe_hint_telepresence()  # once per session, never a storm
+        await app.integrations.maybe_hint_telepresence()  # once per session, never a storm
         await pilot.pause()
         assert calls["n"] == 1
         hints = sum(1 for n in app._notifications if "traffic-manager detected" in n.message)
@@ -229,7 +229,7 @@ async def test_no_hint_when_manager_absent_or_client_present() -> None:
 
     app = make_app(telepresence=None, probe=absent)
     async with app.run_test() as pilot:
-        await app._maybe_hint_telepresence()
+        await app.integrations.maybe_hint_telepresence()
         await pilot.pause()
         assert not any("traffic-manager" in n.message for n in app._notifications)
 
@@ -238,7 +238,7 @@ async def test_no_hint_when_manager_absent_or_client_present() -> None:
 
     with_client = make_app(telepresence=FakeTelepresence(), probe=present)
     async with with_client.run_test() as pilot:
-        await with_client._maybe_hint_telepresence()
+        await with_client.integrations.maybe_hint_telepresence()
         await pilot.pause()
         assert not any("traffic-manager" in n.message for n in with_client._notifications)
 
@@ -274,7 +274,7 @@ async def test_multi_daemon_panel_scopes_list_to_the_selected_daemon() -> None:
     tp = RecordingTP()
     app = make_app(telepresence=tp)
     async with app.run_test() as pilot:
-        app._handle_telepresence_command()
+        app.integrations.handle_telepresence_command()
         await until(
             pilot,
             lambda: isinstance(app.screen, TelepresenceScreen),
@@ -294,7 +294,7 @@ async def test_cli_error_notification_renders_without_markup() -> None:
 
     app = make_app(telepresence=ExplodingTP())
     async with app.run_test() as pilot:
-        app._handle_telepresence_command()
+        app.integrations.handle_telepresence_command()
         await until(
             pilot,
             lambda: any("refused" in n.message for n in app._notifications),
@@ -315,11 +315,11 @@ async def test_hint_retries_after_a_managerless_start() -> None:
 
     app = make_app(telepresence=None, probe=probe)
     async with app.run_test() as pilot:
-        await app._maybe_hint_telepresence()
+        await app.integrations.maybe_hint_telepresence()
         await pilot.pause()
         assert not any("traffic-manager" in n.message for n in app._notifications)
         answers["present"] = True  # the cluster behind a :ctx switch has one
-        await app._maybe_hint_telepresence()
+        await app.integrations.maybe_hint_telepresence()
         await until(
             pilot,
             lambda: any("traffic-manager detected" in n.message for n in app._notifications),
@@ -340,10 +340,10 @@ async def test_probe_result_from_the_old_context_is_discarded() -> None:
 
     app = make_app(telepresence=None, probe=probe)
     async with app.run_test() as pilot:
-        first = asyncio.create_task(app._maybe_hint_telepresence())
+        first = asyncio.create_task(app.integrations.maybe_hint_telepresence())
         await pilot.pause()
         app._ctx._epoch += 1  # what a :ctx switch does
-        second = asyncio.create_task(app._maybe_hint_telepresence())  # switch re-probe
+        second = asyncio.create_task(app.integrations.maybe_hint_telepresence())  # switch re-probe
         await pilot.pause()
         gate.set()
         await first

@@ -99,7 +99,7 @@ async def test_shell_uses_config_context() -> None:
     """s must invoke kubectl exec pinned to the app's kubeconfig context."""
     app = make_app([_pod("api-1")], kube_context="pinned-ctx")
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=0) as mock_call,
         patch.object(type(app), "suspend", return_value=_noop_cm()),
     ):
@@ -266,7 +266,7 @@ async def test_shell_kubectl_missing_error_notify() -> None:
     """s with kubectl missing → error notification; subprocess.call NOT invoked."""
     app = make_app([_pod("api-1")])
     with (
-        patch("korvid.ui.app.shutil.which", return_value=None),
+        patch("shutil.which", return_value=None),
         patch("subprocess.call") as mock_call,
     ):
         async with app.run_test() as pilot:
@@ -277,7 +277,7 @@ async def test_shell_kubectl_missing_error_notify() -> None:
             )
             await until(
                 pilot,
-                lambda: app._cursor_row_key() == "default/api-1",
+                lambda: app._inspect_surface.cursor_row_key() == "default/api-1",
                 label="pod row selected",
             )
             await pilot.press("s")
@@ -299,7 +299,7 @@ async def test_shell_non_pods_kind_is_inert() -> None:
         extra_data={"deployments": [_deploy("frontend")]},
     )
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call") as mock_call,
     ):
         async with app.run_test() as pilot:
@@ -337,7 +337,7 @@ async def test_shell_empty_table_warning() -> None:
     """s with empty table → warning notification; subprocess.call NOT invoked."""
     app = make_app([])
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call") as mock_call,
     ):
         async with app.run_test() as pilot:
@@ -356,7 +356,7 @@ async def test_shell_selected_pod_invokes_kubectl() -> None:
     """s on a selected pod → subprocess.call called with correct argv."""
     app = make_app([_pod("api-1")])
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=0) as mock_call,
         patch.object(type(app), "suspend", return_value=_noop_cm()),
     ):
@@ -423,7 +423,7 @@ async def test_shell_multi_container_shows_picker() -> None:
     """s on a multi-container pod → PickScreen listing containers; pick runs exec -c."""
     app = make_app([_multi_container_pod("web-1")])
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=0) as mock_call,
         patch.object(type(app), "suspend", return_value=_noop_cm()),
     ):
@@ -455,7 +455,7 @@ async def test_shell_multi_container_picker_escape_cancels() -> None:
     """Escaping the container picker runs nothing."""
     app = make_app([_multi_container_pod("web-1")])
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call") as mock_call,
         patch.object(type(app), "suspend", return_value=_noop_cm()),
     ):
@@ -491,7 +491,7 @@ async def test_shell_exec_failure_offers_debug_fallback(tmp_path: Path) -> None:
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", side_effect=_recording_call(calls)),
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
@@ -557,7 +557,7 @@ async def test_shell_nonzero_exit_with_working_shell_no_fallback() -> None:
     """Non-zero exec exit but probe succeeds (user's command failed) → no offer."""
     app = make_app([_pod("api-1")])
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1) as mock_call,
         patch("subprocess.run", return_value=SimpleNamespace(returncode=0)),
         patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
@@ -582,7 +582,7 @@ async def test_shell_exec_failure_no_declines_debug(tmp_path: Path) -> None:
     """Declining the fallback dialog runs nothing further."""
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1) as mock_call,
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", return_value=_noop_cm()),
@@ -658,7 +658,7 @@ async def test_debug_fallback_not_offered_in_readonly(tmp_path: Path) -> None:
     fallback offer, matching every other gated write."""
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"), readonly=True)
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1) as mock_call,
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", return_value=_noop_cm()),
@@ -684,7 +684,7 @@ async def test_debug_fallback_not_offered_without_audit() -> None:
     """Fail-closed: no audit sink means the mutating fallback is not offered."""
     app = make_app([_pod("api-1")])  # audit=None
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1) as mock_call,
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", return_value=_noop_cm()),
@@ -712,7 +712,7 @@ async def test_debug_fallback_not_offered_without_permission(tmp_path: Path) -> 
     'missing permission' instead of an approval that would then fail."""
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"), permitted=False)
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1) as mock_call,
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", return_value=_noop_cm()),
@@ -744,7 +744,7 @@ async def test_debug_fallback_offered_with_permission(tmp_path: Path) -> None:
     """With patch pods/ephemeralcontainers allowed the offer still appears."""
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"), permitted=True)
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", return_value=_noop_cm()),
@@ -787,7 +787,7 @@ async def test_debug_picker_recommends_runtime_image(tmp_path: Path) -> None:
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
@@ -835,7 +835,7 @@ async def test_debug_picker_busybox_first_without_manifest(tmp_path: Path) -> No
     """No manifest source → no runtime detection → busybox leads the picker."""
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", return_value=_noop_cm()),
@@ -869,7 +869,7 @@ async def test_debug_picker_air_gapped_config_only_configured_images(tmp_path: P
         debug_default_image="registry.corp.local/tools/busybox:1.36",
     )
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", return_value=_noop_cm()),
@@ -904,7 +904,7 @@ async def test_debug_picker_air_gapped_without_default_omits_busybox(tmp_path: P
         debug_images={"jvm": "registry.corp.local/tools/debug-jvm:latest"},
     )
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", return_value=_noop_cm()),
@@ -938,7 +938,7 @@ async def test_debug_picker_explicit_empty_images_config_custom_only(tmp_path: P
         debug_images={},
     )
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", return_value=_noop_cm()),
@@ -965,7 +965,7 @@ async def test_debug_picker_custom_image_prompt(tmp_path: Path) -> None:
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
@@ -1018,7 +1018,7 @@ async def test_debug_picker_escape_cancels(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app([_pod("api-1")], audit=AuditLog(audit_path))
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1) as mock_call,
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", return_value=_noop_cm()),
@@ -1086,7 +1086,7 @@ async def test_debug_pull_failure_offers_retry_with_fallback(tmp_path: Path) -> 
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         # First attach (koolkits:jvm) hangs on the pull; the retry succeeds.
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang"])),
@@ -1156,7 +1156,7 @@ async def test_debug_pull_failure_detected_when_process_exits_nonzero(tmp_path: 
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         # The first attach exits nonzero immediately (kubectl gave up).
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls, ["fail"])),
@@ -1206,7 +1206,7 @@ async def test_debug_pull_failure_no_retry_when_fallback_is_chosen_image(tmp_pat
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang"])),
         patch("subprocess.run", side_effect=_pull_failure_run(DEBUG_IMAGE)),
@@ -1254,7 +1254,7 @@ async def test_debug_pull_failure_no_retry_when_fallback_is_equivalent_ref(
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang"])),
         patch("subprocess.run", side_effect=_pull_failure_run("nicolaka/netshoot")),
@@ -1330,7 +1330,7 @@ async def test_debug_pull_monitoring_disabled_without_baseline(tmp_path: Path) -
         return SimpleNamespace(returncode=0, stdout=stale_json)
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang"])),
         patch("subprocess.call", return_value=1),
         patch("subprocess.run", side_effect=fake_run),
@@ -1372,7 +1372,7 @@ async def test_debug_pull_failure_detected_on_final_poll_at_deadline(tmp_path: P
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang"])),
         patch("subprocess.call", return_value=1),
         patch("subprocess.run", side_effect=_pull_failure_run(DEBUG_IMAGE)),
@@ -1421,7 +1421,7 @@ async def test_debug_pull_failure_air_gapped_without_default_notifies_only(
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang"])),
         patch(
@@ -1487,7 +1487,7 @@ async def test_debug_stale_failed_entry_with_same_image_not_blamed(tmp_path: Pat
         return SimpleNamespace(returncode=0, stdout=stale_json)
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         # 'hang-once': the attach survives one poll cycle, then exits cleanly.
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang-once"])),
         patch("subprocess.call", return_value=1),
@@ -1554,7 +1554,7 @@ async def test_debug_aborts_when_pod_replaced_after_prompt(tmp_path: Path) -> No
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", side_effect=_recording_call(calls)),
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
@@ -1601,7 +1601,7 @@ async def test_debug_runs_when_pod_uid_unchanged(tmp_path: Path) -> None:
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", side_effect=_recording_call(calls)),
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
@@ -1654,7 +1654,7 @@ async def test_debug_aborts_when_baseline_snapshot_sees_replacement(tmp_path: Pa
         return SimpleNamespace(returncode=0, stdout=replaced_pod)
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", side_effect=_recording_call(calls)),
         patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
         patch("subprocess.run", side_effect=fake_run),
@@ -1708,7 +1708,7 @@ async def test_debug_not_offered_when_pod_gone(tmp_path: Path) -> None:
         get_manifest=get_manifest,
     )
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1) as mock_call,
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
@@ -1829,7 +1829,7 @@ async def test_shell_refused_while_context_switching() -> None:
     race the teardown and could attach to whichever cluster wins (issue #36)."""
     app = make_app([_pod("api-1")])
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call") as mock_call,
     ):
         async with app.run_test() as pilot:
@@ -1859,7 +1859,7 @@ async def test_shell_picker_cancelled_when_context_switched_while_open() -> None
     would target the new one (issue #36 review round 11)."""
     app = make_app([_multi_container_pod("web-1")])
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call") as mock_call,
         patch.object(type(app), "suspend", return_value=_noop_cm()),
     ):

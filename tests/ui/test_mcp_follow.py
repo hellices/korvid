@@ -46,7 +46,7 @@ def make_app(
 
 
 async def _command(app: KorvidApp, pilot: object, text: str) -> None:
-    app._handle_mcp_command(text.split()[1:])  # same entry the command bar uses
+    app.integrations.handle_mcp_command(text.split()[1:])  # same entry the command bar uses
 
 
 # ---------------------------------------------------------------------------
@@ -57,31 +57,31 @@ async def _command(app: KorvidApp, pilot: object, text: str) -> None:
 async def test_follow_starts_from_config() -> None:
     app = make_app(config=KorvidConfig(namespace="default", mcp_follow=True))
     async with app.run_test():
-        assert app.mcp_follow_enabled is True
+        assert app.integrations.follow_enabled is True
     app2 = make_app()
     async with app2.run_test():
-        assert app2.mcp_follow_enabled is False
+        assert app2.integrations.follow_enabled is False
 
 
 async def test_mcp_follow_command_toggles_and_reports() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await _command(app, pilot, "mcp follow on")
-        await until(pilot, lambda: app.mcp_follow_enabled, label="follow on")
+        await until(pilot, lambda: app.integrations.follow_enabled, label="follow on")
         await until(
             pilot,
             lambda: any("follow" in n.message.lower() for n in app._notifications),
             label="toggle reported",
         )
         await _command(app, pilot, "mcp follow off")
-        await until(pilot, lambda: not app.mcp_follow_enabled, label="follow off")
+        await until(pilot, lambda: not app.integrations.follow_enabled, label="follow off")
 
 
 async def test_bare_mcp_follow_toggles() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await _command(app, pilot, "mcp follow")
-        await until(pilot, lambda: app.mcp_follow_enabled, label="follow toggled on")
+        await until(pilot, lambda: app.integrations.follow_enabled, label="follow toggled on")
 
 
 async def test_bare_mcp_status_reports_follow_state() -> None:
@@ -138,7 +138,7 @@ async def test_no_follow_badge_when_the_server_is_off() -> None:
 async def test_note_mcp_activity_shows_a_transient_toast() -> None:
     app = make_app()
     async with app.run_test() as pilot:
-        app.note_mcp_activity("copilot: get_logs api-1 (ns prod)")
+        app.integrations.note_activity("copilot: get_logs api-1 (ns prod)")
         await until(
             pilot,
             lambda: any("get_logs api-1" in n.message for n in app._notifications),
@@ -195,7 +195,7 @@ async def test_activity_toast_renders_without_rich_markup() -> None:
     show literally, not restyle the toast."""
     app = make_app()
     async with app.run_test() as pilot:
-        app.note_mcp_activity("mcp: get_logs [bold red]FAKE APPROVAL[/] (ns d)")
+        app.integrations.note_activity("mcp: get_logs [bold red]FAKE APPROVAL[/] (ns d)")
         await until(
             pilot,
             lambda: any("FAKE APPROVAL" in n.message for n in app._notifications),

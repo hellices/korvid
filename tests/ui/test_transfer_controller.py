@@ -1,9 +1,12 @@
-"""Unit tests for TransferController (issue #91 U3a).
+"""Unit tests for TransferController (issue #91 U3a, extended by Deep Task 9).
 
-The controller owns the transfer execution lifecycle — serialization,
-uid re-verification, fail-closed intent audit, stream with progress,
-outcome audit — and is testable here without the full app: every
-dependency is a constructor-injected callable.
+The controller owns the whole ctrl+t journey: the selection and its
+guards, the container pick, the transfer dialog with its remote-path
+listing, the upload approval, and then the execution lifecycle —
+serialization, uid re-verification, fail-closed intent audit, stream with
+progress, outcome audit. None of it needs the app: the Textual surface,
+the view and the write perimeter arrive as injected interfaces, and the
+perimeter here is the real `WriteCoordinator`.
 """
 
 from __future__ import annotations
@@ -15,22 +18,31 @@ import json
 import tarfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
+
+import pytest
 
 from korvid.core.audit import AuditLog
-from korvid.core.transfer import TransferSpec
-from korvid.ui.transfer import TransferController, TransferProgress
+from korvid.core.transfer import RemoteEntry, TransferError, TransferSpec
+from korvid.k8s.errors import ApiStatusError
+from korvid.ui.transfer import TransferController, TransferScreens
+from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.widgets.pick_screen import PickScreen
+from korvid.ui.widgets.transfer_screen import TransferScreen
+
+from .test_write_coordinator import FakeView, make_env
 
 SUCCESS = json.dumps({"metadata": {}, "status": "Success"}).encode()
 
 
-class FakeProgress:
-    """Stands in for TransferProgressScreen."""
+class FakeScreens(TransferScreens):
+    """Records the progress modals the lifecycle pops."""
 
     def __init__(self) -> None:
-        self.counts: list[int] = []
+        self.dismissed: list[Any] = []
 
-    def update_progress(self, count: int) -> None:
-        self.counts.append(count)
+    def dismiss_if_current(self, screen: Any) -> None:
+        self.dismissed.append(screen)
 
 
 class FakeMsg:
@@ -75,9 +87,9 @@ class Harness:
         frames: list[bytes] | None = None,
         stall: bool = False,
     ) -> None:
-        self.notifications: list[tuple[str, str]] = []
-        self.progress_screens: list[FakeProgress] = []
-        self.closed: list[FakeProgress] = []
+        self.env = make_env(tmp_path, audit="none")
+        self.ui = self.env.ui
+        self.screens = FakeScreens()
         self.exec_calls: list[tuple[str, str, str | None]] = []
         self.uid_checks: list[tuple[str, str, str]] = []
         self._uid_ok = uid_ok
@@ -92,16 +104,31 @@ class Harness:
             opener = self._open_exec
         self._opener = opener
         self.controller = TransferController(
-            notify=self._notify,
+            ui=self.ui,
+            view=self.env.view,
+            writes=self.env.coordinator,
+            screens=self.screens,
             open_pod_exec=lambda: self._opener,  # type: ignore[arg-type,return-value]  # duck-typed fake
             audit=lambda: self._audit,
+            pod_containers=lambda ns, name: ("app",),
+            target_uid=self._target_uid,
             pod_uid_unchanged=self._uid_unchanged,
-            show_progress=self._show_progress,
-            close_progress=self._close_progress,
         )
 
-    def _notify(self, message: str, *, severity: str = "information") -> None:
-        self.notifications.append((message, severity))
+    @property
+    def notifications(self) -> list[tuple[str, str]]:
+        return self.ui.notifications
+
+    @property
+    def progress_screens(self) -> list[Any]:
+        return [screen for screen, _callback in self.ui.screens]
+
+    @property
+    def closed(self) -> list[Any]:
+        return self.screens.dismissed
+
+    async def _target_uid(self, kind: str, namespace: str | None, name: str) -> str | None:
+        return "uid-1"
 
     def _open_exec(
         self, namespace: str, name: str, container: str | None, command: list[str], *, stdin: bool
@@ -118,17 +145,8 @@ class Harness:
     async def _uid_unchanged(self, namespace: str, name: str, uid: str, *, action: str) -> bool:
         self.uid_checks.append((namespace, name, uid))
         if not self._uid_ok:
-            self._notify(f"{action} cancelled - pod {name} was replaced", severity="warning")
+            self.ui.notify(f"{action} cancelled - pod {name} was replaced", severity="warning")
         return self._uid_ok
-
-    async def _show_progress(self, label: str) -> FakeProgress:
-        screen = FakeProgress()
-        self.progress_screens.append(screen)
-        return screen
-
-    def _close_progress(self, screen: TransferProgress) -> None:
-        assert isinstance(screen, FakeProgress)
-        self.closed.append(screen)
 
 
 def _tar_bytes(name: str, payload: bytes) -> bytes:
@@ -247,3 +265,290 @@ async def test_missing_exec_opener_returns_silently(tmp_path: Path) -> None:
     await h.controller.run("ns", "api-1", None, _spec(tmp_path), None)
     assert not audit_path.exists()
     assert h.notifications == []
+
+
+# ---------------------------------------------------------------------------
+# The user-facing half (Deep Task 9): selection, dialogs, listing, approval
+# ---------------------------------------------------------------------------
+
+
+class FlowHarness:
+    """The controller over a real `WriteCoordinator` and fake surfaces.
+
+    The perimeter is real so "an upload cannot reach the cluster without the
+    approval dialog and the reservation" is observed, not asserted about a
+    double.
+    """
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        kind: str = "pods",
+        selected: tuple[str | None, str | None] = ("default", "api-1"),
+        containers: tuple[str, ...] = ("app",),
+        uid: str | None = "uid-1",
+        readonly: bool = False,
+        opener: object = "default",
+        current_uid: str | None = "uid-1",
+        uid_error: BaseException | None = None,
+        entries: list[RemoteEntry] | None = None,
+    ) -> None:
+        self.env = make_env(
+            tmp_path,
+            view=FakeView(kind=kind, selected=selected, uid=uid, readonly=readonly),
+        )
+        self.ui = self.env.ui
+        self.screens = FakeScreens()
+        self.containers = containers
+        self.current_uid = current_uid
+        self.uid_error = uid_error
+        self.uid_checks: list[tuple[str, str, str]] = []
+        self.exec_calls: list[tuple[str, str, str | None]] = []
+        self.listed: list[str] = []
+        self._entries = entries if entries is not None else []
+        self.ran: list[tuple[str, str, str | None, TransferSpec, str | None]] = []
+        if opener == "default":
+            opener = self._open_exec
+        self.opener = opener
+        self.controller = TransferController(
+            ui=self.ui,
+            view=self.env.view,
+            writes=self.env.coordinator,
+            screens=self.screens,
+            open_pod_exec=lambda: self.opener,  # type: ignore[arg-type,return-value]  # duck-typed fake
+            audit=lambda: self.env.audit,
+            pod_containers=lambda ns, name: self.containers,
+            target_uid=self._target_uid,
+            pod_uid_unchanged=self._uid_unchanged,
+        )
+        self.controller.run = self._record_run  # type: ignore[method-assign]
+
+    def _open_exec(
+        self, namespace: str, name: str, container: str | None, command: list[str], *, stdin: bool
+    ) -> contextlib.AbstractAsyncContextManager[Any]:
+        self.exec_calls.append((namespace, name, container))
+
+        @contextlib.asynccontextmanager
+        async def _cm() -> Any:
+            yield FakeExecSession([])
+
+        return _cm()
+
+    async def _target_uid(self, kind: str, namespace: str | None, name: str) -> str | None:
+        if self.uid_error is not None:
+            raise self.uid_error
+        return self.current_uid
+
+    async def _uid_unchanged(self, namespace: str, name: str, uid: str, *, action: str) -> bool:
+        self.uid_checks.append((namespace, name, uid))
+        return True
+
+    async def _record_run(
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        spec: TransferSpec,
+        uid: str | None,
+    ) -> None:
+        self.ran.append((namespace, name, container, spec, uid))
+
+    def screen(self) -> Any:
+        return self.ui.screens[-1][0]
+
+    def answer(self, result: Any) -> None:
+        _screen, callback = self.ui.screens[-1]
+        assert callback is not None
+        callback(result)
+
+
+async def test_start_rejects_a_non_pods_view(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, kind="nodes")
+    h.controller.start()
+    assert h.ui.screens == []
+    assert "File transfer is only available for pods" in h.ui.messages()
+
+
+async def test_start_reports_a_missing_exec_client(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, opener=None)
+    h.controller.start()
+    assert h.ui.screens == []
+    assert any("no cluster connection" in message for message in h.ui.messages())
+
+
+async def test_start_refuses_while_a_transfer_is_in_flight(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    h.controller._in_flight = True
+    h.controller.start()
+    assert h.ui.screens == []
+    assert "A transfer is already in progress" in h.ui.messages()
+
+
+async def test_start_refuses_during_a_context_switch(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    h.env.context.reads = False
+    h.controller.start()
+    assert h.ui.screens == []
+
+
+async def test_start_without_a_selection_opens_nothing(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, selected=(None, None))
+    h.controller.start()
+    assert h.ui.screens == []
+
+
+async def test_start_opens_the_transfer_dialog_for_a_single_container(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    h.controller.start()
+    screen = h.screen()
+    assert isinstance(screen, TransferScreen)
+    assert screen._target == "default/api-1 (app)"
+
+
+async def test_start_picks_the_container_first_when_the_pod_has_several(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, containers=("app", "sidecar"))
+    h.controller.start()
+    assert isinstance(h.screen(), PickScreen)
+    h.answer("sidecar")
+    assert isinstance(h.screen(), TransferScreen)
+    assert h.screen()._target == "default/api-1 (sidecar)"
+
+
+async def test_a_dismissed_container_pick_opens_no_dialog(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, containers=("app", "sidecar"))
+    h.controller.start()
+    h.answer(None)
+    assert len(h.ui.screens) == 1
+
+
+async def test_download_runs_without_an_approval_dialog(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    h.controller.start_transfer(
+        "default", "api-1", "app", _spec(tmp_path), "uid-1", h.env.context.epoch()
+    )
+    await h.ui.settle()
+    assert h.ran == [("default", "api-1", "app", _spec(tmp_path), "uid-1")]
+    assert h.ui.screens == []
+
+
+async def test_upload_is_blocked_in_read_only_mode(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, readonly=True)
+    h.controller.start_transfer(
+        "default", "api-1", "app", _spec(tmp_path, "upload"), "uid-1", h.env.context.epoch()
+    )
+    await h.ui.settle()
+    assert h.ran == []
+    assert "Upload disabled in read-only mode" in h.ui.messages()
+
+
+async def test_upload_passes_the_approval_gate(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    spec = _spec(tmp_path, "upload")
+    h.controller.start_transfer("default", "api-1", "app", spec, "uid-1", h.env.context.epoch())
+    assert isinstance(h.screen(), ConfirmScreen)
+    assert h.ran == []
+    h.answer(True)
+    await h.ui.settle()
+    assert h.ran == [("default", "api-1", "app", spec, "uid-1")]
+
+
+async def test_declined_upload_never_runs(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    h.controller.start_transfer(
+        "default", "api-1", "app", _spec(tmp_path, "upload"), "uid-1", h.env.context.epoch()
+    )
+    h.answer(False)
+    await h.ui.settle()
+    assert h.ran == []
+
+
+async def test_start_transfer_is_cancelled_by_a_context_switch(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    stale = h.env.context.epoch()
+    h.env.context.value += 1
+    h.controller.start_transfer("default", "api-1", "app", _spec(tmp_path), "uid-1", stale)
+    await h.ui.settle()
+    assert h.ran == []
+    assert any("the kube context" in message for message in h.ui.messages())
+
+
+async def test_an_approval_left_open_across_a_switch_is_refused(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    epoch = h.env.context.epoch()
+    h.controller.start_transfer(
+        "default", "api-1", "app", _spec(tmp_path, "upload"), "uid-1", epoch
+    )
+    h.env.context.value += 1  # the switch completed while the dialog was open
+    h.answer(True)
+    await h.ui.settle()
+    assert h.ran == []
+    assert any("the kube context" in message for message in h.ui.messages())
+
+
+async def test_remote_lister_is_unavailable_without_an_exec_client(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, opener=None)
+    assert h.controller.remote_lister("default", "api-1", "app", uid=None, epoch=0) is None
+
+
+async def test_remote_lister_lists_over_the_exec_api(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    lister = h.controller.remote_lister(
+        "default", "api-1", "app", uid=None, epoch=h.env.context.epoch()
+    )
+    assert lister is not None
+    with patch(
+        "korvid.ui.transfer.list_remote_dir",
+        new=_fake_list_remote_dir([RemoteEntry("etc", True)]),
+    ):
+        assert await lister("/") == [RemoteEntry("etc", True)]
+
+
+async def test_remote_lister_refuses_after_a_context_switch(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    lister = h.controller.remote_lister(
+        "default", "api-1", "app", uid=None, epoch=h.env.context.epoch()
+    )
+    assert lister is not None
+    h.env.context.value += 1
+    with pytest.raises(TransferError, match="the kube context changed"):
+        await lister("/")
+
+
+async def test_remote_lister_refuses_a_replaced_pod(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, current_uid="uid-2")
+    lister = h.controller.remote_lister(
+        "default", "api-1", "app", uid="uid-1", epoch=h.env.context.epoch()
+    )
+    assert lister is not None
+    with pytest.raises(TransferError, match="was replaced"):
+        await lister("/")
+
+
+async def test_remote_lister_refuses_an_unverifiable_pod(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, current_uid=None)
+    lister = h.controller.remote_lister(
+        "default", "api-1", "app", uid="uid-1", epoch=h.env.context.epoch()
+    )
+    assert lister is not None
+    with pytest.raises(TransferError, match="could not be verified"):
+        await lister("/")
+
+
+async def test_remote_lister_reports_a_vanished_pod(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, uid_error=ApiStatusError(404, "NotFound", "gone"))
+    lister = h.controller.remote_lister(
+        "default", "api-1", "app", uid="uid-1", epoch=h.env.context.epoch()
+    )
+    assert lister is not None
+    with pytest.raises(TransferError, match="no longer exists"):
+        await lister("/")
+
+
+def _fake_list_remote_dir(entries: list[RemoteEntry]) -> Any:
+    async def _list(open_exec: Any, path: str) -> list[RemoteEntry]:
+        async with open_exec(["ls"], False):
+            pass
+        return entries
+
+    return _list

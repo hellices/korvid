@@ -825,7 +825,7 @@ async def test_mcp_toggle_refused_while_switching() -> None:
     async with app.run_test() as pilot:
         app._ctx._switching = True
         try:
-            app._handle_mcp_command(["on"])
+            app.integrations.handle_mcp_command(["on"])
             await until(
                 pilot,
                 lambda: any(
@@ -848,13 +848,13 @@ async def test_transfer_cancelled_when_context_switched_while_dialog_open() -> N
     app = env.app
     async with app.run_test() as pilot:
         spec = TransferSpec(direction="download", remote_path="/tmp/x", local_path="/tmp/x")
-        app._start_transfer("default", "pod-a", None, spec, None, app._ctx.epoch() - 1)
+        app._transfer.start_transfer("default", "pod-a", None, spec, None, app._ctx.epoch() - 1)
         await until(
             pilot,
             lambda: any("kube context" in n.message for n in app._notifications),
             label="transfer epoch refusal",
         )
-        assert app._transfer_task is None
+        assert app._transfer.task is None
 
 
 async def test_describe_cancelled_when_context_switches_during_fetch() -> None:
@@ -1055,7 +1055,7 @@ async def test_mcp_toggle_queued_before_switch_rechecks_inside_lock() -> None:
         await app._workspace_ctl.nav_lock.acquire()  # stand-in for the switch holding it
         workers_before = {id(worker) for worker in app.workers}
         try:
-            app._handle_mcp_command(["on"])  # pre-check passes; worker blocks
+            app.integrations.handle_mcp_command(["on"])  # pre-check passes; worker blocks
             await until(
                 pilot,
                 lambda: any(

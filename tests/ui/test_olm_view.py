@@ -230,6 +230,25 @@ async def test_operators_command_without_olm_explains_why() -> None:
         assert app.current_kind == "pods"  # the view did not change
 
 
+async def test_explain_missing_catalog_answers_whether_it_handled_the_command() -> None:
+    """The OLM owner - not the command router - decides whether `:operators`
+    means "the API group was never discovered" or "the arguments were wrong
+    on a view that exists"."""
+    absent = make_app({}, olm=False)
+    async with absent.run_test() as pilot:
+        assert absent._olm.explain_missing_catalog() is True
+        await until(
+            pilot,
+            lambda: any("OLM" in n.message for n in absent._notifications),
+            label="OLM-absent explanation shown",
+        )
+    present = make_app({})
+    async with present.run_test() as pilot:
+        assert present._olm.explain_missing_catalog() is False
+        await pilot.pause()
+        assert not list(present._notifications)
+
+
 async def test_subscriptions_view_shows_olm_columns() -> None:
     app = make_app({"subscriptions": [_subscription("cert-manager")]})
     async with app.run_test() as pilot:

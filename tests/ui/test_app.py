@@ -1076,7 +1076,7 @@ async def test_shell_nonzero_exit_offers_debug_fallback(tmp_path: Path) -> None:
             label="pod row visible",
         )
         with (
-            patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
             patch("subprocess.call", return_value=1),
             patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
             patch.object(app, "suspend", nullcontext),

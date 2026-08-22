@@ -331,7 +331,7 @@ async def test_graph_goto_reuses_normal_navigation() -> None:
         await pilot.press("enter")
         await until(pilot, lambda: app.current_kind == "configmaps", label="navigated")
         assert app.current_namespace == "prod"
-        namespace, name = app._selected_ns_name()
+        namespace, name = app._view.selected_ns_name()
         assert (namespace, name) == ("prod", "cm-a")
 
 

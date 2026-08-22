@@ -20,9 +20,9 @@ KorvidApp  (ui/app.py)
 │                       (ui/resource_write_controller.py)  delete/restart/edit/scale/resize/cordon/drain
 ├── HelmController      (ui/helm_controller.py)      install/upgrade/rollback/uninstall
 ├── OperatorController  (ui/operator_controller.py)  OLM subscribe/approve/uninstall
-├── ForwardController   (ui/forward_controller.py)   port-forward sessions
+├── ForwardController   (ui/forward_controller.py)   the shift+f dialog and port-forward sessions
 ├── ShellController     (ui/shell_controller.py)     pod exec, debug fallback, node shell
-├── TransferController  (ui/transfer.py)             post-approval file transfer
+├── TransferController  (ui/transfer.py)             the ctrl+t journey: dialogs, approval, stream
 ├── DebugController     (ui/debug.py)                gated kubectl debug runs
 ├── SessionTimelineController
 │                       (ui/session_timeline_controller.py)  timeline producers and modal navigation
@@ -35,6 +35,11 @@ KorvidApp  (ui/app.py)
 ├── ProposalController   (ui/proposal_controller.py)     external MCP write proposals: intake, review, execution, expiry
 ├── ContextSwitchCoordinator
 │                       (ui/context_switch_coordinator.py)  the `:ctx` epoch and the quiesce/retarget/resume transaction
+├── ResourceInspectController
+│                       (ui/resource_inspect_controller.py)  describe, Secret masking, container pick, hint details
+├── IntegrationController
+│                       (ui/integration_controller.py)  `:mcp` on/off/follow and `:tp` status/hint
+├── CommandRouter        (ui/command_router.py)          which owner an unresolved `:` command belongs to
 └── ...
 ```
 
@@ -622,10 +627,49 @@ tests added before the move where the behaviour is not already pinned.
     gone; the app keeps two message delegates and two adapters
     (`AppContextSurface`, `AppSessionConfiguration`).
 
+15. ~~The remaining integration and inspection flows~~ — done (#187);
+    three owners, not one bag:
+    - `ForwardController` gained `open_dialog`, so the whole shift+f journey
+      (forwardable-kind check, `:ctx` read gate, missing registry/kubectl,
+      Service TCP-port resolution, dialog, post-dialog epoch revalidation,
+      launch) lives with the session lifecycle it starts; it took `ViewState`
+      for the one selection read that journey makes.
+    - `TransferController` gained the user-facing half of ctrl+t: the
+      selection guards, the container pick, the transfer dialog with its
+      read-only remote listing and pod-uid binding, the upload approval, and
+      the progress modal. Its perimeter is the real `WriteCoordinator`
+      (`confirm_screen` + `reserved`), and the one screen-stack action it
+      needs is the narrow `TransferScreens.dismiss_if_current` — `UiSurface`
+      deliberately cannot pop screens.
+    - `ResourceInspectController` (`ui/resource_inspect_controller.py`) owns
+      describe (selected and named), the shared Secret-masking rule, the
+      provider footer, the container rows and shell/logs pick, the
+      hint-details overlay, the pods store lookups those share, and the
+      pod-identity guard the debug and transfer flows bind an approved action
+      to. It reads the two mounted widgets it needs — the table row cursor
+      and the hint strip — through `InspectSurface`.
+    - `IntegrationController` (`ui/integration_controller.py`) owns the
+      optional integrations and all four pieces of state the app used to
+      hold: the MCP follow flag, and the telepresence hinted/probing/reprobe
+      trio. It reaches the proposal sweeps through `IntegrationProposals`
+      and the `:ctx` navigation lock through `SwitchSerializer`.
+    - `CommandRouter` (`ui/command_router.py`) decides which of those owners
+      an unresolved `:` command belongs to, and produces exactly one message
+      of its own — the unknown-command report. `OperatorController` answers
+      the `:operators` half through `explain_missing_catalog()`, because only
+      the OLM owner can tell an undiscovered API group from a syntax error on
+      a discovered view.
+
+    Selection reads (`selected_ns_name`, `selected_uid`) moved onto
+    `AppViewState`, which is where the interface already declared them; the
+    app holds one `self._view` and no longer implements them.
+
 Issue #238 showed that logs and describe were technically extractable without
 introducing a new pane-composition seam, and issue #245 kept describe as a
-deliberate low-ROI non-extraction. Logs are now extracted through the narrow
-`LogPaneView` accessor (above); describe stays on the app for the same
-low-ROI reason. `SessionTimelineController` owns the timeline-specific
-boundary, and `ContextSwitchCoordinator` owns the `:ctx` transaction — the app
-keeps only the two `:ctx` message handlers as one-line delegates.
+deliberate low-ROI non-extraction at the time. Both are now extracted — logs
+through the narrow `LogPaneView` accessor (above), describe through
+`ResourceInspectController` — because the app-as-integration-hub cost had
+grown past the per-flow saving. `SessionTimelineController` owns the
+timeline-specific boundary, and `ContextSwitchCoordinator` owns the `:ctx`
+transaction — the app keeps only the two `:ctx` message handlers as one-line
+delegates.

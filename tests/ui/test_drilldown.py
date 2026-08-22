@@ -185,7 +185,7 @@ async def test_drill_to_pods_and_breadcrumb() -> None:
             lambda: (
                 app.current_kind == "deployments"
                 and _row_names(table) == ["api", "web"]
-                and app._cursor_row_key() == "default/api"
+                and app._inspect_surface.cursor_row_key() == "default/api"
             ),
             label="deployments rendered",
         )
@@ -196,7 +196,7 @@ async def test_drill_to_pods_and_breadcrumb() -> None:
             lambda: (
                 app.current_kind == "replicasets"
                 and _row_names(table) == ["web-6d9f88", "web-5c4e77"]
-                and app._cursor_row_key() == "default/web-6d9f88"
+                and app._inspect_surface.cursor_row_key() == "default/web-6d9f88"
             ),
             label="replicasets drilled",
         )
@@ -206,7 +206,7 @@ async def test_drill_to_pods_and_breadcrumb() -> None:
             lambda: (
                 app.current_kind == "pods"
                 and _row_names(table) == ["web-6d9f88-aaa"]
-                and app._cursor_row_key() == "default/web-6d9f88-aaa"
+                and app._inspect_surface.cursor_row_key() == "default/web-6d9f88-aaa"
                 and "deployments/web" in _status_text(app)
                 and "replicasets/web-6d9f88" in _status_text(app)
             ),
@@ -1088,7 +1088,7 @@ async def test_two_level_pop_waits_for_rows_the_drill_filter_will_show() -> None
             lambda: (
                 app.current_kind == "deployments"
                 and _row_names(table) == ["api", "web"]
-                and app._cursor_row_key() == "default/api"
+                and app._inspect_surface.cursor_row_key() == "default/api"
             ),
             label="deployments rendered",
         )
@@ -1099,7 +1099,7 @@ async def test_two_level_pop_waits_for_rows_the_drill_filter_will_show() -> None
             lambda: (
                 app.current_kind == "replicasets"
                 and _row_names(table) == ["web-6d9f88", "web-5c4e77"]
-                and app._cursor_row_key() == "default/web-6d9f88"
+                and app._inspect_surface.cursor_row_key() == "default/web-6d9f88"
             ),
             label="replicaset drill active",
         )
@@ -1109,7 +1109,7 @@ async def test_two_level_pop_waits_for_rows_the_drill_filter_will_show() -> None
             lambda: (
                 app.current_kind == "pods"
                 and _row_names(table) == ["web-6d9f88-aaa"]
-                and app._cursor_row_key() == "default/web-6d9f88-aaa"
+                and app._inspect_surface.cursor_row_key() == "default/web-6d9f88-aaa"
             ),
             label="pod drill active",
         )

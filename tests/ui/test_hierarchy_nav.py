@@ -266,7 +266,7 @@ async def test_goto_from_tree_jumps_to_view_with_cursor() -> None:
         )
         await until(
             pilot,
-            lambda: app._cursor_row_key() == "default/web-nginx",
+            lambda: app._inspect_surface.cursor_row_key() == "default/web-nginx",
             label="target resource selected",
         )
 

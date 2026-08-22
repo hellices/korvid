@@ -7,7 +7,6 @@ import contextlib
 import dataclasses
 import functools
 import logging
-import shutil
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -42,7 +41,6 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, WorkerError, WorkerState
 
 from korvid.agent.events import AgentEvent
-from korvid.agent.install_hint import isolated_install_hint
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -61,7 +59,6 @@ from korvid.core.relationships import SummaryLike
 from korvid.core.session_timeline import SessionTimeline, TimelineResourceRef
 from korvid.core.sorting import SortSpec
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
-from korvid.core.transfer import RemoteEntry, TransferError, TransferSpec, list_remote_dir
 from korvid.core.watch import WatchManager
 from korvid.k8s.components import (
     ComponentRef,
@@ -75,14 +72,14 @@ from korvid.k8s.helm import (
 from korvid.k8s.helmcli import HelmCLI
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
-from korvid.k8s.models import ContainerTrouble, GenericSummary, PodSummary
+from korvid.k8s.models import ContainerTrouble, GenericSummary
 from korvid.k8s.olm import (
     OPERATORS_GROUP,
     PACKAGES_GROUP,
 )
 from korvid.k8s.portforward import FORWARDABLE_KINDS
 from korvid.k8s.relations import owned_by
-from korvid.k8s.telepresence import TelepresenceCLI, TelepresenceError
+from korvid.k8s.telepresence import TelepresenceCLI
 from korvid.k8s.writes import WriteOps
 from korvid.tools.executor import UIBridge
 from korvid.tools.proposals import ProposalStore, WriteProposal
@@ -94,6 +91,7 @@ from korvid.ui.agent_ui_controller import (
 )
 from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.command import command_help
+from korvid.ui.command_router import CommandRouter
 from korvid.ui.context_switch_coordinator import (
     ContextSurface,
     ContextSwitchCoordinator,
@@ -104,7 +102,8 @@ from korvid.ui.debug import DebugController
 from korvid.ui.drain import DrainController
 from korvid.ui.forward_controller import ForwardController
 from korvid.ui.helm_controller import HelmController
-from korvid.ui.hints import EventsFetcher, HintController, pod_needs_hint
+from korvid.ui.hints import EventsFetcher, HintController
+from korvid.ui.integration_controller import IntegrationController
 from korvid.ui.log_controller import LogController
 from korvid.ui.messages import (
     AgentPromptSubmitted,
@@ -133,6 +132,7 @@ from korvid.ui.proposal_controller import (
     ReviewTasks,
 )
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader
+from korvid.ui.resource_inspect_controller import InspectSurface, ResourceInspectController
 from korvid.ui.resource_write_controller import (
     RESTARTABLE,
     SCALABLE,
@@ -144,33 +144,27 @@ from korvid.ui.session_timeline_controller import (
     SessionTimelineController,
 )
 from korvid.ui.shell_controller import ShellController, ShellSettings
-from korvid.ui.transfer import TransferController, TransferProgress
+from korvid.ui.transfer import TransferController, TransferScreens
 from korvid.ui.ui_surface import ScreenResultT, Severity, UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt, ReplicasPrompt
-from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
-from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen, provider_footer_note
+from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.helm_install import HelmInstallPrompt
 from korvid.ui.widgets.help_screen import HelpScreen, collect_help
 from korvid.ui.widgets.hierarchy_screen import HierarchyScreen
-from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.hint_strip import HintStrip
 from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 from korvid.ui.widgets.pick_screen import PickScreen
-from korvid.ui.widgets.port_forward_screen import PortForwardScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
-from korvid.ui.widgets.secret_screen import SecretScreen
 from korvid.ui.widgets.status_bar import StatusBar
-from korvid.ui.widgets.telepresence_screen import TelepresenceScreen
 from korvid.ui.widgets.top_bar import KeyEntry, TopBar
-from korvid.ui.widgets.transfer_screen import TransferProgressScreen, TransferScreen
 from korvid.ui.workspace_controller import (
     RELATIONSHIP_GROUP,
     WorkspaceController,
@@ -210,12 +204,6 @@ _HELM_PREVIEW_TIMEOUT = 20.0
 #: A rendered chart can run to thousands of lines; the approval dialog shows
 #: at most this many so the operation summary stays reviewable.
 _HELM_PREVIEW_MAX_LINES = 60
-
-#: Upper bound on the hint-overlay events fetch (issue #34): the trouble half
-#: comes from the status the app already holds, so a stalled API connection
-#: must not delay the overlay past this - the events are marked unavailable
-#: instead.
-_HINT_EVENTS_TIMEOUT = 3.0
 
 
 class _RelationshipLister:
@@ -425,17 +413,16 @@ class KorvidApp(App[None]):
         watch_warning_events: (Callable[[str | None], AsyncIterator[dict[str, Any]]] | None) = None,
     ) -> None:
         super().__init__()
+        #: The session's one typed view surface (issue #187): every
+        #: controller reads the focused pane through it, and the selection
+        #: reads (`selected_ns_name`, `selected_uid`) live on it rather than
+        #: on the app - they are widget/store reads about "what the user is
+        #: looking at", which is exactly what this boundary names.
+        self._view = AppViewState(self)
         self.config = config
         self.store = store
         self.watch_manager = watch_manager
         self._list_namespaces = list_namespaces
-        #: Optional telepresence integration (issue #159): None = binary
-        #: absent or kill-switched; the `:tp` panel simply reports that.
-        self._telepresence = telepresence
-        self._probe_traffic_manager = probe_traffic_manager
-        self._telepresence_hinted = False
-        self._telepresence_probing = False
-        self._telepresence_reprobe = False
         self._get_manifest = get_manifest
         self._get_helm_components = get_helm_components
         self._get_events = get_events
@@ -444,9 +431,6 @@ class KorvidApp(App[None]):
         self._audit = audit
         self._check_permission = check_permission
         self._mcp = mcp
-        #: MCP follow mode (issue #153): mirror external cluster reads in
-        #: the TUI. Config seeds the state; `:mcp follow on|off` toggles it.
-        self._mcp_follow: bool = config.mcp_follow
         #: Operational relationship graph (issue #281): the loader is a
         #: pure orchestrator built once around the injected LIST callable;
         #: it performs no Textual operations, so the app owns the worker
@@ -472,7 +456,7 @@ class KorvidApp(App[None]):
         self._ctx = ContextSwitchCoordinator(
             ui=AppUiSurface(self),
             surface=AppContextSurface(self),
-            view=AppViewState(self),
+            view=self._view,
             session=AppSessionConfiguration(self),
             store=self.store,
             watches=self.watch_manager,
@@ -499,7 +483,7 @@ class KorvidApp(App[None]):
         #: build without the feature pays nothing per event.
         self._timeline = SessionTimelineController(
             ui=AppUiSurface(self),
-            view=AppViewState(self),
+            view=self._view,
             watch_manager=self.watch_manager,
             timeline=session_timeline,
             get_epoch=self._ctx.epoch,
@@ -519,7 +503,7 @@ class KorvidApp(App[None]):
         #: one implementation of that ordering in the app.
         self._writes = WriteCoordinator(
             ui=AppUiSurface(self),
-            view=AppViewState(self),
+            view=self._view,
             context=self._ctx,
             audit=lambda: self._audit,
             timeline=self._timeline,
@@ -542,17 +526,38 @@ class KorvidApp(App[None]):
         self._edit_text = edit_text
         self._metrics = metrics
         self._forwards = forwards
+        #: Read-only resource inspection (issue #187 / Deep Task 9): describe
+        #: (selected and named) with its Secret masking rule and provider
+        #: footer, the container pick behind Enter, the hint-details overlay,
+        #: the store lookups those share, and the pod-identity guard the
+        #: interactive flows bind an approved action to. The shell and log
+        #: collaborators are late-bound because they are constructed below.
+        self._inspect_surface = AppInspectSurface(self)
+        self._inspect = ResourceInspectController(
+            ui=AppUiSurface(self),
+            view=self._view,
+            context=self._ctx,
+            surface=self._inspect_surface,
+            shell=lambda: self._shell,
+            logs=lambda: self._logs,
+            get_manifest=lambda: self._get_manifest,
+            get_events=lambda: self._get_events,
+            stream_logs=lambda: self._stream_logs,
+            target_uid=lambda kind, ns, name: self._target_uid(kind, ns, name),
+            audit=lambda: self._audit,
+            provider_hint=lambda: self._provider_hint,
+        )
         #: interactive sessions (issue #187): pod exec, the kubectl debug
         #: fallback, and the approval-gated node shell. run_worker ownership
         #: and the write perimeter stay here.
         self._shell = ShellController(
             gate=self._writes,
-            view=AppViewState(self),
+            view=self._view,
             ui=AppUiSurface(self),
             debug=lambda: self._debug,
             audit=lambda: self._audit,
             get_manifest=lambda: self._get_manifest,
-            pod_containers=lambda ns, name: self._get_pod_containers(ns, name),
+            pod_containers=self._inspect.pod_containers,
             node_target=lambda action: self._node_target(action),
             target_uid=lambda kind, ns, name: self._target_uid(kind, ns, name),
             settings=lambda: ShellSettings(
@@ -569,6 +574,7 @@ class KorvidApp(App[None]):
         self._forward = ForwardController(
             gate=self._writes,
             ui=AppUiSurface(self),
+            view=self._view,
             forwards=lambda: self._forwards,
             audit=lambda: self._audit,
             get_manifest=lambda: self._get_manifest,
@@ -593,16 +599,22 @@ class KorvidApp(App[None]):
         #: not on PATH - the install/upgrade/rollback keys then explain
         #: their absence instead of doing nothing.
         self._helm = helm
-        #: transfer execution lifecycle (issue #91 U3a): the controller owns
-        #: the stream task and in-flight serialization; the app keeps the
-        #: dialogs, approval gate, epoch checks, and run_worker ownership.
+        #: the ctrl+t transfer journey (issue #91 U3a / Deep Task 9): the
+        #: controller owns the selection guards, the container pick, the
+        #: dialog with its read-only remote listing, the upload approval it
+        #: composes out of `WriteCoordinator`, the stream task and the
+        #: in-flight serialization. The app keeps run_worker ownership and
+        #: the Textual entry points as thin delegates.
         self._transfer = TransferController(
-            notify=self.notify,
+            ui=AppUiSurface(self),
+            view=self._view,
+            writes=self._writes,
+            screens=AppTransferScreens(self),
             open_pod_exec=lambda: self._open_pod_exec,
             audit=lambda: self._audit,
-            pod_uid_unchanged=self._pod_uid_unchanged,
-            show_progress=self._show_transfer_progress,
-            close_progress=self._close_transfer_progress,
+            pod_containers=self._inspect.pod_containers,
+            target_uid=lambda kind, ns, name: self._target_uid(kind, ns, name),
+            pod_uid_unchanged=self._inspect.pod_uid_unchanged,
         )
         #: OLM workflows (issue #187): the wizard, InstallPlan approval and
         #: the CSV-aware uninstall. The install dialog re-checks the
@@ -610,7 +622,7 @@ class KorvidApp(App[None]):
         #: permitted/run directly rather than the standard confirm flow.
         self._olm = OperatorController(
             gate=self._writes,
-            view=AppViewState(self),
+            view=self._view,
             ui=AppUiSurface(self),
             write_ops=lambda: self._write_ops,
             get_manifest=lambda: self._get_manifest,
@@ -625,7 +637,7 @@ class KorvidApp(App[None]):
         self._helm_ctl = HelmController(
             helm=lambda: self._helm,
             gate=self._writes,
-            view=AppViewState(self),
+            view=self._view,
             ui=AppUiSurface(self),
             # Late-binding, like DebugController's suspend/refresh: the editor
             # entry points are patched per test, so binding the bound method
@@ -642,7 +654,7 @@ class KorvidApp(App[None]):
             audit=lambda: self._audit,
             readonly=lambda: self.config.readonly,
             kube_context=lambda: self.config.kube_context,
-            pod_uid_unchanged=self._pod_uid_unchanged,
+            pod_uid_unchanged=self._inspect.pod_uid_unchanged,
             suspend=lambda: self.suspend(),
             refresh=lambda: self.refresh(),
             offer_pull_retry=self._offer_pull_retry,
@@ -664,7 +676,7 @@ class KorvidApp(App[None]):
         #: handlers as thin delegates.
         self._resource_writes = ResourceWriteController(
             writes=self._writes,
-            view=AppViewState(self),
+            view=self._view,
             ui=AppUiSurface(self),
             drain=self._drain,
             write_ops=lambda: self._write_ops,
@@ -699,12 +711,12 @@ class KorvidApp(App[None]):
         # cache and the parked-cursor refresh timer; widget access and worker
         # scheduling stay here, injected as narrow callables.
         self._hints = HintController(
-            find_pod_summary=self._find_pod_summary,
-            cursor_row_key=self._cursor_row_key,
+            find_pod_summary=self._inspect.find_pod_summary,
+            cursor_row_key=self._inspect_surface.cursor_row_key,
             on_pods_view=lambda: self.current_kind == "pods",
             get_events=lambda: self._get_events,
-            show_trouble=self._hint_show_trouble,
-            clear_hint=self._hint_clear,
+            show_trouble=self._inspect_surface.show_trouble,
+            clear_hint=self._inspect_surface.clear_hint,
             start_fetch=lambda coro: self.run_worker(coro, exclusive=True, group="hint-events"),
             set_timer=self.set_timer,
             ctx_epoch=self._ctx.epoch,
@@ -719,8 +731,8 @@ class KorvidApp(App[None]):
             ui=AppUiSurface(self),
             get_log_pane=lambda: self._log_pane,
             get_stream_logs=lambda: self._stream_logs,
-            pod_containers=self._get_pod_containers,
-            selected_ns_name=self._selected_ns_name,
+            pod_containers=self._inspect.pod_containers,
+            selected_ns_name=self._view.selected_ns_name,
             visible_pod_keys=lambda: [
                 str(row.key.value) for row in self._focused_table().ordered_rows
             ],
@@ -749,7 +761,7 @@ class KorvidApp(App[None]):
             relationship_loader=self._relationship_loader,
             ui=AppUiSurface(self),
             surface=AppWorkspaceSurface(self),
-            view=AppViewState(self),
+            view=self._view,
             context=self._ctx,
             logs=self._logs,
             hints=self._hints,
@@ -757,7 +769,7 @@ class KorvidApp(App[None]):
             get_manifest=lambda: self._get_manifest,
             get_helm_components=lambda: self._get_helm_components,
             olm_alias_key=self._olm.alias_key,
-            describe_named=self._describe_named,
+            describe_named=self._inspect.describe_named,
             cluster_list_permitted=self._cluster_list_permitted,
         )
         #: External MCP write proposals (issue #110 / Deep Task 7): the
@@ -785,6 +797,27 @@ class KorvidApp(App[None]):
             # patch `_refresh_status` after the app is constructed.
             refresh_status=lambda: self._refresh_status(),
         )
+        #: The optional integrations (issue #187 / Deep Task 9): the `:mcp`
+        #: on/off toggle with its proposal sweeps, the follow mirror flag,
+        #: and the `:tp` status panel with its one-shot traffic-manager
+        #: hint - together with all four pieces of state those keep. Wired
+        #: after the proposal controller and the workspace, because a
+        #: server-run transition sweeps the one and serializes on the
+        #: other's `:ctx` navigation lock.
+        self._integrations = IntegrationController(
+            ui=AppUiSurface(self),
+            context=self._ctx,
+            proposals=self._proposals,
+            serializer=self._workspace_ctl,
+            mcp=lambda: self._mcp,
+            telepresence=telepresence,
+            probe_traffic_manager=probe_traffic_manager,
+            telepresence_enabled=lambda: self.config.telepresence_enabled,
+            follow_enabled=config.mcp_follow,
+            # Late-binding, like the other controllers' app callables: tests
+            # patch `_refresh_status` after the app is constructed.
+            refresh_status=lambda: self._refresh_status(),
+        )
         #: The built-in agent's session and UI ownership (issue #187 / Deep
         #: Task 6): the runtime/settings/profile/follow state, the turn task
         #: with its interrupt-and-submit lifecycle, the screen context the
@@ -799,7 +832,7 @@ class KorvidApp(App[None]):
             panel=AppAgentPanel(self),
             screens=AppAgentScreens(self),
             ui=AppUiSurface(self),
-            view=AppViewState(self),
+            view=self._view,
             context=self._ctx,
             writes=self._writes,
             workspace=self._workspace,
@@ -811,7 +844,7 @@ class KorvidApp(App[None]):
             get_manifest=lambda: self._get_manifest,
             get_events=lambda: self._get_events,
             stream_logs=lambda: self._stream_logs,
-            pod_containers=self._get_pod_containers,
+            pod_containers=self._inspect.pod_containers,
             write_ops=lambda: self._write_ops,
             audit=lambda: self._audit,
             pod_resize_supported=lambda: self._pod_resize_supported,
@@ -831,6 +864,18 @@ class KorvidApp(App[None]):
             rebuild=rebuild_agent,
             disconnect=disconnect_agent,
             available=agent_available,
+        )
+        #: Where an unresolved `:` command goes (issue #187 / Deep Task 9):
+        #: one typed dispatch to the owner that implements it, so no feature
+        #: flow stays reachable through the app itself. Wired last because it
+        #: names every other owner.
+        self._commands = CommandRouter(
+            ui=AppUiSurface(self),
+            agent=self._agent_ui,
+            integrations=self._integrations,
+            proposals=self._proposals,
+            forwards=self._forward,
+            operators=self._olm,
         )
 
     # -- Focused-pane delegation (issue #48): `WorkspaceState` owns the pane
@@ -1098,7 +1143,7 @@ class KorvidApp(App[None]):
         self.set_timer(5.0, self._dismiss_splash)
         # Telepresence install hint (issue #159): fire-and-forget probe; a
         # failed or slow GET never delays startup.
-        self.run_worker(self._maybe_hint_telepresence(), exclusive=False)
+        self.run_worker(self._integrations.maybe_hint_telepresence(), exclusive=False)
 
     #: Minimum time the startup splash stays visible in a real terminal.
     #: Skipped in headless (test) mode so Pilot tests see the table at once.
@@ -1238,7 +1283,7 @@ class KorvidApp(App[None]):
             overrides=overrides,
         )
         self.push_screen(
-            HelpScreen(groups, command_help(telepresence=self._telepresence is not None))
+            HelpScreen(groups, command_help(telepresence=self._integrations.telepresence_available))
         )
 
     def action_open_command(self) -> None:
@@ -1383,101 +1428,17 @@ class KorvidApp(App[None]):
             # focused pane's selection only.
             return
         if self.current_kind != "pods" or event.row_key is None:
-            self._hint_clear()
+            self._inspect_surface.clear_hint()
             return
         self._hints.show_for_row(str(event.row_key.value))
 
-    def _hint_show_trouble(
-        self, trouble: tuple[ContainerTrouble, ...], *, event: str | None = None
-    ) -> None:
-        """Strip adapter for the hint controller (widget access stays here).
-
-        A render dispatched during shutdown/teardown can arrive after the
-        strip is unmounted; nothing to render then.
-        """
-        with contextlib.suppress(NoMatches):
-            self._hint_strip.show_trouble(trouble, event=event)
-
-    def _hint_clear(self) -> None:
-        """Strip adapter for the hint controller (widget access stays here)."""
-        with contextlib.suppress(NoMatches):  # strip unmounted during shutdown/teardown
-            self._hint_strip.clear_hint()
-
-    def _cursor_row_key(self) -> str | None:
-        """Row key under the table cursor, or None (empty table / no cursor)."""
-        try:
-            table = self._focused_table()
-        except NoMatches:  # timer fired while the app is shutting down
-            return None
-        if table.cursor_row < 0:
-            return None
-        try:
-            key = table.coordinate_to_cell_key(Coordinate(table.cursor_row, 0)).row_key
-        except CellDoesNotExist:
-            return None
-        return None if key is None else str(key.value)
-
-    def _find_pod_summary(self, row_key: str) -> PodSummary | None:
-        parts = row_key.split("/", 1)
-        if len(parts) != 2:
-            return None
-        namespace, name = parts
-        for obj in self.store.get("pods", self.current_scope):
-            if obj.namespace == namespace and obj.name == name and isinstance(obj, PodSummary):
-                return obj
-        return None
-
     def action_hint_details(self) -> None:
-        """Open the read-only detail overlay for the hinted pod row (issue #34):
-        the full trouble list plus recent Warning events - everything the
-        two-line strip folded away."""
-        if self.current_kind != "pods":
-            return
-        row_key = self._cursor_row_key()
-        if row_key is None:
-            return
-        summary = self._find_pod_summary(row_key)
-        if summary is None or not pod_needs_hint(summary):
-            return
-        self.run_worker(
-            self._open_hint_details(row_key, summary), exclusive=True, group="hint-detail"
-        )
+        """`h` — open the read-only detail overlay for the hinted pod row.
 
-    async def _open_hint_details(self, row_key: str, summary: PodSummary) -> None:
-        """Fetch events best-effort, then push the overlay: the trouble half
-        renders even when the events API fails ("unavailable" is stated, not
-        conflated with "no events"). The context is revalidated after the
-        await - the cursor, view, or screen stack may have changed meanwhile,
-        and stale details for the wrong pod are worse than none."""
-        events: list[dict[str, Any]] = []
-        events_unavailable = False
-        if self._get_events is not None:
-            try:
-                events = await asyncio.wait_for(
-                    self._get_events.fetch(
-                        summary.namespace, summary.name, uid=summary.uid or None
-                    ),
-                    timeout=_HINT_EVENTS_TIMEOUT,
-                )
-            except Exception:  # events are decoration; trouble alone still helps
-                events_unavailable = True
-        if len(self.screen_stack) > 1:  # another dialog opened during the fetch
-            return
-        if self.current_kind != "pods" or self._cursor_row_key() != row_key:
-            return
-        fresh = self._find_pod_summary(row_key)
-        if fresh is None or fresh.uid != summary.uid:
-            return  # deleted or recreated mid-fetch
-        if not pod_needs_hint(fresh):
-            return  # recovered mid-fetch: the strip is gone, details would be noise
-        await self.push_screen(
-            HintDetailScreen(
-                f"{summary.namespace}/{summary.name}",
-                fresh.trouble,
-                events,
-                events_unavailable=events_unavailable,
-            )
-        )
+        Textual resolves `action_*` on the app, so the binding entry point
+        stays here; the overlay flow belongs to `ResourceInspectController`.
+        """
+        self._inspect.hint_details()
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter drills down: pods -> containers; kinds with a
@@ -1496,46 +1457,7 @@ class KorvidApp(App[None]):
         parts = row_key.split("/", 1)
         if len(parts) != 2:
             return
-        await self._open_containers_screen(parts[0], parts[1])
-
-    async def _open_containers_screen(self, namespace: str, name: str) -> None:
-        """Push the containers screen for a pod; shell/logs run per pick.
-
-        The row fetch and the open screen both span awaited gaps, so the
-        context epoch captured here cancels stale picks: a shell or log
-        stream started after a completed switch would target the new cluster
-        with the old cluster's pod selection.
-        """
-        epoch = self._ctx.epoch()
-        rows = await self._build_container_rows(namespace, name)
-        if not rows:
-            self.notify("No containers found for this pod", severity="warning")
-            return
-        if self._ctx.crossed(epoch):
-            # The row fetch awaited through a context switch: the selection
-            # belongs to the old cluster.
-            return
-
-        def _on_pick(result: tuple[str, str] | None) -> None:
-            if result is None:
-                return
-            if self._ctx.crossed(epoch):
-                self.notify(
-                    f"container action on {name} cancelled - the kube context"
-                    " changed while the containers screen was open",
-                    severity="warning",
-                )
-                return
-            action, container = result
-            if action == "shell":
-                self._shell.run_shell(namespace, name, container)
-            else:
-                if self._stream_logs is None:
-                    self.notify("Log streaming unavailable", severity="warning")
-                    return
-                self.run_worker(self._logs.open_pane(namespace, [(name, container)]))
-
-        await self.push_screen(ContainersScreen(name, rows), _on_pick)
+        await self._inspect.open_containers(parts[0], parts[1])
 
     def action_shell(self) -> None:
         """`s` - exec into the selected pod, or open a node shell.
@@ -1563,53 +1485,6 @@ class KorvidApp(App[None]):
             return False
         table.move_cursor(row=index)
         return True
-
-    async def _describe_named(self, kind: str, namespace: str, name: str) -> None:
-        """Describe an object named by a hierarchy tree node (no table row
-        to read the selection from - `action_describe`'s selection-bound
-        path does not apply)."""
-        if self._get_manifest is None:
-            self.notify("Describe unavailable", severity="warning")
-            return
-        if not self._ctx.reads_allowed():
-            return
-        epoch = self._ctx.epoch()
-        try:
-            manifest = await self._get_manifest(kind, namespace or None, name)
-        except ApiStatusError as exc:
-            self.notify(
-                explain_api_error(exc.status, exc.reason, kind, namespace or None),
-                severity="error",
-            )
-            return
-        except ValueError as exc:
-            self.notify(str(exc), severity="error")
-            return
-        if self._ctx.crossed(epoch):
-            return
-        title = f"{kind}/{namespace}/{name}" if namespace else f"{kind}/{name}"
-        if manifest.get("kind") == "Secret":
-            # Same masking rule as action_describe (spec §5 #9).
-            await self.push_screen(SecretScreen(title, manifest, audit=self._audit))
-            return
-        await self.push_screen(
-            DescribeScreen(title, manifest, [], footer_note=self._provider_footer(manifest))
-        )
-
-    async def _build_container_rows(
-        self, namespace: str, name: str
-    ) -> list[tuple[str, str, str, str, str]]:
-        """Container rows from the live manifest; store names as fallback."""
-        if self._get_manifest is not None:
-            try:
-                manifest = await self._get_manifest("pods", namespace, name)
-            except (ApiStatusError, ValueError) as exc:
-                logger.debug("manifest fetch for container list failed: %s", exc)
-            else:
-                rows = build_container_rows(manifest)
-                if rows:
-                    return rows
-        return [(ctr, "-", "-", "-", "-") for ctr in self._get_pod_containers(namespace, name)]
 
     def action_relationships(self) -> None:
         """Load and show the operational relationship graph for the selected
@@ -1675,7 +1550,7 @@ class KorvidApp(App[None]):
             display_kind=meta.kind,
             namespace=namespace,
             name=name,
-            uid=self._selected_uid(namespace or None, name),
+            uid=self._view.selected_uid(namespace or None, name),
         )
 
     def action_timeline(self) -> None:
@@ -1690,631 +1565,51 @@ class KorvidApp(App[None]):
         self._timeline.open()
 
     async def action_describe(self) -> None:
-        """Fetch and display the manifest + events for the currently highlighted row."""
-        if self._get_manifest is None:
-            self.notify("Describe unavailable", severity="warning")
-            return
-        # The fetch would race the client swap and could render either
-        # cluster's manifest — refuse up front.
-        if not self._ctx.reads_allowed():
-            return
-        epoch = self._ctx.epoch()
+        """`d` — describe the currently highlighted row.
 
-        namespace, name = self._selected_ns_name()
-        if namespace is None or name is None:
-            return
-        ns: str | None = namespace if namespace else None
-
-        try:
-            manifest = await self._get_manifest(self.current_kind, ns, name)
-        except ApiStatusError as exc:
-            msg = explain_api_error(exc.status, exc.reason, self.current_kind, namespace or None)
-            self.notify(msg, severity="error")
-            return
-        except ValueError as exc:
-            self.notify(str(exc), severity="error")
-            return
-
-        events: list[dict[str, Any]] = []
-        # Events are filtered by involvedObject.name only, so restrict to pods
-        # to avoid showing events for unrelated objects with the same name.
-        if self._get_events is not None and ns is not None and self.current_kind == "pods":
-            try:
-                events = await self._get_events.fetch(namespace, name)
-            except ApiStatusError as exc:
-                # Events are best-effort; surface but still show the manifest.
-                msg = explain_api_error(exc.status, exc.reason, "events", namespace)
-                self.notify(msg, severity="warning")
-
-        if self._ctx.crossed(epoch):
-            # The fetches awaited through a context switch: the manifest (or
-            # a mixed manifest/events pair) describes the old cluster and
-            # must not be pushed over the new session.
-            self.notify(
-                f"describe {name} cancelled - the kube context changed during the fetch",
-                severity="warning",
-            )
-            return
-        title = f"{self.current_kind}/{namespace}/{name}"
-        if manifest.get("kind") == "Secret":
-            # Secrets get the dedicated masked viewer (spec §5 #9): values
-            # render masked; per-key reveal is explicit and audit-logged.
-            await self.push_screen(SecretScreen(title, manifest, audit=self._audit))
-            return
-        await self.push_screen(
-            DescribeScreen(title, manifest, events, footer_note=self._provider_footer(manifest))
-        )
+        Textual resolves `action_*` on the app, so the binding entry point
+        stays here; the flow belongs to `ResourceInspectController`.
+        """
+        await self._inspect.describe_selected()
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
-        parts = message.text.strip().split()
-        head = parts[0] if parts else ""
-        if head in {"ai", "agent"} and self._agent_ui.available:
-            self._agent_ui.handle_command(parts[1:])
-            return
-        if head == "model" and self._agent_ui.available:
-            self._agent_ui.handle_model_command(parts[1:])
-            return
-        if head == "mcp":
-            self._handle_mcp_command(parts[1:])
-            return
-        if head in {"tp", "telepresence"}:
-            self._handle_telepresence_command()
-            return
-        if head == "proposals":
-            self._proposals.open_review()
-            return
-        if head == "pf":
-            self._forward.open_list()
-            return
-        if head == "operators" and "operators" not in self.aliases:
-            # The catalog view only exists where OLM serves PackageManifests;
-            # explain the absence instead of a generic unknown-kind error.
-            # Only when the alias is genuinely unavailable: a syntax error on
-            # a discovered view (":operators ns extra") falls through to the
-            # normal unknown-command message.
-            # "Not discovered" and not "absent": background discovery may
-            # still be running, or may have failed (pods-only fallback) -
-            # indistinguishable states from here.
-            self.notify(
-                "The operator catalog is unavailable: the"
-                " packages.operators.coreos.com API group was not discovered"
-                " (OLM may be absent, or discovery may still be running)",
-                severity="warning",
-            )
-            return
-        self.notify(
-            f"Unknown resource or command: {message.text}"
-            " — not found in this cluster's API (CRD not installed?)",
-            severity="warning",
-        )
-
-    def _handle_telepresence_command(self) -> None:
-        """`:tp` / `:telepresence` (issue #159): open the read-only status
-        panel. Queries run only here, on the explicit user action - the
-        telepresence CLI spawns its local user daemon to answer, so korvid
-        never polls it in the background."""
-        tp = self._telepresence
-        if tp is None:
-            self.notify(
-                "telepresence not available — binary not on PATH, or disabled "
-                "via `integrations: {telepresence: off}`",
-                severity="warning",
-            )
-            return
-
-        async def _open() -> None:
-            with self._progress("querying telepresence"):
-                try:
-                    status = await tp.status()
-                    intercepts = (
-                        await tp.list_intercepts(daemon=status.daemon_name or None)
-                        if status.connected
-                        else []
-                    )
-                except TelepresenceError as exc:
-                    # stderr tails are hostile input for a markup toast.
-                    self.notify(str(exc), title="telepresence", severity="error", markup=False)
-                    return
-            await self.push_screen(TelepresenceScreen(status, intercepts))
-
-        self.run_worker(_open(), exclusive=True, group="telepresence")
-
-    async def _maybe_hint_telepresence(self) -> None:
-        """One dim hint per session (issue #159): the cluster runs a
-        traffic-manager but the local client is absent. The probe is an
-        injected pure API check - never the telepresence binary; a missing
-        probe, a failure or the kill-switch all silently mean no hint.
-
-        Re-runnable until the hint actually shows: the startup cluster may
-        lack a manager while a later `:ctx` target runs one. Results are
-        epoch-bound - a probe answering for a context that was already left
-        is discarded - and a re-probe requested while one is in flight is
-        queued instead of lost.
-        """
-        if (
-            self._telepresence is not None
-            or self._telepresence_hinted
-            or not self.config.telepresence_enabled
-            or self._probe_traffic_manager is None
-        ):
-            return
-        if self._telepresence_probing:
-            # A :ctx switch mid-probe: run again once the old probe (whose
-            # answer describes the old cluster) unwinds.
-            self._telepresence_reprobe = True
-            return
-        self._telepresence_probing = True
-        epoch = self._ctx.epoch()
-        try:
-            present = await self._probe_traffic_manager()
-        except Exception:
-            return  # absent / forbidden / transient: all mean "no hint"
-        finally:
-            self._telepresence_probing = False
-            if self._telepresence_reprobe:
-                self._telepresence_reprobe = False
-                self.run_worker(self._maybe_hint_telepresence(), exclusive=False)
-        if not present or self._ctx.epoch() != epoch:
-            return  # no manager, or the answer describes a left context
-        self._telepresence_hinted = True
-        self.notify(
-            "telepresence traffic-manager detected in this cluster — install "
-            "the client and restart korvid to inspect intercepts (`:tp`)",
-            severity="information",
-            timeout=8,
-        )
-
-    def _handle_mcp_follow_command(self, args: list[str]) -> None:
-        """`:mcp follow [on|off]` (issue #153): toggle mirroring of external
-        cluster reads in the TUI. Bare `:mcp follow` flips the state."""
-        if args and args[0].lower() not in ("on", "off"):
-            self.notify("Usage: :mcp follow [on|off]", severity="warning")
-            return
-        self._mcp_follow = args[0].lower() == "on" if args else not self._mcp_follow
-        state = "on" if self._mcp_follow else "off"
-        self.notify(
-            f"MCP follow {state} — external reads are {'mirrored on screen' if self._mcp_follow else 'no longer mirrored'}"
-        )
-        self._refresh_status()
+        """A `:` command the bar could not resolve to a kind: the router
+        hands it to the owner that implements it."""
+        self._commands.route(message.text)
 
     @property
-    def mcp_follow_enabled(self) -> bool:
-        """Current follow-mode state; read by the MCP server's wiring."""
-        return self._mcp_follow
+    def integrations(self) -> IntegrationController:
+        """The optional-integration owner (`:mcp`, `:tp`).
 
-    def note_mcp_activity(self, line: str) -> None:
-        """Transient activity note for an external MCP read (issue #153):
-        with follow off, this is the only trace an external host leaves on
-        screen. Display only — never raises into the caller."""
-        with contextlib.suppress(Exception):
-            # markup=False: parts of the line are caller-controlled (pod and
-            # namespace names from the MCP host) - Rich tags must render
-            # literally, never restyle or forge toast content.
-            self.notify(line, title="MCP", severity="information", timeout=3, markup=False)
-
-    def _handle_mcp_command(self, args: list[str]) -> None:
-        """`:mcp` shows server state; `:mcp on` / `:mcp off` toggle it live."""
-        mcp = self._mcp
-        if mcp is None:
-            self.notify(
-                f"MCP unavailable — {isolated_install_hint(feature='mcp')}",
-                severity="warning",
-                markup=False,
-            )
-            return
-        if not args:
-            follow = "follow on" if self._mcp_follow else "follow off"
-            self.notify(f"{mcp.status()} · {follow}")
-            return
-        action = args[0].lower()
-        if action == "follow":
-            self._handle_mcp_follow_command(args[1:])
-            return
-        if action not in ("on", "off"):
-            self.notify("Usage: :mcp [on|off] | :mcp follow [on|off]", severity="warning")
-            return
-        self._toggle_mcp_server(mcp, action)
-
-    def _toggle_mcp_server(self, mcp: MCPControllerBase, action: str) -> None:
-        """Start/stop the MCP server live (`:mcp on` / `:mcp off`)."""
-        if self._ctx.switching():
-            # The switch quiesced the server before swapping the client and
-            # alias map; a toggle landing mid-swap could restart it against
-            # state that is being replaced.
-            self.notify(
-                "A context switch is in progress — try again once it completes",
-                severity="warning",
-            )
-            return
-
-        async def _switch() -> None:
-            # Serialize with the `:ctx` flow (which holds _nav_lock through
-            # quiesce/teardown/retarget) and re-check inside the lock: a
-            # toggle queued just before the switch claimed the ctx switch
-            # could otherwise start the server against the client/alias map
-            # mid-swap, or have its stop undone by the switch's restart.
-            async with self._workspace_ctl.nav_lock:
-                if self._ctx.switching():
-                    self.notify(
-                        "A context switch is in progress — try again once it completes",
-                        severity="warning",
-                    )
-                    return
-                was_running = mcp.running
-                if action == "on" and not was_running:
-                    # Any pending proposal predates the run about to start —
-                    # its capability token is from an older, ended run.
-                    # Sweep BEFORE the endpoint goes live: once start()
-                    # returns, the new run's callers may already have
-                    # submitted, and their work must not be expired as
-                    # old-run stragglers.
-                    await self._proposals.expire_all("the MCP server was restarted")
-                msg = await (mcp.start() if action == "on" else mcp.stop())
-                # A real stop invalidates every capability token handed out
-                # for that run (issue #110): pending proposals from it must
-                # not survive. A stop whose bounded teardown timed out
-                # (`running` still True) has still ended that run's
-                # authority, so it expires too; only an idempotent
-                # status-preserving toggle (`:mcp on` while already
-                # running) keeps pending work.
-                stopped = action == "off" and was_running
-                # Captured under the lock and BEFORE the audited sweep: the
-                # sweep awaits audit appends, and the dying run's task can
-                # finish during that wait — `running` re-read afterwards
-                # would be False, skipping the follow-up sweep that catches
-                # the run's last in-flight submissions. The wait below must
-                # bind to *this* dying run, never to whichever run the
-                # controller owns once the lock is released.
-                old_task = mcp.pending_task() if stopped and mcp.running else None
-                if stopped:
-                    await self._proposals.expire_all("the MCP server was stopped")
-            self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
-            self._refresh_status()
-            if old_task is not None:
-                # The bounded stop timed out and the old run is still dying
-                # in the background: wait it out, then sweep again so an
-                # in-flight submission that raced the teardown cannot
-                # outlive its server run.
-                await self._sweep_after_mcp_teardown(mcp, old_task)
-
-        self.run_worker(_switch(), exclusive=False)
-
-    async def _sweep_after_mcp_teardown(
-        self, mcp: MCPControllerBase, task: asyncio.Task[None]
-    ) -> None:
-        """Final proposal sweep once a dragged-out MCP teardown completes.
-
-        `stop()`'s bounded wait can return while the old server run is still
-        dying; an in-flight proposal call on that run may land *after* the
-        stop-time sweep. *task* is the old run's server task, captured under
-        `_nav_lock` before it was released: the follow-up wait binds to that
-        exact run, so a fresh server started by a racing `:mcp on` is never
-        the one waited on or torn down here.
+        Public because the composition root wires the MCP server's follow
+        hooks straight to it: follow state and the activity note belong to
+        the controller that owns them, not to a pair of app forwarders.
         """
-        with contextlib.suppress(Exception):
-            await asyncio.wait({task})
-        # Serialize the sweep decision against a racing `:mcp on`: if a
-        # fresh run came up while the old teardown dragged on, pending
-        # proposals belong to that live run (its start transition already
-        # swept old-run stragglers) and must not be expired here.
-        async with self._workspace_ctl.nav_lock:
-            if mcp.running:
-                return
-            await self._proposals.expire_all("the MCP server was stopped")
+        return self._integrations
 
     async def action_port_forward(self) -> None:
-        """Open the port-forward dialog for the selected pod or service (shift+f)."""
-        if self.current_kind not in FORWARDABLE_KINDS:
-            self.notify("Port-forward is only available for pods and services", severity="warning")
-            return
-        # The forward would race the teardown/retarget and could spawn
-        # against whichever cluster wins — refuse up front.
-        if not self._ctx.reads_allowed():
-            return
-        epoch = self._ctx.epoch()
-        if self._forwards is None:
-            self.notify("Port-forward unavailable in this build", severity="warning")
-            return
-        if shutil.which("kubectl") is None:
-            self.notify(
-                "kubectl not found on PATH — port-forward requires kubectl", severity="error"
-            )
-            return
-        ns, name = self._selected_ns_name()
-        if ns is None or name is None:
-            return
-        kind = self.current_kind
-        ports, manifest_ok = await self._forward.prefill_ports(kind, ns, name)
-        if kind == "services" and manifest_ok and not ports:
-            # A fetched Service with no TCP ports can never be forwarded —
-            # kubectl port-forward is TCP-only. (A failed fetch still opens
-            # the dialog: the port list is a convenience, not the source of
-            # truth, and kubectl gives the authoritative error.)
-            self.notify(
-                f"{name} declares no TCP ports — kubectl port-forward is TCP-only",
-                severity="error",
-            )
-            return
+        """Open the port-forward dialog for the selected pod or service (shift+f).
 
-        def _on_result(result: tuple[int, int] | None) -> None:
-            if result is None:
-                return
-            if self._ctx.crossed(epoch):
-                # The dialog stayed open across a context switch (or the
-                # port prefill awaited through one): the selection belongs
-                # to the old cluster while kubectl and the reopened forward
-                # registry now target the new one.
-                self.notify(
-                    f"port-forward to {name} cancelled - the kube context"
-                    " changed while the dialog was open",
-                    severity="warning",
-                )
-                return
-            self.run_worker(
-                self._forward.start(
-                    kind, ns, name, local_port=result[0], remote_port=result[1], epoch=epoch
-                )
-            )
-
-        await self.push_screen(
-            PortForwardScreen(f"{kind}/{ns}/{name}", ports, restrict_remote=kind == "services"),
-            _on_result,
-        )
-
-    #: Pod controller kinds a re-attach can follow, mapped to their plural.
-    #: ReplicaSets are chased one level up so the forward survives rollouts,
-    #: not just single pod replacements.
+        Textual resolves `action_*` on the app, so the binding entry point
+        stays here; the flow itself belongs to `ForwardController`.
+        """
+        await self._forward.open_dialog()
 
     # -- File transfer (issue #47): download/upload over the exec API as a
     # -- tar stream; uploads are approval-gated, both directions audited
     # -- fail-closed.
 
     def action_transfer(self) -> None:
-        """Open the ctrl+t transfer dialog for the selected pod."""
-        if self.current_kind != "pods":
-            self.notify("File transfer is only available for pods", severity="warning")
-            return
-        if self._open_pod_exec is None:
-            self.notify("File transfer unavailable (no cluster connection)", severity="warning")
-            return
-        if self._transfer_in_flight:
-            self.notify("A transfer is already in progress", severity="warning")
-            return
-        # The stream would race the teardown/retarget and could address
-        # whichever cluster wins — refuse up front.
-        if not self._ctx.reads_allowed():
-            return
-        epoch = self._ctx.epoch()
+        """Open the ctrl+t transfer dialog for the selected pod.
 
-        ns, name = self._selected_ns_name()
-        if ns is None or name is None:
-            return
-        namespace = ns
-
-        summary = self._find_pod(namespace, name)
-        containers = summary.containers if summary is not None else ()
-        # Bind the transfer to this pod *incarnation*: the exec API addresses
-        # the pod by namespace/name only, so the uid is re-verified in
-        # _run_transfer right before streaming (a same-named replacement
-        # created while the dialogs are open must never receive the bytes).
-        uid = (summary.uid or None) if summary is not None else None
-        if len(containers) > 1:
-
-            def _on_pick(container: str | None) -> None:
-                if container is not None:
-                    self._open_transfer_dialog(namespace, name, container, uid, epoch)
-
-            self.push_screen(PickScreen(f"Container in {name}:", list(containers)), _on_pick)
-            return
-        self._open_transfer_dialog(
-            namespace, name, containers[0] if containers else None, uid, epoch
-        )
-
-    def _open_transfer_dialog(
-        self, namespace: str, name: str, container: str | None, uid: str | None, epoch: int
-    ) -> None:
-        target = f"{namespace}/{name}" + (f" ({container})" if container else "")
-
-        def _on_spec(spec: TransferSpec | None) -> None:
-            if spec is not None:
-                self._start_transfer(namespace, name, container, spec, uid, epoch)
-
-        self.push_screen(
-            TransferScreen(
-                target,
-                remote_lister=self._remote_lister(namespace, name, container, uid, epoch),
-            ),
-            _on_spec,
-        )
-
-    def _remote_lister(
-        self, namespace: str, name: str, container: str | None, uid: str | None, epoch: int
-    ) -> Callable[[str], Awaitable[list[RemoteEntry]]] | None:
-        """Directory-listing callable for the ctrl+o remote path picker.
-
-        A read-only `ls` over the exec API (issue #124): names only, so the
-        masking pipeline does not apply, and it is never exposed to the
-        agent — browsing is user-driven like the transfer itself.
-
-        Bound to the dialog's context *epoch* and pod *uid*: a :ctx switch
-        retargets the shared exec client, and a same-named replacement pod
-        does not change the epoch — either way the listing would come from
-        somewhere other than what the dialog shows. Raises TransferError
-        (the picker's degradation path) when either binding is stale,
-        checked before each exec and again after the await so a listing
-        that raced the change is discarded.
+        Textual resolves `action_*` on the app, so the binding entry point
+        stays here; the journey itself belongs to `TransferController`.
         """
-        open_pod_exec = self._open_pod_exec
-        if open_pod_exec is None:
-            return None
-
-        async def _guard() -> None:
-            def check_epoch() -> None:
-                if self._ctx.crossed(epoch):
-                    raise TransferError(
-                        f"the kube context changed while the dialog for {namespace}/{name} was open"
-                    )
-
-            check_epoch()
-            await self._verify_listing_pod(namespace, name, uid)
-            # The uid lookup awaited the manifest source: a switch that
-            # completed during that await retargeted the shared exec client,
-            # so re-check before any exec follows.
-            check_epoch()
-
-        async def _list(path: str) -> list[RemoteEntry]:
-            await _guard()
-
-            def open_exec(
-                command: list[str], stdin: bool
-            ) -> contextlib.AbstractAsyncContextManager[Any]:
-                return open_pod_exec(namespace, name, container, command, stdin=stdin)
-
-            entries = await list_remote_dir(open_exec, path)
-            # Re-check: a listing that raced a switch or a pod replacement
-            # must never be presented under the old selection.
-            await _guard()
-            return entries
-
-        return _list
-
-    async def _verify_listing_pod(self, namespace: str, name: str, uid: str | None) -> None:
-        """Raise TransferError unless pod `uid` is still the incarnation the
-        transfer dialog was opened for. Fails open when no uid was captured
-        (matching the transfer's own uid gate in ui/transfer.py); with a
-        captured uid an unverifiable lookup fails closed — browsing is
-        optional, so degrading to manual entry beats listing a same-named
-        replacement pod."""
-        if uid is None:
-            return
-        try:
-            current = await self._target_uid("pods", namespace, name)
-        except ApiStatusError as exc:
-            raise TransferError(f"pod {name} no longer exists") from exc
-        if current is None:
-            raise TransferError(f"pod {name} could not be verified — enter the path manually")
-        if current != uid:
-            raise TransferError(f"pod {name} was replaced since the dialog was opened")
-
-    def _start_transfer(
-        self,
-        namespace: str,
-        name: str,
-        container: str | None,
-        spec: TransferSpec,
-        uid: str | None,
-        epoch: int,
-    ) -> None:
-        """Gate then launch: uploads write into the container filesystem, so
-        they are blocked in read-only mode and pass the approval dialog."""
-        if self._ctx.crossed(epoch):
-            # The picker/transfer dialogs stayed open across a context
-            # switch: the pod selection (and its uid, which fails open when
-            # missing) belongs to the old cluster while the shared exec
-            # client now targets the new one.
-            self.notify(
-                f"transfer to {namespace}/{name} cancelled - the kube context"
-                " changed while the dialog was open",
-                severity="warning",
-            )
-            return
-        if spec.direction == "upload":
-            if self.config.readonly:
-                self.notify("Upload disabled in read-only mode", severity="warning")
-                return
-
-            def _approved(approved: bool | None) -> None:
-                if not approved:
-                    return
-                if self._ctx.crossed(epoch):
-                    self.notify(
-                        f"transfer to {namespace}/{name} cancelled - the kube"
-                        " context changed while the approval was open",
-                        severity="warning",
-                    )
-                    return
-                self.run_worker(
-                    self._writes.reserved(
-                        lambda: self._run_transfer(namespace, name, container, spec, uid)
-                    )
-                )
-
-            self.push_screen(
-                self._writes.confirm_screen(
-                    f"Upload file to {namespace}/{name}",
-                    f"{spec.local_path} → {container or 'pod'}:{spec.remote_path}\n"
-                    "This writes into the container filesystem.",
-                ),
-                _approved,
-            )
-            return
-        self.run_worker(
-            self._writes.reserved(lambda: self._run_transfer(namespace, name, container, spec, uid))
-        )
-
-    async def _run_transfer(
-        self,
-        namespace: str,
-        name: str,
-        container: str | None,
-        spec: TransferSpec,
-        uid: str | None,
-    ) -> None:
-        """Delegate to the transfer controller.
-
-        Callers wrap this in `WriteCoordinator.reserved`, which counts the
-        transfer as an in-flight cluster write so `:ctx` switching refuses
-        while it runs.
-        """
-        await self._transfer.run(namespace, name, container, spec, uid)
-
-    async def _show_transfer_progress(self, label: str) -> TransferProgressScreen:
-        """Widget access stays here: the controller only sees the protocol."""
-        screen = TransferProgressScreen(label)
-        await self.push_screen(screen)
-        return screen
-
-    def _close_transfer_progress(self, screen: TransferProgress) -> None:
-        if self.screen is screen:  # type: ignore[comparison-overlap]  # protocol narrows the Screen type away
-            self.pop_screen()
+        self._transfer.start()
 
     def on_transfer_cancel_requested(self, message: TransferCancelRequested) -> None:
         message.stop()
         self._transfer.cancel()
-
-    @property
-    def _transfer_in_flight(self) -> bool:
-        """True from transfer-worker launch through the outcome audit; a
-        single task slot only works with one transfer at a time, so a
-        second launch is refused for its whole lifecycle (issue #47)."""
-        return self._transfer.in_flight
-
-    @property
-    def _transfer_task(self) -> asyncio.Task[int] | None:
-        """The in-flight transfer stream; the progress screen's escape
-        cancels it (never the surrounding worker)."""
-        return self._transfer.task
-
-    async def _pod_uid_unchanged(
-        self, namespace: str, name: str, approved_uid: str, *, action: str
-    ) -> bool:
-        """Re-verify the approved pod incarnation just before `action`
-        executes; notifies and returns False when the pod is gone or replaced."""
-        try:
-            current_uid = await self._target_uid("pods", namespace, name)
-        except ApiStatusError:
-            self.notify(
-                f"{action} cancelled - pod {name} no longer exists.",
-                severity="warning",
-            )
-            return False
-        if current_uid is not None and current_uid != approved_uid:
-            self.notify(
-                f"{action} cancelled - pod {name} was replaced since the prompt was shown.",
-                severity="warning",
-            )
-            return False
-        return True
 
     def _offer_pull_retry(
         self,
@@ -2452,38 +1747,6 @@ class KorvidApp(App[None]):
         """Stream all filtered pods' containers (``L`` binding); cap at 8."""
         await self._logs.action_logs_multi()
 
-    def _selected_ns_name(self) -> tuple[str | None, str | None]:
-        """Return (namespace, name) of the currently selected row or (None, None) + warn."""
-        table = self._focused_table()
-        if table.row_count == 0:
-            self.notify("No resource selected", severity="warning")
-            return None, None
-
-        row_index = table.cursor_row
-        ordered = table.ordered_rows
-        if row_index >= len(ordered):
-            self.notify("No resource selected", severity="warning")
-            return None, None
-
-        row_key = str(ordered[row_index].key.value)
-        parts = row_key.split("/", 1)
-        if len(parts) != 2:
-            self.notify("Cannot determine resource from selection", severity="warning")
-            return None, None
-        return parts[0], parts[1]
-
-    def _get_pod_containers(self, namespace: str, name: str) -> tuple[str, ...]:
-        """Return container names for pod from the store, or empty tuple if not found."""
-        summary = self._find_pod(namespace, name)
-        return summary.containers if summary is not None else ()
-
-    def _find_pod(self, namespace: str, name: str) -> PodSummary | None:
-        """The store's PodSummary for the selection, or None once it is gone."""
-        for obj in self.store.get(self.current_kind, self.current_scope):
-            if obj.namespace == namespace and obj.name == name and isinstance(obj, PodSummary):
-                return obj
-        return None
-
     # -- Write operations (issue #16): every path goes through a ConfirmScreen
     # -- confirmed only by a user keystroke; executed writes are audited.
 
@@ -2494,16 +1757,6 @@ class KorvidApp(App[None]):
     #: 'deployments') must never be treated as an apps/* workload.
     _RESTARTABLE: ClassVar[frozenset[tuple[str, str]]] = RESTARTABLE
     _SCALABLE: ClassVar[frozenset[tuple[str, str]]] = SCALABLE
-
-    def _selected_uid(self, ns: str | None, name: str) -> str | None:
-        """Uid of the selected row's object from the store, binding an
-        approval to the exact incarnation on screen; None when the summary
-        type carries no uid (the write then runs without a precondition)."""
-        for obj in self.store.get(self.current_kind, self.current_scope):
-            if obj.namespace == (ns or "") and obj.name == name:
-                uid = str(getattr(obj, "uid", "") or "")
-                return uid or None
-        return None
 
     async def action_delete_resource(self) -> None:
         """Ctrl-D: delete the selected resource (issue #16)."""
@@ -2579,7 +1832,7 @@ class KorvidApp(App[None]):
         tree (issue #120); rollback keeps working from the revisions view."""
         if not self._helm_view_guard(HELM_RELEASES_META, "Helm history"):
             return
-        namespace, name = self._selected_ns_name()
+        namespace, name = self._view.selected_ns_name()
         if namespace is None or name is None:
             return
         error = await self._workspace_ctl.drill_into(namespace, name)
@@ -2599,7 +1852,7 @@ class KorvidApp(App[None]):
         if helm is None:
             return
         epoch = self._ctx.epoch()
-        ns, name = self._selected_ns_name()
+        ns, name = self._view.selected_ns_name()
         if name is None:
             return
         row = self._helm_ctl.revision_row(ns, name)
@@ -2622,7 +1875,7 @@ class KorvidApp(App[None]):
         if helm is None:
             return
         epoch = self._ctx.epoch()
-        ns, name = self._selected_ns_name()
+        ns, name = self._view.selected_ns_name()
         if name is None:
             return
         row = self._helm_ctl.release_row(ns, name)
@@ -2771,7 +2024,8 @@ class KorvidApp(App[None]):
         if self._agent_ui.runtime is not None and self._agent_ui.blocked_in_protected():
             label = "AI blocked"
         mcp_label = self._mcp.status() if self._mcp is not None else ""
-        if mcp_label and self._mcp is not None and self._mcp.running and self._mcp_follow:
+        follow = self._integrations.follow_enabled
+        if mcp_label and self._mcp is not None and self._mcp.running and follow:
             mcp_label += " ·follow"
         try:
             self._status_bar.update_status(
@@ -3009,11 +2263,6 @@ class KorvidApp(App[None]):
         `ResourceWriteController` shares the agent path's lookup."""
         return await self._agent_ui.managed_note_from(manifest, ns)
 
-    def _provider_footer(self, manifest: dict[str, Any]) -> str | None:
-        """Describe footer for the user-triggered views (issue #30); the
-        agent's own describe renders the identical note."""
-        return provider_footer_note(manifest, self._provider_hint)
-
     def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
         """Show guidance instead of a silent blank table (empty ns or no filter match)."""
         empty = self.query_one("#empty-state", Static)
@@ -3223,6 +2472,59 @@ class AppProposalScreens(ProposalScreens):
                 self._app.pop_screen()
 
 
+class AppInspectSurface(InspectSurface):
+    """Nominal `InspectSurface` adapter over `KorvidApp`'s mounted widgets.
+
+    Adapter for the same metaclass reason as the others. Two widgets: the
+    focused table's row cursor, and the ops hint strip. Every call is a live
+    lookup and tolerates the widget being gone - a render or a timer
+    dispatched during shutdown/teardown can arrive after the tree is
+    unmounted, which simply means "no row" or "nothing to clear".
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    def cursor_row_key(self) -> str | None:
+        try:
+            table = self._app._focused_table()
+        except NoMatches:  # timer fired while the app is shutting down
+            return None
+        if table.cursor_row < 0:
+            return None
+        try:
+            key = table.coordinate_to_cell_key(Coordinate(table.cursor_row, 0)).row_key
+        except CellDoesNotExist:
+            return None
+        return None if key is None else str(key.value)
+
+    def show_trouble(
+        self, trouble: tuple[ContainerTrouble, ...], *, event: str | None = None
+    ) -> None:
+        with contextlib.suppress(NoMatches):  # strip unmounted during shutdown
+            self._app._hint_strip.show_trouble(trouble, event=event)
+
+    def clear_hint(self) -> None:
+        with contextlib.suppress(NoMatches):  # strip unmounted during shutdown
+            self._app._hint_strip.clear_hint()
+
+
+class AppTransferScreens(TransferScreens):
+    """Nominal `TransferScreens` adapter over `KorvidApp`'s screen stack.
+
+    One method, because the transfer lifecycle needs one screen action: pop
+    the progress modal it pushed, once the stream has ended. The screen is
+    never handed over — a live `Screen` also carries `dismiss` and `app`.
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    def dismiss_if_current(self, screen: Screen[Any]) -> None:
+        if self._app.screen is screen:
+            self._app.pop_screen()
+
+
 class AppReviewTasks(ReviewTasks):
     """Nominal `ReviewTasks` adapter: the review loop as an app worker.
 
@@ -3297,10 +2599,33 @@ class AppViewState(ViewState):
         return self._app.config.namespace
 
     def selected_ns_name(self) -> tuple[str | None, str | None]:
-        return self._app._selected_ns_name()
+        table = self._app._focused_table()
+        if table.row_count == 0:
+            self._app.notify("No resource selected", severity="warning")
+            return None, None
+
+        row_index = table.cursor_row
+        ordered = table.ordered_rows
+        if row_index >= len(ordered):
+            self._app.notify("No resource selected", severity="warning")
+            return None, None
+
+        row_key = str(ordered[row_index].key.value)
+        parts = row_key.split("/", 1)
+        if len(parts) != 2:
+            self._app.notify("Cannot determine resource from selection", severity="warning")
+            return None, None
+        return parts[0], parts[1]
 
     def selected_uid(self, namespace: str | None, name: str) -> str | None:
-        return self._app._selected_uid(namespace, name)
+        """Uid of the selected row's object from the store, binding an
+        approval to the exact incarnation on screen; None when the summary
+        type carries no uid (the write then runs without a precondition)."""
+        for obj in self._app.store.get(self._app.current_kind, self._app.current_scope):
+            if obj.namespace == (namespace or "") and obj.name == name:
+                uid = str(getattr(obj, "uid", "") or "")
+                return uid or None
+        return None
 
     def gvr_label(self, meta: ResourceMeta) -> str:
         return gvr_label(meta)
@@ -3480,7 +2805,7 @@ class AppSessionConfiguration(SessionConfiguration):
         self._app._helm = result.helm
         # The new cluster may run a telepresence traffic-manager the old one
         # lacked: re-probe (a no-op once the session's hint was shown).
-        self._app.run_worker(self._app._maybe_hint_telepresence(), exclusive=False)
+        self._app.run_worker(self._app._integrations.maybe_hint_telepresence(), exclusive=False)
 
 
 class AppWorkspaceSurface(WorkspaceSurface):

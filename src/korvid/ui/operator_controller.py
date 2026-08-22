@@ -333,6 +333,29 @@ class OperatorController:
                 return key
         return None
 
+    def explain_missing_catalog(self) -> bool:
+        """Explain an undiscovered operator catalog; True when it did.
+
+        `:operators` only exists where OLM serves PackageManifests. When the
+        alias is genuinely absent, saying so beats a generic unknown-kind
+        error - but only then: a syntax error on a *discovered* view
+        (`:operators ns extra`) must fall through to the normal
+        unknown-command report, which is what the False return means.
+
+        "Not discovered" and not "absent": background discovery may still be
+        running, or may have failed (pods-only fallback) - states this cannot
+        tell apart.
+        """
+        if "operators" in self._view.aliases():
+            return False
+        self._ui.notify(
+            "The operator catalog is unavailable: the"
+            " packages.operators.coreos.com API group was not discovered"
+            " (OLM may be absent, or discovery may still be running)",
+            severity="warning",
+        )
+        return True
+
     async def uninstall(
         self,
         sub_meta: ResourceMeta,
