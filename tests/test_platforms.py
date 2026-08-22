@@ -136,7 +136,7 @@ def test_ci_workflow_defines_the_required_windows_test_job() -> None:
         step
         for step in steps
         if isinstance(step, dict)
-        and step.get("uses") == "astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9"
+        and step.get("uses") == "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d"
     )
     assert windows_job["runs-on"] == "windows-latest"
     assert_pinned_action_ref(segment, "actions/checkout")

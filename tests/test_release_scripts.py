@@ -1268,7 +1268,7 @@ def test_release_metadata_is_generated_in_the_build_job() -> None:
 def test_release_build_toolchain_is_fully_pinned() -> None:
     workflow = _release_workflow()
     setup_uv_count = workflow.count(
-        "uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9"
+        "uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d"
     )
     assert setup_uv_count > 0
     assert workflow.count('version: "0.10.9"') == setup_uv_count
