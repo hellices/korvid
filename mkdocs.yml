@@ -6,6 +6,10 @@ repo_name: hellices/korvid
 docs_dir: docs
 site_dir: site
 strict: true
+# Declared explicitly (it is also MkDocs' default) because every concept
+# page's raw-HTML media is written as `../assets/…`, which only resolves
+# while each page is served from its own directory (`/tui/`, not `/tui.html`).
+use_directory_urls: true
 exclude_docs: |
   overrides/
   dev/plans/

@@ -41,6 +41,20 @@ def _load_mkdocs_config() -> dict[str, Any]:
     return config
 
 
+def _uses_directory_urls() -> bool:
+    """Whether MkDocs serves each page from its own directory.
+
+    Returns:
+        `mkdocs.yml`'s `use_directory_urls`, falling back to MkDocs' own
+        default of `True` when the key is absent.
+    """
+    value = _load_mkdocs_config().get("use_directory_urls", True)
+    assert isinstance(value, bool), (
+        f"use_directory_urls must be a boolean, found {value!r} in mkdocs.yml"
+    )
+    return value
+
+
 def _excluded_prefixes() -> tuple[str, ...]:
     """Directory prefixes `mkdocs.yml` keeps out of the published site."""
     excluded = _load_mkdocs_config().get("exclude_docs") or ""
@@ -128,6 +142,13 @@ def test_raw_html_media_resolves_from_every_published_page_url() -> None:
     published page, resolves each local media URL exactly as a browser
     would, and asserts the docs source exists.
     """
+    assert _uses_directory_urls() is True, (
+        "every raw-HTML media URL on a concept page is written as `../assets/…`, "
+        "which only resolves because MkDocs serves `docs/tui.md` from `/tui/`. "
+        "With `use_directory_urls: false` those pages are served as `/tui.html` "
+        "and each `../assets/…` escapes the site root into a 404 that this walk "
+        "would no longer model; fix the page URLs before turning it off"
+    )
     checked = 0
     for source in _public_markdown_sources():
         page_url = _built_directory_url(source)
