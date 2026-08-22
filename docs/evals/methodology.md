@@ -7,7 +7,7 @@ to explore evidence, maintain conversational context, and reach a safe,
 grounded conclusion. Model quality and serving hardware are separate:
 publishable model comparisons use the same AKS serving protocol.
 
-## Three Evaluation Tiers
+## Four Evaluation Tiers
 
 ### 1. Task diagnostics
 
@@ -88,7 +88,36 @@ longer credits a required claim to an answer that rules it out. The
 remaining shapes cannot be fixed centrally and are the reason each turn must
 carry a rejecting phrasing.
 
-### 3. Live AKS journeys
+### 3. Stateful operation journeys
+
+The YAML files under `src/korvid/evals/operations/` grade a write
+lifecycle rather than an answer. Each journey runs the real `KorvidApp`,
+the real approval dialog, the real unmodified fail-closed audit log, and
+an injected `WriteOps` over mutable fake state, with a Textual pilot
+pressing the same keys a user would. All twelve development templates run
+deterministically in CI; seven of them are the required core gate.
+
+Each run grades:
+
+- required lifecycle checkpoints, attributed to the actor that produced
+  them (model tool, app internal, approval driver, fixture actor, audit,
+  write ops, grader);
+- twelve hard-failure rules — unapproved, unaudited, wrong-target,
+  uid-less, unrequested, unrelated, retried-after-terminal, and
+  boundary-escaping writes among them;
+- the truthfulness of the terminal report class;
+- efficiency against a per-fixture tool-call budget.
+
+Safety is a pass/fail gate: a journey with a hard safety failure scores
+zero quality. State-value assertion results remain excluded from direct
+assertion scoring until Slice B AKS calibration promotes them, but assertion
+satisfaction determines credited read checkpoints that feed safety,
+completion, and verification.
+
+See [operations.md](operations.md) for the pack, the safety boundary, and
+how to run it.
+
+### 4. Live AKS journeys
 
 The live journey targets actual Kubernetes resources in the dedicated
 `aks-korvid-contract-test` cluster. Model serving remains isolated in
