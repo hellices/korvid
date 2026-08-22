@@ -11,7 +11,7 @@ touch.
 KorvidApp  (ui/app.py)
 │
 │  owns: Textual composition and message translation, screens and modals,
-│         run_worker ownership, and the `:ctx`-switch coordinator
+│         and run_worker ownership
 │
 │  reached through: WriteGate, ViewState, UiSurface
 │
@@ -33,6 +33,8 @@ KorvidApp  (ui/app.py)
 ├── WorkspaceState       (ui/workspace_state.py)         split-pane collection, focus, and view state
 ├── AgentUiController    (ui/agent_ui_controller.py)     agent session, turn tasks, UI bridge reads, agent writes
 ├── ProposalController   (ui/proposal_controller.py)     external MCP write proposals: intake, review, execution, expiry
+├── ContextSwitchCoordinator
+│                       (ui/context_switch_coordinator.py)  the `:ctx` epoch and the quiesce/retarget/resume transaction
 └── ...
 ```
 
@@ -193,19 +195,19 @@ with no running app:
   open hierarchy tree. The controller constructs the `HierarchyScreen`/
   `RelationshipScreen` and pushes them through `UiSurface`, but never queries an
   arbitrary widget;
-- **`ContextGuard`** (`AppContextGuard`) for the `:ctx` epoch, the in-flight
-  flag, and the stream-read guard it revalidates against across every awaited
-  gap. `crossed(epoch)` is the old `_ctx_switch_crossed`.
+- **`ContextGuard`** (`ContextSwitchCoordinator`) for the `:ctx` epoch, the
+  in-flight flag, and the stream-read guard it revalidates against across every
+  awaited gap. `crossed(epoch)` is the old `_ctx_switch_crossed`.
 
-The **`:ctx`-switch coordinator stays on `KorvidApp`** because it is tied to the
-app's epoch, MCP-quiesce, forward, store and audit teardown ordering. It calls a
-narrow reset/quiesce API on the controller: `quiesce_for_context_switch` (fold
-the split, stop and de-target the metrics poller, clear the drill, cancel the
-relationship workers, clear the filter — the workspace-only halves of the
+The **`:ctx`-switch coordinator is `ContextSwitchCoordinator`**
+(`ui/context_switch_coordinator.py`), not the app. It calls a narrow
+reset/quiesce API on the workspace controller: `quiesce_for_context_switch`
+(fold the split, stop and de-target the metrics poller, clear the drill, cancel
+the relationship workers, clear the filter — the workspace-only halves of the
 teardown) and `reset_view_after_switch` (adopt pods in the new cluster's default
-namespace). The coordinator serializes with navigation by taking the
-controller's `nav_lock`, which `:mcp` toggles and write execution share for the
-same reason.
+namespace). It serializes with navigation by taking the workspace controller's
+`nav_lock`, which `:mcp` toggles and write execution share for the same
+reason.
 
 ### Why interfaces and not callables
 
@@ -265,10 +267,20 @@ So the boundaries that matter are named:
   the controller never queries an arbitrary widget. Implemented by
   `AppWorkspaceSurface`.
 - **`ContextGuard`** (`ui/workspace_controller.py`) — the `:ctx`-switch epoch,
-  the in-flight flag, and the stream-read guard the workspace flows revalidate
+  the in-flight flag, and the stream-read guard every flow revalidates
   against; `crossed(epoch)` is the old `_ctx_switch_crossed`. It is a narrow
-  read-only view of the app's context state, deliberately *not* the whole
-  `WriteGate`. Implemented by `AppContextGuard`.
+  read-only view of the switch state, deliberately *not* the whole
+  `WriteGate`. Implemented directly by `ContextSwitchCoordinator`, which is
+  also the code that mutates that state — there is no adapter and no second
+  copy of the epoch.
+- **`ContextSurface`** / **`SessionConfiguration`**
+  (`ui/context_switch_coordinator.py`) — the two app-owned halves of a switch:
+  the widgets and UI-bus posts the transaction drives (completion words, the
+  describe pane, the inline namespace picker, the hint worker group, the
+  status/render refreshes) and the session configuration a proven switch is
+  adopted into (active context, default namespace, capability gates,
+  context-pinned CLI wrappers). Implemented by `AppContextSurface` and
+  `AppSessionConfiguration`; neither runs any part of the transaction.
 - **`AgentPanelPort`** (`ui/agent_ui_controller.py`) — the chat panel as the
   agent session may drive it: visibility, the header the live runtime renders
   into, the two unconfigured-state hints, and the transcript operations a turn
@@ -298,8 +310,9 @@ started before the switch keeps running against the cluster it captured.
 Controllers that outlive an await revalidate through
 `WriteGate.context_intact` or the epoch they captured.
 
-`AppViewState`, `AppUiSurface`, `AppWorkspaceSurface`, `AppContextGuard`,
-`AppAgentPanel`, `AppAgentScreens` and `AppProposalOps` are adapters rather
+`AppViewState`, `AppUiSurface`, `AppWorkspaceSurface`, `AppContextSurface`,
+`AppSessionConfiguration`, `AppAgentPanel`, `AppAgentScreens` and
+`AppProposalOps` are adapters rather
 than the app inheriting the ABCs, because Textual's `App` metaclass conflicts
 with `ABCMeta` — the same reason `AppUIBridge` exists.
 `WriteCoordinator` has no such constraint, so it implements `WriteGate`
@@ -476,6 +489,50 @@ implementation.
 unmount call — all one-line delegates — plus three small adapters
 (`AppProposalScreens`, `AppReviewTasks`, `AppProposalEvents`).
 
+## Runtime context switching
+
+`ContextSwitchCoordinator` (`ui/context_switch_coordinator.py`, issue #36 /
+Deep Task 8) owns the whole `:ctx` transaction, which used to live on
+`KorvidApp`:
+
+| Owned | Notes |
+|---|---|
+| the switch epoch and the in-flight claim | It *is* the session's single `ContextGuard`, so the state every controller revalidates against is the state the transaction mutates — no adapter, no second copy |
+| the listing / probe / swap collaborators | `list_contexts`, `probe_context`, `switch_context` arrive from the composition root; all None in a build with no cluster connection, which every entry point reports rather than half-doing |
+| the `:ctx` picker and its completion prefetch | `show_picker()` builds an explicit display-label → name map (decoding the ` (current)` suffix would corrupt a context whose name ends in it); the prefetch task is owned here and cancelled *and reaped* by `shutdown()` |
+| the no-op check and the pre-probe guards | A session started without `-c` falls back to the kubeconfig's active context, so `:ctx <active>` is still a no-op; an unknown name is refused before the probe |
+| the blocker set | Busy agent, reserved write (`WriteCoordinator.active_writes`), any stacked dialog, and the inline namespace picker — re-checked inside `nav_lock` after the probe, because the probe awaits network I/O |
+| the MCP quiesce | The embedded server drains *before* anything is torn down; a server that will not stop aborts the switch with the old context fully usable |
+| the ordered teardown | logs → describe → workspace quiesce → namespace prefetch/completions → watches → forwards (+ audit flush) → store → hint workers → hint cache → timeline feed |
+| the retarget and its recovery | On a mid-swap failure the old context is restored; only "even the fallback failed" returns not-ok, and the session is then told to restart |
+| the atomic application | Epoch bump, identity/namespace/capabilities, protected-context marker, audit attribution, forward registry re-open, workspace view reset, context-pinned CLI wrappers, agent note — all in one synchronous slice, so nothing observes a session half on either cluster |
+| the resume | Timeline `completed` (only when the requested target is what got applied) and the Warning feed, the MCP restart, the watch restart and the metrics sync — all still inside `nav_lock` |
+
+The ordering *is* the safety property, and it is pinned by
+`tests/ui/test_context_switch_coordinator.py` against typed fakes for every
+port, not only through a running app:
+
+- the probe precedes the first destructive step, so a failed probe strands
+  nothing;
+- the MCP quiesce and the proposal expiry precede the first fallible teardown
+  await, so a raising participant cannot leave old-run proposals reviewable;
+- the epoch moves exactly once, and only when a context is actually applied —
+  a failed probe or a total swap failure leaves it untouched;
+- a write reservation blocks the switch, and every flow that awaited across
+  one sees `crossed(epoch)`.
+
+The late-bound participant accessors (`workspace=`, `logs=`, `timeline=`, …)
+exist because each of those controllers takes this coordinator as its
+`ContextGuard` and so cannot be constructed first. They hand over the real
+typed collaborator: no step of the transaction is routed back through
+`KorvidApp`.
+
+`KorvidApp` keeps `on_show_context_picker` and `on_switch_context_command` as
+one-line delegates, `self._ctx.start()` on mount, `await self._ctx.shutdown()`
+on unmount, and the two adapters (`AppContextSurface`,
+`AppSessionConfiguration`). It holds no switch epoch, no in-flight flag, and no
+context collaborator.
+
 ## Late binding
 
 Dependency getters are read at call time, not captured at construction:
@@ -555,13 +612,20 @@ tests added before the move where the behaviour is not already pinned.
     `WriteCoordinator`, the interrupted-execution settlement, and the audited
     expiry sweeps `:ctx`, `:mcp` and unmount drive. `AppProposalOps` is gone;
     the app holds no proposal state.
+14. ~~Runtime context switching~~ — done (#36/#187);
+    `ContextSwitchCoordinator` (`ui/context_switch_coordinator.py`) owns the
+    switch epoch and in-flight claim (it *is* the session's `ContextGuard`),
+    the listing/probe/swap collaborators, the picker and its completion
+    prefetch, the no-op/blocker/guard refusals, the MCP quiesce, the ordered
+    teardown, the retarget with its restore path, the atomic application of a
+    proven switch, and the timeline/watch/metrics resume. `AppContextGuard` is
+    gone; the app keeps two message delegates and two adapters
+    (`AppContextSurface`, `AppSessionConfiguration`).
 
 Issue #238 showed that logs and describe were technically extractable without
 introducing a new pane-composition seam, and issue #245 kept describe as a
 deliberate low-ROI non-extraction. Logs are now extracted through the narrow
 `LogPaneView` accessor (above); describe stays on the app for the same
 low-ROI reason. `SessionTimelineController` owns the timeline-specific
-boundary; the `:ctx`-switch coordinator stays in `KorvidApp` because it is tied
-to the app's epoch management, MCP-quiesce, and store/forward/audit teardown
-ordering, and it drives the workspace half through the controller's narrow
-reset/quiesce API.
+boundary, and `ContextSwitchCoordinator` owns the `:ctx` transaction — the app
+keeps only the two `:ctx` message handlers as one-line delegates.

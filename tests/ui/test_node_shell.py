@@ -933,7 +933,7 @@ async def test_node_shell_refused_when_the_context_switches_while_the_dialog_is_
                 lambda: isinstance(app.screen, ConfirmScreen),
                 label="node-shell approval dialog opened",
             )
-            app._ctx_epoch += 1  # a switch completed while the dialog was open
+            app._ctx._epoch += 1  # a switch completed while the dialog was open
             await pilot.press("y")
             await until(
                 pilot,

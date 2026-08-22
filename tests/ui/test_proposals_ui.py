@@ -369,7 +369,7 @@ async def test_a_context_switch_begun_during_the_rbac_check_never_reaches_a_dial
         armed.set()
         app._proposals.open_review()
         await asyncio.wait_for(entered.wait(), timeout=5)
-        app._ctx_switching = True  # what :ctx holds while a switch is in flight
+        app._ctx._switching = True  # what :ctx holds while a switch is in flight
         gate.set()
         await until(pilot, lambda: _review_worker_finished(app))
         assert not isinstance(app.screen, ConfirmScreen)
@@ -526,7 +526,7 @@ async def test_review_expires_a_stale_context_epoch_without_a_dialog(tmp_path: P
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
-        app._ctx_epoch += 1  # a context switch landed after submission
+        app._ctx._epoch += 1  # a context switch landed after submission
         app._proposals.open_review()
         await until(pilot, lambda: store.get(pid) is not None and store.get(pid)[1] != "pending")  # type: ignore[index]  # guarded above
         assert not isinstance(app.screen, ConfirmScreen)
@@ -673,7 +673,7 @@ async def test_context_switch_after_the_approval_claim_fails_the_proposal(
         rebuilt = app._proposals._rebuild_op(proposal)
         assert not isinstance(rebuilt, str)
         meta, ns, op, _operation, _detail = rebuilt
-        app._ctx_epoch += 1  # a context switch raced the approval
+        app._ctx._epoch += 1  # a context switch raced the approval
         await app._proposals._execute(store, proposal, meta, ns, op)
         found = store.get(proposal.id)
     assert rec.calls == []
@@ -906,7 +906,7 @@ async def test_submit_during_a_context_switch_is_rejected(tmp_path: Path) -> Non
         original = app._agent_ui.preview_for_action
 
         async def switching_preview(*args: Any, **kwargs: Any) -> list[str] | None:
-            app._ctx_epoch += 1  # a context switch lands mid-intake
+            app._ctx._epoch += 1  # a context switch lands mid-intake
             return await original(*args, **kwargs)
 
         app._agent_ui.preview_for_action = switching_preview  # type: ignore[method-assign]  # test seam
@@ -997,10 +997,10 @@ async def test_a_failed_context_switch_still_expires_pending_proposals(tmp_path:
         async def noop_teardown() -> None:
             return None
 
-        app._probe_context = probe_ok
-        app._switch_context = failing_switch
-        app._teardown_for_context_switch = noop_teardown  # type: ignore[method-assign]  # focus on expiry
-        await app._switch_context_locked("ctx-b")
+        app._ctx._probe_context = probe_ok
+        app._ctx._switch_context = failing_switch
+        app._ctx._teardown = noop_teardown  # type: ignore[method-assign]  # focus on expiry
+        await app._ctx._switch_locked("ctx-b")
         found = store.get(pid)
         assert found is not None
         assert found[1] == "expired"
@@ -1009,7 +1009,7 @@ async def test_a_failed_context_switch_still_expires_pending_proposals(tmp_path:
 
 async def test_a_failing_teardown_still_expires_pending_proposals(tmp_path: Path) -> None:
     """Expiry happens the moment the committed transition begins — right
-    after MCP quiescing succeeds, before `_teardown_for_context_switch()`.
+    after MCP quiescing succeeds, before the coordinator's teardown.
     The teardown performs several fallible awaits; if one raises, the old
     MCP run is already stopped and its proposals must not stay pending and
     executable from the TUI."""
@@ -1026,10 +1026,10 @@ async def test_a_failing_teardown_still_expires_pending_proposals(tmp_path: Path
         async def exploding_teardown() -> None:
             raise RuntimeError("teardown blew up")
 
-        app._probe_context = probe_ok
-        app._teardown_for_context_switch = exploding_teardown  # type: ignore[method-assign]  # fault injection
+        app._ctx._probe_context = probe_ok
+        app._ctx._teardown = exploding_teardown  # type: ignore[method-assign]  # fault injection
         with pytest.raises(RuntimeError, match="teardown blew up"):
-            await app._switch_context_locked("ctx-b")
+            await app._ctx._switch_locked("ctx-b")
         found = store.get(pid)
         assert found is not None
         assert found[1] == "expired"

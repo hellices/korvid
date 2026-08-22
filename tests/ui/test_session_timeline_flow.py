@@ -121,7 +121,7 @@ async def test_r_toggle_pins_the_resource_selected_when_timeline_opened() -> Non
 
 
 async def test_context_epoch_guard_discards_stale_modal_navigation() -> None:
-    """A context switch that lands (bumping `_ctx_epoch`) while the modal
+    """A context switch that lands (bumping the context epoch) while the modal
     was open must discard a goto dismissed after it — the same invariant
     `_jump_to_object`'s own epoch guard already enforces for every other
     goto-style navigation (relationship graph, hierarchy tree)."""
@@ -147,7 +147,7 @@ async def test_context_epoch_guard_discards_stale_modal_navigation() -> None:
         await until(
             pilot, lambda: isinstance(app.screen, SessionTimelineScreen), label="timeline open"
         )
-        app._ctx_epoch += 1  # simulate a context switch that landed while open
+        app._ctx._epoch += 1  # simulate a context switch that landed while open
         await pilot.press("enter")
         await pilot.pause()
         assert app.current_kind != "deployments"
@@ -161,7 +161,9 @@ async def test_timeline_navigation_failure_renders_event_name_literally() -> Non
         await until(
             pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pods visible"
         )
-        await app._workspace_ctl.jump_to_object("pods", "default", "[/bold]", epoch=app._ctx_epoch)
+        await app._workspace_ctl.jump_to_object(
+            "pods", "default", "[/bold]", epoch=app._ctx.epoch()
+        )
         await until(
             pilot,
             lambda: any("is not visible" in item.message for item in app._notifications),

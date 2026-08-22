@@ -549,7 +549,7 @@ async def test_debug_fallback_not_offered_over_open_dialog(tmp_path: Path) -> No
         blocker = PickScreen("unrelated dialog", ["a", "b"])
         await app.push_screen(blocker)
         await until(pilot, lambda: app.screen is blocker, label="blocking dialog open")
-        await app._shell._offer_debug_fallback("default", "api-1", None, 127, app._ctx_epoch)
+        await app._shell._offer_debug_fallback("default", "api-1", None, 127, app._ctx.epoch())
         assert app.screen is blocker  # nothing stacked on top
 
 
@@ -1838,7 +1838,7 @@ async def test_shell_refused_while_context_switching() -> None:
                 lambda: app.query_one(ResourceTable).row_count == 1,
                 label="pod row visible",
             )
-            app._ctx_switching = True
+            app._ctx._switching = True
             try:
                 await pilot.press("s")
                 await until(
@@ -1849,7 +1849,7 @@ async def test_shell_refused_while_context_switching() -> None:
                     label="shell refusal",
                 )
             finally:
-                app._ctx_switching = False
+                app._ctx._switching = False
             mock_call.assert_not_called()
 
 
@@ -1875,7 +1875,7 @@ async def test_shell_picker_cancelled_when_context_switched_while_open() -> None
                 lambda: isinstance(app.screen, PickScreen),
                 label="container picker open",
             )
-            app._ctx_epoch += 1  # a context switch completed under the picker
+            app._ctx._epoch += 1  # a context switch completed under the picker
             await pilot.press("enter")
             await until(
                 pilot,

@@ -859,7 +859,7 @@ async def test_drill_abandons_across_a_context_epoch_change() -> None:
             lambda: ("replicasets", "default") in app.watch_manager.active,
             label="prewarm started",
         )
-        app._ctx_epoch += 1  # what a :ctx switch does
+        app._ctx._epoch += 1  # what a :ctx switch does
         result = await drill
         assert result is not None
         assert "abandoned" in result

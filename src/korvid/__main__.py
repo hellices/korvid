@@ -68,9 +68,9 @@ from korvid.tools.proposals import ProposalStore
 from korvid.tools.registry import mcp_tool_schemas
 from korvid.ui.app import (
     AppUIBridge,
-    ContextSwitchResult,
     KorvidApp,
 )
+from korvid.ui.context_switch_coordinator import ContextSwitchResult
 from korvid.ui.hints import EventsFetcher
 from korvid.ui.widgets.resource_table import sanitize_views
 

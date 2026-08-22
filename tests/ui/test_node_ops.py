@@ -1099,7 +1099,7 @@ async def test_drain_plan_failure_never_calls_graph(tmp_path: Path) -> None:
 
 
 class _CtxSwitchDuringPlanRecorder(NodeRecorder):
-    """Increments _ctx_epoch from within drain_plan, simulating a context switch
+    """Increments the context epoch from within drain_plan, simulating a context switch
     that happens while the API call for the plan is in flight."""
 
     def __init__(self, plan: DrainPlan | None = None) -> None:
@@ -1112,7 +1112,7 @@ class _CtxSwitchDuringPlanRecorder(NodeRecorder):
     async def drain_plan(self, node_name: str) -> DrainPlan:
         self.calls.append(("plan", node_name))
         if self._app is not None:
-            self._app._ctx_epoch += 1
+            self._app._ctx._epoch += 1
         return DrainPlan(
             targets=tuple(t for t in self.plan.targets if t.name not in self.evicted_names),
             skipped_daemonset=self.plan.skipped_daemonset,
@@ -1242,7 +1242,7 @@ class _UidChangeDuringGraphLister:
 
 
 class _CtxSwitchDuringGraphLister:
-    """list_relationship_objects fake that increments _ctx_epoch from within the
+    """list_relationship_objects fake that increments the context epoch from within the
     call, simulating a context switch (`:ctx`) that completes while the graph
     LIST is in flight.  The graph load itself returns normally; the identity
     check immediately after it detects the stale epoch and cancels."""
@@ -1257,7 +1257,7 @@ class _CtxSwitchDuringGraphLister:
     async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
         self.calls.append((meta.plural, namespace))
         if self._app is not None and meta.plural == "nodes":
-            self._app._ctx_epoch += 1
+            self._app._ctx._epoch += 1
         if meta.plural == "nodes":
             return [
                 GenericSummary(

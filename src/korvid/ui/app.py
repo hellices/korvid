@@ -94,6 +94,12 @@ from korvid.ui.agent_ui_controller import (
 )
 from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.command import command_help
+from korvid.ui.context_switch_coordinator import (
+    ContextSurface,
+    ContextSwitchCoordinator,
+    ContextSwitchResult,
+    SessionConfiguration,
+)
 from korvid.ui.debug import DebugController
 from korvid.ui.drain import DrainController
 from korvid.ui.forward_controller import ForwardController
@@ -167,7 +173,6 @@ from korvid.ui.widgets.top_bar import KeyEntry, TopBar
 from korvid.ui.widgets.transfer_screen import TransferProgressScreen, TransferScreen
 from korvid.ui.workspace_controller import (
     RELATIONSHIP_GROUP,
-    ContextGuard,
     WorkspaceController,
     WorkspaceSurface,
 )
@@ -211,27 +216,6 @@ _HELM_PREVIEW_MAX_LINES = 60
 #: must not delay the overlay past this - the events are marked unavailable
 #: instead.
 _HINT_EVENTS_TIMEOUT = 3.0
-
-
-@dataclasses.dataclass(frozen=True)
-class ContextSwitchResult:
-    """What the composition root re-derived for the new cluster (issue #36).
-
-    Returned by the injected ``switch_context`` callable once the connection
-    is retargeted: capability gates are per-cluster facts the app must adopt
-    atomically with the switch.
-    """
-
-    pod_resize_supported: bool
-    provider_hint: str | None
-    context_namespace: str | None
-    #: helm CLI wrapper rebound to the new context (issue #31 x #36): the
-    #: startup HelmCLI pins --kube-context, so keeping it across a switch
-    #: would send approval-gated helm writes to the OLD cluster.
-    helm: HelmCLI | None = None
-    #: The new context's name when it matches `protected_contexts` (issue
-    #: #83), None otherwise — the marker is re-derived on every switch.
-    protected_context: str | None = None
 
 
 class _RelationshipLister:
@@ -445,13 +429,6 @@ class KorvidApp(App[None]):
         self.store = store
         self.watch_manager = watch_manager
         self._list_namespaces = list_namespaces
-        #: `:ctx` collaborators (issue #36), wired by the composition root:
-        #: kubeconfig context listing, the pre-switch auth probe, and the
-        #: connection/capability retarget. All None in builds without a
-        #: cluster connection.
-        self._list_contexts = list_contexts
-        self._probe_context = probe_context
-        self._switch_context = switch_context
         #: Optional telepresence integration (issue #159): None = binary
         #: absent or kill-switched; the `:tp` panel simply reports that.
         self._telepresence = telepresence
@@ -459,12 +436,6 @@ class KorvidApp(App[None]):
         self._telepresence_hinted = False
         self._telepresence_probing = False
         self._telepresence_reprobe = False
-        #: True while a context switch is tearing down / retargeting;
-        #: refuses concurrent switches.
-        self._ctx_switching = False
-        #: Bumped every time a switch is applied: pre-approval awaits capture
-        #: it and refuse to proceed if the cluster changed under them.
-        self._ctx_epoch = 0
         self._get_manifest = get_manifest
         self._get_helm_components = get_helm_components
         self._get_events = get_events
@@ -487,6 +458,39 @@ class KorvidApp(App[None]):
             if list_relationship_objects is not None
             else None
         )
+        #: Runtime `:ctx` switching (issue #36 / Deep Task 8): the switch
+        #: epoch, the in-flight claim, the listing/probe/swap collaborators,
+        #: the picker with its completion prefetch, the blocker set, the MCP
+        #: quiesce, the ordered teardown, the retarget with its recovery, and
+        #: the timeline/watch/metrics resume all live in the coordinator. It
+        #: *is* this session's single `ContextGuard`, so every controller
+        #: below revalidates against the same state the transaction mutates.
+        #: The late-bound participant accessors exist because those
+        #: controllers take this coordinator as their guard and so cannot be
+        #: constructed first; each one hands over the real collaborator, and
+        #: no step of the transaction routes back through the app.
+        self._ctx = ContextSwitchCoordinator(
+            ui=AppUiSurface(self),
+            surface=AppContextSurface(self),
+            view=AppViewState(self),
+            session=AppSessionConfiguration(self),
+            store=self.store,
+            watches=self.watch_manager,
+            workspace=lambda: self._workspace_ctl,
+            logs=lambda: self._logs,
+            hints=lambda: self._hints,
+            timeline=lambda: self._timeline,
+            proposals=lambda: self._proposals,
+            forwards=lambda: self._forward,
+            registry=lambda: self._forwards,
+            writes=lambda: self._writes,
+            agent=lambda: self._agent_ui,
+            mcp=lambda: self._mcp,
+            audit=lambda: self._audit,
+            list_contexts=list_contexts,
+            probe_context=probe_context,
+            switch_context=switch_context,
+        )
         #: Bounded session timeline (issue #282, Task 3): producers, the
         #: Warning-event feed lifecycle, and the modal open/navigate flow
         #: all live in the controller. None (the constructor's `timeline`
@@ -498,8 +502,8 @@ class KorvidApp(App[None]):
             view=AppViewState(self),
             watch_manager=self.watch_manager,
             timeline=session_timeline,
-            get_epoch=lambda: self._ctx_epoch,
-            epoch_crossed=self._ctx_switch_crossed,
+            get_epoch=self._ctx.epoch,
+            epoch_crossed=self._ctx.crossed,
             watch_warning_events=watch_warning_events,
             selected_resource=self._selected_timeline_resource,
             navigate=lambda kind, namespace, name, epoch: self._workspace_ctl.jump_to_object(
@@ -516,7 +520,7 @@ class KorvidApp(App[None]):
         self._writes = WriteCoordinator(
             ui=AppUiSurface(self),
             view=AppViewState(self),
-            context=AppContextGuard(self),
+            context=self._ctx,
             audit=lambda: self._audit,
             timeline=self._timeline,
             check_permission=lambda: self._check_permission,
@@ -690,7 +694,6 @@ class KorvidApp(App[None]):
         #: updates (every render re-applies it) and switching views restores
         #: each kind's own sort. Lives in PaneState (see `_sorts` property).
         self._ns_prefetch_task: asyncio.Task[None] | None = None
-        self._ctx_prefetch_task: asyncio.Task[None] | None = None
         self._splash_shown_at: float = monotonic()
         # Hint-strip lifecycle (issue #97 U3b): the controller owns the event
         # cache and the parked-cursor refresh timer; widget access and worker
@@ -704,8 +707,8 @@ class KorvidApp(App[None]):
             clear_hint=self._hint_clear,
             start_fetch=lambda coro: self.run_worker(coro, exclusive=True, group="hint-events"),
             set_timer=self.set_timer,
-            ctx_epoch=lambda: self._ctx_epoch,
-            ctx_crossed=self._ctx_switch_crossed,
+            ctx_epoch=self._ctx.epoch,
+            ctx_crossed=self._ctx.crossed,
         )
         #: Log subsystem ownership (issue #187): the controller owns the stream
         #: tasks, display buffer, reconnect/error flags, selected triples, pane
@@ -723,9 +726,9 @@ class KorvidApp(App[None]):
             ],
             current_kind=lambda: self.current_kind,
             focused_pane=lambda: self._pane,
-            ctx_epoch=lambda: self._ctx_epoch,
-            ctx_switch_crossed=self._ctx_switch_crossed,
-            ctx_reads_allowed=self._ctx_reads_allowed,
+            ctx_epoch=self._ctx.epoch,
+            ctx_switch_crossed=self._ctx.crossed,
+            ctx_reads_allowed=self._ctx.reads_allowed,
             refresh_bindings=self.refresh_bindings,
             buffer_max_lines=config.log_buffer_lines,
         )
@@ -747,7 +750,7 @@ class KorvidApp(App[None]):
             ui=AppUiSurface(self),
             surface=AppWorkspaceSurface(self),
             view=AppViewState(self),
-            context=AppContextGuard(self),
+            context=self._ctx,
             logs=self._logs,
             hints=self._hints,
             config=lambda: self.config,
@@ -772,7 +775,7 @@ class KorvidApp(App[None]):
             screens=AppProposalScreens(self),
             tasks=AppReviewTasks(self),
             events=AppProposalEvents(self),
-            context=AppContextGuard(self),
+            context=self._ctx,
             writes=self._writes,
             navigation=self._workspace_ctl,
             builder=lambda: self._agent_ui,
@@ -797,7 +800,7 @@ class KorvidApp(App[None]):
             screens=AppAgentScreens(self),
             ui=AppUiSurface(self),
             view=AppViewState(self),
-            context=AppContextGuard(self),
+            context=self._ctx,
             writes=self._writes,
             workspace=self._workspace,
             navigation=self._workspace_ctl,
@@ -1053,16 +1056,9 @@ class KorvidApp(App[None]):
             # must fire when one breaks even while :pf is closed.
             self.set_interval(_FORWARD_POLL_SECONDS, self._forward.poll)
         self._prefetch_namespaces()
-        if self._list_contexts is not None:
-            # Kubeconfig contexts feed the `:ctx` completion; a local file
-            # read, but off-loop so a slow filesystem never blocks mount.
-            list_contexts = self._list_contexts
-
-            async def _fetch_contexts() -> None:
-                names, _ = await asyncio.to_thread(list_contexts)
-                self._command_bar.context_words = names
-
-            self._ctx_prefetch_task = asyncio.create_task(_fetch_contexts())
+        # Kubeconfig contexts feed the `:ctx` completion; the coordinator owns
+        # that prefetch task and reaps it on unmount.
+        self._ctx.start()
         for warning in self.config.warnings:
             # Config problems (e.g. an invalid custom column) surface once at
             # startup instead of hiding in a log file (issue #45).
@@ -1322,22 +1318,22 @@ class KorvidApp(App[None]):
             return
         # The listing would race the client swap and could return either
         # cluster's namespaces — refuse up front.
-        if not self._ctx_reads_allowed():
+        if not self._ctx.reads_allowed():
             return
-        epoch = self._ctx_epoch
+        epoch = self._ctx.epoch()
         try:
             namespaces = await self._list_namespaces()
         except ApiStatusError as exc:  # API failures get the actionable mapping (§5-5)
-            if self._ctx_switch_crossed(epoch):
+            if self._ctx.crossed(epoch):
                 return  # a stale old-cluster error is not worth surfacing
             self._handle_namespace_list_error(exc)
             return
         except Exception as exc:  # surface any other listing failure to the user
-            if self._ctx_switch_crossed(epoch):
+            if self._ctx.crossed(epoch):
                 return
             self.notify(str(exc), title="Failed to list namespaces", severity="error")
             return
-        if self._ctx_switch_crossed(epoch):
+        if self._ctx.crossed(epoch):
             # The listing awaited through a :ctx switch: opening the picker
             # now would offer old-cluster namespaces to the new session.
             self.notify(
@@ -1351,25 +1347,6 @@ class KorvidApp(App[None]):
         self._command_bar.namespace_words = namespaces
         self._namespace_picker.open(namespaces)
 
-    def _ctx_switch_crossed(self, epoch: int) -> bool:
-        """True when a :ctx switch started or completed since *epoch* was taken."""
-        return self._ctx_switching or epoch != self._ctx_epoch
-
-    def _ctx_reads_allowed(self) -> bool:
-        """Refuse read actions that spawn cluster streams during a :ctx switch.
-
-        Streams started mid-swap would attach to whichever cluster wins the
-        switch while still labeled with the old selection (issue #84).
-        Returns True when it is safe to proceed.
-        """
-        if self._ctx_switching:
-            self.notify(
-                "A context switch is in progress — try again once it completes",
-                severity="warning",
-            )
-            return False
-        return True
-
     def _handle_namespace_list_error(self, exc: ApiStatusError) -> None:
         """403 is an authorization boundary (issue #108): show one concise
         permission notice pointing at `:ns <name>` free-text entry — never
@@ -1381,401 +1358,17 @@ class KorvidApp(App[None]):
 
     # ------------------------------------------------------------------
     # `:ctx` — runtime context switching (issue #36)
+    #
+    # Both handlers are thin delegates: `ContextSwitchCoordinator` owns the
+    # switch epoch, the in-flight claim and the whole quiesce/retarget/resume
+    # transaction (see ui/context_switch_coordinator.py).
     # ------------------------------------------------------------------
 
     def on_show_context_picker(self, message: ShowContextPicker) -> None:
-        self.run_worker(self._show_context_picker(), exclusive=False)
+        self._ctx.show_picker()
 
     def on_switch_context_command(self, message: SwitchContextCommand) -> None:
-        self.run_worker(self._switch_context_flow(message.name), exclusive=False)
-
-    _CURRENT_CTX_SUFFIX = " (current)"
-
-    async def _show_context_picker(self) -> None:
-        if self._list_contexts is None:
-            self.notify("Context switching unavailable in this build", severity="warning")
-            return
-        names, active = await asyncio.to_thread(self._list_contexts)
-        if not names:
-            self.notify("No contexts found in kubeconfig", severity="warning")
-            return
-        self._command_bar.context_words = names
-        # Sessions started from the kubeconfig current-context have no
-        # explicit config value — fall back to what the kubeconfig reports.
-        current = self.config.kube_context or active
-        # Explicit display->name mapping: decoding the label (suffix strip)
-        # would corrupt a real context whose name ends in " (current)".
-        labels: dict[str, str] = {}
-        for n in names:
-            label = f"{n}{self._CURRENT_CTX_SUFFIX}" if n == current else n
-            if label != n and (label in names or label in labels):
-                label = n  # marker collides with another context's name
-            labels[label] = n
-
-        def _on_pick(choice: str | None) -> None:
-            if choice is None:
-                return
-            self.post_message(SwitchContextCommand(labels.get(choice, choice)))
-
-        self.push_screen(PickScreen("Switch context:", list(labels)), _on_pick)
-
-    async def _switch_context_flow(self, name: str) -> None:
-        """Orchestrate a context switch: guards, auth probe, teardown, swap.
-
-        The probe runs against a private client configuration first — on any
-        failure nothing has been torn down and the old context keeps working
-        (issue #36's "don't strand the user" requirement). Only a proven
-        target proceeds to teardown and retarget.
-        """
-        if self._probe_context is None or self._switch_context is None:
-            self.notify("Context switching unavailable in this build", severity="warning")
-            return
-        # Claim before the first await: two queued SwitchContextCommands
-        # must not both pass the guards and race the teardown.
-        if self._ctx_switching:
-            self.notify("A context switch is already in progress", severity="warning")
-            return
-        self._ctx_switching = True
-        try:
-            await self._switch_context_locked(name)
-        finally:
-            self._ctx_switching = False
-
-    async def _switch_context_locked(self, name: str) -> None:
-        """The body of `_switch_context_flow`; runs with the claim held."""
-        old = self.config.kube_context
-        if await self._is_ctx_noop(name, old):
-            self.notify(f"Already on context {name}")
-            return
-        if not await self._ctx_switch_guards_pass(name):
-            return
-        # The switch is now committed to attempting: recorded before the
-        # probe, on the epoch that is still serving this session. Anything
-        # refused above never started, and inventing a `started` for it
-        # would put a transition in the record that never happened.
-        epoch = self._ctx_epoch
-        self._timeline.record_context_switch(
-            epoch=epoch, phase="started", from_context=old, to_context=name
-        )
-        try:
-            await self._probe_context(name)  # type: ignore[misc]  # guarded by caller
-        except Exception as exc:
-            # Nothing was torn down and no cluster was applied, so the
-            # failure belongs to the epoch that is still live.
-            self._timeline.record_context_switch(
-                epoch=epoch,
-                phase="failed",
-                from_context=old,
-                to_context=name,
-                note=self._describe_ctx_error(exc),
-            )
-            self.notify(
-                f"Cannot switch to context {name!r}: {self._describe_ctx_error(exc)}"
-                f" — staying on {old or 'the current context'}",
-                severity="error",
-                timeout=10,
-            )
-            return
-        async with self._workspace_ctl.nav_lock:
-            # The probe awaited network I/O — an agent turn or a dialog may
-            # have started meanwhile; re-check before anything is torn down.
-            blocker = self._ctx_switch_blocker()
-            if blocker is not None:
-                # A `started` with no terminal phase would read as a switch
-                # still in flight; the abort is the outcome, on the old epoch.
-                self._timeline.record_context_switch(
-                    epoch=epoch,
-                    phase="failed",
-                    from_context=old,
-                    to_context=name,
-                    note=blocker,
-                )
-                self.notify(blocker, severity="warning")
-                return
-            # Quiesce the embedded MCP server BEFORE any teardown: external
-            # callers share the client and alias map being swapped, and an
-            # undrainable server must abort while the old context is still
-            # fully usable (watches, forwards, store all intact).
-            mcp_restart = await self._quiesce_mcp_for_switch()
-            if mcp_restart is None:
-                self._timeline.record_context_switch(
-                    epoch=epoch,
-                    phase="failed",
-                    from_context=old,
-                    to_context=name,
-                    note="embedded MCP server did not stop in time",
-                )
-                return
-            # Old-context proposals are stale the moment this committed
-            # transition begins: the old MCP run (and its capability) is
-            # already stopped, and both the teardown below and the retarget
-            # perform fallible awaits — expire them now, not at a later
-            # point that an exception could keep from ever being reached.
-            await self._proposals.expire_all("kube context switched")
-            await self._teardown_for_context_switch()
-            ok, applied = await self._retarget_context(name, old)
-            if not ok:
-                if mcp_restart:
-                    self.notify(
-                        "Embedded MCP server was stopped for the switch —"
-                        " restart it with :mcp on once reconnected",
-                        severity="warning",
-                        timeout=15,
-                    )
-                return
-            self._resume_timeline_after_retarget(name, old, applied)
-            if mcp_restart and self._mcp is not None:
-                # Resume on the same endpoint, now serving whichever context
-                # was actually applied (target, or the restored old one).
-                msg = await self._mcp.start()
-                self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
-            await self.watch_manager.start(self.current_kind, self.current_scope)
-            await self._workspace_ctl.sync_metrics_poller()
-        self.post_message(ResourcesUpdated(self.current_kind))
-        self._refresh_status()
-        self._prefetch_namespaces()
-        self.on_aliases_updated()
-        if applied == name:
-            self.notify(f"Switched to context {name} (ns: {self.current_scope})")
-
-    def _resume_timeline_after_retarget(
-        self, name: str, old: str | None, applied: str | None
-    ) -> None:
-        """Close out the switch on the timeline and rebind its Warning feed.
-
-        `completed` belongs to the epoch the switch created, so the new
-        cluster's record opens with the switch that started it — but only
-        when the requested target is what got applied: `_apply_context_switch`
-        also runs while *restoring* the old context after a failed swap, and
-        recording completion there would report the target that failed as if
-        it had succeeded. The feed restarts either way: teardown cancelled the
-        old epoch's, and whichever context is now applied deserves one.
-        """
-        if applied == name:
-            self._timeline.record_context_switch(
-                epoch=self._ctx_epoch,
-                phase="completed",
-                from_context=old,
-                to_context=name,
-                note="all cluster state was reset",
-            )
-        self._timeline.start_warning_watch()
-
-    async def _quiesce_mcp_for_switch(self) -> bool | None:
-        """Drain and stop the embedded MCP server ahead of a context switch.
-
-        Returns True when a restart is owed after the switch, False when the
-        server was not running, and None when the server could not be drained
-        in time — the switch must then abort with nothing torn down.
-        """
-        if self._mcp is None or not self._mcp.running:
-            return False
-        pending = await self._mcp.shutdown()
-        if pending is not None:
-            # Even cancellation didn't land within its deadline: an in-flight
-            # tool call could cross the context boundary if we proceeded.
-            self.notify(
-                "Embedded MCP server did not stop in time — context"
-                " switch aborted (old context untouched)",
-                severity="error",
-                timeout=10,
-            )
-            return None
-        return True
-
-    async def _is_ctx_noop(self, name: str, old: str | None) -> bool:
-        """True when *name* is already the active context — explicitly, or as
-        the kubeconfig's active context for sessions started without
-        -c/--context (old stays None there for the recovery path)."""
-        effective = old
-        if effective is None and self._list_contexts is not None:
-            with contextlib.suppress(Exception):
-                _, effective = await asyncio.to_thread(self._list_contexts)
-        return name == effective
-
-    def _ctx_switch_blocker(self) -> str | None:
-        """Why a switch cannot proceed right now, or None when it can."""
-        if self._agent_ui.busy:
-            return "Agent is busy — wait for the current turn to finish before switching contexts"
-        if self._writes.active_writes():
-            return (
-                "A cluster write is in progress — wait for it to finish before switching contexts"
-            )
-        if len(self.screen_stack) > 1:
-            return "Close open dialogs before switching contexts"
-        try:
-            # The inline namespace picker is not a screen: its old-cluster
-            # options would survive teardown and a later selection would
-            # navigate the new cluster to a namespace picked from the old.
-            if self._namespace_picker.display:
-                return "Close the namespace picker before switching contexts"
-        except NoMatches:  # widget tree not composed (shutdown/startup)
-            pass
-        return None
-
-    async def _ctx_switch_guards_pass(self, name: str) -> bool:
-        """Pre-probe refusals; each states why the switch cannot start now."""
-        blocker = self._ctx_switch_blocker()
-        if blocker is not None:
-            self.notify(blocker, severity="warning")
-            return False
-        if self._list_contexts is not None:
-            names, _ = await asyncio.to_thread(self._list_contexts)
-            if names and name not in names:
-                self.notify(
-                    f"Unknown context {name!r} — kubeconfig has: {', '.join(names)}",
-                    severity="error",
-                )
-                return False
-        return True
-
-    @staticmethod
-    def _describe_ctx_error(exc: Exception) -> str:
-        if isinstance(exc, TimeoutError):
-            return "authentication check timed out"
-        return str(exc) or type(exc).__name__
-
-    async def _teardown_for_context_switch(self) -> None:
-        """Stop every consumer of the old cluster before the client swaps.
-
-        Order matters: streams and pollers first (they hold the old
-        connection), then session state that would otherwise leak old-cluster
-        rows, breadcrumbs, or hints into the new one.
-        """
-        await self._logs.close()
-        self._describe_pane.hide()
-        # The workspace controller folds the split back to one pane, stops and
-        # de-targets the metrics poller, clears the drill breadcrumb, cancels
-        # the relationship workers holding the old client, and clears the
-        # filter — the workspace-only halves of the teardown (issue #187 /
-        # Deep Task 3). It runs first (under this coordinator's nav lock, held
-        # by the caller) so those pollers and workers release the old
-        # connection before the wholesale watch stop below.
-        await self._workspace_ctl.quiesce_for_context_switch()
-        # An old-cluster namespace prefetch still in flight could land after
-        # the new cluster's and overwrite its completions — cancel it first.
-        if self._ns_prefetch_task is not None:
-            self._ns_prefetch_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._ns_prefetch_task
-            self._ns_prefetch_task = None
-        # Completions that already loaded are old-cluster names — drop them
-        # now so they aren't offered while (or if) the new prefetch fails.
-        self._command_bar.namespace_words = []
-        await self.watch_manager.stop_all()
-        if self._forwards is not None:
-            # Same quiesce-stop-audit sequence as app exit: in-flight
-            # launches land first, stop_all runs off-loop (it polls up to
-            # the grace deadline), and every stop is enqueued for audit.
-            stopped = await self._forward.teardown(self._forwards)
-            if stopped:
-                self.notify(f"Stopped {len(stopped)} port-forward(s) targeting the old cluster")
-        # Old-cluster audit entries resolve their context only at append();
-        # flush them before _apply_context_switch re-points the audit log,
-        # or they would be written as belonging to the new cluster.
-        await self._forward.flush_audits()
-        self.store.clear_all()
-        # The hint-events worker holds the old client and its exception path
-        # re-populates the cache — cancel it (and the parked-cursor refresh
-        # timer) before the cache is cleared, so no late result or retry can
-        # resurrect old-cluster hints.
-        self.workers.cancel_group(self, "hint-events")
-        self._hints.teardown()
-        await self._timeline.stop()
-
-    async def _retarget_context(self, name: str, old: str | None) -> tuple[bool, str | None]:
-        """Swap the connection to *name*; on failure fall back to *old*.
-
-        Returns ``(ok, applied)``: ``ok`` is False only when even the
-        fallback failed (the session then needs a restart — everything is
-        already torn down and nothing is connected). ``applied`` is the
-        context actually in effect, which may legitimately be None (the
-        kubeconfig default) — that is why success is a separate flag.
-
-        Old-context proposals were already expired by the caller (right
-        after MCP quiescing), before teardown or either switch attempt.
-        """
-        # Captured before the first attempt: `_apply_context_switch` bumps
-        # the epoch as its first action, so reading it in the handler below
-        # could file a failed swap under the epoch it failed to create.
-        epoch = self._ctx_epoch
-        try:
-            result = await self._switch_context(name)  # type: ignore[misc]  # guarded by caller
-            self._apply_context_switch(name, old, result)
-            return True, name
-        except Exception as exc:
-            self._timeline.record_context_switch(
-                epoch=epoch,
-                phase="failed",
-                from_context=old,
-                to_context=name,
-                note=self._describe_ctx_error(exc),
-            )
-            self.notify(
-                f"Context switch to {name!r} failed mid-swap: {self._describe_ctx_error(exc)}",
-                severity="error",
-                timeout=10,
-            )
-        try:
-            result = await self._switch_context(old)  # type: ignore[misc]  # guarded by caller
-            self._apply_context_switch(old, old, result)
-            self.notify(f"Restored context {old or '(kubeconfig default)'}")
-            return True, old
-        except Exception as exc:
-            self.notify(
-                f"Could not restore context {old or '(kubeconfig default)'}:"
-                f" {self._describe_ctx_error(exc)} — restart korvid",
-                severity="error",
-                timeout=15,
-            )
-            return False, None
-
-    def _apply_context_switch(
-        self, name: str | None, old: str | None, result: ContextSwitchResult
-    ) -> None:
-        """Adopt the new cluster's identity and re-probed capabilities."""
-        self._ctx_epoch += 1
-        # Adopt the target context's kubeconfig namespace as the session
-        # default too: `ns` toggle-back and the helm/operator namespace
-        # fallbacks read config.namespace, and jumping to the *startup*
-        # context's namespace after a switch would cross clusters.
-        self.config = dataclasses.replace(
-            self.config,
-            kube_context=name,
-            namespace=result.context_namespace or self.config.namespace,
-        )
-        self._pod_resize_supported = result.pod_resize_supported
-        self._provider_hint = result.provider_hint
-        self._writes.set_protected_context(result.protected_context)
-        if result.protected_context is not None:
-            self.notify(
-                f"Context {result.protected_context!r} is protected — writes"
-                " require typing the context name",
-                severity="warning",
-                timeout=10,
-            )
-        if self._audit is not None:
-            self._audit.set_context(name)
-        if self._forwards is not None:
-            # Reopen the registry that teardown latched closed; forwards
-            # started from now on target the new cluster.
-            self._forwards.retarget(name)
-            self._forward.reopen()
-        # Adopt the new cluster's default view (pods in its default namespace)
-        # through the workspace controller, which owns the view state and the
-        # view-scoped binding refresh.
-        self._workspace_ctl.reset_view_after_switch()
-        # Rebind the helm wrapper: it pins --kube-context per instance, and
-        # helm writes must follow the active cluster (None when helm is off).
-        self._helm = result.helm
-        # The new cluster may run a telepresence traffic-manager the old one
-        # lacked: re-probe (a no-op once the session's hint was shown).
-        self.run_worker(self._maybe_hint_telepresence(), exclusive=False)
-        if name != old:
-            self._agent_ui.note_context_switch(
-                f"kube context switched from {old or '(default)'} to {name};"
-                " all cluster state was reset"
-            )
+        self._ctx.switch(message.name)
 
     def on_quit_command(self, message: QuitCommand) -> None:
         self.exit()
@@ -1913,12 +1506,12 @@ class KorvidApp(App[None]):
         stream started after a completed switch would target the new cluster
         with the old cluster's pod selection.
         """
-        epoch = self._ctx_epoch
+        epoch = self._ctx.epoch()
         rows = await self._build_container_rows(namespace, name)
         if not rows:
             self.notify("No containers found for this pod", severity="warning")
             return
-        if self._ctx_switching or epoch != self._ctx_epoch:
+        if self._ctx.crossed(epoch):
             # The row fetch awaited through a context switch: the selection
             # belongs to the old cluster.
             return
@@ -1926,7 +1519,7 @@ class KorvidApp(App[None]):
         def _on_pick(result: tuple[str, str] | None) -> None:
             if result is None:
                 return
-            if self._ctx_switching or epoch != self._ctx_epoch:
+            if self._ctx.crossed(epoch):
                 self.notify(
                     f"container action on {name} cancelled - the kube context"
                     " changed while the containers screen was open",
@@ -1978,9 +1571,9 @@ class KorvidApp(App[None]):
         if self._get_manifest is None:
             self.notify("Describe unavailable", severity="warning")
             return
-        if not self._ctx_reads_allowed():
+        if not self._ctx.reads_allowed():
             return
-        epoch = self._ctx_epoch
+        epoch = self._ctx.epoch()
         try:
             manifest = await self._get_manifest(kind, namespace or None, name)
         except ApiStatusError as exc:
@@ -1992,7 +1585,7 @@ class KorvidApp(App[None]):
         except ValueError as exc:
             self.notify(str(exc), severity="error")
             return
-        if self._ctx_switching or epoch != self._ctx_epoch:
+        if self._ctx.crossed(epoch):
             return
         title = f"{kind}/{namespace}/{name}" if namespace else f"{kind}/{name}"
         if manifest.get("kind") == "Secret":
@@ -2103,9 +1696,9 @@ class KorvidApp(App[None]):
             return
         # The fetch would race the client swap and could render either
         # cluster's manifest — refuse up front.
-        if not self._ctx_reads_allowed():
+        if not self._ctx.reads_allowed():
             return
-        epoch = self._ctx_epoch
+        epoch = self._ctx.epoch()
 
         namespace, name = self._selected_ns_name()
         if namespace is None or name is None:
@@ -2133,7 +1726,7 @@ class KorvidApp(App[None]):
                 msg = explain_api_error(exc.status, exc.reason, "events", namespace)
                 self.notify(msg, severity="warning")
 
-        if self._ctx_switching or epoch != self._ctx_epoch:
+        if self._ctx.crossed(epoch):
             # The fetches awaited through a context switch: the manifest (or
             # a mixed manifest/events pair) describes the old cluster and
             # must not be pushed over the new session.
@@ -2251,7 +1844,7 @@ class KorvidApp(App[None]):
             self._telepresence_reprobe = True
             return
         self._telepresence_probing = True
-        epoch = self._ctx_epoch
+        epoch = self._ctx.epoch()
         try:
             present = await self._probe_traffic_manager()
         except Exception:
@@ -2261,7 +1854,7 @@ class KorvidApp(App[None]):
             if self._telepresence_reprobe:
                 self._telepresence_reprobe = False
                 self.run_worker(self._maybe_hint_telepresence(), exclusive=False)
-        if not present or epoch != self._ctx_epoch:
+        if not present or self._ctx.epoch() != epoch:
             return  # no manager, or the answer describes a left context
         self._telepresence_hinted = True
         self.notify(
@@ -2324,7 +1917,7 @@ class KorvidApp(App[None]):
 
     def _toggle_mcp_server(self, mcp: MCPControllerBase, action: str) -> None:
         """Start/stop the MCP server live (`:mcp on` / `:mcp off`)."""
-        if self._ctx_switching:
+        if self._ctx.switching():
             # The switch quiesced the server before swapping the client and
             # alias map; a toggle landing mid-swap could restart it against
             # state that is being replaced.
@@ -2337,11 +1930,11 @@ class KorvidApp(App[None]):
         async def _switch() -> None:
             # Serialize with the `:ctx` flow (which holds _nav_lock through
             # quiesce/teardown/retarget) and re-check inside the lock: a
-            # toggle queued just before the switch claimed _ctx_switching
+            # toggle queued just before the switch claimed the ctx switch
             # could otherwise start the server against the client/alias map
             # mid-swap, or have its stop undone by the switch's restart.
             async with self._workspace_ctl.nav_lock:
-                if self._ctx_switching:
+                if self._ctx.switching():
                     self.notify(
                         "A context switch is in progress — try again once it completes",
                         severity="warning",
@@ -2416,9 +2009,9 @@ class KorvidApp(App[None]):
             return
         # The forward would race the teardown/retarget and could spawn
         # against whichever cluster wins — refuse up front.
-        if not self._ctx_reads_allowed():
+        if not self._ctx.reads_allowed():
             return
-        epoch = self._ctx_epoch
+        epoch = self._ctx.epoch()
         if self._forwards is None:
             self.notify("Port-forward unavailable in this build", severity="warning")
             return
@@ -2446,7 +2039,7 @@ class KorvidApp(App[None]):
         def _on_result(result: tuple[int, int] | None) -> None:
             if result is None:
                 return
-            if self._ctx_switching or epoch != self._ctx_epoch:
+            if self._ctx.crossed(epoch):
                 # The dialog stayed open across a context switch (or the
                 # port prefill awaited through one): the selection belongs
                 # to the old cluster while kubectl and the reopened forward
@@ -2489,9 +2082,9 @@ class KorvidApp(App[None]):
             return
         # The stream would race the teardown/retarget and could address
         # whichever cluster wins — refuse up front.
-        if not self._ctx_reads_allowed():
+        if not self._ctx.reads_allowed():
             return
-        epoch = self._ctx_epoch
+        epoch = self._ctx.epoch()
 
         ns, name = self._selected_ns_name()
         if ns is None or name is None:
@@ -2557,7 +2150,7 @@ class KorvidApp(App[None]):
 
         async def _guard() -> None:
             def check_epoch() -> None:
-                if self._ctx_switch_crossed(epoch):
+                if self._ctx.crossed(epoch):
                     raise TransferError(
                         f"the kube context changed while the dialog for {namespace}/{name} was open"
                     )
@@ -2614,7 +2207,7 @@ class KorvidApp(App[None]):
     ) -> None:
         """Gate then launch: uploads write into the container filesystem, so
         they are blocked in read-only mode and pass the approval dialog."""
-        if self._ctx_switching or epoch != self._ctx_epoch:
+        if self._ctx.crossed(epoch):
             # The picker/transfer dialogs stayed open across a context
             # switch: the pod selection (and its uid, which fails open when
             # missing) belongs to the old cluster while the shared exec
@@ -2633,7 +2226,7 @@ class KorvidApp(App[None]):
             def _approved(approved: bool | None) -> None:
                 if not approved:
                     return
-                if self._ctx_switching or epoch != self._ctx_epoch:
+                if self._ctx.crossed(epoch):
                     self.notify(
                         f"transfer to {namespace}/{name} cancelled - the kube"
                         " context changed while the approval was open",
@@ -3005,7 +2598,7 @@ class KorvidApp(App[None]):
         helm = self._helm_ctl.gate()
         if helm is None:
             return
-        epoch = self._ctx_epoch
+        epoch = self._ctx.epoch()
         ns, name = self._selected_ns_name()
         if name is None:
             return
@@ -3028,7 +2621,7 @@ class KorvidApp(App[None]):
         helm = self._helm_ctl.gate()
         if helm is None:
             return
-        epoch = self._ctx_epoch
+        epoch = self._ctx.epoch()
         ns, name = self._selected_ns_name()
         if name is None:
             return
@@ -3454,8 +3047,9 @@ class KorvidApp(App[None]):
         await self._proposals.shutdown()
         if self._ns_prefetch_task is not None:
             self._ns_prefetch_task.cancel()
-        if self._ctx_prefetch_task is not None:
-            self._ctx_prefetch_task.cancel()
+        # The `:ctx` completion prefetch belongs to the switch coordinator;
+        # this is the narrow lifecycle call that cancels and reaps it.
+        await self._ctx.shutdown()
         await self._agent_ui.shutdown()
         await self._logs.shutdown()
         if self._metrics is not None:
@@ -3796,27 +3390,97 @@ class AppUiSurface(UiSurface):
         return len(self._app.screen_stack)
 
 
-class AppContextGuard(ContextGuard):
-    """Nominal `ContextGuard` adapter over `KorvidApp` (issue #187).
+class AppContextSurface(ContextSurface):
+    """Nominal `ContextSurface` adapter over `KorvidApp` (issue #36 / #187).
 
-    Same metaclass reason as the other adapters: the boundary is an
-    `abc.ABC`, but Textual's `App` metaclass conflicts with `ABCMeta`, so the
-    app conforms through a thin adapter. The `:ctx`-switch epoch, the
-    in-flight flag, and the stream-read guard stay the app's single
-    implementation, which the workspace controller revalidates against.
+    Adapter for the same metaclass reason as the others. Everything here is
+    a widget the app owns (the command bar's completion words, the describe
+    pane, the inline namespace picker), an app worker group, or a UI-bus
+    post — no method routes any part of the switch transaction back into the
+    app, which is `ContextSwitchCoordinator`'s alone.
     """
 
     def __init__(self, app: KorvidApp) -> None:
         self._app = app
 
-    def epoch(self) -> int:
-        return self._app._ctx_epoch
+    def request_switch(self, name: str) -> None:
+        self._app.post_message(SwitchContextCommand(name))
 
-    def switching(self) -> bool:
-        return self._app._ctx_switching
+    def namespace_picker_open(self) -> bool:
+        try:
+            return bool(self._app._namespace_picker.display)
+        except NoMatches:  # widget tree not composed (shutdown/startup)
+            return False
 
-    def reads_allowed(self) -> bool:
-        return self._app._ctx_reads_allowed()
+    def hide_describe(self) -> None:
+        self._app._describe_pane.hide()
+
+    def set_context_words(self, names: list[str]) -> None:
+        self._app._command_bar.context_words = names
+
+    def clear_namespace_words(self) -> None:
+        self._app._command_bar.namespace_words = []
+
+    async def cancel_namespace_prefetch(self) -> None:
+        task = self._app._ns_prefetch_task
+        if task is None:
+            return
+        self._app._ns_prefetch_task = None
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    def start_namespace_prefetch(self) -> None:
+        self._app._prefetch_namespaces()
+
+    def cancel_worker_group(self, group: str) -> None:
+        self._app.workers.cancel_group(self._app, group)
+
+    def refresh_completions(self) -> None:
+        self._app.on_aliases_updated()
+
+    def refresh_status(self) -> None:
+        self._app._refresh_status()
+
+    def resources_updated(self, kind: str) -> None:
+        self._app.post_message(ResourcesUpdated(kind))
+
+
+class AppSessionConfiguration(SessionConfiguration):
+    """Nominal `SessionConfiguration` adapter over `KorvidApp` (issue #36).
+
+    The active context, the session default namespace, the per-cluster
+    capability gates and the context-pinned CLI wrappers are app state every
+    flow reads directly, so the app keeps them; the coordinator decides
+    *when* a proven switch is adopted, and adopts it through here.
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    def kube_context(self) -> str | None:
+        return self._app.config.kube_context
+
+    def adopt(self, context: str | None, result: ContextSwitchResult) -> None:
+        # Adopt the target context's kubeconfig namespace as the session
+        # default too: `ns` toggle-back and the helm/operator namespace
+        # fallbacks read config.namespace, and jumping to the *startup*
+        # context's namespace after a switch would cross clusters.
+        self._app.config = dataclasses.replace(
+            self._app.config,
+            kube_context=context,
+            namespace=result.context_namespace or self._app.config.namespace,
+        )
+        self._app._pod_resize_supported = result.pod_resize_supported
+        self._app._provider_hint = result.provider_hint
+
+    def retarget_tools(self, result: ContextSwitchResult) -> None:
+        # Rebind the helm wrapper: it pins --kube-context per instance, and
+        # helm writes must follow the active cluster (None when helm is off).
+        self._app._helm = result.helm
+        # The new cluster may run a telepresence traffic-manager the old one
+        # lacked: re-probe (a no-op once the session's hint was shown).
+        self._app.run_worker(self._app._maybe_hint_telepresence(), exclusive=False)
 
 
 class AppWorkspaceSurface(WorkspaceSurface):

@@ -342,7 +342,7 @@ async def test_probe_result_from_the_old_context_is_discarded() -> None:
     async with app.run_test() as pilot:
         first = asyncio.create_task(app._maybe_hint_telepresence())
         await pilot.pause()
-        app._ctx_epoch += 1  # what a :ctx switch does
+        app._ctx._epoch += 1  # what a :ctx switch does
         second = asyncio.create_task(app._maybe_hint_telepresence())  # switch re-probe
         await pilot.pause()
         gate.set()

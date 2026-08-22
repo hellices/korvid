@@ -1684,12 +1684,12 @@ async def test_l_refused_while_context_switching() -> None:
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
     async with app.run_test() as pilot:
         await _pod_row_ready(app, pilot)
-        app._ctx_switching = True
+        app._ctx._switching = True
         try:
             await pilot.press("l")
             await until(pilot, lambda: _refusal_notified(app), label="refusal notification")
         finally:
-            app._ctx_switching = False
+            app._ctx._switching = False
         assert app.query_one(LogPane).display is False
 
 
@@ -1699,12 +1699,12 @@ async def test_multi_logs_refused_while_context_switching() -> None:
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
     async with app.run_test() as pilot:
         await _pod_row_ready(app, pilot)
-        app._ctx_switching = True
+        app._ctx._switching = True
         try:
             await pilot.press("L")
             await until(pilot, lambda: _refusal_notified(app), label="refusal notification")
         finally:
-            app._ctx_switching = False
+            app._ctx._switching = False
         assert app.query_one(LogPane).display is False
 
 
@@ -1722,12 +1722,12 @@ async def test_previous_logs_refused_while_context_switching() -> None:
             lambda: app.query_one(LogPane).display and app._logs.tasks,
             label="log pane streaming",
         )
-        app._ctx_switching = True
+        app._ctx._switching = True
         try:
             await pilot.press("p")
             await until(pilot, lambda: _refusal_notified(app), label="refusal notification")
         finally:
-            app._ctx_switching = False
+            app._ctx._switching = False
         assert app._logs.mode == "l"  # previous mode never engaged
 
 
@@ -1762,7 +1762,7 @@ async def test_previous_logs_dropped_when_epoch_moves_in_awaited_gap() -> None:
         try:
             action = asyncio.create_task(app.action_log_previous())
             await until(pilot, entered.is_set, label="action blocked in cancel")
-            app._ctx_epoch += 1
+            app._ctx._epoch += 1
             release.set()
             await action
         finally:

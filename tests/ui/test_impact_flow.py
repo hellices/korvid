@@ -1286,7 +1286,7 @@ async def test_context_switch_during_the_impact_load_aborts_before_the_dialog(
     app = env.app
 
     def bump_epoch() -> None:
-        app._ctx_epoch += 1
+        app._ctx._epoch += 1
 
     env.lister.on_first_call = bump_epoch
     async with app.run_test() as pilot:
@@ -1922,7 +1922,7 @@ async def test_scale_down_context_switch_during_the_dry_run_never_loads_relation
     app = env.app
 
     def bump_epoch() -> None:
-        app._ctx_epoch += 1
+        app._ctx._epoch += 1
 
     env.ops.on_first_preview = bump_epoch
     async with app.run_test() as pilot:

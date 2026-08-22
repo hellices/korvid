@@ -375,7 +375,7 @@ class TestContextEpochGuard:
             dialog = await _open_dialog(pilot, app)
             remote = dialog.query_one("#transfer-remote", Input)
             remote.focus()
-            app._ctx_epoch += 1  # a :ctx switch completed under the dialog
+            app._ctx._epoch += 1  # a :ctx switch completed under the dialog
             await pilot.press("ctrl+o")
             await until(
                 pilot,
@@ -397,12 +397,12 @@ class TestContextEpochGuard:
             stdin: bool,
         ) -> contextlib.AbstractAsyncContextManager[Any]:
             # A switch completes while the listing is in flight.
-            app._ctx_epoch += 1
+            app._ctx._epoch += 1
             return inner(namespace, pod, container, command, stdin=stdin)
 
         app = make_app([_pod("api-1")], open_pod_exec=flipping)
         async with app.run_test():
-            lister = app._remote_lister("default", "api-1", "app", uid=None, epoch=app._ctx_epoch)
+            lister = app._remote_lister("default", "api-1", "app", uid=None, epoch=app._ctx.epoch())
             assert lister is not None
             with pytest.raises(TransferError, match="context changed"):
                 await lister("/")
@@ -450,7 +450,7 @@ class TestPodUidGuard:
         )
         async with app.run_test():
             lister = app._remote_lister(
-                "default", "api-1", "app", uid="uid-approved", epoch=app._ctx_epoch
+                "default", "api-1", "app", uid="uid-approved", epoch=app._ctx.epoch()
             )
             assert lister is not None
             with pytest.raises(TransferError, match="replaced"):
@@ -472,7 +472,7 @@ class TestPodUidGuard:
         )
         async with app.run_test():
             lister = app._remote_lister(
-                "default", "api-1", "app", uid="uid-approved", epoch=app._ctx_epoch
+                "default", "api-1", "app", uid="uid-approved", epoch=app._ctx.epoch()
             )
             assert lister is not None
             with pytest.raises(TransferError, match="verif"):
@@ -486,7 +486,7 @@ class TestPodUidGuard:
         opener = FakeExecOpener(_listing("etc/"))
 
         async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
-            app._ctx_epoch += 1  # switch completes while the lookup is in flight
+            app._ctx._epoch += 1  # switch completes while the lookup is in flight
             return {"metadata": {"uid": "uid-approved"}}
 
         app = make_app(
@@ -496,7 +496,7 @@ class TestPodUidGuard:
         )
         async with app.run_test():
             lister = app._remote_lister(
-                "default", "api-1", "app", uid="uid-approved", epoch=app._ctx_epoch
+                "default", "api-1", "app", uid="uid-approved", epoch=app._ctx.epoch()
             )
             assert lister is not None
             with pytest.raises(TransferError, match="context changed"):

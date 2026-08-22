@@ -493,20 +493,20 @@ async def test_return_is_refused_when_a_ctx_switch_starts_during_the_navigate() 
 
         async def navigate_then_switch(*args: object, **kwargs: object) -> None:
             await original(*args, **kwargs)  # type: ignore[arg-type]  # passthrough wrapper
-            app._ctx_switching = True
+            app._ctx._switching = True
 
         app._workspace_ctl.navigate = navigate_then_switch  # type: ignore[method-assign]  # test seam
         try:
             await pilot.press("escape")
             await until(
                 pilot,
-                lambda: app._ctx_switching and not isinstance(app.screen, HierarchyScreen),
+                lambda: app._ctx.switching() and not isinstance(app.screen, HierarchyScreen),
                 label="hierarchy return aborted by context switch",
             )
             assert not isinstance(app.screen, HierarchyScreen)
         finally:
             app._workspace_ctl.navigate = original  # type: ignore[method-assign]  # restore
-            app._ctx_switching = False
+            app._ctx._switching = False
 
 
 async def test_refresh_hierarchy_survives_an_empty_screen_stack() -> None:
@@ -925,7 +925,7 @@ async def test_jump_aborts_on_stale_context_epoch() -> None:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
         await app._workspace_ctl.jump_to_object(
-            "deployments", "default", "web-nginx", epoch=app._ctx_epoch - 1
+            "deployments", "default", "web-nginx", epoch=app._ctx.epoch() - 1
         )
         assert app.current_kind == "helmreleases"
 

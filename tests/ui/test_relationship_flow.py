@@ -33,7 +33,8 @@ from korvid.k8s.relationship_facts import (
     RelationshipFacts,
     TargetReference,
 )
-from korvid.ui.app import ContextSwitchResult, KorvidApp
+from korvid.ui.app import KorvidApp
+from korvid.ui.context_switch_coordinator import ContextSwitchResult
 from korvid.ui.messages import NavigateCommand, SwitchContextCommand
 from korvid.ui.widgets.relationship_screen import RelationshipScreen
 from korvid.ui.widgets.resource_table import ResourceTable
@@ -489,7 +490,7 @@ async def test_unresolved_relationship_kind_renders_literally() -> None:
     app = env.app
     async with app.run_test() as pilot:
         app._workspace_ctl.on_relationship_result(
-            app._ctx_epoch,
+            app._ctx.epoch(),
             ("goto", "evil.example.io", "[/bold]", "default", "api-0"),
         )
         await until(

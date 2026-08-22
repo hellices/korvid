@@ -2013,7 +2013,7 @@ async def test_forward_refused_while_context_switching() -> None:
     with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
-            app._ctx_switching = True
+            app._ctx._switching = True
             try:
                 await pilot.press("F")
                 await until(
@@ -2024,7 +2024,7 @@ async def test_forward_refused_while_context_switching() -> None:
                     label="forward refusal",
                 )
             finally:
-                app._ctx_switching = False
+                app._ctx._switching = False
             assert procs == []
 
 
@@ -2039,7 +2039,7 @@ async def test_forward_dialog_cancelled_when_context_switched_while_open() -> No
             await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
-            app._ctx_epoch += 1  # a context switch completed under the dialog
+            app._ctx._epoch += 1  # a context switch completed under the dialog
             await pilot.press("enter")
             await until(
                 pilot,
@@ -2058,14 +2058,14 @@ async def test_forward_worker_cancelled_when_context_switched_mid_lookup() -> No
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
 
     async def switching_lookup(namespace: str, name: str) -> str | None:
-        app._ctx_epoch += 1  # a switch completed while the lookup was in flight
+        app._ctx._epoch += 1  # a switch completed while the lookup was in flight
         return None
 
     async with app.run_test() as pilot:
         await _wait_rows(app, pilot)
         app._forward._resolve_forward_workload = switching_lookup  # type: ignore[method-assign]
         await app._forward.start(
-            "pods", "default", "api-1", local_port=18080, remote_port=80, epoch=app._ctx_epoch
+            "pods", "default", "api-1", local_port=18080, remote_port=80, epoch=app._ctx.epoch()
         )
         await until(
             pilot,
@@ -2088,7 +2088,7 @@ async def test_forward_worker_refused_when_scheduled_with_stale_epoch() -> None:
     async with app.run_test() as pilot:
         await _wait_rows(app, pilot)
         await app._forward.start(
-            "pods", "default", "api-1", local_port=18081, remote_port=80, epoch=app._ctx_epoch - 1
+            "pods", "default", "api-1", local_port=18081, remote_port=80, epoch=app._ctx.epoch() - 1
         )
         await until(
             pilot,

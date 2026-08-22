@@ -315,7 +315,7 @@ async def test_containers_screen_pick_cancelled_when_context_switched() -> None:
                 lambda: isinstance(app.screen, ContainersScreen),
                 label="containers screen open",
             )
-            app._ctx_epoch += 1  # a context switch completed under the screen
+            app._ctx._epoch += 1  # a context switch completed under the screen
             await pilot.press("s")
             await until(
                 pilot,

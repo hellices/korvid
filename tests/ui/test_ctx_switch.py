@@ -26,7 +26,8 @@ from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import PodSummary
-from korvid.ui.app import ContextSwitchResult, KorvidApp
+from korvid.ui.app import KorvidApp
+from korvid.ui.context_switch_coordinator import ContextSwitchResult
 from korvid.ui.messages import ShowContextPicker, SwitchContextCommand
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resource_table import ResourceTable
@@ -405,7 +406,7 @@ async def test_keybinding_write_refused_while_switching() -> None:
     env = _CtxEnv()
     app = env.app
     async with app.run_test() as pilot:
-        app._ctx_switching = True
+        app._ctx._switching = True
         try:
             ok = await app._writes.precheck_keybinding_write(
                 "delete", _PODS_META, "default", "pod-a"
@@ -419,7 +420,7 @@ async def test_keybinding_write_refused_while_switching() -> None:
                 label="switch-in-progress refusal",
             )
         finally:
-            app._ctx_switching = False
+            app._ctx._switching = False
 
 
 async def test_write_slot_reserved_before_worker_starts() -> None:
@@ -450,7 +451,7 @@ async def test_agent_prompt_refused_while_switching() -> None:
     env = _CtxEnv()
     app = env.app
     async with app.run_test() as pilot:
-        app._ctx_switching = True
+        app._ctx._switching = True
         try:
             app.post_message(AgentPromptSubmitted("why is pod-a failing?"))
             await until(
@@ -462,7 +463,7 @@ async def test_agent_prompt_refused_while_switching() -> None:
             )
             assert app._agent_ui._task is None
         finally:
-            app._ctx_switching = False
+            app._ctx._switching = False
 
 
 async def test_picker_marks_kubeconfig_default_when_no_explicit_context() -> None:
@@ -519,13 +520,13 @@ async def test_mcp_quiesced_before_teardown_and_restarted_after_switch() -> None
     mcp = _FakeMCP()
     app._mcp = cast("Any", mcp)
     teardowns: list[str] = []
-    real_teardown = app._teardown_for_context_switch
+    real_teardown = app._ctx._teardown
 
     async def spying_teardown() -> None:
         teardowns.append(f"teardown(mcp-running={mcp.running})")
         await real_teardown()
 
-    app._teardown_for_context_switch = spying_teardown  # type: ignore[method-assign]
+    app._ctx._teardown = spying_teardown  # type: ignore[method-assign]
     async with app.run_test() as pilot:
         await _first_pod_visible(env, pilot, "pod-a")
         app.post_message(SwitchContextCommand("ctx-b"))
@@ -584,7 +585,7 @@ async def test_keybinding_write_aborted_when_context_changed_during_precheck() -
     app = env.app
 
     async def permission_check_during_switch(*args: object) -> bool:
-        app._ctx_epoch += 1  # a switch was applied while we awaited
+        app._ctx._epoch += 1  # a switch was applied while we awaited
         return True
 
     async with app.run_test() as pilot:
@@ -655,7 +656,7 @@ async def test_total_switch_failure_mentions_stopped_mcp() -> None:
 
     async with app.run_test() as pilot:
         await _first_pod_visible(env, pilot, "pod-a")
-        app._switch_context = always_failing_switch
+        app._ctx._switch_context = always_failing_switch
         app.post_message(SwitchContextCommand("ctx-b"))
         await until(
             pilot,
@@ -679,7 +680,7 @@ async def test_delete_aborted_when_context_switches_during_preview(tmp_path: Pat
         async def preview_delete(
             self, meta: Any, ns: Any, name: Any, *, uid: str | None = None
         ) -> list[str]:
-            app._ctx_epoch += 1  # a switch was applied while we awaited
+            app._ctx._epoch += 1  # a switch was applied while we awaited
             return ["- pod pod-a"]
 
         async def delete_object(
@@ -766,7 +767,7 @@ async def test_helm_flow_cancelled_when_context_switched_before_approval() -> No
             release="web", version="", namespace="default", edit_values=False
         )
         ok = app._helm_ctl._context_after_preview(
-            "helm-install", choices, upgrade=False, epoch=app._ctx_epoch - 1
+            "helm-install", choices, upgrade=False, epoch=app._ctx.epoch() - 1
         )
         assert ok is False
         await until(
@@ -788,7 +789,7 @@ async def test_hint_fetch_result_dropped_when_context_switches() -> None:
             self.error = error
 
         async def fetch(self, ns: str, name: str, uid: str | None = None) -> list[Any]:
-            app._ctx_epoch += 1  # a switch completes during the fetch
+            app._ctx._epoch += 1  # a switch completes during the fetch
             if self.error:
                 raise RuntimeError("client closed by the switch")
             return []
@@ -822,7 +823,7 @@ async def test_mcp_toggle_refused_while_switching() -> None:
     mcp = _FakeMCP()
     app._mcp = cast("Any", mcp)
     async with app.run_test() as pilot:
-        app._ctx_switching = True
+        app._ctx._switching = True
         try:
             app._handle_mcp_command(["on"])
             await until(
@@ -833,7 +834,7 @@ async def test_mcp_toggle_refused_while_switching() -> None:
                 label="mcp toggle refusal",
             )
         finally:
-            app._ctx_switching = False
+            app._ctx._switching = False
         assert "mcp-started" not in mcp.events
 
 
@@ -847,7 +848,7 @@ async def test_transfer_cancelled_when_context_switched_while_dialog_open() -> N
     app = env.app
     async with app.run_test() as pilot:
         spec = TransferSpec(direction="download", remote_path="/tmp/x", local_path="/tmp/x")
-        app._start_transfer("default", "pod-a", None, spec, None, app._ctx_epoch - 1)
+        app._start_transfer("default", "pod-a", None, spec, None, app._ctx.epoch() - 1)
         await until(
             pilot,
             lambda: any("kube context" in n.message for n in app._notifications),
@@ -863,7 +864,7 @@ async def test_describe_cancelled_when_context_switches_during_fetch() -> None:
     app = env.app
 
     async def fake_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
-        app._ctx_epoch += 1  # a switch completed while the fetch was in flight
+        app._ctx._epoch += 1  # a switch completed while the fetch was in flight
         return {"metadata": {"name": name, "uid": "u1"}}
 
     async with app.run_test() as pilot:
@@ -929,7 +930,7 @@ async def test_debug_fallback_cancelled_when_context_switched(tmp_path: Path) ->
     app = env.app
     async with app.run_test() as pilot:
         await _first_pod_visible(env, pilot, "pod-a")
-        await app._shell._offer_debug_fallback("default", "pod-a", None, 1, app._ctx_epoch - 1)
+        await app._shell._offer_debug_fallback("default", "pod-a", None, 1, app._ctx.epoch() - 1)
         await until(
             pilot,
             lambda: any(
@@ -969,9 +970,9 @@ async def test_debug_fallback_refused_when_the_context_switches_during_approval(
             started.append((namespace, name, image))
 
         monkeypatch.setattr(app._shell, "run_debug", _record)
-        app._shell._confirm_debug("default", "pod-a", None, 1, None, "busybox", app._ctx_epoch)
+        app._shell._confirm_debug("default", "pod-a", None, 1, None, "busybox", app._ctx.epoch())
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
-        app._ctx_epoch += 1
+        app._ctx._epoch += 1
         await pilot.press("y")
         await until(
             pilot,
@@ -1023,7 +1024,7 @@ async def test_namespace_picker_list_dropped_when_context_switches() -> None:
     app = env.app
 
     async def stale_list() -> list[str]:
-        app._ctx_epoch += 1  # a switch completed while the LIST was in flight
+        app._ctx._epoch += 1  # a switch completed while the LIST was in flight
         return ["old-ns"]
 
     async with app.run_test() as pilot:
@@ -1042,7 +1043,7 @@ async def test_namespace_picker_list_dropped_when_context_switches() -> None:
 
 
 async def test_mcp_toggle_queued_before_switch_rechecks_inside_lock() -> None:
-    """A toggle worker queued before :ctx claimed _ctx_switching must not
+    """A toggle worker queued before :ctx claimed the switch must not
     start the server mid-swap: it serializes on _nav_lock (held by the
     switch through quiesce/teardown/retarget) and re-checks the flag inside
     (issue #36 review round 21)."""
@@ -1063,7 +1064,7 @@ async def test_mcp_toggle_queued_before_switch_rechecks_inside_lock() -> None:
                 ),
                 label="queued mcp toggle worker started",
             )
-            app._ctx_switching = True  # the switch claims while the toggle waits
+            app._ctx._switching = True  # the switch claims while the toggle waits
         finally:
             app._workspace_ctl.nav_lock.release()
         try:
@@ -1075,7 +1076,7 @@ async def test_mcp_toggle_queued_before_switch_rechecks_inside_lock() -> None:
                 label="in-lock mcp toggle refusal",
             )
         finally:
-            app._ctx_switching = False
+            app._ctx._switching = False
         assert "mcp-started" not in mcp.events
 
 
@@ -1146,7 +1147,7 @@ async def test_switch_closes_live_log_pane() -> None:
 
 async def test_logs_refused_during_switch_via_ctx_flow() -> None:
     """`l` pressed while a real `:ctx` switch is in flight (blocked at the
-    auth probe, which runs after `_ctx_switching` is claimed) is refused up
+    auth probe, which runs after the switch is claimed) is refused up
     front (issue #84)."""
     from korvid.ui.widgets.log_pane import LogPane
 
@@ -1170,7 +1171,7 @@ async def test_logs_refused_during_switch_via_ctx_flow() -> None:
         app.post_message(SwitchContextCommand("ctx-b"))
         await until(
             pilot,
-            lambda: env.probe_calls == ["ctx-b"] and app._ctx_switching,
+            lambda: env.probe_calls == ["ctx-b"] and app._ctx.switching(),
             label="switch flow blocked at the probe",
         )
         try:
@@ -1324,7 +1325,7 @@ async def test_timeline_failure_does_not_abort_context_switch() -> None:
     timeline = _FailingContextTimeline(max_entries=16, max_bytes=8192)
     env = _CtxEnv(timeline=timeline)
     async with env.app.run_test():
-        await env.app._switch_context_flow("ctx-b")
+        await env.app._ctx._switch_flow("ctx-b")
         assert env.app.config.kube_context == "ctx-b"
         assert any(
             "Timeline skipped context switch" in item.message for item in env.app._notifications
@@ -1431,3 +1432,61 @@ async def test_switch_rebinds_the_warning_feed_to_the_new_epoch() -> None:
             entry.payload.note for entry in first if isinstance(entry.payload, WarningEventPayload)
         ] == ["stream-1"]
         hold.set()
+
+
+class _SpyCoordinator:
+    """Wraps the live coordinator, recording only the two entry points.
+
+    Everything else falls through, so replacing it mid-session cannot break
+    an unrelated flow that reads the epoch or the in-flight claim.
+    """
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+        self.pickers = 0
+        self.switches: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def show_picker(self) -> None:
+        self.pickers += 1
+
+    def switch(self, name: str) -> None:
+        self.switches.append(name)
+
+
+async def test_ctx_message_handlers_are_thin_delegates() -> None:
+    """`:ctx` and `:ctx <name>` reach `ContextSwitchCoordinator` directly:
+    the app owns no part of the picker or the switch transaction."""
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        spy = _SpyCoordinator(app._ctx)
+        app._ctx = cast("Any", spy)
+        app.post_message(ShowContextPicker())
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: spy.pickers == 1 and spy.switches == ["ctx-b"],
+            label="both handlers delegated",
+        )
+        assert env.probe_calls == []  # nothing ran behind the coordinator's back
+
+
+async def test_context_completions_are_prefetched_at_mount_and_reaped_at_unmount() -> None:
+    """The coordinator owns the `:ctx` completion prefetch end to end."""
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        from korvid.ui.widgets.command_bar import CommandBar
+
+        await until(
+            pilot,
+            lambda: app.query_one(CommandBar).context_words == ["ctx-a", "ctx-b"],
+            label="context completions warmed",
+        )
+        task = app._ctx._prefetch_task
+        assert task is not None
+    assert task.done()
+    assert app._ctx._prefetch_task is None
