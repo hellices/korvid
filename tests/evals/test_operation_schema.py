@@ -489,6 +489,32 @@ def test_required_checkpoints_must_be_known_and_ordered(tmp_path: Path) -> None:
         load_operation_journey(_write(tmp_path, data))
 
 
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        "goal_received",
+        "target_resolved",
+        "precondition_read",
+        "write_requested",
+        "approval_observed",
+        "mutation_started",
+        "mutation_finished",
+        "postcondition_read",
+        "outcome_reported",
+    ],
+)
+def test_completed_write_requires_mandatory_checkpoints(tmp_path: Path, checkpoint: str) -> None:
+    data = _minimal()
+    data["operation"]["required_checkpoints"].remove(checkpoint)
+
+    with pytest.raises(
+        ValueError, match="required_checkpoints must include mandatory checkpoints"
+    ) as caught:
+        load_operation_journey(_write(tmp_path, data))
+
+    assert checkpoint in str(caught.value)
+
+
 def test_forbidden_entries_must_name_known_hard_failures(tmp_path: Path) -> None:
     data = _minimal()
     data["operation"]["forbidden"] = ["be_careful"]

@@ -109,6 +109,10 @@ _SUPPORTED_TARGETS = frozenset(
 )
 
 _VALUE_OPERATORS = frozenset({"equals", "not_equals", "greater_than"})
+_BASE_MANDATORY_CHECKPOINTS = frozenset({"goal_received", "precondition_read", "outcome_reported"})
+_COMPLETED_WRITE_CHECKPOINTS = frozenset(
+    {"target_resolved", "mutation_started", "mutation_finished", "postcondition_read"}
+)
 
 _TOP_LEVEL_KEYS = frozenset(
     {"schema_version", "id", "split", "operation", "turns", "rbac", "cluster"}
@@ -395,7 +399,20 @@ def _assertions(
     return tuple(_assertion(item, default_target, f"{label}[{i}]") for i, item in enumerate(raw))
 
 
-def _checkpoints(raw: Any, label: str) -> tuple[str, ...]:
+def _mandatory_checkpoints(
+    operation: dict[str, Any], requests: int, dialogs: int
+) -> frozenset[str]:
+    mandatory = set(_BASE_MANDATORY_CHECKPOINTS)
+    if requests:
+        mandatory.add("write_requested")
+    if dialogs:
+        mandatory.update({"target_resolved", "approval_observed"})
+    if requests and operation["expected_outcome"] == "completed":
+        mandatory.update(_COMPLETED_WRITE_CHECKPOINTS)
+    return frozenset(mandatory)
+
+
+def _checkpoints(raw: Any, mandatory: frozenset[str], label: str) -> tuple[str, ...]:
     if not isinstance(raw, list) or not raw:
         raise ValueError(f"{label} must be a non-empty list of checkpoint names")
     names = [str(item) for item in raw]
@@ -405,6 +422,9 @@ def _checkpoints(raw: Any, label: str) -> tuple[str, ...]:
     order = [LIFECYCLE_CHECKPOINTS.index(name) for name in names]
     if order != sorted(order) or len(set(order)) != len(order):
         raise ValueError(f"{label} must follow the lifecycle order without repeats")
+    missing = [name for name in LIFECYCLE_CHECKPOINTS if name in mandatory and name not in names]
+    if missing:
+        raise ValueError(f"{label} must include mandatory checkpoints: {missing}")
     return tuple(names)
 
 
@@ -775,7 +795,9 @@ def load_operation_journey(path: Path) -> OperationJourney:
             operation["efficiency_budget"], f"{path.name}: efficiency_budget", minimum=1
         ),
         required_checkpoints=_checkpoints(
-            operation["required_checkpoints"], f"{path.name}: required_checkpoints"
+            operation["required_checkpoints"],
+            _mandatory_checkpoints(operation, requests, dialogs),
+            f"{path.name}: required_checkpoints",
         ),
         preconditions=_assertions(
             operation["preconditions"], target, f"{path.name}: preconditions"

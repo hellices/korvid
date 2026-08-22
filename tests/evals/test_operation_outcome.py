@@ -40,6 +40,52 @@ def test_a_completion_verb_under_negation_is_not_completed() -> None:
     assert classify_operation_outcome("I have not restarted anything.").outcome == "unknown"
 
 
+def test_negation_does_not_cross_a_causal_boundary() -> None:
+    answer = "I cannot perform this operation because RBAC denied it."
+    assert classify_operation_outcome(answer).outcome == "rejected"
+
+
+def test_a_negated_causal_explanation_does_not_create_rejection() -> None:
+    answer = "The operation completed, not because RBAC denied it."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+def test_a_fronted_causal_clause_does_not_negate_the_main_claim() -> None:
+    answer = "Because the API did not fail, the operation completed."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+def test_fronted_causal_parentheticals_preserve_negation_scope() -> None:
+    answer = "Because the request was not, in fact, denied, the operation completed."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+def test_fronted_causal_parentheticals_before_negation_stay_in_the_cause() -> None:
+    answer = "Because the request, in fact, was not denied, the operation completed."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+def test_fronted_causal_parsing_stops_before_trailing_main_clauses() -> None:
+    answer = "Because the API did not fail, the operation completed, and verification passed."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+def test_main_clause_parentheticals_do_not_extend_the_causal_prefix() -> None:
+    answer = "Because the API did not fail, as expected, the operation completed."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Because the request cannot, in fact, be denied, the operation completed.",
+        "Because the request, in fact, wasn't denied, the operation completed.",
+    ],
+)
+def test_fronted_causal_auxiliaries_continue_across_parentheticals(answer: str) -> None:
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
 @pytest.mark.parametrize(
     "answer",
     [

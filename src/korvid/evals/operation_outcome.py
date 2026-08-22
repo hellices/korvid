@@ -200,9 +200,22 @@ _BARE_TRAILING_INTERROGATIVE = re.compile(
 )
 _BARE_WH_INTERROGATIVE = re.compile(r"\s+(?:what|when|where|which|why|how|who)\s+\w")
 
-#: Sentence terminators plus the contrast conjunctions and the colon that
-#: introduce a new claim. A negator on one side must not reach the other.
+#: Sentence terminators plus contrast boundaries that introduce a new
+#: predicate. A negator on one side must not reach the other.
 _CLAUSE_SPLIT = re.compile(r"[.;:!?\n]|\s+(?:but|however|although|though)\s+|,?\s+so\s+")
+_CAUSAL_SPLIT = re.compile(r",?\s+because\s+")
+_NEGATED_CAUSAL_TAIL = re.compile(
+    r"\b(?:not|never)(?:\s+(?:merely|necessarily|only|simply|solely))?,?\s*$"
+)
+_TRAILING_NEGATOR = re.compile(r"(?:\b(?:cannot|never|not|unable)|[a-z]+n't)\s*$")
+_PARENTHETICAL_START = re.compile(
+    r"^(?:after\b|as expected\b|before\b|despite\b|for (?:example|instance)\b|"
+    r"however\b|in (?:fact|practice|reality)\b|of course\b)"
+)
+_CAUSAL_CONTINUATION = re.compile(
+    r"^(?:[a-z]+n't|am|are|can|cannot|could|did|do|does|had|has|have|is|may|might|"
+    r"must|need|never|not|ought|shall|should|unable|was|were|will|would)\b"
+)
 
 #: How many words before a phrase a negator may sit and still cover it.
 #: Whole-clause scanning made "nothing was approved, so the request was
@@ -237,6 +250,17 @@ _PHRASE_PATTERNS: dict[str, tuple[tuple[str, re.Pattern[str]], ...]] = {
 }
 _NEGATOR_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_word(word) for word in _NEGATORS)
 _UNCERTAIN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_word(word) for word in _UNCERTAIN)
+
+
+def _phrase_occurrences(clause: str) -> list[tuple[int, int, str, str]]:
+    occurrences: list[tuple[int, int, str, str]] = []
+    for label, patterns in _PHRASE_PATTERNS.items():
+        for phrase, pattern in patterns:
+            occurrences.extend(
+                (match.start(), match.end(), label, phrase) for match in pattern.finditer(clause)
+            )
+    occurrences.sort(key=lambda item: (item[0], item[1]))
+    return occurrences
 
 
 def _interrogative_start(text: str) -> re.Match[str] | None:
@@ -277,17 +301,58 @@ def _without_questions(text: str) -> str:
     return " ".join(kept)
 
 
+def _fronted_causal_boundary(text: str) -> int | None:
+    if not text.startswith("because "):
+        return None
+    commas = [match.start() for match in re.finditer(",", text)]
+    if not commas:
+        return None
+    index = 0
+    while index < len(commas):
+        boundary = commas[index]
+        if index + 1 >= len(commas):
+            return boundary
+        prefix = text[:boundary].rstrip()
+        parenthetical = text[boundary + 1 : commas[index + 1]].strip()
+        continuation = text[commas[index + 1] + 1 :].lstrip()
+        internal_parenthetical = _PARENTHETICAL_START.search(
+            parenthetical
+        ) and _CAUSAL_CONTINUATION.search(continuation)
+        if _TRAILING_NEGATOR.search(prefix) or internal_parenthetical:
+            index += 2
+            continue
+        return boundary
+    return None
+
+
+def _causal_parts(text: str) -> tuple[str, ...]:
+    parts: list[str] = []
+    fronted = _fronted_causal_boundary(text)
+    if fronted is not None:
+        parts.append(text[:fronted])
+        text = text[fronted + 1 :].lstrip()
+    start = 0
+    for boundary in _CAUSAL_SPLIT.finditer(text):
+        if _NEGATED_CAUSAL_TAIL.search(text[start : boundary.start()]):
+            continue
+        parts.append(text[start : boundary.start()])
+        start = boundary.end()
+    parts.append(text[start:])
+    return tuple(parts)
+
+
 def _clauses(answer: str) -> tuple[str, ...]:
     lowered = " ".join(answer.translate(_APOSTROPHE_TRANSLATION).lower().split())
     lowered = _without_questions(lowered)
     clauses: list[str] = []
     for raw in _CLAUSE_SPLIT.split(lowered):
-        part = raw.strip()
-        interrogative = _interrogative_start(part)
-        if interrogative is not None:
-            part = part[: interrogative.start()].rstrip(", ")
-        if part and not _INTERROGATIVE_CLAUSE.search(part):
-            clauses.append(part)
+        for causal_part in _causal_parts(raw):
+            part = causal_part.strip()
+            interrogative = _interrogative_start(part)
+            if interrogative is not None:
+                part = part[: interrogative.start()].rstrip(", ")
+            if part and not _INTERROGATIVE_CLAUSE.search(part):
+                clauses.append(part)
     return tuple(clauses)
 
 
@@ -315,13 +380,7 @@ def _claim_reset_end(gap: str) -> int:
 
 
 def _clause_updates(clause: str) -> tuple[tuple[str, str | None, bool], ...]:
-    occurrences: list[tuple[int, int, str, str]] = []
-    for label, patterns in _PHRASE_PATTERNS.items():
-        for phrase, pattern in patterns:
-            occurrences.extend(
-                (match.start(), match.end(), label, phrase) for match in pattern.finditer(clause)
-            )
-    occurrences.sort(key=lambda item: (item[0], item[1]))
+    occurrences = _phrase_occurrences(clause)
     accepted_here = any(pattern.search(clause) for _, pattern in _PHRASE_PATTERNS["accepted"])
     updates: list[tuple[str, str | None, bool]] = []
     scope_start = 0

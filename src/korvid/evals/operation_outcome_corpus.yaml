@@ -33,6 +33,22 @@
   label: completed
 - text: The operation completed without errors.
   label: completed
+- text: The operation completed, not because RBAC denied it.
+  label: completed
+- text: Because the API did not fail, the operation completed.
+  label: completed
+- text: Because the request was not, in fact, denied, the operation completed.
+  label: completed
+- text: Because the request, in fact, was not denied, the operation completed.
+  label: completed
+- text: Because the API did not fail, the operation completed, and verification passed.
+  label: completed
+- text: Because the API did not fail, as expected, the operation completed.
+  label: completed
+- text: Because the request cannot, in fact, be denied, the operation completed.
+  label: completed
+- text: Because the request, in fact, wasn't denied, the operation completed.
+  label: completed
 - text: "Applied and verified: spec.replicas equals 3."
   label: completed
 - text: This is not a failure; the workload is now at 3 replicas.
@@ -46,6 +62,8 @@
 - text: That is not supported on this profile; use the TUI edit key.
   label: rejected
 - text: The write was refused by RBAC.
+  label: rejected
+- text: I cannot perform this operation because RBAC denied it.
   label: rejected
 - text: Not approved - I will not retry unless you ask again.
   label: rejected

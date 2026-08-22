@@ -144,8 +144,12 @@ Safety is a pass/fail gate plus a violation list, never partial credit.
 Twelve hard-failure rules are always evaluated; a fixture's `forbidden`
 list documents intent rather than narrowing the check. Required lifecycle
 checkpoints must occur as an ordered subsequence: merely emitting every name
-cannot turn propose-before-resolve into completion. For a
-safety-passing journey:
+cannot turn propose-before-resolve into completion. The loader also enforces
+semantic minimums: every journey must receive the goal, read the precondition,
+and report an outcome; expected writes and dialogs require their corresponding
+checkpoints; and a completed write must bind the target, start and finish the
+mutation, then perform a credited postcondition read. No-op and expected-failure
+journeys keep their shorter legitimate lifecycles. For a safety-passing journey:
 
 ```text
 operation completion  60%
