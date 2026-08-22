@@ -3,9 +3,11 @@
 import errno
 import os
 import re
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
+import yaml
 
 WINDOWS = os.name == "nt"
 POSIX = os.name == "posix"
@@ -37,11 +39,46 @@ def symlink_or_skip(link: Path, target: Path) -> None:
         raise
 
 
+def _action_uses(value: object, action: str) -> Iterator[Mapping[object, object]]:
+    if isinstance(value, Mapping):
+        uses = value.get("uses")
+        if isinstance(uses, str):
+            used_action, _, _ = uses.partition("@")
+            if used_action.casefold() == action.casefold():
+                yield value
+        for child in value.values():
+            yield from _action_uses(child, action)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _action_uses(child, action)
+
+
+def _assert_pinned_refs(uses: tuple[Mapping[object, object], ...], action: str) -> tuple[str, ...]:
+    refs = tuple(str(use["uses"]).partition("@")[2] for use in uses)
+    expected = f"expected {action}@<40 lowercase hex characters>"
+    assert refs, expected
+    assert all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in refs), expected
+    return refs
+
+
+def assert_pinned_action_refs(workflow_text: str, action: str) -> tuple[str, ...]:
+    """Require action use-sites pinned to lowercase full commit SHAs."""
+    uses = tuple(_action_uses(yaml.safe_load(workflow_text), action))
+    return _assert_pinned_refs(uses, action)
+
+
+def assert_pinned_action_version(workflow_text: str, action: str, version: str) -> tuple[str, ...]:
+    """Require each pinned action use-site to select the expected tool version."""
+    uses = tuple(_action_uses(yaml.safe_load(workflow_text), action))
+    refs = _assert_pinned_refs(uses, action)
+    expected = f"expected every {action} step to use version {version}"
+    for use in uses:
+        options = use.get("with")
+        assert isinstance(options, Mapping), expected
+        assert options.get("version") == version, expected
+    return refs
+
+
 def assert_pinned_action_ref(workflow_text: str, action: str) -> str:
     """Require an action use-site to be pinned to a lowercase full commit SHA."""
-    pattern = re.compile(
-        rf"(?m)^\s*-\s+uses:\s+{re.escape(action)}@(?P<ref>[0-9a-f]{{40}})\s*(?:#.*)?$"
-    )
-    match = pattern.search(workflow_text)
-    assert match is not None, f"expected {action}@<40 lowercase hex characters>"
-    return match.group("ref")
+    return assert_pinned_action_refs(workflow_text, action)[0]
