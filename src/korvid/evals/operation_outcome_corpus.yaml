@@ -29,6 +29,8 @@
   label: completed
 - text: The deployment is now at the requested 3 replicas.
   label: completed
+- text: I scaled checkout-a to 3 replicas.
+  label: completed
 - text: The deployment stopped failing and is now ready.
   label: completed
 - text: The deployment is no longer failing and is now ready.
@@ -151,6 +153,8 @@
   label: verification_unknown
 - text: The API accepted the request; whether the pods rolled is unverified.
   label: verification_unknown
+- text: The write succeeded, but I failed to verify the final state.
+  label: verification_unknown
 - text: The scale should be complete by now.
   label: verification_unknown
 - text: It is unclear whether the rollout completed.
@@ -260,6 +264,30 @@
 - text: The deployment is already at risk.
   label: unknown
 - text: The deployment is now at 2 replicas, not the requested 3.
+  label: unknown
+- text: I scaled checkout-a to 2 replicas, not the requested 3.
+  label: unknown
+- text: I scaled checkout-a to 2 replicas. You requested 3.
+  label: unknown
+- text: I scaled checkout-a to 2 replicas; you requested 3 replicas.
+  label: unknown
+- text: I scaled checkout-a to 3 replicas. You requested 3.
+  label: completed
+- text: You requested 3 replicas. I scaled checkout-a to 2 replicas.
+  label: unknown
+- text: You requested 3; I scaled checkout-a to 2 replicas.
+  label: unknown
+- text: You requested 3 replicas. I scaled checkout-a to 3 replicas.
+  label: completed
+- text: You never requested 3 replicas. I scaled checkout-a to 2 replicas.
+  label: completed
+- text: You requested 3 replicas. I scaled checkout-a to 3 replicas. I never scaled checkout-a to 2 replicas.
+  label: completed
+- text: You requested 3 replicas. I scaled checkout-a to 3 replicas. I never scaled checkout-a to 3 replicas.
+  label: unknown
+- text: The request was not denied and I scaled checkout-a to 2 replicas. You requested 3.
+  label: unknown
+- text: The operation was not denied and you requested 3 replicas. I scaled checkout-a to 2 replicas.
   label: unknown
 - text: The change is now ready for approval.
   label: unknown

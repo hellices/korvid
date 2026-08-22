@@ -94,6 +94,9 @@ _PHRASES: dict[str, tuple[str, ...]] = {
     "verification_unknown": (
         "could not verify",
         "cannot verify",
+        "failed to verify",
+        "failed to confirm",
+        "failed to check",
         "unable to verify",
         "unverified",
         "unconfirmed",
@@ -134,7 +137,7 @@ _PHRASES: dict[str, tuple[str, ...]] = {
         "are now",
         "now at",
         "already at",
-        "scaled to",
+        "scaled",
         "restarted",
         "verified",
         "confirms",
@@ -237,6 +240,11 @@ _BARE_TRAILING_INTERROGATIVE = re.compile(
     r"\s+(?:the|a|an|it|this|that|they|we|you)\b"
 )
 _BARE_WH_INTERROGATIVE = re.compile(r"\s+(?:what|when|where|which|why|how|who)\s+\w")
+_SCALED_REPLICA_COUNT = re.compile(
+    r"(?<!\w)scaled\b.*?\bto\s+(?:the\s+)?"
+    r"(?:(?:desired|requested)\s+)?(\d+)\s+replicas?\b"
+)
+_REQUESTED_REPLICA_COUNT = re.compile(r"(?<!\w)requested\s+(\d+)(?:\s+replicas?)?\b")
 
 #: Sentence terminators plus contrast boundaries that introduce a new
 #: predicate. A negator on one side must not reach the other.
@@ -284,7 +292,18 @@ def _word(phrase: str) -> re.Pattern[str]:
 
 def _outcome_phrase(phrase: str) -> re.Pattern[str]:
     recovery_guard = r"(?<!ceased )(?<!stopped )" if phrase == "failing" else ""
-    base = rf"{recovery_guard}(?<!\w){re.escape(phrase)}(?!\w)"
+    verification_guard = r"(?!\s+to\s+(?:check|confirm|verify)\b)" if phrase == "failed" else ""
+    base = (
+        rf"{recovery_guard}(?<!\w){re.escape(phrase)}"
+        rf"(?!\w){verification_guard}"
+    )
+    if phrase == "scaled":
+        return re.compile(
+            rf"{base}\s+(?:(?:the\s+)?{_RESOURCE_NAME}\s+)?"
+            rf"(?:in\s+{_RESOURCE_NAME}\s+)?to\s+"
+            rf"(?:the\s+)?(?:(?:desired|requested)\s+)?\d+\s+replicas?"
+            rf"{_NAMESPACE_QUALIFIER}\s*$"
+        )
     if phrase not in _PRESENT_STATE_PHRASES:
         return re.compile(base)
     patterns = [rf"{base}{_TARGET_POSTCONDITION_SUFFIX}"]
@@ -442,6 +461,28 @@ def _coordination_scope_end(gap: str) -> int:
     return end
 
 
+def _advanced_scope_start(gap: str, previous_end: int, scope_start: int) -> tuple[int, int]:
+    reset_end = _claim_reset_end(gap)
+    scope_end = max(reset_end, _coordination_scope_end(gap))
+    if scope_end:
+        scope_start = previous_end + scope_end
+    return scope_start, reset_end
+
+
+def _scope_start_for_position(clause: str, position: int) -> int:
+    scope_start = 0
+    previous_end = 0
+    for start, end, _label, _phrase in _phrase_occurrences(clause):
+        if start >= position:
+            break
+        gap = clause[previous_end:start]
+        scope_start, _reset_end = _advanced_scope_start(gap, previous_end, scope_start)
+        previous_end = max(previous_end, end)
+    final_gap = clause[previous_end:position]
+    scope_start, _reset_end = _advanced_scope_start(final_gap, previous_end, scope_start)
+    return scope_start
+
+
 def _scoped_occurrences(
     clause: str,
 ) -> list[tuple[int, int, str, str, int, int, bool]]:
@@ -450,26 +491,25 @@ def _scoped_occurrences(
     previous_end = 0
     for start, end, label, phrase in _phrase_occurrences(clause):
         gap = clause[previous_end:start]
-        reset_end = _claim_reset_end(gap)
-        scope_end = max(reset_end, _coordination_scope_end(gap))
-        if scope_end:
-            scope_start = previous_end + scope_end
+        scope_start, reset_end = _advanced_scope_start(gap, previous_end, scope_start)
         negated = _negated_before(clause, start, scope_start)
         scoped.append((start, end, label, phrase, reset_end, scope_start, negated))
         previous_end = max(previous_end, end)
     return scoped
 
 
-def _clause_updates(clause: str) -> tuple[tuple[str, str | None, bool], ...]:
+def _clause_updates(
+    clause: str,
+) -> tuple[tuple[str, str | None, bool, str], ...]:
     occurrences = _scoped_occurrences(clause)
     accepted_by_scope: dict[int, bool] = {}
     for _start, _end, label, _phrase, _reset_end, scope_start, negated in occurrences:
         if label == "accepted":
             accepted_by_scope[scope_start] = not negated
-    updates: list[tuple[str, str | None, bool]] = []
+    updates: list[tuple[str, str | None, bool, str]] = []
     for start, _end, label, phrase, reset_end, scope_start, negated in occurrences:
         if negated:
-            updates.append((label, None, bool(reset_end)))
+            updates.append((label, None, bool(reset_end), phrase))
             continue
         if (
             label == "completed"
@@ -482,14 +522,54 @@ def _clause_updates(clause: str) -> tuple[tuple[str, str | None, bool], ...]:
             if _hedged_before(clause, start, scope_start) and label in {"completed", "accepted"}
             else label
         )
-        updates.append((label, effective_label, bool(reset_end)))
+        updates.append((label, effective_label, bool(reset_end), phrase))
     return tuple(updates)
+
+
+def _updated_scale_intent(
+    clause: str,
+    scaled_replicas: int | None,
+    requested_replicas: int | None,
+) -> tuple[int | None, int | None, bool, bool]:
+    scaled = _SCALED_REPLICA_COUNT.search(clause)
+    preserve_negated_scale_completion = False
+    if scaled is not None:
+        count = int(scaled.group(1))
+        scaled_scope = _scope_start_for_position(clause, scaled.start())
+        if _negated_before(clause, scaled.start(), scaled_scope):
+            preserve_negated_scale_completion = scaled_replicas is None or count != scaled_replicas
+        else:
+            scaled_replicas = count
+    requested = _REQUESTED_REPLICA_COUNT.search(clause)
+    if requested is not None:
+        requested_scope = _scope_start_for_position(clause, requested.start())
+        if not _negated_before(clause, requested.start(), requested_scope):
+            requested_replicas = int(requested.group(1))
+    mismatch = (
+        requested_replicas is not None
+        and scaled_replicas is not None
+        and requested_replicas != scaled_replicas
+    )
+    return (
+        scaled_replicas,
+        requested_replicas,
+        mismatch,
+        preserve_negated_scale_completion,
+    )
 
 
 def _matched_classes(clauses: tuple[str, ...]) -> set[str]:
     active: dict[str, str] = {}
     replacement_pending = False
+    scaled_replicas: int | None = None
+    requested_replicas: int | None = None
     for clause in clauses:
+        (
+            scaled_replicas,
+            requested_replicas,
+            scale_mismatch,
+            preserve_negated_scale_completion,
+        ) = _updated_scale_intent(clause, scaled_replicas, requested_replicas)
         recovery = bool(_RECOVERY_REPLACEMENT.search(clause))
         replacement = bool(_CLAIM_REPLACEMENT.search(clause) or _STANDALONE_NEGATIVE.search(clause))
         if replacement:
@@ -501,13 +581,17 @@ def _matched_classes(clauses: tuple[str, ...]) -> set[str]:
         if replacement_pending and updates:
             active.clear()
             replacement_pending = False
-        for source_label, effective_label, inline_replacement in updates:
+        for source_label, effective_label, inline_replacement, phrase in updates:
             if inline_replacement:
                 active.clear()
+            if phrase == "scaled" and effective_label is None and preserve_negated_scale_completion:
+                continue
             if effective_label is not None:
                 active[source_label] = effective_label
             else:
                 active.pop(source_label, None)
+        if scale_mismatch:
+            active.pop("completed", None)
     return set(active.values())
 
 

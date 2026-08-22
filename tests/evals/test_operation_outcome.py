@@ -114,6 +114,88 @@ def test_yet_to_is_explicit_non_completion() -> None:
     assert classify_operation_outcome("The rollout has yet to complete.").outcome == "unknown"
 
 
+def test_transitive_scale_report_is_completed() -> None:
+    assert classify_operation_outcome("I scaled checkout-a to 3 replicas.").outcome == "completed"
+
+
+def test_transitive_scale_mismatch_is_not_completed() -> None:
+    answer = "I scaled checkout-a to 2 replicas, not the requested 3."
+    assert classify_operation_outcome(answer).outcome == "unknown"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "I scaled checkout-a to 2 replicas. You requested 3.",
+        "I scaled checkout-a to 2 replicas; you requested 3 replicas.",
+    ],
+)
+def test_transitive_scale_mismatch_in_a_later_clause_is_not_completed(answer: str) -> None:
+    assert classify_operation_outcome(answer).outcome == "unknown"
+
+
+def test_transitive_scale_with_matching_later_request_is_completed() -> None:
+    answer = "I scaled checkout-a to 3 replicas. You requested 3."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "You requested 3 replicas. I scaled checkout-a to 2 replicas.",
+        "You requested 3; I scaled checkout-a to 2 replicas.",
+    ],
+)
+def test_request_before_transitive_scale_mismatch_is_not_completed(answer: str) -> None:
+    assert classify_operation_outcome(answer).outcome == "unknown"
+
+
+def test_request_before_matching_transitive_scale_is_completed() -> None:
+    answer = "You requested 3 replicas. I scaled checkout-a to 3 replicas."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "You never requested 3 replicas. I scaled checkout-a to 2 replicas.",
+        (
+            "You requested 3 replicas. I scaled checkout-a to 3 replicas. "
+            "I never scaled checkout-a to 2 replicas."
+        ),
+    ],
+)
+def test_negated_counts_do_not_change_scale_intent(answer: str) -> None:
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
+def test_negating_the_current_scale_count_retracts_completion() -> None:
+    answer = (
+        "You requested 3 replicas. I scaled checkout-a to 3 replicas. "
+        "I never scaled checkout-a to 3 replicas."
+    )
+    assert classify_operation_outcome(answer).outcome == "unknown"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        ("The request was not denied and I scaled checkout-a to 2 replicas. You requested 3."),
+        (
+            "The operation was not denied and you requested 3 replicas. "
+            "I scaled checkout-a to 2 replicas."
+        ),
+    ],
+)
+def test_scale_counts_use_coordination_negation_scope(answer: str) -> None:
+    assert classify_operation_outcome(answer).outcome == "unknown"
+
+
+def test_verification_failure_is_not_an_operation_failure() -> None:
+    answer = "The write succeeded, but I failed to verify the final state."
+    assert classify_operation_outcome(answer).outcome == "verification_unknown"
+
+
 @pytest.mark.parametrize(
     ("answer", "expected"),
     [
