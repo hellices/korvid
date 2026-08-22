@@ -1645,12 +1645,14 @@ Mermaid diagrams.
 
 - [ ] **Step 4: Add an annotated cockpit anatomy to the TUI page**
 
-Insert after the opening paragraph in `docs/tui.md`:
+Insert after the opening paragraph in `docs/tui.md`. `use_directory_urls` is
+on and MkDocs never rewrites raw-HTML `src`, so a page in a subdirectory URL
+(`/tui/`) must reach the shared asset tree with `../assets/…`:
 
 ```html
 <figure class="docs-visual docs-visual--annotated">
   <div class="docs-visual__stage">
-    <img src="assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table filtered to a synthetic crash-looping payment worker">
+    <img src="../assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table filtered to a synthetic crash-looping payment worker">
     <span class="docs-visual__pin" style="--x: 12%; --y: 8%;" aria-hidden="true">1</span>
     <span class="docs-visual__pin" style="--x: 50%; --y: 20%;" aria-hidden="true">2</span>
     <span class="docs-visual__pin" style="--x: 50%; --y: 92%;" aria-hidden="true">3</span>
@@ -1673,7 +1675,7 @@ Insert after the opening agent write-safety paragraph and before
 ```html
 <section class="docs-storyboard" aria-labelledby="agent-storyboard-title">
   <figure>
-    <img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic crash-looping payment worker with cited evidence">
+    <img src="../assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic crash-looping payment worker with cited evidence">
     <figcaption id="agent-storyboard-title">One prompt stays attached to the operational screen.</figcaption>
   </figure>
   <ol>
@@ -1740,7 +1742,7 @@ Insert before `## Opening the view` in `docs/resource-relationships.md`:
 
 ```html
 <figure class="docs-visual">
-  <img src="assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a synthetic Pod dependency on a ConfigMap">
+  <img src="../assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a synthetic Pod dependency on a ConfigMap">
   <figcaption>The two panes separate dependencies from dependents; every row preserves relation direction, confidence, state, and source field.</figcaption>
 </figure>
 ```
@@ -1918,6 +1920,24 @@ rg -n "url\\((['\"]?)https?://" site -g '*.css'
 Expected: no matches (each command should exit 1). Ordinary clickable links
 to GitHub and external documentation are allowed; executable, media, style,
 and built CSS asset URLs are not.
+
+- [ ] **Step 4b: Verify every referenced visual actually resolves at its page URL**
+
+`mkdocs build --strict` validates Markdown links only, so raw-HTML `src`/
+`poster` values are emitted verbatim and can 404 silently. Serve the built
+site and request each concept page's assets at the URL the browser resolves:
+
+```bash
+python3 -m http.server 8766 --bind 127.0.0.1 --directory site &
+for url in /tui/../assets/scenes/cockpit-poster.png \
+  /agent/../assets/scenes/agent-poster.png \
+  /resource-relationships/../assets/scenes/relationship-graph.png; do
+  curl -s -o /dev/null -w "%{http_code} $url\n" "http://127.0.0.1:8766$url"
+done
+```
+
+Expected: `200` for every URL, matching
+`tests/test_docs_links.py::test_raw_html_media_resolves_from_every_published_page_url`.
 
 - [ ] **Step 5: Verify the no-JavaScript fallback**
 

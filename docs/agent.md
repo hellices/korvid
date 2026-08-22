@@ -56,7 +56,7 @@ agent-requested — is recorded in the fail-closed
 
 <section class="docs-storyboard" aria-labelledby="agent-storyboard-title">
   <figure>
-    <img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic crash-looping payment worker with cited evidence">
+    <img src="../assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic crash-looping payment worker with cited evidence">
     <figcaption id="agent-storyboard-title">One prompt stays attached to the operational screen.</figcaption>
   </figure>
   <ol>
