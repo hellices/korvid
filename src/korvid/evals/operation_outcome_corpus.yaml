@@ -105,6 +105,10 @@
   label: verification_unknown
 - text: It is uncertain whether the rollout completed.
   label: verification_unknown
+- text: It is possible the rollout completed.
+  label: verification_unknown
+- text: The rollout could have completed.
+  label: verification_unknown
 - text: The rollout is in progress; pods are still starting.
   label: in_progress
 - text: The restart is rolling out now.

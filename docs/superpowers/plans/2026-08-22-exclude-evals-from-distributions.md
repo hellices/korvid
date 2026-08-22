@@ -34,7 +34,7 @@
 
 **Interfaces:**
 - Consumes: wheel member names from `zipfile.ZipFile.namelist()` and sdist member names from `tarfile.TarFile.getnames()`.
-- Produces: `_validate_contents(artifact: Path, members: tuple[str, ...], *, required_suffix: tuple[str, ...]) -> None`.
+- Produces: `_validate_contents(artifact: Path, members: tuple[str, ...], *, required_members: tuple[tuple[str, ...], ...]) -> None`.
 
 - [ ] **Step 1: Write the failing artifact-content tests**
 
@@ -149,7 +149,7 @@ def _validate_contents(
     artifact: Path,
     members: tuple[str, ...],
     *,
-    required_suffix: tuple[str, ...],
+    required_members: tuple[tuple[str, ...], ...],
 ) -> None:
     forbidden_patterns = [("korvid", "evals"), ("tests", "evals")]
     offender = next(
@@ -165,8 +165,9 @@ def _validate_contents(
         raise ValueError(
             f"{artifact.name}: contains development-only evaluation harness: {offender}"
         )
-    if not any(PurePosixPath(name).parts[-len(required_suffix) :] == required_suffix for name in members):
-        required = "/".join(required_suffix)
+    member_parts = {PurePosixPath(name).parts for name in members}
+    if not any(required in member_parts for required in required_members):
+        required = " or ".join("/".join(path) for path in required_members)
         raise ValueError(f"{artifact.name}: missing required production member: {required}")
 ```
 
@@ -176,14 +177,20 @@ In `main`, immediately after locating the single wheel and sdist, validate both 
     _validate_contents(
         wheels[0],
         _archive_members(wheels[0]),
-        required_suffix=("korvid", "__init__.py"),
+        required_members=(("korvid", "__init__.py"),),
     )
+    sdist_root = sdists[0].name.removesuffix(".tar.gz")
     _validate_contents(
         sdists[0],
         _archive_members(sdists[0]),
-        required_suffix=("pyproject.toml",),
+        required_members=(("pyproject.toml",), (sdist_root, "pyproject.toml")),
     )
 ```
+
+Add regressions that omit the true required member and inject only
+`vendor/korvid/__init__.py` in the wheel or
+`korvid-1.2.3/docs/pyproject.toml` in the sdist. Both must fail with
+`missing required production member`.
 
 Add the shared Hatch exclusion before the wheel target in `pyproject.toml`:
 

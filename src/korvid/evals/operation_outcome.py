@@ -154,7 +154,9 @@ _UNCERTAIN = (
     "assume",
     "assuming",
     "perhaps",
+    "possible",
     "possibly",
+    "could",
     "unclear",
     "uncertain",
 )

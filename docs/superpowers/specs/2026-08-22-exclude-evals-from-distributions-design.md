@@ -32,9 +32,11 @@ must prove the validator rejects artifacts containing `korvid/evals` or
 `("korvid", "evals")` and `("tests", "evals")`. The validator must also prove:
 
 - neither artifact contains a path below `korvid/evals` or `tests/evals`;
-- the wheel still contains the production `korvid` package; and
-- the source distribution still contains the project metadata needed to build
-  the wheel.
+- the wheel contains `korvid/__init__.py` at the archive root rather than only
+  a nested decoy; and
+- the source distribution contains `pyproject.toml` either at its root or
+  directly below its single distribution root directory, not below another
+  nested directory.
 
 Run the targeted validator tests and lint the touched files. Then use the
 repository's existing constrained build command and run the validator against

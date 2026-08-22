@@ -860,11 +860,14 @@ def _fake_dist(
     *,
     wheel_members: tuple[str, ...] = (),
     sdist_members: tuple[str, ...] = (),
+    include_wheel_package: bool = True,
+    include_sdist_project: bool = True,
 ) -> Path:
     dist = tmp_path / "dist"
     dist.mkdir()
     with zipfile.ZipFile(dist / "korvid-1.2.3-py3-none-any.whl", "w") as wheel:
-        wheel.writestr("korvid/__init__.py", "")
+        if include_wheel_package:
+            wheel.writestr("korvid/__init__.py", "")
         wheel.writestr("korvid-1.2.3.dist-info/METADATA", metadata_text)
         for member in wheel_members:
             wheel.writestr(member, "")
@@ -872,12 +875,51 @@ def _fake_dist(
     pkg_info.write_text(metadata_text)
     with tarfile.open(dist / "korvid-1.2.3.tar.gz", "w:gz") as sdist:
         sdist.add(pkg_info, arcname="korvid-1.2.3/PKG-INFO")
-        for member in ("korvid-1.2.3/pyproject.toml", *sdist_members):
+        required = ("korvid-1.2.3/pyproject.toml",) if include_sdist_project else ()
+        for member in (*required, *sdist_members):
             info = tarfile.TarInfo(member)
             payload = b"" if member != "korvid-1.2.3/pyproject.toml" else b"[build-system]\n"
             info.size = len(payload)
             sdist.addfile(info, io.BytesIO(payload))
     return dist
+
+
+@pytest.mark.parametrize(
+    ("wheel_members", "sdist_members", "include_wheel_package", "include_sdist_project"),
+    [
+        pytest.param(
+            ("vendor/korvid/__init__.py",),
+            (),
+            False,
+            True,
+            id="wheel-nested-decoy",
+        ),
+        pytest.param(
+            (),
+            ("korvid-1.2.3/docs/pyproject.toml",),
+            True,
+            False,
+            id="sdist-nested-decoy",
+        ),
+    ],
+)
+def test_artifacts_reject_nested_decoys_for_required_root_members(
+    tmp_path: Path,
+    wheel_members: tuple[str, ...],
+    sdist_members: tuple[str, ...],
+    include_wheel_package: bool,
+    include_sdist_project: bool,
+) -> None:
+    dist = _fake_dist(
+        tmp_path,
+        _metadata_text(),
+        wheel_members=wheel_members,
+        sdist_members=sdist_members,
+        include_wheel_package=include_wheel_package,
+        include_sdist_project=include_sdist_project,
+    )
+    with pytest.raises(ValueError, match="missing required production member"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
 def test_wheel_and_sdist_metadata_match_version_and_extras(tmp_path: Path) -> None:

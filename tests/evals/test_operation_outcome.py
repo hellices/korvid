@@ -183,6 +183,8 @@ def test_a_completion_verb_under_uncertainty_is_verification_unknown() -> None:
     [
         "It is unclear whether the rollout completed.",
         "It is uncertain whether the rollout completed.",
+        "It is possible the rollout completed.",
+        "The rollout could have completed.",
     ],
 )
 def test_explicit_uncertainty_cannot_be_misclassified_as_completed(answer: str) -> None:
