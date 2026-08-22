@@ -584,6 +584,7 @@ async def test_everything_is_crossed_while_the_switch_is_in_flight(tmp_path: Pat
     """A flow that captured the *current* epoch is still stale mid-switch:
     the client is being swapped under it."""
     gate = asyncio.Event()
+    started = asyncio.Event()
     env = Env(tmp_path)
     observed: list[tuple[bool, bool, int]] = []
 
@@ -596,11 +597,12 @@ async def test_everything_is_crossed_while_the_switch_is_in_flight(tmp_path: Pat
                 env.coordinator.epoch(),
             )
         )
+        started.set()
         await gate.wait()
 
     env.coordinator._probe_context = probe_that_waits
     env.coordinator.switch("ctx-b")
-    await asyncio.sleep(0)
+    await asyncio.wait_for(started.wait(), timeout=5)
     assert observed == [(True, True, 0)]
     gate.set()
     await env.ui.settle()
@@ -700,17 +702,19 @@ async def test_a_blocker_that_appears_during_the_probe_aborts_before_teardown(
 
 async def test_a_second_switch_is_refused_while_one_is_in_flight(tmp_path: Path) -> None:
     gate = asyncio.Event()
+    started = asyncio.Event()
     env = Env(tmp_path)
 
     async def probe_that_waits(name: str) -> None:
         env.probes.append(name)
+        started.set()
         await gate.wait()
 
     env.coordinator._probe_context = probe_that_waits
     env.coordinator.switch("ctx-b")
-    await asyncio.sleep(0)
+    await asyncio.wait_for(started.wait(), timeout=5)
     env.coordinator.switch("ctx-b")
-    await asyncio.sleep(0)
+    await env.ui.workers[-1]
     assert env.probes == ["ctx-b"]
     assert any("already in progress" in message for message in env.ui.messages())
     gate.set()
