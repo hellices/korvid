@@ -11,7 +11,7 @@ import tarfile
 import tomllib
 import zipfile
 from email.message import Message
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def _wheel_metadata(path: Path) -> Message:
@@ -153,6 +153,39 @@ def _expected_extra_dependencies(project: dict[str, object]) -> dict[str, set[st
     return {extra: expand(extra) for extra in raw_extras}
 
 
+def _archive_members(path: Path) -> tuple[str, ...]:
+    if path.suffix == ".whl":
+        with zipfile.ZipFile(path) as wheel:
+            return tuple(wheel.namelist())
+    with tarfile.open(path) as sdist:
+        return tuple(sdist.getnames())
+
+
+def _has_contiguous_parts(name: str, expected: tuple[str, ...]) -> bool:
+    parts = PurePosixPath(name).parts
+    width = len(expected)
+    return any(parts[index : index + width] == expected for index in range(len(parts) - width + 1))
+
+
+def _validate_contents(
+    artifact: Path,
+    members: tuple[str, ...],
+    *,
+    required_suffix: tuple[str, ...],
+) -> None:
+    forbidden = ("korvid", "evals")
+    offender = next((name for name in members if _has_contiguous_parts(name, forbidden)), None)
+    if offender is not None:
+        raise ValueError(
+            f"{artifact.name}: contains development-only evaluation harness: {offender}"
+        )
+    if not any(
+        PurePosixPath(name).parts[-len(required_suffix) :] == required_suffix for name in members
+    ):
+        required = "/".join(required_suffix)
+        raise ValueError(f"{artifact.name}: missing required production member: {required}")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dist", required=True)
@@ -170,6 +203,16 @@ def main(argv: list[str]) -> int:
     if not expected_dependencies:
         raise ValueError("pyproject.toml declares no optional extras to validate")
 
+    _validate_contents(
+        wheels[0],
+        _archive_members(wheels[0]),
+        required_suffix=("korvid", "__init__.py"),
+    )
+    _validate_contents(
+        sdists[0],
+        _archive_members(sdists[0]),
+        required_suffix=("pyproject.toml",),
+    )
     _validate_metadata(
         wheels[0],
         _wheel_metadata(wheels[0]),

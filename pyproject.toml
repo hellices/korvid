@@ -86,6 +86,9 @@ all = [
 requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+exclude = ["/src/korvid/evals"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/korvid"]
 
