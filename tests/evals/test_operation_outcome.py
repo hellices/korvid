@@ -114,6 +114,80 @@ def test_yet_to_is_explicit_non_completion() -> None:
     assert classify_operation_outcome("The rollout has yet to complete.").outcome == "unknown"
 
 
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("The deployment is now failing.", "failed"),
+        ("The pods are now not ready.", "unknown"),
+        ("The service is now at risk.", "unknown"),
+        ("The deployment is already at risk.", "unknown"),
+        ("The deployment is now accepted.", "accepted"),
+        ("The rollout is now in progress.", "in_progress"),
+    ],
+)
+def test_present_state_phrases_require_a_positive_postcondition(answer: str, expected: str) -> None:
+    assert classify_operation_outcome(answer).outcome == expected
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("The deployment is now at the requested 3 replicas.", "completed"),
+        ("The deployment is now at 2 replicas, not the requested 3.", "unknown"),
+        ("The change is now ready for approval.", "unknown"),
+        ("The rollout is now ready to begin.", "unknown"),
+        ("The request is now available for review.", "unknown"),
+        ("The approval request is now ready.", "unknown"),
+        ("The patch is now ready.", "unknown"),
+        ("The approval request for the deployment is now ready.", "unknown"),
+        ("The patch for the deployment is now ready.", "unknown"),
+        ("No deployment is now ready.", "unknown"),
+        ("No pods are now healthy.", "unknown"),
+        ("Neither deployment is now available.", "unknown"),
+        ("No deployment stopped failing and is now ready.", "unknown"),
+        ("0 pods are now ready.", "unknown"),
+        ("Two pods are now ready.", "unknown"),
+        ("Few pods are now healthy.", "unknown"),
+        ("Some deployments are now available.", "unknown"),
+        ("Most pods are now stable.", "unknown"),
+        ("Some pods stopped failing and are now ready.", "unknown"),
+        ("The deployment stopped failing and is now ready.", "completed"),
+        ("The deployment is no longer failing and is now ready.", "completed"),
+        ("The deployment checkout-a is now ready.", "completed"),
+        ("Deployment/checkout-a is now ready.", "completed"),
+        (
+            "The deployment was failing, but the deployment stopped failing and is now ready.",
+            "completed",
+        ),
+        (
+            "The deployment was failing, but stopped failing and is now ready.",
+            "completed",
+        ),
+        ("The pods stopped failing and are now ready.", "completed"),
+        ("The pods ceased failing and are now healthy.", "completed"),
+        ("Pods are no longer failing and are now stable.", "completed"),
+        ("The checkout-a deployment in shop-a is now ready.", "completed"),
+        (
+            "The deployment checkout-a in namespace shop-a is now healthy.",
+            "completed",
+        ),
+        ("All pods are now ready.", "completed"),
+        (
+            "RBAC denied the request, but the deployment stopped failing and is now ready.",
+            "ambiguous",
+        ),
+        (
+            "checkout-b is already at 3 replicas in shop-a, so no change was needed.",
+            "completed",
+        ),
+    ],
+)
+def test_present_state_phrases_match_a_complete_terminal_predicate(
+    answer: str, expected: str
+) -> None:
+    assert classify_operation_outcome(answer).outcome == expected
+
+
 def test_a_later_unnegated_occurrence_of_the_same_phrase_is_classified() -> None:
     answer = "It had not completed initially and eventually completed."
     assert classify_operation_outcome(answer).outcome == "completed"

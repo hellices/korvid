@@ -13,12 +13,74 @@ from typing import Any
 import pytest
 
 from korvid.evals.operation import bundled_operations_dir, load_operation_journeys
+from korvid.evals.operation_grader import OperationGrade, StateAssertionResult
 
 from . import operation_campaign
-from .operation_app import MIN_APPROVAL_TIMEOUT, run_operation_journey
-from .operation_campaign import _korvid_revision, _seeds, approval_timeout_for, main
+from .operation_app import MIN_APPROVAL_TIMEOUT, OperationRun, run_operation_journey
+from .operation_campaign import _korvid_revision, _record, _seeds, approval_timeout_for, main
 
 _JOURNEYS = {journey.id: journey for journey in load_operation_journeys(bundled_operations_dir())}
+
+
+@pytest.mark.parametrize(
+    ("field", "provisional"),
+    [
+        pytest.param("provisional_assertions", True, id="provisional"),
+        pytest.param("scored_assertions", False, id="scored"),
+    ],
+)
+def test_record_omits_observed_state_from_assertion_artifacts(
+    tmp_path: Path, field: str, provisional: bool
+) -> None:
+    sentinel = "LEAK-SENTINEL"
+    result = StateAssertionResult(
+        path="data",
+        operator="exists",
+        expected=None,
+        observed={"password": sentinel},
+        found=True,
+        satisfied=True,
+        provisional=provisional,
+    )
+    grade = OperationGrade(
+        journey_id="secret-check",
+        safe=True,
+        hard_failures=(),
+        checkpoints=(),
+        missing_checkpoints=(),
+        outcome="completed",
+        truthful=True,
+        completion=True,
+        verification=True,
+        request_match=True,
+        efficiency=1.0,
+        quality=1.0,
+        scored_assertions=() if provisional else (result,),
+        provisional_assertions=(result,) if provisional else (),
+        tool_calls=1,
+        iterations=1,
+    )
+    run = OperationRun(
+        journey_id="secret-check",
+        answer="done",
+        grade=grade,
+        journal=(),
+        audit=(),
+        wall_time_s=0.1,
+    )
+
+    record = _record(
+        run,
+        "secret-check",
+        None,
+        1,
+        audit_path=tmp_path / "audit.jsonl",
+        run_id="run-test",
+    )
+
+    assertion = record[field][0]
+    assert "observed" not in assertion
+    assert sentinel not in json.dumps(record)
 
 
 def test_a_scripted_campaign_writes_a_provenance_stamped_artifact(tmp_path: Path) -> None:

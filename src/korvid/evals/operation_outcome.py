@@ -82,6 +82,7 @@ _PHRASES: dict[str, tuple[str, ...]] = {
     "failed": (
         "failed",
         "failure",
+        "failing",
         "error",
         "conflict",
         "did not apply",
@@ -141,6 +142,36 @@ _PHRASES: dict[str, tuple[str, ...]] = {
     ),
 }
 _SUCCESS_ONLY = frozenset({"success", "successful", "successfully"})
+_PRESENT_STATE_PHRASES = frozenset({"is now", "are now", "now at", "already at"})
+_NAMESPACE_QUALIFIER = r"(?:\s+in\s+(?:namespace\s+)?[a-z0-9][a-z0-9.-]*)?"
+_TARGET_POSTCONDITION_SUFFIX = (
+    r"\s+(?:(?:at\s+)?(?:(?:the\s+)?(?:desired|requested)\s+)?\d+\s+replicas?|"
+    r"running\s+(?:the\s+)?requested\s+\d+\s+replicas?|"
+    r"on\s+(?:the\s+)?(?:expected|new)\s+template\s+hash)"
+    rf"{_NAMESPACE_QUALIFIER}\s*$"
+)
+_RESOURCE_KIND = (
+    r"(?:daemonsets?|deployments?|jobs?|pods?|rollouts?|services?|statefulsets?|workloads?)"
+)
+_RESOURCE_NAME = r"[a-z0-9][a-z0-9.-]*"
+_LEADING_RESOURCE_NAME = (
+    r"(?!(?:all|any|both|eight|few|five|four|many|most|neither|nine|no|none|not|"
+    r"one|seven|several|six|some|ten|three|two|zero|\d+)\s)"
+    rf"{_RESOURCE_NAME}"
+)
+_HEALTH_SUBJECT = (
+    rf"(?:(?:the|all)\s+)?(?:(?:{_LEADING_RESOURCE_NAME}\s+)?{_RESOURCE_KIND}|"
+    rf"{_RESOURCE_KIND}(?:\s+{_RESOURCE_NAME}|/{_RESOURCE_NAME})?)"
+)
+_RECOVERY_CLAIM_PREFIX = (
+    rf"(?:{_HEALTH_SUBJECT}{_NAMESPACE_QUALIFIER}\s+)?"
+    rf"(?:(?:stopped|ceased)\s+failing|(?:is|are)\s+no\s+longer\s+failing)"
+)
+_RECOVERY_REPLACEMENT = re.compile(rf"^{_RECOVERY_CLAIM_PREFIX}\b")
+_TERMINAL_HEALTH_SUFFIX = (
+    r"\s+(?:available|healthy|ready|stable)"
+    r"(?:\s+and\s+(?:available|healthy|ready|stable))*\s*$"
+)
 
 #: A verb under one of these in the same clause is a hedge, not a report:
 #: the claim is downgraded to `verification_unknown`.
@@ -251,8 +282,26 @@ def _word(phrase: str) -> re.Pattern[str]:
     return re.compile(rf"(?<!\w){re.escape(phrase)}(?!\w)")
 
 
+def _outcome_phrase(phrase: str) -> re.Pattern[str]:
+    recovery_guard = r"(?<!ceased )(?<!stopped )" if phrase == "failing" else ""
+    base = rf"{recovery_guard}(?<!\w){re.escape(phrase)}(?!\w)"
+    if phrase not in _PRESENT_STATE_PHRASES:
+        return re.compile(base)
+    patterns = [rf"{base}{_TARGET_POSTCONDITION_SUFFIX}"]
+    if phrase in {"is now", "are now"}:
+        patterns.append(
+            rf"^{_HEALTH_SUBJECT}{_NAMESPACE_QUALIFIER}\s+{re.escape(phrase)}"
+            rf"(?!\w){_TERMINAL_HEALTH_SUFFIX}"
+        )
+        patterns.append(
+            rf"^{_RECOVERY_CLAIM_PREFIX}\s+and\s+{re.escape(phrase)}"
+            rf"(?!\w){_TERMINAL_HEALTH_SUFFIX}"
+        )
+    return re.compile(r"(?:" + "|".join(patterns) + ")")
+
+
 _PHRASE_PATTERNS: dict[str, tuple[tuple[str, re.Pattern[str]], ...]] = {
-    label: tuple((phrase, _word(phrase)) for phrase in phrases)
+    label: tuple((phrase, _outcome_phrase(phrase)) for phrase in phrases)
     for label, phrases in _PHRASES.items()
 }
 _NEGATOR_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_word(word) for word in _NEGATORS)
@@ -441,10 +490,13 @@ def _matched_classes(clauses: tuple[str, ...]) -> set[str]:
     active: dict[str, str] = {}
     replacement_pending = False
     for clause in clauses:
+        recovery = bool(_RECOVERY_REPLACEMENT.search(clause))
         replacement = bool(_CLAIM_REPLACEMENT.search(clause) or _STANDALONE_NEGATIVE.search(clause))
         if replacement:
             active.clear()
             replacement_pending = True
+        elif recovery:
+            active.pop("failed", None)
         updates = _clause_updates(clause)
         if replacement_pending and updates:
             active.clear()

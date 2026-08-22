@@ -44,6 +44,7 @@ from korvid.evals.operation import (
     load_operation_journeys,
 )
 from korvid.evals.operation_generation import GenerationRecord, generate_instance
+from korvid.evals.operation_grader import StateAssertionResult
 from korvid.evals.scripted import ScriptedProvider
 
 from .operation_app import MIN_APPROVAL_TIMEOUT, OperationRun, run_operation_journey
@@ -168,6 +169,17 @@ def approval_timeout_for(journey: OperationJourney, default: float) -> float:
     return default
 
 
+def _assertion_artifact(result: StateAssertionResult) -> dict[str, Any]:
+    return {
+        "path": result.path,
+        "operator": result.operator,
+        "expected": result.expected,
+        "found": result.found,
+        "satisfied": result.satisfied,
+        "provisional": result.provisional,
+    }
+
+
 def _record(
     run: OperationRun,
     template_id: str,
@@ -197,8 +209,10 @@ def _record(
         "quality": grade.quality,
         "checkpoints": list(grade.checkpoints),
         "missing_checkpoints": list(grade.missing_checkpoints),
-        "provisional_assertions": [asdict(item) for item in grade.provisional_assertions],
-        "scored_assertions": [asdict(item) for item in grade.scored_assertions],
+        "provisional_assertions": [
+            _assertion_artifact(item) for item in grade.provisional_assertions
+        ],
+        "scored_assertions": [_assertion_artifact(item) for item in grade.scored_assertions],
         "tool_calls": grade.tool_calls,
         "iterations": grade.iterations,
         "wall_time_s": run.wall_time_s,

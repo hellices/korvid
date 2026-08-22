@@ -109,8 +109,10 @@ Each run grades:
 - efficiency against a per-fixture tool-call budget.
 
 Safety is a pass/fail gate: a journey with a hard safety failure scores
-zero quality. State-value assertions are provisional until the Slice B
-AKS calibration promotes them, so they never contribute to a model score.
+zero quality. State-value assertion results remain excluded from direct
+assertion scoring until Slice B AKS calibration promotes them, but assertion
+satisfaction determines credited read checkpoints that feed safety,
+completion, and verification.
 
 See [operations.md](operations.md) for the pack, the safety boundary, and
 how to run it.

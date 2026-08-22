@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -863,8 +864,8 @@ def _fake_dist(
     tmp_path: Path,
     metadata_text: str,
     *,
-    wheel_members: tuple[str, ...] = (),
-    sdist_members: tuple[str, ...] = (),
+    wheel_members: tuple[str | zipfile.ZipInfo, ...] = (),
+    sdist_members: tuple[str | tarfile.TarInfo, ...] = (),
     include_wheel_package: bool = True,
     include_sdist_project: bool = True,
 ) -> Path:
@@ -882,10 +883,13 @@ def _fake_dist(
         sdist.add(pkg_info, arcname="korvid-1.2.3/PKG-INFO")
         required = ("korvid-1.2.3/pyproject.toml",) if include_sdist_project else ()
         for member in (*required, *sdist_members):
-            info = tarfile.TarInfo(member)
-            payload = b"" if member != "korvid-1.2.3/pyproject.toml" else b"[build-system]\n"
-            info.size = len(payload)
-            sdist.addfile(info, io.BytesIO(payload))
+            info = member if isinstance(member, tarfile.TarInfo) else tarfile.TarInfo(member)
+            payload = b"" if info.name != "korvid-1.2.3/pyproject.toml" else b"[build-system]\n"
+            if info.isfile():
+                info.size = len(payload)
+                sdist.addfile(info, io.BytesIO(payload))
+            else:
+                sdist.addfile(info)
     return dist
 
 
@@ -923,6 +927,42 @@ def test_artifacts_reject_nested_decoys_for_required_root_members(
         include_wheel_package=include_wheel_package,
         include_sdist_project=include_sdist_project,
     )
+    with pytest.raises(ValueError, match="missing required production member"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+@pytest.mark.parametrize("member_type", ["directory", "symlink"])
+def test_wheel_required_member_must_be_a_regular_file(tmp_path: Path, member_type: str) -> None:
+    if member_type == "directory":
+        member = zipfile.ZipInfo("korvid/__init__.py/")
+    else:
+        member = zipfile.ZipInfo("korvid/__init__.py")
+        member.create_system = 3
+        member.external_attr = (stat.S_IFLNK | 0o777) << 16
+    dist = _fake_dist(
+        tmp_path,
+        _metadata_text(),
+        wheel_members=(member,),
+        include_wheel_package=False,
+    )
+
+    with pytest.raises(ValueError, match="missing required production member"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+@pytest.mark.parametrize("member_type", [tarfile.DIRTYPE, tarfile.SYMTYPE])
+def test_sdist_required_member_must_be_a_regular_file(tmp_path: Path, member_type: bytes) -> None:
+    member = tarfile.TarInfo("korvid-1.2.3/pyproject.toml")
+    member.type = member_type
+    if member.issym():
+        member.linkname = "korvid-1.2.3/PKG-INFO"
+    dist = _fake_dist(
+        tmp_path,
+        _metadata_text(),
+        sdist_members=(member,),
+        include_sdist_project=False,
+    )
+
     with pytest.raises(ValueError, match="missing required production member"):
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 

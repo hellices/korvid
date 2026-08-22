@@ -6,12 +6,20 @@ from __future__ import annotations
 import argparse
 import email
 import re
+import stat
 import sys
 import tarfile
 import tomllib
 import zipfile
+from dataclasses import dataclass
 from email.message import Message
 from pathlib import Path, PurePosixPath
+
+
+@dataclass(frozen=True)
+class _ArchiveMember:
+    name: str
+    is_regular_file: bool
 
 
 def _wheel_metadata(path: Path) -> Message:
@@ -153,12 +161,24 @@ def _expected_extra_dependencies(project: dict[str, object]) -> dict[str, set[st
     return {extra: expand(extra) for extra in raw_extras}
 
 
-def _archive_members(path: Path) -> tuple[str, ...]:
+def _archive_members(path: Path) -> tuple[_ArchiveMember, ...]:
     if path.suffix == ".whl":
         with zipfile.ZipFile(path) as wheel:
-            return tuple(wheel.namelist())
+            members: list[_ArchiveMember] = []
+            for info in wheel.infolist():
+                file_type = stat.S_IFMT(info.external_attr >> 16)
+                members.append(
+                    _ArchiveMember(
+                        name=info.filename,
+                        is_regular_file=not info.is_dir() and file_type in {0, stat.S_IFREG},
+                    )
+                )
+            return tuple(members)
     with tarfile.open(path) as sdist:
-        return tuple(sdist.getnames())
+        return tuple(
+            _ArchiveMember(name=member.name, is_regular_file=member.isfile())
+            for member in sdist.getmembers()
+        )
 
 
 def _has_contiguous_parts(name: str, expected: tuple[str, ...]) -> bool:
@@ -169,17 +189,17 @@ def _has_contiguous_parts(name: str, expected: tuple[str, ...]) -> bool:
 
 def _validate_contents(
     artifact: Path,
-    members: tuple[str, ...],
+    members: tuple[_ArchiveMember, ...],
     *,
     required_members: tuple[tuple[str, ...], ...],
 ) -> None:
     forbidden_patterns = [("korvid", "evals"), ("tests", "evals")]
     offender = next(
         (
-            name
-            for name in members
+            member.name
+            for member in members
             for forbidden in forbidden_patterns
-            if _has_contiguous_parts(name, forbidden)
+            if _has_contiguous_parts(member.name, forbidden)
         ),
         None,
     )
@@ -187,7 +207,9 @@ def _validate_contents(
         raise ValueError(
             f"{artifact.name}: contains development-only evaluation harness: {offender}"
         )
-    member_parts = {PurePosixPath(name).parts for name in members}
+    member_parts = {
+        PurePosixPath(member.name).parts for member in members if member.is_regular_file
+    }
     if not any(required in member_parts for required in required_members):
         required = " or ".join("/".join(path) for path in required_members)
         raise ValueError(f"{artifact.name}: missing required production member: {required}")

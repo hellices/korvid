@@ -173,9 +173,10 @@ incomplete operation into a success.
 
 Every Slice A state-value assertion is `provisional`. The loader rejects
 `provisional: false`. Provisional results prove the fake is deterministic
-and the harness is wired correctly, and they never contribute to
-`OperationGrade.quality`. Slice B calibrates each transition against
-`aks-korvid-contract-test` and either promotes it or corrects the fake.
+and the harness is wired correctly. They remain excluded from direct
+assertion scoring, while their satisfaction controls checkpoint-derived
+safety, completion, and verification. Slice B calibrates each transition
+against `aks-korvid-contract-test` and either promotes it or corrects the fake.
 
 ## Running the pack
 
@@ -199,7 +200,9 @@ Artifacts record the fixture schema version, template id, generation
 seed, korvid revision, profile, prompt/tool fingerprint, repetitions, the
 summarized journals, and the audit records each run produced. The JSON
 metadata also records `run_id`, the artifact base directory, and the
-run-specific artifact directory. `--artifacts` is a stable base path; each
+run-specific artifact directory. Assertion artifacts omit authoritative
+`observed` values so a custom Secret assertion cannot publish payload data.
+`--artifacts` is a stable base path; each
 campaign invocation writes its audit files into a fresh
 `<base>/<run_id>/...` subdirectory so rerunning the same command cannot
 reuse or append stale audit intents. The campaign exits `0` when every
