@@ -456,9 +456,9 @@
   border-radius: 999px;
 }
 
-/* Material ships `ol:not([hidden]) { display: flow-root; }`, so this rule
-   must target the ordered list element directly or the generic list default
-   wins and the guarded grid never reappears. */
+/* Material's `.md-typeset ol:not([hidden]) { display: flow-root; }` ties the
+   same specificity as this element-qualified selector, and because extra.css
+   loads later it preserves the grid instead of the generic list default. */
 .md-typeset ol.write-path__stages {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
