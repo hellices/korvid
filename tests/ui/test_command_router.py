@@ -152,6 +152,13 @@ def test_operators_on_a_discovered_catalog_reports_the_syntax_error() -> None:
     assert any("Unknown resource or command" in message for message in h.ui.messages())
 
 
+def test_malformed_operators_command_is_not_explained_as_a_missing_catalog() -> None:
+    h = Harness(catalog_missing=True)
+    h.router.route("operators ns extra")
+    assert h.operators.explanations == 0
+    assert any("Unknown resource or command" in message for message in h.ui.messages())
+
+
 def test_an_unknown_command_is_reported_verbatim() -> None:
     h = Harness()
     h.router.route("frobnicate everything")

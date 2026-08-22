@@ -111,7 +111,7 @@ class CommandRouter:
         if head == "pf":
             self._forwards.open_list()
             return
-        if head == "operators" and self._operators.explain_missing_catalog():
+        if head == "operators" and len(args) <= 1 and self._operators.explain_missing_catalog():
             return
         self._ui.notify(
             f"Unknown resource or command: {text}"

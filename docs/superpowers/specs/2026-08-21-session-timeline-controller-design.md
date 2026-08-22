@@ -40,9 +40,10 @@ policy and delegates every Textual operation through `UiSurface`.
 - `WatchManager`;
 - `ViewState`;
 - `UiSurface`;
-- a live epoch getter;
-- a callback that captures the currently selected resource without warning;
-- a callback that reuses the app's existing `_jump_to_object` navigation path.
+- `ContextSwitchCoordinator.epoch` and `.crossed` as the live epoch boundary;
+- `WorkspaceController.selected_timeline_resource` for silent selected-row
+  capture;
+- `WorkspaceController.jump_to_object` for guarded object navigation.
 
 The controller exists even when no timeline is configured. In that state it is
 inert: it does not install a watch sink or start a worker, and `open()` emits the
@@ -65,18 +66,17 @@ The controller owns:
 
 ### `KorvidApp`
 
-The app continues to own:
+The app owns only:
 
 - creation of the controller;
-- the current context epoch;
-- silent selected-row capture;
-- `_jump_to_object`;
-- global context-switch ordering;
 - `on_worker_state_changed`, which translates failed named workers into
-  notifications;
-- durable audit append and the fail-closed write perimeter.
+  notifications.
 
-After a durable audit append succeeds, the app calls
+`ContextSwitchCoordinator` owns the current epoch and the complete
+quiesce/retarget/resume transaction. It records each switch phase through the
+timeline port. `WorkspaceController` owns selected-row capture and object
+navigation. `WriteCoordinator` owns durable audit append and the fail-closed
+write perimeter; only after an audit append succeeds does it call
 `SessionTimelineController.record_write()`. A timeline failure remains
 non-fatal and cannot turn a failed audit into a success-shaped timeline record.
 
@@ -97,26 +97,30 @@ screen stack directly.
 
 ### Startup
 
-1. `KorvidApp.on_mount()` calls `timeline.start()`.
+1. `KorvidApp.on_mount()` delegates timeline startup to the controller.
 2. When enabled, the controller installs `record_watch_event` as the watch
    manager's post-store event sink.
 3. The controller starts the Warning Event feed in its dedicated worker group.
 
 ### Context switch
 
-1. The app records the `started` phase through the controller.
-2. During teardown, the app calls `await timeline.stop()`.
-3. The app retargets all cluster dependencies and increments the epoch.
-4. The app records `completed` only when the requested context was applied.
-5. The app calls `timeline.start_warning_watch()` for whichever context remains
-   active.
+1. `ContextSwitchCoordinator` records the `started` phase through its timeline
+   port.
+2. During teardown, the coordinator calls `await timeline.stop()`.
+3. The coordinator retargets all cluster dependencies and increments its epoch
+   exactly once when a context is applied.
+4. The coordinator records `completed` only when the requested context was
+   applied; failures remain on the epoch that owns the failed attempt.
+5. The coordinator calls `timeline.start_warning_watch()` for whichever
+   context remains active.
 
 The controller's reconnect loop captures one epoch. It stops when that epoch no
 longer matches, and cancellation propagates unchanged.
 
 ### Audited write
 
-1. The app writes the audit record.
+1. `WriteCoordinator` writes the audit record inside the single write
+   perimeter.
 2. Only after the durable append returns, it calls `timeline.record_write()`.
 3. The controller appends the timeline entry and reports any refusal or
    internal timeline exception.
@@ -126,10 +130,12 @@ The timeline remains a non-authoritative view of the authoritative audit log.
 ### Modal navigation
 
 1. `KorvidApp.action_timeline()` delegates to `timeline.open()`.
-2. The controller captures the epoch and selected resource exactly once.
+2. The controller captures the `ContextSwitchCoordinator` epoch and the
+   `WorkspaceController` selected resource exactly once.
 3. It opens `SessionTimelineScreen`.
 4. On a goto result, it rejects a crossed epoch or starts the existing
-   `_jump_to_object` callback in the timeline navigation worker group.
+   `WorkspaceController.jump_to_object` callback in the timeline navigation
+   worker group.
 
 ## Error handling
 
@@ -167,10 +173,8 @@ run the full repository gate before the final commit.
 
 ## Out of scope
 
-- write-preview extraction;
-- resource-write controller extraction;
-- log controller extraction;
-- context-switch coordinator extraction;
-- agent/MCP proposal refactoring;
-- pane, hierarchy, or navigation redesign;
-- a line-count target for `app.py`.
+This design covered only the timeline extraction. The broader PR subsequently
+extracted write previews and resource writes, logs, context switching, agent/MCP
+proposal handling, and workspace navigation into their final controllers. Their
+contracts are documented in `docs/dev/ui-controllers.md`; they are referenced
+here only where they now provide a timeline dependency.
