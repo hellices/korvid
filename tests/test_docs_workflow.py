@@ -295,6 +295,10 @@ def test_contributor_docs_explain_how_the_site_is_published() -> None:
     assert "optional" in normalized, (
         "a custom domain is deliberately deferred; say so instead of leaving it open"
     )
+    for entry_point in ("readme", "pyproject.toml", "entry-point tests"):
+        assert entry_point in normalized, (
+            f"custom-domain migration must include the canonical {entry_point} contract"
+        )
 
 
 def test_publishing_section_links_the_workflow_in_a_strict_build_safe_way() -> None:
@@ -369,3 +373,9 @@ def test_design_describes_ephemeral_isolation_for_untrusted_pr_builds() -> None:
     assert "ephemeral github-hosted runner" in design
     assert "pull-request-controlled" in design
     assert "never executes untrusted documentation code" not in design
+
+
+def test_design_records_every_custom_domain_entry_point() -> None:
+    design = " ".join(DESIGN_DOC.read_text(encoding="utf-8").lower().split())
+    for entry_point in ("site_url", "readme", "pyproject.toml", "entry-point tests"):
+        assert entry_point in design

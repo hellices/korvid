@@ -225,5 +225,7 @@ deterministically by MkDocs.
 
 The first deployment uses `https://hellices.github.io/korvid/`. A custom domain
 is deferred until a domain name and DNS ownership are explicitly chosen;
-adopting one later requires only `site_url`, Pages settings, DNS, and an
-optional `CNAME`, not a content migration.
+adopting one later does not require a content migration, but it does require
+updating `site_url`, Pages settings, DNS, the optional `CNAME`, hosted links in
+`README.md`, `pyproject.toml`'s Documentation URL, and the entry-point tests
+that pin those canonical links.

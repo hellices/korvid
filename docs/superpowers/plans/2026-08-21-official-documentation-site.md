@@ -247,7 +247,7 @@ removes the write path entirely.
 
 - [ ] **Step 2: Create the install guide**
 
-Create `docs/getting-started.md` with supported Python/OS requirements, Homebrew and `uv tool` install commands, the base/agent/MCP/all extras table, the first `korvid` invocation, a ten-key quick reference, and links to `tui.md`, `agent.md`, `mcp.md`, and `airgap.md`. State that the current published release is `0.3.0`, pin intentionally versioned install and upgrade commands to `0.3.0`, disclose that the live `brew install hellices/korvid/korvid` route still packages `0.2.0`, direct readers to `uv tool` or `pipx` for current `0.3.0`, and retain the Git fallback install command from README for readers wanting unreleased `main`.
+Create `docs/getting-started.md` with supported Python/OS requirements, Homebrew and `uv tool` install commands, the base/agent/MCP/observability-combination/all extras table, the first `korvid` invocation, a ten-key quick reference, and links to `tui.md`, `agent.md`, `mcp.md`, and `airgap.md`. State that the current published release is `0.3.0`, pin intentionally versioned install and upgrade commands to `0.3.0`, disclose that the live `brew install hellices/korvid/korvid` route still packages `0.2.0`, direct readers to `uv tool` or `pipx` for current `0.3.0`, and retain the Git fallback install command from README for readers wanting unreleased `main`.
 
 - [ ] **Step 3: Add the template, mark, and responsive visual system**
 

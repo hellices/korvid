@@ -70,6 +70,8 @@ or both:
 | `korvid==0.3.0` | The keyboard-first TUI only — no agent, no MCP server |
 | `korvid[agent]==0.3.0` | The embedded agent (`Ctrl-A`, `:ai`, `:model`) |
 | `korvid[mcp]==0.3.0` | The MCP server (`korvid --mcp`) |
+| `korvid[agent,observability]==0.3.0` | Embedded agent plus Prometheus/Loki investigation tools |
+| `korvid[mcp,observability]==0.3.0` | MCP server plus Prometheus/Loki investigation tools |
 | `korvid[all]==0.3.0` | Agent, MCP, and observability connectors — the recommended first install |
 | `korvid[all,entra]==0.3.0` | Everything above, plus Entra ID auth for Azure OpenAI |
 

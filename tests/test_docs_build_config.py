@@ -214,6 +214,15 @@ def test_getting_started_describes_the_all_extra_completely() -> None:
         )
 
 
+def test_getting_started_lists_observability_surface_combinations() -> None:
+    """Observability is installed with the agent or MCP surface that exposes it."""
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    project_version = pyproject["project"]["version"]
+    getting_started = (ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
+    for extras in ("agent,observability", "mcp,observability"):
+        assert f"`korvid[{extras}]=={project_version}`" in getting_started
+
+
 def test_getting_started_limits_the_helm_cli_requirement_to_writes() -> None:
     """Cluster-backed Helm browsing works without the local Helm executable."""
     getting_started = (ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")

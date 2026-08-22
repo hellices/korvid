@@ -51,6 +51,8 @@ triggers the workflow and publishes <https://hellices.github.io/korvid/>.
 Pull request builds validate the site (strict build, link checks) but do
 not deploy it — only a push to `main` runs the deploy job.
 
-A custom domain is optional and deliberately deferred: adopting one later
-only requires `site_url`, Pages settings, DNS, and a `CNAME` file, not a
-content migration.
+A custom domain is optional and deliberately deferred. Adopting one later does
+not require a content migration, but it does require updating `site_url`,
+Pages settings, DNS, the optional `CNAME`, hosted links in `README.md`,
+`pyproject.toml`'s Documentation URL, and the entry-point tests that pin those
+canonical links.
