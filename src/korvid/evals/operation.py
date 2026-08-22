@@ -131,6 +131,7 @@ _OPERATION_KEYS = frozenset(
         "dialog_intervention",
     }
 )
+_OPTIONAL_OPERATION_KEYS = frozenset({"approval_rerequest_turns"})
 _TARGET_KEYS = frozenset({"context", "namespace", "group", "kind", "plural", "name", "uid"})
 _REQUEST_KEYS = frozenset({"action", "replicas"})
 _ASSERTION_KEYS = frozenset({"resource", "path", "operator", "expected", "provisional"})
@@ -312,6 +313,9 @@ class OperationJourney:
     turns: tuple[str, ...]
     permission_denials: tuple[PermissionDenial, ...]
     cluster: OperationCluster
+    #: One-based scripted turn indices that explicitly ask again after a
+    #: denied or expired approval.
+    approval_rerequest_turns: tuple[int, ...] = ()
 
 
 def _target(raw: Any, label: str) -> OperationTarget:
@@ -454,6 +458,30 @@ def _turns(raw: Any, label: str) -> tuple[str, ...]:
         if not isinstance(item, str) or not item.strip():
             raise ValueError(f"{label} entries must be non-blank strings")
     return tuple(str(item) for item in raw)
+
+
+def _approval_rerequest_turns(
+    raw: Any,
+    turns: tuple[str, ...],
+    approval: str,
+    label: str,
+) -> tuple[int, ...]:
+    if raw is None:
+        return ()
+    if approval not in {"denied", "expired"}:
+        raise ValueError(f"{label} requires a denied or expired approval outcome")
+    if not isinstance(raw, list):
+        raise ValueError(f"{label} must be a list of one-based turn indices")
+    indices: list[int] = []
+    for item in raw:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError(f"{label} entries must be integers")
+        if item <= 1 or item > len(turns):
+            raise ValueError(f"{label} entries must identify follow-up turns")
+        indices.append(item)
+    if len(indices) != len(set(indices)):
+        raise ValueError(f"{label} entries must be unique")
+    return tuple(sorted(indices))
 
 
 def _denials(raw: Any, label: str) -> tuple[PermissionDenial, ...]:
@@ -637,7 +665,7 @@ def _target_count(cluster: OperationCluster, target: OperationTarget) -> int:
 def _operation(raw: Any, label: str) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"{label} must be a mapping")
-    _reject_unknown_keys(raw, _OPERATION_KEYS, label)
+    _reject_unknown_keys(raw, _OPERATION_KEYS | _OPTIONAL_OPERATION_KEYS, label)
     missing = sorted(_OPERATION_KEYS - set(raw))
     if missing:
         raise ValueError(f"{label} is missing required keys: {missing}")
@@ -648,6 +676,39 @@ def _operation(raw: Any, label: str) -> dict[str, Any]:
     if raw.get("expected_outcome") not in OUTCOME_CLASSES:
         raise ValueError(f"{label}.expected_outcome must be one of {sorted(OUTCOME_CLASSES)}")
     return raw
+
+
+def _expected_counts(
+    operation: dict[str, Any],
+    rerequest_turns: tuple[int, ...],
+    path: Path,
+) -> tuple[int, int]:
+    requests = _positive_int(
+        operation["expected_write_requests"], f"{path.name}: expected_write_requests"
+    )
+    if requests > 1 and not rerequest_turns:
+        raise ValueError(f"{path.name}: expected_write_requests must be 0 or 1")
+    if rerequest_turns and requests != 1 + len(rerequest_turns):
+        raise ValueError(
+            f"{path.name}: expected_write_requests must include each explicit approval rerequest"
+        )
+    dialogs = _positive_int(
+        operation["expected_approval_dialogs"], f"{path.name}: expected_approval_dialogs"
+    )
+    if dialogs > requests:
+        raise ValueError(
+            f"{path.name}: expected_approval_dialogs cannot exceed expected_write_requests"
+        )
+    approval = operation["approval"]
+    if (approval == "none") != (dialogs == 0):
+        raise ValueError(f"{path.name}: approval outcome and expected dialogs are inconsistent")
+    if rerequest_turns and dialogs != requests:
+        raise ValueError(
+            f"{path.name}: expected_approval_dialogs must include each explicit approval rerequest"
+        )
+    if operation["goal"] == "unsupported" and requests != 0:
+        raise ValueError(f"{path.name}: unsupported journeys cannot expect write requests")
+    return requests, dialogs
 
 
 def load_operation_journey(path: Path) -> OperationJourney:
@@ -671,28 +732,20 @@ def load_operation_journey(path: Path) -> OperationJourney:
         raise ValueError(f"{path.name}: split must be one of {sorted(SPLITS)}")
     operation = _operation(data.get("operation"), f"{path.name}: operation")
     target = _target(operation["target"], f"{path.name}: operation.target")
+    turns = _turns(data.get("turns"), f"{path.name}: turns")
+    approval = operation["approval"]
+    rerequest_turns = _approval_rerequest_turns(
+        operation.get("approval_rerequest_turns"),
+        turns,
+        approval,
+        f"{path.name}: operation.approval_rerequest_turns",
+    )
     allowed_kinds = OPERATION_GOAL_KINDS.get(operation["goal"])
     if allowed_kinds is not None and target.kind not in allowed_kinds:
         raise ValueError(
             f"{path.name}: target kind is not supported for operation goal {operation['goal']!r}"
         )
-    requests = _positive_int(
-        operation["expected_write_requests"], f"{path.name}: expected_write_requests"
-    )
-    if requests > 1:
-        raise ValueError(f"{path.name}: expected_write_requests must be 0 or 1")
-    dialogs = _positive_int(
-        operation["expected_approval_dialogs"], f"{path.name}: expected_approval_dialogs"
-    )
-    if dialogs > requests:
-        raise ValueError(
-            f"{path.name}: expected_approval_dialogs cannot exceed expected_write_requests"
-        )
-    approval = operation["approval"]
-    if (approval == "none") != (dialogs == 0):
-        raise ValueError(f"{path.name}: approval outcome and expected dialogs are inconsistent")
-    if operation["goal"] == "unsupported" and requests != 0:
-        raise ValueError(f"{path.name}: unsupported journeys cannot expect write requests")
+    requests, dialogs = _expected_counts(operation, rerequest_turns, path)
     cluster = _cluster(data.get("cluster"), f"{path.name}: cluster")
     if _target_count(cluster, target) != 1:
         raise ValueError(f"{path.name}: cluster must contain the exact operation target once")
@@ -737,9 +790,10 @@ def load_operation_journey(path: Path) -> OperationJourney:
             dialogs,
             f"{path.name}: dialog_intervention",
         ),
-        turns=_turns(data.get("turns"), f"{path.name}: turns"),
+        turns=turns,
         permission_denials=_denials(data.get("rbac"), f"{path.name}: rbac"),
         cluster=cluster,
+        approval_rerequest_turns=rerequest_turns,
     )
 
 
@@ -750,7 +804,11 @@ def bundled_operations_dir() -> Path:
 
 def load_operation_journeys(directory: Path) -> list[OperationJourney]:
     """Load every operation journey in stable id order; reject duplicate ids."""
+    if not directory.is_dir():
+        raise ValueError(f"operation pack directory not found: {directory}")
     journeys = [load_operation_journey(path) for path in sorted(directory.glob("*.yaml"))]
+    if not journeys:
+        raise ValueError(f"operation pack must contain at least one journey: {directory}")
     seen: set[str] = set()
     for journey in journeys:
         if journey.id in seen:

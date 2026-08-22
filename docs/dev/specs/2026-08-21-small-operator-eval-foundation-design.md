@@ -358,7 +358,10 @@ Fixtures support:
 - `expired`
 
 Denied and expired are terminal until a new scripted user turn explicitly asks
-again. Automatic re-proposal is a hard failure.
+again. Automatic re-proposal is a hard failure. Fixtures declare those
+one-based turn indices in `operation.approval_rerequest_turns`; the harness
+journals `approval_rerequested` from `fixture_actor`, and only that event clears
+the terminal latch.
 
 Turn interruption/cancellation is a runtime lifecycle test, not an approval
 outcome. It remains covered separately by agent interruption tests and is

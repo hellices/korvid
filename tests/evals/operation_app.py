@@ -46,7 +46,7 @@ from typing import Any
 from textual.widgets import Static
 from yaml import YAMLError, safe_load
 
-from korvid.agent.events import AgentEvent, TextDelta, ToolCallFinished
+from korvid.agent.events import AgentError, AgentEvent, TextDelta, ToolCallFinished
 from korvid.agent.outbound import sanitize_recorded_tool_result
 from korvid.agent.profiles import build_profile
 from korvid.agent.runtime import AgentRuntime
@@ -517,8 +517,9 @@ class _AnswerCapturingRuntime(AgentRuntime):
     segment the diagnostic runner grades. `turn_started`/`turn_finished`
     are the harness's observable turn signal: `turn_finished` is appended
     in a `finally`, *after* the answer, so a wait on it can never observe a
-    finished turn whose answer is not captured yet — and an interrupted or
-    errored turn still ends the wait instead of hanging it.
+    finished turn whose answer is not captured yet. Interrupted or errored
+    turns end the wait with an empty, ungradable answer instead of publishing
+    a partial completion claim.
     """
 
     def __init__(self, *args: Any, journal: ActionJournal, **kwargs: Any) -> None:
@@ -533,20 +534,26 @@ class _AnswerCapturingRuntime(AgentRuntime):
             detail=summarize_untrusted(chars=len(user_text)),
         )
         buffer = ""
+        completed = False
+        failed = False
         try:
             async for event in super().run_turn(user_text, screen_context):
                 if isinstance(event, TextDelta):
                     buffer += event.text
                 elif isinstance(event, ToolCallFinished):
                     buffer = ""
+                elif isinstance(event, AgentError):
+                    failed = True
                 yield event
+            completed = True
         finally:
-            self.answers.append(buffer)
+            answer = buffer if completed and not failed else ""
+            self.answers.append(answer)
             self._journal.append(
                 event="turn_finished",
                 actor="app_internal",
-                result="captured" if buffer else "empty",
-                detail=summarize_untrusted(chars=len(buffer)),
+                result="error" if not completed or failed else ("captured" if answer else "empty"),
+                detail=summarize_untrusted(chars=len(answer)),
             )
 
 
@@ -965,6 +972,12 @@ async def _run_turns(
             actor="fixture_actor",
             detail=summarize_untrusted(count=index + 1),
         )
+        if index + 1 in journey.approval_rerequest_turns:
+            journal.append(
+                event="approval_rerequested",
+                actor="fixture_actor",
+                detail=summarize_untrusted(count=index + 1),
+            )
         if index == 0:
             journal.append(
                 event="goal_received",

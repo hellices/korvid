@@ -313,9 +313,9 @@ default wiring exactly, so frontier models are unaffected.
 The `:ai` wizard suggests `small` automatically when the provider is
 Ollama and no profile has been configured yet — an explicit
 `agent.profile` (either value) is always preserved. The agent panel
-header shows `[small]` so you always know which
-mode is live. Compare the profiles on your own endpoint with the eval
-harness: `python -m korvid.evals --profile small` (see below).
+header shows `[small]` so you always know which mode is live. Compare the
+profiles on your own endpoint with the development-only eval harness from a
+source checkout (see below).
 
 ## Tuning the agent for your model
 
@@ -387,11 +387,12 @@ tool name (the other overrides still apply), and a prompt large enough to
 crowd the profile's history budget — that one still uses your prompt, it
 just tells you it is squeezing the conversation.
 
-To find out whether your wording is actually better, measure it:
+To find out whether your wording is actually better, measure it from a source
+checkout prepared as described in [Agent eval harness](#agent-eval-harness):
 
 ```bash
-python -m korvid.evals --profile small --json baseline.json
-python -m korvid.evals --profile small --json tuned.json \
+uv run python -m korvid.evals --profile small --json baseline.json
+uv run python -m korvid.evals --profile small --json tuned.json \
   --system-prompt-file ~/.config/korvid/prompts/small-system.md
 ```
 
@@ -422,7 +423,17 @@ while an approval dialog or a describe screen you are reading is open.
 
 ## Agent eval harness
 
-`korvid.evals` measures how well a model diagnoses cluster faults through
+`korvid.evals` is a development-only harness: PyPI wheels and source
+distributions intentionally exclude it. Clone the repository and prepare its
+locked development environment before running these commands:
+
+```sh
+git clone https://github.com/hellices/korvid.git
+cd korvid
+uv sync --frozen --dev --all-extras
+```
+
+The harness measures how well a model diagnoses cluster faults through
 korvid's real agent runtime and tools. Each scenario is a YAML fixture — a
 simulated cluster (manifests, events, log tails), a user question, and
 deterministic grading assertions (keywords the answer must claim positively,

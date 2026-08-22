@@ -385,6 +385,43 @@ def test_operation_fixture_cannot_expect_multiple_write_requests(tmp_path: Path)
         load_operation_journey(_write(tmp_path, data))
 
 
+def test_explicit_approval_rerequest_turns_allow_multiple_write_requests(tmp_path: Path) -> None:
+    data = _minimal()
+    data["operation"]["approval"] = "denied"
+    data["operation"]["expected_outcome"] = "rejected"
+    data["operation"]["expected_write_requests"] = 2
+    data["operation"]["expected_approval_dialogs"] = 2
+    data["operation"]["approval_rerequest_turns"] = [2]
+    data["turns"].append("Please ask for approval to scale it again.")
+
+    journey = load_operation_journey(_write(tmp_path, data))
+
+    assert journey.approval_rerequest_turns == (2,)
+    assert journey.expected_write_requests == 2
+
+
+@pytest.mark.parametrize(
+    "turns",
+    [
+        pytest.param([1], id="initial-turn"),
+        pytest.param([3], id="out-of-range"),
+        pytest.param([2, 2], id="duplicate"),
+        pytest.param(["2"], id="not-an-integer"),
+    ],
+)
+def test_approval_rerequest_turn_indices_are_strict(tmp_path: Path, turns: list[object]) -> None:
+    data = _minimal()
+    data["operation"]["approval"] = "denied"
+    data["operation"]["expected_outcome"] = "rejected"
+    data["operation"]["expected_write_requests"] = 2
+    data["operation"]["expected_approval_dialogs"] = 2
+    data["operation"]["approval_rerequest_turns"] = turns
+    data["turns"].append("Please ask for approval to scale it again.")
+
+    with pytest.raises(ValueError, match="approval_rerequest_turns"):
+        load_operation_journey(_write(tmp_path, data))
+
+
 @pytest.mark.parametrize(
     ("approval", "dialogs"),
     [("none", 1), ("approved", 0), ("denied", 0), ("expired", 0)],
@@ -477,6 +514,16 @@ def test_duplicate_ids_in_a_directory_are_rejected(tmp_path: Path) -> None:
     _write(tmp_path, _minimal(), "a.yaml")
     _write(tmp_path, _minimal(), "b.yaml")
     with pytest.raises(ValueError, match="duplicate operation journey id"):
+        load_operation_journeys(tmp_path)
+
+
+def test_a_missing_operation_pack_directory_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="operation pack directory not found"):
+        load_operation_journeys(tmp_path / "missing")
+
+
+def test_an_empty_operation_pack_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="operation pack must contain at least one journey"):
         load_operation_journeys(tmp_path)
 
 

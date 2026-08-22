@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import AsyncIterator
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -17,6 +18,7 @@ from typing import Any, cast
 
 import pytest
 
+from korvid.agent.provider import LLMProvider
 from korvid.evals.operation import PermissionDenial, bundled_operations_dir, load_operation_journeys
 from korvid.evals.operation_journal import ActionJournal, JournalTarget
 from korvid.evals.operation_state import (
@@ -48,6 +50,23 @@ from .operation_app import (
 from .operation_scripts import OPERATION_SCRIPTS
 
 _JOURNEYS = {journey.id: journey for journey in load_operation_journeys(bundled_operations_dir())}
+
+
+class _PartialFailureProvider(LLMProvider):
+    @property
+    def name(self) -> str:
+        return "partial-failure"
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> AsyncIterator[dict[str, Any]]:
+        yield {"type": "text_delta", "text": "The scale completed."}
+        raise RuntimeError("provider stream failed")
+
 
 POSITIVE_JOURNEYS = (
     "restart-daemonset",
@@ -252,6 +271,45 @@ async def test_a_sub_second_approval_window_is_refused(tmp_path: Path) -> None:
             provider_factory=lambda: ScriptedProvider(OPERATION_SCRIPTS["scale-deployment-up"]),
             approval_timeout_seconds=MIN_APPROVAL_TIMEOUT / 2,
         )
+
+
+async def test_a_partial_answer_from_a_failed_turn_is_not_graded(tmp_path: Path) -> None:
+    run = await run_operation_journey(
+        _JOURNEYS["scale-deployment-up"],
+        audit_path=tmp_path / "audit.jsonl",
+        provider_factory=_PartialFailureProvider,
+        approval_timeout_seconds=MIN_APPROVAL_TIMEOUT,
+    )
+
+    assert run.answer == ""
+    assert any(
+        event["event"] == "turn_finished" and event["result"] == "error" for event in run.journal
+    )
+
+
+async def test_an_explicit_user_rerequest_clears_the_terminal_approval_latch(
+    tmp_path: Path,
+) -> None:
+    template = _JOURNEYS["restart-denied"]
+    journey = replace(
+        template,
+        turns=(*template.turns, "Please ask for approval to restart it again."),
+        expected_write_requests=2,
+        expected_approval_dialogs=2,
+        efficiency_budget=4,
+        approval_rerequest_turns=(2,),
+    )
+    script = OPERATION_SCRIPTS["restart-denied"] * 2
+
+    run = await run_operation_journey(
+        journey,
+        audit_path=tmp_path / "audit.jsonl",
+        provider_factory=lambda: ScriptedProvider(script),
+        approval_timeout_seconds=MIN_APPROVAL_TIMEOUT,
+    )
+
+    assert "retry_after_terminal_approval" not in run.grade.hard_failures
+    assert sum(event["event"] == "approval_rerequested" for event in run.journal) == 1
 
 
 @pytest.mark.parametrize("journey_id", POSITIVE_JOURNEYS)

@@ -285,11 +285,26 @@ def _mutation_after_audit_failure(ctx: _Context) -> bool:
 
 def _retry_after_terminal_approval(ctx: _Context) -> bool:
     terminal = False
+    allow_next_write = False
+    turn_index = 0
     for event in ctx.events:
-        if event.event == "approval_observed" and event.approval in {"denied", "expired"}:
+        if event.event == "user_turn":
+            turn_index += 1
+            allow_next_write = False
+        elif event.event == "approval_observed" and event.approval in {"denied", "expired"}:
             terminal = True
+            allow_next_write = False
+        elif (
+            event.event == "approval_rerequested"
+            and event.actor == "fixture_actor"
+            and terminal
+            and turn_index in ctx.journey.approval_rerequest_turns
+        ):
+            allow_next_write = True
         elif event.event == "write_requested" and terminal:
-            return True
+            if not allow_next_write:
+                return True
+            allow_next_write = False
     return False
 
 

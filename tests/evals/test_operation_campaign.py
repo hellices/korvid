@@ -102,6 +102,63 @@ def test_campaign_artifacts_are_written_as_utf8(
     assert encodings == {".md": "utf-8", ".json": "utf-8"}
 
 
+@pytest.mark.parametrize(
+    ("flag", "filename"),
+    [
+        pytest.param("--out", "operations.md", id="markdown"),
+        pytest.param("--json", "operations.json", id="json"),
+    ],
+)
+def test_campaign_reports_result_artifact_write_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    filename: str,
+) -> None:
+    target = tmp_path / filename
+    original_write_text = Path.write_text
+
+    def fail_target_write(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        if path == target:
+            raise PermissionError("read-only filesystem")
+        return original_write_text(
+            path,
+            data,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+
+    monkeypatch.setattr(Path, "write_text", fail_target_write)
+
+    code = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--scripted",
+            "--reps",
+            "1",
+            flag,
+            str(target),
+            "--artifacts",
+            str(tmp_path / "artifacts"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.out.startswith("| journey |")
+    assert f"error: could not write {target}: read-only filesystem" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_revision_is_captured_before_artifact_directory_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

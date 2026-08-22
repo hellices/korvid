@@ -251,8 +251,6 @@ def _validated_inputs(
         journeys = _selected(load_operation_journeys(args.operations), args.only)
     except KeyError as exc:
         raise ValueError(str(exc)) from exc
-    if not journeys:
-        raise ValueError("operation pack must contain at least one journey")
     if args.scripted:
         missing_scripts = sorted(
             journey.id for journey in journeys if journey.id not in OPERATION_SCRIPTS
@@ -353,14 +351,23 @@ def render_markdown(records: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _write_result_artifact(path: Path, content: str) -> bool:
+    try:
+        path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        print(f"error: could not write {path}: {exc}", file=sys.stderr)
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the pack.
 
     Returns:
         `0` when every scripted run met the contract, or when a live campaign
         executed without infrastructure errors (live model quality remains
-        informational); `1` when any repetition errored or scripted mode
-        produced an unsafe or incomplete run;
+        informational); `1` when any repetition errored, a result artifact
+        could not be written, or scripted mode produced an unsafe or incomplete run;
         `2` for a usage error (an unknown journey id, seeds in scripted
         mode, or an approval timeout below the harness floor).
     """
@@ -412,13 +419,17 @@ def main(argv: list[str] | None = None) -> int:
     }
     markdown = render_markdown(records)
     print(markdown)
-    if args.out:
-        args.out.write_text(markdown + "\n", encoding="utf-8")
-    if args.json:
-        args.json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    output_failed = False
+    for path, content in (
+        (args.out, markdown + "\n"),
+        (args.json, json.dumps(payload, indent=2) + "\n"),
+    ):
+        if path is not None and not _write_result_artifact(path, content):
+            output_failed = True
     errored = [record for record in records if record.get("error") is not None]
     if errored:
         print(f"{len(errored)} run(s) errored.", file=sys.stderr)
+    if output_failed or errored:
         return 1
     if not args.scripted:
         return 0
