@@ -59,6 +59,12 @@ def test_gitignore_excludes_site_dir() -> None:
     )
 
 
+def test_gitignore_excludes_material_privacy_cache() -> None:
+    """Build-localized third-party assets must never become untracked changes."""
+    gitignore = (ROOT / ".gitignore").read_text()
+    assert "/.cache/plugin/privacy/" in gitignore
+
+
 def _load_mkdocs_config() -> dict[str, Any]:
     """Parse `mkdocs.yml`, tolerating its `!!python/name:...` custom tag.
 

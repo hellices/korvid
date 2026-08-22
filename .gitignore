@@ -11,3 +11,4 @@ dist/
 htmlcov/
 .config/
 /site/
+/.cache/plugin/privacy/
