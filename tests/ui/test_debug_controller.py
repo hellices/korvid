@@ -115,6 +115,7 @@ class Harness:
         images: dict[str, str] | None = None,
     ) -> None:
         self.readonly = readonly
+        self.epoch = 0
         self.audit_log = audit
         self._uid_ok = uid_ok
         self._process_result = process_result
@@ -129,6 +130,8 @@ class Harness:
             readonly=lambda: self.readonly,
             settings=lambda: self.settings,
             pod_uid_unchanged=self._uid_unchanged,
+            get_epoch=lambda: self.epoch,
+            epoch_crossed=lambda epoch: epoch != self.epoch,
             confirm_screen=self._confirm_screen,
             run_debug=lambda: self._rerun,
         )
@@ -336,6 +339,17 @@ async def test_an_approved_retry_reruns_the_debug_with_the_fallback() -> None:
     h.controller.offer_pull_retry("team", "api-1", "app", "u1", "koolkits:jvm", "ErrImagePull")
     await h.approve()
     assert h.reruns == [("team", "api-1", "app", "u1", "registry.local/busybox:1.36")]
+
+
+async def test_an_approved_retry_is_cancelled_after_a_context_switch_without_a_uid() -> None:
+    h = Harness(default_image="registry.local/busybox:1.36")
+    h.controller.offer_pull_retry("team", "api-1", "app", None, "koolkits:jvm", "ErrImagePull")
+    h.epoch += 1
+    await h.approve()
+    assert h.reruns == []
+    assert h.notifications == [
+        ("kubectl debug retry cancelled - the kube context changed", "warning")
+    ]
 
 
 async def test_a_declined_retry_never_reruns_the_debug() -> None:

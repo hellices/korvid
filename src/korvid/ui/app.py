@@ -637,6 +637,8 @@ class KorvidApp(App[None]):
                 images=self.config.debug_images,
             ),
             pod_uid_unchanged=self._inspect.pod_uid_unchanged,
+            get_epoch=self._ctx.epoch,
+            epoch_crossed=self._ctx.crossed,
             confirm_screen=self._writes.confirm_screen,
             # Late-binding: the retry reruns through `ShellController`, which
             # keeps the write decorator and the tests patch per case.

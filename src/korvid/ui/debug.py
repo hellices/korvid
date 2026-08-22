@@ -79,6 +79,8 @@ class DebugController:
         readonly: Callable[[], bool],
         settings: Callable[[], DebugSettings],
         pod_uid_unchanged: Callable[..., Awaitable[bool]],
+        get_epoch: Callable[[], int],
+        epoch_crossed: Callable[[int], bool],
         #: `WriteCoordinator.confirm_screen`; typed by its return so the
         #: retry callback is checked against the dialog's own result type.
         confirm_screen: Callable[..., ConfirmScreen],
@@ -91,6 +93,8 @@ class DebugController:
         self._readonly = readonly
         self._settings = settings
         self._pod_uid_unchanged = pod_uid_unchanged
+        self._get_epoch = get_epoch
+        self._epoch_crossed = epoch_crossed
         self._confirm_screen = confirm_screen
         self._run_debug = run_debug
 
@@ -202,12 +206,20 @@ class DebugController:
             )
             return
         retry_image = fallback
+        epoch = self._get_epoch()
 
         def _on_choice(confirmed: bool | None) -> None:
-            if confirmed:
-                self._ui.run_worker(
-                    self._run_debug()(namespace, name, container, approved_uid, retry_image)
+            if not confirmed:
+                return
+            if self._epoch_crossed(epoch):
+                self._ui.notify(
+                    "kubectl debug retry cancelled - the kube context changed",
+                    severity="warning",
                 )
+                return
+            self._ui.run_worker(
+                self._run_debug()(namespace, name, container, approved_uid, retry_image)
+            )
 
         self._ui.push_screen(
             self._confirm_screen(
