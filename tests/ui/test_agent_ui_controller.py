@@ -1061,11 +1061,7 @@ async def test_an_agent_write_is_approved_by_the_user_and_audited(tmp_path: Path
     request = asyncio.ensure_future(
         env.controller.agent_request_write("delete", "pods", "web-1", "default")
     )
-    await asyncio.sleep(0)
-    for _ in range(6):
-        if env.ui.screens:
-            break
-        await asyncio.sleep(0)
+    await env.ui.wait_for_screens()
     assert isinstance(env.ui.screens[-1][0], ConfirmScreen)
     env.ui.answer(True)
     out = await request
@@ -1082,10 +1078,7 @@ async def test_a_declined_agent_write_never_mutates(tmp_path: Path) -> None:
     request = asyncio.ensure_future(
         env.controller.agent_request_write("delete", "pods", "web-1", "default")
     )
-    for _ in range(6):
-        if env.ui.screens:
-            break
-        await asyncio.sleep(0)
+    await env.ui.wait_for_screens()
     env.ui.answer(False)
     out = await request
     assert out.startswith("denied")
@@ -1100,10 +1093,7 @@ async def test_an_agent_write_is_blocked_when_the_audit_sink_is_broken(tmp_path:
     request = asyncio.ensure_future(
         env.controller.agent_request_write("delete", "pods", "web-1", "default")
     )
-    for _ in range(6):
-        if env.ui.screens:
-            break
-        await asyncio.sleep(0)
+    await env.ui.wait_for_screens()
     env.ui.answer(True)
     out = await request
     assert out.startswith("ERROR:")
@@ -1170,10 +1160,7 @@ async def test_an_interrupted_agent_write_dismisses_its_dialog(tmp_path: Path) -
     request = asyncio.ensure_future(
         env.controller.agent_request_write("delete", "pods", "web-1", "default")
     )
-    for _ in range(6):
-        if env.ui.screens:
-            break
-        await asyncio.sleep(0)
+    await env.ui.wait_for_screens()
     screen = env.ui.screens[-1][0]
     env.screens.stacked.append(screen)
     request.cancel()

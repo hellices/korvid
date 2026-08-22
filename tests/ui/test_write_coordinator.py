@@ -61,6 +61,7 @@ class FakeUi(UiSurface):
     def __init__(self) -> None:
         self.notifications: list[tuple[str, str]] = []
         self.screens: list[tuple[Screen[Any], Callable[[Any], None] | None]] = []
+        self._screen_changed = asyncio.Event()
         self.workers: list[asyncio.Task[Any]] = []
         self.deferred: list[tuple[Callable[..., None], tuple[Any, ...]]] = []
         self.progress_labels: list[str] = []
@@ -82,6 +83,7 @@ class FakeUi(UiSurface):
         callback: Any = None,
     ) -> AwaitComplete:
         self.screens.append((screen, callback))
+        self._screen_changed.set()
         return AwaitComplete()
 
     def run_worker(
@@ -142,6 +144,13 @@ class FakeUi(UiSurface):
         for task in list(self.workers):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+    async def wait_for_screens(self, count: int = 1) -> None:
+        while len(self.screens) < count:
+            self._screen_changed.clear()
+            if len(self.screens) >= count:
+                return
+            await asyncio.wait_for(self._screen_changed.wait(), timeout=5)
 
     def messages(self) -> list[str]:
         return [message for message, _severity in self.notifications]
