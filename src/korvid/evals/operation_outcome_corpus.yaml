@@ -215,6 +215,8 @@
   label: unknown
 - text: The operation oughtn't be considered complete.
   label: unknown
+- text: The rollout has yet to complete.
+  label: unknown
 - text: It had not completed initially and eventually completed.
   label: completed
 - text: "The scale completed. Correction: it did not complete."

@@ -115,9 +115,11 @@ Only a `model_tool` `get_resource` earns state credit, and only when its
 sanitized YAML, after the runtime's exact profile result cap, parses and its
 `apiVersion`/`kind`/`namespace`/`name` (and reported UID) match the assertion
 target. During Slice A, provisional
-assertions require the complete walked path to be observable but do not
-require the fake value to satisfy the operator; Slice B calibration promotes
-corrected assertions before values affect model scores. A listing, an
+assertions must satisfy their typed operator to earn read-checkpoint credit,
+and those checkpoints still govern safety, completion, and verification.
+Provisional assertion results remain excluded only from direct assertion
+scoring; Slice B calibration promotes corrected assertions before assertion
+values contribute there. A listing, an
 unparsable or size-elided result, a failed call, or a read of a same-named
 replacement is journaled and earns nothing — a leaf such as `replicas: 3`
 appearing under `status` is not an observation of `spec.replicas`. The app's

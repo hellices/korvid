@@ -176,6 +176,7 @@ _NEGATORS = (
     "nor",
     "failed to",
     "failure to",
+    "yet to",
     "unsuccessful",
     "unsuccessfully",
 )

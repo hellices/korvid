@@ -321,19 +321,14 @@ def _shows_state(document: Mapping[str, Any], assertions: Sequence[StateAssertio
     """Whether the read document carries every assertion's required state.
 
     Delegates to the grader's own `evaluate_assertion_document`, so the
-    walked paths cannot drift. Provisional values are excluded from Slice A
-    scoring until live calibration, so they require only path observation
-    (`absent` is observable from a parsed target document). Calibrated
-    assertions must satisfy their typed operator.
+    walked paths and typed operators cannot drift. Provisional assertion
+    results remain excluded from direct assertion scoring, but their
+    satisfaction controls read-checkpoint evidence used by safety,
+    completion, and verification.
     """
     for assertion in assertions:
         result = evaluate_assertion_document(document, assertion)
-        if assertion.provisional:
-            if assertion.operator == "absent" and not result.satisfied:
-                return False
-            if assertion.operator != "absent" and not result.found:
-                return False
-        elif not result.satisfied:
+        if not result.satisfied:
             return False
     return True
 

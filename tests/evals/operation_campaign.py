@@ -34,6 +34,7 @@ from korvid.evals.__main__ import (
     capture_serving,
     httpx_fetch,
     prompt_fingerprint,
+    provider_factory_from_env,
     warn_if_unpinned,
 )
 from korvid.evals.operation import (
@@ -137,14 +138,17 @@ def _instances(
     return pairs
 
 
-def _provider_factory(journey_id: str, scripted: bool) -> Callable[[], Any]:
+def _provider_factory(
+    journey_id: str,
+    scripted: bool,
+    live_factory: Callable[[], Any] | None,
+) -> Callable[[], Any]:
     if scripted:
         script = OPERATION_SCRIPTS[journey_id]
         return lambda: ScriptedProvider(script)
-    from korvid.evals.__main__ import provider_factory_from_env
-
-    factory: Callable[[], Any] = provider_factory_from_env(os.environ)
-    return factory
+    if live_factory is None:
+        raise RuntimeError("live provider factory was not preflighted")
+    return live_factory
 
 
 def approval_timeout_for(journey: OperationJourney, default: float) -> float:
@@ -262,12 +266,30 @@ def _validated_inputs(
     return seeds, _instances(journeys, seeds)
 
 
+def _validated_campaign_inputs(
+    args: argparse.Namespace,
+) -> tuple[
+    list[int],
+    list[tuple[OperationJourney, GenerationRecord | None]],
+    Callable[[], Any] | None,
+]:
+    seeds, pairs = _validated_inputs(args)
+    if args.scripted:
+        return seeds, pairs, None
+    try:
+        live_provider_factory = provider_factory_from_env(os.environ)
+    except SystemExit as exc:
+        raise ValueError(str(exc)) from exc
+    return seeds, pairs, live_provider_factory
+
+
 async def _run(
     args: argparse.Namespace,
     pairs: list[tuple[OperationJourney, GenerationRecord | None]],
     *,
     run_id: str,
     run_dir: Path,
+    live_provider_factory: Callable[[], Any] | None = None,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for instance, generation in pairs:
@@ -279,7 +301,9 @@ async def _run(
                 run = await run_operation_journey(
                     instance,
                     audit_path=audit_path,
-                    provider_factory=_provider_factory(template_id, args.scripted),
+                    provider_factory=_provider_factory(
+                        template_id, args.scripted, live_provider_factory
+                    ),
                     profile_name=args.profile,
                     approval_timeout_seconds=approval_timeout_for(instance, args.approval_timeout),
                 )
@@ -369,7 +393,8 @@ def main(argv: list[str] | None = None) -> int:
         informational); `1` when any repetition errored, a result artifact
         could not be written, or scripted mode produced an unsafe or incomplete run;
         `2` for a usage error (an unknown journey id, seeds in scripted
-        mode, or an approval timeout below the harness floor).
+        mode, an invalid live-provider configuration, or an approval timeout
+        below the harness floor).
     """
 
     try:
@@ -377,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return _exit_code(exc)
     try:
-        seeds, pairs = _validated_inputs(args)
+        seeds, pairs, live_provider_factory = _validated_campaign_inputs(args)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -397,7 +422,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         warn_if_unpinned(serving)
-    records = asyncio.run(_run(args, pairs, run_id=run_id, run_dir=run_dir))
+    records = asyncio.run(
+        _run(
+            args,
+            pairs,
+            run_id=run_id,
+            run_dir=run_dir,
+            live_provider_factory=live_provider_factory,
+        )
+    )
     profile = build_profile(
         args.profile, readonly=False, resize_supported=False, overrides=PromptOverrides()
     )

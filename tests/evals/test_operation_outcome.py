@@ -110,6 +110,10 @@ def test_contracted_negators_cannot_be_misclassified_as_completed(answer: str) -
     assert classify_operation_outcome(answer).outcome == "unknown"
 
 
+def test_yet_to_is_explicit_non_completion() -> None:
+    assert classify_operation_outcome("The rollout has yet to complete.").outcome == "unknown"
+
+
 def test_a_later_unnegated_occurrence_of_the_same_phrase_is_classified() -> None:
     answer = "It had not completed initially and eventually completed."
     assert classify_operation_outcome(answer).outcome == "completed"

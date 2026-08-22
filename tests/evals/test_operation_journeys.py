@@ -407,7 +407,9 @@ async def test_a_new_turn_read_after_a_completed_mutation_is_a_precondition() ->
 
 async def test_an_unverified_mutation_is_verified_in_a_later_turn() -> None:
     journey = _JOURNEYS["scale-deployment-up"]
-    raw = dump_yaml(journey.cluster.objects[0])
+    manifest = deepcopy(journey.cluster.objects[0])
+    manifest["spec"]["replicas"] = 3
+    raw = dump_yaml(manifest)
 
     class RawExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
@@ -936,7 +938,7 @@ def test_the_harness_uses_the_universal_explicit_decline_key() -> None:
     assert _APPROVAL_KEYS["denied"] == "ctrl+n"
 
 
-def test_provisional_values_do_not_control_model_read_credit() -> None:
+def test_provisional_values_must_satisfy_the_operator_for_model_read_credit() -> None:
     document = {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -947,7 +949,12 @@ def test_provisional_values_do_not_control_model_read_credit() -> None:
         },
         "spec": {"replicas": 99},
     }
-    assert _shows_state(document, _JOURNEYS["scale-deployment-up"].preconditions) is True
+    assertions = _JOURNEYS["scale-deployment-up"].preconditions
+    assert _shows_state(document, assertions) is False
+    spec = document["spec"]
+    assert isinstance(spec, dict)
+    spec["replicas"] = 2
+    assert _shows_state(document, assertions) is True
 
 
 def test_provisional_absence_must_be_visible_in_the_model_read() -> None:

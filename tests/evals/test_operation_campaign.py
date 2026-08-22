@@ -233,6 +233,66 @@ def test_a_live_campaign_records_the_serving_environment(
     assert json.loads(payload_path.read_text())["meta"]["serving"] == serving
 
 
+@pytest.mark.parametrize(
+    ("environment", "message"),
+    [
+        pytest.param({}, "needs a live model endpoint", id="missing-endpoint"),
+        pytest.param(
+            {
+                "KORVID_EVAL_BASE_URL": "https://models.example/v1",
+                "KORVID_EVAL_MODEL": "operator-model",
+                "KORVID_EVAL_TIMEOUT_SECONDS": "invalid",
+            },
+            "KORVID_EVAL_TIMEOUT_SECONDS must be a positive number",
+            id="invalid-timeout",
+        ),
+    ],
+)
+def test_live_provider_configuration_is_rejected_before_artifact_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environment: dict[str, str],
+    message: str,
+) -> None:
+    captures = 0
+
+    async def fake_capture(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        nonlocal captures
+        captures += 1
+        return {"model": "operator-model", "unavailable": []}
+
+    for name in (
+        "KORVID_EVAL_BASE_URL",
+        "KORVID_EVAL_MODEL",
+        "KORVID_EVAL_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(operation_campaign, "capture_serving", fake_capture)
+    artifacts = tmp_path / "artifacts"
+
+    code = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--reps",
+            "1",
+            "--artifacts",
+            str(artifacts),
+        ]
+    )
+
+    assert code == 2
+    assert captures == 0
+    assert not artifacts.exists()
+    stderr = capsys.readouterr().err
+    assert stderr.startswith("error: ")
+    assert message in stderr
+    assert "Traceback" not in stderr
+
+
 def test_seeded_generation_is_rejected_in_scripted_mode(tmp_path: Path) -> None:
     code = main(
         [
