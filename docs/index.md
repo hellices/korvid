@@ -26,19 +26,44 @@ hide:
   </figure>
 </section>
 
-## One operational experience. Three ways to drive it.
-
-Korvid coordinates one operational experience around the active cluster
-context, navigation semantics, and approval/audit boundary. The TUI presents
-watch-backed snapshots while embedded-agent and MCP tools can perform fresh
-reads, so their snapshots can differ in time. **Different surfaces. Shared
-context and safety.**
-
-<div class="feature-grid">
-  <article><span>01</span><h3>Drive it yourself</h3><p>Browse, filter, follow relationships, and run guarded operations through the watch-backed TUI while staying within the active context and safety boundary.</p></article>
-  <article><span>02</span><h3>Delegate to the agent</h3><p>An embedded agent performs bounded fresh reads in the active context, cites its evidence, and drives korvid on your behalf. Its writes still cross the confirmation gate.</p></article>
-  <article><span>03</span><h3>Connect over MCP</h3><p>When enabled, give VS Code, Claude Code, Cursor, or Zed bounded fresh reads in the active context. Write proposals stay opt-in and always need a human to confirm.</p></article>
-</div>
+<section class="scene-switcher" data-scene-switcher aria-labelledby="scene-switcher-title">
+  <div class="section-heading">
+    <p class="eyebrow">ONE OPERATIONAL EXPERIENCE</p>
+    <h2 id="scene-switcher-title">One incident. Three ways to drive it.</h2>
+    <p>Find the failing workload, inspect its evidence, and land on the useful screen—directly, through the embedded agent, or from an external MCP client.</p>
+  </div>
+  <div class="scene-tabs" role="tablist" aria-label="Choose who drives korvid">
+    <button id="scene-tab-direct" type="button" role="tab" aria-selected="true" aria-controls="scene-direct">You drive</button>
+    <button id="scene-tab-agent" type="button" role="tab" aria-selected="false" aria-controls="scene-agent" tabindex="-1">Agent delegates</button>
+    <button id="scene-tab-mcp" type="button" role="tab" aria-selected="false" aria-controls="scene-mcp" tabindex="-1">MCP connects</button>
+  </div>
+  <div class="scene-panels">
+    <article id="scene-direct" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-direct" tabindex="0">
+      <video src="assets/demo.mp4" poster="assets/scenes/cockpit-poster.png" controls muted loop playsinline preload="none" aria-label="An operator filters to a failing pod, describes it, and opens its logs in korvid">Your browser does not support this direct-operation demo.</video>
+      <div><strong>Input</strong> Keyboard intent</div>
+      <div><strong>Evidence</strong> Watch-backed TUI snapshot</div>
+      <div><strong>Result</strong> The real korvid view</div>
+      <p>You stay on the live cockpit and choose every next step.</p>
+      <a href="tui/">Explore the TUI</a>
+    </article>
+    <article id="scene-agent" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-agent" tabindex="0">
+      <video src="assets/scenes/agent-demo.mp4" poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="The embedded agent diagnoses the failing payment worker and cites its evidence">Your browser does not support this embedded-agent demo.</video>
+      <div><strong>Input</strong> Current selection + prompt</div>
+      <div><strong>Evidence</strong> Bounded fresh reads + citations</div>
+      <div><strong>Result</strong> Answer and UI drive</div>
+      <p>The agent investigates in context while writes remain proposals.</p>
+      <a href="agent/">Explore the embedded agent</a>
+    </article>
+    <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
+      <video src="assets/scenes/mcp-follow-demo.mp4" poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
+      <div><strong>Input</strong> External assistant</div>
+      <div><strong>Evidence</strong> Tool-specific bounded fresh reads</div>
+      <div><strong>Result</strong> MCP response + optional follow</div>
+      <p>MCP exposes bounded tools; write proposals are off by default.</p>
+      <a href="mcp/">Explore MCP</a>
+    </article>
+  </div>
+</section>
 
 ## Sharp tools. Human hands.
 

@@ -31,6 +31,7 @@ MERMAID_VENDOR = ROOT / "docs" / "assets" / "javascripts" / "vendor" / "mermaid-
 RESIZE_OBSERVER_VENDOR = (
     ROOT / "docs" / "assets" / "javascripts" / "vendor" / "resize-observer-polyfill-1.5.1.js"
 )
+VISUAL_STORYTELLING = ROOT / "docs" / "assets" / "javascripts" / "visual-storytelling.js"
 
 
 def test_makefile_docs_build_uses_frozen() -> None:
@@ -294,6 +295,22 @@ def test_material_bundle_checkout_preserves_reviewed_bytes() -> None:
     attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
     assert "docs/assets/javascripts/bundle.d7400e89.min.js -text" in attributes
     assert "docs/assets/javascripts/vendor/*.js -text" in attributes
+
+
+def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
+    config = _load_mkdocs_config()
+    assert config.get("extra_javascript") == [
+        "assets/javascripts/visual-storytelling.js"
+    ]
+    assert VISUAL_STORYTELLING.is_file()
+    assert hashlib.sha256(VISUAL_STORYTELLING.read_bytes()).hexdigest() == (
+        "bf2abf3e16c1b1997445f1966e36eea88363b7c0ac495ca8dd912a7ae1609f8f"
+    )
+
+
+def test_storytelling_script_checkout_preserves_reviewed_bytes() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "docs/assets/javascripts/visual-storytelling.js text eol=lf" in attributes
 
 
 def test_mkdocs_excludes_override_sources_but_keeps_theme_customization() -> None:

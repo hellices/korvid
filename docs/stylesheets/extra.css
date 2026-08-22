@@ -2,12 +2,12 @@
  * korvid landing page visual polish.
  *
  * Scope: custom properties, the amber-on-charcoal hero and its product
- * media, the feature grid, the site footer,
+ * media, the scene switcher, the site footer,
  * keyboard-focus visibility, reduced-motion handling, and comfortable
  * reading widths for the new landing content. Everything here is additive
  * to the Material for MkDocs theme already configured in mkdocs.yml
- * (palette: scheme slate, primary black, accent amber) — no custom JavaScript
- * or custom fonts. Generated local/vendor assets are allowed.
+ * (palette: scheme slate, primary black, accent amber) — no custom fonts.
+ * Generated local/vendor assets are allowed.
  * Browser runtime third-party requests are not.
  */
 
@@ -264,43 +264,110 @@
 }
 
 /* ------------------------------------------------------------------ */
-/* Feature grid — three cards                                          */
+/* Scene switcher — direct / agent / MCP                              */
 /* ------------------------------------------------------------------ */
 
-.md-typeset .feature-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: var(--korvid-gap);
-  margin: 0 0 2rem;
+.md-typeset .scene-switcher {
+  margin: 4rem 0;
 }
 
-@media (min-width: 720px) {
-  .md-typeset .feature-grid {
-    grid-template-columns: repeat(3, 1fr);
-  }
+.md-typeset .section-heading {
+  max-width: 46rem;
+  margin-bottom: 1.5rem;
 }
 
-.md-typeset .feature-grid article {
+.md-typeset .section-heading > p:last-child {
+  color: var(--korvid-ink-dim);
+}
+
+.md-typeset .scene-tabs {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding: 0.25rem 0 0.75rem;
+}
+
+.md-typeset .scene-tabs button {
+  flex: none;
+  padding: 0.65rem 1rem;
+  color: var(--korvid-ink-dim);
+  background: transparent;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: 999px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.md-typeset .scene-tabs button[aria-selected="true"] {
+  color: var(--korvid-charcoal);
+  background: var(--korvid-amber);
+  border-color: var(--korvid-amber);
+}
+
+.md-typeset .scene-tabs button:focus-visible,
+.md-typeset .scene-panel:focus-visible {
+  outline: 3px solid var(--korvid-amber-bright);
+  outline-offset: 3px;
+}
+
+.md-typeset .scene-panels {
   background: var(--korvid-charcoal-raised);
   border: 1px solid var(--korvid-charcoal-border);
   border-radius: var(--korvid-radius);
-  padding: 1.5rem;
+  overflow: hidden;
 }
 
-.md-typeset .feature-grid article span {
-  color: var(--korvid-amber);
-  font-weight: 700;
-  font-size: 0.85rem;
-  letter-spacing: 0.08em;
+.md-typeset .scene-panel {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  padding: 1rem;
 }
 
-.md-typeset .feature-grid article h3 {
-  margin: 0.5rem 0;
+.md-typeset .scene-panel[hidden] {
+  display: none;
 }
 
-.md-typeset .feature-grid article p {
+.md-typeset .scene-panel video {
+  grid-column: 1 / -1;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #07090c;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: calc(var(--korvid-radius) - 0.15rem);
+}
+
+.md-typeset .scene-panel > div {
   color: var(--korvid-ink-dim);
-  margin: 0;
+  font-size: 0.75rem;
+}
+
+.md-typeset .scene-panel > div strong {
+  display: block;
+  color: var(--korvid-amber);
+}
+
+.md-typeset .scene-panel p {
+  grid-column: 1 / -1;
+  margin: 0.5rem 0 0;
+}
+
+.md-typeset .scene-panel > a {
+  grid-column: 1 / -1;
+  width: fit-content;
+}
+
+@media (max-width: 599px) {
+  .md-typeset .scene-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .md-typeset .scene-panel video,
+  .md-typeset .scene-panel p,
+  .md-typeset .scene-panel > a {
+    grid-column: 1;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -401,7 +468,6 @@
 
 .md-typeset .hero a:focus-visible,
 .md-typeset .hero .install-command:focus-visible,
-.md-typeset .feature-grid article:focus-visible,
 .md-typeset .hero-demo video:focus-visible,
 .md-footer .korvid-footer a:focus-visible {
   outline: 3px solid var(--korvid-amber);

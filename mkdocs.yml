@@ -86,3 +86,5 @@ plugins:
 
 extra_css:
   - stylesheets/extra.css
+extra_javascript:
+  - assets/javascripts/visual-storytelling.js

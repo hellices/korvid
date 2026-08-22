@@ -50,21 +50,8 @@ def _css() -> str:
     return EXTRA_CSS.read_text(encoding="utf-8")
 
 
-def _product_model_intro() -> str:
-    """Return the prose between the product-model heading and the feature grid.
-
-    Scoping shared-state assertions to this paragraph (rather than the whole
-    of `docs/index.md`) matters because "evidence", "navigation", "approval",
-    and "audit" all appear elsewhere on the page too (the safety section and
-    the flight-path list). An unscoped search would keep passing even if a
-    future edit dropped the shared-state claim from *this* intro specifically,
-    as long as the words survived somewhere else on the page.
-    """
-    index = _index()
-    heading = "## One operational experience. Three ways to drive it."
-    start = index.index(heading)
-    end = index.index('<div class="feature-grid">', start)
-    return index[start:end]
+def _scene_switcher() -> str:
+    return _section('<section class="scene-switcher"', "</section>")
 
 
 def _strip_css_comments(css: str) -> str:
@@ -364,61 +351,36 @@ def test_rule_helper_ignores_selectors_that_only_appear_in_a_comment() -> None:
     assert "break-word" not in block, "the helper must not return a comment's contents"
 
 
-# --- 4. one operational experience, three surfaces that drive it ------------
+# --- 4. one incident, three drivers -----------------------------------------
 
 
-def test_landing_frames_one_experience_rather_than_three_separate_products() -> None:
-    """The product model section must not read as three unrelated entry points.
-
-    Korvid is a single agentic Kubernetes UI. A human operator, the embedded
-    agent, and an external MCP-connected assistant are *actors* driving one
-    operational experience, not three products bolted together, so the
-    heading must say so.
-    """
-    index = _index()
-    assert "## One cockpit. Three ways in." not in index, (
-        "'three ways in' reads as three doors into three things; the site sells "
-        "one operational experience with three ways to drive it"
-    )
-    assert "## One operational experience. Three ways to drive it." in index, (
-        "the product-model heading must name the single experience the three surfaces share"
-    )
+def test_landing_presents_one_incident_through_three_drivers() -> None:
+    switcher = _scene_switcher()
+    assert "One incident. Three ways to drive it." in switcher
+    for scene in ("direct", "agent", "mcp"):
+        assert f'id="scene-tab-{scene}"' in switcher
+        assert f'aria-controls="scene-{scene}"' in switcher
+        assert f'id="scene-{scene}"' in switcher
+    assert "same evidence" not in switcher.lower()
 
 
-def test_landing_names_the_boundaries_the_three_surfaces_actually_share() -> None:
-    """Distinguish shared boundaries from independently timed cluster reads."""
-    intro = _product_model_intro()
-    lowered = " ".join(intro.lower().replace("*", "").split())
-    assert "different surfaces. shared context and safety." in lowered
-    for shared in ("active cluster context", "navigation", "approval", "audit"):
-        assert shared in lowered, f"the product-model intro must name {shared!r}"
-    assert "watch-backed" in lowered
-    assert "fresh reads" in lowered
-    assert "snapshots can differ" in lowered
-    for overclaim in ("one operational state", "one resource cache", "same evidence"):
-        assert overclaim not in lowered
+def test_scene_switcher_source_is_a_complete_no_javascript_fallback() -> None:
+    switcher = _scene_switcher()
+    panels = re.findall(r'<article id="scene-[^"]+"[^>]*role="tabpanel"[^>]*>', switcher)
+    assert len(panels) == 3
+    assert all(" hidden" not in panel for panel in panels)
+    assert 'src="assets/demo.mp4"' in switcher
+    assert 'src="assets/scenes/agent-demo.mp4"' in switcher
+    assert 'src="assets/scenes/mcp-follow-demo.mp4"' in switcher
 
 
-def test_feature_cards_are_ways_to_drive_korvid_not_three_feature_silos() -> None:
-    """Each card must describe an actor driving the shared experience."""
-    index = _index()
-    grid_start = index.index('<div class="feature-grid">')
-    grid = index[grid_start : index.index("</div>", grid_start)]
-    headings = re.findall(r"<h3>(.*?)</h3>", grid)
-    assert len(headings) == 3, "the product model still has exactly three surfaces"
-    joined = " ".join(headings).lower()
-    assert "yourself" in joined or "you drive" in joined or "direct" in joined, (
-        "the first card is the human operator driving korvid directly"
-    )
-    assert "delegate" in joined, "the second card is delegation to the embedded agent"
-    assert "mcp" in joined, "the third card is connecting an external assistant over MCP"
-    body = grid.lower()
-    assert "active context" in body
-    assert "safety" in body
-    assert "same evidence" not in body
-    assert "when enabled" in body or "opt-in" in body, (
-        "the MCP card must not imply the optional MCP server is always enabled"
-    )
+def test_scene_switcher_uses_the_aria_tab_contract() -> None:
+    switcher = _scene_switcher()
+    assert 'role="tablist"' in switcher
+    assert switcher.count('role="tab"') == 3
+    assert switcher.count('role="tabpanel"') == 3
+    assert switcher.count('aria-selected="true"') == 1
+    assert switcher.count('aria-selected="false"') == 2
 
 
 def test_safety_section_converges_every_actor_on_one_write_path() -> None:
