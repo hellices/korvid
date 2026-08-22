@@ -189,6 +189,12 @@ def test_user_approval_followed_by_an_api_failure_is_failed() -> None:
     assert classify_operation_outcome(answer).outcome == "failed"
 
 
+def test_failure_to_complete_is_a_failure_not_an_ambiguous_completion() -> None:
+    result = classify_operation_outcome("The operation failed to complete.")
+    assert result.outcome == "failed"
+    assert result.matched == ("failed",)
+
+
 def test_precedence_resolves_non_conflicting_overlaps() -> None:
     result = classify_operation_outcome("The API accepted the patch; the rollout is in progress.")
     assert result.outcome == "in_progress"

@@ -141,7 +141,7 @@ _DENIAL_KEYS = frozenset({"verb", "resource", "subresource", "namespace"})
 _INTERVENTION_KEYS = frozenset({"replace_target"})
 _REPLACE_TARGET_KEYS = frozenset({"uid"})
 
-_PATH_SEGMENT = re.compile(r'"([^"]+)"|([^.]+)')
+_PATH_SEGMENT = re.compile(r'"([^"]+)"|([^."\']+)')
 _JOURNEY_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
@@ -679,6 +679,8 @@ def load_operation_journey(path: Path) -> OperationJourney:
     requests = _positive_int(
         operation["expected_write_requests"], f"{path.name}: expected_write_requests"
     )
+    if requests > 1:
+        raise ValueError(f"{path.name}: expected_write_requests must be 0 or 1")
     dialogs = _positive_int(
         operation["expected_approval_dialogs"], f"{path.name}: expected_approval_dialogs"
     )

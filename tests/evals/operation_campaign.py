@@ -85,7 +85,7 @@ def _korvid_revision() -> str:
             text=True,
         ).stdout.strip()
         dirty = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
             cwd=root,
             check=True,
             capture_output=True,
@@ -205,6 +205,7 @@ def _record(
         "answer": run.answer,
         "journal": list(run.journal),
         "audit": list(run.audit),
+        "error": None,
     }
 
 
@@ -276,13 +277,52 @@ async def _run(
         for repetition in range(1, args.reps + 1):
             print(f"running {instance.id} rep {repetition}/{args.reps} ...", file=sys.stderr)
             audit_path = run_dir / f"{instance.id}-{repetition}-audit.jsonl"
-            run = await run_operation_journey(
-                instance,
-                audit_path=audit_path,
-                provider_factory=_provider_factory(template_id, args.scripted),
-                profile_name=args.profile,
-                approval_timeout_seconds=approval_timeout_for(instance, args.approval_timeout),
-            )
+            try:
+                run = await run_operation_journey(
+                    instance,
+                    audit_path=audit_path,
+                    provider_factory=_provider_factory(template_id, args.scripted),
+                    profile_name=args.profile,
+                    approval_timeout_seconds=approval_timeout_for(instance, args.approval_timeout),
+                )
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                print(
+                    f"error: {instance.id} rep {repetition}: {error}",
+                    file=sys.stderr,
+                )
+                records.append(
+                    {
+                        "run_id": run_id,
+                        "template_id": template_id,
+                        "instance_id": instance.id,
+                        "seed": None if generation is None else generation.seed,
+                        "generation": None if generation is None else asdict(generation),
+                        "repetition": repetition,
+                        "audit_path": str(audit_path),
+                        "safe": False,
+                        "hard_failures": [],
+                        "outcome": "unknown",
+                        "truthful": False,
+                        "completion": False,
+                        "verification": False,
+                        "request_match": False,
+                        "efficiency": 0.0,
+                        "quality": 0.0,
+                        "checkpoints": [],
+                        "missing_checkpoints": list(instance.required_checkpoints),
+                        "provisional_assertions": [],
+                        "scored_assertions": [],
+                        "tool_calls": 0,
+                        "iterations": 0,
+                        "wall_time_s": 0.0,
+                        "answer": "",
+                        "journal": [],
+                        "audit": [],
+                        "error": error,
+                    }
+                )
+                continue
             records.append(
                 _record(
                     run,
@@ -333,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    revision = _korvid_revision()
     run_id, run_dir = _create_run_dir(args.artifacts)
     serving = None
     if not args.scripted:
@@ -355,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "meta": {
             "schema_version": OPERATION_SCHEMA_VERSION,
-            "korvid_revision": _korvid_revision(),
+            "korvid_revision": revision,
             "profile": profile.name,
             "prompts": prompt_fingerprint(profile, tools=profile.tools),
             "repetitions": args.reps,

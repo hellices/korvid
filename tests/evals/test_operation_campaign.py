@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,7 +15,7 @@ import pytest
 from korvid.evals.operation import bundled_operations_dir, load_operation_journeys
 
 from . import operation_campaign
-from .operation_app import MIN_APPROVAL_TIMEOUT
+from .operation_app import MIN_APPROVAL_TIMEOUT, run_operation_journey
 from .operation_campaign import _korvid_revision, _seeds, approval_timeout_for, main
 
 _JOURNEYS = {journey.id: journey for journey in load_operation_journeys(bundled_operations_dir())}
@@ -99,6 +102,32 @@ def test_campaign_artifacts_are_written_as_utf8(
     assert encodings == {".md": "utf-8", ".json": "utf-8"}
 
 
+def test_revision_is_captured_before_artifact_directory_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    observed: list[bool] = []
+
+    def fake_revision() -> str:
+        observed.append(artifacts.exists())
+        return "revision"
+
+    monkeypatch.setattr(operation_campaign, "_korvid_revision", fake_revision)
+    code = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--scripted",
+            "--reps",
+            "1",
+            "--artifacts",
+            str(artifacts),
+        ]
+    )
+    assert code == 0
+    assert observed == [False]
+
+
 def test_a_live_campaign_records_the_serving_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -182,6 +211,61 @@ def test_source_campaign_revision_identifies_the_checkout(
 ) -> None:
     monkeypatch.delenv("KORVID_EVAL_REVISION", raising=False)
     assert re.fullmatch(r"[0-9a-f]{40}(?:\+dirty)?", _korvid_revision())
+
+
+def test_untracked_eval_inputs_mark_the_campaign_revision_dirty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KORVID_EVAL_REVISION", raising=False)
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        if command[1:3] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="a" * 40 + "\n")
+        stdout = "" if "--untracked-files=no" in command else "?? tests/evals/new_fixture.yaml\n"
+        return SimpleNamespace(stdout=stdout)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _korvid_revision() == f"{'a' * 40}+dirty"
+
+
+def test_campaign_preserves_an_error_record_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = operation_campaign._parse_args(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--scripted",
+            "--reps",
+            "2",
+            "--artifacts",
+            str(tmp_path / "artifacts"),
+        ]
+    )
+    _seeds_value, pairs = operation_campaign._validated_inputs(args)
+    original = run_operation_journey
+    attempts = 0
+
+    async def flaky_run(*run_args: Any, **run_kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("provider disconnected")
+        return await original(*run_args, **run_kwargs)
+
+    monkeypatch.setattr(operation_campaign, "run_operation_journey", flaky_run)
+    records = asyncio.run(
+        operation_campaign._run(
+            args,
+            pairs,
+            run_id="run-test",
+            run_dir=tmp_path,
+        )
+    )
+    assert len(records) == 2
+    assert records[0]["error"] == "RuntimeError: provider disconnected"
+    assert records[0]["safe"] is False
+    assert records[1]["error"] is None
 
 
 def test_reusing_an_artifact_base_creates_a_new_run_directory_each_time(tmp_path: Path) -> None:

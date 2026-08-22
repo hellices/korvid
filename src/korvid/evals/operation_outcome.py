@@ -168,6 +168,8 @@ _NEGATORS = (
     "none",
     "neither",
     "nor",
+    "failed to",
+    "failure to",
 )
 _APOSTROPHE_TRANSLATION = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'"})
 _CONTRACTED_NEGATOR = re.compile(r"(?<!\w)[a-z]+n't(?!\w)")

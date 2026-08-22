@@ -81,6 +81,8 @@
   label: failed
 - text: Scaling failed; replicas are unchanged.
   label: failed
+- text: The operation failed to complete.
+  label: failed
 - text: The write was accepted but I could not verify the new replica count.
   label: verification_unknown
 - text: I cannot confirm the current state.

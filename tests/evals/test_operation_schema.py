@@ -377,6 +377,14 @@ def test_a_dialog_intervention_without_an_expected_dialog_is_rejected(tmp_path: 
         load_operation_journey(_write(tmp_path, data))
 
 
+def test_operation_fixture_cannot_expect_multiple_write_requests(tmp_path: Path) -> None:
+    data = _minimal()
+    data["operation"]["expected_write_requests"] = 2
+    data["operation"]["expected_approval_dialogs"] = 2
+    with pytest.raises(ValueError, match="expected_write_requests must be 0 or 1"):
+        load_operation_journey(_write(tmp_path, data))
+
+
 @pytest.mark.parametrize(
     ("approval", "dialogs"),
     [("none", 1), ("approved", 0), ("denied", 0), ("expired", 0)],
@@ -486,6 +494,12 @@ def test_split_path_understands_quoted_annotation_segments() -> None:
 def test_split_path_rejects_an_unparsable_path() -> None:
     with pytest.raises(ValueError, match="unparsable state path"):
         split_path("spec..replicas")
+
+
+@pytest.mark.parametrize("path", ['spec."replicas', 'spec.""'])
+def test_quotes_require_a_complete_quoted_path_segment(path: str) -> None:
+    with pytest.raises(ValueError, match="unparsable state path"):
+        split_path(path)
 
 
 def test_walk_path_reports_presence_separately_from_value() -> None:
