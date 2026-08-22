@@ -119,8 +119,8 @@ hide:
   </div>
   <div class="evidence-mosaic__grid">
     <article class="evidence-card evidence-card--wide">
-      <figure><img src="assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table filtered to a crash-looping payment worker"><figcaption>Resource cockpit</figcaption></figure>
-      <p>Filter live resources and keep status, scope, and utilization in one keyboard path.</p>
+      <figure><img src="assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table for a synthetic shop namespace with the crash-looping payment worker selected and its BackOff warning in the ops hint strip"><figcaption>Resource cockpit</figcaption></figure>
+      <p>Browse and filter live resources, keeping status, scope, and restart signals in one keyboard path.</p>
       <a href="tui/">Browse the cockpit</a>
     </article>
     <article class="evidence-card">

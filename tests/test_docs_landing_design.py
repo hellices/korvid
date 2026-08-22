@@ -668,6 +668,28 @@ def test_capability_mosaic_contains_six_real_linked_product_scenes() -> None:
         assert len(re.sub(r"<[^>]+>", " ", paragraphs[0]).split()) <= 30
 
 
+def test_evidence_copy_claims_only_what_its_capture_actually_shows() -> None:
+    """A caption must not promise a signal the screenshot cannot contain.
+
+    The cockpit capture comes from an in-memory fixture with no metrics
+    source, so every CPU/MEM column renders an em-dash placeholder. Claiming
+    the frame shows "utilization" made the page's own headline evidence
+    contradict itself.
+    """
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    cockpit = next(
+        card
+        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
+        if "cockpit-poster.png" in card
+    )
+    assert "utilization" not in cockpit.lower(), (
+        "the cockpit capture has no live metrics, so its caption must describe "
+        "what it does show (status, scope, restarts) instead"
+    )
+    for signal in ("status", "scope", "restart"):
+        assert signal in cockpit.lower()
+
+
 def test_flight_paths_are_four_compact_user_destinations() -> None:
     paths = _section('<nav class="flight-paths"', "</nav>")
     for label, href in (

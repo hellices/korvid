@@ -129,11 +129,18 @@ Run from the repository root:
 
 ```bash
 mkdir -p docs/assets/scenes
-ffmpeg -y -ss 00:00:10 -i docs/assets/demo.mp4 -frames:v 1 \
+ffmpeg -y -ss 00:00:05 -i docs/assets/demo.mp4 -frames:v 1 \
   docs/assets/scenes/cockpit-poster.png
 ```
 
-Verify the capture is the filtered `payment-worker` table, not an empty startup frame:
+00:00:05 is inside the tape's settled pause after the last `Down`: the full
+`shop` pod table with the crash-looping `payment-worker` row selected, its
+`BackOff` ops hint, and the `ctx:/ns:` status row. 00:00:10 is mid-filter —
+one row and a live `/` prompt — which is the empty-table frame the design
+forbids.
+
+Verify the capture is the settled, populated `payment-worker` table, not an
+empty or mid-filter frame:
 
 ```bash
 file docs/assets/scenes/cockpit-poster.png
@@ -649,7 +656,7 @@ vhs docs/demo/demo.tape
 ffmpeg -y -i docs/assets/demo.gif -an -movflags +faststart \
   -pix_fmt yuv420p -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' \
   docs/assets/demo.mp4
-ffmpeg -y -ss 00:00:10 -i docs/assets/demo.mp4 -frames:v 1 \
+ffmpeg -y -ss 00:00:05 -i docs/assets/demo.mp4 -frames:v 1 \
   docs/assets/scenes/cockpit-poster.png
 ffmpeg -y -ss 00:00:16 -i docs/assets/demo.mp4 -frames:v 1 \
   docs/assets/scenes/diagnosis.png
@@ -1443,8 +1450,8 @@ Delete the old “Find your flight path” list and add:
   </div>
   <div class="evidence-mosaic__grid">
     <article class="evidence-card evidence-card--wide">
-      <figure><img src="assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table filtered to a crash-looping payment worker"><figcaption>Resource cockpit</figcaption></figure>
-      <p>Filter live resources and keep status, scope, and utilization in one keyboard path.</p>
+      <figure><img src="assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table for a synthetic shop namespace with the crash-looping payment worker selected and its BackOff warning in the ops hint strip"><figcaption>Resource cockpit</figcaption></figure>
+      <p>Browse and filter live resources, keeping status, scope, and restart signals in one keyboard path.</p>
       <a href="tui/">Browse the cockpit</a>
     </article>
     <article class="evidence-card">
@@ -1687,10 +1694,10 @@ on and MkDocs never rewrites raw-HTML `src`, so a page in a subdirectory URL
 ```html
 <figure class="docs-visual docs-visual--annotated">
   <div class="docs-visual__stage">
-    <img src="../assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table filtered to a synthetic crash-looping payment worker">
-    <span class="docs-visual__pin" style="--x: 12%; --y: 8%;" aria-hidden="true">1</span>
-    <span class="docs-visual__pin" style="--x: 50%; --y: 20%;" aria-hidden="true">2</span>
-    <span class="docs-visual__pin" style="--x: 50%; --y: 92%;" aria-hidden="true">3</span>
+    <img src="../assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table for a synthetic shop namespace with the crash-looping payment worker selected and its BackOff warning in the ops hint strip">
+    <span class="docs-visual__pin" style="--x: 12%; --y: 97%;" aria-hidden="true">1</span>
+    <span class="docs-visual__pin" style="--x: 50%; --y: 18%;" aria-hidden="true">2</span>
+    <span class="docs-visual__pin" style="--x: 50%; --y: 3%;" aria-hidden="true">3</span>
   </div>
   <figcaption>
     <ol>
@@ -1701,6 +1708,13 @@ on and MkDocs never rewrites raw-HTML `src`, so a page in a subdirectory URL
   </figcaption>
 </figure>
 ```
+
+Measure the offsets against the poster the branch actually ships rather than
+copying them: in `cockpit-poster.png` the key-hint row occupies y 8-25px, the
+selected `CrashLoopBackOff` row y 119-137px, and the `ctx:/ns:` status row
+y 695-710px of 720. Pin 1 (context/namespace) is the bottom row, pin 2
+(resource evidence) the selected row, pin 3 (effective keys) the top row —
+the same order the figcaption list explains them in.
 
 - [ ] **Step 5: Add the embedded-agent storyboard**
 

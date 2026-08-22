@@ -32,13 +32,22 @@ vhs docs/demo/demo.tape
 ffmpeg -y -i docs/assets/demo.gif -an -movflags +faststart \
   -pix_fmt yuv420p -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' \
   docs/assets/demo.mp4
-ffmpeg -y -ss 00:00:10 -i docs/assets/demo.mp4 -frames:v 1 \
+ffmpeg -y -ss 00:00:05 -i docs/assets/demo.mp4 -frames:v 1 \
   docs/assets/scenes/cockpit-poster.png
 ffmpeg -y -ss 00:00:16 -i docs/assets/demo.mp4 -frames:v 1 \
   docs/assets/scenes/diagnosis.png
 ffmpeg -y -ss 00:00:23 -i docs/assets/demo.mp4 -frames:v 1 \
   docs/assets/scenes/merged-logs.png
 ```
+
+`cockpit-poster.png` is cut at **00:00:05**, inside the tape's 1.5s pause
+after the last `Down` and before the `0` all-namespaces toggle: a settled
+frame with the full `shop` pod table, the crash-looping `payment-worker` row
+selected, its `BackOff` ops hint, and the `ctx:/ns:` status row. Do not cut
+it around 00:00:10 — the tape is mid-filter there, showing a single row and
+a live `/` prompt. The demo has no metrics source, so every CPU/MEM column
+renders `–`; nothing on the site may present this frame as evidence of
+utilization.
 
 ## Embedded agent
 

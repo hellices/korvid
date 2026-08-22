@@ -7,10 +7,10 @@ and context switching. Keys referenced here are listed in
 
 <figure class="docs-visual docs-visual--annotated">
   <div class="docs-visual__stage">
-    <img src="../assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table filtered to a synthetic crash-looping payment worker">
-    <span class="docs-visual__pin" style="--x: 12%; --y: 92%;" aria-hidden="true">1</span>
-    <span class="docs-visual__pin" style="--x: 50%; --y: 20%;" aria-hidden="true">2</span>
-    <span class="docs-visual__pin" style="--x: 50%; --y: 8%;" aria-hidden="true">3</span>
+    <img src="../assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table for a synthetic shop namespace with the crash-looping payment worker selected and its BackOff warning in the ops hint strip">
+    <span class="docs-visual__pin" style="--x: 12%; --y: 97%;" aria-hidden="true">1</span>
+    <span class="docs-visual__pin" style="--x: 50%; --y: 18%;" aria-hidden="true">2</span>
+    <span class="docs-visual__pin" style="--x: 50%; --y: 3%;" aria-hidden="true">3</span>
   </div>
   <figcaption>
     <ol>

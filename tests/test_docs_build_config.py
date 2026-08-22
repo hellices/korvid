@@ -129,16 +129,37 @@ def test_core_concept_pages_each_have_their_selected_visual_evidence() -> None:
 
 
 def test_tui_annotation_pins_match_the_poster_layout() -> None:
-    """`tui.md` must keep the semantic labels aligned with the poster pins."""
+    """`tui.md`'s pins must land on what their captions claim.
+
+    Measured against the 1280x720 `cockpit-poster.png` this branch ships
+    (a settled, populated post-navigation frame):
+
+    * the effective key-hint row occupies y 8-25px (~1-3%);
+    * the selected `CrashLoopBackOff` row occupies y 119-137px (~17-19%);
+    * the `ctx:(current)  ns:shop` status row occupies y 695-710px (~97%),
+      with `ns:shop` starting near x 157px (~12%).
+
+    The pins are ordered 1, 2, 3 in the source, matching the ordered list in
+    the figcaption. An earlier revision pointed pin 3 at 8% (the first pod
+    row) and pin 1 at 92% (~40px above the status row) and asserted those
+    offsets as fact, so the test actively defended the mismatch.
+    """
     source = (ROOT / "docs" / "tui.md").read_text(encoding="utf-8")
-    assert (
-        '<span class="docs-visual__pin" style="--x: 12%; --y: 92%;" aria-hidden="true">1</span>'
-        in source
-    ), "pin 1 must point to the bottom context/status row at --y: 92%"
-    assert (
-        '<span class="docs-visual__pin" style="--x: 50%; --y: 8%;" aria-hidden="true">3</span>'
-        in source
-    ), "pin 3 must point to the top keybinding hint row at --y: 8%"
+    expected = {
+        1: ("12%", "97%", "the context/namespace status row"),
+        2: ("50%", "18%", "the selected, populated resource row"),
+        3: ("50%", "3%", "the effective key-hint row"),
+    }
+    for number, (x, y, target) in expected.items():
+        pin = (
+            f'<span class="docs-visual__pin" style="--x: {x}; --y: {y};" '
+            f'aria-hidden="true">{number}</span>'
+        )
+        assert pin in source, f"pin {number} must point at {target} (--x: {x}; --y: {y})"
+    positions = [source.index(f'aria-hidden="true">{number}</span>') for number in (1, 2, 3)]
+    assert positions == sorted(positions), (
+        "the pins must stay in the order their figcaption list explains them"
+    )
 
 
 def test_getting_started_matches_current_project_and_readme_release() -> None:
