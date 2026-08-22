@@ -497,10 +497,15 @@ def test_smoke_install_required_korvid_modules_follow_the_selected_variant() -> 
 
 def test_smoke_install_forbids_optional_feature_packages_outside_their_variant() -> None:
     """MCP 2 uses httpx2, so a plain MCP install must not leak agent/obs httpx."""
-    assert smoke_install.forbidden_modules("base") == {"httpx", "keyring", "mcp"}
-    assert smoke_install.forbidden_modules("agent") == {"mcp"}
-    assert smoke_install.forbidden_modules("mcp") == {"httpx", "keyring"}
-    assert smoke_install.forbidden_modules("all") == set()
+    assert smoke_install.forbidden_modules("base") == {
+        "httpx",
+        "keyring",
+        "korvid.evals",
+        "mcp",
+    }
+    assert smoke_install.forbidden_modules("agent") == {"korvid.evals", "mcp"}
+    assert smoke_install.forbidden_modules("mcp") == {"httpx", "keyring", "korvid.evals"}
+    assert smoke_install.forbidden_modules("all") == {"korvid.evals"}
 
 
 def test_smoke_install_variant_matrix_excludes_entra() -> None:

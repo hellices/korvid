@@ -52,6 +52,8 @@ _VARIANT_FORBIDDEN_MODULES = {
     "mcp": frozenset({"httpx", "keyring"}),
     "all": frozenset(),
 }
+#: Development-only modules that must be absent from every installed variant.
+_DEVELOPMENT_ONLY_MODULES = frozenset({"korvid.evals"})
 
 
 def variants() -> tuple[str, ...]:
@@ -88,9 +90,9 @@ def required_korvid_modules(variant: str) -> set[str]:
 
 
 def forbidden_modules(variant: str) -> set[str]:
-    """Optional feature modules that must *not* be importable for *variant*."""
+    """Modules that must *not* be importable for *variant*."""
     normalized = _normalize_variant(variant)
-    return set(_VARIANT_FORBIDDEN_MODULES[normalized])
+    return set(_VARIANT_FORBIDDEN_MODULES[normalized] | _DEVELOPMENT_ONLY_MODULES)
 
 
 @dataclass(frozen=True)

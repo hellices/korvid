@@ -36,7 +36,9 @@ must prove the validator rejects artifacts containing `korvid/evals` or
   a nested decoy; and
 - the source distribution contains `pyproject.toml` either at its root or
   directly below its single distribution root directory, not below another
-  nested directory.
+  nested directory; and
+- every clean-install smoke variant proves `korvid.evals` is not importable
+  while the production modules and `korvid` console entry point still work.
 
 Run the targeted validator tests and lint the touched files. Then use the
 repository's existing constrained build command and run the validator against
