@@ -317,9 +317,10 @@ path filters for `docs/**`, `mkdocs.yml`, `pyproject.toml`, `uv.lock`,
 - `actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b`
 - `actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e`
 
-The build job has `contents: read`, runs `uv sync --locked --group docs`, then
-`make docs-build`, and uploads `site/` only on pushes to `main`. The deploy job
-also runs only on pushes to `main`, needs the build job, has
+The build job runs on `ubuntu-latest` with `contents: read`, uses uv version
+`0.10.9`, runs `uv sync --locked --group docs`, then
+`uv run --frozen --group docs mkdocs build --strict`, and uploads `site/` only
+on pushes to `main`. The deploy job also runs only on pushes to `main`, needs the build job, has
 `pages: write`/`id-token: write`, uses the `github-pages` environment, and sets
 its URL from the deploy step output. `configure-pages` is the deploy job's first
 step under `pages: write`; `deploy-pages` follows it.

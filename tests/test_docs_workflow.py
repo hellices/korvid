@@ -98,6 +98,10 @@ def test_every_action_is_pinned_to_the_expected_full_commit_sha() -> None:
 def test_build_job_has_only_read_permissions_and_runs_the_docs_build() -> None:
     config = _load()
     build = config["jobs"]["build"]
+    assert build["runs-on"] == "ubuntu-latest", (
+        "pull-request-controlled dependencies and MkDocs plugins must run on an "
+        "ephemeral GitHub-hosted runner, not persistent shared infrastructure"
+    )
     assert build["permissions"] == {"contents": "read"}
 
     run_steps = [step["run"] for step in build["steps"] if "run" in step]
@@ -112,6 +116,19 @@ def test_build_job_has_only_read_permissions_and_runs_the_docs_build() -> None:
     )
     assert all("make " not in run for run in run_steps), (
         "the docs workflow must not depend on make being installed on the runner"
+    )
+
+
+def test_docs_workflow_pins_the_uv_tool_version() -> None:
+    config = _load()
+    build = config["jobs"]["build"]
+    setup_steps = [
+        step for step in build["steps"] if step.get("uses", "").startswith("astral-sh/setup-uv@")
+    ]
+    assert len(setup_steps) == 1
+    assert setup_steps[0].get("with", {}).get("version") == "0.10.9", (
+        "the docs build must use the repository's release-workflow uv version "
+        "instead of downloading an unbounded latest release"
     )
 
 
@@ -332,3 +349,15 @@ def test_plan_places_configure_pages_first_in_the_privileged_deploy_job() -> Non
         "Task 3 must say configure-pages runs first in deploy, where pages: write "
         "exists; an action pin alone does not preserve that ordering"
     )
+
+
+def test_plan_reproduces_the_ephemeral_direct_docs_build() -> None:
+    """Following the executable plan must preserve the CI security and tool contract."""
+    plan = PLAN_DOC.read_text()
+    step = plan.split("- [ ] **Step 2: Add the Pages workflow**", 1)[1]
+    step = step.split("- [ ] **Step 3:", 1)[0]
+    normalized = " ".join(step.lower().replace("`", "").split())
+    assert "build job runs on ubuntu-latest" in normalized
+    assert "uv version 0.10.9" in normalized
+    assert "uv run --frozen --group docs mkdocs build --strict" in normalized
+    assert "make docs-build" not in normalized

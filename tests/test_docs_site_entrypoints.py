@@ -1,7 +1,7 @@
 """Canonical documentation entry points (Task 3, issue #169 follow-on).
 
 Once the MkDocs site is deployed, `pyproject.toml` and the README's feature
-index should point readers at the hosted, versioned site
+index should point readers at the hosted site
 (`https://hellices.github.io/korvid/<slug>/`) rather than a GitHub blob link
 frozen to whatever commit happens to be on `main`. Links that are
 intentionally source-adjacent — the security-reporting pointer, the demo

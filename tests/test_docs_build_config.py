@@ -154,8 +154,11 @@ def test_getting_started_describes_the_all_extra_completely() -> None:
     all_extra = pyproject["project"]["optional-dependencies"]["all"]
     assert all_extra == ["korvid[agent,mcp,observability]"]
 
+    project_version = pyproject["project"]["version"]
+    needle = f"`korvid[all]=={project_version}`"
     getting_started = (ROOT / "docs" / "getting-started.md").read_text()
-    row = next(line for line in getting_started.splitlines() if "`korvid[all]==0.3.0`" in line)
+    row = next((line for line in getting_started.splitlines() if needle in line), None)
+    assert row is not None, f"getting-started.md must contain an install-table row for {needle}"
     for component in ("agent", "mcp", "observability"):
         assert component in row.lower(), (
             f"the `all` install row must name its {component} component"
