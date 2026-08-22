@@ -19,17 +19,20 @@ code.
 
 ## Verification
 
-Add a distribution contract test that builds both artifact types and inspects
-their member lists. The test must prove:
+Extend the release artifact validator, which runs immediately after the release
+workflow builds both artifact types, to inspect their member lists. Unit tests
+must prove the validator rejects artifacts containing `korvid/evals`. The
+validator must also prove:
 
 - neither artifact contains a path below `korvid/evals`;
 - the wheel still contains the production `korvid` package; and
 - the source distribution still contains the project metadata needed to build
   the wheel.
 
-Run the targeted contract test and lint the touched files. Building must use the
-repository's existing constrained build command so it does not rewrite
-`uv.lock` or resolve through an unintended package index.
+Run the targeted validator tests and lint the touched files. Then use the
+repository's existing constrained build command and run the validator against
+the resulting artifacts. This must not rewrite `uv.lock` or resolve through an
+unintended package index.
 
 ## Non-goals
 
