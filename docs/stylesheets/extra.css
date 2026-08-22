@@ -456,7 +456,10 @@
   border-radius: 999px;
 }
 
-.md-typeset .write-path__stages {
+/* Material ships `ol:not([hidden]) { display: flow-root; }`, so this rule
+   must target the ordered list element directly or the generic list default
+   wins and the guarded grid never reappears. */
+.md-typeset ol.write-path__stages {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0.75rem;
@@ -607,7 +610,7 @@
 }
 
 @media (max-width: 799px) {
-  .md-typeset .write-path__stages {
+  .md-typeset ol.write-path__stages {
     grid-template-columns: 1fr;
   }
 }

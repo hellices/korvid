@@ -440,6 +440,22 @@ def test_guarded_write_path_orders_confirmation_audit_and_execution() -> None:
     assert "fail-closed" in lowered
 
 
+def test_write_path_stage_grid_targets_the_ordered_list_specificity() -> None:
+    """Material's `ol:not([hidden]) { display: flow-root; }` must be out-spec'd.
+
+    The write-path stages are an ordered list, so the grid rule has to target
+    `ol.write-path__stages` directly in both the base rule and the narrow-width
+    fallback. If the selector were only `.write-path__stages`, Material's more
+    specific ordered-list default would keep control and the stage list would
+    stop behaving like a grid.
+    """
+    raw_css = _css()
+    css = _strip_css_comments(raw_css)
+    assert "ol:not([hidden]) { display: flow-root; }" in raw_css
+    assert css.count(".md-typeset ol.write-path__stages {") == 2
+    assert ".md-typeset .write-path__stages {" not in css
+
+
 def test_landing_keeps_agent_masking_distinct_from_mcp_disclosure() -> None:
     path = _section('<section class="write-path"', "</section>")
     lowered = " ".join(re.sub(r"<[^>]+>", " ", path).lower().split())
