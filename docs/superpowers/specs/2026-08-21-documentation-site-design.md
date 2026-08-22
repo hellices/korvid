@@ -134,8 +134,11 @@ A dedicated GitHub Pages workflow:
 - uses pinned GitHub Actions;
 - grants read-only permissions to the build job and Pages-specific permissions
   only to the deployment job;
-- uses GitHub's Pages environment and concurrency controls; and
-- never executes untrusted documentation code or needs a repository secret.
+- uses GitHub's Pages environment and concurrency controls;
+- executes pull-request-controlled dependencies, plugins, and templates only
+  on an ephemeral GitHub-hosted runner, isolating untrusted builds from
+  persistent infrastructure; and
+- needs no repository secret.
 
 Before the workflow can deploy for the first time, a repository admin must
 enable Pages once: **Settings -> Pages -> Build and deployment -> Source: GitHub Actions.**

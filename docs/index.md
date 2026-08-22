@@ -15,7 +15,7 @@ hide:
       <a class="md-button md-button--primary" href="getting-started/">Start flying</a>
       <a class="md-button" href="https://github.com/hellices/korvid">View on GitHub</a>
     </div>
-    <div class="install-command" tabindex="0" role="group" aria-label="Install korvid with Homebrew"><span class="install-command__prompt" aria-hidden="true">$</span><code>brew install hellices/korvid/korvid</code></div>
+    <div class="install-command" tabindex="0" role="group" aria-label="Install the current korvid release with uv"><span class="install-command__prompt" aria-hidden="true">$</span><code>uv tool install 'korvid[all]==0.3.0'</code></div>
   </div>
   <aside class="hero-panel" aria-label="korvid key legend">
     <div class="hero-panel__bar" aria-hidden="true">
@@ -61,8 +61,10 @@ triggered it directly, the embedded agent proposed it after reading the
 evidence, or an MCP client submitted a request when MCP is enabled. MCP
 write proposals are opt-in and never executed automatically. Whoever
 initiates it, the write converges on the same in-TUI confirmation and the
-same fail-closed audit path. Secret values are masked before model calls,
-and `--readonly` removes the write path entirely.
+same fail-closed audit path. Embedded-agent provider calls pass through
+credential-pattern masking. MCP
+results instead follow the per-tool disclosure boundaries documented for
+external clients and their models. `--readonly` removes the write path entirely.
 
 [Read the safety model](ops.md){ .md-button .korvid-button } [Inspect the threat model](threat-model.md){ .md-button .korvid-button }
 

@@ -32,15 +32,15 @@ uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'
 
 ### Homebrew (macOS and Linux)
 
-On macOS or Linux, the live Homebrew tap is the fastest path to the TUI and
-embedded agent and needs no system Python:
+The live Homebrew tap needs no system Python:
 
 ```sh
 brew install hellices/korvid/korvid
 ```
 
-The formula builds against Homebrew's Python and deliberately excludes the MCP
-HTTP server. Install with `uv` or `pipx` below if you need `korvid --mcp`.
+The tap currently packages **`0.2.0`**. For the current **`0.3.0`** release,
+use `uv tool` or `pipx` below. The formula builds against Homebrew's Python and
+deliberately excludes the MCP HTTP server.
 
 ### `uv tool` (recommended cross-platform)
 

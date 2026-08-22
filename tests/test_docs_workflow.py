@@ -361,3 +361,10 @@ def test_plan_reproduces_the_ephemeral_direct_docs_build() -> None:
     assert "uv version 0.10.9" in normalized
     assert "uv run --frozen --group docs mkdocs build --strict" in normalized
     assert "make docs-build" not in normalized
+
+
+def test_design_describes_ephemeral_isolation_for_untrusted_pr_builds() -> None:
+    design = " ".join(DESIGN_DOC.read_text().lower().split())
+    assert "ephemeral github-hosted runner" in design
+    assert "pull-request-controlled" in design
+    assert "never executes untrusted documentation code" not in design

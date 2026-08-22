@@ -148,6 +148,25 @@ def test_getting_started_cannot_call_homebrew_unpublished_when_readme_installs_i
         )
 
 
+def test_current_release_is_primary_when_the_homebrew_formula_lags() -> None:
+    """The site must not present an older tap formula as the current release."""
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    project_version = pyproject["project"]["version"]
+    index = (ROOT / "docs" / "index.md").read_text()
+    assert f"uv tool install 'korvid[all]=={project_version}'" in index
+
+    getting_started = (ROOT / "docs" / "getting-started.md").read_text()
+    section = getting_started.split("### Homebrew (macOS and Linux)", 1)[1]
+    section = section.split("\n### ", 1)[0]
+    normalized = " ".join(section.lower().replace("`", "").replace("*", "").split())
+    packaged = re.search(r"tap currently packages \**(\d+\.\d+\.\d+)\**", normalized)
+    assert packaged is not None, "the guide must state which release the external tap packages"
+    if packaged.group(1) != project_version:
+        assert f"current {project_version}" in normalized
+        assert "uv tool" in normalized
+        assert "pipx" in normalized
+
+
 def test_getting_started_describes_the_all_extra_completely() -> None:
     """The canonical install table must include every component in the `all` extra."""
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())

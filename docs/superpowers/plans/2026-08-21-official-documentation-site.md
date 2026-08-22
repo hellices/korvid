@@ -200,7 +200,7 @@ hide:
     <a class="md-button md-button--primary" href="getting-started/">Start flying</a>
     <a class="md-button" href="https://github.com/hellices/korvid">View on GitHub</a>
   </div>
-  <div class="install-command"><code>brew install hellices/korvid/korvid</code></div>
+  <div class="install-command"><code>uv tool install 'korvid[all]==0.3.0'</code></div>
 </section>
 
 <figure class="product-demo">
@@ -230,8 +230,10 @@ triggered it directly, the embedded agent proposed it after reading the
 evidence, or an MCP client submitted a request when MCP is enabled. MCP
 write proposals are opt-in and never executed automatically. Whoever
 initiates it, the write converges on the same in-TUI confirmation and the
-same fail-closed audit path. Secret values are masked before model calls,
-and `--readonly` removes the write path entirely.
+same fail-closed audit path. Embedded-agent provider calls pass through
+credential-pattern masking. MCP results instead follow the per-tool disclosure
+boundaries documented for external clients and their models. `--readonly`
+removes the write path entirely.
 
 [Read the safety model](ops.md){ .md-button .korvid-button } [Inspect the threat model](threat-model.md){ .md-button .korvid-button }
 
@@ -245,7 +247,7 @@ and `--readonly` removes the write path entirely.
 
 - [ ] **Step 2: Create the install guide**
 
-Create `docs/getting-started.md` with supported Python/OS requirements, Homebrew and `uv tool` install commands, the base/agent/MCP/all extras table, the first `korvid` invocation, a ten-key quick reference, and links to `tui.md`, `agent.md`, `mcp.md`, and `airgap.md`. State that the current published release is `0.3.0`, pin intentionally versioned install and upgrade commands to `0.3.0`, present the live `brew install hellices/korvid/korvid` route, and retain the Git fallback install command from README for readers wanting unreleased `main`.
+Create `docs/getting-started.md` with supported Python/OS requirements, Homebrew and `uv tool` install commands, the base/agent/MCP/all extras table, the first `korvid` invocation, a ten-key quick reference, and links to `tui.md`, `agent.md`, `mcp.md`, and `airgap.md`. State that the current published release is `0.3.0`, pin intentionally versioned install and upgrade commands to `0.3.0`, disclose that the live `brew install hellices/korvid/korvid` route still packages `0.2.0`, direct readers to `uv tool` or `pipx` for current `0.3.0`, and retain the Git fallback install command from README for readers wanting unreleased `main`.
 
 - [ ] **Step 3: Add the template, mark, and responsive visual system**
 

@@ -37,6 +37,7 @@ EXTRA_CSS = DOCS / "stylesheets" / "extra.css"
 OVERRIDES = DOCS / "overrides"
 COPYRIGHT_PARTIAL = OVERRIDES / "partials" / "copyright.html"
 MARK = DOCS / "assets" / "korvid-mark.svg"
+DEMO_README = DOCS / "demo" / "README.md"
 
 MATERIAL_ATTRIBUTION = "https://squidfunk.github.io/mkdocs-material/"
 
@@ -294,6 +295,17 @@ def test_product_demo_has_native_motion_controls() -> None:
     assert "demo.gif" not in demo, "an autoplaying GIF has no pause or stop control"
 
 
+def test_demo_regeneration_updates_both_readme_and_site_formats() -> None:
+    """One canonical recording must refresh the README GIF and site MP4 together."""
+    instructions = DEMO_README.read_text()
+    assert "vhs docs/demo/demo.tape" in instructions
+    assert "ffmpeg" in instructions
+    assert "docs/assets/demo.gif" in instructions
+    assert "docs/assets/demo.mp4" in instructions
+    assert "-movflags +faststart" in instructions
+    assert "yuv420p" in instructions
+
+
 # --- the whole page stays original, asset-light, and script-free -------------
 
 
@@ -452,6 +464,25 @@ def test_safety_section_converges_every_actor_on_one_write_path() -> None:
     assert "when mcp is enabled" in lowered or "opt-in" in lowered, (
         "the landing page must not imply the optional MCP server is always enabled"
     )
+    assert "embedded-agent provider" in lowered
+    assert "mask" in lowered, "credential-pattern masking applies to embedded provider calls"
+    assert "mcp" in lowered
+    assert "disclosure" in lowered, "MCP results follow a separate per-tool disclosure boundary"
+    assert "secret values are masked before model calls" not in lowered, (
+        "that unqualified claim incorrectly includes MCP client models"
+    )
+
+
+def test_plan_preserves_the_mcp_disclosure_boundary() -> None:
+    plan = (
+        ROOT / "docs" / "superpowers" / "plans" / "2026-08-21-official-documentation-site.md"
+    ).read_text()
+    lowered = plan.lower()
+    assert "embedded-agent provider" in lowered
+    assert "mask" in lowered
+    assert "mcp" in lowered
+    assert "disclosure" in lowered
+    assert "secret values are masked before model calls" not in lowered
 
 
 def test_landing_never_claims_the_surfaces_look_the_same() -> None:
