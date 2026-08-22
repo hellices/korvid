@@ -83,8 +83,9 @@ counter, the pane display mode (`""`/`l`/`L`/`p`), and which workspace pane
 owns the pane — together with the workflows that drive them: the `l`/`L`
 open/toggle actions, the live and previous-log stream lifecycles with the
 reconnect policy, and the display actions (`f`/`w`/`t`/`Ctrl-S`/`p`/`n`/`N`).
-`KorvidApp` keeps only the Textual `action_*`/`agent_open_logs` entry points
-as one-line delegates.
+`KorvidApp` keeps only the Textual `action_*` entry points as one-line
+delegates. Agent-originated log opens enter through
+`AgentUiController.agent_open_logs`.
 
 It differs from the shape above in two deliberate ways:
 
@@ -109,10 +110,11 @@ It differs from the shape above in two deliberate ways:
   takes `UiSurface` only for `notify`; approvals never apply because log
   streaming is a read.
 
-`agent_open_logs` stays on the app: it owns the agent-priority checks (screen
+`AgentUiController.agent_open_logs` owns the agent-priority checks (screen
 stack, approval dialog) and the stale-generation guards that read
-`LogController.pane_gen` around `cancel_tasks`, then calls `open_agent_logs`
-once those clear.
+`LogController.pane_gen` around `cancel_tasks`, then invokes the injected
+`LogController.open_agent_logs` once those checks clear. The app is not part of
+this controller-to-controller flow.
 
 ### WorkspaceState owns the split-workspace state
 
