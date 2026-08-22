@@ -177,6 +177,20 @@ _CLAIM_REPLACEMENT = re.compile(
     r"^(?:correction|wait|actually|rather|i was wrong|finally|later|subsequently|eventually)\b"
 )
 _STANDALONE_NEGATIVE = re.compile(r"^no(?:$|,\s*(?:it|that|this)\b)")
+_INTERROGATIVE_CLAUSE = re.compile(
+    r"^(?:am|is|are|was|were|do|does|did|can|could|should|would|will|"
+    r"has|have|had|what|when|where|which|why|how|who)\b"
+)
+_TRAILING_INTERROGATIVE = re.compile(
+    r"(?:,\s*|\s+(?:(?:and|but|so|or)\s+)?)"
+    r"(?:am\s+i|(?:is|was|does|did|can|could|should|would|will|has|had)\s+"
+    r"(?:it|this|that)|(?:are|were|do|have)\s+(?:they|we|you))\b"
+)
+_BARE_TRAILING_INTERROGATIVE = re.compile(
+    r"\s+(?:am|is|are|was|were|do|does|did|can|could|should|would|will|has|have|had)"
+    r"\s+(?:the|a|an|it|this|that|they|we|you)\b"
+)
+_BARE_WH_INTERROGATIVE = re.compile(r"\s+(?:what|when|where|which|why|how|who)\s+\w")
 
 #: Sentence terminators plus the contrast conjunctions and the colon that
 #: introduce a new claim. A negator on one side must not reach the other.
@@ -217,9 +231,56 @@ _NEGATOR_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_word(word) for word in _
 _UNCERTAIN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_word(word) for word in _UNCERTAIN)
 
 
+def _interrogative_start(text: str) -> re.Match[str] | None:
+    marked = _TRAILING_INTERROGATIVE.search(text) or _INTERROGATIVE_CLAUSE.search(text)
+    if marked is not None:
+        return marked
+    for bare in (
+        _BARE_TRAILING_INTERROGATIVE.search(text),
+        _BARE_WH_INTERROGATIVE.search(text),
+    ):
+        if bare is None:
+            continue
+        prefix = text[: bare.start()]
+        if bare.re is _BARE_WH_INTERROGATIVE and prefix.rstrip().endswith(","):
+            continue
+        if any(
+            pattern.search(prefix)
+            for patterns in _PHRASE_PATTERNS.values()
+            for _, pattern in patterns
+        ):
+            return bare
+    return None
+
+
+def _without_questions(text: str) -> str:
+    kept: list[str] = []
+    remaining = text
+    while "?" in remaining:
+        before, _separator, remaining = remaining.partition("?")
+        boundary = max(before.rfind(mark) for mark in ".;:!\n")
+        head = before[: boundary + 1]
+        question = before[boundary + 1 :]
+        interrogative = _interrogative_start(question)
+        if interrogative is not None and interrogative.start() > 0:
+            head = f"{head} {question[: interrogative.start()].rstrip(', ')}."
+        kept.append(head)
+    kept.append(remaining)
+    return " ".join(kept)
+
+
 def _clauses(answer: str) -> tuple[str, ...]:
     lowered = " ".join(answer.translate(_APOSTROPHE_TRANSLATION).lower().split())
-    return tuple(part.strip() for part in _CLAUSE_SPLIT.split(lowered) if part.strip())
+    lowered = _without_questions(lowered)
+    clauses: list[str] = []
+    for raw in _CLAUSE_SPLIT.split(lowered):
+        part = raw.strip()
+        interrogative = _interrogative_start(part)
+        if interrogative is not None:
+            part = part[: interrogative.start()].rstrip(", ")
+        if part and not _INTERROGATIVE_CLAUSE.search(part):
+            clauses.append(part)
+    return tuple(clauses)
 
 
 def _negated_before(clause: str, start: int, lower_bound: int) -> bool:

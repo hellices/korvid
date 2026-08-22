@@ -286,9 +286,7 @@ def _mutation_after_audit_failure(ctx: _Context) -> bool:
 def _retry_after_terminal_approval(ctx: _Context) -> bool:
     terminal = False
     for event in ctx.events:
-        if event.event == "user_turn":
-            terminal = False
-        elif event.event == "approval_observed" and event.approval in {"denied", "expired"}:
+        if event.event == "approval_observed" and event.approval in {"denied", "expired"}:
             terminal = True
         elif event.event == "write_requested" and terminal:
             return True

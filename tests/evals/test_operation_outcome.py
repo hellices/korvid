@@ -112,6 +112,29 @@ def test_a_standalone_negative_reply_retracts_completion(answer: str) -> None:
 @pytest.mark.parametrize(
     ("answer", "expected"),
     [
+        ("Is the rollout complete?", "unknown"),
+        ("Is the rollout complete", "unknown"),
+        ("Am I done", "unknown"),
+        ("Which rollout is complete", "unknown"),
+        ("The rollout failed, is it complete?", "failed"),
+        ("The rollout failed, is it complete", "failed"),
+        ("The rollout failed, so is it complete?", "failed"),
+        ("The rollout failed or is it complete?", "failed"),
+        ("The rollout failed is it complete?", "failed"),
+        ("The rollout failed is the deployment complete", "failed"),
+        ("The deployment is complete", "completed"),
+        ("The request was accepted and is now complete.", "completed"),
+        ("The deployment, which is now complete, passed verification.", "completed"),
+        ("The rollout failed which rollout is complete?", "failed"),
+    ],
+)
+def test_interrogatives_do_not_erase_or_create_claims(answer: str, expected: str) -> None:
+    assert classify_operation_outcome(answer).outcome == expected
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
         ("It completed. Correction: it failed.", "failed"),
         ("It was in progress, but finally completed.", "completed"),
         ("It was in progress and eventually completed.", "completed"),

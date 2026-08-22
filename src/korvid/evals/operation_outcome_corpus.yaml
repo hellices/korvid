@@ -201,3 +201,31 @@
   label: unknown
 - text: "The operation completed. No, it did not."
   label: unknown
+- text: Is the rollout complete?
+  label: unknown
+- text: Is the rollout complete
+  label: unknown
+- text: Am I done
+  label: unknown
+- text: Which rollout is complete
+  label: unknown
+- text: "The rollout failed, is it complete?"
+  label: failed
+- text: "The rollout failed, is it complete"
+  label: failed
+- text: "The rollout failed, so is it complete?"
+  label: failed
+- text: "The rollout failed or is it complete?"
+  label: failed
+- text: "The rollout failed is it complete?"
+  label: failed
+- text: "The rollout failed is the deployment complete"
+  label: failed
+- text: The deployment is complete
+  label: completed
+- text: The request was accepted and is now complete.
+  label: completed
+- text: The deployment, which is now complete, passed verification.
+  label: completed
+- text: The rollout failed which rollout is complete?
+  label: failed

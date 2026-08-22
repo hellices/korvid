@@ -276,13 +276,8 @@ def approval_from_result(result: str) -> str:
     return "error"
 
 
-def _mutation_finished_in_current_turn(journal: ActionJournal) -> bool:
-    for event in reversed(journal.events):
-        if event.event == "user_turn":
-            return False
-        if event.event == "mutation_finished":
-            return True
-    return False
+def _mutation_pending_verification(journal: ActionJournal) -> bool:
+    return journal.count("mutation_finished") > journal.count("postcondition_read")
 
 
 def _read_document(text: str) -> dict[str, Any] | None:
@@ -414,6 +409,7 @@ class _JournalingExecutor(RecordedExecution):
         request_target = (
             _write_request_target(self._journey, arguments) if effect == "cluster_write" else None
         )
+        dialogs_before = self._journal.count("approval_observed")
         self.tool_calls += 1
         self._journal.append(
             event="tool_call",
@@ -434,12 +430,20 @@ class _JournalingExecutor(RecordedExecution):
             )
         outcome = await self._executor.execute_recorded(name, arguments)
         if effect == "cluster_write":
+            approval = approval_from_result(outcome.text)
+            new_approvals = [
+                event for event in self._journal.events if event.event == "approval_observed"
+            ][dialogs_before:]
+            if approval == "approved" and not any(
+                event.approval == "approved" for event in new_approvals
+            ):
+                approval = "error"
             self._journal.append(
                 event="approval_reported",
                 actor="model_tool",
                 action=name,
                 target=request_target,
-                approval=approval_from_result(outcome.text),
+                approval=approval,
                 result="reported",
                 detail=summarize_untrusted(tool=name, chars=len(outcome.text)),
             )
@@ -481,7 +485,7 @@ class _JournalingExecutor(RecordedExecution):
                 detail=summarize_untrusted(tool=name, reason="not_a_target_document"),
             )
             return
-        after = _mutation_finished_in_current_turn(self._journal)
+        after = _mutation_pending_verification(self._journal)
         assertions = self._journey.postconditions if after else self._journey.preconditions
         shows = _shows_state(document, assertions)
         checkpoint = "postcondition_read" if after else "precondition_read"
@@ -825,8 +829,8 @@ def _select_neutral_row(app: KorvidApp, journey: OperationJourney, journal: Acti
 
     `operation.initial_selection: neutral` means "start from a truthful
     distractor row and let the scripted clarification reveal the target."
-    The loader guarantees such a distractor exists; if that contract ever
-    drifts, fail with the fixture id rather than timing out under `until`.
+    The loader guarantees such a distractor exists; rows still arrive one
+    at a time, so keep polling until the distractor has been seeded.
     """
     table = app.query_one(ResourceTable)
     if not table.ordered_rows:
@@ -844,10 +848,7 @@ def _select_neutral_row(app: KorvidApp, journey: OperationJourney, journal: Acti
             detail=summarize_untrusted(row_key=key),
         )
         return True
-    raise AssertionError(
-        f"{journey.id}: initial_selection=neutral loaded without a distractor row; "
-        "schema validation should have rejected this fixture"
-    )
+    return False
 
 
 def _turn_ended(journal: ActionJournal, completed: int) -> Callable[[], bool]:
@@ -1211,7 +1212,7 @@ async def run_operation_journey(
                 await until(
                     pilot,
                     lambda: _select_neutral_row(app, journey, journal),
-                    label="ambiguity journey neutral row selected",
+                    label=f"{journey.id} neutral distractor row selected",
                 )
             else:
                 await app.agent_navigate(journey.target.plural, journey.target.namespace)

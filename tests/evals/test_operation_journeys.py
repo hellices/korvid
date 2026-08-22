@@ -12,6 +12,7 @@ import os
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -24,7 +25,7 @@ from korvid.evals.operation_state import (
     StatefulFakeWriteOps,
 )
 from korvid.evals.scripted import ScriptedProvider
-from korvid.tools.executor import RecordedExecution
+from korvid.tools.executor import RecordedExecution, ToolOutcome
 from korvid.tools.structured import dump_yaml
 
 from . import operation_app
@@ -331,6 +332,7 @@ async def test_a_new_turn_read_after_a_completed_mutation_is_a_precondition() ->
         target=JournalTarget.of(journey.target),
         result="success",
     )
+    journal.append(event="postcondition_read", actor="model_tool", credit=True)
     journal.append(event="user_turn", actor="fixture_actor")
     executor = _JournalingExecutor(
         RawExecutor(),
@@ -343,6 +345,99 @@ async def test_a_new_turn_read_after_a_completed_mutation_is_a_precondition() ->
         {"kind": "deployments", "name": "checkout-a", "namespace": "shop-a"},
     )
     assert journal.events[-1].event == "precondition_read"
+
+
+async def test_an_unverified_mutation_is_verified_in_a_later_turn() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+    raw = dump_yaml(journey.cluster.objects[0])
+
+    class RawExecutor(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return raw
+
+    journal = ActionJournal()
+    journal.append(event="user_turn", actor="fixture_actor")
+    journal.append(
+        event="mutation_finished",
+        actor="write_ops",
+        action="scale",
+        target=JournalTarget.of(journey.target),
+        result="success",
+    )
+    journal.append(event="user_turn", actor="fixture_actor")
+    executor = _JournalingExecutor(RawExecutor(), journal, journey, max_result_chars=3_000)
+    await executor.execute_recorded(
+        "get_resource",
+        {"kind": "deployments", "name": "checkout-a", "namespace": "shop-a"},
+    )
+    assert journal.events[-1].event == "postcondition_read"
+
+
+def test_neutral_row_selection_waits_for_the_distractor_to_arrive() -> None:
+    journey = _JOURNEYS["scale-ambiguous-namespace"]
+    target_key = f"{journey.target.namespace}/{journey.target.name}"
+    table = SimpleNamespace(
+        ordered_rows=[SimpleNamespace(key=SimpleNamespace(value=target_key))],
+        move_cursor=lambda **_kwargs: None,
+    )
+    app = SimpleNamespace(query_one=lambda _widget: table)
+    assert operation_app._select_neutral_row(cast(Any, app), journey, ActionJournal()) is False
+
+
+async def test_approved_error_without_a_dialog_is_not_reported_as_approved() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+
+    class RawExecutor(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ERROR: scale deployments.apps/checkout-a failed: conflict"
+
+        async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            return ToolOutcome(text=await self.execute(name, arguments), error=True)
+
+    journal = ActionJournal()
+    executor = _JournalingExecutor(RawExecutor(), journal, journey, max_result_chars=3_000)
+    await executor.execute_recorded(
+        "scale_resource",
+        {
+            "kind": "deployments",
+            "name": journey.target.name,
+            "namespace": journey.target.namespace,
+            "replicas": 3,
+        },
+    )
+    reported = next(event for event in journal.events if event.event == "approval_reported")
+    assert reported.approval == "error"
+
+
+async def test_approved_error_after_a_denied_dialog_is_not_reported_as_approved() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+    journal = ActionJournal()
+
+    class RawExecutor(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            journal.append(
+                event="approval_observed",
+                actor="approval_driver",
+                approval="denied",
+                result="keystroke",
+            )
+            return "ERROR: scale deployments.apps/checkout-a failed: conflict"
+
+        async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            return ToolOutcome(text=await self.execute(name, arguments), error=True)
+
+    executor = _JournalingExecutor(RawExecutor(), journal, journey, max_result_chars=3_000)
+    await executor.execute_recorded(
+        "scale_resource",
+        {
+            "kind": "deployments",
+            "name": journey.target.name,
+            "namespace": journey.target.namespace,
+            "replicas": 3,
+        },
+    )
+    reported = next(event for event in journal.events if event.event == "approval_reported")
+    assert reported.approval == "error"
 
 
 @pytest.mark.parametrize("journey_id", CORE_GATE_JOURNEYS)
