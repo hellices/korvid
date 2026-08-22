@@ -105,8 +105,13 @@ def _rule(css: str, selector: str) -> str:
 
 def _section(opening: str, closing: str) -> str:
     source = _index()
-    start = source.index(opening)
-    return source[start : source.index(closing, start) + len(closing)]
+    start = source.find(opening)
+    assert start != -1, f"missing opening marker: {opening!r}"
+    end = source.find(closing, start)
+    assert end != -1, (
+        f"missing closing marker: {closing!r} after opening marker {opening!r}"
+    )
+    return source[start : end + len(closing)]
 
 
 # --- 1. the install command never breaks mid-token ---------------------------
@@ -240,6 +245,9 @@ def test_hero_media_is_controllable_and_has_a_text_fallback() -> None:
     video = re.search(r"<video\b[^>]*>", hero)
     assert video is not None
     opening = video.group(0)
+    assert "aria-label=" in opening or "aria-labelledby=" in opening, (
+        "the hero video must have an accessible name"
+    )
     for attribute in ("controls", "muted", "loop", "playsinline"):
         assert re.search(rf"\b{attribute}\b", opening)
     assert 'preload="metadata"' in opening
