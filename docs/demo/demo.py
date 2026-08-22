@@ -7,23 +7,40 @@ regenerate ``docs/assets/demo.gif``.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import random
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from korvid.agent.events import (
+    AgentEvent,
+    TextDelta,
+    ToolCallFinished,
+    ToolCallStarted,
+    TurnComplete,
+)
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.k8s.relationship_facts import (
+    FactConfidence,
+    ReferenceFact,
+    RelationKind,
+    RelationshipFacts,
+    TargetReference,
+)
 from korvid.ui.app import EventsFetcher, KorvidApp
+from korvid.ui.messages import AgentPromptSubmitted
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
 _SVC_META = ResourceMeta("Service", "services", "", "v1", True, ("svc",))
+_CONFIGMAP_META = ResourceMeta("ConfigMap", "configmaps", "", "v1", True, ("cm",))
 
 ALIASES: dict[str, ResourceMeta] = {
     "pods": _PODS_META,
@@ -36,6 +53,8 @@ ALIASES: dict[str, ResourceMeta] = {
     "service": _SVC_META,
     "svc": _SVC_META,
 }
+for alias in ("configmaps", "configmap", "cm"):
+    ALIASES[alias] = _CONFIGMAP_META
 
 
 def _pod(
@@ -48,6 +67,9 @@ def _pod(
     qos: str = "Burstable",
     cpu: str = "100m",
     mem: str = "128Mi",
+    *,
+    uid: str = "",
+    relationships: RelationshipFacts | None = None,
 ) -> PodSummary:
     return PodSummary(
         name=name,
@@ -60,7 +82,26 @@ def _pod(
         cpu_request=cpu,
         mem_request=mem,
         containers=("app",),
+        uid=uid,
+        relationships=relationships or RelationshipFacts(),
     )
+
+
+_PAYMENT_RELATIONSHIPS = RelationshipFacts(
+    references=(
+        ReferenceFact(
+            relation=RelationKind.USES_CONFIG,
+            target=TargetReference(
+                group="",
+                kind="ConfigMap",
+                namespace="shop",
+                name="payment-config",
+            ),
+            confidence=FactConfidence.DECLARED,
+            field="spec.volumes[0].configMap.name",
+        ),
+    ),
+)
 
 
 PODS = [
@@ -75,6 +116,8 @@ PODS = [
         ready="0/1",
         restarts=17,
         node="node-2",
+        uid="pod-payment",
+        relationships=_PAYMENT_RELATIONSHIPS,
     ),
     _pod("checkout-svc-84c5d6-ln7wk", "shop", restarts=2),
     _pod("inventory-db-0", "shop", qos="Guaranteed", cpu="500m", mem="1Gi", node="node-3"),
@@ -115,6 +158,15 @@ EXTRA: dict[str, list[Summary]] = {
         _svc("checkout-svc", "shop", 33),
         _svc("grafana", "monitoring", 90),
         _svc("prometheus", "monitoring", 90),
+    ],
+    "configmaps": [
+        GenericSummary(
+            name="payment-config",
+            namespace="shop",
+            kind="ConfigMap",
+            created="",
+            uid="cm-payment",
+        )
     ],
 }
 
@@ -291,9 +343,85 @@ async def stream_logs(
         yield LogLine(pod=pod, container=container, text=text, timestamp=datetime.now(UTC))
 
 
+class ScriptedAgentRuntime:
+    """Deterministic real AgentPanel input for documentation captures."""
+
+    def __init__(self) -> None:
+        self.total_tokens = (0, 0)
+        self.usage_estimated = False
+
+    async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
+        del user_text, screen_context
+        yield ToolCallStarted(
+            call_id="demo-diagnose",
+            name="diagnose_pod",
+            arguments='{"namespace":"shop","name":"payment-worker-6c9f7d-b3xnq"}',
+        )
+        await asyncio.sleep(0.8)
+        yield ToolCallFinished(
+            call_id="demo-diagnose",
+            name="diagnose_pod",
+            ok=True,
+            summary="CrashLoopBackOff · 17 restarts · gateway 503 evidence [E1]",
+        )
+        await asyncio.sleep(0.5)
+        yield TextDelta(
+            text=(
+                "The payment worker is crash-looping after repeated gateway 503s. "
+                "Open its logs and inspect the owner before changing it. [E1]"
+            )
+        )
+        yield TurnComplete(
+            input_tokens=612,
+            output_tokens=43,
+            estimated=False,
+            cited=("E1",),
+        )
+
+
+class DemoKorvidApp(KorvidApp):
+    """KorvidApp with documentation-only scene choreography."""
+
+    def __init__(self, *args: Any, demo_scene: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._demo_scene = demo_scene
+
+    async def on_mount(self) -> None:
+        await super().on_mount()
+        if self._demo_scene == "agent":
+            self.set_timer(0.2, self.action_toggle_agent)
+            self.set_timer(7.2, self._submit_agent_scene_prompt)
+
+    def _submit_agent_scene_prompt(self) -> None:
+        if not self._agent_panel_expanded():
+            self.action_toggle_agent()
+        self.on_agent_prompt_submitted(AgentPromptSubmitted("Why is the payment worker failing?"))
+
+
+async def list_relationship_objects(
+    meta: ResourceMeta,
+    namespace: str | None,
+) -> list[Any]:
+    rows: list[Any] = list(PODS) if meta.plural == "pods" else list(EXTRA.get(meta.plural, []))
+    if namespace is None:
+        return rows
+    return [row for row in rows if row.namespace == namespace]
+
+
+def _parse_scene() -> str:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--scene",
+        choices=("base", "agent", "relationships"),
+        default="base",
+    )
+    return str(parser.parse_args().scene)
+
+
 def main() -> None:
+    scene = _parse_scene()
     store = ResourceStore()
-    app = KorvidApp(
+    app = DemoKorvidApp(
         config=KorvidConfig(namespace="shop"),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -302,6 +430,10 @@ def main() -> None:
         get_manifest=get_manifest,
         get_events=DemoEvents(),
         stream_logs=stream_logs,
+        agent_runtime=ScriptedAgentRuntime() if scene == "agent" else None,
+        agent_model_name="korvid-demo" if scene == "agent" else None,
+        list_relationship_objects=(list_relationship_objects if scene == "relationships" else None),
+        demo_scene=scene,
     )
     app.run()
 
