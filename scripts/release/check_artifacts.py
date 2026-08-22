@@ -173,8 +173,16 @@ def _validate_contents(
     *,
     required_suffix: tuple[str, ...],
 ) -> None:
-    forbidden = ("korvid", "evals")
-    offender = next((name for name in members if _has_contiguous_parts(name, forbidden)), None)
+    forbidden_patterns = [("korvid", "evals"), ("tests", "evals")]
+    offender = next(
+        (
+            name
+            for name in members
+            for forbidden in forbidden_patterns
+            if _has_contiguous_parts(name, forbidden)
+        ),
+        None,
+    )
     if offender is not None:
         raise ValueError(
             f"{artifact.name}: contains development-only evaluation harness: {offender}"

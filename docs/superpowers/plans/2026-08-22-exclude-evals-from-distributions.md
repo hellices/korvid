@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Exclude `src/korvid/evals` from Korvid wheels and source distributions while keeping the harness usable from a source checkout.
+**Goal:** Exclude `src/korvid/evals` and `tests/evals` from Korvid wheels and source distributions while keeping the harness usable from a source checkout.
 
 **Architecture:** Configure Hatch's shared file-selection layer so the rule applies to both artifact targets. Extend the existing release artifact validator to fail closed if a future packaging change reintroduces the harness, and unit-test that contract with synthetic wheel and sdist archives.
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Neither the wheel nor the source distribution may contain `korvid/evals`.
+- Neither the wheel nor the source distribution may contain `korvid/evals` or `tests/evals`.
 - The source tree and development evaluation workflow remain unchanged.
 - The wheel must retain the production `korvid` package.
 - The source distribution must retain `pyproject.toml`.
@@ -88,6 +88,12 @@ Add a parameterized regression that exercises both artifact types:
             "korvid-1.2.3.tar.gz",
             id="sdist",
         ),
+        pytest.param(
+            (),
+            ("korvid-1.2.3/tests/evals/test_operation.py",),
+            "korvid-1.2.3.tar.gz",
+            id="sdist-tests-evals",
+        ),
     ],
 )
 def test_artifacts_reject_the_evaluation_harness(
@@ -145,8 +151,16 @@ def _validate_contents(
     *,
     required_suffix: tuple[str, ...],
 ) -> None:
-    forbidden = ("korvid", "evals")
-    offender = next((name for name in members if _has_contiguous_parts(name, forbidden)), None)
+    forbidden_patterns = [("korvid", "evals"), ("tests", "evals")]
+    offender = next(
+        (
+            name
+            for name in members
+            for forbidden in forbidden_patterns
+            if _has_contiguous_parts(name, forbidden)
+        ),
+        None,
+    )
     if offender is not None:
         raise ValueError(
             f"{artifact.name}: contains development-only evaluation harness: {offender}"
@@ -175,7 +189,7 @@ Add the shared Hatch exclusion before the wheel target in `pyproject.toml`:
 
 ```toml
 [tool.hatch.build]
-exclude = ["/src/korvid/evals"]
+exclude = ["/src/korvid/evals", "/tests/evals"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/korvid"]

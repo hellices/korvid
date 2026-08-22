@@ -4,13 +4,19 @@
 
 Keep Korvid's evaluation harness available to contributors from a source
 checkout while excluding it from artifacts installed by end users. Neither the
-wheel nor the source distribution may contain `korvid/evals`.
+wheel nor the source distribution may contain `korvid/evals` or `tests/evals`.
 
 ## Design
 
-Add a Hatch build exclusion for the complete `src/korvid/evals` subtree. Apply
-the exclusion at the shared build level so it covers both wheel and source
-distribution targets without duplicating configuration.
+Add Hatch build exclusions for both the `src/korvid/evals` subtree and the
+`tests/evals` subtree. Apply the exclusions at the shared build level so they
+cover both wheel and source distribution targets without duplicating
+configuration:
+
+```toml
+[tool.hatch.build]
+exclude = ["/src/korvid/evals", "/tests/evals"]
+```
 
 The source tree and development workflow remain unchanged. Contributors can
 continue importing and running the evaluation harness from a checkout, while
@@ -21,10 +27,11 @@ code.
 
 Extend the release artifact validator, which runs immediately after the release
 workflow builds both artifact types, to inspect their member lists. Unit tests
-must prove the validator rejects artifacts containing `korvid/evals`. The
-validator must also prove:
+must prove the validator rejects artifacts containing `korvid/evals` or
+`tests/evals`. The validator checks two forbidden contiguous path patterns:
+`("korvid", "evals")` and `("tests", "evals")`. The validator must also prove:
 
-- neither artifact contains a path below `korvid/evals`;
+- neither artifact contains a path below `korvid/evals` or `tests/evals`;
 - the wheel still contains the production `korvid` package; and
 - the source distribution still contains the project metadata needed to build
   the wheel.
