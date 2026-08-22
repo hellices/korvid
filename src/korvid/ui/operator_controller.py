@@ -33,6 +33,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import manifest_uid
 from korvid.k8s.olm import (
     OPERATORS_GROUP,
+    PACKAGES_GROUP,
     PackageInstallFacts,
     build_subscription,
     package_install_facts,
@@ -81,6 +82,7 @@ class OperatorController:
         confirm_screen: Callable[..., Any],
         uid_intact_after_fetch: Callable[..., bool],
         precheck_keybinding_write: Callable[..., Any],
+        write_target: Callable[[], tuple[ResourceMeta, str | None, str, str | None] | None],
     ) -> None:
         self._gate = gate
         self._view = view
@@ -90,6 +92,30 @@ class OperatorController:
         self._confirm_screen = confirm_screen
         self._uid_intact_after_fetch = uid_intact_after_fetch
         self._precheck_keybinding_write = precheck_keybinding_write
+        self._write_target = write_target
+
+    async def install_selected(self) -> None:
+        """`I`: on the operator catalog, install the selected package (wizard,
+        then approval with the full Subscription manifest); on InstallPlans,
+        approve a pending manual plan. Everything offered comes from the
+        cluster's own catalog objects - no hardcoded operator knowledge."""
+        if self._write_ops() is None:
+            self._ui.notify("Install unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name, uid = target
+        if (meta.group, meta.plural) == (PACKAGES_GROUP, "packagemanifests"):
+            await self.install(meta, ns, name, uid)
+        elif (meta.group, meta.plural) == (OPERATORS_GROUP, "installplans"):
+            await self.approve_plan(meta, ns, name, uid)
+        else:
+            self._ui.notify(
+                f"Install/Approve does not apply to {self._view.gvr_label(meta)}"
+                " (use it on packagemanifests or installplans)",
+                severity="warning",
+            )
 
     async def install(
         self, pkg_meta: ResourceMeta, ns: str | None, name: str, uid: str | None
@@ -333,6 +359,29 @@ class OperatorController:
                 return key
         return None
 
+    def explain_missing_catalog(self) -> bool:
+        """Explain an undiscovered operator catalog; True when it did.
+
+        `:operators` only exists where OLM serves PackageManifests. When the
+        alias is genuinely absent, saying so beats a generic unknown-kind
+        error - but only then: a syntax error on a *discovered* view
+        (`:operators ns extra`) must fall through to the normal
+        unknown-command report, which is what the False return means.
+
+        "Not discovered" and not "absent": background discovery may still be
+        running, or may have failed (pods-only fallback) - states this cannot
+        tell apart.
+        """
+        if "operators" in self._view.aliases():
+            return False
+        self._ui.notify(
+            "The operator catalog is unavailable: the"
+            " packages.operators.coreos.com API group was not discovered"
+            " (OLM may be absent, or discovery may still be running)",
+            severity="warning",
+        )
+        return True
+
     async def uninstall(
         self,
         sub_meta: ResourceMeta,
@@ -509,6 +558,11 @@ class OperatorController:
         confirmation callback hands the result to `run_worker`, which starts
         it a loop iteration later - and a `:ctx` queued in that gap has to
         see the write already in flight (issue #36).
+
+        This reservation covers only the span *before* the perimeter takes
+        its own: the worker hand-off and the staleness re-fetch. It is
+        released at the point `WriteGate.run` reserves the mutation, so the
+        two never overlap - see `_apply_uninstall_locked`.
         """
         release = self._gate.reserve_write()
 
@@ -524,6 +578,7 @@ class OperatorController:
                     csv_meta=csv_meta,
                     csv_name=csv_name,
                     csv_uid=csv_uid,
+                    release=release,
                 )
             finally:
                 release()
@@ -549,8 +604,20 @@ class OperatorController:
         csv_meta: ResourceMeta | None,
         csv_name: str,
         csv_uid: str | None,
+        release: Callable[[], None],
     ) -> None:
-        """The uninstall itself, with the in-flight reservation already held."""
+        """The uninstall itself, holding the pre-mutation reservation until
+        the perimeter takes its own.
+
+        `release` ends the reservation `_operator_apply_uninstall` took for
+        the worker hand-off and the staleness re-fetch. It is called
+        *after* `WriteGate.run` has built its coroutine - `run` reserves
+        synchronously, and so does this release, so no event-loop iteration
+        (and therefore no `:ctx` switch) fits between the two. The exclusion
+        is continuous, and the in-flight count during the mutation is
+        exactly one: holding both would make the uninstall the only write in
+        korvid that reserves twice, with two independent releases to leak.
+        """
         if await self._subscription_target_stale(fetch_kind, ns, name, uid, csv_name):
             self._ui.notify(
                 f"uninstall {name} aborted: the subscription changed while"
@@ -558,7 +625,7 @@ class OperatorController:
                 severity="warning",
             )
             return
-        outcome = await self._gate.run(
+        write = self._gate.run(
             "uninstall",
             sub_meta,
             ns,
@@ -566,6 +633,12 @@ class OperatorController:
             lambda: ops.delete_object(sub_meta, ns, name, uid=uid),
             detail=f"csv={csv_name or '-'}",
         )
+        # Hand-off, not overlap: `run` above reserved the mutation
+        # synchronously and this release is synchronous too. Never insert an
+        # `await` between these two statements - a `:ctx` switch could then
+        # slip into the gap and find no write in flight.
+        release()
+        outcome = await write
         if outcome != "done" or csv_meta is None or not csv_name:
             return
         await self._gate.run(

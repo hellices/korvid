@@ -185,7 +185,7 @@ async def test_drill_to_pods_and_breadcrumb() -> None:
             lambda: (
                 app.current_kind == "deployments"
                 and _row_names(table) == ["api", "web"]
-                and app._cursor_row_key() == "default/api"
+                and app._inspect_surface.cursor_row_key() == "default/api"
             ),
             label="deployments rendered",
         )
@@ -196,7 +196,7 @@ async def test_drill_to_pods_and_breadcrumb() -> None:
             lambda: (
                 app.current_kind == "replicasets"
                 and _row_names(table) == ["web-6d9f88", "web-5c4e77"]
-                and app._cursor_row_key() == "default/web-6d9f88"
+                and app._inspect_surface.cursor_row_key() == "default/web-6d9f88"
             ),
             label="replicasets drilled",
         )
@@ -206,7 +206,7 @@ async def test_drill_to_pods_and_breadcrumb() -> None:
             lambda: (
                 app.current_kind == "pods"
                 and _row_names(table) == ["web-6d9f88-aaa"]
-                and app._cursor_row_key() == "default/web-6d9f88-aaa"
+                and app._inspect_surface.cursor_row_key() == "default/web-6d9f88-aaa"
                 and "deployments/web" in _status_text(app)
                 and "replicasets/web-6d9f88" in _status_text(app)
             ),
@@ -371,7 +371,7 @@ async def test_agent_drill_down_from_deployments_view() -> None:
             lambda: app.current_kind == "deployments" and table.row_count == 2,
             label="deployments rendered",
         )
-        out = await app.agent_drill_down("web")
+        out = await app._agent_ui.agent_drill_down("web")
         await until(
             pilot,
             lambda: app.current_kind == "replicasets" and table.row_count == 2,
@@ -397,7 +397,7 @@ async def test_agent_drill_down_unknown_name_is_error() -> None:
             lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
             label="deployments rendered",
         )
-        out = await app.agent_drill_down("nope")
+        out = await app._agent_ui.agent_drill_down("nope")
         assert out.startswith("ERROR:")
         assert app.current_kind == "deployments"
 
@@ -410,7 +410,7 @@ async def test_agent_drill_down_without_child_kind_is_error() -> None:
             lambda: app.query_one(ResourceTable).row_count == 2,
             label="pod rows visible",
         )  # pods view: containers need a picker, not a kind
-        out = await app.agent_drill_down("web-6d9f88-aaa")
+        out = await app._agent_ui.agent_drill_down("web-6d9f88-aaa")
         assert out.startswith("ERROR:")
 
 
@@ -429,7 +429,7 @@ async def test_agent_drill_down_respects_visible_filter() -> None:
         )
         app.on_filter_command(FilterCommand("api"))  # the real filter path (#44)
         await until(pilot, lambda: table.row_count == 1, label="deployment filter applied")
-        out = await app.agent_drill_down("web")
+        out = await app._agent_ui.agent_drill_down("web")
         assert out.startswith("ERROR:")
         assert app.current_kind == "deployments"
 
@@ -517,7 +517,7 @@ async def test_agent_drill_down_rejected_while_describe_screen_open() -> None:
             lambda: app.screen.__class__ is DescribeScreen,
             label="describe screen opened",
         )
-        out = await app.agent_drill_down("web")
+        out = await app._agent_ui.agent_drill_down("web")
         assert out.startswith("ERROR:")
         assert app.current_kind == "deployments"
         assert isinstance(app.screen, DescribeScreen)
@@ -547,7 +547,7 @@ async def test_concurrent_drill_and_navigate_stay_consistent() -> None:
             await orig_stop(kind, scope)
 
         app.watch_manager.stop = slow_stop  # type: ignore[method-assign]  # test seam to widen the race window
-        drill = asyncio.create_task(app.agent_drill_down("web"))
+        drill = asyncio.create_task(app._agent_ui.agent_drill_down("web"))
         # The drill pre-warms before taking the lock (issue #157): wait until
         # it is really inside the critical section, blocked in stop().
         await asyncio.wait_for(entered.wait(), timeout=5)
@@ -710,7 +710,7 @@ async def test_drill_prewarm_shows_a_progress_label_while_waiting() -> None:
         )
         # Drive the drill as a task: pilot.press would await the whole
         # transition, leaving no window to observe the in-flight label.
-        drill = asyncio.create_task(app._drill_into("default", "web"))
+        drill = asyncio.create_task(app._workspace_ctl.drill_into("default", "web"))
         await until(
             pilot,
             lambda: any("replicasets" in v for v in app._progress_labels.values()),
@@ -728,7 +728,7 @@ async def test_drill_prewarm_times_out_and_still_switches() -> None:
     data = _default_data()
     data["replicasets"] = []  # LIST returns nothing to own
     app = _make_slow_app(data, delay_kinds={})
-    app.DRILL_PREWARM_TIMEOUT = 0.1
+    app._workspace_ctl.DRILL_PREWARM_TIMEOUT = 0.1
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
         await until(
@@ -772,7 +772,7 @@ async def test_drill_prewarm_skips_the_wait_when_the_watch_is_live() -> None:
         )
         await pilot.press("ctrl+w")
         await pilot.press("v")  # split: both panes on deployments
-        await until(pilot, lambda: len(app._panes) == 2, label="split pane opened")
+        await until(pilot, lambda: len(app._workspace.panes) == 2, label="split pane opened")
         second = app.query_one("#pane-1", ResourceTable)
         await _navigate(pilot, "replicasets")  # focused pane -> rs watch live
         await until(
@@ -815,7 +815,7 @@ async def test_drill_abandons_when_a_newer_navigation_lands_during_prewarm() -> 
             lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
             label="deployments rendered",
         )
-        drill = asyncio.create_task(app._drill_into("default", "web"))
+        drill = asyncio.create_task(app._workspace_ctl.drill_into("default", "web"))
         await until(
             pilot,
             lambda: ("replicasets", "default") in app.watch_manager.active,
@@ -853,13 +853,13 @@ async def test_drill_abandons_across_a_context_epoch_change() -> None:
             lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
             label="deployments rendered",
         )
-        drill = asyncio.create_task(app._drill_into("default", "web"))
+        drill = asyncio.create_task(app._workspace_ctl.drill_into("default", "web"))
         await until(
             pilot,
             lambda: ("replicasets", "default") in app.watch_manager.active,
             label="prewarm started",
         )
-        app._ctx_epoch += 1  # what a :ctx switch does
+        app._ctx._epoch += 1  # what a :ctx switch does
         result = await drill
         assert result is not None
         assert "abandoned" in result
@@ -892,7 +892,7 @@ async def test_pop_abandons_when_the_view_changed_during_prewarm() -> None:
             label="replicaset drill active",
         )
         delays["deployments"] = 0.3  # slow re-LIST on the way back
-        pop = asyncio.create_task(app._pop_drill())
+        pop = asyncio.create_task(app._workspace_ctl.pop_drill())
         await until(
             pilot,
             lambda: ("deployments", "default") in app.watch_manager.active,
@@ -926,7 +926,7 @@ async def test_drill_abandons_when_a_same_target_navigation_lands_during_prewarm
             lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
             label="deployments rendered",
         )
-        drill = asyncio.create_task(app._drill_into("default", "web"))
+        drill = asyncio.create_task(app._workspace_ctl.drill_into("default", "web"))
         await until(
             pilot,
             lambda: ("replicasets", "default") in app.watch_manager.active,
@@ -954,8 +954,8 @@ async def test_pane_closed_during_prewarm_reports_abandonment() -> None:
         await _navigate(pilot, "deployments")
         await pilot.press("ctrl+w")
         await pilot.press("v")  # split so a pane *can* close
-        await until(pilot, lambda: len(app._panes) == 2, label="split pane opened")
-        drill = asyncio.create_task(app._drill_into("default", "web"))
+        await until(pilot, lambda: len(app._workspace.panes) == 2, label="split pane opened")
+        drill = asyncio.create_task(app._workspace_ctl.drill_into("default", "web"))
         await until(
             pilot,
             lambda: ("replicasets", "default") in app.watch_manager.active,
@@ -994,13 +994,13 @@ async def test_overlapping_drills_do_not_skip_each_others_prewarm() -> None:
             label="deployments rendered",
         )
         _spy_renders(app, renders)
-        first = asyncio.create_task(app._drill_into("default", "web"))
+        first = asyncio.create_task(app._workspace_ctl.drill_into("default", "web"))
         await until(
             pilot,
             lambda: ("replicasets", "default") in app.watch_manager.active,
             label="first prewarm started",
         )
-        second = asyncio.create_task(app._drill_into("default", "api"))
+        second = asyncio.create_task(app._workspace_ctl.drill_into("default", "api"))
         results = [await first, await second]
         await until(pilot, lambda: app.current_kind == "replicasets", label="winning drill landed")
         assert app.current_kind == "replicasets"
@@ -1028,7 +1028,7 @@ async def test_cancelled_prewarm_releases_its_lease_and_watch() -> None:
             lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
             label="deployments rendered",
         )
-        drill = asyncio.create_task(app._drill_into("default", "web"))
+        drill = asyncio.create_task(app._workspace_ctl.drill_into("default", "web"))
         await until(
             pilot,
             lambda: ("replicasets", "default") in app.watch_manager.active,
@@ -1039,7 +1039,7 @@ async def test_cancelled_prewarm_releases_its_lease_and_watch() -> None:
             await drill
         await until(
             pilot,
-            lambda: not app._prewarm_leases,
+            lambda: not app._workspace_ctl._prewarm_leases,
             label="lease released",
         )
         assert ("replicasets", "default") not in app.watch_manager.active
@@ -1088,7 +1088,7 @@ async def test_two_level_pop_waits_for_rows_the_drill_filter_will_show() -> None
             lambda: (
                 app.current_kind == "deployments"
                 and _row_names(table) == ["api", "web"]
-                and app._cursor_row_key() == "default/api"
+                and app._inspect_surface.cursor_row_key() == "default/api"
             ),
             label="deployments rendered",
         )
@@ -1099,7 +1099,7 @@ async def test_two_level_pop_waits_for_rows_the_drill_filter_will_show() -> None
             lambda: (
                 app.current_kind == "replicasets"
                 and _row_names(table) == ["web-6d9f88", "web-5c4e77"]
-                and app._cursor_row_key() == "default/web-6d9f88"
+                and app._inspect_surface.cursor_row_key() == "default/web-6d9f88"
             ),
             label="replicaset drill active",
         )
@@ -1109,7 +1109,7 @@ async def test_two_level_pop_waits_for_rows_the_drill_filter_will_show() -> None
             lambda: (
                 app.current_kind == "pods"
                 and _row_names(table) == ["web-6d9f88-aaa"]
-                and app._cursor_row_key() == "default/web-6d9f88-aaa"
+                and app._inspect_surface.cursor_row_key() == "default/web-6d9f88-aaa"
             ),
             label="pod drill active",
         )
@@ -1141,9 +1141,9 @@ async def test_prewarm_restarts_a_dead_watch_even_when_pane_backed() -> None:
             label="replicasets rendered",
         )
         await app.watch_manager.stop("replicasets", "default")  # teardown race stand-in
-        await app._prewarm_view("replicasets", "default", lambda rows: bool(rows))
+        await app._workspace_ctl.prewarm_view("replicasets", "default", lambda rows: bool(rows))
         assert ("replicasets", "default") in app.watch_manager.active  # restarted
-        await app._stop_watch_if_unused("replicasets", "default")
+        await app._workspace_ctl.stop_watch_if_unused("replicasets", "default")
         # still displayed by the pane: the release must not reap it
         assert ("replicasets", "default") in app.watch_manager.active
 
@@ -1166,7 +1166,9 @@ async def test_navigation_teardown_honors_outstanding_prewarm_leases() -> None:
             lambda: app.current_kind == "replicasets" and table.row_count == 3,
             label="replicasets rendered",
         )
-        app._prewarm_leases[("replicasets", "default")] = 1  # an in-flight drill's lease
+        await app._workspace_ctl.prewarm_view(
+            "replicasets", "default", lambda rows: True
+        )  # simulates an in-flight drill's lease
         await app.on_navigate_command(NavigateCommand("pods", None))
         await until(
             pilot,
@@ -1178,5 +1180,5 @@ async def test_navigation_teardown_honors_outstanding_prewarm_leases() -> None:
         )
         assert app.current_kind == "pods"
         assert ("replicasets", "default") in app.watch_manager.active  # lease honored
-        await app._stop_watch_if_unused("replicasets", "default")  # last release
+        await app._workspace_ctl.stop_watch_if_unused("replicasets", "default")  # last release
         assert ("replicasets", "default") not in app.watch_manager.active  # now reaped

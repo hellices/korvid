@@ -1,9 +1,17 @@
 """U0 characterization of the write-confirmation callbacks (issue #91).
 
-`ui/app.py` nests 12 structurally similar `_done(confirmed)` confirmation
+`ui/app.py` nested 12 structurally similar `_done(confirmed)` confirmation
 callbacks around its approval dialogs. This module records their
 classification (the U0 exit criterion) and pins the decline behavior that
-had no confirm-stage coverage. Every test here passes on unmodified code.
+had no confirm-stage coverage.
+
+The classification below is written in the shape those callbacks had on the
+app; the shared ones now live in `WriteCoordinator.confirm`
+(`ui/write_coordinator.py`) and the resource/node flows that raise them in
+`ResourceWriteController` (`ui/resource_write_controller.py`). The
+*behaviour* each test pins is unchanged, which is the point of a
+characterization suite: it survived the extraction untouched except for the
+drain worker's new home, noted in group (c).
 
 Classification of the 12 callbacks:
 
@@ -27,9 +35,10 @@ catalog incarnation inside `_done` before launching, because create has
 no server-side uid precondition (no target object exists yet).
 
 Group (c) — dedicated drain worker (1): drain assigns
-`self._drain_worker = self.run_worker(self._run_drain(...))` so mid-drain
-cancellation and the uncordon-refusal guard can find it; it does not go
-through `_run_write`.
+`self._drain_worker = self._ui.run_worker(...)` (on
+`ResourceWriteController`, which owns that handle) so mid-drain cancellation
+and the uncordon-refusal guard can find it; it does not go through
+`WriteCoordinator.run`.
 
 Group (d) — approval-future completion (1): the agent write gate's
 callback resolves an asyncio future; approval timing and expiry are owned
@@ -282,6 +291,6 @@ async def test_drain_declined_at_confirm_starts_no_worker(tmp_path: Path) -> Non
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
         await pilot.press("escape")
         await _dialog_closed(pilot)
-        assert app._drain_worker is None
+        assert app._resource_writes.drain_worker is None
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not audit_path.exists()

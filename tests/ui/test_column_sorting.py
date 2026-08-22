@@ -458,19 +458,19 @@ async def test_header_click_sorts_the_clicked_pane_not_the_focused_one() -> None
         await pilot.press("ctrl+w", "v")  # split; focus moves to pane 1
         await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="split")
         tables = list(app.query(ResourceTable))
-        pane0_table = next(t for t in tables if t.id == app._panes[0].table_id)
-        assert app._focused_pane == 1  # pane 1 focused, pane 0 clicked
+        pane0_table = next(t for t in tables if t.id == app._workspace.panes[0].table_id)
+        assert app._workspace.focused_index == 1  # pane 1 focused, pane 0 clicked
         key = next(iter(pane0_table.columns))
         pane0_table.post_message(
             DataTable.HeaderSelected(pane0_table, key, 0, pane0_table.columns[key].label)
         )
         await until(
             pilot,
-            lambda: app._panes[0].sorts.get("pods") is not None,
+            lambda: app._workspace.panes[0].sorts.get("pods") is not None,
             label="clicked pane sorted",
         )
-        assert app._panes[0].sorts["pods"].column == "name"
-        assert "pods" not in app._panes[1].sorts  # the focused pane untouched
+        assert app._workspace.panes[0].sorts["pods"].column == "name"
+        assert "pods" not in app._workspace.panes[1].sorts  # the focused pane untouched
         # A second click flips the clicked pane to descending - visibly.
         key = next(iter(pane0_table.columns))
         pane0_table.post_message(

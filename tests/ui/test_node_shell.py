@@ -189,9 +189,9 @@ def _node_shell_env(run_fake, call_exit: int = 0, call_error: Exception | None =
         return call_exit
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
-        patch("korvid.ui.app.subprocess.call", side_effect=fake_call),
-        patch("korvid.ui.app.subprocess.run", side_effect=run_fake),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
+        patch("subprocess.call", side_effect=fake_call),
+        patch("subprocess.run", side_effect=run_fake),
         patch.object(KorvidApp, "suspend", side_effect=lambda: _noop_cm()),
     ):
         yield call_records
@@ -738,12 +738,12 @@ async def test_create_failure_outcomes_distinguish_launch_error_from_timeout(
 
     app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
     async with app.run_test():
-        with patch("korvid.ui.app.subprocess.run", side_effect=OSError("kubectl vanished")):
+        with patch("subprocess.run", side_effect=OSError("kubectl vanished")):
             outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == "error: kubectl could not be launched; no pod created"
 
         with patch(
-            "korvid.ui.app.subprocess.run",
+            "subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=30),
         ):
             outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
@@ -760,7 +760,7 @@ async def test_ambiguous_create_failure_keeps_namespace_hint(tmp_path: Path) -> 
         failure = SimpleNamespace(
             returncode=1, stdout=b"", stderr=b"error: unexpected EOF reading response"
         )
-        with patch("korvid.ui.app.subprocess.run", return_value=failure):
+        with patch("subprocess.run", return_value=failure):
             outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == "error: pod creation failed; cleanup skipped: check namespace default"
 
@@ -774,7 +774,7 @@ async def test_ambiguous_create_failure_keeps_namespace_hint(tmp_path: Path) -> 
         failure = SimpleNamespace(
             returncode=1, stdout=b"", stderr=b'error: watch of pod "forbidden-checker" failed'
         )
-        with patch("korvid.ui.app.subprocess.run", return_value=failure):
+        with patch("subprocess.run", return_value=failure):
             outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == "error: pod creation failed; cleanup skipped: check namespace default"
 
@@ -825,7 +825,7 @@ async def test_non_psa_rejection_omits_namespace_remediation(tmp_path: Path) -> 
             stderr=b'Error from server (Forbidden): pods is forbidden: User "dev"'
             b' cannot create resource "pods"',
         )
-        with patch("korvid.ui.app.subprocess.run", return_value=failure):
+        with patch("subprocess.run", return_value=failure):
             outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == "error: pod creation rejected"
 
@@ -849,7 +849,7 @@ async def test_valid_json_with_scalar_metadata_is_unidentifiable(tmp_path: Path)
     async with app.run_test():
         create_ok = SimpleNamespace(returncode=0, stdout=_create_msg(), stderr=b"")
         weird = SimpleNamespace(returncode=0, stdout=b'{"metadata": "unexpected"}', stderr=b"")
-        with patch("korvid.ui.app.subprocess.run", side_effect=[create_ok, weird]):
+        with patch("subprocess.run", side_effect=[create_ok, weird]):
             outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == (
             "error: created pod could not be identified; cleanup skipped: check namespace default"
@@ -880,9 +880,9 @@ async def test_suspend_not_supported_refuses_gracefully_and_cleans_up(
         yield
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
-        patch("korvid.ui.app.subprocess.call", side_effect=fake_call),
-        patch("korvid.ui.app.subprocess.run", side_effect=run_fake),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
+        patch("subprocess.call", side_effect=fake_call),
+        patch("subprocess.run", side_effect=run_fake),
         patch.object(KorvidApp, "suspend", side_effect=raising_suspend),
     ):
         async with app.run_test() as pilot:
@@ -933,7 +933,7 @@ async def test_node_shell_refused_when_the_context_switches_while_the_dialog_is_
                 lambda: isinstance(app.screen, ConfirmScreen),
                 label="node-shell approval dialog opened",
             )
-            app._ctx_epoch += 1  # a switch completed while the dialog was open
+            app._ctx._epoch += 1  # a switch completed while the dialog was open
             await pilot.press("y")
             await until(
                 pilot,

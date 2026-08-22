@@ -1,5 +1,17 @@
 # Graph-Derived Blast-Radius Summaries Implementation Plan
 
+> **Superseded in part (2026-08-22).** The write perimeter this plan places on
+> `KorvidApp` — `_WriteOrigin`, `_write_origin`, `_impact_preview`,
+> `_confirm_screen`, `_push_write_confirmation`, `_write_context_intact` /
+> `_write_identity_intact` — now lives in `src/korvid/ui/write_coordinator.py`
+> (`WriteCoordinator`, the single `WriteGate` implementation), and the delete
+> and rollout-restart flows that call it live in
+> `src/korvid/ui/resource_write_controller.py`. The behaviour, the closed
+> per-action relation semantics and the safety constraints below are
+> unchanged; only the file and method names moved. This plan is kept as the
+> historical record of how #283 was delivered and is not rewritten — read the
+> two modules above for where the code is today.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver issue #283: deterministic, advisory `ImpactSummary` text beside the server dry-run preview in the delete and rollout-restart approval dialogs, without weakening approval, UID, RBAC, dry-run, or fail-closed audit guarantees.

@@ -683,7 +683,7 @@ async def test_log_reconnect_flaky_stream() -> None:
             await asyncio.sleep(1000)  # stay alive until cancelled
 
     app = _make_log_app(_flaky)
-    app._reconnect_sleep = 0.0
+    app._logs.reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
         await until(
@@ -708,15 +708,15 @@ async def test_log_reconnect_flaky_stream() -> None:
             pilot,
             lambda: (
                 call_count == 2
-                and app._log_buffer is not None
-                and len(app._log_buffer.lines()) == 4
+                and app._logs.buffer is not None
+                and len(app._logs.buffer.lines()) == 4
                 and log_pane._state == "\u25cf streaming"
             ),
             label="reconnected stream resumed",
         )
         assert call_count == 2
-        assert app._log_buffer is not None
-        assert len(app._log_buffer.lines()) == 4
+        assert app._logs.buffer is not None
+        assert len(app._logs.buffer.lines()) == 4
         assert log_pane._state == "\u25cf streaming"
 
 
@@ -742,7 +742,7 @@ async def test_log_reconnect_exhausted_shows_error() -> None:
         yield  # make it an async generator
 
     app = _make_log_app(_always_fail)
-    app._reconnect_sleep = 0.0
+    app._logs.reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
         await until(
@@ -788,7 +788,7 @@ async def test_log_reconnect_api_error_no_retry() -> None:
         yield  # make it an async generator
 
     app = _make_log_app(_api_error)
-    app._reconnect_sleep = 0.0
+    app._logs.reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
         await until(
@@ -837,7 +837,7 @@ async def test_log_previous_no_reconnect() -> None:
         yield LogLine(pod=pod, container=ctr, text="prev-line2")
 
     app = _make_log_app(_stream)
-    app._reconnect_sleep = 0.0
+    app._logs.reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
         await until(
@@ -878,8 +878,8 @@ async def test_log_overflow_banner_shown_once() -> None:
         await asyncio.sleep(1000)  # stay alive until cancelled
 
     app = _make_log_app(_five_lines)
-    app._reconnect_sleep = 0.0
-    app._log_buffer_max_lines = 3  # small cap so overflow fires on line 4
+    app._logs.reconnect_sleep = 0.0
+    app._logs.buffer_max_lines = 3  # small cap so overflow fires on line 4
 
     async with app.run_test() as pilot:
         await until(
@@ -904,18 +904,18 @@ async def test_log_overflow_banner_shown_once() -> None:
         await until(
             pilot,
             lambda: (
-                app._log_buffer is not None
-                and app._log_buffer.overflowed
-                and len(app._log_buffer.lines()) == 3
+                app._logs.buffer is not None
+                and app._logs.buffer.overflowed
+                and len(app._logs.buffer.lines()) == 3
                 and banner_calls == 1
             ),
             label="overflow banner shown",
         )
 
         # Buffer should be overflowed and capped at max_lines.
-        assert app._log_buffer is not None
-        assert app._log_buffer.overflowed
-        assert len(app._log_buffer.lines()) == 3
+        assert app._logs.buffer is not None
+        assert app._logs.buffer.overflowed
+        assert len(app._logs.buffer.lines()) == 3
         # Banner fires exactly once per session even though 2 lines overflowed.
         assert banner_calls == 1
 
@@ -938,7 +938,7 @@ async def test_log_cancel_during_reconnect_sleep_no_error() -> None:
         yield  # make it an async generator
 
     app = _make_log_app(_always_fail)
-    app._reconnect_sleep = 100.0  # long sleep so task is sleeping when we close
+    app._logs.reconnect_sleep = 100.0  # long sleep so task is sleeping when we close
 
     async with app.run_test() as pilot:
         await until(
@@ -1076,9 +1076,9 @@ async def test_shell_nonzero_exit_offers_debug_fallback(tmp_path: Path) -> None:
             label="pod row visible",
         )
         with (
-            patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
-            patch("korvid.ui.app.subprocess.call", return_value=1),
-            patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.call", return_value=1),
+            patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
             patch.object(app, "suspend", nullcontext),
         ):
             await pilot.press("s")
@@ -1428,6 +1428,17 @@ async def test_watch_deltas_are_inert_without_a_timeline() -> None:
         assert app.watch_manager.on_event is None
 
 
+async def test_timeline_startup_installs_the_controllers_watch_sink() -> None:
+    """Startup wires `WatchManager.on_event` to the `SessionTimelineController`
+    itself (issue #282 Task 3), not to an app-owned method that merely
+    forwards to it - so the sink survives however the controller later
+    chooses to implement it."""
+    timeline = SessionTimeline(max_entries=16, max_bytes=8192)
+    app = make_app([_pod("web-1")], session_timeline=timeline)
+    async with app.run_test():
+        assert app.watch_manager.on_event == app._timeline.record_watch_event
+
+
 async def test_warning_watch_redacts_before_timeline_storage() -> None:
     """Warning-event text is cluster-controlled: credentials must be masked
     and newlines flattened before anything is retained."""
@@ -1469,7 +1480,7 @@ async def test_warning_watch_reconnects_after_a_normal_stream_end() -> None:
             await hold.wait()
 
     app = make_app([_pod("web-1")], session_timeline=timeline, watch_warning_events=warnings)
-    app.TIMELINE_EVENT_RETRY_SECONDS = 0.0
+    app._timeline.TIMELINE_EVENT_RETRY_SECONDS = 0.0
     async with app.run_test() as pilot:
         await until(pilot, lambda: len(calls) >= 2, label="stream reconnected")
         notes = [
@@ -1495,7 +1506,7 @@ async def test_warning_watch_stops_visibly_on_a_deterministic_denial() -> None:
         yield {}  # pragma: no cover - makes the callable an async generator
 
     app = make_app([_pod("web-1")], session_timeline=timeline, watch_warning_events=warnings)
-    app.TIMELINE_EVENT_RETRY_SECONDS = 0.0
+    app._timeline.TIMELINE_EVENT_RETRY_SECONDS = 0.0
     async with app.run_test() as pilot:
         await until(
             pilot,
@@ -1519,7 +1530,7 @@ async def test_warning_watch_failure_never_stops_resource_watches() -> None:
         yield {}  # pragma: no cover - makes the callable an async generator
 
     app = make_app([_pod("web-1")], session_timeline=timeline, watch_warning_events=warnings)
-    app.TIMELINE_EVENT_RETRY_SECONDS = 0.0
+    app._timeline.TIMELINE_EVENT_RETRY_SECONDS = 0.0
     async with app.run_test() as pilot:
         await until(
             pilot,
@@ -1528,7 +1539,7 @@ async def test_warning_watch_failure_never_stops_resource_watches() -> None:
             ),
             label="feed gave up",
         )
-        assert len(calls) == app.TIMELINE_EVENT_MAX_FAILURES
+        assert len(calls) == app._timeline.TIMELINE_EVENT_MAX_FAILURES
         assert app.query_one(ResourceTable).row_count == 1
         assert [pod.name for pod in app.store.get("pods", app.current_scope)] == ["web-1"]
 

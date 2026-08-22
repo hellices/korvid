@@ -202,7 +202,7 @@ async def test_agent_prompt_refused_when_disabled_in_protected(tmp_path: Path) -
         agent_disable_in_protected=True,
     )
     runtime = _RecordingRuntime()
-    app._agent_runtime = runtime  # type: ignore[assignment]  # duck-typed fake
+    app._agent_ui._runtime = runtime  # type: ignore[assignment]  # duck-typed fake
     async with app.run_test() as pilot:
         await _pod_row_ready(app, pilot)
         app.post_message(AgentPromptSubmitted("delete everything"))
@@ -221,7 +221,7 @@ async def test_agent_prompt_allowed_in_protected_without_flag(tmp_path: Path) ->
 
     app = make_app(tmp_path / "audit.log", protected_context="prod-eu")
     runtime = _RecordingRuntime()
-    app._agent_runtime = runtime  # type: ignore[assignment]  # duck-typed fake
+    app._agent_ui._runtime = runtime  # type: ignore[assignment]  # duck-typed fake
     async with app.run_test() as pilot:
         await _pod_row_ready(app, pilot)
         app.post_message(AgentPromptSubmitted("what is wrong?"))
@@ -241,7 +241,9 @@ async def test_agent_write_approval_uses_protected_gate(tmp_path: Path) -> None:
         result_box: list[str] = []
 
         async def _request() -> None:
-            result_box.append(await app._await_user_approval("Agent delete", "delete pods/web-1"))
+            result_box.append(
+                await app._agent_ui._await_user_approval("Agent delete", "delete pods/web-1")
+            )
 
         task = asyncio.create_task(_request())
         await until(

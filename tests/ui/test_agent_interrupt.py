@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 from textual.widgets import Input
 
 from korvid.agent.events import AgentEvent, TextDelta, ToolCallStarted, TurnComplete
@@ -78,7 +79,7 @@ async def test_explicit_stop_marks_partial_and_returns_to_idle() -> None:
         assert "✗" not in _panel_text(app)  # never rendered as an error
         assert inp.disabled is False
         assert app.focused is inp  # focus back in the input
-        assert app._agent_task is None or app._agent_task.done()
+        assert app._agent_ui._task is None or app._agent_ui._task.done()
 
 
 async def test_interrupt_and_submit_starts_exactly_one_replacement() -> None:
@@ -182,7 +183,7 @@ async def test_cancel_before_the_turn_coroutine_runs_still_starts_replacement() 
         # created but its coroutine has not run when the second arrives and
         # cancels it.
         app.on_agent_prompt_submitted(AgentPromptSubmitted("first"))
-        assert app._agent_task is not None
+        assert app._agent_ui._task is not None
         app.on_agent_prompt_submitted(AgentPromptSubmitted("second"))
         await until(
             pilot,
@@ -239,7 +240,7 @@ async def test_rapid_corrections_inject_cancellation_only_once() -> None:
     async with app.run_test() as pilot:
         await _start_turn(app, pilot, "first")
         await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
-        task = app._agent_task
+        task = app._agent_ui._task
         assert task is not None
         app.on_agent_prompt_submitted(AgentPromptSubmitted("second"))
         app.on_agent_prompt_submitted(AgentPromptSubmitted("third"))
@@ -258,7 +259,7 @@ async def test_immediate_stop_before_the_turn_first_runs_clears_busy_state() -> 
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")
         app.on_agent_prompt_submitted(AgentPromptSubmitted("first"))
-        task = app._agent_task
+        task = app._agent_ui._task
         assert task is not None
         app.action_interrupt_agent()  # same tick: the coroutine never ran
         await until(pilot, lambda: task.done(), label="task settled")
@@ -295,6 +296,78 @@ async def test_stop_then_immediate_shutdown_injects_cancellation_once() -> None:
         app.action_interrupt_agent()
         # exit immediately — shutdown runs while the stop is still draining
     assert runtime.cleanup_done
+
+
+async def test_unmount_marks_the_agent_down_before_its_first_await(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`on_unmount` must mark the agent session shutting down *synchronously*,
+    before its first await.
+
+    Teardown awaits the bridge-dispatch reap and the proposal expiry sweep
+    before it reaches the agent controller. An interrupt-and-submit whose
+    cancelled turn settles inside one of those awaits would otherwise drain
+    its queued replacement and start a fresh turn — reading the screen stack
+    of an app that is being torn down (ScreenStackError)."""
+
+    class GatedCleanupRuntime(BlockingRuntime):
+        """Holds its cancellation cleanup until released, so the interrupted
+        turn settles exactly inside the teardown await under test."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = asyncio.Event()
+
+        async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
+            self.calls.append(user_text)
+            try:
+                yield TextDelta(text="let me check")
+                await asyncio.Event().wait()
+            finally:
+                await self.release.wait()
+
+    runtime = GatedCleanupRuntime()
+    app = make_app(runtime)
+    drained = asyncio.Event()
+    screen_reads: list[str] = []
+
+    async with app.run_test() as pilot:
+        inp = await _start_turn(app, pilot, "first")
+        await until(pilot, lambda: "let me check" in _panel_text(app), label="streaming")
+        task = app._agent_ui._task
+        assert task is not None
+        # Added after the controller's own drain callback, and callbacks run
+        # in the order they were added: the teardown step below resumes only
+        # once the replacement has had its chance to start.
+        task.add_done_callback(lambda _task: drained.set())
+
+        screens = app._agent_ui._screens
+        read_selected_row = screens.selected_row_key
+
+        def _record_screen_read() -> str | None:
+            screen_reads.append("selected_row_key")
+            return read_selected_row()
+
+        monkeypatch.setattr(screens, "selected_row_key", _record_screen_read)
+
+        expire_proposals = app._proposals.expire_all
+
+        async def _expire_while_the_turn_settles(reason: str) -> None:
+            runtime.release.set()  # the interrupted turn settles in here
+            await drained.wait()
+            await asyncio.sleep(0)  # a replacement turn's first step, if any
+            await expire_proposals(reason)
+
+        monkeypatch.setattr(app._proposals, "expire_all", _expire_while_the_turn_settles)
+
+        inp.value = "second"
+        await pilot.press("enter")  # interrupt-and-submit: queued, then cancelled
+        assert task.cancelling() == 1
+        # exit immediately — unmount runs while the interrupt is still draining
+
+    assert app._agent_ui._task is task  # no replacement turn was ever started
+    assert runtime.calls == ["first"]
+    assert screen_reads == []  # nothing read the screen stack during teardown
 
 
 async def test_interrupt_marker_owns_the_partial_not_the_replacement() -> None:
@@ -356,7 +429,7 @@ async def test_stop_while_a_replacement_is_queued_discards_it() -> None:
     async with app.run_test() as pilot:
         await _start_turn(app, pilot, "first")
         await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
-        task = app._agent_task
+        task = app._agent_ui._task
         assert task is not None
         drained = asyncio.Event()
         task.add_done_callback(lambda _done: drained.set())
@@ -364,7 +437,7 @@ async def test_stop_while_a_replacement_is_queued_discards_it() -> None:
         app.action_interrupt_agent()  # same tick: the queue must be dropped
         await until(pilot, lambda: drained.is_set(), label="queued replacement drain ran")
         assert runtime.calls == ["first"]  # the replacement never started
-        assert app._agent_replacement is None
+        assert app._agent_ui._replacement is None
 
 
 async def test_stale_done_callback_cannot_consume_the_replacement() -> None:
@@ -378,11 +451,11 @@ async def test_stale_done_callback_cannot_consume_the_replacement() -> None:
         await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
         stale = asyncio.create_task(asyncio.sleep(0))
         await stale
-        app._agent_replacement = "queued"
-        app._drain_agent_replacement(stale)  # not the current agent task
+        app._agent_ui._replacement = "queued"
+        app._agent_ui._drain_replacement(stale)  # not the current agent task
         await pilot.pause()
         assert len(runtime.calls) == 1  # no second turn was launched
-        assert app._agent_replacement == "queued"  # left for the real owner
+        assert app._agent_ui._replacement == "queued"  # left for the real owner
 
 
 # --- write safety (issue #170): interrupt vs the approval gate -------------
@@ -401,7 +474,7 @@ async def test_interrupt_while_awaiting_approval_dismisses_dialog(tmp_path: Any)
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog shown")
         task.cancel()
@@ -450,7 +523,7 @@ async def test_interrupt_after_approval_lets_the_write_finish(tmp_path: Any) -> 
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog shown")
         await pilot.press("y")
@@ -515,12 +588,16 @@ async def test_repeated_cancels_never_kill_an_approved_write(tmp_path: Any) -> N
     rec = SlowRecorder()
     audit_path = tmp_path / "audit.jsonl"
     probe = ShieldProbe(asyncio.shield)
-    with patch("korvid.ui.app.asyncio.shield", new=probe.shield):
+    # Patched on the module that owns the shielded write loop: the app no
+    # longer runs one itself, `WriteCoordinator` does.
+    with patch("korvid.ui.write_coordinator.asyncio.shield", new=probe.shield):
         app = make_write_app(rec, audit_path)
         async with app.run_test() as pilot:
             _expand_panel(app)
             task = asyncio.ensure_future(
-                app.agent_request_write("delete", "deployments", "web", namespace="default")
+                app._agent_ui.agent_request_write(
+                    "delete", "deployments", "web", namespace="default"
+                )
             )
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog shown")
             await pilot.press("y")

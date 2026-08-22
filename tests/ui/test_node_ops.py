@@ -31,10 +31,11 @@ from korvid.k8s.relationship_facts import (
     TargetReference,
 )
 from korvid.k8s.writes import WriteOps
-from korvid.ui.app import KorvidApp, PaneState
+from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
+from korvid.ui.workspace_state import PaneState
 
 from .waits import until
 
@@ -577,8 +578,8 @@ async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: P
             label="wrong-node cancel warning shown",
         )
         assert "cancelled" not in (audit_path.read_text() if audit_path.exists() else "")
-        assert app._drain_worker is not None
-        assert app._drain_worker.is_running
+        assert app._resource_writes.drain_worker is not None
+        assert app._resource_writes.drain_worker.is_running
         rec.release_evictions.set()
         await until(
             pilot,
@@ -1098,7 +1099,7 @@ async def test_drain_plan_failure_never_calls_graph(tmp_path: Path) -> None:
 
 
 class _CtxSwitchDuringPlanRecorder(NodeRecorder):
-    """Increments _ctx_epoch from within drain_plan, simulating a context switch
+    """Increments the context epoch from within drain_plan, simulating a context switch
     that happens while the API call for the plan is in flight."""
 
     def __init__(self, plan: DrainPlan | None = None) -> None:
@@ -1111,7 +1112,7 @@ class _CtxSwitchDuringPlanRecorder(NodeRecorder):
     async def drain_plan(self, node_name: str) -> DrainPlan:
         self.calls.append(("plan", node_name))
         if self._app is not None:
-            self._app._ctx_epoch += 1
+            self._app._ctx._epoch += 1
         return DrainPlan(
             targets=tuple(t for t in self.plan.targets if t.name not in self.evicted_names),
             skipped_daemonset=self.plan.skipped_daemonset,
@@ -1137,9 +1138,9 @@ class _FocusSwitchDuringGraphLister:
             # different identity) so origin.pane is not self._app._pane — the
             # same effect as the user focusing a different pane, but without
             # a second ResourceTable widget in the DOM.
-            current = self._app._panes[0]
+            current = self._app._workspace.panes[0]
             replacement = PaneState(current.kind, current.scope, current.table_id)
-            self._app._panes[0] = replacement
+            self._app._workspace._panes[0] = replacement
         if meta.plural == "nodes":
             return [
                 GenericSummary(
@@ -1176,7 +1177,7 @@ class _ScopeChangeDuringGraphLister:
     async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
         self.calls.append((meta.plural, namespace))
         if self._app is not None and meta.plural == "nodes":
-            self._app._panes[0].scope = "other-namespace"
+            self._app._workspace.panes[0].scope = "other-namespace"
         if meta.plural == "nodes":
             return [
                 GenericSummary(
@@ -1241,7 +1242,7 @@ class _UidChangeDuringGraphLister:
 
 
 class _CtxSwitchDuringGraphLister:
-    """list_relationship_objects fake that increments _ctx_epoch from within the
+    """list_relationship_objects fake that increments the context epoch from within the
     call, simulating a context switch (`:ctx`) that completes while the graph
     LIST is in flight.  The graph load itself returns normally; the identity
     check immediately after it detects the stale epoch and cancels."""
@@ -1256,7 +1257,7 @@ class _CtxSwitchDuringGraphLister:
     async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
         self.calls.append((meta.plural, namespace))
         if self._app is not None and meta.plural == "nodes":
-            self._app._ctx_epoch += 1
+            self._app._ctx._epoch += 1
         if meta.plural == "nodes":
             return [
                 GenericSummary(
@@ -1359,7 +1360,7 @@ async def test_drain_context_switch_during_plan_refuses_confirmation(
             label="drain cancelled notification",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1384,7 +1385,7 @@ async def test_drain_focus_change_during_graph_load_refuses_confirmation(
             label="drain cancelled notification",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1409,7 +1410,7 @@ async def test_drain_scope_change_during_graph_load_refuses_confirmation(
             label="drain cancelled notification",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1435,7 +1436,7 @@ async def test_drain_uid_change_during_graph_load_refuses_confirmation(
             label="drain cancelled notification",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1467,7 +1468,7 @@ async def test_drain_uid_change_in_confirmation_dispatches_nothing(
             label="drain cancelled after uid drift in confirmation",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1492,7 +1493,7 @@ async def test_drain_context_switch_during_graph_load_refuses_confirmation(
             label="drain cancelled after context switch during graph",
         )
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not any(call[0] == "evict" for call in rec.calls)
         assert not audit_path.exists()
@@ -1515,7 +1516,7 @@ async def test_cancelled_drain_graph_load_dispatches_nothing(tmp_path: Path) -> 
                 await task
             assert lister.cancelled.is_set()
             assert not isinstance(app.screen, ConfirmScreen)
-            assert app._active_cluster_writes == 0
+            assert app._writes.active_writes() == 0
             assert not any(call[0] == "cordon" for call in rec.calls)
             assert not any(call[0] == "evict" for call in rec.calls)
             assert not audit_path.exists()

@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from textual.worker import WorkerError
 
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
@@ -150,9 +151,68 @@ def test_ui_surface_names_the_terminal_capabilities() -> None:
     as three loose callables is the pattern the seams replaced.
     """
     missing = [
-        name for name in ("suspend", "refresh", "call_from_thread") if not hasattr(UiSurface, name)
+        name
+        for name in ("suspend", "refresh", "call_from_thread", "cancel_workers")
+        if not hasattr(UiSurface, name)
     ]
     assert missing == []
+
+
+class _CancelWorker:
+    def __init__(self, name: str, calls: list[str], *, fail: bool = False) -> None:
+        self.name = name
+        self._calls = calls
+        self._fail = fail
+
+    async def wait(self) -> None:
+        self._calls.append(self.name)
+        if self._fail:
+            raise WorkerError("cancelled")
+
+
+def test_app_ui_surface_forwards_untrusted_markup_and_worker_error_policy() -> None:
+    """The adapter must delegate every new policy bit to Textual."""
+    app = _app()
+    surface: Any = AppUiSurface(app)
+    calls: list[tuple[str, object]] = []
+
+    def notify_spy(message: str, **kwargs: object) -> None:
+        calls.append(("notify", kwargs.get("markup")))
+
+    def run_worker_spy(work: object, **kwargs: object) -> object:
+        calls.append(("worker", kwargs.get("exit_on_error")))
+        return object()
+
+    app.notify = notify_spy  # type: ignore[method-assign]  # spy
+    app.run_worker = run_worker_spy  # type: ignore[assignment,method-assign]  # spy
+
+    surface.notify("cluster text", markup=False)
+    surface.run_worker(lambda: None, exit_on_error=False)
+
+    assert calls == [("notify", False), ("worker", False)]
+
+
+def test_app_ui_surface_cancels_and_awaits_a_worker_group() -> None:
+    """Cancellation must wait for each worker returned by the app manager."""
+    app = _app()
+    surface: Any = AppUiSurface(app)
+    calls: list[str] = []
+    cancel_calls: list[tuple[object, str]] = []
+    workers = [
+        _CancelWorker("first", calls, fail=True),
+        _CancelWorker("second", calls),
+    ]
+
+    def cancel_group_spy(app_arg: object, group: str) -> list[_CancelWorker]:
+        cancel_calls.append((app_arg, group))
+        return workers
+
+    app.workers.cancel_group = cancel_group_spy  # type: ignore[assignment,method-assign]  # spy
+
+    asyncio.run(surface.cancel_workers("timeline-test"))
+
+    assert cancel_calls == [(app, "timeline-test")]
+    assert calls == ["first", "second"]
 
 
 def test_app_ui_surface_delegates_the_terminal_capabilities() -> None:

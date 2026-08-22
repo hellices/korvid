@@ -13,7 +13,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
-from korvid.tools.executor import RecordedExecution
+from korvid.tools.executor import RecordedExecution, UIBridge
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.log_pane import LogPane
@@ -55,6 +55,7 @@ def make_app(
     manifest_init_containers: list[str] | None = None,
     manifest_ephemeral_containers: list[str] | None = None,
     manifest_uid: str | Callable[[], str] | None = None,
+    agent_follow_bridge: UIBridge | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -94,6 +95,7 @@ def make_app(
         aliases=dict(_ALIASES),
         get_manifest=get_manifest if with_manifest else None,
         stream_logs=stream_logs if with_logs else None,
+        agent_follow_bridge=agent_follow_bridge,
     )
 
 
@@ -104,7 +106,7 @@ async def test_agent_navigate_switches_view() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_navigate("deployments")
+        out = await app._agent_ui.agent_navigate("deployments")
         await pilot.pause()
         assert app.current_kind == "deployments"
         assert not out.startswith("ERROR:")
@@ -115,7 +117,7 @@ async def test_agent_navigate_with_namespace_switches_scope() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_navigate("pods", "prod")
+        out = await app._agent_ui.agent_navigate("pods", "prod")
         await pilot.pause()
         assert app.current_scope == "prod"
         assert "prod" in out
@@ -125,7 +127,7 @@ async def test_agent_navigate_unknown_view_is_error() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_navigate("wombats")
+        out = await app._agent_ui.agent_navigate("wombats")
         assert out.startswith("ERROR:")
         assert app.current_kind == "pods"
 
@@ -134,7 +136,7 @@ async def test_agent_navigate_reports_row_count() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_navigate("pods")
+        out = await app._agent_ui.agent_navigate("pods")
         await pilot.pause()
         assert "2" in out  # two pods visible
 
@@ -146,7 +148,7 @@ async def test_agent_set_filter_applies_pattern() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_set_filter("web-1")
+        out = await app._agent_ui.agent_set_filter("web-1")
         await pilot.pause()
         assert app.filter_pattern == "web-1"
         assert not out.startswith("ERROR:")
@@ -156,9 +158,9 @@ async def test_agent_set_filter_empty_clears() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.agent_set_filter("web-1")
+        await app._agent_ui.agent_set_filter("web-1")
         await pilot.pause()
-        out = await app.agent_set_filter("")
+        out = await app._agent_ui.agent_set_filter("")
         await pilot.pause()
         assert app.filter_pattern == ""
         assert "clear" in out.lower()
@@ -171,7 +173,7 @@ async def test_agent_open_describe_pushes_screen() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_describe("pods", "web-1", "default")
+        out = await app._agent_ui.agent_open_describe("pods", "web-1", "default")
         await pilot.pause()
         assert isinstance(app.screen, DescribeScreen)
         assert not out.startswith("ERROR:")
@@ -181,7 +183,7 @@ async def test_agent_open_describe_unknown_kind_is_error() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_describe("wombats", "x", "default")
+        out = await app._agent_ui.agent_open_describe("wombats", "x", "default")
         assert out.startswith("ERROR:")
 
 
@@ -189,7 +191,7 @@ async def test_agent_open_describe_without_manifest_source_is_error() -> None:
     app = make_app(with_manifest=False)
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_describe("pods", "web-1", "default")
+        out = await app._agent_ui.agent_open_describe("pods", "web-1", "default")
         assert out.startswith("ERROR:")
 
 
@@ -200,7 +202,7 @@ async def test_agent_open_logs_opens_pane() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_logs("web-1", "default")
+        out = await app._agent_ui.agent_open_logs("web-1", "default")
         await pilot.pause()
         assert app.query_one(LogPane).display is True
         assert not out.startswith("ERROR:")
@@ -211,7 +213,7 @@ async def test_agent_open_logs_without_streaming_is_error() -> None:
     app = make_app(with_logs=False)
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_logs("web-1", "default")
+        out = await app._agent_ui.agent_open_logs("web-1", "default")
         assert out.startswith("ERROR:")
 
 
@@ -219,7 +221,7 @@ async def test_agent_open_logs_specific_container() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_logs("web-1", "default", "main")
+        out = await app._agent_ui.agent_open_logs("web-1", "default", "main")
         await pilot.pause()
         assert app.query_one(LogPane).display is True
         assert not out.startswith("ERROR:")
@@ -238,7 +240,7 @@ async def test_bridge_methods_return_error_instead_of_raising() -> None:
     app._get_manifest = boom
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_describe("pods", "web-1", "default")
+        out = await app._agent_ui.agent_open_describe("pods", "web-1", "default")
         assert out.startswith("ERROR:")
         assert "api down" in out
 
@@ -267,7 +269,7 @@ async def test_concurrent_navigations_serialize() -> None:
             await orig_stop(kind, scope)
 
         app.watch_manager.stop = slow_stop  # type: ignore[method-assign]  # instrumenting stop to observe handler overlap; restored via orig_stop
-        t1 = asyncio.create_task(app.agent_navigate("deployments"))
+        t1 = asyncio.create_task(app._agent_ui.agent_navigate("deployments"))
         t2 = asyncio.create_task(app.on_navigate_command(NavigateCommand("pods", "prod")))
         await asyncio.gather(t1, t2)
         assert max_concurrent == 1
@@ -277,9 +279,9 @@ async def test_agent_navigate_row_count_respects_filter() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.agent_set_filter("web-1")
+        await app._agent_ui.agent_set_filter("web-1")
         await pilot.pause()
-        out = await app.agent_navigate("pods")
+        out = await app._agent_ui.agent_navigate("pods")
         assert "1" in out
         assert "2 resources" not in out
 
@@ -290,10 +292,10 @@ async def test_agent_open_logs_resolves_containers_from_manifest() -> None:
     app = make_app(manifest_containers=["main", "sidecar"])
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_logs("other-pod", "elsewhere")
+        out = await app._agent_ui.agent_open_logs("other-pod", "elsewhere")
         await pilot.pause()
         assert not out.startswith("ERROR:")
-        containers = {c for _, _, c in app._current_log_triples}
+        containers = {c for _, _, c in app._logs.current_triples}
         assert containers == {"main", "sidecar"}
 
 
@@ -310,16 +312,16 @@ async def test_agent_open_logs_unknown_pod_errors_without_disturbing_pane() -> N
     app._get_manifest = manifest_or_404
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.agent_open_logs("web-1", "default")
+        await app._agent_ui.agent_open_logs("web-1", "default")
         await pilot.pause()
         assert app.query_one(LogPane).display is True
-        before = list(app._current_log_triples)
+        before = list(app._logs.current_triples)
 
-        out = await app.agent_open_logs("ghost", "default")
+        out = await app._agent_ui.agent_open_logs("ghost", "default")
         await pilot.pause()
         assert out.startswith("ERROR:")
         assert "ghost" in out
-        assert app._current_log_triples == before
+        assert app._logs.current_triples == before
 
 
 async def test_agent_open_logs_yields_to_user_log_action_during_lookup() -> None:
@@ -336,17 +338,17 @@ async def test_agent_open_logs_yields_to_user_log_action_during_lookup() -> None
     app._get_manifest = slow_manifest
     async with app.run_test() as pilot:
         await pilot.pause()
-        task = asyncio.create_task(app.agent_open_logs("web-1", "default"))
+        task = asyncio.create_task(app._agent_ui.agent_open_logs("web-1", "default"))
         await asyncio.sleep(0.02)
         # User opens logs for web-2 while the agent's manifest lookup is pending.
-        await app._open_log_pane(
+        await app._logs.open_pane(
             "default", [("web-2", "main")], triples=[("default", "web-2", "main")]
         )
         release.set()
         out = await task
         await pilot.pause()
         assert out.startswith("ERROR:")
-        assert ("default", "web-2", "main") in app._current_log_triples
+        assert ("default", "web-2", "main") in app._logs.current_triples
 
 
 async def test_agent_navigate_all_namespace_maps_to_all_scope() -> None:
@@ -357,7 +359,7 @@ async def test_agent_navigate_all_namespace_maps_to_all_scope() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_navigate("pods", "all")
+        out = await app._agent_ui.agent_navigate("pods", "all")
         await pilot.pause()
         assert app.current_scope == ALL_NAMESPACES
         assert not out.startswith("ERROR:")
@@ -374,11 +376,11 @@ async def test_agent_open_logs_ignores_same_named_non_pod_in_store() -> None:
     app._get_manifest = manifest_404
     async with app.run_test() as pilot:
         await pilot.pause()
-        out_nav = await app.agent_navigate("deployments")
+        out_nav = await app._agent_ui.agent_navigate("deployments")
         assert not out_nav.startswith("ERROR:")
         await pilot.pause()
         # 'api' exists in the store — but as a Deployment, not a Pod.
-        out = await app.agent_open_logs("api", "default")
+        out = await app._agent_ui.agent_open_logs("api", "default")
         assert out.startswith("ERROR:")
         assert "api" in out
 
@@ -393,7 +395,7 @@ async def test_agent_open_logs_rejects_unknown_pod_even_with_container() -> None
     app._get_manifest = manifest_404
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_logs("ghost", "default", "main")
+        out = await app._agent_ui.agent_open_logs("ghost", "default", "main")
         assert out.startswith("ERROR:")
         assert "ghost" in out
 
@@ -404,7 +406,7 @@ async def test_agent_open_logs_rejects_unknown_container() -> None:
     app = make_app(manifest_containers=["main", "sidecar"])
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_logs("web-1", "default", "nope")
+        out = await app._agent_ui.agent_open_logs("web-1", "default", "nope")
         assert out.startswith("ERROR:")
         assert "nope" in out
         assert "main" in out
@@ -423,7 +425,7 @@ async def test_agent_open_describe_yields_to_user_screen_change_during_fetch() -
     app._get_manifest = slow_manifest
     async with app.run_test() as pilot:
         await pilot.pause()
-        task = asyncio.create_task(app.agent_open_describe("pods", "web-1", "default"))
+        task = asyncio.create_task(app._agent_ui.agent_open_describe("pods", "web-1", "default"))
         await asyncio.sleep(0.02)
         user_screen = DescribeScreen("user's screen", {"kind": "Pod"}, [])
         await app.push_screen(user_screen)
@@ -453,7 +455,7 @@ async def test_toggle_all_namespaces_serializes_with_agent_navigate() -> None:
             await orig_stop(kind, scope)
 
         app.watch_manager.stop = slow_stop  # type: ignore[method-assign]  # instrumenting stop to observe handler overlap; restored via orig_stop
-        t1 = asyncio.create_task(app.agent_navigate("deployments"))
+        t1 = asyncio.create_task(app._agent_ui.agent_navigate("deployments"))
         t2 = asyncio.create_task(app.action_toggle_all_namespaces())
         await asyncio.gather(t1, t2)
         assert max_concurrent == 1
@@ -473,7 +475,7 @@ async def test_agent_open_logs_api_rejection_beats_stale_cache() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         # web-1 is still in the store (watch cache), but the API says 404.
-        out = await app.agent_open_logs("web-1", "default")
+        out = await app._agent_ui.agent_open_logs("web-1", "default")
         await pilot.pause()
         assert out.startswith("ERROR:")
         assert app.query_one(LogPane).display is False
@@ -485,20 +487,20 @@ async def test_agent_open_logs_rechecks_pane_gen_after_cancel() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        orig_cancel = app._cancel_log_tasks
+        orig_cancel = app._logs.cancel_tasks
 
         async def cancel_then_user_opens() -> None:
             await orig_cancel()
-            app._cancel_log_tasks = orig_cancel  # type: ignore[method-assign]  # restoring the original bound method after the one-shot intercept
-            await app._open_log_pane(
+            app._logs.cancel_tasks = orig_cancel  # type: ignore[method-assign]  # restoring the original bound method after the one-shot intercept
+            await app._logs.open_pane(
                 "default", [("web-2", "main")], triples=[("default", "web-2", "main")]
             )
 
-        app._cancel_log_tasks = cancel_then_user_opens  # type: ignore[method-assign]  # simulating a user pane change inside the agent's cancel window
-        out = await app.agent_open_logs("web-1", "default")
+        app._logs.cancel_tasks = cancel_then_user_opens  # type: ignore[method-assign]  # simulating a user pane change inside the agent's cancel window
+        out = await app._agent_ui.agent_open_logs("web-1", "default")
         await pilot.pause()
         assert out.startswith("ERROR:")
-        assert ("default", "web-2", "main") in app._current_log_triples
+        assert ("default", "web-2", "main") in app._logs.current_triples
 
 
 async def test_agent_open_describe_shares_screen_when_panel_visible() -> None:
@@ -514,7 +516,7 @@ async def test_agent_open_describe_shares_screen_when_panel_visible() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         app.query_one(AgentPanel).display = True
-        out = await app.agent_open_describe("pods", "web-1", "default")
+        out = await app._agent_ui.agent_open_describe("pods", "web-1", "default")
         await pilot.pause()
         assert not out.startswith("ERROR:")
         assert not isinstance(app.screen, DescribeScreen)
@@ -536,7 +538,7 @@ async def test_escape_closes_shared_describe_pane() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         app.query_one(AgentPanel).display = True
-        await app.agent_open_describe("pods", "web-1", "default")
+        await app._agent_ui.agent_open_describe("pods", "web-1", "default")
         await pilot.pause()
         assert app.query_one(DescribePane).display is True
         await pilot.press("escape")
@@ -551,7 +553,7 @@ async def test_agent_open_describe_fullscreen_when_panel_hidden() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         app.query_one(AgentPanel).display = False
-        out = await app.agent_open_describe("pods", "web-1", "default")
+        out = await app._agent_ui.agent_open_describe("pods", "web-1", "default")
         await pilot.pause()
         assert not out.startswith("ERROR:")
         assert isinstance(app.screen, DescribeScreen)
@@ -563,10 +565,10 @@ async def test_agent_open_logs_accepts_init_container() -> None:
     app = make_app(manifest_containers=["main"], manifest_init_containers=["setup"])
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_logs("web-1", "default", "setup")
+        out = await app._agent_ui.agent_open_logs("web-1", "default", "setup")
         await pilot.pause()
         assert not out.startswith("ERROR:")
-        assert ("default", "web-1", "setup") in app._current_log_triples
+        assert ("default", "web-1", "setup") in app._logs.current_triples
 
 
 async def test_agent_open_logs_all_includes_init_and_ephemeral() -> None:
@@ -578,12 +580,12 @@ async def test_agent_open_logs_all_includes_init_and_ephemeral() -> None:
     )
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_logs("web-1", "default")
+        out = await app._agent_ui.agent_open_logs("web-1", "default")
         await pilot.pause()
         assert not out.startswith("ERROR:")
-        assert ("default", "web-1", "main") in app._current_log_triples
-        assert ("default", "web-1", "setup") in app._current_log_triples
-        assert ("default", "web-1", "debugger") in app._current_log_triples
+        assert ("default", "web-1", "main") in app._logs.current_triples
+        assert ("default", "web-1", "setup") in app._logs.current_triples
+        assert ("default", "web-1", "debugger") in app._logs.current_triples
 
 
 async def test_navigation_closes_shared_describe_pane() -> None:
@@ -596,10 +598,10 @@ async def test_navigation_closes_shared_describe_pane() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         app.query_one(AgentPanel).display = True
-        await app.agent_open_describe("pods", "web-1", "default")
+        await app._agent_ui.agent_open_describe("pods", "web-1", "default")
         await pilot.pause()
         assert app.query_one(DescribePane).display is True
-        out = await app.agent_navigate("deployments")
+        out = await app._agent_ui.agent_navigate("deployments")
         await pilot.pause()
         assert not out.startswith("ERROR:")
         assert app.query_one(DescribePane).display is False
@@ -613,9 +615,9 @@ async def test_navigation_closes_pane_even_when_view_already_matches() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         app.query_one(AgentPanel).display = True
-        await app.agent_open_describe("pods", "web-1", "default")
+        await app._agent_ui.agent_open_describe("pods", "web-1", "default")
         await pilot.pause()
-        out = await app.agent_navigate("pods")  # same kind/scope
+        out = await app._agent_ui.agent_navigate("pods")  # same kind/scope
         await pilot.pause()
         assert not out.startswith("ERROR:")
         assert app.query_one(DescribePane).display is False
@@ -629,7 +631,7 @@ async def test_agent_navigate_rejected_while_user_describe_modal_open() -> None:
         await pilot.pause()
         await app.push_screen(DescribeScreen("pods/default/web-1", {"kind": "Pod"}, []))
         await pilot.pause()
-        out = await app.agent_navigate("deployments")
+        out = await app._agent_ui.agent_navigate("deployments")
         assert out.startswith("ERROR:")
         assert isinstance(app.screen, DescribeScreen)
         assert app.current_kind == "pods"
@@ -644,7 +646,7 @@ async def test_agent_open_logs_reports_panel_truncation() -> None:
     app = make_app(manifest_containers=[f"c{i}" for i in range(total)])
     async with app.run_test() as pilot:
         await pilot.pause()
-        out = await app.agent_open_logs("web-1", "default")
+        out = await app._agent_ui.agent_open_logs("web-1", "default")
         await pilot.pause()
         assert not out.startswith("ERROR:")
         assert f"first {MAX_PANELS} of {total}" in out
@@ -657,7 +659,7 @@ def _with_runtime(app: KorvidApp) -> AgentRuntime:
     harness does not otherwise need an agent.
     """
     runtime = AgentRuntime(_SilentProvider(), _NoToolExecutor())
-    app._agent_runtime = runtime
+    app._agent_ui._runtime = runtime
     return runtime
 
 
@@ -694,7 +696,7 @@ async def test_opening_a_citation_shows_the_evidence_it_points_at() -> None:
         )
         assert ref is not None
 
-        out = await app.open_evidence(ref)
+        out = await app._agent_ui.open_evidence(ref)
         await pilot.pause()
 
         assert isinstance(app.screen, DescribeScreen)
@@ -708,7 +710,7 @@ async def test_opening_an_unknown_citation_reports_it() -> None:
         await pilot.pause()
         _with_runtime(app)
 
-        out = await app.open_evidence("E9")
+        out = await app._agent_ui.open_evidence("E9")
 
         assert out.startswith("ERROR:")
         assert "E9" in out
@@ -723,7 +725,7 @@ async def test_a_citation_with_nowhere_to_go_says_so() -> None:
         ref = runtime.evidence.record("helm_list_releases", {"namespace": "default"}, "ok")
         assert ref is not None
 
-        out = await app.open_evidence(ref)
+        out = await app._agent_ui.open_evidence(ref)
 
         assert out.startswith("ERROR:")
 
@@ -739,7 +741,7 @@ async def test_a_log_citation_opens_the_container_the_read_used() -> None:
         )
         assert ref is not None
 
-        out = await app.open_evidence(ref)
+        out = await app._agent_ui.open_evidence(ref)
         await pilot.pause()
 
         assert not out.startswith("ERROR:")
@@ -762,7 +764,7 @@ async def test_a_cluster_wide_list_citation_opens_all_namespaces() -> None:
         ref = runtime.evidence.record("list_resources", {"kind": "pods"}, "web-1")
         assert ref is not None
 
-        out = await app.open_evidence(ref)
+        out = await app._agent_ui.open_evidence(ref)
         await pilot.pause()
 
         assert not out.startswith("ERROR:")
@@ -787,7 +789,7 @@ async def test_an_event_citation_on_a_non_pod_says_what_is_shown() -> None:
         )
         assert ref is not None
 
-        out = await app.open_evidence(ref)
+        out = await app._agent_ui.open_evidence(ref)
         await pilot.pause()
 
         assert "events are not shown" in out.lower()
@@ -804,7 +806,7 @@ async def test_an_event_citation_on_a_pod_shows_them_without_a_caveat() -> None:
         )
         assert ref is not None
 
-        out = await app.open_evidence(ref)
+        out = await app._agent_ui.open_evidence(ref)
         await pilot.pause()
 
         assert "not shown" not in out.lower()
@@ -828,7 +830,7 @@ async def test_a_log_citation_resolves_a_pod_outside_the_current_view() -> None:
         )
         assert ref is not None
 
-        out = await app.open_evidence(ref)
+        out = await app._agent_ui.open_evidence(ref)
         await pilot.pause()
 
         assert not out.startswith("ERROR:")
@@ -856,7 +858,7 @@ async def test_opening_a_citation_for_a_replaced_object_says_so() -> None:
         )
         assert ref is not None
 
-        out = await app.open_evidence(ref)
+        out = await app._agent_ui.open_evidence(ref)
         await pilot.pause()
 
         assert "replaced" in out.lower()
@@ -876,7 +878,7 @@ async def test_opening_a_citation_for_the_same_object_is_not_flagged() -> None:
         )
         assert ref is not None
 
-        out = await app.open_evidence(ref)
+        out = await app._agent_ui.open_evidence(ref)
         await pilot.pause()
 
         assert "replaced" not in out.lower()
@@ -904,7 +906,7 @@ async def test_a_replacement_between_the_check_and_the_open_is_still_reported() 
         )
         assert ref is not None
 
-        out = await app.open_evidence(ref)
+        out = await app._agent_ui.open_evidence(ref)
         await pilot.pause()
 
         assert "replaced" in out.lower()

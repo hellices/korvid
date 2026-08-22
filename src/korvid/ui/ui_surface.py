@@ -11,15 +11,16 @@ controller that needs more than this is reaching for app internals, which is
 the thing the decomposition is trying to stop.
 
 `AppUiSurface` on `KorvidApp` is the single implementation, an adapter for
-the same reason `AppUIBridge` and `AppWriteGate` are - Textual's `App`
-metaclass conflicts with `ABCMeta`.
+the same reason `AppUIBridge` is - Textual's `App` metaclass conflicts
+with `ABCMeta`. (`WriteGate` needs no adapter: `WriteCoordinator` is a plain
+class and implements it directly.)
 """
 
 from __future__ import annotations
 
 import contextlib
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, TypeVar
 
 from textual.await_complete import AwaitComplete
@@ -48,6 +49,7 @@ class UiSurface(ABC):
         title: str = "",
         severity: Severity = "information",
         timeout: float | None = None,
+        markup: bool = True,
     ) -> None:
         """Show a toast. The only way a controller talks to the user directly."""
 
@@ -71,11 +73,12 @@ class UiSurface(ABC):
     @abstractmethod
     def run_worker(
         self,
-        work: Coroutine[Any, Any, Any] | Callable[[], Any],
+        work: Awaitable[Any] | Callable[[], Any],
         *,
         exclusive: bool = False,
         group: str = "default",
         name: str = "",
+        exit_on_error: bool = True,
         thread: bool = False,
     ) -> Worker[Any]:
         """Run work off the message pump.
@@ -84,12 +87,22 @@ class UiSurface(ABC):
         `asyncio` tasks that nothing supervises: app workers are cancelled
         on shutdown and are visible to the test pilot.
 
-        A `:ctx` switch is *not* a cancellation point. It cancels only the
-        `hint-events` group; every other worker keeps running against the
+        A `:ctx` switch is not one blanket cancellation point: the app's
+        context-switch teardown cancels exactly the groups it knows hold a
+        stale-cluster connection, by name - `hint-events`, `relationships`,
+        and `timeline-warning-events` - and `cancel_workers` is the seam a
+        controller uses to do the same for a group it owns, the way
+        `SessionTimelineController.stop` cancels `timeline-warning-events`.
+        A worker in any other group (for example the timeline navigation
+        worker) is not touched by the switch and keeps running against the
         cluster it was started for. A controller whose work outlives a
         context switch must revalidate through `WriteGate.context_intact`
         or the epoch it captured - the surface will not do it for you.
         """
+
+    @abstractmethod
+    def cancel_workers(self, group: str) -> Awaitable[None]:
+        """Cancel every worker in *group* and wait for them to settle."""
 
     @abstractmethod
     def suspend(self) -> contextlib.AbstractContextManager[None]:
@@ -110,6 +123,17 @@ class UiSurface(ABC):
 
         Interactive subprocesses are driven off-loop; touching the UI from
         that thread directly is a data race.
+        """
+
+    @abstractmethod
+    def call_later(self, callback: Callable[..., None], *args: Any) -> None:
+        """Run *callback* on the next message-pump iteration.
+
+        The seam a modal's result callback needs: Textual invokes it
+        *before* it pops the dismissed screen, so a re-validation that
+        counts stacked screens must not run inline - it would see the
+        confirmation the user just answered and read as "another dialog
+        opened".
         """
 
     @abstractmethod

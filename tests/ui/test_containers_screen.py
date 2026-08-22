@@ -230,8 +230,8 @@ async def test_containers_screen_s_opens_shell() -> None:
 
     app = make_app([_pod("web-1")], get_manifest=_get_manifest)
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
-        patch("korvid.ui.app.subprocess.call", side_effect=_record_call),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
+        patch("subprocess.call", side_effect=_record_call),
         patch.object(type(app), "suspend", side_effect=lambda *a: _noop_cm()),
     ):
         async with app.run_test() as pilot:
@@ -299,8 +299,8 @@ async def test_containers_screen_pick_cancelled_when_context_switched() -> None:
 
     app = make_app([_pod("web-1")], get_manifest=_get_manifest)
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
-        patch("korvid.ui.app.subprocess.call", side_effect=_record_call),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
+        patch("subprocess.call", side_effect=_record_call),
         patch.object(type(app), "suspend", side_effect=lambda *a: _noop_cm()),
     ):
         async with app.run_test() as pilot:
@@ -315,7 +315,7 @@ async def test_containers_screen_pick_cancelled_when_context_switched() -> None:
                 lambda: isinstance(app.screen, ContainersScreen),
                 label="containers screen open",
             )
-            app._ctx_epoch += 1  # a context switch completed under the screen
+            app._ctx._epoch += 1  # a context switch completed under the screen
             await pilot.press("s")
             await until(
                 pilot,
