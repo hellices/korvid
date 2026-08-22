@@ -32,6 +32,7 @@ KorvidApp  (ui/app.py)
 ├── WorkspaceController  (ui/workspace_controller.py)    navigation, drill, hierarchy, relationship, and pane flows
 ├── WorkspaceState       (ui/workspace_state.py)         split-pane collection, focus, and view state
 ├── AgentUiController    (ui/agent_ui_controller.py)     agent session, turn tasks, UI bridge reads, agent writes
+├── ProposalController   (ui/proposal_controller.py)     external MCP write proposals: intake, review, execution, expiry
 └── ...
 ```
 
@@ -425,8 +426,9 @@ user keystroke can resolve, and executes through `WriteCoordinator.run_shielded`
 An approval never surfaces while the panel is collapsed or another screen is
 stacked, and an unanswered one expires rather than hanging the turn.
 
-Proposals are explicitly *not* here: `AgentProposals` is a three-method port,
-so the store, TTL, review loop and execution path can move on their own.
+Proposals are explicitly *not* here: `AgentProposals` is a three-method port
+the agent controller forwards to, and `ProposalController` implements it (see
+below).
 
 `KorvidApp` keeps `action_toggle_agent`, `on_agent_prompt_submitted` and
 `action_interrupt_agent` as one-line delegates, the `AgentPanel` widget in
@@ -437,6 +439,42 @@ controller that owns them.
 
 `AppUIBridge` is now `AgentUIBridge(app._agent_ui, app._bridge_dispatch)`: it
 holds no app reference and calls no app method.
+
+## External write proposals
+
+`ProposalController` (`ui/proposal_controller.py`, issue #110 / Deep Task 7)
+owns the whole external-proposal inbox, which used to live on `KorvidApp`:
+
+| Owned | Notes |
+|---|---|
+| the `ProposalStore` reference and the submit/get/cancel intake | It *is* the `AgentProposals` implementation the agent controller forwards to; the app exposes no proposal store property and no proposal tool method |
+| provenance and the terminal-outcome audit | `provenance()` shell-quotes untrusted MCP `clientInfo`, so every `key=` field in an audit detail is korvid's own; outcome appends are best-effort (they mutate nothing) and bind to the proposal's own `context` |
+| the update subscription and external-change handling | `subscribe()` registers the store callbacks; both are marshalled onto the UI loop through the `ProposalEvents` port, because the store is shared with the MCP server's thread |
+| the pending-proposal status label | `status_label()`; the app's `_refresh_status` reads it |
+| the `:proposals` review loop | Oldest first, one decision at a time, on a supervised worker in the `proposal-review` group through the `ReviewTasks` port — never `exclusive`, because cancelling a claimed execution would strand the record |
+| the approval dialog | `WriteCoordinator.confirm_screen`, resolved only by real key input, refused outright when another screen is stacked, and treated as a dismissal after `APPROVAL_TIMEOUT` (a dismissed proposal stays pending until its own TTL) |
+| operation rebuild and re-validation | The stored record never carries an executable closure: `build_write_op` runs again at review time, and context epoch, kube context, RBAC and the UID binding are each rechecked before the dialog *and* after the claim |
+| execution, settlement and failure | The claim is taken under the shared `nav_lock` so it linearizes with the `:ctx`/`:mcp` expiry sweeps; the mutation goes through `WriteCoordinator.run` and nothing else; a cancelled worker settles the record as `failed` with the cluster outcome explicitly uncertain, and the terminal audit append is shielded |
+| the audited expiry sweep | `expire_all(reason)` for `:ctx` and the `:mcp on`/`:mcp off` transitions, `shutdown()` (close, then sweep) for unmount |
+
+It owns no security ordering either: every accepted proposal enters
+`WriteCoordinator.run` exactly once, so the reserve → fail-closed intent audit
+→ mutate → outcome audit ordering has a single implementation. The proposal
+dialog is deliberately separate from the agent's own write approval: this flow
+is user-initiated (`:proposals`), so it has no panel gate, but it can never
+stack over another dialog where a stray keystroke could approve.
+
+Write-operation construction is *not* duplicated: `builder` is a late-binding
+`WriteOpBuilder` (structurally `AgentUiController`, which owns that
+construction for the direct agent write), so read-only mode, audit
+availability, kind resolution and argument validation are rechecked by the one
+implementation.
+
+`KorvidApp` keeps `on_external_proposals_changed`,
+`on_external_proposal_expired`, the `:proposals` command word, the
+`proposals_label=` status read, the three `:ctx`/`:mcp` sweep calls and the
+unmount call — all one-line delegates — plus three small adapters
+(`AppProposalScreens`, `AppReviewTasks`, `AppProposalEvents`).
 
 ## Late binding
 
@@ -507,8 +545,16 @@ tests added before the move where the behaviour is not already pinned.
     interrupt-and-submit lifecycle, the screen context, follow mirroring, all
     `UIBridge` reads, and the direct approval-gated agent write. `AppUIBridge`
     became an adapter over it plus `AppContextDispatch`
-    (`ui/bridge_dispatch.py`). External write proposals stay on the app behind
-    the `AgentProposals` port — their own extraction is next.
+    (`ui/bridge_dispatch.py`).
+13. ~~External write proposals~~ — done (#110/#187);
+    `ProposalController` (`ui/proposal_controller.py`) owns the store, the
+    submit/get/cancel intake behind `AgentProposals`, provenance and outcome
+    audit, the update subscription and status label, the one-at-a-time
+    `:proposals` review with its own approval dialog and timeout, the
+    operation rebuild and every re-validation, the claimed execution through
+    `WriteCoordinator`, the interrupted-execution settlement, and the audited
+    expiry sweeps `:ctx`, `:mcp` and unmount drive. `AppProposalOps` is gone;
+    the app holds no proposal state.
 
 Issue #238 showed that logs and describe were technically extractable without
 introducing a new pane-composition seam, and issue #245 kept describe as a

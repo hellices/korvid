@@ -350,7 +350,7 @@ async def test_unmount_marks_the_agent_down_before_its_first_await(
 
         monkeypatch.setattr(screens, "selected_row_key", _record_screen_read)
 
-        expire_proposals = app._expire_proposals_audited
+        expire_proposals = app._proposals.expire_all
 
         async def _expire_while_the_turn_settles(reason: str) -> None:
             runtime.release.set()  # the interrupted turn settles in here
@@ -358,7 +358,7 @@ async def test_unmount_marks_the_agent_down_before_its_first_await(
             await asyncio.sleep(0)  # a replacement turn's first step, if any
             await expire_proposals(reason)
 
-        monkeypatch.setattr(app, "_expire_proposals_audited", _expire_while_the_turn_settles)
+        monkeypatch.setattr(app._proposals, "expire_all", _expire_while_the_turn_settles)
 
         inp.value = "second"
         await pilot.press("enter")  # interrupt-and-submit: queued, then cancelled

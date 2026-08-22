@@ -117,7 +117,7 @@ def make_app(
 
 
 async def _submit(app: KorvidApp) -> str:
-    return await app.agent_submit_write_proposal(
+    return await app._proposals.submit_write_proposal(
         "delete",
         "deployments",
         "web",
@@ -181,7 +181,7 @@ async def test_submit_unknown_kind_is_rejected(tmp_path: Path) -> None:
     store = ProposalStore()
     app = make_app(Recorder(), tmp_path / "a.jsonl", store)
     async with app.run_test():
-        result = await app.agent_submit_write_proposal(
+        result = await app._proposals.submit_write_proposal(
             "delete", "gadgets", "web", "default", session_id="s"
         )
     assert result.startswith("ERROR:")
@@ -197,10 +197,10 @@ async def test_get_write_proposal_reports_state(tmp_path: Path) -> None:
     async with app.run_test():
         await _submit(app)
         pid = store.pending()[0].id
-        line = await app.agent_get_write_proposal(pid)
+        line = await app._proposals.get_write_proposal(pid)
         assert pid in line
         assert "pending" in line
-        missing = await app.agent_get_write_proposal("nope")
+        missing = await app._proposals.get_write_proposal("nope")
     assert missing.startswith("ERROR:")
 
 
@@ -210,9 +210,9 @@ async def test_cancel_is_bound_to_the_submitting_session(tmp_path: Path) -> None
     async with app.run_test():
         await _submit(app)
         pid = store.pending()[0].id
-        stranger = await app.agent_cancel_write_proposal(pid, session_id="other")
+        stranger = await app._proposals.cancel_write_proposal(pid, session_id="other")
         assert stranger.startswith("ERROR:")
-        owner = await app.agent_cancel_write_proposal(pid, session_id="sess-1")
+        owner = await app._proposals.cancel_write_proposal(pid, session_id="sess-1")
         assert "cancelled" in owner
     assert store.pending() == []
 
@@ -228,7 +228,7 @@ async def test_review_approve_executes_with_the_bound_uid(tmp_path: Path) -> Non
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         await until(pilot, lambda: rec.calls != [])
@@ -275,7 +275,7 @@ async def test_a_second_proposals_open_never_cancels_a_claimed_execution(tmp_pat
         pid = store.pending()[0].id
         # A second pending proposal so the duplicate open gets past the
         # empty-inbox check and would actually start a replacement worker.
-        await app.agent_submit_write_proposal(
+        await app._proposals.submit_write_proposal(
             "delete",
             "deployments",
             "web-2",
@@ -284,7 +284,7 @@ async def test_a_second_proposals_open_never_cancels_a_claimed_execution(tmp_pat
             client_name="claude-code",
             client_version="1.0",
         )
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
 
@@ -294,7 +294,7 @@ async def test_a_second_proposals_open_never_cancels_a_claimed_execution(tmp_pat
 
         # The claim has landed; the write itself is still gated in flight.
         await until(pilot, lambda: state(pid) == "approved")
-        app._open_proposal_review()  # duplicate open mid-execution
+        app._proposals.open_review()  # duplicate open mid-execution
         rec.release.set()
         await until(pilot, lambda: state(pid) != "approved")
         assert state(pid) == "executed"
@@ -341,7 +341,7 @@ async def test_a_proposal_cancelled_during_the_rbac_check_never_reaches_a_dialog
         await _submit(app)
         pid = store.pending()[0].id
         armed.set()
-        app._open_proposal_review()
+        app._proposals.open_review()
         # `pilot.pause` waits for app idle and would starve behind the
         # in-flight check — await the checkpoint event directly.
         await asyncio.wait_for(entered.wait(), timeout=5)
@@ -367,7 +367,7 @@ async def test_a_context_switch_begun_during_the_rbac_check_never_reaches_a_dial
         await _submit(app)
         pid = store.pending()[0].id
         armed.set()
-        app._open_proposal_review()
+        app._proposals.open_review()
         await asyncio.wait_for(entered.wait(), timeout=5)
         app._ctx_switching = True  # what :ctx holds while a switch is in flight
         gate.set()
@@ -389,7 +389,7 @@ async def test_worker_cancellation_never_strands_a_claimed_proposal(tmp_path: Pa
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
 
@@ -416,7 +416,7 @@ async def test_approval_racing_a_shutdown_expiry_loses_the_claim(tmp_path: Path)
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         async with app._workspace_ctl.nav_lock:  # what :mcp off holds during shutdown
             await pilot.press("y")
@@ -444,7 +444,7 @@ async def test_cancelled_execution_still_audits_a_terminal_outcome(tmp_path: Pat
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
 
@@ -478,7 +478,7 @@ async def test_hostile_client_metadata_cannot_forge_audit_fields(tmp_path: Path)
     audit_path = tmp_path / "a.jsonl"
     app = make_app(Recorder(), audit_path, store)
     async with app.run_test():
-        await app.agent_submit_write_proposal(
+        await app._proposals.submit_write_proposal(
             "delete",
             "deployments",
             "web",
@@ -489,7 +489,7 @@ async def test_hostile_client_metadata_cannot_forge_audit_fields(tmp_path: Path)
         )
         pid = store.pending()[0].id
         proposal = next(p for p in store.pending() if p.id == pid)
-        await app._audit_proposal_outcome(proposal, "denied", "declined by operator")
+        await app._proposals._audit_outcome(proposal, "denied", "declined by operator")
     entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
     detail = next(e["detail"] for e in entries if "external_mcp" in e.get("detail", ""))
     # Parse quote-aware: every field must come from korvid, not the client.
@@ -509,7 +509,7 @@ async def test_review_decline_denies_without_mutating(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("n")
         await until(pilot, lambda: store.get(pid) is not None and store.get(pid)[1] != "pending")  # type: ignore[index]  # guarded above
@@ -527,7 +527,7 @@ async def test_review_expires_a_stale_context_epoch_without_a_dialog(tmp_path: P
         await _submit(app)
         pid = store.pending()[0].id
         app._ctx_epoch += 1  # a context switch landed after submission
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: store.get(pid) is not None and store.get(pid)[1] != "pending")  # type: ignore[index]  # guarded above
         assert not isinstance(app.screen, ConfirmScreen)
     assert rec.calls == []
@@ -548,7 +548,7 @@ async def test_review_uid_change_fails_the_proposal(tmp_path: Path) -> None:
             return {"metadata": {"uid": "uid-2"}}
 
         app._get_manifest = replaced  # the target was deleted and recreated
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         # Wait for the terminal state: `!= "approved"` would accept the
@@ -568,9 +568,9 @@ async def test_pending_proposals_show_in_the_status_bar(tmp_path: Path) -> None:
     store = ProposalStore()
     app = make_app(Recorder(), tmp_path / "a.jsonl", store)
     async with app.run_test() as pilot:
-        assert app._proposals_label() == ""
+        assert app._proposals.status_label() == ""
         await _submit(app)
-        label = app._proposals_label()
+        label = app._proposals.status_label()
         assert "claude-code" in label
         assert "delete" in label
         assert ":proposals" in label
@@ -587,7 +587,7 @@ async def test_multiple_pending_proposals_keep_source_and_target_in_the_label(
     app = make_app(Recorder(), tmp_path / "a.jsonl", store)
     async with app.run_test():
         await _submit(app)
-        await app.agent_submit_write_proposal(
+        await app._proposals.submit_write_proposal(
             "delete",
             "deployments",
             "web-2",
@@ -596,7 +596,7 @@ async def test_multiple_pending_proposals_keep_source_and_target_in_the_label(
             client_name="other-agent",
             client_version="1.0",
         )
-        label = app._proposals_label()
+        label = app._proposals.status_label()
     assert "2 proposals" in label
     assert "claude-code" in label
     assert "deployments/web" in label
@@ -670,11 +670,11 @@ async def test_context_switch_after_the_approval_claim_fails_the_proposal(
     async with app.run_test():
         await _submit(app)
         proposal = store.pending()[0]
-        rebuilt = app._rebuild_proposal_op(proposal)
+        rebuilt = app._proposals._rebuild_op(proposal)
         assert not isinstance(rebuilt, str)
         meta, ns, op, _operation, _detail = rebuilt
         app._ctx_epoch += 1  # a context switch raced the approval
-        await app._execute_proposal(store, proposal, meta, ns, op)
+        await app._proposals._execute(store, proposal, meta, ns, op)
         found = store.get(proposal.id)
     assert rec.calls == []
     assert found is not None
@@ -689,7 +689,7 @@ async def test_review_dialog_shows_the_proposal_safety_bindings(tmp_path: Path) 
     app = make_app(Recorder(), tmp_path / "a.jsonl", store)
     async with app.run_test() as pilot:
         await _submit(app)
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         body = str(app.screen.query_one(".confirm-operation", Static).render())
         await pilot.press("n")
@@ -709,13 +709,13 @@ async def test_denied_and_cancelled_outcomes_are_audited_with_provenance(
     async with app.run_test() as pilot:
         await _submit(app)
         denied_id = store.pending()[0].id
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("n")
         await until(pilot, lambda: (f := store.get(denied_id)) is not None and f[1] == "denied")
         await _submit(app)
         cancelled_id = store.pending()[0].id
-        await app.agent_cancel_write_proposal(cancelled_id, session_id="sess-1")
+        await app._proposals.cancel_write_proposal(cancelled_id, session_id="sess-1")
     assert rec.calls == []
     entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
     outcomes = {e["outcome"]: e["detail"] for e in entries}
@@ -832,7 +832,7 @@ async def test_review_escape_leaves_the_proposal_pending(tmp_path: Path) -> None
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("escape")
         await until(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
@@ -863,7 +863,7 @@ async def test_terminal_outcome_audits_run_off_the_event_loop(
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
-        app._open_proposal_review()
+        app._proposals.open_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("n")
         await until(pilot, lambda: (f := store.get(pid)) is not None and f[1] == "denied")
@@ -933,7 +933,7 @@ async def test_oversized_arguments_are_rejected_before_any_cluster_io(tmp_path: 
 
     app._target_uid = counting_uid  # type: ignore[assignment]  # test seam
     async with app.run_test():
-        result = await app.agent_submit_write_proposal(
+        result = await app._proposals.submit_write_proposal(
             "delete",
             "deployments",
             "web",
@@ -1164,14 +1164,14 @@ async def test_a_run_dying_during_the_stop_sweep_still_gets_the_follow_up_sweep(
         await _submit(app)  # gives the stop-time sweep an audit to write
         entered = asyncio.Event()
         gate = asyncio.Event()
-        orig = app._audit_proposal_outcome
+        orig = app._proposals._audit_outcome
 
         async def gated(proposal: WriteProposal, state: str, reason: str) -> None:
             entered.set()
             await gate.wait()
             await orig(proposal, state, reason)
 
-        app._audit_proposal_outcome = gated  # type: ignore[method-assign]  # holding the sweep's audit in flight to race the dying run
+        app._proposals._audit_outcome = gated  # type: ignore[method-assign]  # holding the sweep's audit in flight to race the dying run
         app._handle_mcp_command(["off"])
         await asyncio.wait_for(entered.wait(), timeout=5)
         # While the sweep's audit is in flight: the old run finishes dying
@@ -1215,7 +1215,7 @@ async def test_proposal_outcome_audits_bind_to_the_proposal_context(tmp_path: Pa
         pid = store.pending()[0].id
         assert app._audit is not None
         app._audit.set_context("ctx-b")  # what a :ctx switch does mid-flight
-        await app.agent_cancel_write_proposal(pid, session_id="sess-1")
+        await app._proposals.cancel_write_proposal(pid, session_id="sess-1")
 
         def outcome_context() -> object:
             for line in path.read_text().splitlines():
