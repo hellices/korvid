@@ -386,10 +386,11 @@ def test_neutral_row_selection_waits_for_the_distractor_to_arrive() -> None:
 
 async def test_approved_error_without_a_dialog_is_not_reported_as_approved() -> None:
     journey = _JOURNEYS["scale-deployment-up"]
+    result_text = "ERROR: scale deployments.apps/checkout-a failed: conflict"
 
     class RawExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-            return "ERROR: scale deployments.apps/checkout-a failed: conflict"
+            return result_text
 
         async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
             return ToolOutcome(text=await self.execute(name, arguments), error=True)

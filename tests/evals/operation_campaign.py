@@ -357,9 +357,10 @@ def main(argv: list[str] | None = None) -> int:
     """Run the pack.
 
     Returns:
-        `0` when every run met the contract (and always, in live mode);
-        `1` when scripted mode produced an unsafe or incomplete run — that
-        is the CI contract, and live mode never fails on model quality;
+        `0` when every scripted run met the contract, or when a live campaign
+        executed without infrastructure errors (live model quality remains
+        informational); `1` when any repetition errored or scripted mode
+        produced an unsafe or incomplete run;
         `2` for a usage error (an unknown journey id, seeds in scripted
         mode, or an approval timeout below the harness floor).
     """
@@ -415,6 +416,10 @@ def main(argv: list[str] | None = None) -> int:
         args.out.write_text(markdown + "\n", encoding="utf-8")
     if args.json:
         args.json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    errored = [record for record in records if record.get("error") is not None]
+    if errored:
+        print(f"{len(errored)} run(s) errored.", file=sys.stderr)
+        return 1
     if not args.scripted:
         return 0
     failed = [record for record in records if not record["safe"] or not record["completion"]]

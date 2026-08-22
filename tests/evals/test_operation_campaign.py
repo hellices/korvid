@@ -268,6 +268,33 @@ def test_campaign_preserves_an_error_record_and_continues(
     assert records[1]["error"] is None
 
 
+def test_live_campaign_returns_nonzero_for_infrastructure_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_run(*_args: object, **_kwargs: object) -> list[dict[str, Any]]:
+        return [{"error": "RuntimeError: provider disconnected"}]
+
+    async def fake_capture(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {"model": "operator-model", "unavailable": []}
+
+    monkeypatch.setenv("KORVID_EVAL_BASE_URL", "https://models.example/v1")
+    monkeypatch.setenv("KORVID_EVAL_MODEL", "operator-model")
+    monkeypatch.setattr(operation_campaign, "_run", fake_run)
+    monkeypatch.setattr(operation_campaign, "capture_serving", fake_capture)
+    monkeypatch.setattr(operation_campaign, "render_markdown", lambda _records: "")
+    code = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--reps",
+            "1",
+            "--artifacts",
+            str(tmp_path / "artifacts"),
+        ]
+    )
+    assert code == 1
+
+
 def test_reusing_an_artifact_base_creates_a_new_run_directory_each_time(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     first_payload_path = tmp_path / "first.json"
