@@ -43,11 +43,11 @@ MATERIAL_ATTRIBUTION = "https://squidfunk.github.io/mkdocs-material/"
 
 
 def _index() -> str:
-    return INDEX.read_text()
+    return INDEX.read_text(encoding="utf-8")
 
 
 def _css() -> str:
-    return EXTRA_CSS.read_text()
+    return EXTRA_CSS.read_text(encoding="utf-8")
 
 
 def _product_model_intro() -> str:
@@ -173,7 +173,7 @@ def test_footer_is_overridden_with_an_original_korvid_partial() -> None:
 
 def test_footer_carries_the_mark_the_tagline_and_the_license() -> None:
     """The footer must identify the project rather than only the generator."""
-    footer = COPYRIGHT_PARTIAL.read_text()
+    footer = COPYRIGHT_PARTIAL.read_text(encoding="utf-8")
     assert "korvid-mark.svg" in footer, "the footer should carry the original korvid mark"
     assert "korvid" in footer
     assert "Apache-2.0" in footer, "the footer must state the project's license"
@@ -186,7 +186,7 @@ def test_footer_links_are_built_from_mkdocs_urls_not_hardcoded_paths() -> None:
     `/getting-started/` would 404 on the published site while working
     locally.
     """
-    footer = COPYRIGHT_PARTIAL.read_text()
+    footer = COPYRIGHT_PARTIAL.read_text(encoding="utf-8")
     internal_hrefs = re.findall(r'href="([^"]+)"', footer)
     assert internal_hrefs, "the footer must offer links"
     for href in internal_hrefs:
@@ -202,14 +202,14 @@ def test_footer_links_are_built_from_mkdocs_urls_not_hardcoded_paths() -> None:
 
 def test_footer_keeps_the_material_for_mkdocs_attribution() -> None:
     """Replacing the default footer must not drop the upstream theme credit."""
-    footer = COPYRIGHT_PARTIAL.read_text()
+    footer = COPYRIGHT_PARTIAL.read_text(encoding="utf-8")
     assert MATERIAL_ATTRIBUTION in footer
     assert "Material for MkDocs" in footer
 
 
 def test_footer_link_targets_are_real_documentation_pages() -> None:
     """Every internal footer destination must map to a page MkDocs actually builds."""
-    footer = COPYRIGHT_PARTIAL.read_text()
+    footer = COPYRIGHT_PARTIAL.read_text(encoding="utf-8")
     slugs = re.findall(r"\{\{ '([a-z0-9\-/]+)/' \| url \}\}", footer)
     assert slugs, "the footer must offer at least one internal destination"
     for slug in slugs:
@@ -239,7 +239,7 @@ def test_hero_panel_is_a_keyboard_legend_of_real_korvid_keys() -> None:
     panel = index[panel_start : index.index("</aside>", panel_start)]
     for key in ("<kbd>:</kbd>", "<kbd>/</kbd>", "<kbd>d</kbd>", "<kbd>l</kbd>"):
         assert key in panel, f"the hero panel must document the real korvid key {key}"
-    keybindings = (DOCS / "keybindings.md").read_text()
+    keybindings = (DOCS / "keybindings.md").read_text(encoding="utf-8")
     assert "`Ctrl-A`" in keybindings, "keybindings.md must still document Ctrl-A"
     assert "Ctrl-A" in panel, "the hero panel must stay in sync with keybindings.md"
 
@@ -311,7 +311,7 @@ def test_product_demo_has_native_motion_controls() -> None:
 
 def test_demo_regeneration_updates_both_readme_and_site_formats() -> None:
     """One canonical recording must refresh the README GIF and site MP4 together."""
-    instructions = DEMO_README.read_text()
+    instructions = DEMO_README.read_text(encoding="utf-8")
     assert "vhs docs/demo/demo.tape" in instructions
     assert "ffmpeg" in instructions
     assert "docs/assets/demo.gif" in instructions
@@ -335,8 +335,8 @@ def test_landing_customizations_add_no_scripts_or_remote_assets() -> None:
     sources = [
         _index(),
         _css(),
-        COPYRIGHT_PARTIAL.read_text(),
-        (OVERRIDES / "home.html").read_text(),
+        COPYRIGHT_PARTIAL.read_text(encoding="utf-8"),
+        (OVERRIDES / "home.html").read_text(encoding="utf-8"),
     ]
     for source in sources:
         assert "<script" not in source
@@ -349,7 +349,9 @@ def test_landing_customizations_add_no_scripts_or_remote_assets() -> None:
 def test_local_assets_referenced_by_the_landing_page_exist() -> None:
     """No broken image: every locally referenced asset is checked into the repo."""
     referenced = set(re.findall(r"assets/([A-Za-z0-9._\-]+)", _index()))
-    referenced |= set(re.findall(r"assets/([A-Za-z0-9._\-]+)", COPYRIGHT_PARTIAL.read_text()))
+    referenced |= set(
+        re.findall(r"assets/([A-Za-z0-9._\-]+)", COPYRIGHT_PARTIAL.read_text(encoding="utf-8"))
+    )
     assert referenced, "the landing page should reference at least one local asset"
     for name in referenced:
         assert (DOCS / "assets" / name).is_file(), f"docs/assets/{name} is referenced but missing"
@@ -480,7 +482,7 @@ def test_safety_section_converges_every_actor_on_one_write_path() -> None:
 def test_plan_preserves_the_mcp_disclosure_boundary() -> None:
     plan = (
         ROOT / "docs" / "superpowers" / "plans" / "2026-08-21-official-documentation-site.md"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     lowered = plan.lower()
     assert "embedded-agent provider" in lowered
     assert "mask" in lowered
@@ -580,7 +582,7 @@ def test_design_document_records_the_agentic_ui_positioning() -> None:
     """The committed design doc must describe the same product model as the site."""
     design = (
         ROOT / "docs" / "superpowers" / "specs" / "2026-08-21-documentation-site-design.md"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     lowered = design.lower()
     assert "one operational experience" in lowered, (
         "the design document still describes the landing page as three separate "
@@ -611,7 +613,7 @@ def test_plan_document_records_the_agentic_ui_positioning() -> None:
     """
     plan = (
         ROOT / "docs" / "superpowers" / "plans" / "2026-08-21-official-documentation-site.md"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     assert "## One cockpit. Three ways in." not in plan, (
         "the plan's embedded landing-content example still reads as three "
         "separate products bolted together; it must match docs/index.md's "
@@ -634,7 +636,7 @@ def test_design_and_css_describe_build_localized_runtime_assets_truthfully() -> 
     """Generated vendor assets are allowed; third-party browser requests are not."""
     design = (
         ROOT / "docs" / "superpowers" / "specs" / "2026-08-21-documentation-site-design.md"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     lowered = design.lower()
     assert "pinned client-side mermaid asset" not in lowered, (
         "Material/privacy manages Mermaid; the design must not claim a manually "

@@ -39,7 +39,7 @@ PINNED_ACTIONS = {
 
 def _load() -> dict[str, Any]:
     assert WORKFLOW.exists(), f"{WORKFLOW} must exist"
-    text = WORKFLOW.read_text()
+    text = WORKFLOW.read_text(encoding="utf-8")
     config: dict[str, Any] = yaml.safe_load(text)
     return config
 
@@ -237,7 +237,7 @@ SITE_URL = "https://hellices.github.io/korvid/"
 
 def _publishing_section() -> str:
     """Return the contributor docs' publishing section, or fail loudly."""
-    text = DEV_README.read_text()
+    text = DEV_README.read_text(encoding="utf-8")
     heading = "## Publishing the documentation site"
     assert heading in text, (
         "docs/dev/README.md must explain how the site reaches "
@@ -319,7 +319,7 @@ def test_publishing_section_links_the_workflow_in_a_strict_build_safe_way() -> N
 
 def test_design_document_records_the_one_time_pages_enablement() -> None:
     """The committed design doc must not imply the workflow is sufficient alone."""
-    design = " ".join(DESIGN_DOC.read_text().lower().split())
+    design = " ".join(DESIGN_DOC.read_text(encoding="utf-8").lower().split())
     enablement = re.search(
         r"before the workflow can deploy for the first time[^.]*"
         r"enable pages once:[^.]*source: github actions",
@@ -334,7 +334,7 @@ def test_design_document_records_the_one_time_pages_enablement() -> None:
 
 def test_plan_records_the_one_time_pages_enablement_step() -> None:
     """The implementation plan must carry the same one-time enablement step."""
-    plan = PLAN_DOC.read_text().lower()
+    plan = PLAN_DOC.read_text(encoding="utf-8").lower()
     assert "source: github actions" in plan, (
         "the plan's deployment task must include the one-time repository setting "
         "(Settings -> Pages -> Build and deployment -> Source: GitHub Actions), "
@@ -344,7 +344,7 @@ def test_plan_records_the_one_time_pages_enablement_step() -> None:
 
 def test_plan_places_configure_pages_first_in_the_privileged_deploy_job() -> None:
     """The executable plan must reproduce the workflow's least-privilege ordering."""
-    plan = " ".join(PLAN_DOC.read_text().lower().replace("`", "").split())
+    plan = " ".join(PLAN_DOC.read_text(encoding="utf-8").lower().replace("`", "").split())
     assert "configure-pages is the deploy job's first step" in plan, (
         "Task 3 must say configure-pages runs first in deploy, where pages: write "
         "exists; an action pin alone does not preserve that ordering"
@@ -353,7 +353,7 @@ def test_plan_places_configure_pages_first_in_the_privileged_deploy_job() -> Non
 
 def test_plan_reproduces_the_ephemeral_direct_docs_build() -> None:
     """Following the executable plan must preserve the CI security and tool contract."""
-    plan = PLAN_DOC.read_text()
+    plan = PLAN_DOC.read_text(encoding="utf-8")
     step = plan.split("- [ ] **Step 2: Add the Pages workflow**", 1)[1]
     step = step.split("- [ ] **Step 3:", 1)[0]
     normalized = " ".join(step.lower().replace("`", "").split())
@@ -364,7 +364,7 @@ def test_plan_reproduces_the_ephemeral_direct_docs_build() -> None:
 
 
 def test_design_describes_ephemeral_isolation_for_untrusted_pr_builds() -> None:
-    design = " ".join(DESIGN_DOC.read_text().lower().split())
+    design = " ".join(DESIGN_DOC.read_text(encoding="utf-8").lower().split())
     assert "ephemeral github-hosted runner" in design
     assert "pull-request-controlled" in design
     assert "never executes untrusted documentation code" not in design

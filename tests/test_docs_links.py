@@ -12,7 +12,7 @@ DOCS = ROOT / "docs"
 
 def test_raw_html_hero_primary_cta_resolves_to_a_docs_source() -> None:
     """Raw HTML bypasses MkDocs' relative-link tree processor, so resolve it here."""
-    index = (DOCS / "index.md").read_text()
+    index = (DOCS / "index.md").read_text(encoding="utf-8")
     hero = index[index.index('<section class="hero">') : index.index("</section>")]
     match = re.search(r'<a class="md-button md-button--primary" href="([^"]+)"', hero)
     assert match is not None, "the hero must keep its primary CTA"
@@ -30,7 +30,7 @@ def test_raw_html_hero_primary_cta_resolves_to_a_docs_source() -> None:
 
 def test_scoreboard_source_directories_use_strict_safe_github_urls() -> None:
     """Extensionless links escaping docs/ are not rejected by MkDocs strict mode."""
-    scoreboard = (DOCS / "evals" / "scoreboard.md").read_text()
+    scoreboard = (DOCS / "evals" / "scoreboard.md").read_text(encoding="utf-8")
     expected = {
         "https://github.com/hellices/korvid/tree/main/src/korvid/evals/scenarios",
         "https://github.com/hellices/korvid/tree/main/src/korvid/evals/journeys",
@@ -42,7 +42,7 @@ def test_scoreboard_source_directories_use_strict_safe_github_urls() -> None:
 
 def test_dev_readme_does_not_link_missing_directory_indexes() -> None:
     """MkDocs does not create index pages for bare specs/ and plans/ directories."""
-    dev_readme = (DOCS / "dev" / "README.md").read_text()
+    dev_readme = (DOCS / "dev" / "README.md").read_text(encoding="utf-8")
     for broken in ("](../)", "](specs/)", "](plans/)"):
         assert broken not in dev_readme
     assert "](../index.md)" in dev_readme

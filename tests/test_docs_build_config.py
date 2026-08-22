@@ -30,7 +30,7 @@ MATERIAL_BUNDLE = ROOT / "docs" / "assets" / "javascripts" / "bundle.d7400e89.mi
 
 def test_makefile_docs_build_uses_frozen() -> None:
     """docs-build target must pass --frozen to prevent lock rewrites."""
-    makefile = (ROOT / "Makefile").read_text()
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     # Find the docs-build recipe line
     assert "uv run --frozen --group docs mkdocs build" in makefile, (
         "docs-build must use 'uv run --frozen --group docs mkdocs build --strict'"
@@ -39,7 +39,7 @@ def test_makefile_docs_build_uses_frozen() -> None:
 
 def test_makefile_docs_serve_uses_frozen() -> None:
     """docs-serve target must pass --frozen to prevent lock rewrites."""
-    makefile = (ROOT / "Makefile").read_text()
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "uv run --frozen --group docs mkdocs serve" in makefile, (
         "docs-serve must use 'uv run --frozen --group docs mkdocs serve'"
     )
@@ -47,13 +47,13 @@ def test_makefile_docs_serve_uses_frozen() -> None:
 
 def test_docs_dependency_matches_the_vendored_material_bundle() -> None:
     """The hashed bundle override is specific to Material 9.7.7."""
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["dependency-groups"]["docs"] == ["mkdocs-material==9.7.7"]
 
 
 def test_gitignore_excludes_site_dir() -> None:
     """/site/ must be in .gitignore to prevent committing generated output."""
-    gitignore = (ROOT / ".gitignore").read_text()
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "/site/" in gitignore, (
         "/site/ must be listed in .gitignore so 'make docs-build' output cannot be committed"
     )
@@ -61,7 +61,7 @@ def test_gitignore_excludes_site_dir() -> None:
 
 def test_gitignore_excludes_material_privacy_cache() -> None:
     """Build-localized third-party assets must never become untracked changes."""
-    gitignore = (ROOT / ".gitignore").read_text()
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "/.cache/plugin/privacy/" in gitignore
 
 
@@ -84,7 +84,7 @@ def _load_mkdocs_config() -> dict[str, Any]:
     _TolerantLoader.add_multi_constructor(  # type: ignore[no-untyped-call]  # untyped in types-PyYAML
         "tag:yaml.org,2002:python/name:", lambda loader, suffix, node: suffix
     )
-    config = yaml.load((ROOT / "mkdocs.yml").read_text(), Loader=_TolerantLoader)
+    config = yaml.load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"), Loader=_TolerantLoader)
     assert isinstance(config, dict), "mkdocs.yml must parse to a mapping"
     return config
 
@@ -106,10 +106,10 @@ def test_mkdocs_config_does_not_downgrade_link_validation() -> None:
 
 def test_getting_started_matches_current_project_and_readme_release() -> None:
     """The offline release sources must agree on every intentionally pinned install."""
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     project_version = pyproject["project"]["version"]
-    readme = (ROOT / "README.md").read_text()
-    getting_started = (ROOT / "docs" / "getting-started.md").read_text()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    getting_started = (ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
 
     readme_install = re.search(
         r"uv tool install 'korvid\[all\]==([^']+)'",
@@ -141,17 +141,19 @@ def test_getting_started_matches_current_project_and_readme_release() -> None:
 
 def test_getting_started_matches_the_python_installation_contract() -> None:
     """The guide must not invent an upper bound absent from Requires-Python."""
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["project"]["requires-python"] == ">=3.11"
-    getting_started = " ".join((ROOT / "docs" / "getting-started.md").read_text().lower().split())
+    getting_started = " ".join(
+        (ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8").lower().split()
+    )
     assert "python 3.11 or newer" in getting_started
     assert "ci currently qualifies 3.11, 3.12, and 3.13" in getting_started
 
 
 def test_getting_started_cannot_call_homebrew_unpublished_when_readme_installs_it() -> None:
     """README's live brew route and the guide's Homebrew section cannot contradict."""
-    readme = (ROOT / "README.md").read_text()
-    getting_started = (ROOT / "docs" / "getting-started.md").read_text()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    getting_started = (ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
     command = "brew install hellices/korvid/korvid"
     assert command in readme, "README is the offline repository source for the brew route"
     assert command in getting_started
@@ -173,12 +175,12 @@ def test_getting_started_cannot_call_homebrew_unpublished_when_readme_installs_i
 
 def test_current_release_is_primary_when_the_homebrew_formula_lags() -> None:
     """The site must not present an older tap formula as the current release."""
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     project_version = pyproject["project"]["version"]
-    index = (ROOT / "docs" / "index.md").read_text()
+    index = (ROOT / "docs" / "index.md").read_text(encoding="utf-8")
     assert f"uv tool install 'korvid[all]=={project_version}'" in index
 
-    getting_started = (ROOT / "docs" / "getting-started.md").read_text()
+    getting_started = (ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
     section = getting_started.split("### Homebrew (macOS and Linux)", 1)[1]
     section = section.split("\n### ", 1)[0]
     normalized = " ".join(section.lower().replace("`", "").replace("*", "").split())
@@ -192,13 +194,13 @@ def test_current_release_is_primary_when_the_homebrew_formula_lags() -> None:
 
 def test_getting_started_describes_the_all_extra_completely() -> None:
     """The canonical install table must include every component in the `all` extra."""
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     all_extra = pyproject["project"]["optional-dependencies"]["all"]
     assert all_extra == ["korvid[agent,mcp,observability]"]
 
     project_version = pyproject["project"]["version"]
     needle = f"`korvid[all]=={project_version}`"
-    getting_started = (ROOT / "docs" / "getting-started.md").read_text()
+    getting_started = (ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
     row = next((line for line in getting_started.splitlines() if needle in line), None)
     assert row is not None, f"getting-started.md must contain an install-table row for {needle}"
     for component in ("agent", "mcp", "observability"):
@@ -209,7 +211,7 @@ def test_getting_started_describes_the_all_extra_completely() -> None:
 
 def test_getting_started_limits_the_helm_cli_requirement_to_writes() -> None:
     """Cluster-backed Helm browsing works without the local Helm executable."""
-    getting_started = (ROOT / "docs" / "getting-started.md").read_text()
+    getting_started = (ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
     requirements = getting_started.split("## Requirements", 1)[1].split("\n## ", 1)[0]
     requirements = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", requirements)
     normalized = " ".join(requirements.lower().split())
@@ -279,6 +281,12 @@ def test_material_bundle_pins_the_resize_observer_fallback() -> None:
     ), "the reviewed Material bundle override must not drift without an explicit update"
 
 
+def test_material_bundle_checkout_preserves_reviewed_bytes() -> None:
+    """Git must not rewrite the checksum-pinned JavaScript to CRLF on Windows."""
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "docs/assets/javascripts/bundle.d7400e89.min.js -text" in attributes
+
+
 def test_mkdocs_excludes_override_sources_but_keeps_theme_customization() -> None:
     """Jinja sources stay out of site/ while remaining available to Material."""
     config = _load_mkdocs_config()
@@ -299,7 +307,9 @@ def test_mkdocs_excludes_override_sources_but_keeps_theme_customization() -> Non
 def test_current_release_notes_are_in_navigation() -> None:
     """The current project release must be discoverable in the site navigation."""
     config = _load_mkdocs_config()
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "version"
+    ]
     nav_text = repr(config.get("nav"))
     expected = f"release-notes/v{version}.md"
     assert expected in nav_text, f"mkdocs nav must include the current release notes: {expected}"

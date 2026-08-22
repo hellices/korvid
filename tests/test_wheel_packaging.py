@@ -60,7 +60,7 @@ FILE_INJECTING_KEYS = ("force-include", "include", "only-include", "artifacts", 
 
 
 def _pyproject() -> dict[str, object]:
-    return tomllib.loads((ROOT / "pyproject.toml").read_text())
+    return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 
 def _hatch_build() -> dict[str, object]:

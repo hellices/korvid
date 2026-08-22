@@ -39,7 +39,7 @@ HOSTED_FEATURE_SLUGS = [
 
 
 def _readme() -> str:
-    return (ROOT / "README.md").read_text()
+    return (ROOT / "README.md").read_text(encoding="utf-8")
 
 
 def _features_section() -> str:
@@ -51,7 +51,7 @@ def _features_section() -> str:
 
 def test_pyproject_documentation_url_is_the_official_site() -> None:
     """`[project.urls].Documentation` must point at the hosted MkDocs site."""
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["project"]["urls"]["Documentation"] == SITE_URL
 
 
