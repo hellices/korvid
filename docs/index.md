@@ -7,15 +7,9 @@ hide:
 ---
 
 <section class="hero">
-  <div class="hero-copy-column">
+  <div class="hero-heading">
     <p class="eyebrow">AI-NATIVE KUBERNETES TUI</p>
     <h1>See the cluster.<br>Drive the response.</h1>
-    <p class="hero-copy">Operate from the keyboard, delegate bounded investigation to an agent, or connect an external assistant over MCP. Every write still stops for you.</p>
-    <div class="hero-actions">
-      <a class="md-button md-button--primary" href="getting-started/">Start flying</a>
-      <a class="md-button" href="https://github.com/hellices/korvid">View on GitHub</a>
-    </div>
-    <div class="install-command" tabindex="0" role="group" aria-label="Install the current korvid release with uv"><span class="install-command__prompt" aria-hidden="true">$</span><code>uv tool install 'korvid[all]==0.3.0'</code></div>
   </div>
   <figure class="hero-demo">
     <div class="hero-demo__frame">
@@ -24,6 +18,14 @@ hide:
     </div>
     <figcaption><strong>Real korvid, synthetic cluster.</strong> The cockpit needs only your kubeconfig; AI is optional.</figcaption>
   </figure>
+  <div class="hero-copy-column">
+    <p class="hero-copy">Operate from the keyboard, delegate bounded investigation to an agent, or connect an external assistant over MCP. Every write still stops for you.</p>
+    <div class="hero-actions">
+      <a class="md-button md-button--primary" href="getting-started/">Start flying</a>
+      <a class="md-button" href="https://github.com/hellices/korvid">View on GitHub</a>
+    </div>
+    <div class="install-command" tabindex="0" role="group" aria-label="Install the current korvid release with uv"><span class="install-command__prompt" aria-hidden="true">$</span><code>uv tool install 'korvid[all]==0.3.0'</code></div>
+  </div>
 </section>
 
 <section class="scene-switcher" data-scene-switcher aria-labelledby="scene-switcher-title">

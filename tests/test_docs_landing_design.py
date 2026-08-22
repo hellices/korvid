@@ -266,6 +266,34 @@ def test_hero_becomes_two_columns_only_at_wide_widths() -> None:
     )
 
 
+def test_hero_keeps_heading_then_demo_then_copy_in_source_and_desktop_grid() -> None:
+    """Mobile/tablet flow must surface the product before the supporting copy."""
+    hero = _section('<section class="hero">', "</section>")
+    heading = hero.find('class="hero-heading"')
+    demo = hero.find('class="hero-demo"')
+    copy = hero.find('class="hero-copy-column"')
+    assert heading != -1, "the hero must keep a dedicated .hero-heading wrapper"
+    assert demo != -1, "the hero must keep the real product demo figure"
+    assert copy != -1, "the hero must keep a dedicated .hero-copy-column wrapper"
+    assert heading < demo < copy, (
+        "source order must stay headline → product demo → supporting copy so "
+        "mobile and tablet reading/tab order matches the visual stack"
+    )
+
+    css = _css()
+    wide_css = re.search(
+        r"@media \(min-width: 960px\) \{(?P<body>.*?)\n\}",
+        _strip_css_comments(css),
+        re.DOTALL,
+    )
+    assert wide_css is not None
+    demo_rule = _rule(wide_css.group("body"), ".md-typeset .hero-demo {")
+    assert "grid-column: 2" in demo_rule
+    assert "grid-row: 1 / span 2" in demo_rule, (
+        "desktop layout must keep the demo in column 2 spanning both copy rows"
+    )
+
+
 def test_demo_regeneration_updates_both_readme_and_site_formats() -> None:
     """One canonical recording must refresh the README GIF and site MP4 together."""
     instructions = DEMO_README.read_text(encoding="utf-8")

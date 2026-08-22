@@ -32,6 +32,8 @@
 .md-typeset .hero {
   /* The amber wash is anchored to the top-right corner, where the cockpit
      panel sits, so the panel reads as lit rather than pasted on. */
+  display: grid;
+  gap: 1.5rem;
   background:
     radial-gradient(115% 130% at 100% 0%, rgba(245, 166, 35, 0.09), transparent 58%),
     var(--korvid-charcoal);
@@ -42,6 +44,7 @@
   margin: 0 0 2rem;
 }
 
+.md-typeset .hero .hero-heading,
 .md-typeset .hero .hero-copy-column {
   max-width: var(--korvid-measure);
 }
@@ -60,6 +63,10 @@
   line-height: 1.15;
   margin: 0 0 1rem;
   max-width: var(--korvid-measure);
+}
+
+.md-typeset .hero .hero-heading h1 {
+  margin-bottom: 0;
 }
 
 .md-typeset .hero .hero-copy {
@@ -201,7 +208,7 @@
 
 .md-typeset .hero-demo {
   min-width: 0;
-  margin: 2.5rem 0 0;
+  margin: 0;
 }
 
 .md-typeset .hero-demo__frame {
@@ -253,12 +260,26 @@
   .md-typeset .hero {
     display: grid;
     grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
-    gap: clamp(2rem, 4vw, 4rem);
+    column-gap: clamp(2rem, 4vw, 4rem);
+    row-gap: 1rem;
     align-items: center;
     padding: 3.5rem;
   }
 
+  .md-typeset .hero .hero-heading {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: end;
+  }
+
+  .md-typeset .hero .hero-copy-column {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
   .md-typeset .hero-demo {
+    grid-column: 2;
+    grid-row: 1 / span 2;
     margin-top: 0;
   }
 }
