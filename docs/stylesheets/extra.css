@@ -547,15 +547,25 @@
   border-radius: var(--korvid-radius);
 }
 
-/* Material ships `.md-typeset figure { width: fit-content }`, which shrinks
-   an unloaded `loading="lazy"` figure down to its `<figcaption>` text and
-   makes every tile jump on load. Restate the box so the card's width is
-   reserved before the image decodes; the `width`/`height` attributes then
-   hold the height through the `aspect-ratio` rule below. */
+/* Material's typeset defaults we deliberately override, in one place:
+
+     .md-typeset figure     { width: fit-content; text-align: center }
+     .md-typeset figcaption { font-style: italic; margin: 1em auto;
+                              max-width: 24rem }
+
+   `width: fit-content` shrinks an unloaded `loading="lazy"` figure down to
+   its `<figcaption>` text and makes every tile jump on load, so the box is
+   restated here and the `width`/`height` attributes hold the height through
+   the `aspect-ratio` rule below. `text-align: center` inherits into the
+   caption, and the 24rem auto-centred caption measure floats a narrow
+   italic column under a full-width image, so alignment, measure and style
+   are restated too. Every korvid figure block below repeats this set; the
+   hero caption keeps its own deliberate 34rem measure. */
 .md-typeset .evidence-card figure {
   display: block;
   width: 100%;
   margin: 0;
+  text-align: left;
 }
 
 .md-typeset .evidence-card img {
@@ -589,8 +599,10 @@
 
 .md-typeset .evidence-card figcaption {
   margin-top: 0.85rem;
+  max-width: none;
   color: var(--korvid-amber);
   font-weight: 700;
+  font-style: normal;
 }
 
 .md-typeset .evidence-card p {
@@ -667,13 +679,27 @@
 /* Core concept visual explanations                                    */
 /* ------------------------------------------------------------------ */
 
+/* `.docs-visual` is itself a `<figure>` and `.docs-storyboard` wraps one, so
+   both meet the same Material defaults documented above the mosaic rules:
+   the shrink-wrapped box, the inherited centring, and the narrow italic
+   caption measure. */
 .md-typeset .docs-visual,
 .md-typeset .docs-storyboard {
+  display: block;
+  width: 100%;
   margin: 2rem 0;
   padding: 1rem;
   background: var(--korvid-charcoal-raised);
   border: 1px solid var(--korvid-charcoal-border);
   border-radius: var(--korvid-radius);
+  text-align: left;
+}
+
+.md-typeset .docs-storyboard figure {
+  display: block;
+  width: 100%;
+  margin: 0;
+  text-align: left;
 }
 
 .md-typeset .docs-visual img,
@@ -687,9 +713,11 @@
 
 .md-typeset .docs-visual figcaption,
 .md-typeset .docs-storyboard figcaption {
-  margin-top: 0.8rem;
+  max-width: none;
+  margin: 0.8rem 0 0;
   color: var(--korvid-ink-dim);
   font-size: 0.8rem;
+  font-style: normal;
 }
 
 .md-typeset .docs-visual__stage {

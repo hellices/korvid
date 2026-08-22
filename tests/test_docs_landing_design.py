@@ -601,6 +601,82 @@ def test_evidence_figures_reserve_the_full_card_width_before_images_load() -> No
         )
 
 
+def test_korvid_figures_left_align_against_materials_centred_typeset_default() -> None:
+    """Material centres every `figure`; korvid's evidence blocks must not inherit it.
+
+    Material for MkDocs ships `.md-typeset figure { text-align: center }`, and
+    `text-align` inherits. Measured at 1440px on the built site, that centred
+    the `tui.md` pin legend's numbered list and every mosaic caption against
+    left-aligned body copy around them — a legend whose markers and text
+    disagree. Each korvid figure container therefore has to restate the
+    alignment its own content assumes.
+    """
+    css = _css()
+    for selector in (
+        ".md-typeset .evidence-card figure",
+        ".md-typeset .docs-visual,",
+        ".md-typeset .docs-storyboard figure",
+    ):
+        block = _rule(css, selector)
+        assert "text-align: left" in block, (
+            f"`{selector.rstrip(',')}` must declare `text-align: left` so Material's "
+            "centred `figure` default cannot reach its caption; found: "
+            f"{' '.join(block.split())!r}"
+        )
+
+
+def test_korvid_figcaptions_defeat_materials_narrow_italic_caption_default() -> None:
+    """`figcaption { font-style: italic; margin: 1em auto; max-width: 24rem }` must lose.
+
+    Material's caption default is a 24rem (480px at the theme's 125% root)
+    auto-centred italic column. On a 688px content column that rendered the
+    concept-page captions and the `tui.md` legend as a narrow floating block
+    beside their own full-width image, and italicised copy that is not an
+    aside. Every korvid caption restates the box and the style; the hero
+    keeps its own deliberate 34rem measure and is intentionally untouched
+    here.
+    """
+    css = _css()
+    for selector in (
+        ".md-typeset .evidence-card figcaption {",
+        ".md-typeset .docs-visual figcaption,",
+    ):
+        block = _rule(css, selector)
+        for declaration in ("max-width: none", "font-style: normal"):
+            assert declaration in block, (
+                f"`{selector.rstrip(' {,')}` must declare `{declaration}`; found: "
+                f"{' '.join(block.split())!r}"
+            )
+    concept = _rule(css, ".md-typeset .docs-visual figcaption,")
+    assert "margin: 0.8rem 0 0" in concept, (
+        "the concept-page caption must set all four margins so Material's "
+        f"`margin: 1em auto` cannot re-centre it; found: {' '.join(concept.split())!r}"
+    )
+    card = _rule(css, ".md-typeset .evidence-card figcaption,")
+    assert "margin-left: 1rem" in card, (
+        "the mosaic caption stays aligned with the card's own gutter, not centred; "
+        f"found: {' '.join(card.split())!r}"
+    )
+    hero = _rule(css, ".md-typeset .hero-demo figcaption")
+    assert "max-width: 34rem" in hero, "the hero caption keeps its own deliberate measure"
+
+
+def test_concept_visual_containers_keep_the_full_content_width() -> None:
+    """Material's `figure { width: fit-content }` also reaches `.docs-visual`.
+
+    `.docs-visual` *is* a `<figure>`, so the same shrink-wrap that broke the
+    mosaic tiles applies here; only the image's own `width: 100%` currently
+    keeps the box open. Restating the box makes the panel's width independent
+    of whether its lazy image has decoded.
+    """
+    block = _rule(_css(), ".md-typeset .docs-visual,")
+    for declaration in ("display: block", "width: 100%"):
+        assert declaration in block, (
+            f"the concept visual container must declare `{declaration}`; found: "
+            f"{' '.join(block.split())!r}"
+        )
+
+
 def test_scene_tabs_stay_hidden_until_the_controller_enhances_the_switcher() -> None:
     """Without the controller the tab strip is inert, so it must not render.
 
