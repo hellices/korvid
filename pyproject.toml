@@ -150,7 +150,11 @@ fail_under = 80
 show_missing = true
 
 [tool.typos.files]
-extend-exclude = ["*.lock", "*.snap"]
+extend-exclude = [
+    "*.lock",
+    "*.snap",
+    "docs/assets/javascripts/bundle.d7400e89.min.js",
+]
 
 [tool.typos.default.extend-words]
 aks = "aks"  # Azure Kubernetes Service — not a typo of "ask"
