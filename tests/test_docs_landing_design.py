@@ -15,9 +15,9 @@ screenshot:
    partial that carries the mark, the tagline, the useful destinations, and
    the license — while keeping the upstream theme attribution.
 3. **The hero was prose in an empty panel at wide widths** — 840px of copy
-   inside a 1188px panel. The hero now pairs the copy with an original
-   korvid cockpit panel (a terminal motif listing real korvid keys), so the
-   panel is balanced by content rather than padding.
+   inside a 1188px panel. The hero now pairs the copy with the actual product
+   media, so the panel is balanced by real product evidence rather than a key
+   legend.
 
 These tests read the *sources* (`docs/index.md`, `docs/overrides/**`,
 `docs/stylesheets/extra.css`, `mkdocs.yml`) because that is what a future
@@ -101,6 +101,12 @@ def _rule(css: str, selector: str) -> str:
     open_brace = stripped.index("{", index)
     close_brace = stripped.index("}", open_brace)
     return stripped[open_brace + 1 : close_brace]
+
+
+def _section(opening: str, closing: str) -> str:
+    source = _index()
+    start = source.index(opening)
+    return source[start : source.index(closing, start) + len(closing)]
 
 
 # --- 1. the install command never breaks mid-token ---------------------------
@@ -218,44 +224,39 @@ def test_footer_link_targets_are_real_documentation_pages() -> None:
         )
 
 
-# --- 3. the hero is balanced by content at wide widths -----------------------
+# --- 3. the hero is balanced by the actual product media at wide widths ------
 
 
-def test_hero_pairs_the_copy_with_an_original_cockpit_panel() -> None:
-    """The hero must contain a second column, not 348px of empty charcoal."""
-    index = _index()
-    assert 'class="hero-copy-column"' in index, (
-        "the hero's prose must live in its own column so a second column can balance it"
+def test_hero_leads_with_real_korvid_media() -> None:
+    hero = _section('<section class="hero">', "</section>")
+    assert 'class="hero-demo"' in hero
+    assert 'src="assets/demo.mp4"' in hero
+    assert 'poster="assets/scenes/cockpit-poster.png"' in hero
+    assert "hero-panel" not in hero
+
+
+def test_hero_media_is_controllable_and_has_a_text_fallback() -> None:
+    hero = _section('<section class="hero">', "</section>")
+    video = re.search(r"<video\b[^>]*>", hero)
+    assert video is not None
+    opening = video.group(0)
+    for attribute in ("controls", "muted", "loop", "playsinline"):
+        assert re.search(rf"\b{attribute}\b", opening)
+    assert 'preload="metadata"' in opening
+    assert "autoplay" not in opening
+    assert "Your browser does not support the korvid demo video." in hero
+    assert "<figcaption>" in hero
+
+
+def test_hero_gives_the_product_at_least_half_the_wide_layout() -> None:
+    css = _css()
+    wide_hero = re.search(
+        r"@media \(min-width: 960px\).*?\.md-typeset \.hero \{(?P<body>.*?)\}",
+        _strip_css_comments(css),
+        re.DOTALL,
     )
-    assert 'class="hero-panel"' in index, (
-        "the hero needs an original korvid panel to balance the copy at wide widths"
-    )
-
-
-def test_hero_panel_is_a_keyboard_legend_of_real_korvid_keys() -> None:
-    """The balancing panel must carry real product content, not filler shapes."""
-    index = _index()
-    panel_start = index.index('class="hero-panel"')
-    panel = index[panel_start : index.index("</aside>", panel_start)]
-    for key in ("<kbd>:</kbd>", "<kbd>/</kbd>", "<kbd>d</kbd>", "<kbd>l</kbd>"):
-        assert key in panel, f"the hero panel must document the real korvid key {key}"
-    keybindings = (DOCS / "keybindings.md").read_text(encoding="utf-8")
-    assert "`Ctrl-A`" in keybindings, "keybindings.md must still document Ctrl-A"
-    assert "Ctrl-A" in panel, "the hero panel must stay in sync with keybindings.md"
-
-
-def test_hero_panel_has_an_accessible_name_and_hidden_decoration() -> None:
-    """Screen readers get the legend; the terminal chrome is decorative only."""
-    index = _index()
-    panel_start = index.index("<aside")
-    panel = index[panel_start : index.index("</aside>", panel_start)]
-    assert "aria-label=" in panel or "aria-labelledby=" in panel, (
-        "the hero panel is a landmark-ish region and needs an accessible name"
-    )
-    assert 'aria-hidden="true"' in panel, (
-        "the panel's terminal chrome (prompt glyph, window dots) is decoration and "
-        "must be hidden from assistive technology"
-    )
+    assert wide_hero is not None
+    assert "grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr)" in wide_hero.group("body")
 
 
 def test_hero_becomes_two_columns_only_at_wide_widths() -> None:
@@ -270,43 +271,6 @@ def test_hero_becomes_two_columns_only_at_wide_widths() -> None:
         "the hero must stay single-column on phones and small tablets; "
         f"found a {match.group(1)}px breakpoint"
     )
-
-
-def test_hero_panel_is_not_a_second_copy_of_the_demo_asset() -> None:
-    """The panel is CSS/HTML, so it must not re-embed the demo GIF."""
-    index = _index()
-    panel_start = index.index("<aside")
-    panel = index[panel_start : index.index("</aside>", panel_start)]
-    assert "demo.gif" not in panel
-    assert "<img" not in panel or "korvid-mark.svg" in panel
-
-
-def test_hero_key_note_preserves_fixed_confirmation_keys() -> None:
-    """Only app-level actions are remappable; approval confirmation stays fixed."""
-    index = _index()
-    panel_start = index.index("<aside")
-    panel = index[panel_start : index.index("</aside>", panel_start)]
-    note_start = panel.index('class="hero-panel__note"')
-    note = panel[note_start : panel.index("</p>", note_start)]
-    lowered = note.lower()
-    assert "app-level actions are remappable" in lowered
-    assert "confirmation keys stay fixed" in lowered
-    assert "always shows the effective set" in lowered
-    assert "every key is remappable" not in lowered
-
-
-def test_product_demo_has_native_motion_controls() -> None:
-    """A demo longer than five seconds must be pausable without custom JavaScript."""
-    index = _index()
-    start = index.index('<figure class="product-demo">')
-    demo = index[start : index.index("</figure>", start)]
-    assert "<video" in demo, "the moving demo must use a controllable media element"
-    assert 'src="assets/demo.mp4"' in demo
-    for attribute in ("controls", "autoplay", "muted", "loop", "playsinline"):
-        assert re.search(rf"<video\b[^>]*\b{attribute}\b", demo), (
-            f"the demo video must declare {attribute!r}"
-        )
-    assert "demo.gif" not in demo, "an autoplaying GIF has no pause or stop control"
 
 
 def test_demo_regeneration_updates_both_readme_and_site_formats() -> None:
@@ -348,13 +312,15 @@ def test_landing_customizations_add_no_scripts_or_remote_assets() -> None:
 
 def test_local_assets_referenced_by_the_landing_page_exist() -> None:
     """No broken image: every locally referenced asset is checked into the repo."""
-    referenced = set(re.findall(r"assets/([A-Za-z0-9._\-]+)", _index()))
-    referenced |= set(
-        re.findall(r"assets/([A-Za-z0-9._\-]+)", COPYRIGHT_PARTIAL.read_text(encoding="utf-8"))
-    )
+    sources = (_index(), COPYRIGHT_PARTIAL.read_text(encoding="utf-8"))
+    referenced = {
+        match
+        for source in sources
+        for match in re.findall(r'(?:src|poster)="(assets/[A-Za-z0-9_./-]+)"', source)
+    }
     assert referenced, "the landing page should reference at least one local asset"
-    for name in referenced:
-        assert (DOCS / "assets" / name).is_file(), f"docs/assets/{name} is referenced but missing"
+    for relative in referenced:
+        assert (DOCS / relative).is_file(), f"docs/{relative} is referenced but missing"
     assert MARK.is_file()
 
 
@@ -519,38 +485,6 @@ def test_landing_never_claims_the_surfaces_look_the_same() -> None:
         "the three actors share context and safety boundaries, not literal "
         f"screens; non-negated overclaims: {violations}"
     )
-
-
-def test_hero_terminal_motif_reinforces_the_three_actors() -> None:
-    """The cockpit motif carries the convergence idea with no new markup weight."""
-    index = _index()
-    panel_start = index.index('class="hero-panel"')
-    aside_close = index.index("</aside>", panel_start)
-    panel = index[panel_start:aside_close]
-
-    bar_start = panel.index('class="hero-panel__bar"')
-    # Search for the closing tag *from* bar_start, not from the start of the
-    # panel: an unanchored `panel.index("</div>")` happens to find the right
-    # tag today only because no earlier `<div>` exists before the bar, which
-    # is a coincidence of the current markup rather than something this test
-    # should rely on.
-    bar_close = panel.index("</div>", bar_start)
-    bar = panel[bar_start:bar_close]
-
-    lowered = bar.lower()
-    # Word-boundary, in-order matching: a bare substring check for "you"
-    # would also match inside "your" (or "youtube", etc.), so it could pass
-    # even if the actual actor token were replaced by something else that
-    # merely contains the substring. Assert the literal, ordered sequence of
-    # actor tokens instead.
-    actor_sequence = re.compile(r"\byou\b.*\bagent\b.*\bmcp\b", re.DOTALL)
-    assert actor_sequence.search(lowered), (
-        "the terminal status line must name all three actors, in order, as "
-        "whole words — 'you', then 'agent', then 'mcp' — reinforcing that "
-        "all three actors drive one session"
-    )
-    assert "<img" not in bar, "the reinforcement must stay text-in-CSS-chrome, not a new asset"
-    assert "svg" not in lowered, "the reinforcement must stay text-in-CSS-chrome, not a new asset"
 
 
 # --- 5. every declared value must actually take effect ----------------------

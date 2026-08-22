@@ -9,35 +9,22 @@ hide:
 <section class="hero">
   <div class="hero-copy-column">
     <p class="eyebrow">AI-NATIVE KUBERNETES TUI</p>
-    <h1>A tool-using bird<br>for your cluster.</h1>
-    <p class="hero-copy">Browse, diagnose, and operate Kubernetes from a keyboard-first cockpit. Add an agent that sees your screen—or let your editor inspect the cluster over MCP—without giving either one an unchecked write path.</p>
+    <h1>See the cluster.<br>Drive the response.</h1>
+    <p class="hero-copy">Operate from the keyboard, delegate bounded investigation to an agent, or connect an external assistant over MCP. Every write still stops for you.</p>
     <div class="hero-actions">
       <a class="md-button md-button--primary" href="getting-started/">Start flying</a>
       <a class="md-button" href="https://github.com/hellices/korvid">View on GitHub</a>
     </div>
     <div class="install-command" tabindex="0" role="group" aria-label="Install the current korvid release with uv"><span class="install-command__prompt" aria-hidden="true">$</span><code>uv tool install 'korvid[all]==0.3.0'</code></div>
   </div>
-  <aside class="hero-panel" aria-label="korvid key legend">
-    <div class="hero-panel__bar" aria-hidden="true">
-      <span class="hero-panel__lights"></span>
-      <span class="hero-panel__title">korvid — you · agent · mcp — ctx:(current) ns:shop</span>
+  <figure class="hero-demo">
+    <div class="hero-demo__frame">
+      <div class="hero-demo__bar" aria-hidden="true"><span></span><strong>ctx:(current) · ns:shop</strong></div>
+      <video src="assets/demo.mp4" poster="assets/scenes/cockpit-poster.png" controls muted loop playsinline preload="metadata" aria-label="korvid browsing, filtering, describing, and following logs for a failing workload">Your browser does not support the korvid demo video.</video>
     </div>
-    <dl class="hero-panel__keys">
-      <dt><kbd>:</kbd></dt><dd>command bar — <span class="hero-panel__literal">pods</span>, <span class="hero-panel__literal">ns shop</span>, <span class="hero-panel__literal">helm</span></dd>
-      <dt><kbd>/</kbd></dt><dd>filter: fuzzy, regex, label, exclude</dd>
-      <dt><kbd>d</kbd></dt><dd>describe — manifest and events</dd>
-      <dt><kbd>l</kbd></dt><dd>follow logs, <kbd>L</kbd> merges the filtered set</dd>
-      <dt><kbd>g</kbd></dt><dd>relationship graph for the selection</dd>
-      <dt><kbd>Ctrl-A</kbd></dt><dd>ask the agent about what you see</dd>
-    </dl>
-    <p class="hero-panel__note">App-level actions are remappable; confirmation keys stay fixed, and <kbd>?</kbd> always shows the effective set.</p>
-  </aside>
+    <figcaption><strong>Real korvid, synthetic cluster.</strong> The cockpit needs only your kubeconfig; AI is optional.</figcaption>
+  </figure>
 </section>
-
-<figure class="product-demo">
-  <video src="assets/demo.mp4" controls autoplay muted loop playsinline aria-label="korvid browsing pods, filtering resources, describing a pod, following logs, and opening help">Your browser does not support the korvid demo video.</video>
-  <figcaption>The cockpit works with your kubeconfig alone. AI is optional.</figcaption>
-</figure>
 
 ## One operational experience. Three ways to drive it.
 
