@@ -342,6 +342,43 @@ def test_hero_keeps_heading_then_demo_then_copy_in_source_and_desktop_grid() -> 
     )
 
 
+def test_visual_storytelling_plan_hero_markup_matches_the_shipped_sources() -> None:
+    """The plan's hero markup must stay identical to the shipped landing page."""
+    plan_hero = _fenced_block_after(
+        _plan(),
+        "- [ ] **Step 4: Replace the hero markup and remove the separate demo figure**",
+        "html",
+    )
+    shipped_hero = _section('<section class="hero">', "</section>")
+    assert _compact(plan_hero) == _compact(shipped_hero)
+
+
+def test_visual_storytelling_plan_hero_css_matches_the_shipped_rules() -> None:
+    """The plan's hero CSS must stay synced with the shipped source snippets."""
+    plan_css = _fenced_block_after(
+        _plan(),
+        "- [ ] **Step 5: Replace the legend/product-demo CSS with the product stage**",
+        "css",
+    )
+    shipped_css = _css()
+
+    plan_demo = _rule(plan_css, ".md-typeset .hero-demo {")
+    shipped_demo = _rule(shipped_css, ".md-typeset .hero-demo {")
+    assert _compact(plan_demo) == _compact(shipped_demo)
+
+    plan_wide = next(
+        block
+        for block in _media_blocks(plan_css, "@media (min-width: 960px)")
+        if ".hero .hero-heading" in block
+    )
+    shipped_wide = next(
+        block
+        for block in _media_blocks(shipped_css, "@media (min-width: 960px)")
+        if ".hero .hero-heading" in block
+    )
+    assert _compact(plan_wide) == _compact(shipped_wide)
+
+
 def test_demo_regeneration_updates_both_readme_and_site_formats() -> None:
     """One canonical recording must refresh the README GIF and site MP4 together."""
     instructions = DEMO_README.read_text(encoding="utf-8")
@@ -602,6 +639,25 @@ def test_write_path_stage_grid_targets_the_ordered_list_specificity() -> None:
     css = _strip_css_comments(raw_css)
     assert css.count(".md-typeset ol.write-path__stages {") == 2
     assert ".md-typeset .write-path__stages {" not in css
+
+
+def test_visual_storytelling_plan_write_path_css_matches_the_shipped_rules() -> None:
+    """The plan's write-path snippets must stay synced with the shipped source."""
+    plan_css = _fenced_block_after(
+        _plan(),
+        "- [ ] **Step 4: Style the semantic diagrams without relying on color**",
+        "css",
+    )
+    shipped_css = _css()
+
+    plan_base = _rule(plan_css, ".md-typeset ol.write-path__stages {")
+    shipped_base = _rule(shipped_css, ".md-typeset ol.write-path__stages {")
+    assert _compact(plan_base) == _compact(shipped_base)
+
+    plan_mobile = _media_blocks(plan_css, "@media (max-width: 799px)")
+    shipped_mobile = _media_blocks(shipped_css, "@media (max-width: 799px)")
+    assert len(plan_mobile) == len(shipped_mobile) == 1
+    assert _compact(plan_mobile[0]) == _compact(shipped_mobile[0])
 
 
 def test_evidence_figures_reserve_the_full_card_width_before_images_load() -> None:

@@ -156,15 +156,9 @@ Replace the current `<section class="hero">...</section>` and delete the separat
 
 ```html
 <section class="hero">
-  <div class="hero-copy-column">
+  <div class="hero-heading">
     <p class="eyebrow">AI-NATIVE KUBERNETES TUI</p>
     <h1>See the cluster.<br>Drive the response.</h1>
-    <p class="hero-copy">Operate from the keyboard, delegate bounded investigation to an agent, or connect an external assistant over MCP. Every write still stops for you.</p>
-    <div class="hero-actions">
-      <a class="md-button md-button--primary" href="getting-started/">Start flying</a>
-      <a class="md-button" href="https://github.com/hellices/korvid">View on GitHub</a>
-    </div>
-    <div class="install-command" tabindex="0" role="group" aria-label="Install the current korvid release with uv"><span class="install-command__prompt" aria-hidden="true">$</span><code>uv tool install 'korvid[all]==0.3.0'</code></div>
   </div>
   <figure class="hero-demo">
     <div class="hero-demo__frame">
@@ -173,6 +167,14 @@ Replace the current `<section class="hero">...</section>` and delete the separat
     </div>
     <figcaption><strong>Real korvid, synthetic cluster.</strong> The cockpit needs only your kubeconfig; AI is optional.</figcaption>
   </figure>
+  <div class="hero-copy-column">
+    <p class="hero-copy">Operate from the keyboard, delegate bounded investigation to an agent, or connect an external assistant over MCP. Every write still stops for you.</p>
+    <div class="hero-actions">
+      <a class="md-button md-button--primary" href="getting-started/">Start flying</a>
+      <a class="md-button" href="https://github.com/hellices/korvid">View on GitHub</a>
+    </div>
+    <div class="install-command" tabindex="0" role="group" aria-label="Install the current korvid release with uv"><span class="install-command__prompt" aria-hidden="true">$</span><code>uv tool install 'korvid[all]==0.3.0'</code></div>
+  </div>
 </section>
 ```
 
@@ -183,7 +185,7 @@ Delete the `.hero-panel*` and `.product-demo*` blocks from `docs/stylesheets/ext
 ```css
 .md-typeset .hero-demo {
   min-width: 0;
-  margin: 2.5rem 0 0;
+  margin: 0;
 }
 
 .md-typeset .hero-demo__frame {
@@ -235,12 +237,26 @@ Delete the `.hero-panel*` and `.product-demo*` blocks from `docs/stylesheets/ext
   .md-typeset .hero {
     display: grid;
     grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
-    gap: clamp(2rem, 4vw, 4rem);
+    column-gap: clamp(2rem, 4vw, 4rem);
+    row-gap: 1rem;
     align-items: center;
     padding: 3.5rem;
   }
 
+  .md-typeset .hero .hero-heading {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: end;
+  }
+
+  .md-typeset .hero .hero-copy-column {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
   .md-typeset .hero-demo {
+    grid-column: 2;
+    grid-row: 1 / span 2;
     margin-top: 0;
   }
 }
@@ -1314,7 +1330,7 @@ Add:
   border-radius: 999px;
 }
 
-.md-typeset .write-path__stages {
+.md-typeset ol.write-path__stages {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0.75rem;
@@ -1324,7 +1340,6 @@ Add:
 }
 
 .md-typeset .write-path__stages li {
-  position: relative;
   min-width: 0;
   padding: 1rem;
   background: var(--korvid-charcoal-raised);
@@ -1364,7 +1379,7 @@ Add:
 }
 
 @media (max-width: 799px) {
-  .md-typeset .write-path__stages {
+  .md-typeset ol.write-path__stages {
     grid-template-columns: 1fr;
   }
 }
