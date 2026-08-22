@@ -178,6 +178,23 @@ def test_a_completion_verb_under_uncertainty_is_verification_unknown() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "It is unclear whether the rollout completed.",
+        "It is uncertain whether the rollout completed.",
+    ],
+)
+def test_explicit_uncertainty_cannot_be_misclassified_as_completed(answer: str) -> None:
+    assert classify_operation_outcome(answer).outcome == "verification_unknown"
+
+
+def test_unsuccessfully_cannot_be_misclassified_as_completed() -> None:
+    assert classify_operation_outcome("The deployment was unsuccessfully restarted.").outcome == (
+        "unknown"
+    )
+
+
 def test_conflicting_positive_and_negative_classes_are_ambiguous() -> None:
     result = classify_operation_outcome("The restart completed, but the API returned an error.")
     assert result.outcome == "ambiguous"

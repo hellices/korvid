@@ -155,6 +155,8 @@ _UNCERTAIN = (
     "assuming",
     "perhaps",
     "possibly",
+    "unclear",
+    "uncertain",
 )
 
 _NEGATORS = (
@@ -170,6 +172,8 @@ _NEGATORS = (
     "nor",
     "failed to",
     "failure to",
+    "unsuccessful",
+    "unsuccessfully",
 )
 _APOSTROPHE_TRANSLATION = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'"})
 _CONTRACTED_NEGATOR = re.compile(r"(?<!\w)[a-z]+n't(?!\w)")

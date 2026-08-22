@@ -101,6 +101,10 @@
   label: verification_unknown
 - text: The scale should be complete by now.
   label: verification_unknown
+- text: It is unclear whether the rollout completed.
+  label: verification_unknown
+- text: It is uncertain whether the rollout completed.
+  label: verification_unknown
 - text: The rollout is in progress; pods are still starting.
   label: in_progress
 - text: The restart is rolling out now.
@@ -127,6 +131,8 @@
   label: accepted
 - text: The change was successfully submitted.
   label: accepted
+- text: The deployment was unsuccessfully restarted.
+  label: unknown
 - text: You approved it, and the scale completed; a fresh read confirms it is now 3.
   label: completed
 - text: The restart completed, but the API returned an error.
