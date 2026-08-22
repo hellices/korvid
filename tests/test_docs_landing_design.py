@@ -507,15 +507,16 @@ def test_landing_never_claims_the_surfaces_look_the_same() -> None:
     lowered = _index().lower()
     negation_cues = ("not ", "never ", "no ", "without implying ", "isn't ", "aren't ")
     overclaim = re.compile(r"(same|identical)\s+(screens?|uis?|interfaces?)")
+    violations: list[str] = []
     for match in overclaim.finditer(lowered):
         preceding = lowered[max(0, match.start() - 40) : match.start()]
         if any(preceding.endswith(cue) for cue in negation_cues):
             continue
-        raise AssertionError(
-            f"{match.group(0)!r} overclaims: the three actors share korvid's "
-            "operational state and safety boundary, not their literal screens "
-            "(and this occurrence is not preceded by a negation cue)"
-        )
+        violations.append(match.group(0))
+    assert not violations, (
+        "the three actors share context and safety boundaries, not literal "
+        f"screens; non-negated overclaims: {violations}"
+    )
 
 
 def test_hero_terminal_motif_reinforces_the_three_actors() -> None:

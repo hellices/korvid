@@ -82,23 +82,28 @@ def _wheel_target() -> dict[str, object]:
     return target
 
 
-def _assert_no_docs_injection(table: dict[str, object], where: str) -> None:
-    """Fail if any file-injecting key in `table` mentions documentation-site paths.
+def _docs_injection_violations(table: dict[str, object], where: str) -> list[str]:
+    """Return file-injecting settings that mention documentation-site paths.
 
     Args:
         table: A hatch build table (`[tool.hatch.build]` or a target's table).
         where: The table's dotted name, used in the failure message.
+
+    Returns:
+        Human-readable violations, empty when the build table is safe.
     """
+    violations: list[str] = []
     for key in FILE_INJECTING_KEYS:
         value = table.get(key)
         if value is None:
             continue
         rendered = str(value).lower()
         for token in DOCS_ONLY_TOKENS:
-            assert token not in rendered, (
-                f"[{where}].{key} = {value!r} would pull {token!r} into the wheel; "
-                "the wheel ships code only"
-            )
+            if token in rendered:
+                violations.append(
+                    f"[{where}].{key} = {value!r} would pull {token!r} into the wheel"
+                )
+    return violations
 
 
 def test_wheel_ships_only_the_korvid_package() -> None:
@@ -111,7 +116,8 @@ def test_wheel_ships_only_the_korvid_package() -> None:
 
 def test_wheel_target_does_not_force_extra_files_into_the_artifact() -> None:
     """No hatch key may inject docs, site output, CSS, SVG, or mkdocs.yml."""
-    _assert_no_docs_injection(_wheel_target(), "tool.hatch.build.targets.wheel")
+    violations = _docs_injection_violations(_wheel_target(), "tool.hatch.build.targets.wheel")
+    assert not violations, f"the wheel ships code only: {violations}"
 
 
 def test_shared_build_config_does_not_force_extra_files_into_the_artifact() -> None:
@@ -123,7 +129,8 @@ def test_shared_build_config_does_not_force_extra_files_into_the_artifact() -> N
     which is exactly the edit a reader of the wheel-target test alone would
     believe was safe.
     """
-    _assert_no_docs_injection(_hatch_build(), "tool.hatch.build")
+    violations = _docs_injection_violations(_hatch_build(), "tool.hatch.build")
+    assert not violations, f"the wheel ships code only: {violations}"
 
 
 def test_no_build_hook_can_smuggle_the_documentation_site_into_the_wheel() -> None:

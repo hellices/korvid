@@ -4,7 +4,8 @@ Five minutes from an empty terminal to a running cockpit.
 
 ## Requirements
 
-- **Python 3.11, 3.12, or 3.13** on Linux, macOS, or Windows.
+- **Python 3.11 or newer** on Linux, macOS, or Windows. CI currently
+  qualifies 3.11, 3.12, and 3.13.
 - A working `kubeconfig` — korvid reads the same config, contexts, and
   credential plugins as `kubectl`.
 - The [Helm and operator views](helm-operators.md) do not require the Helm CLI;

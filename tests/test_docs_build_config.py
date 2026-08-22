@@ -133,6 +133,15 @@ def test_getting_started_matches_current_project_and_readme_release() -> None:
     assert "awaiting publication" not in getting_started.lower()
 
 
+def test_getting_started_matches_the_python_installation_contract() -> None:
+    """The guide must not invent an upper bound absent from Requires-Python."""
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    assert pyproject["project"]["requires-python"] == ">=3.11"
+    getting_started = " ".join((ROOT / "docs" / "getting-started.md").read_text().lower().split())
+    assert "python 3.11 or newer" in getting_started
+    assert "ci currently qualifies 3.11, 3.12, and 3.13" in getting_started
+
+
 def test_getting_started_cannot_call_homebrew_unpublished_when_readme_installs_it() -> None:
     """README's live brew route and the guide's Homebrew section cannot contradict."""
     readme = (ROOT / "README.md").read_text()
