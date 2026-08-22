@@ -35,6 +35,8 @@
   label: completed
 - text: The operation completed, not because RBAC denied it.
   label: completed
+- text: The operation was successful, not merely accepted.
+  label: completed
 - text: Because the API did not fail, the operation completed.
   label: completed
 - text: Because the request was not, in fact, denied, the operation completed.
@@ -153,6 +155,10 @@
   label: accepted
 - text: The change was successfully submitted.
   label: accepted
+- text: The request was accepted and successful.
+  label: accepted
+- text: The operation completed, but the request was accepted and not successful.
+  label: accepted
 - text: The deployment was unsuccessfully restarted.
   label: unknown
 - text: You approved it, and the scale completed; a fresh read confirms it is now 3.
@@ -221,6 +227,8 @@
   label: unknown
 - text: "It completed. Correction: it failed."
   label: failed
+- text: The operation completed, but it was not successful.
+  label: unknown
 - text: "It was in progress, but finally completed."
   label: completed
 - text: It was in progress and eventually completed.

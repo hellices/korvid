@@ -144,6 +144,26 @@ def test_a_later_explicit_retraction_removes_completion(answer: str) -> None:
     assert classify_operation_outcome(answer).outcome == "unknown"
 
 
+def test_a_later_success_retraction_removes_completion() -> None:
+    answer = "The operation completed, but it was not successful."
+    assert classify_operation_outcome(answer).outcome == "unknown"
+
+
+def test_a_successful_submission_is_still_only_accepted() -> None:
+    answer = "The request was accepted and successful."
+    assert classify_operation_outcome(answer).outcome == "accepted"
+
+
+def test_an_accepted_but_unsuccessful_request_retracts_completion() -> None:
+    answer = "The operation completed, but the request was accepted and not successful."
+    assert classify_operation_outcome(answer).outcome == "accepted"
+
+
+def test_a_successful_but_unaccepted_operation_is_completed() -> None:
+    answer = "The operation was successful, not merely accepted."
+    assert classify_operation_outcome(answer).outcome == "completed"
+
+
 @pytest.mark.parametrize(
     "answer",
     [

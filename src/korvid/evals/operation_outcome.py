@@ -125,6 +125,7 @@ _PHRASES: dict[str, tuple[str, ...]] = {
         "complete",
         "done",
         "finished",
+        "successful",
         "successfully",
         "success",
         "is now",
@@ -138,7 +139,7 @@ _PHRASES: dict[str, tuple[str, ...]] = {
         "confirmed",
     ),
 }
-_SUCCESS_ONLY = frozenset({"success", "successfully"})
+_SUCCESS_ONLY = frozenset({"success", "successful", "successfully"})
 
 #: A verb under one of these in the same clause is a hedge, not a report:
 #: the claim is downgraded to `verification_unknown`.
@@ -379,23 +380,39 @@ def _claim_reset_end(gap: str) -> int:
     return end
 
 
-def _clause_updates(clause: str) -> tuple[tuple[str, str | None, bool], ...]:
-    occurrences = _phrase_occurrences(clause)
-    accepted_here = any(pattern.search(clause) for _, pattern in _PHRASE_PATTERNS["accepted"])
-    updates: list[tuple[str, str | None, bool]] = []
+def _scoped_occurrences(
+    clause: str,
+) -> list[tuple[int, int, str, str, int, int, bool]]:
+    scoped: list[tuple[int, int, str, str, int, int, bool]] = []
     scope_start = 0
     previous_end = 0
-    for start, end, label, phrase in occurrences:
+    for start, end, label, phrase in _phrase_occurrences(clause):
         gap = clause[previous_end:start]
         reset_end = _claim_reset_end(gap)
         if reset_end:
             scope_start = previous_end + reset_end
         negated = _negated_before(clause, start, scope_start)
+        scoped.append((start, end, label, phrase, reset_end, scope_start, negated))
         previous_end = max(previous_end, end)
-        if label == "completed" and phrase in _SUCCESS_ONLY and accepted_here:
-            continue
+    return scoped
+
+
+def _clause_updates(clause: str) -> tuple[tuple[str, str | None, bool], ...]:
+    occurrences = _scoped_occurrences(clause)
+    accepted_by_scope: dict[int, bool] = {}
+    for _start, _end, label, _phrase, _reset_end, scope_start, negated in occurrences:
+        if label == "accepted":
+            accepted_by_scope[scope_start] = not negated
+    updates: list[tuple[str, str | None, bool]] = []
+    for start, _end, label, phrase, reset_end, scope_start, negated in occurrences:
         if negated:
             updates.append((label, None, bool(reset_end)))
+            continue
+        if (
+            label == "completed"
+            and phrase in _SUCCESS_ONLY
+            and accepted_by_scope.get(scope_start, False)
+        ):
             continue
         effective_label = (
             "verification_unknown"

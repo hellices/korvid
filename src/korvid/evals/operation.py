@@ -390,12 +390,18 @@ def _assertion(raw: Any, default_target: OperationTarget, label: str) -> StateAs
 
 
 def _assertions(
-    raw: Any, default_target: OperationTarget, label: str
+    raw: Any,
+    default_target: OperationTarget,
+    label: str,
+    *,
+    minimum: int = 0,
 ) -> tuple[StateAssertion, ...]:
     if raw is None:
-        return ()
+        raw = []
     if not isinstance(raw, list):
         raise ValueError(f"{label} must be a list of assertion mappings")
+    if len(raw) < minimum:
+        raise ValueError(f"{label} must contain at least one assertion")
     return tuple(_assertion(item, default_target, f"{label}[{i}]") for i, item in enumerate(raw))
 
 
@@ -800,10 +806,16 @@ def load_operation_journey(path: Path) -> OperationJourney:
             f"{path.name}: required_checkpoints",
         ),
         preconditions=_assertions(
-            operation["preconditions"], target, f"{path.name}: preconditions"
+            operation["preconditions"],
+            target,
+            f"{path.name}: preconditions",
+            minimum=1,
         ),
         postconditions=_assertions(
-            operation["postconditions"], target, f"{path.name}: postconditions"
+            operation["postconditions"],
+            target,
+            f"{path.name}: postconditions",
+            minimum=int(requests > 0 and operation["expected_outcome"] == "completed"),
         ),
         forbidden=_forbidden(operation["forbidden"], f"{path.name}: forbidden"),
         dialog_intervention=_dialog_intervention(

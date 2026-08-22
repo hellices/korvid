@@ -482,6 +482,36 @@ def test_a_non_provisional_assertion_is_rejected_in_slice_a(tmp_path: Path) -> N
         load_operation_journey(_write(tmp_path, data))
 
 
+@pytest.mark.parametrize("assertions", [None, []])
+def test_every_journey_requires_a_precondition_assertion(
+    tmp_path: Path, assertions: list[object] | None
+) -> None:
+    data = _minimal()
+    data["operation"]["preconditions"] = assertions
+
+    with pytest.raises(ValueError, match="preconditions must contain at least one assertion"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+@pytest.mark.parametrize("assertions", [None, []])
+def test_completed_write_requires_a_postcondition_assertion(
+    tmp_path: Path, assertions: list[object] | None
+) -> None:
+    data = _minimal()
+    data["operation"]["postconditions"] = assertions
+
+    with pytest.raises(ValueError, match="postconditions must contain at least one assertion"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+def test_expected_failure_may_omit_postcondition_assertions(tmp_path: Path) -> None:
+    data = _minimal()
+    data["operation"]["expected_outcome"] = "failed"
+    data["operation"]["postconditions"] = []
+
+    assert load_operation_journey(_write(tmp_path, data)).postconditions == ()
+
+
 def test_required_checkpoints_must_be_known_and_ordered(tmp_path: Path) -> None:
     data = _minimal()
     data["operation"]["required_checkpoints"] = ["mutation_finished", "write_requested"]
