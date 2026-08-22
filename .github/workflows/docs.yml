@@ -22,12 +22,11 @@ on:
 permissions:
   contents: read
 
-# GitHub Pages rejects overlapping deployments to the same environment; a
-# second push to main before the first deploy finishes would otherwise race
-# it instead of queueing behind it.
+# Keep each pull request in its own replaceable group while serializing every
+# main deployment. A PR run must never replace a pending Pages deployment.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:

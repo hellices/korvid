@@ -196,6 +196,21 @@ def test_workflow_level_permissions_are_read_only() -> None:
     assert config.get("permissions") == {"contents": "read"}
 
 
+def test_concurrency_never_lets_a_pull_request_discard_a_main_deployment() -> None:
+    config = _load()
+    concurrency = config.get("concurrency")
+    assert isinstance(concurrency, dict), "docs workflow must configure concurrency"
+    assert concurrency.get("group") == (
+        "${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'pages' }}"
+    ), (
+        "pull requests need their own ref-scoped groups while pushes share the "
+        "Pages deployment group"
+    )
+    assert concurrency.get("cancel-in-progress") == (
+        "${{ github.event_name == 'pull_request' }}"
+    ), "only superseded runs of the same pull request should be cancelled"
+
+
 DEV_README = ROOT / "docs" / "dev" / "README.md"
 DESIGN_DOC = ROOT / "docs" / "superpowers" / "specs" / "2026-08-21-documentation-site-design.md"
 PLAN_DOC = ROOT / "docs" / "superpowers" / "plans" / "2026-08-21-official-documentation-site.md"

@@ -7,8 +7,9 @@ Five minutes from an empty terminal to a running cockpit.
 - **Python 3.11, 3.12, or 3.13** on Linux, macOS, or Windows.
 - A working `kubeconfig` — korvid reads the same config, contexts, and
   credential plugins as `kubectl`.
-- Optionally, `helm` on `PATH` for the [Helm and operators](helm-operators.md)
-  views, and `kubectl` itself for shell/debug fallbacks.
+- The [Helm and operator views](helm-operators.md) do not require the Helm CLI;
+  they read release data from the cluster. Helm write actions require `helm`
+  on `PATH`, while shell/debug fallbacks require `kubectl`.
 
 korvid is an application, not a library: install it into its own isolated
 environment rather than whatever Python happens to be active. `uv` and
@@ -68,7 +69,7 @@ or both:
 | `korvid==0.3.0` | The keyboard-first TUI only — no agent, no MCP server |
 | `korvid[agent]==0.3.0` | The embedded agent (`Ctrl-A`, `:ai`, `:model`) |
 | `korvid[mcp]==0.3.0` | The MCP server (`korvid --mcp`) |
-| `korvid[all]==0.3.0` | Both agent and MCP — the recommended first install |
+| `korvid[all]==0.3.0` | Agent, MCP, and observability connectors — the recommended first install |
 | `korvid[all,entra]==0.3.0` | Everything above, plus Entra ID auth for Azure OpenAI |
 
 Extras do not expand in place: if you installed `korvid` alone and later want

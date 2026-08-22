@@ -176,7 +176,7 @@ git commit -m "build: add reproducible documentation site"
 - Create: `docs/stylesheets/extra.css`
 
 **Interfaces:**
-- Consumes: `docs/assets/demo.gif`, existing user guides, and the navigation/configuration from Task 1.
+- Consumes: `docs/assets/demo.mp4`, existing user guides, and the navigation/configuration from Task 1.
 - Produces: A responsive product landing page, install guide, and korvid-specific visual identity rendered through MkDocs.
 
 - [ ] **Step 1: Create the landing content**
@@ -204,7 +204,7 @@ hide:
 </section>
 
 <figure class="product-demo">
-  <img src="assets/demo.gif" alt="korvid browsing pods, filtering resources, describing a pod, following logs, and opening help">
+  <video src="assets/demo.mp4" controls autoplay muted loop playsinline aria-label="korvid browsing pods, filtering resources, describing a pod, following logs, and opening help">Your browser does not support the korvid demo video.</video>
   <figcaption>The cockpit works with your kubeconfig alone. AI is optional.</figcaption>
 </figure>
 

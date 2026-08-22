@@ -341,7 +341,7 @@
   padding: 0;
 }
 
-.md-typeset .product-demo img {
+.md-typeset .product-demo video {
   width: 100%;
   border-radius: var(--korvid-radius);
   border: 1px solid var(--korvid-charcoal-border);
@@ -509,7 +509,7 @@
 .md-typeset .hero a:focus-visible,
 .md-typeset .hero .install-command:focus-visible,
 .md-typeset .feature-grid article:focus-visible,
-.md-typeset .product-demo:focus-visible,
+.md-typeset .product-demo video:focus-visible,
 .md-footer .korvid-footer a:focus-visible {
   outline: 3px solid var(--korvid-amber);
   outline-offset: 2px;

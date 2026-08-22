@@ -43,7 +43,17 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 
 # Anything whose presence in the wheel would mean the docs site leaked in.
-DOCS_ONLY_TOKENS = ("docs", "site", "mkdocs", "stylesheets", "overrides", ".css", ".svg", ".gif")
+DOCS_ONLY_TOKENS = (
+    "docs",
+    "site",
+    "mkdocs",
+    "stylesheets",
+    "overrides",
+    ".css",
+    ".svg",
+    ".gif",
+    ".mp4",
+)
 
 # Hatch keys that can add files to a wheel beyond `packages`.
 FILE_INJECTING_KEYS = ("force-include", "include", "only-include", "artifacts", "shared-data")

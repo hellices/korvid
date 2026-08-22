@@ -280,6 +280,20 @@ def test_hero_panel_is_not_a_second_copy_of_the_demo_asset() -> None:
     assert "<img" not in panel or "korvid-mark.svg" in panel
 
 
+def test_product_demo_has_native_motion_controls() -> None:
+    """A demo longer than five seconds must be pausable without custom JavaScript."""
+    index = _index()
+    start = index.index('<figure class="product-demo">')
+    demo = index[start : index.index("</figure>", start)]
+    assert "<video" in demo, "the moving demo must use a controllable media element"
+    assert 'src="assets/demo.mp4"' in demo
+    for attribute in ("controls", "autoplay", "muted", "loop", "playsinline"):
+        assert re.search(rf"<video\b[^>]*\b{attribute}\b", demo), (
+            f"the demo video must declare {attribute!r}"
+        )
+    assert "demo.gif" not in demo, "an autoplaying GIF has no pause or stop control"
+
+
 # --- the whole page stays original, asset-light, and script-free -------------
 
 

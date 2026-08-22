@@ -35,7 +35,7 @@ hide:
 </section>
 
 <figure class="product-demo">
-  <img src="assets/demo.gif" alt="korvid browsing pods, filtering resources, describing a pod, following logs, and opening help">
+  <video src="assets/demo.mp4" controls autoplay muted loop playsinline aria-label="korvid browsing pods, filtering resources, describing a pod, following logs, and opening help">Your browser does not support the korvid demo video.</video>
   <figcaption>The cockpit works with your kubeconfig alone. AI is optional.</figcaption>
 </figure>
 

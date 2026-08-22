@@ -148,6 +148,30 @@ def test_getting_started_cannot_call_homebrew_unpublished_when_readme_installs_i
         )
 
 
+def test_getting_started_describes_the_all_extra_completely() -> None:
+    """The canonical install table must include every component in the `all` extra."""
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    all_extra = pyproject["project"]["optional-dependencies"]["all"]
+    assert all_extra == ["korvid[agent,mcp,observability]"]
+
+    getting_started = (ROOT / "docs" / "getting-started.md").read_text()
+    row = next(line for line in getting_started.splitlines() if "`korvid[all]==0.3.0`" in line)
+    for component in ("agent", "mcp", "observability"):
+        assert component in row.lower(), (
+            f"the `all` install row must name its {component} component"
+        )
+
+
+def test_getting_started_limits_the_helm_cli_requirement_to_writes() -> None:
+    """Cluster-backed Helm browsing works without the local Helm executable."""
+    getting_started = (ROOT / "docs" / "getting-started.md").read_text()
+    requirements = getting_started.split("## Requirements", 1)[1].split("\n## ", 1)[0]
+    requirements = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", requirements)
+    normalized = " ".join(requirements.lower().split())
+    assert "helm and operator views do not require the helm cli" in normalized
+    assert "helm write actions require" in normalized
+
+
 def _plugin_options(config: dict[str, Any], name: str) -> dict[str, Any] | None:
     """Return a configured plugin's options, using `{}` for its short form."""
     plugins = config.get("plugins")
