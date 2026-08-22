@@ -23,7 +23,7 @@ when the wire protocol or auth flow truly differs.
 > `complete()` receives that payload, it is free to mutate, retain, log,
 > cache, or independently transmit it anywhere; korvid has no further
 > control or visibility past the handoff. See
-> [`SECURITY.md`](../SECURITY.md) to report a vulnerability.
+> [`SECURITY.md`](https://github.com/hellices/korvid/blob/main/SECURITY.md) to report a vulnerability.
 
 ## When you should not write a plugin
 

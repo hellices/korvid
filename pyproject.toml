@@ -45,7 +45,7 @@ Homepage = "https://github.com/hellices/korvid"
 Source = "https://github.com/hellices/korvid"
 Issues = "https://github.com/hellices/korvid/issues"
 "Release notes" = "https://github.com/hellices/korvid/releases"
-Documentation = "https://github.com/hellices/korvid/blob/main/docs/tui.md"
+Documentation = "https://hellices.github.io/korvid/"
 Security = "https://github.com/hellices/korvid/blob/main/SECURITY.md"
 
 [project.optional-dependencies]
@@ -90,6 +90,7 @@ build-backend = "hatchling.build"
 packages = ["src/korvid"]
 
 [dependency-groups]
+docs = ["mkdocs-material==9.7.7"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
@@ -149,7 +150,12 @@ fail_under = 80
 show_missing = true
 
 [tool.typos.files]
-extend-exclude = ["*.lock", "*.snap"]
+extend-exclude = [
+    "*.lock",
+    "*.snap",
+    "docs/assets/javascripts/bundle.d7400e89.min.js",
+    "docs/assets/javascripts/vendor/*.js",
+]
 
 [tool.typos.default.extend-words]
 aks = "aks"  # Azure Kubernetes Service — not a typo of "ask"

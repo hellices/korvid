@@ -8,7 +8,7 @@ code (`src/korvid/agent/outbound.py`, `src/korvid/core/redaction.py`,
 `src/korvid/core/private_export.py`).
 It is not a general product security overview — see
 [`docs/ops.md`](ops.md) for the cluster-write safety model and
-[`SECURITY.md`](../SECURITY.md) for how to report a vulnerability.
+[`SECURITY.md`](https://github.com/hellices/korvid/blob/main/SECURITY.md) for how to report a vulnerability.
 
 ## Assets
 

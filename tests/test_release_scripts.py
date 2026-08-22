@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.platforms import assert_pinned_action_version
 from tests.release_contracts import (
     UPGRADE_SOURCE_VERSION,
     markdown_section,
@@ -1267,11 +1268,8 @@ def test_release_metadata_is_generated_in_the_build_job() -> None:
 
 def test_release_build_toolchain_is_fully_pinned() -> None:
     workflow = _release_workflow()
-    setup_uv_count = workflow.count(
-        "uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9"
-    )
-    assert setup_uv_count > 0
-    assert workflow.count('version: "0.10.9"') == setup_uv_count
+    setup_uv_refs = assert_pinned_action_version(workflow, "astral-sh/setup-uv", "0.10.9")
+    assert len(set(setup_uv_refs)) == 1
     assert (
         "uv build --build-constraints scripts/release/build-constraints.txt --require-hashes"
     ) in workflow
@@ -1424,7 +1422,9 @@ def test_pypi_metadata_gives_the_project_page_its_sidebar_links() -> None:
     assert urls["Source"] == repo
     assert urls["Issues"] == f"{repo}/issues"
     assert urls["Release notes"] == f"{repo}/releases"
-    assert urls["Documentation"] == f"{repo}/blob/main/docs/tui.md"
+    # The hosted MkDocs site (Task 3) supersedes a single docs/tui.md blob
+    # link as the project's canonical Documentation entry point.
+    assert urls["Documentation"] == "https://hellices.github.io/korvid/"
     assert urls["Security"] == f"{repo}/blob/main/SECURITY.md"
 
 

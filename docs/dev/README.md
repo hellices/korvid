@@ -2,7 +2,7 @@
 
 Internal documents for people (and agents) working **on** korvid, as
 opposed to the user-facing feature docs that live directly under
-[`docs/`](../).
+[`docs/`](../index.md).
 
 **Start here if you are new:**
 [`specs/2026-08-12-korvid-architecture.md`](specs/2026-08-12-korvid-architecture.md)
@@ -11,10 +11,10 @@ provider boundary, and the evidence system, with diagrams. It documents the
 system as built (and names the tensions it still has), where the 2026-07-23
 design document states the original intent.
 
-- [`specs/`](specs/) — the product design document and the engineering
+- [`specs/`](https://github.com/hellices/korvid/tree/main/docs/dev/specs) — the product design document and the engineering
   standards. These are the durable references: layer rules, quality
   gates, and the security invariants that code must never weaken.
-- [`plans/`](plans/) — dated implementation plans for individual phases
+- [`plans/`](https://github.com/hellices/korvid/tree/main/docs/dev/plans) — dated implementation plans for individual phases
   and slices. Historical once executed; kept for traceability, not
   updated retroactively.
 - [`quality-gates.md`](quality-gates.md) — which checks run locally, in CI,
@@ -32,4 +32,27 @@ design document states the original intent.
   agent capabilities.
 
 If you are looking for how to *use* korvid, start at the
-[project README](../../README.md).
+[project README](https://github.com/hellices/korvid/blob/main/README.md).
+
+## Publishing the documentation site
+
+Publishing is a merge, not a deploy script: no server or hosting
+infrastructure is provisioned or operated for the site. GitHub Pages serves
+the static build produced by
+[`.github/workflows/docs.yml`](https://github.com/hellices/korvid/blob/main/.github/workflows/docs.yml).
+
+Before the very first deployment, a repository admin must enable Pages
+**once**: **Settings -> Pages -> Build and deployment -> Source: GitHub Actions.**
+Until that one-time setting is made, the workflow's build job still
+succeeds but the deploy job fails.
+
+After that one-time setup, merging documentation-site changes to `main`
+triggers the workflow and publishes <https://hellices.github.io/korvid/>.
+Pull request builds validate the site (strict build, link checks) but do
+not deploy it — only a push to `main` runs the deploy job.
+
+A custom domain is optional and deliberately deferred. Adopting one later does
+not require a content migration, but it does require updating `site_url`,
+Pages settings, DNS, the optional `CNAME`, hosted links in `README.md`,
+`pyproject.toml`'s Documentation URL, and the entry-point tests that pin those
+canonical links.

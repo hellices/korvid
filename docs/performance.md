@@ -99,7 +99,7 @@ mutates it, so a shared instance would corrupt unrelated rows.
 
 The corrected probe has been exercised against a local, deterministic replay of
 the 1,000-pod / 24-events-per-second workload committed as
-[`tests/performance/profiles/steady-24eps-1k.json`](../tests/performance/profiles/steady-24eps-1k.json)
+[`tests/performance/profiles/steady-24eps-1k.json`](https://github.com/hellices/korvid/blob/main/tests/performance/profiles/steady-24eps-1k.json)
 (1,000 Pods across 20 namespaces, 30 seconds of burst-free churn at 24
 events/s). That replay exercises the real app, watch manager, store and table,
 but not the API server, the watch decoder, or a real terminal, so it can never

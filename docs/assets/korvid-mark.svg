@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-labelledby="korvid-mark-title" fill="currentColor">
+  <title id="korvid-mark-title">korvid mark</title>
+  <!--
+    mkdocs renders this mark through an <img> tag (theme.logo / favicon),
+    which loads it as a standalone document: page CSS cannot set `color`
+    on it. `currentColor` still drives every shape below so the mark
+    inherits a host page's color when inlined directly, but this ":root"
+    rule (the <svg> element itself, in a standalone SVG document) gives it
+    a legible default — the same light ink used for body text on the
+    charcoal hero — instead of falling back to the initial black.
+  -->
+  <style>:root { color: #e7e9ee; }</style>
+  <!-- Upswept wing: three tapering geometric bars -->
+  <path d="M10,100 L70,100 L55,84 L10,84 Z" />
+  <path d="M18,80 L68,80 L56,64 L18,64 Z" />
+  <path d="M28,60 L66,60 L57,46 L28,46 Z" />
+  <!-- Angular head with a pointed beak and a negative-space eye -->
+  <path
+    fill-rule="evenodd"
+    d="M56,46 L64,18 L88,8 L108,30 L86,36 L94,48 L70,50 Z
+       M82,18 A6,6 0 1,0 82,30 A6,6 0 1,0 82,18 Z" />
+</svg>

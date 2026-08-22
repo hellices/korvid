@@ -65,10 +65,11 @@ every model struggles with; see below.
 
 **Scenario names** (`healthy-service-endpoints`, `pvc-wait-for-first-consumer`,
 `healthy-restart-history`, …) are files under
-[`src/korvid/evals/scenarios/`](../../src/korvid/evals/scenarios).
+[`src/korvid/evals/scenarios/`](https://github.com/hellices/korvid/tree/main/src/korvid/evals/scenarios).
 **Journey names** (`healthy-stop`, `logs-to-events`, `triage-and-correct`,
 `rollout-owner-chain`) are files under
-[`src/korvid/evals/journeys/`](../../src/korvid/evals/journeys) and belong to
+[`src/korvid/evals/journeys/`](https://github.com/hellices/korvid/tree/main/src/korvid/evals/journeys)
+and belong to
 the separate multi-turn pack below.
 
 Journey pack — `triage-and-correct`, `logs-to-events` and `healthy-stop`

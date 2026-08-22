@@ -1,7 +1,7 @@
 # MCP server
 
 Requires the `[mcp]` extra (see the README's
-[installation section](../README.md#installation)).
+[installation section](https://github.com/hellices/korvid/blob/main/README.md#installation)).
 Start with `korvid --mcp` (or set `mcp: {enabled: true}` in
 `~/.config/korvid/config.yaml`) to expose the read and UI-drive tools to
 external agents — VS Code Copilot Chat, Claude Code, Cursor, Zed — over a

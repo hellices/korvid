@@ -1,0 +1,40 @@
+{#-
+  korvid footer.
+
+  Replaces Material's default footer meta — a lone "Made with Material for
+  MkDocs" line — with a footer that actually identifies the project: the
+  original korvid mark, the tagline from `site_description`, the four
+  destinations a reader most often wants next, and the license.
+
+  Internal links go through MkDocs' `url` filter because the site is served
+  from the `/korvid/` subpath on GitHub Pages; a hardcoded `/ops/` would work
+  locally and 404 in production. The upstream theme attribution stays.
+-#}
+<div class="md-copyright korvid-footer">
+  <div class="korvid-footer__identity">
+    <img
+      class="korvid-footer__mark"
+      src="{{ 'assets/korvid-mark.svg' | url }}"
+      alt=""
+      width="28"
+      height="28"
+    >
+    <div>
+      <p class="korvid-footer__name">korvid</p>
+      <p class="korvid-footer__tagline">{{ config.site_description }}</p>
+    </div>
+  </div>
+  <nav class="korvid-footer__links" aria-label="Footer links">
+    <a href="{{ 'getting-started/' | url }}">Install</a>
+    <a href="{{ 'keybindings/' | url }}">Keybindings</a>
+    <a href="{{ 'ops/' | url }}">Safety model</a>
+    <a href="{{ 'threat-model/' | url }}">Threat model</a>
+    <a href="{{ config.repo_url }}" rel="noopener">Source</a>
+  </nav>
+  <p class="korvid-footer__meta">
+    korvid is open source under the
+    <a href="{{ config.repo_url }}/blob/main/LICENSE" rel="noopener">Apache-2.0 license</a>.
+    Built with
+    <a href="https://squidfunk.github.io/mkdocs-material/" rel="noopener">Material for MkDocs</a>.
+  </p>
+</div>

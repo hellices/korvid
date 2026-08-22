@@ -1,7 +1,7 @@
 # AI agent
 
 Requires the `[agent]` extra (see the README's
-[installation section](../README.md#installation)).
+[installation section](https://github.com/hellices/korvid/blob/main/README.md#installation)).
 Press `Ctrl-A` to open the agent panel — a chat sidebar that answers questions
 about the cluster you are looking at.  The agent sees your current screen
 context (view, namespace, selected resource, active filter) and inspects the

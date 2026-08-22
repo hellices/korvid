@@ -73,6 +73,11 @@ def _ci_workflow() -> str:
     return read_text_utf8(Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml")
 
 
+def _workflow_files() -> tuple[Path, ...]:
+    workflows = Path(__file__).parents[1] / ".github" / "workflows"
+    return tuple(sorted((*workflows.glob("*.yml"), *workflows.glob("*.yaml"))))
+
+
 def _workflow_job(workflow: str, name: str) -> dict[str, Any]:
     parsed = yaml.safe_load(workflow)
     assert isinstance(parsed, dict), "expected workflow YAML to parse to a mapping"
@@ -98,6 +103,88 @@ def test_assert_pinned_action_ref_accepts_full_lowercase_commit_shas() -> None:
         assert_pinned_action_ref(workflow, "actions/checkout")
         == "34e114876b0b11c390a56381ad16ebd13914f8d5"
     )
+
+
+def test_assert_pinned_action_refs_accepts_revision_changes() -> None:
+    workflow = """
+    - uses: astral-sh/setup-uv@1111111111111111111111111111111111111111
+    - uses: astral-sh/setup-uv@2222222222222222222222222222222222222222
+    """
+
+    assert platform_helpers.assert_pinned_action_refs(workflow, "astral-sh/setup-uv") == (
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+    )
+
+
+def test_assert_pinned_action_refs_rejects_any_unpinned_use_site() -> None:
+    workflow = """
+    - uses: astral-sh/setup-uv@1111111111111111111111111111111111111111
+    - name: Named setup step
+      uses: Astral-SH/setup-UV@v10
+    """
+
+    with pytest.raises(
+        AssertionError, match="expected astral-sh/setup-uv@<40 lowercase hex characters>"
+    ):
+        platform_helpers.assert_pinned_action_refs(workflow, "astral-sh/setup-uv")
+
+
+def test_assert_pinned_action_version_rejects_unrelated_matching_text() -> None:
+    workflow = """
+    jobs:
+      build:
+        steps:
+          - uses: astral-sh/setup-uv@1111111111111111111111111111111111111111
+            with:
+              version: "0.10.8"
+          - run: 'echo version: "0.10.9"'
+    """
+
+    with pytest.raises(
+        AssertionError, match=r"expected every astral-sh/setup-uv step to use version 0.10.9"
+    ):
+        platform_helpers.assert_pinned_action_version(workflow, "astral-sh/setup-uv", "0.10.9")
+
+
+def test_find_action_refs_ignores_unrelated_matching_text() -> None:
+    workflow = """
+    # astral-sh/setup-uv is intentionally not used here.
+    jobs:
+      build:
+        steps:
+          - run: echo astral-sh/setup-uv
+    """
+
+    assert platform_helpers.find_action_refs(workflow, "astral-sh/setup-uv") == ()
+
+
+def test_find_action_refs_ignores_unrelated_uses_keys() -> None:
+    workflow = """
+    jobs:
+      build:
+        env:
+          uses: astral-sh/setup-uv@v10
+        steps:
+          - run: echo no setup action
+    """
+
+    assert platform_helpers.find_action_refs(workflow, "astral-sh/setup-uv") == ()
+
+
+def test_all_setup_uv_workflow_steps_are_pinned_to_one_revision() -> None:
+    action = "astral-sh/setup-uv"
+    refs: list[str] = []
+    matched_workflows: list[Path] = []
+    for path in _workflow_files():
+        workflow = read_text_utf8(path)
+        if not platform_helpers.find_action_refs(workflow, action):
+            continue
+        matched_workflows.append(path)
+        refs.extend(platform_helpers.assert_pinned_action_refs(workflow, action))
+
+    assert matched_workflows
+    assert len(set(refs)) == 1
 
 
 @pytest.mark.parametrize("bad_ref", ["v4", "v4.3.1", "34E114876B0B11C390A56381AD16EBD13914F8D5"])
@@ -136,7 +223,7 @@ def test_ci_workflow_defines_the_required_windows_test_job() -> None:
         step
         for step in steps
         if isinstance(step, dict)
-        and step.get("uses") == "astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9"
+        and str(step.get("uses", "")).partition("@")[0].casefold() == "astral-sh/setup-uv"
     )
     assert windows_job["runs-on"] == "windows-latest"
     assert_pinned_action_ref(segment, "actions/checkout")
@@ -157,7 +244,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - uses: astral-sh/setup-uv@1111111111111111111111111111111111111111
       - run: uv sync --locked --dev --all-extras
       - run: uv run pytest -q
   test:
