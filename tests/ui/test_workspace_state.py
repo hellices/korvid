@@ -13,8 +13,10 @@ import pytest
 
 from korvid.core.filters import parse_filter
 from korvid.core.sorting import toggle_sort
+from korvid.core.store import Summary
+from korvid.k8s.models import PodSummary
 from korvid.ui.navigation import DrillLevel
-from korvid.ui.workspace_state import PaneState, WorkspaceState
+from korvid.ui.workspace_state import PaneState, WorkspaceState, filtered_rows
 
 
 def _split_workspace() -> WorkspaceState:
@@ -243,3 +245,43 @@ def test_contains_reports_pane_membership() -> None:
     assert ws.contains(clone)
     ws.close_focused()
     assert not ws.contains(clone)
+
+
+def _pod(name: str, *, phase: str = "Running", app_label: str | None = None) -> PodSummary:
+    return PodSummary(
+        name=name,
+        namespace="default",
+        phase=phase,
+        ready="1/1",
+        restarts=0,
+        node=None,
+        qos="-",
+        labels=(("app", app_label),) if app_label is not None else (),
+    )
+
+
+def test_filtered_rows_returns_the_rows_unchanged_when_the_filter_is_inactive() -> None:
+    """An inactive filter is the identity: the render path must not pay for
+    a copy, and the agent's row counts must match the table exactly."""
+    rows: list[Summary] = [_pod("web-1"), _pod("db-1")]
+
+    assert filtered_rows(rows, parse_filter("")) is rows
+
+
+def test_filtered_rows_matches_name_labels_and_phase() -> None:
+    """The single shared implementation of "what the user actually sees" —
+    the render path and the agent's read tools both call it, so it must
+    honour every filter dimension the table renders (issue #44)."""
+    rows: list[Summary] = [
+        _pod("web-1", app_label="web"),
+        _pod("web-2", app_label="db"),
+        _pod("web-done", phase="Succeeded", app_label="web"),
+    ]
+
+    by_name = filtered_rows(rows, parse_filter("web-1"))
+    by_label = filtered_rows(rows, parse_filter("-l app=web"))
+    by_phase = filtered_rows(rows, parse_filter("-s"))
+
+    assert [row.name for row in by_name] == ["web-1"]
+    assert [row.name for row in by_label] == ["web-1", "web-done"]
+    assert [row.name for row in by_phase] == ["web-1", "web-2"]

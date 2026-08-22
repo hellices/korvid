@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from textual.screen import Screen
@@ -515,7 +515,7 @@ async def test_ai_off_is_refused_while_a_turn_runs(tmp_path: Path) -> None:
     env.controller.submit_prompt("why is web-1 sad?")
     await asyncio.sleep(0)
     env.controller.handle_command(["off"])
-    assert env.controller.runtime is runtime
+    assert env.controller.runtime is cast(Any, runtime)
     assert any("busy" in message for message in env.ui.messages())
     gate.set()
     await env.close()
@@ -545,7 +545,7 @@ async def test_applying_settings_swaps_the_runtime_and_the_profile(tmp_path: Pat
         provider="ollama", auth_method="none", base_url=None, model="m-2", profile="small"
     )
     assert env.controller.apply_settings(settings) is True
-    assert env.controller.runtime is fresh
+    assert env.controller.runtime is cast(Any, fresh)
     assert env.controller.model_name == "m-2"
     assert env.controller.profile == "small"
 
@@ -557,7 +557,7 @@ async def test_a_failed_rebuild_keeps_the_previous_runtime(tmp_path: Path) -> No
         provider="ollama", auth_method="none", base_url=None, model="m-2", profile="full"
     )
     assert env.controller.apply_settings(settings) is False
-    assert env.controller.runtime is previous
+    assert env.controller.runtime is cast(Any, previous)
 
 
 # ---------------------------------------------------------------------------
@@ -727,6 +727,44 @@ async def test_shutdown_does_not_touch_the_torn_down_transcript(tmp_path: Path) 
     before = len(env.panel.events)
     await env.controller.shutdown()
     assert len(env.panel.events) == before
+    await env.dispatch.shutdown()
+
+
+async def test_begin_shutdown_stops_a_replacement_that_drains_before_shutdown(
+    tmp_path: Path,
+) -> None:
+    """Teardown awaits other subsystems before it reaches `shutdown()`; a
+    turn cancelled by an interrupt-and-submit can settle in that window.
+    `begin_shutdown` marks the session down synchronously, so the drain
+    starts no replacement (review of Deep Task 6)."""
+    gate = asyncio.Event()
+    runtime = ScriptedRuntime(gate=gate)
+    env = Env(tmp_path=tmp_path, runtime=runtime)
+    env.controller.submit_prompt("first")
+    await asyncio.sleep(0)
+    task = env.controller.turn_task
+    env.controller.submit_prompt("second")  # queues the replacement, cancels
+    env.controller.begin_shutdown()
+    await settle()  # the cancelled turn settles here, before shutdown() runs
+    assert runtime.prompts == ["first"]
+    assert env.controller.turn_task is task
+    await env.controller.shutdown()
+    await env.dispatch.shutdown()
+
+
+async def test_begin_shutdown_is_idempotent(tmp_path: Path) -> None:
+    """Teardown marks the session down, and `shutdown()` marks it again
+    defensively — a repeat must be inert, never reset the flag."""
+    gate = asyncio.Event()
+    runtime = ScriptedRuntime(gate=gate)
+    env = Env(tmp_path=tmp_path, runtime=runtime)
+    env.controller.submit_prompt("first")
+    await asyncio.sleep(0)
+    env.controller.begin_shutdown()
+    env.controller.begin_shutdown()
+    assert env.controller._shutting_down is True
+    await env.controller.shutdown()
+    assert env.controller._shutting_down is True
     await env.dispatch.shutdown()
 
 
@@ -958,7 +996,8 @@ async def test_open_describe_aborts_when_the_screen_changed_during_the_fetch(env
         env.screens.top = object()
         return _POD_MANIFEST
 
-    env.controller._get_manifest = lambda: moving_manifest  # type: ignore[assignment]  # seam
+    controller: Any = env.controller  # the seam is patched, not typed
+    controller._get_manifest = lambda: moving_manifest
     out = await env.controller.agent_open_describe("pods", "web-1", "default")
     assert out.startswith("ERROR: the screen changed")
 
@@ -1156,19 +1195,32 @@ async def test_proposal_calls_are_delegated_to_the_proposal_port(env: Env) -> No
     assert [name for name, _ in env.proposals.calls] == ["submit", "get", "cancel"]
 
 
-def test_the_controller_holds_no_app_reference() -> None:
-    """The module must never import `KorvidApp` — that is what the ports are for."""
+def test_the_controller_module_imports_nothing_from_the_app_module() -> None:
+    """The module must never import `korvid.ui.app` or name `KorvidApp` in code.
+
+    An import/name check, and no more than that: the ports the app binds at
+    runtime *are* app-backed adapters (`AppAgentPanel`, `AppAgentScreens`,
+    `AppProposalOps`, …). What this pins is that the controller depends on
+    the port interfaces, never on the app module or an app type it names
+    itself — prose in docstrings is free to explain where it came from.
+    """
     import ast
 
     source = Path("src/korvid/ui/agent_ui_controller.py").read_text()
     tree = ast.parse(source)
     imported: list[str] = []
+    referenced: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             imported.extend(f"{node.module}.{alias.name}" for alias in node.names)
         elif isinstance(node, ast.Import):
             imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.Name):
+            referenced.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            referenced.append(node.attr)
     assert not any(name.endswith("KorvidApp") or name == "korvid.ui.app" for name in imported)
+    assert "KorvidApp" not in referenced
 
 
 # ---------------------------------------------------------------------------

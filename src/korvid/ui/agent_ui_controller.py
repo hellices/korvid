@@ -989,13 +989,32 @@ class AgentUiController:
             return
         await mirror_read(self._follow_bridge() or self._bridge, name, arguments)
 
+    def begin_shutdown(self) -> None:
+        """Mark the agent session down, synchronously and idempotently.
+
+        Teardown has awaits of its own to run before it reaches the agent
+        (the bridge-dispatch reap, the proposal expiry sweep). A turn that
+        an interrupt-and-submit left cancelling can settle inside any of
+        them, and its drain callback would then start the queued
+        replacement against a screen stack that is being torn down. Marking
+        the session down before the *first* await of teardown closes that
+        window; `shutdown` still cancels and reaps the task.
+        """
+        self._shutting_down = True
+
     async def shutdown(self) -> None:
         """Shutdown teardown of the agent turn: mark the session shutting
         down (finalization must not touch the torn-down transcript or start
         a replacement) and let the task drain. An explicit stop may already
         have the task cancelling — re-injecting cancellation would abort
-        that cleanup mid-flight."""
-        self._shutting_down = True
+        that cleanup mid-flight.
+
+        Teardown normally marks the session down earlier, with
+        `begin_shutdown` (the app has awaits to run before it reaches the
+        controller); the call here is the defensive one for callers that
+        only await this.
+        """
+        self.begin_shutdown()
         if self._task is None:
             return
         if self._task.cancelling() == 0:

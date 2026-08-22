@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 from textual.widgets import Input
 
 from korvid.agent.events import AgentEvent, TextDelta, ToolCallStarted, TurnComplete
@@ -295,6 +296,78 @@ async def test_stop_then_immediate_shutdown_injects_cancellation_once() -> None:
         app.action_interrupt_agent()
         # exit immediately — shutdown runs while the stop is still draining
     assert runtime.cleanup_done
+
+
+async def test_unmount_marks_the_agent_down_before_its_first_await(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`on_unmount` must mark the agent session shutting down *synchronously*,
+    before its first await.
+
+    Teardown awaits the bridge-dispatch reap and the proposal expiry sweep
+    before it reaches the agent controller. An interrupt-and-submit whose
+    cancelled turn settles inside one of those awaits would otherwise drain
+    its queued replacement and start a fresh turn — reading the screen stack
+    of an app that is being torn down (ScreenStackError)."""
+
+    class GatedCleanupRuntime(BlockingRuntime):
+        """Holds its cancellation cleanup until released, so the interrupted
+        turn settles exactly inside the teardown await under test."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = asyncio.Event()
+
+        async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
+            self.calls.append(user_text)
+            try:
+                yield TextDelta(text="let me check")
+                await asyncio.Event().wait()
+            finally:
+                await self.release.wait()
+
+    runtime = GatedCleanupRuntime()
+    app = make_app(runtime)
+    drained = asyncio.Event()
+    screen_reads: list[str] = []
+
+    async with app.run_test() as pilot:
+        inp = await _start_turn(app, pilot, "first")
+        await until(pilot, lambda: "let me check" in _panel_text(app), label="streaming")
+        task = app._agent_ui._task
+        assert task is not None
+        # Added after the controller's own drain callback, and callbacks run
+        # in the order they were added: the teardown step below resumes only
+        # once the replacement has had its chance to start.
+        task.add_done_callback(lambda _task: drained.set())
+
+        screens = app._agent_ui._screens
+        read_selected_row = screens.selected_row_key
+
+        def _record_screen_read() -> str | None:
+            screen_reads.append("selected_row_key")
+            return read_selected_row()
+
+        monkeypatch.setattr(screens, "selected_row_key", _record_screen_read)
+
+        expire_proposals = app._expire_proposals_audited
+
+        async def _expire_while_the_turn_settles(reason: str) -> None:
+            runtime.release.set()  # the interrupted turn settles in here
+            await drained.wait()
+            await asyncio.sleep(0)  # a replacement turn's first step, if any
+            await expire_proposals(reason)
+
+        monkeypatch.setattr(app, "_expire_proposals_audited", _expire_while_the_turn_settles)
+
+        inp.value = "second"
+        await pilot.press("enter")  # interrupt-and-submit: queued, then cancelled
+        assert task.cancelling() == 1
+        # exit immediately — unmount runs while the interrupt is still draining
+
+    assert app._agent_ui._task is task  # no replacement turn was ever started
+    assert runtime.calls == ["first"]
+    assert screen_reads == []  # nothing read the screen stack during teardown
 
 
 async def test_interrupt_marker_owns_the_partial_not_the_replacement() -> None:

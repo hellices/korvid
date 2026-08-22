@@ -174,7 +174,7 @@ from korvid.ui.workspace_controller import (
     WorkspaceController,
     WorkspaceSurface,
 )
-from korvid.ui.workspace_state import PaneState, WorkspaceState
+from korvid.ui.workspace_state import PaneState, WorkspaceState, filtered_rows
 from korvid.ui.write_coordinator import (
     WriteCoordinator,
     canonical_meta_kind,
@@ -1170,7 +1170,7 @@ class KorvidApp(App[None]):
         drill_uid = pane.drill.parent_uid
         if drill_uid is not None and kind == pane.drill.child_kind:
             rows = [r for r in rows if owned_by(r, drill_uid)]
-        rows = self._filtered_rows(rows, pane.resource_filter)
+        rows = filtered_rows(rows, pane.resource_filter)
         all_namespaces = pane.scope == ALL_NAMESPACES
         metrics = None
         if kind == "pods" and self._metrics is not None and self._metrics.available:
@@ -1256,23 +1256,6 @@ class KorvidApp(App[None]):
 
     def on_clear_filter(self, message: ClearFilter) -> None:
         self._workspace_ctl.clear_filter()
-
-    def _filtered_rows(
-        self, rows: list[Summary], resource_filter: ResourceFilter | None = None
-    ) -> list[Summary]:
-        """Apply the active filter the way the table renders it (issue #44)."""
-        flt = resource_filter if resource_filter is not None else self._resource_filter
-        if not flt.active:
-            return rows
-        return [
-            r
-            for r in rows
-            if flt.matches(
-                r.name,
-                labels=dict(getattr(r, "labels", ())),
-                phase=getattr(r, "phase", None),
-            )
-        ]
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
         await self._workspace_ctl.navigate_command(message.view, message.namespace)
@@ -3949,6 +3932,11 @@ class KorvidApp(App[None]):
         empty.display = True
 
     async def on_unmount(self) -> None:
+        # Mark the agent session down before the *first* await below: a turn
+        # an interrupt-and-submit left cancelling can settle inside any of
+        # these teardown awaits, and its drain callback would then start the
+        # queued replacement against a screen stack being torn down.
+        self._agent_ui.begin_shutdown()
         # Refuse new foreign UI work and reap in-flight bridge dispatches
         # (issue #165): the MCP server stays live until after run_async()
         # returns, so a request racing teardown could otherwise spawn work
