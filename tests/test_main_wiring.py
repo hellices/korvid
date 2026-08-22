@@ -2027,6 +2027,12 @@ class _FakeAppCapturesKwargs:
 
     def __init__(self, **kwargs: Any) -> None:
         self.captured = kwargs
+        # `AppUIBridge(app)` reads exactly these two collaborators right
+        # after construction: the agent controller it delegates every UI
+        # tool to, and the dispatcher that marshals the call onto the app
+        # context. Sentinels are enough - the bridge only stores them.
+        self._agent_ui: Any = object()
+        self._bridge_dispatch: Any = object()
         _FakeAppCapturesKwargs.instances.append(self)
 
     def on_aliases_updated(self) -> None:

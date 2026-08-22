@@ -703,7 +703,7 @@ async def test_agent_resize_approved_by_user_key(tmp_path: Path) -> None:
         await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "resize", "pods", "web-1", namespace="default", resources=resources
             )
         )
@@ -763,7 +763,7 @@ async def test_agent_resize_uses_explicit_namespace_for_impact(tmp_path: Path) -
         assert app.current_scope == "default"
         _expand_panel(app)
         task = asyncio.create_task(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "resize",
                 "pods",
                 "web-1",
@@ -807,7 +807,7 @@ async def test_agent_resize_keeps_local_notes_when_manifest_lookup_fails_open(
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.create_task(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "resize",
                 "pods",
                 "web-1",
@@ -833,7 +833,7 @@ async def test_agent_resize_keeps_local_notes_when_manifest_lookup_fails_open(
 async def test_agent_resize_expiry_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("korvid.ui.app._APPROVAL_TIMEOUT", 0.2)
+    monkeypatch.setattr("korvid.ui.agent_ui_controller.APPROVAL_TIMEOUT", 0.2)
     recorder = ResizeRecorder()
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(
@@ -844,7 +844,7 @@ async def test_agent_resize_expiry_writes_nothing(
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.create_task(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "resize",
                 "pods",
                 "web-1",
@@ -876,7 +876,7 @@ async def test_non_resize_agent_writes_do_not_gain_impact(tmp_path: Path) -> Non
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.create_task(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "delete",
                 "deployments",
                 "web",
@@ -903,7 +903,7 @@ async def test_cancelled_agent_resize_impact_load_writes_nothing(tmp_path: Path)
     resources = {"app": {"requests": {"cpu": "200m"}}}
     async with app.run_test() as pilot:
         task = asyncio.create_task(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "resize",
                 "pods",
                 "web-1",
@@ -929,7 +929,9 @@ async def test_agent_resize_requires_resources(tmp_path: Path) -> None:
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
-        result = await app.agent_request_write("resize", "pods", "web-1", namespace="default")
+        result = await app._agent_ui.agent_request_write(
+            "resize", "pods", "web-1", namespace="default"
+        )
         assert result.startswith("ERROR:")
         assert rec.calls == []
 
@@ -939,7 +941,7 @@ async def test_agent_resize_rejected_for_non_pod_kind(tmp_path: Path) -> None:
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
-        result = await app.agent_request_write(
+        result = await app._agent_ui.agent_request_write(
             "resize",
             "deployments",
             "web",
@@ -956,7 +958,7 @@ async def test_agent_resize_rejected_when_cluster_lacks_subresource(tmp_path: Pa
     app = make_app(rec, tmp_path / "audit.jsonl", resize_supported=False)
     async with app.run_test() as pilot:
         await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
-        result = await app.agent_request_write(
+        result = await app._agent_ui.agent_request_write(
             "resize",
             "pods",
             "web-1",

@@ -41,7 +41,7 @@ async def test_agent_panel_accessor_raises_when_agent_unavailable(tmp_path: Path
     """AgentPanel is composed only when an agent is wired; the accessor
     must keep the `NoMatches` contract for the guarded call sites."""
     app = make_app(Recorder(), tmp_path / "audit.jsonl")
-    app._agent_available = False  # compose() reads this at mount
+    app._agent_ui._available = False  # compose() reads this at mount
     async with app.run_test() as pilot:
         await pilot.pause()
         with pytest.raises(NoMatches, match="AgentPanel"):

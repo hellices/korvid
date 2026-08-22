@@ -242,7 +242,7 @@ async def test_switch_refused_while_agent_turn_live() -> None:
         async def _busy() -> None:
             await gate.wait()
 
-        app._agent_task = asyncio.create_task(_busy())
+        app._agent_ui._task = asyncio.create_task(_busy())
         try:
             app.post_message(SwitchContextCommand("ctx-b"))
             await until(
@@ -253,7 +253,7 @@ async def test_switch_refused_while_agent_turn_live() -> None:
             assert env.probe_calls == []
         finally:
             gate.set()
-            await app._agent_task
+            await app._agent_ui._task
 
 
 async def test_switch_refused_while_dialog_open() -> None:
@@ -321,15 +321,15 @@ async def test_agent_screen_context_carries_switch_note() -> None:
             return
             yield  # pragma: no cover - makes this an async generator
 
-    app._agent_runtime = _FakeRuntime()  # type: ignore[assignment]  # fake
+    app._agent_ui._runtime = _FakeRuntime()  # type: ignore[assignment]  # fake
     async with app.run_test() as pilot:
         app.post_message(SwitchContextCommand("ctx-b"))
         await until(pilot, lambda: app.config.kube_context == "ctx-b", label="switched")
-        await app._run_agent_turn("hello")
+        await app._agent_ui.run_turn("hello")
         assert "context=ctx-b" in seen_context[0]
         assert "switched" in seen_context[0]
         # The note is one-shot: the next turn goes back to plain context.
-        await app._run_agent_turn("again")
+        await app._agent_ui.run_turn("again")
         assert "switched" not in seen_context[1]
 
 
@@ -460,7 +460,7 @@ async def test_agent_prompt_refused_while_switching() -> None:
                 ),
                 label="agent-prompt refusal",
             )
-            assert app._agent_task is None
+            assert app._agent_ui._task is None
         finally:
             app._ctx_switching = False
 

@@ -27,6 +27,7 @@ import dataclasses
 
 from korvid.core.filters import ResourceFilter, parse_filter
 from korvid.core.sorting import SortSpec
+from korvid.core.store import Summary
 from korvid.k8s.components import ComponentRef
 from korvid.ui.navigation import NavigationStack
 
@@ -316,3 +317,24 @@ class WorkspaceState:
         closing = self._panes.pop(1)
         self._focused = 0
         return ClosedPanes(closing=closing, remaining=self._panes[0])
+
+
+def filtered_rows(rows: list[Summary], resource_filter: ResourceFilter) -> list[Summary]:
+    """Apply a pane's filter the way the table renders it (issue #44).
+
+    Module-level because two callers must agree on "what the user actually
+    sees": the render path, and the agent's read tools - a navigate that
+    counted unfiltered rows, or a drill that reached a hidden one, would
+    describe a screen that does not exist.
+    """
+    if not resource_filter.active:
+        return rows
+    return [
+        row
+        for row in rows
+        if resource_filter.matches(
+            row.name,
+            labels=dict(getattr(row, "labels", ())),
+            phase=getattr(row, "phase", None),
+        )
+    ]

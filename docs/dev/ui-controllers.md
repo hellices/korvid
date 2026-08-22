@@ -31,6 +31,7 @@ KorvidApp  (ui/app.py)
 ├── LogController        (ui/log_controller.py)          log stream tasks, buffer, pane lifecycle
 ├── WorkspaceController  (ui/workspace_controller.py)    navigation, drill, hierarchy, relationship, and pane flows
 ├── WorkspaceState       (ui/workspace_state.py)         split-pane collection, focus, and view state
+├── AgentUiController    (ui/agent_ui_controller.py)     agent session, turn tasks, UI bridge reads, agent writes
 └── ...
 ```
 
@@ -84,8 +85,8 @@ It differs from the shape above in two deliberate ways:
   close (`close`), and app teardown (`shutdown`, called from `on_unmount`).
   The fan-out and reconnect bookkeeping (which task ended, whether all streams
   ended, first-overflow banner) is simpler when the controller manages the set
-  directly, and the streams must inherit the app context the `AppUIBridge`
-  dispatch installs — spawning them as workers would not preserve that. This
+  directly, and the streams must inherit the app context `AppContextDispatch`
+  installs — spawning them as workers would not preserve that. This
   is the one place `UiSurface.run_worker`'s supervision is traded for direct
   ownership.
 - **It reaches the pane through a narrow `LogPaneView` accessor, not
@@ -267,6 +268,25 @@ So the boundaries that matter are named:
   against; `crossed(epoch)` is the old `_ctx_switch_crossed`. It is a narrow
   read-only view of the app's context state, deliberately *not* the whole
   `WriteGate`. Implemented by `AppContextGuard`.
+- **`AgentPanelPort`** (`ui/agent_ui_controller.py`) — the chat panel as the
+  agent session may drive it: visibility, the header the live runtime renders
+  into, the two unconfigured-state hints, and the transcript operations a turn
+  performs. Implemented by `AppAgentPanel`.
+- **`AgentScreens`** (`ui/agent_ui_controller.py`) — the screen the agent may
+  observe, must not disturb, and may fill: the approval-dialog and
+  describe-screen guards, a top-screen identity token for before/after
+  comparison, `dismiss_if_current`, the selected row key, and the non-modal
+  describe pane. Implemented by `AppAgentScreens`.
+- **`AgentProposals`** (`ui/agent_ui_controller.py`) — the three external
+  write-proposal tool calls, and nothing else about proposals. Implemented by
+  `AppProposalOps`, which still holds the store, review loop and execution
+  path (their own extraction is next).
+- **`BridgeDispatch`** (`ui/bridge_dispatch.py`) — where a foreign `UIBridge`
+  coroutine is allowed to run. `AppContextDispatch` owns the app-context
+  snapshot and the in-flight dispatch set: the app activates it on mount and
+  shuts it down on unmount, so a pre-mount MCP request or one racing teardown
+  is refused as "UI not ready" instead of composing widgets in the caller's
+  context (issue #165).
 
 `UiSurface.run_worker` gives supervision, not context safety: a `:ctx`
 switch cancels the groups it knows hold a stale-cluster connection, by
@@ -277,9 +297,10 @@ started before the switch keeps running against the cluster it captured.
 Controllers that outlive an await revalidate through
 `WriteGate.context_intact` or the epoch they captured.
 
-`AppViewState`, `AppUiSurface`, `AppWorkspaceSurface` and `AppContextGuard`
-are adapters rather than the app inheriting the ABCs, because Textual's `App`
-metaclass conflicts with `ABCMeta` — the same reason `AppUIBridge` exists.
+`AppViewState`, `AppUiSurface`, `AppWorkspaceSurface`, `AppContextGuard`,
+`AppAgentPanel`, `AppAgentScreens` and `AppProposalOps` are adapters rather
+than the app inheriting the ABCs, because Textual's `App` metaclass conflicts
+with `ABCMeta` — the same reason `AppUIBridge` exists.
 `WriteCoordinator` has no such constraint, so it implements `WriteGate`
 itself: there is no adapter between the interface controllers call and the
 code that enforces it.
@@ -384,6 +405,39 @@ and `_run_node_shell` that enforce it, each blocking the subprocess when the
 append fails. `tests/ui/test_node_shell.py::test_node_shell_blocked_when_audit_append_fails`
 pins that, and it is the reason this row reads "the flow" rather than "gate".
 
+## The agent's session and its UI bridge
+
+`AgentUiController` (`ui/agent_ui_controller.py`, issue #187 / Deep Task 6)
+owns everything about the built-in agent that used to live on `KorvidApp`:
+
+| Owned | Notes |
+|---|---|
+| runtime, model, settings, capability profile, configurator/rebuild/disconnect seams, the `:ai off` disconnect marker, the follow flag | `:ai`, `:ai off`, `:ai follow`, `:ai payload` and `:model` are all handled here; the app routes the command word and nothing else |
+| the turn task | A bare app-loop task, created through the `TurnTasks` port: the interrupt key must cancel *this* turn, the queued interrupt-and-submit replacement starts from the cancelled task's done callback, and `shutdown()` cancels and reaps it |
+| the screen context the model is told about | Composed from `WorkspaceState` and the selected row, plus the one-shot `:ctx` note the switch coordinator hands over through `note_context_switch` |
+| follow mirroring | Successful cluster reads are mirrored through the injected serialized bridge (the composition root's `_UIBridgeProxy`), falling back to the controller's own `AgentUIBridge` |
+| every `UIBridge` read | evidence open, navigate, filter, drill, logs, describe — each with the approval-dialog and describe-screen guards |
+| the direct agent write | `agent_request_write`, its target manifest/uid/ownership lookups, the dry-run preview, the resize impact lines, and the write-op construction the proposal path shares |
+
+It owns no security ordering: `agent_request_write` builds an operation
+factory, asks `WriteCoordinator.permitted`, waits for a `ConfirmScreen` only a
+user keystroke can resolve, and executes through `WriteCoordinator.run_shielded`.
+An approval never surfaces while the panel is collapsed or another screen is
+stacked, and an unanswered one expires rather than hanging the turn.
+
+Proposals are explicitly *not* here: `AgentProposals` is a three-method port,
+so the store, TTL, review loop and execution path can move on their own.
+
+`KorvidApp` keeps `action_toggle_agent`, `on_agent_prompt_submitted` and
+`action_interrupt_agent` as one-line delegates, the `AgentPanel` widget in
+`compose`, the status-bar label (read from `runtime` / `blocked_in_protected()`),
+and two shared helpers — `_target_uid` and `_managed_note`/`_managed_note_from` —
+which the shell, transfer, proposal and resource-write flows reach through the
+controller that owns them.
+
+`AppUIBridge` is now `AgentUIBridge(app._agent_ui, app._bridge_dispatch)`: it
+holds no app reference and calls no app method.
+
 ## Late binding
 
 Dependency getters are read at call time, not captured at construction:
@@ -447,6 +501,14 @@ tests added before the move where the behaviour is not already pinned.
     backed exclusively by `WriteCoordinator`; the app keeps thin action
     delegates and re-exports the eligibility sets for `_ACTION_VIEWS` and the
     agent write ops.
+12. ~~The agent session and its UI bridge~~ — done (#187);
+    `AgentUiController` (`ui/agent_ui_controller.py`) owns the runtime /
+    settings / profile / follow state, the turn task with its
+    interrupt-and-submit lifecycle, the screen context, follow mirroring, all
+    `UIBridge` reads, and the direct approval-gated agent write. `AppUIBridge`
+    became an adapter over it plus `AppContextDispatch`
+    (`ui/bridge_dispatch.py`). External write proposals stay on the app behind
+    the `AgentProposals` port — their own extraction is next.
 
 Issue #238 showed that logs and describe were technically extractable without
 introducing a new pane-composition seam, and issue #245 kept describe as a

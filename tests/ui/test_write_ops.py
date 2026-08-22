@@ -1485,7 +1485,7 @@ async def test_owner_chain_walk_shares_one_deadline(tmp_path: Path) -> None:
         return _helm_deploy_manifest(kind, ns, name)
 
     app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
-    with mock.patch("korvid.ui.app._UID_LOOKUP_TIMEOUT", 1.0):
+    with mock.patch("korvid.ui.agent_ui_controller.UID_LOOKUP_TIMEOUT", 1.0):
         assert await app._managed_note("pods", "default", "web-1") is None
 
 

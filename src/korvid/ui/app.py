@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import contextvars
 import dataclasses
 import functools
 import json
@@ -16,7 +15,6 @@ from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
-    Coroutine,
     Iterator,
     Mapping,
     Sequence,
@@ -45,9 +43,8 @@ from textual.widgets import DataTable, Static
 from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, WorkerError, WorkerState
 
-from korvid.agent.events import AgentError, AgentEvent, ToolCallFinished, ToolCallStarted
+from korvid.agent.events import AgentEvent
 from korvid.agent.install_hint import isolated_install_hint
-from korvid.agent.navigation import EvidenceTarget, target_for
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -57,17 +54,12 @@ from korvid.core.debugimage import (
 )
 from korvid.core.errors import explain_api_error
 from korvid.core.filters import ResourceFilter
-from korvid.core.impact import ImpactAction
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import (
-    OWNER_CHAIN_PLURALS,
     ForwardRegistry,
-    controller_owner,
 )
 from korvid.core.relationships import SummaryLike
-from korvid.core.resize_impact import classify_pod_resize
-from korvid.core.secrets import mask_secret_manifest
 from korvid.core.session_timeline import SessionTimeline, TimelineResourceRef
 from korvid.core.sorting import SortSpec
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -84,19 +76,17 @@ from korvid.k8s.helm import (
 )
 from korvid.k8s.helmcli import HelmCLI
 from korvid.k8s.logs import LogLine
-from korvid.k8s.managed import manager_of
 from korvid.k8s.metrics import MetricsPoller
-from korvid.k8s.models import ContainerTrouble, GenericSummary, PodSummary, manifest_uid
+from korvid.k8s.models import ContainerTrouble, GenericSummary, PodSummary
 from korvid.k8s.olm import (
     OPERATORS_GROUP,
     PACKAGES_GROUP,
 )
 from korvid.k8s.portforward import FORWARDABLE_KINDS
-from korvid.k8s.relations import drill_child, owned_by
+from korvid.k8s.relations import owned_by
 from korvid.k8s.telepresence import TelepresenceCLI, TelepresenceError
 from korvid.k8s.writes import WriteOps, restart_stamp
-from korvid.tools.executor import UIBridge, incarnation_of
-from korvid.tools.follow import FOLLOWABLE_TOOLS, mirror_read
+from korvid.tools.executor import UIBridge
 from korvid.tools.proposals import (
     ProposalClosedError,
     ProposalLimitError,
@@ -105,6 +95,14 @@ from korvid.tools.proposals import (
     ProposalTooLargeError,
     WriteProposal,
 )
+from korvid.ui.agent_ui_controller import (
+    AgentPanelPort,
+    AgentProposals,
+    AgentScreens,
+    AgentUIBridge,
+    AgentUiController,
+)
+from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.command import command_help
 from korvid.ui.debug import DebugController
 from korvid.ui.drain import DrainController
@@ -132,12 +130,10 @@ from korvid.ui.messages import (
 from korvid.ui.navigation import NavigationStack
 from korvid.ui.operator_controller import OperatorController
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader
-from korvid.ui.resize_impact_preview import compose_resize_impact_lines
 from korvid.ui.resource_write_controller import (
     RESTARTABLE,
     SCALABLE,
     ResourceWriteController,
-    resize_summary,
 )
 from korvid.ui.session_timeline_controller import (
     TIMELINE_EVENT_GROUP,
@@ -149,22 +145,20 @@ from korvid.ui.transfer import TransferController, TransferProgress
 from korvid.ui.ui_surface import ScreenResultT, Severity, UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.agent_panel import AgentPanel
-from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
-from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
+from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen, provider_footer_note
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.helm_install import HelmInstallPrompt
 from korvid.ui.widgets.help_screen import HelpScreen, collect_help
 from korvid.ui.widgets.hierarchy_screen import HierarchyScreen
 from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.hint_strip import HintStrip
-from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
+from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
-from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.port_forward_screen import PortForwardScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
@@ -199,21 +193,16 @@ logger = logging.getLogger(__name__)
 #: How often the app polls the forward registry for dead kubectl processes.
 _FORWARD_POLL_SECONDS = 2.0
 
-#: Seconds an agent-requested approval dialog stays open before it counts as
-#: a denial - an unanswered dialog must never hang the agent turn forever.
+#: Seconds a proposal-review dialog stays open before it counts as a
+#: dismissal - an unanswered dialog must never wedge the review loop. The
+#: agent's own approval budget lives with the flow that owns it
+#: (`agent_ui_controller.APPROVAL_TIMEOUT`).
 _APPROVAL_TIMEOUT = 120.0
 #: Upper bound on the all-namespaces LIST SubjectAccessReview probe: a
 #: stalled authorization endpoint must never hang the `0` keypress. Writes
 #: have their own budget - the pre-check they use lives with the perimeter
 #: that owns it (`write_coordinator._PERMISSION_CHECK_TIMEOUT`).
 _PERMISSION_CHECK_TIMEOUT = 10.0
-
-
-#: Upper bound on the pre-approval uid lookup: a stalled API server must
-#: never leave an agent tool call (or the debug offer) pending indefinitely.
-#: On timeout the lookup fails open (write proceeds without a precondition,
-#: still approval-gated and audited).
-_UID_LOOKUP_TIMEOUT = 10.0
 
 
 #: Upper bound on a helm preview (issue #31): `helm ... --dry-run` shells out
@@ -484,13 +473,7 @@ class KorvidApp(App[None]):
         #: Bumped every time a switch is applied: pre-approval awaits capture
         #: it and refuse to proceed if the cluster changed under them.
         self._ctx_epoch = 0
-        #: One-shot notice injected into the agent's next screen context
-        #: after a switch, so a running conversation learns the cluster
-        #: changed under it.
-        self._ctx_switch_note: str | None = None
         self._get_manifest = get_manifest
-        #: Identity of the object the last evidence open actually displayed.
-        self._displayed_incarnation: str | None = None
         self._get_helm_components = get_helm_components
         self._get_events = get_events
         self._stream_logs = stream_logs
@@ -501,17 +484,6 @@ class KorvidApp(App[None]):
         #: MCP follow mode (issue #153): mirror external cluster reads in
         #: the TUI. Config seeds the state; `:mcp follow on|off` toggles it.
         self._mcp_follow: bool = config.mcp_follow
-        #: Agent follow: mirror the built-in agent's cluster reads on screen
-        #: — small models rarely volunteer the UI tools, so without this the
-        #: screen sits idle while the agent reads "behind its back". Config
-        #: seeds the state (default on); `:ai follow on|off` toggles it.
-        self._agent_follow: bool = config.agent_follow
-        #: The shared serialized UI bridge (the composition root's
-        #: `_UIBridgeProxy`): agent-follow mirrors route through it so they
-        #: serialize with the agent's own UI tools and concurrent MCP UI
-        #: calls - log-pane swaps and describes must never interleave.
-        #: None (tests, degraded wiring) falls back to a direct adapter.
-        self._agent_follow_bridge = agent_follow_bridge
         #: Operational relationship graph (issue #281): the loader is a
         #: pure orchestrator built once around the injected LIST callable;
         #: it performs no Textual operations, so the app owns the worker
@@ -561,16 +533,12 @@ class KorvidApp(App[None]):
             canonical_meta_kind=self._canonical_meta_kind,
             protected_context=protected_context,
         )
-        #: App-owned execution context (issue #165), captured in on_mount;
-        #: None until then. AppUIBridge._dispatch refuses pre-mount calls
-        #: as 'UI not ready' (production-reachable: the MCP endpoint goes
-        #: live before app.run_async()) - it must never run a bridge
-        #: coroutine directly in the caller's foreign context.
-        self._app_context: contextvars.Context | None = None
-        #: In-flight AppUIBridge dispatches (issue #165): on_unmount cancels
-        #: and reaps them so a foreign caller racing shutdown cannot leave
-        #: work alive against an unmounted app.
-        self._dispatch_tasks: set[asyncio.Task[str]] = set()
+        #: Where foreign `UIBridge` calls run (issue #165): activated in
+        #: on_mount with the app's own execution context and invalidated on
+        #: unmount, so a pre-mount MCP request or one racing teardown is
+        #: refused as 'UI not ready' instead of composing widgets in the
+        #: caller's context or against an unmounted app.
+        self._bridge_dispatch = AppContextDispatch()
         #: External MCP write proposals (issue #110): shared with the MCP
         #: server; None when the feature is disabled.
         self._proposal_store = proposal_store
@@ -715,44 +683,6 @@ class KorvidApp(App[None]):
             helm_uninstall=self._helm_uninstall_start,
             operators=self._olm,
         )
-        self._agent_runtime = agent_runtime
-        self._agent_model_name = agent_model_name
-        self._agent_configurator = agent_configurator
-        self._rebuild_agent = rebuild_agent
-        #: Releases the live provider on `:ai off` (issue #167) — session
-        #: state only; persisted configuration is untouched.
-        self._disconnect_agent = disconnect_agent
-        #: False when the [agent] extra is absent (issue #73): the agent
-        #: panel is not mounted and :ai/:model/Ctrl-A are not offered.
-        self._agent_available = agent_available
-        self._agent_settings: AgentSettings | None = None
-        #: capability profile of the live runtime (issue #71); shown in the
-        #: agent panel header so users know which mode the agent runs in.
-        self._agent_profile = config.agent_profile or "full"
-        #: profile as explicitly configured (None = unset) — the `:ai`
-        #: wizard only suggests `small` for Ollama when this is unset.
-        self._configured_agent_profile = config.agent_profile
-        # A runtime built from config.yaml at startup must seed the settings
-        # snapshot so :model works without running the :ai wizard first.
-        if agent_runtime is not None and config.agent_provider and config.agent_model:
-            self._agent_settings = AgentSettings(
-                provider=config.agent_provider,
-                auth_method=config.agent_auth_method or "none",
-                base_url=config.agent_base_url,
-                model=config.agent_model,
-                api_key_env=config.agent_api_key_env,
-                profile=config.agent_profile or "full",
-                options=config.agent_options,
-            )
-        self._agent_task: asyncio.Task[None] | None = None
-        #: True after :ai off (issue #167): the agent was configured and
-        #: explicitly disconnected — reconnect hint, not the setup wipe.
-        self._agent_disconnected = False
-        # Interrupt-and-submit (issue #170): the latest correction typed
-        # while a turn runs; started once the cancelled turn is finalized.
-        self._agent_replacement: str | None = None
-        self._agent_turn_finalized = False
-        self._shutting_down = False
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)
         )
@@ -838,6 +768,52 @@ class KorvidApp(App[None]):
             describe_named=self._describe_named,
             cluster_list_permitted=self._cluster_list_permitted,
         )
+        #: The built-in agent's session and UI ownership (issue #187 / Deep
+        #: Task 6): the runtime/settings/profile/follow state, the turn task
+        #: with its interrupt-and-submit lifecycle, the screen context the
+        #: model is told about, and every `UIBridge` read plus the direct,
+        #: approval-gated agent write. It composes the same
+        #: `WriteCoordinator` perimeter every other write path uses, and
+        #: reaches proposals only through `AppProposalOps`. The app keeps the
+        #: Textual action/message entry points as thin delegates and the
+        #: widget surfaces the controller drives.
+        self._agent_ui = AgentUiController(
+            panel=AppAgentPanel(self),
+            screens=AppAgentScreens(self),
+            ui=AppUiSurface(self),
+            view=AppViewState(self),
+            context=AppContextGuard(self),
+            writes=self._writes,
+            workspace=self._workspace,
+            navigation=self._workspace_ctl,
+            logs=self._logs,
+            proposals=AppProposalOps(self),
+            dispatch=self._bridge_dispatch,
+            config=lambda: self.config,
+            get_manifest=lambda: self._get_manifest,
+            get_events=lambda: self._get_events,
+            stream_logs=lambda: self._stream_logs,
+            pod_containers=self._get_pod_containers,
+            write_ops=lambda: self._write_ops,
+            audit=lambda: self._audit,
+            pod_resize_supported=lambda: self._pod_resize_supported,
+            provider_hint=lambda: self._provider_hint,
+            # Late-binding, like the other controllers' app callables: tests
+            # patch `_refresh_status` after the app is constructed.
+            refresh_status=lambda: self._refresh_status(),
+            # Agent-follow mirrors route through the shared serialized bridge
+            # (the composition root's `_UIBridgeProxy`) so they serialize with
+            # the agent's own UI tools and concurrent MCP UI calls - log-pane
+            # swaps and describes must never interleave. None (tests, degraded
+            # wiring) falls back to the controller's own adapter.
+            follow_bridge=lambda: agent_follow_bridge,
+            runtime=agent_runtime,
+            model_name=agent_model_name,
+            configurator=agent_configurator,
+            rebuild=rebuild_agent,
+            disconnect=disconnect_agent,
+            available=agent_available,
+        )
 
     # -- Focused-pane delegation (issue #48): `WorkspaceState` owns the pane
     # list and the focused-view state; these properties keep the whole action
@@ -898,7 +874,7 @@ class KorvidApp(App[None]):
     def agent_runtime(self) -> AgentRuntime | None:
         """The live runtime — the :ai wizard may have replaced the initial
         one, so per-cluster retargeting (issue #36) must read it here."""
-        return self._agent_runtime
+        return self._agent_ui.runtime
 
     @property
     def current_namespace(self) -> str:
@@ -971,7 +947,7 @@ class KorvidApp(App[None]):
         yield empty_state
         yield LogPane()
         yield DescribePane()
-        if self._agent_available:
+        if self._agent_ui.available:
             agent_panel = AgentPanel()
             agent_panel.display = False
             yield agent_panel
@@ -1030,12 +1006,12 @@ class KorvidApp(App[None]):
 
     async def on_mount(self) -> None:
         # Snapshot the app-owned execution context (issue #165): on_mount
-        # runs inside Textual's message pump, so this snapshot carries
-        # `active_app` (and the pump ContextVars). AppUIBridge marshals
-        # every foreign call - MCP requests, follow mirrors - onto a copy
-        # of it, because composing a widget tree outside it raises
-        # NoActiveAppError and terminates the app.
-        self._app_context = contextvars.copy_context()
+        # runs inside Textual's message pump, so the snapshot the dispatcher
+        # takes here carries `active_app` (and the pump ContextVars). Every
+        # foreign bridge call - MCP requests, follow mirrors - is marshaled
+        # onto a copy of it, because composing a widget tree outside it
+        # raises NoActiveAppError and terminates the app.
+        self._bridge_dispatch.activate()
         # AUTO_FOCUS skips the hidden #workspace container: the table must
         # take initial focus explicitly or keys land on the CommandBar.
         self.query_one("#pane-0", ResourceTable).focus()
@@ -1622,7 +1598,7 @@ class KorvidApp(App[None]):
 
     def _ctx_switch_blocker(self) -> str | None:
         """Why a switch cannot proceed right now, or None when it can."""
-        if self._agent_task is not None and not self._agent_task.done():
+        if self._agent_ui.busy:
             return "Agent is busy — wait for the current turn to finish before switching contexts"
         if self._writes.active_writes():
             return (
@@ -1799,7 +1775,7 @@ class KorvidApp(App[None]):
         # lacked: re-probe (a no-op once the session's hint was shown).
         self.run_worker(self._maybe_hint_telepresence(), exclusive=False)
         if name != old:
-            self._ctx_switch_note = (
+            self._agent_ui.note_context_switch(
                 f"kube context switched from {old or '(default)'} to {name};"
                 " all cluster state was reset"
             )
@@ -2182,11 +2158,11 @@ class KorvidApp(App[None]):
     def on_unknown_command(self, message: UnknownCommand) -> None:
         parts = message.text.strip().split()
         head = parts[0] if parts else ""
-        if head in {"ai", "agent"} and self._agent_available:
-            self._handle_agent_command(parts[1:])
+        if head in {"ai", "agent"} and self._agent_ui.available:
+            self._agent_ui.handle_command(parts[1:])
             return
-        if head == "model" and self._agent_available:
-            self._handle_model_command(parts[1:])
+        if head == "model" and self._agent_ui.available:
+            self._agent_ui.handle_model_command(parts[1:])
             return
         if head == "mcp":
             self._handle_mcp_command(parts[1:])
@@ -2221,120 +2197,6 @@ class KorvidApp(App[None]):
             " — not found in this cluster's API (CRD not installed?)",
             severity="warning",
         )
-
-    def _handle_agent_command(self, args: list[str]) -> None:
-        subcommand = args[0].lower() if args else ""
-        if subcommand == "payload":
-            self._open_payload_inspector()
-            return
-        if subcommand == "follow":
-            self._handle_agent_follow_command(args[1:])
-            return
-        if subcommand == "off":
-            self._handle_agent_off()
-            return
-        self._open_agent_setup()
-
-    def _open_payload_inspector(self) -> None:
-        """Open the latest stable redacted provider payload, if available."""
-        runtime = self._agent_runtime
-        if runtime is None:
-            self.notify("Agent is off", severity="warning")
-            return
-        if self._agent_task is not None and not self._agent_task.done():
-            self.notify(
-                "Agent is busy — wait for the turn to finish before inspecting its payload",
-                severity="warning",
-            )
-            return
-        snapshot = runtime.latest_outbound_payload
-        if snapshot is None:
-            self.notify("No provider payload has been sent", severity="warning")
-            return
-        self.push_screen(PayloadInspectorScreen(snapshot))
-
-    def _handle_agent_off(self) -> None:
-        """`:ai off` (issue #167): disconnect the runtime for this session.
-
-        Keeps the configured provider/model/profile/credentials so bare
-        `:ai` reconnects without re-entry; never rewrites `agent.enabled`
-        or the persisted config. Refused while a turn runs — cancelling
-        midway is the interrupt key's job, not a state command's.
-        """
-        if self._agent_runtime is None:
-            self.notify("Agent is already off")
-            return
-        if self._agent_task is not None and not self._agent_task.done():
-            self.notify(
-                "Agent is busy — wait for the turn to finish (or stop it) before :ai off",
-                severity="warning",
-            )
-            return
-        if self._disconnect_agent is not None:
-            self._disconnect_agent()
-        self._agent_runtime = None
-        # Disconnected-but-configured (vs never-configured): visibility
-        # toggles must show the reconnect hint, never the setup wipe.
-        self._agent_disconnected = True
-        self._refresh_status()
-        self._agent_panel.show_reconnect_hint()
-        self.notify("Agent disconnected — run :ai to reconnect")
-
-    def _open_agent_setup(self) -> None:
-        if self._agent_configurator is None:
-            self.notify(
-                f"Agent setup unavailable — {isolated_install_hint(feature='agent')}",
-                severity="warning",
-                markup=False,
-            )
-            return
-        # The wizard applies the settings itself (via apply_settings) before
-        # persisting, so a refused swap keeps the wizard open and unsaved.
-        self.push_screen(
-            AgentSetupScreen(
-                self._agent_configurator,
-                apply_settings=self._apply_agent_settings,
-                current_profile=self._configured_agent_profile,
-                current_settings=self._agent_settings,
-            )
-        )
-
-    def _handle_model_command(self, args: list[str]) -> None:
-        """`:model` shows the current model; `:model <name>` switches and persists it."""
-        if not args:
-            # Report only a live model: at startup config may carry a model
-            # name even though provider creation failed (runtime is None).
-            if self._agent_runtime is not None and self._agent_model_name:
-                self.notify(f"Agent model: {self._agent_model_name}")
-            else:
-                self.notify("Agent not configured — run :ai first", severity="warning")
-            return
-        settings = self._agent_settings
-        configurator = self._agent_configurator
-        if settings is None or configurator is None:
-            self.notify("Agent not configured — run :ai first", severity="warning")
-            return
-        new_settings = dataclasses.replace(settings, model=args[0])
-
-        async def _switch() -> None:
-            # Apply first: persistence must be conditional on a successful
-            # swap, or a refused change would silently take effect on restart.
-            if not self._apply_agent_settings(new_settings):
-                return  # _apply_agent_settings already notified the reason
-            try:
-                await configurator.save(new_settings)
-            except Exception as exc:  # runtime is live but disk is stale
-                # Do not name a revert target: after a previous failed save
-                # the in-memory snapshot may itself never have been persisted.
-                self.notify(
-                    f"Model applied, but save failed: {exc} — will revert to "
-                    "the last saved model on restart",
-                    severity="warning",
-                )
-                return
-            self.notify(f"Agent model set to {new_settings.model}")
-
-        self.run_worker(_switch(), exclusive=False)
 
     def _handle_telepresence_command(self) -> None:
         """`:tp` / `:telepresence` (issue #159): open the read-only status
@@ -2424,19 +2286,6 @@ class KorvidApp(App[None]):
             f"MCP follow {state} — external reads are {'mirrored on screen' if self._mcp_follow else 'no longer mirrored'}"
         )
         self._refresh_status()
-
-    def _handle_agent_follow_command(self, args: list[str]) -> None:
-        """`:ai follow [on|off]`: toggle mirroring of the built-in agent's
-        cluster reads on screen. Bare `:ai follow` flips the state."""
-        if args and args[0].lower() not in ("on", "off"):
-            self.notify("Usage: :ai follow [on|off]", severity="warning")
-            return
-        self._agent_follow = args[0].lower() == "on" if args else not self._agent_follow
-        state = "on" if self._agent_follow else "off"
-        self.notify(
-            f"Agent follow {state} — the agent's reads are "
-            f"{'mirrored on screen' if self._agent_follow else 'no longer mirrored'}"
-        )
 
     @property
     def mcp_follow_enabled(self) -> bool:
@@ -2562,59 +2411,6 @@ class KorvidApp(App[None]):
             if mcp.running:
                 return
             await self._expire_proposals_audited("the MCP server was stopped")
-
-    def _apply_agent_settings(self, settings: AgentSettings) -> bool:
-        """Swap in a fresh runtime built from the wizard's settings.
-
-        Transactional: on any failure the previous runtime/settings are kept
-        and False is returned; the swap is also refused while a turn is live.
-        """
-        if self._rebuild_agent is None:
-            self.notify(
-                f"Agent rebuild unavailable — {isolated_install_hint(feature='agent')}",
-                severity="warning",
-                markup=False,
-            )
-            return False
-        if self._agent_task is not None and not self._agent_task.done():
-            self.notify("Agent is busy — wait for the current turn to finish", severity="warning")
-            return False
-        try:
-            runtime = self._rebuild_agent(settings)
-        except Exception as exc:
-            self.notify(f"Agent rebuild failed: {exc}", severity="error", markup=False)
-            return False
-        if runtime is None:
-            self.notify(
-                "Agent rebuild failed — check configuration; keeping previous agent",
-                severity="error",
-            )
-            return False
-        self._agent_runtime = runtime
-        self._agent_disconnected = False  # reconnected (issue #167)
-        self._agent_model_name = settings.model
-        self._agent_settings = settings
-        self._agent_profile = settings.profile
-        # Once applied (and persisted by the wizard) the profile is an
-        # explicit choice — reopening :ai must preserve it.
-        self._configured_agent_profile = settings.profile
-        self._refresh_status()
-        panel = self._agent_panel
-        agent_input = panel.query_one("#agent-input")
-        # Always re-enable: the hint may have disabled it while the panel was
-        # open earlier; only focus/header rendering depends on visibility.
-        agent_input.disabled = False
-        if panel.display:
-            in_tok, out_tok = runtime.total_tokens
-            panel.set_header(
-                settings.model,
-                in_tok,
-                out_tok,
-                estimated=runtime.usage_estimated,
-                profile=settings.profile,
-            )
-            agent_input.focus()
-        return True
 
     async def action_port_forward(self) -> None:
         """Open the port-forward dialog for the selected pod or service (shift+f)."""
@@ -3381,8 +3177,8 @@ class KorvidApp(App[None]):
         # Availability comes from the actual runtime, not the config flag —
         # create_provider may return None (unknown provider, missing base_url/
         # model) while agent_enabled is still true in config.
-        label = "AI on" if self._agent_runtime is not None else "AI off"
-        if self._agent_runtime is not None and self._agent_blocked_in_protected():
+        label = "AI on" if self._agent_ui.runtime is not None else "AI off"
+        if self._agent_ui.runtime is not None and self._agent_ui.blocked_in_protected():
             label = "AI blocked"
         mcp_label = self._mcp.status() if self._mcp is not None else ""
         if mcp_label and self._mcp is not None and self._mcp.running and self._mcp_follow:
@@ -3441,11 +3237,6 @@ class KorvidApp(App[None]):
 
         store.subscribe(_proposals_changed)
         store.set_on_expired(_proposal_expired)
-
-    def _agent_blocked_in_protected(self) -> bool:
-        """`agent.disable_in_protected` (issue #83): agent turns are refused
-        entirely while a protected context is active."""
-        return self._writes.protected_context is not None and self.config.agent_disable_in_protected
 
     # ------------------------------------------------------------------
     # Task-10 actions: JSON toggle, previous logs, search navigation
@@ -3537,17 +3328,6 @@ class KorvidApp(App[None]):
     # loop logic in AgentRuntime.
     # ------------------------------------------------------------------
 
-    def _agent_panel_expanded(self) -> bool:
-        """True when the agent chat panel is mounted and visible on screen."""
-        panels = self.query(AgentPanel)
-        return bool(panels) and panels.first(AgentPanel).display
-
-    def _can_surface_approval(self) -> bool:
-        """An approval dialog may only appear when the panel is expanded AND
-        no other screen is stacked on top: pushing it over an active dialog
-        would let the user's next y/Enter approve an unexpected write."""
-        return self._agent_panel_expanded() and len(self.screen_stack) == 1
-
     #: Resource identities — (group, plural), see `_RESTARTABLE` — where each
     #: view-specific action applies; actions absent from the map work on
     #: every view. `check_action` consults this so the footer legend shows
@@ -3603,7 +3383,7 @@ class KorvidApp(App[None]):
         """Composition availability, independent of the current view: the
         help overlay filters on this alone so off-view keys stay documented
         (issues #73, #114)."""
-        return not (action == "toggle_agent" and not self._agent_available)
+        return not (action == "toggle_agent" and not self._agent_ui.available)
 
     def _log_pane_open(self) -> bool:
         """Whether a log pane is currently visible (pre-compose: no)."""
@@ -3643,874 +3423,33 @@ class KorvidApp(App[None]):
         return meta is not None and (meta.group, meta.plural) in views
 
     def action_toggle_agent(self) -> None:
-        """Toggle the agent chat panel; show setup hint when unconfigured."""
-        if not self._agent_available:
-            return
-        panel = self._agent_panel
-        if panel.display:
-            panel.display = False
-            self._focused_table().focus()
-            return
-        panel.display = True
-        if self._agent_runtime is None:
-            if self._agent_disconnected:
-                # Disconnected-but-configured (:ai off, issue #167): the
-                # transcript must survive visibility toggles — never the
-                # setup wipe meant for a never-configured agent.
-                panel.show_reconnect_hint()
-            else:
-                panel.show_setup_hint()
-            return
-        if self._agent_model_name:
-            runtime = self._agent_runtime
-            in_tok, out_tok = runtime.total_tokens
-            panel.set_header(
-                self._agent_model_name,
-                in_tok,
-                out_tok,
-                estimated=runtime.usage_estimated,
-                profile=self._agent_profile,
-            )
-        panel.query_one("#agent-input").focus()
+        """Toggle the agent chat panel (Ctrl-A)."""
+        self._agent_ui.toggle_panel()
 
     def on_agent_prompt_submitted(self, message: AgentPromptSubmitted) -> None:
-        if self._agent_blocked_in_protected():
-            # agent.disable_in_protected (issue #83): in protected contexts
-            # the agent must not run at all, not merely gate its writes.
-            self.notify(
-                f"Agent is disabled in protected context {self._writes.protected_context!r}"
-                " (agent.disable_in_protected)",
-                severity="warning",
-            )
-            return
-        if self._ctx_switching:
-            # A turn started now would run during teardown/retarget and could
-            # act on the new cluster with the old cluster's screen context.
-            self.notify(
-                "A context switch is in progress — try again once it completes",
-                severity="warning",
-            )
-            return
-        if self._agent_runtime is None:
-            return
-        panel = self._agent_panel
-        if self._agent_task is not None and not self._agent_task.done():
-            # Interrupt-and-submit (issue #170): echo the correction now,
-            # remember only the latest one, and cancel the running turn —
-            # the replacement starts once the cancelled task settles (a
-            # done callback, so it drains even when the cancel lands
-            # before the task's coroutine ever ran).
-            panel.echo_user(message.text)
-            self._agent_replacement = message.text
-            if self._agent_task.cancelling() == 0:
-                # Never re-inject cancellation into a task that is already
-                # cancelling: a second CancelledError can interrupt the
-                # cleanup itself (review on #175). The depth-one queue
-                # above already holds the newest correction.
-                self._agent_task.cancel()
-            return
-        self._agent_replacement = None  # a direct turn supersedes any queue
-        self._start_agent_turn(message.text, echo=True)
-
-    def _start_agent_turn(self, text: str, *, echo: bool) -> None:
-        panel = self._agent_panel
-        panel.stop_key = self._interrupt_key()
-        panel.begin_turn(text, echo=echo)
-        self._agent_turn_finalized = False
-        task = asyncio.create_task(self._run_agent_turn(text))
-        task.add_done_callback(self._drain_agent_replacement)
-        self._agent_task = task
-
-    def _drain_agent_replacement(self, task: asyncio.Task[None]) -> None:
-        """Start the queued interrupt-and-submit correction once the
-        cancelled turn's task settles — including the race where the task
-        was cancelled before its coroutine (and thus its CancelledError
-        handler) ever ran. Scoped to the current owner: a stale callback
-        from a superseded task must not consume the queue or start a
-        second concurrent turn."""
-        if task is not self._agent_task:
-            return
-        if task.cancelled() and not self._agent_turn_finalized:
-            # Cancelled before the coroutine's first step: its own
-            # CancelledError handler never ran, so finalize here — the
-            # runtime is untouched (finalize is inert then) but the panel
-            # must still leave its running state.
-            self._finish_interrupted_turn(self._agent_runtime, self._agent_panel)
-        replacement, self._agent_replacement = self._agent_replacement, None
-        if replacement is None or self._ctx_switching or self._shutting_down:
-            return
-        self._start_agent_turn(replacement, echo=False)
-
-    def _interrupt_key(self) -> str:
-        """The effective stop key's name, resolved by action from the active
-        bindings so an `interrupt_agent` remap moves the advertised hint."""
-        for active in self.screen.active_bindings.values():
-            if active.binding.action == "interrupt_agent":
-                return active.binding.key
-        return "ctrl+x"
+        """A prompt submitted in the chat input starts (or replaces) a turn."""
+        self._agent_ui.submit_prompt(message.text)
 
     def action_interrupt_agent(self) -> None:
-        """Stop the running agent turn (issue #170). No-op when idle. A
-        stop while an interrupt-and-submit is already draining discards
-        the queued replacement (the user changed their mind about it) and
-        never re-injects cancellation into the draining task."""
-        task = self._agent_task
-        if task is None or task.done():
-            return
-        self._agent_replacement = None
-        if task.cancelling() == 0:
-            task.cancel()
-
-    def _selected_row_name(self) -> str | None:
-        table = self._focused_table()
-        if table.row_count == 0:
-            return None
-        ordered = table.ordered_rows
-        if table.cursor_row >= len(ordered):
-            return None
-        return str(ordered[table.cursor_row].key.value)
-
-    def _screen_context(self) -> str:
-        """What the agent is told about the screen: the focused pane in
-        detail plus a one-line summary of the other pane (issue #48), so
-        context stays bounded in a split workspace."""
-        selected = self._selected_row_name() or "-"
-        selected_ns = ""
-        if "/" in selected:
-            # Row keys are 'namespace/name' composites; fed verbatim they
-            # teach the model to paste the whole string as a resource name
-            # (observed: get_resource name='default/otel-…' -> 404). Hand
-            # over the two fields the tool calls actually take.
-            selected_ns, _, selected = selected.partition("/")
-        context = (
-            f"context={self.config.kube_context or '-'} "
-            f"view={self.current_kind} scope={self.current_scope} "
-            f"selected={selected}"
-        )
-        if selected_ns:
-            context += f" selected_ns={selected_ns}"
-        context += f" filter={self.filter_pattern or '-'}"
-        if self._workspace.is_split:
-            other = self._workspace.panes[1 - self._workspace.focused_index]
-            context += f" other_pane={other.kind} other_scope={other.scope}"
-        return context
-
-    async def _run_agent_turn(self, user_text: str) -> None:
-        runtime = self._agent_runtime
-        if runtime is None:
-            return
-        panel = self._agent_panel
-        screen_context = self._screen_context()
-        if self._ctx_switch_note is not None:
-            # One-shot: the conversation only needs to learn about the
-            # switch once; afterwards the context= field carries the truth.
-            screen_context += f" NOTE: {self._ctx_switch_note}"
-            self._ctx_switch_note = None
-        # Agent follow: started cluster reads awaiting their result, keyed
-        # by call id (the finish event does not carry the arguments).
-        pending_reads: dict[str, tuple[str, str]] = {}
-        gen = runtime.run_turn(user_text, screen_context)
-        try:
-            async for event in gen:
-                panel.apply_event(event)
-                await self._maybe_follow_agent_read(event, pending_reads)
-        except asyncio.CancelledError:
-            # Close the generator first: if the cancel landed between
-            # yields the generator is still suspended, and finalize must
-            # not race a later resume that appends to the history.
-            closer = getattr(gen, "aclose", None)
-            if closer is not None:
-                with contextlib.suppress(BaseException):
-                    await closer()
-            self._finish_interrupted_turn(runtime, panel)
-            raise
-        except Exception as exc:
-            panel.apply_event(AgentError(message=str(exc)))
-
-    def _finish_interrupted_turn(self, runtime: Any, panel: AgentPanel) -> None:
-        """Settle an interrupted turn: repair the conversation history and
-        mark the transcript (issue #170). The queued replacement, if any, is
-        drained by the task's done callback — not here, because a task
-        cancelled before its coroutine first ran never reaches this code."""
-        self._agent_turn_finalized = True
-        finalize = getattr(runtime, "finalize_interrupt", None)
-        if finalize is not None:
-            event = finalize()
-            if not self._shutting_down:
-                panel.apply_event(event)
-
-    async def _maybe_follow_agent_read(
-        self,
-        event: AgentEvent,
-        pending: dict[str, tuple[str, str]],
-    ) -> None:
-        """Mirror a successful agent cluster read on screen (agent follow).
-
-        Small local models rarely volunteer the UI tools — they call the
-        data-returning reads and answer in text while the screen sits
-        idle. With follow on, each successful read is mirrored through the
-        same UIBridge mapping MCP follow uses (issue #153). Best-effort:
-        `mirror_read` never raises, and the bridge guards (approval
-        dialogs, screens the user is reading) refuse rather than cover.
-        """
-        if isinstance(event, ToolCallStarted):
-            if event.name in FOLLOWABLE_TOOLS:
-                pending[event.call_id] = (event.name, event.arguments)
-            return
-        if not isinstance(event, ToolCallFinished):
-            return
-        started = pending.pop(event.call_id, None)
-        if started is None or not event.ok or not self._agent_follow:
-            return
-        name, raw_arguments = started
-        try:
-            arguments = json.loads(raw_arguments) if raw_arguments else {}
-        except json.JSONDecodeError:
-            return  # small models emit broken JSON; the read still answered
-        if not isinstance(arguments, dict):
-            return
-        await mirror_read(self._agent_follow_bridge or AppUIBridge(self), name, arguments)
-
-    # ------------------------------------------------------------------
-    # UIBridge implementation (spec §4.1 UI Bus): the agent drives the
-    # exact same handlers as user keystrokes. Every method returns a
-    # confirmation or an "ERROR: …" string and never raises (executor
-    # contract), and every screen change is announced via notify so the
-    # user always sees what the agent did.
-    # ------------------------------------------------------------------
-
-    def _mark_agent_action(self, summary: str) -> None:
-        self.notify(summary, title="agent", severity="information", timeout=3)
-
-    async def open_evidence(self, ref: str) -> str:
-        """Open the read a citation points at (issue #192).
-
-        The reference is resolved against the ledger, never against the
-        answer text: a model that writes `[E9]` cannot make korvid open
-        anything, because `E9` is not something korvid minted.
-
-        Reuses the agent's own view entry points, so a citation cannot
-        reach a screen the agent itself is not allowed to open - the
-        approval-dialog guard included.
-        """
-        runtime = self.agent_runtime
-        if runtime is None:
-            return "ERROR: the agent is not configured in this session"
-        item = runtime.evidence.resolve(ref)
-        if item is None:
-            return f"ERROR: {ref} is not evidence from this turn"
-        target = target_for(item)
-        if target is None:
-            return f"ERROR: {ref} has no view to open ({item.tool})"
-        if target.view == "list":
-            # A listing with no namespace covered every namespace; `None`
-            # would instead be read as "keep the pane's current scope".
-            scope = ALL_NAMESPACES if target.all_namespaces else target.namespace
-            return await self.agent_navigate(target.kind or "", namespace=scope)
-        self._displayed_incarnation = None
-        if target.view == "logs":
-            opened = await self._open_evidence_logs(ref, target)
-        else:
-            opened = await self._open_evidence_describe(ref, target)
-        replaced = self._displayed_is_a_replacement(target)
-        if replaced and not opened.startswith("ERROR:"):
-            # Opened anyway: the user asked to see it, and the current
-            # object is usually what they need next. Saying nothing is the
-            # failure - the claim was about an object that no longer
-            # exists (#250).
-            return (
-                f"{opened} (warning: this object was replaced since the cited read —"
-                " what is on screen is a new instance, not the evidence)"
-            )
-        return opened
-
-    def _displayed_is_a_replacement(self, target: EvidenceTarget) -> bool:
-        """Whether what was just displayed is a different instance.
-
-        Compared against the manifest the opener actually put on screen,
-        not a separate lookup: a second fetch could disagree with the
-        display, which would either miss a replacement or warn about one
-        the user is not looking at.
-
-        Only ever answers yes on a positive identification. No recorded
-        incarnation, or a view that showed no identifiable object, means
-        "cannot tell" - a warning nobody can trust is worse than none.
-        """
-        if target.incarnation is None or self._displayed_incarnation is None:
-            return False
-        return self._displayed_incarnation != target.incarnation
-
-    async def _open_evidence_logs(self, ref: str, target: EvidenceTarget) -> str:
-        """Stream the container the cited read actually looked at."""
-        if target.name is None or target.namespace is None:
-            return f"ERROR: {ref} does not name a pod to stream"
-        container = target.container
-        if target.needs_container_resolution:
-            # The read defaulted to the pod's first container. Opening
-            # every container would show streams that were not the
-            # evidence, and could scroll the cited one away.
-            #
-            # Resolved from the live manifest, not the store: the cited pod
-            # is often outside the pane's kind and scope, where the store
-            # lookup finds nothing and the fallback reopens everything.
-            try:
-                triples = await self._agent_pod_triples(target.namespace, target.name)
-            except ApiStatusError as exc:
-                return (
-                    f"ERROR: {explain_api_error(exc.status, exc.reason, 'pods', target.namespace)}"
-                )
-            container = triples[0][2] if triples and triples[0][2] else None
-        return await self.agent_open_logs(target.name, target.namespace, container=container)
-
-    async def _open_evidence_describe(self, ref: str, target: EvidenceTarget) -> str:
-        """Describe the cited object, saying so when its events are absent."""
-        if target.kind is None or target.name is None:  # narrowed for typing
-            return f"ERROR: {ref} does not name an object to describe"
-        opened = await self.agent_open_describe(target.kind, target.name, target.namespace)
-        if opened.startswith("ERROR:"):
-            return opened
-        if target.expects_events and self._canonical_kind(target.kind) != "pods":
-            # Describe fetches events for pods only, so the cited events
-            # are not on the screen this just opened. Saying so beats the
-            # user hunting for evidence that is not there.
-            return (
-                f"{opened} (note: this evidence includes events, and korvid"
-                " shows events for pods only - the events are not shown here)"
-            )
-        return opened
-
-    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
-        if self._approval_dialog_active():
-            # Same "user is deciding" rule as describe: swapping the view
-            # beneath an approval dialog mid-decision is disorienting.
-            return (
-                "ERROR: an approval dialog is open — the user is deciding; "
-                "wait for their decision before changing the view"
-            )
-        if isinstance(self.screen, DescribeScreen):
-            # The user opened a describe modal and is reading it; switching
-            # the table underneath while reporting 'switched' would lie about
-            # what's on screen. User action takes priority.
-            return (
-                "ERROR: a describe screen is open — the user is reading it; "
-                "ask them to close it (Esc) before changing the view"
-            )
-        key = view.strip().lower()
-        meta = self.aliases.get(key)
-        if meta is None:
-            return f"ERROR: unknown view {view!r} — not a resource kind in this cluster"
-        if namespace and namespace.strip().lower() in ("all", ALL_NAMESPACES):
-            # Same mapping as the human ':view all' command path.
-            namespace = ALL_NAMESPACES
-        try:
-            # Canonical view kind, not the bare plural: safe under alias
-            # collisions (same rule as the command-bar path).
-            await self.on_navigate_command(NavigateCommand(self._canonical_kind(key), namespace))
-        except Exception as exc:
-            return f"ERROR: {exc}"
-        rows = self.store.get(self.current_kind, self.current_scope)
-        # Report what the user actually sees: apply the same filter as the
-        # table render (substring/label/regex/… — issue #44) before counting.
-        rows = self._filtered_rows(rows)
-        self._mark_agent_action(f"view → {self.current_kind} ({self.current_scope})")
-        suffix = " (list may still be loading)" if not rows else ""
-        filter_note = f" (filter {self.filter_pattern!r} applied)" if self.filter_pattern else ""
-        return (
-            f"switched to {self.current_kind} in {self.current_scope} — "
-            f"{len(rows)} resources{filter_note}{suffix}"
-        )
-
-    async def agent_set_filter(self, pattern: str) -> str:
-        try:
-            if pattern:
-                self.on_filter_command(FilterCommand(pattern))
-            else:
-                self.on_clear_filter(ClearFilter())
-        except Exception as exc:
-            return f"ERROR: {exc}"
-        if pattern:
-            self._mark_agent_action(f"filter → {pattern!r}")
-            return f"filter set to {pattern!r} on the {self.current_kind} view"
-        self._mark_agent_action("filter cleared")
-        return "filter cleared"
-
-    @staticmethod
-    def _agent_log_targets(
-        known: list[tuple[str, str, str]], namespace: str, pod: str, container: str | None
-    ) -> list[tuple[str, str, str]] | str:
-        """The (ns, pod, container) triples to stream, or an "ERROR: ..."."""
-        if not known:
-            # Validate before cancel_tasks: a hallucinated pod name
-            # must not tear down the streams the user is watching.
-            return f"ERROR: pod {namespace}/{pod} not found (check the name and namespace)"
-        if container:
-            names = [c for _, _, c in known if c]
-            if names and container not in names:
-                return (
-                    f"ERROR: container {container!r} not found in pod "
-                    f"{namespace}/{pod} (containers: {', '.join(names)})"
-                )
-            return [(namespace, pod, container)]
-        return known
-
-    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
-        if self._approval_dialog_active():
-            # Opening logs tears down the current log stream (the one the
-            # user may be watching beneath the dialog while deciding).
-            return (
-                "ERROR: an approval dialog is open — the user is deciding; "
-                "wait for their decision before opening logs"
-            )
-        if isinstance(self.screen, DescribeScreen):
-            # Same user-priority rule as describe/navigate/drill: opening
-            # logs swaps the streams beneath the modal the user is reading.
-            return (
-                "ERROR: a describe screen is open — the user is reading it; "
-                "ask them to close it (Esc) before opening logs"
-            )
-        if self._stream_logs is None:
-            return "ERROR: log streaming unavailable in this session"
-        pane_gen = self._logs.pane_gen
-        try:
-            known = await self._agent_pod_triples(namespace, pod)
-            triples = self._agent_log_targets(known, namespace, pod, container)
-            if isinstance(triples, str):
-                return triples
-            if pane_gen != self._logs.pane_gen:
-                # The user (or another turn) changed the log pane while we were
-                # resolving containers — user keystrokes take priority.
-                return (
-                    "ERROR: the log pane changed while resolving containers "
-                    "(user action takes priority) — retry if still needed"
-                )
-            if self._approval_dialog_active():
-                # The pre-check can go stale during the awaited lookup: an
-                # approval dialog that opened meanwhile still wins before
-                # the destructive log-pane teardown below.
-                return (
-                    "ERROR: an approval dialog is open — the user is deciding; "
-                    "wait for their decision before opening logs"
-                )
-            await self._logs.cancel_tasks()
-            if pane_gen != self._logs.pane_gen:
-                # Recheck after the cancel await: a user pane change landing
-                # in that window still wins.
-                return (
-                    "ERROR: the log pane changed while preparing the streams "
-                    "(user action takes priority) — retry if still needed"
-                )
-            await self._logs.open_agent_logs(namespace, triples)
-        except Exception as exc:
-            return f"ERROR: {exc}"
-        target = f"{namespace}/{pod}" + (f" [{container}]" if container else "")
-        self._mark_agent_action(f"logs → {target}")
-        # open_pane caps at MAX_PANELS; tell the model which subset is
-        # actually visible so it never assumes every container is on screen.
-        truncated = ""
-        if len(triples) > MAX_PANELS:
-            truncated = (
-                f" (showing first {MAX_PANELS} of {len(triples)} containers; "
-                f"pass 'container' to view a specific one)"
-            )
-        return f"log pane opened for {target} — the user can now see the live logs{truncated}"
-
-    async def _agent_pod_triples(self, namespace: str, pod: str) -> list[tuple[str, str, str]]:
-        """All (ns, pod, container) triples for a pod the agent targets.
-
-        The agent may open logs for a pod outside the visible view/scope, so
-        the live manifest is authoritative; the store bucket is only a
-        fallback. Returns an empty list when the pod cannot be found at all.
-        """
-        if self._get_manifest is not None:
-            try:
-                manifest = await self._get_manifest("pods", namespace, pod)
-            except ApiStatusError:
-                # The API authoritatively rejected the target (e.g. 404 for a
-                # freshly deleted pod still in the watch cache) — surface it
-                # instead of falling back to stale cache data.
-                raise
-            except Exception:
-                logger.debug("agent logs: manifest container lookup failed", exc_info=True)
-            else:
-                spec = manifest.get("spec") or {}
-                # Init and ephemeral containers are valid log targets too
-                # (the human container picker exposes init containers).
-                names = [
-                    c.get("name")
-                    for section in ("containers", "initContainers", "ephemeralContainers")
-                    for c in spec.get(section) or []
-                ]
-                triples = [(namespace, pod, str(n)) for n in names if n]
-                if triples:
-                    return triples
-        containers = self._get_pod_containers(namespace, pod)
-        if containers:
-            return [(namespace, pod, ctr) for ctr in containers]
-        if any(
-            obj.namespace == namespace and obj.name == pod and isinstance(obj, PodSummary)
-            for obj in self.store.get(self.current_kind, self.current_scope)
-        ):
-            # Known pod without container info: blank container = server default.
-            return [(namespace, pod, "")]
-        return []
-
-    async def agent_drill_down(self, name: str) -> str:
-        if isinstance(self.screen, DescribeScreen):
-            # Same user-priority guard as agent_navigate: drilling would
-            # change the table hidden under the modal the user is reading.
-            return (
-                "ERROR: a describe screen is open — the user is reading it; "
-                "ask them to close it (Esc) before changing the view"
-            )
-        canonical = self._canonical_kind(self.current_kind)
-        child = drill_child(canonical)
-        if child is None:
-            return (
-                f"ERROR: {canonical} has no drill-down chain - "
-                "drill_down works on deployments, replicasets, and helm releases"
-            )
-        rows = self.store.get(self.current_kind, self.current_scope)
-        drill_uid = self._drill.parent_uid
-        if drill_uid is not None and self.current_kind == self._drill.child_kind:
-            rows = [r for r in rows if owned_by(r, drill_uid)]
-        # drill_down acts on the visible table: apply the same filter as the
-        # table render so the agent cannot drill into a hidden row.
-        rows = self._filtered_rows(rows)
-        matches = [r for r in rows if r.name == name]
-        if not matches:
-            return f"ERROR: no {canonical} named {name!r} in the current view"
-        if len(matches) > 1:
-            return (
-                f"ERROR: multiple {canonical} named {name!r} across namespaces - "
-                "navigate to one namespace first"
-            )
-        error = await self._workspace_ctl.drill_into(matches[0].namespace, name)
-        if error is not None:
-            return f"ERROR: {error}"
-        self._mark_agent_action(f"drill → {self._drill.breadcrumb()}")
-        return (
-            f"drilled into {canonical}/{name} — now showing the {child} it owns "
-            f"({self._drill.breadcrumb()})"
-        )
-
-    def _approval_dialog_active(self) -> bool:
-        """True while a write-approval dialog or write-parameter wizard owns
-        the screen: agent- or follow-driven screens must never steal its
-        keystroke focus, and every one of these feeds a cluster write."""
-        return isinstance(
-            self.screen,
-            (
-                ConfirmScreen,
-                ReplicasPrompt,
-                ImagePrompt,
-                ResizePrompt,
-                OperatorInstallPrompt,
-                HelmInstallPrompt,
-            ),
-        )
-
-    def _describe_precheck(self, kind: str, namespace: str | None) -> ResourceMeta | str:
-        """Guards + target resolution for agent_open_describe: the meta to
-        describe, or an "ERROR: ..." string."""
-        if self._approval_dialog_active():
-            # Security invariant: approval dialogs are confirmed only by
-            # user keystrokes. A describe pushed on top (agent- or MCP
-            # follow-driven) would steal that focus mid-approval.
-            return (
-                "ERROR: an approval dialog is open — the user is deciding; "
-                "wait for their decision before opening screens"
-            )
-        if isinstance(self.screen, DescribeScreen):
-            # Same user-priority rule as agent_navigate/agent_drill_down
-            # (and the docs/agent.md follow contract): a describe screen on
-            # top is being read — covering it with another would replace
-            # the content mid-read. User action takes priority.
-            return (
-                "ERROR: a describe screen is open — the user is reading it; "
-                "ask them to close it (Esc) before opening another"
-            )
-        if self._get_manifest is None:
-            return "ERROR: describe unavailable in this session"
-        meta = self.aliases.get(kind.strip().lower())
-        if meta is None:
-            return f"ERROR: unknown kind {kind!r} — not a resource kind in this cluster"
-        if meta.namespaced and not namespace:
-            return f"ERROR: kind {kind!r} is namespaced — provide the 'namespace' argument"
-        return meta
-
-    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
-        meta = self._describe_precheck(kind, namespace)
-        if isinstance(meta, str):
-            return meta
-        if self._get_manifest is None:  # re-narrowed for typing; precheck guarantees it
-            return "ERROR: describe unavailable in this session"
-        # Snapshot the visible state: if the user pushes a screen or navigates
-        # while the fetches below are pending, abort instead of covering it.
-        top_screen = self.screen_stack[-1] if self.screen_stack else None
-        view_before = (self.current_kind, self.current_scope)
-        try:
-            manifest = await self._get_manifest(meta.plural, namespace, name)
-        except ApiStatusError as exc:
-            return f"ERROR: {explain_api_error(exc.status, exc.reason, meta.plural, namespace)}"
-        except Exception as exc:
-            return f"ERROR: {exc}"
-        events: list[dict[str, Any]] = []
-        # Events are name-scoped only, so restrict to pods (same rule as `d`).
-        if self._get_events is not None and namespace and meta.plural == "pods":
-            try:
-                events = await self._get_events.fetch(namespace, name)
-            except Exception:  # events are best-effort; the manifest still shows
-                logger.debug("agent describe: event fetch failed", exc_info=True)
-        title = f"{meta.plural}/{namespace or '-'}/{name}"
-        current_top = self.screen_stack[-1] if self.screen_stack else None
-        if current_top is not top_screen or (self.current_kind, self.current_scope) != view_before:
-            return (
-                "ERROR: the screen changed while fetching the manifest "
-                "(user action takes priority) — retry if still needed"
-            )
-        # When the chat panel is visible, show the non-modal pane on the left
-        # instead of pushing a modal: a modal becomes the active screen and
-        # would keep the chat input from taking focus. Resolved outside the
-        # try below so a missing widget isn't masked as a generic push error.
-        share = self._agent_panel_expanded()
-        try:
-            await self._show_describe(share, title, manifest, events)
-        except Exception as exc:
-            return f"ERROR: {exc}"
-        # The identity of what is *actually* displayed, recorded after the
-        # display succeeded: checking a separate fetch beforehand leaves
-        # the same race it was meant to close, only narrower (#250 review).
-        self._displayed_incarnation = incarnation_of(manifest)
-        self._mark_agent_action(f"describe → {title}")
-        return f"describe screen opened for {title} — manifest and events are on screen"
-
-    async def agent_request_write(
-        self,
-        action: str,
-        kind: str,
-        name: str,
-        namespace: str | None = None,
-        replicas: int | None = None,
-        resources: dict[str, dict[str, dict[str, str]]] | None = None,
-    ) -> str:
-        """Approval-gated write requested by the agent (spec §6.2): opens the
-        same ConfirmScreen as the keybindings; only the user's keystroke can
-        approve it, and the outcome (executed/denied/error) flows back as the
-        tool result. Every executed write is audited with an agent marker."""
-        name = name.strip()  # every stage below must see the exact same target
-        # One stamp per approval request (rollout restarts only): the preview
-        # and the executed write send the identical patch body.
-        stamp = restart_stamp()
-        built = self._agent_write_op(
-            action, kind, name, namespace, replicas, resources, restarted_at=stamp
-        )
-        if isinstance(built, str):
-            return built
-        meta, ns, op, operation, detail = built
-        if not await self._writes.permitted(action, meta, ns, name):
-            verb, target = self._writes.perm_target(action, meta)
-            return f"ERROR: missing permission: {verb} {target}"
-        try:
-            # Capture the target's manifest *before* asking for approval:
-            # the executed write carries its uid as a precondition, so the
-            # approval is bound to this exact object incarnation - a
-            # same-named replacement created while the dialog is open gets a
-            # 409, not the mutation. The lookup uses the caller's validated
-            # alias, not meta.plural: alias resolution is first-wins, so a
-            # plural that collides across groups could otherwise resolve to
-            # a different resource than the one validated above. The same
-            # snapshot feeds the ownership banner - no second round trip.
-            snapshot = await self._target_manifest(kind.strip().lower(), ns, name)
-        except ApiStatusError:
-            return f"ERROR: {gvr_label(meta)}/{name} not found{write_locus(ns)}"
-        uid = manifest_uid(snapshot) if snapshot is not None else None
-        preview = await self._preview_for_action(
-            action, meta, ns, name, replicas, resources, uid, stamp
-        )
-        note = await self._managed_note_from(snapshot, ns) if snapshot is not None else None
-        require = name if action == "delete" and not meta.namespaced else None
-        impact_lines = (
-            await self._agent_resize_impact(
-                meta,
-                ns,
-                name,
-                uid,
-                snapshot,
-                resources,
-            )
-            if action == "resize" and resources
-            else None
-        )
-        decision = await self._await_user_approval(
-            f"Agent requests: {action} {gvr_label(meta)}/{name}{write_locus(ns)}",
-            operation,
-            require_name=require,
-            preview=preview,
-            managed_note=note,
-            impact_lines=impact_lines,
-        )
-        if decision == "expired":
-            return (
-                f"not approved: the request expired before the user responded"
-                f" ({action} {gvr_label(meta)}/{name})"
-            )
-        if decision != "approved":
-            return f"denied: the user declined the {action} request for {gvr_label(meta)}/{name}"
-        outcome = await self._writes.run_shielded(
-            action, meta, ns, name, lambda: op(uid), detail=detail
-        )
-        if outcome != "done":
-            return f"ERROR: {action} {gvr_label(meta)}/{name} {outcome}"
-        self._mark_agent_action(f"{action} → {gvr_label(meta)}/{name}")
-        return f"approved and executed: {action} {gvr_label(meta)}/{name}"
-
-    async def _preview_for_action(
-        self,
-        action: str,
-        meta: ResourceMeta,
-        ns: str | None,
-        name: str,
-        replicas: int | None,
-        resources: dict[str, dict[str, dict[str, str]]] | None,
-        uid: str | None,
-        restarted_at: str,
-    ) -> list[str] | None:
-        """Dry-run preview for an agent-requested write; None (no preview)
-        for unknown actions or a scale without a validated replica count.
-        The captured ``uid`` and per-approval ``restarted_at`` stamp ride
-        along so the dry run replays the exact request that would execute
-        on approval."""
-        ops = self._write_ops
-        if ops is None:
-            return None
-        if action == "delete":
-            return await self._writes.dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
-        if action == "scale" and replicas is not None:
-            return await self._writes.dry_run_preview(
-                ops.preview_scale(meta, ns, name, replicas, uid=uid)
-            )
-        if action == "rollout_restart":
-            return await self._writes.dry_run_preview(
-                ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=restarted_at)
-            )
-        if action == "resize" and resources:
-            return await self._writes.dry_run_preview(
-                ops.preview_resize(ns or "", name, resources, uid=uid)
-            )
-        return None
-
-    async def _agent_resize_impact(
-        self,
-        meta: ResourceMeta,
-        ns: str | None,
-        name: str,
-        uid: str | None,
-        snapshot: dict[str, Any] | None,
-        resources: dict[str, dict[str, dict[str, str]]],
-    ) -> tuple[str, ...]:
-        context = classify_pod_resize(snapshot or {}, resources)
-        graph_lines = await self._writes.impact_preview_for_scope(
-            ImpactAction.POD_RESIZE,
-            meta,
-            ns,
-            name,
-            uid,
-            scope=ns if meta.namespaced else None,
-        )
-        return compose_resize_impact_lines(graph_lines, context)
-
-    async def _target_manifest(
-        self, kind_alias: str, ns: str | None, name: str
-    ) -> dict[str, Any] | None:
-        """Manifest of a write target at request time, looked up by the same
-        alias the write was validated with (both resolve through the one
-        aliases mapping wired in __main__, so the manifest and the mutation
-        address the same resource even when plurals collide across groups).
-        Raises ApiStatusError(404) when the target does not exist (the caller
-        turns that into an actionable error before bothering the user with a
-        dialog). Fails open (None -> no precondition, matching the previous
-        behaviour) when no manifest source is wired or the lookup fails for
-        infrastructure reasons - including a lookup slower than
-        _UID_LOOKUP_TIMEOUT, so a stalled API server cannot leave the caller
-        pending forever - the write stays approval-gated and audited."""
-        if self._get_manifest is None:
-            return None
-        try:
-            return await asyncio.wait_for(
-                self._get_manifest(kind_alias, ns, name), _UID_LOOKUP_TIMEOUT
-            )
-        except ApiStatusError as exc:
-            if exc.status == 404:
-                raise
-            logger.warning("uid lookup for %s/%s failed; writing without precondition", ns, name)
-            return None
-        except TimeoutError:
-            logger.warning("uid lookup for %s/%s timed out; writing without precondition", ns, name)
-            return None
-        except Exception:
-            logger.exception("uid lookup for %s/%s failed; writing without precondition", ns, name)
-            return None
+        """Stop the running agent turn (Ctrl-X, issue #170)."""
+        self._agent_ui.interrupt()
 
     async def _target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
-        """Uid of a write target at request time — `_target_manifest` with
-        only the precondition extracted (same 404/fail-open semantics)."""
-        manifest = await self._target_manifest(kind_alias, ns, name)
-        return manifest_uid(manifest) if manifest is not None else None
+        """Uid of a write target at request time, for the flows that are not
+        the agent's own: the interactive shell, the transfer pre-checks and
+        the proposal execution path all bind their approval to one exact
+        object incarnation through the same lookup."""
+        return await self._agent_ui.target_uid(kind_alias, ns, name)
 
     async def _managed_note(self, kind_alias: str, ns: str | None, name: str) -> str | None:
-        """Ownership banner text for a write dialog, or None (issue #119).
-
-        Best-effort display support, fail-open: no manifest source, a slow
-        or failed lookup, or an unmanaged target all yield None — the write
-        flow is never blocked, and the target fetch plus the entire
-        owner-chain walk share one `_UID_LOOKUP_TIMEOUT` deadline.
-        """
-        if self._get_manifest is None:
-            return None
-        try:
-            async with asyncio.timeout(_UID_LOOKUP_TIMEOUT):
-                manifest = await self._get_manifest(kind_alias, ns, name)
-                return await self._walk_managed(manifest, ns)
-        except Exception as exc:  # display support only — never blocks the write
-            # An API error message can embed the response body (for a
-            # Secret, its data): log the exception type, not its payload.
-            logger.debug("manager lookup for %s/%s failed: %s", ns, name, type(exc).__name__)
-            return None
+        """Ownership banner for a write target (issue #119) —
+        `ResourceWriteController` shares the agent path's lookup."""
+        return await self._agent_ui.managed_note(kind_alias, ns, name)
 
     async def _managed_note_from(self, manifest: dict[str, Any], ns: str | None) -> str | None:
-        """Manager note for an already-fetched manifest; the owner-chain
-        walk shares one `_UID_LOOKUP_TIMEOUT` deadline and fails open like
-        `_managed_note`."""
-        try:
-            async with asyncio.timeout(_UID_LOOKUP_TIMEOUT):
-                return await self._walk_managed(manifest, ns)
-        except Exception as exc:  # display support only — never blocks the write
-            # Same payload caution as _managed_note — the exception type
-            # only, and nothing derived from the manifest (which may be a
-            # Secret's; CodeQL py/clear-text-logging-sensitive-data).
-            logger.debug("owner-chain lookup in %s failed: %s", ns, type(exc).__name__)
-            return None
-
-    async def _walk_managed(self, manifest: dict[str, Any], ns: str | None) -> str | None:
-        """Walk the built-in controller chain when the object itself looks
-        unmanaged: a pod owned by rs -> deploy (or job -> cronjob) reports
-        the top owner's manager — helm annotations live on the top-level
-        object, not on every pod it produced. Callers bound this walk with
-        one shared deadline and fail open on any error."""
-        found = manager_of(manifest)
-        current = manifest
-        for _ in range(2):
-            if found is not None:
-                break
-            owner = controller_owner(current)
-            if owner is None:
-                break
-            plural = OWNER_CHAIN_PLURALS.get(owner[0])
-            if plural is None or self._get_manifest is None:
-                break
-            current = await self._get_manifest(plural, ns, owner[1])
-            found = manager_of(current)
-        return found.note if found is not None else None
+        """Ownership banner for an already-fetched manifest (issue #119) —
+        `ResourceWriteController` shares the agent path's lookup."""
+        return await self._agent_ui.managed_note_from(manifest, ns)
 
     async def agent_submit_write_proposal(
         self,
@@ -4544,7 +3483,7 @@ class KorvidApp(App[None]):
         # stamp old-context validation onto a new-context proposal.
         epoch = self._ctx_epoch
         context = self.config.kube_context
-        built = self._agent_write_op(
+        built = self._agent_ui.build_write_op(
             action, kind, name, namespace, replicas, resources, restarted_at=stamp
         )
         if isinstance(built, str):
@@ -4584,7 +3523,7 @@ class KorvidApp(App[None]):
                 "ERROR: could not verify the write target (UID capture"
                 " failed); the proposal was not queued — try again"
             )
-        preview = await self._preview_for_action(
+        preview = await self._agent_ui.preview_for_action(
             action, meta, ns, name, replicas, resources, uid, stamp
         )
         if self._ctx_switching or self._ctx_epoch != epoch or self.config.kube_context != context:
@@ -4844,7 +3783,7 @@ class KorvidApp(App[None]):
             args = json.loads(proposal.arguments_json)
         except ValueError:
             return "ERROR: proposal arguments are unreadable"
-        return self._agent_write_op(
+        return self._agent_ui.build_write_op(
             args["action"],
             args["kind"],
             args["name"],
@@ -4990,263 +3929,10 @@ class KorvidApp(App[None]):
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.shield(self._audit_proposal_outcome(proposal, "failed", reason))
 
-    def _agent_write_op(
-        self,
-        action: str,
-        kind: str,
-        name: str,
-        namespace: str | None,
-        replicas: int | None,
-        resources: dict[str, dict[str, dict[str, str]]] | None,
-        *,
-        restarted_at: str,
-    ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
-        """Validate an agent write request; return (meta, ns, op, operation
-        description, audit detail) or an 'ERROR: ...' string. ``restarted_at``
-        is the per-approval stamp a rollout restart shares with its preview."""
-        if self.config.readonly:
-            return "ERROR: read-only mode - cluster writes are disabled"
-        if self._audit is None:
-            # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
-            return "ERROR: writes disabled - no audit log configured"
-        name = name.strip()
-        if not name:
-            # JSON Schema 'required' does not reject empty strings; an empty
-            # name would build a collection path instead of one exact object.
-            # (agent_request_write pre-strips: keep this for direct callers.)
-            return "ERROR: 'name' must be a non-empty resource name"
-        namespace = namespace.strip() or None if namespace is not None else None
-        resolved = self._agent_write_meta(kind, namespace)
-        if isinstance(resolved, str):
-            return resolved
-        meta, ns = resolved
-        if action == "delete":
-            return self._agent_delete_op(meta, ns, name)
-        if action == "scale":
-            return self._agent_scale_op(meta, ns, name, replicas)
-        if action == "rollout_restart":
-            return self._agent_restart_op(meta, ns, name, restarted_at)
-        if action == "resize":
-            return self._agent_resize_op(meta, ns, name, resources)
-        return f"ERROR: unknown write action {action!r}"
-
-    def _agent_write_meta(
-        self, kind: str, namespace: str | None
-    ) -> tuple[ResourceMeta, str | None] | str:
-        """Resolve an agent write's kind to a writable (meta, ns), or an
-        'ERROR: ...' string: synthetic view kinds (helm browser) are
-        read-only presentations of other objects and can never be written."""
-        meta = self.aliases.get(kind.strip().lower())
-        if meta is None:
-            return f"ERROR: unknown kind {kind!r} - not a resource kind in this cluster"
-        if meta.synthetic:
-            return f"ERROR: kind {kind!r} is a read-only korvid view - it cannot be written"
-        if meta.namespaced and not namespace:
-            return f"ERROR: kind {kind!r} is namespaced - provide the 'namespace' argument"
-        return meta, namespace if meta.namespaced else None
-
-    def _agent_delete_op(
-        self, meta: ResourceMeta, ns: str | None, name: str
-    ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
-        ops = self._write_ops
-        if ops is None:
-            return "ERROR: delete unavailable in this session"
-        return (
-            meta,
-            ns,
-            lambda uid: ops.delete_object(meta, ns, name, uid=uid),
-            f"DELETE {gvr_label(meta)}/{name}{write_locus(ns)}",
-            "requested by agent",
-        )
-
-    def _agent_scale_op(
-        self, meta: ResourceMeta, ns: str | None, name: str, replicas: int | None
-    ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
-        ops = self._write_ops
-        if ops is None:
-            return "ERROR: scale unavailable in this session"
-        if (meta.group, meta.plural) not in self._SCALABLE:
-            return f"ERROR: scale does not apply to {gvr_label(meta)}"
-        if replicas is None or replicas < 0:
-            return "ERROR: scale requires a 'replicas' argument >= 0"
-        return (
-            meta,
-            ns,
-            lambda uid: ops.scale_object(meta, ns, name, replicas, uid=uid),
-            f"PATCH {gvr_label(meta)}/{name} scale -> {replicas} replicas{write_locus(ns)}",
-            f"replicas -> {replicas}; requested by agent",
-        )
-
-    def _agent_restart_op(
-        self, meta: ResourceMeta, ns: str | None, name: str, restarted_at: str
-    ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
-        ops = self._write_ops
-        if ops is None:
-            return "ERROR: rollout restart unavailable in this session"
-        if (meta.group, meta.plural) not in self._RESTARTABLE:
-            return f"ERROR: rollout restart does not apply to {gvr_label(meta)}"
-        return (
-            meta,
-            ns,
-            lambda uid: ops.rollout_restart_with_stamp(
-                meta, ns, name, uid=uid, restarted_at=restarted_at
-            ),
-            f"PATCH {gvr_label(meta)}/{name} pod template (restartedAt annotation)"
-            f"{write_locus(ns)}",
-            "requested by agent",
-        )
-
-    def _agent_resize_op(
-        self,
-        meta: ResourceMeta,
-        ns: str | None,
-        name: str,
-        resources: dict[str, dict[str, dict[str, str]]] | None,
-    ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
-        ops = self._write_ops
-        if ops is None:
-            return "ERROR: resize unavailable in this session"
-        if (meta.group, meta.plural) != ("", "pods"):
-            return f"ERROR: resize does not apply to {gvr_label(meta)}"
-        if not self._pod_resize_supported:
-            return "ERROR: this cluster does not expose pods/resize (requires Kubernetes 1.35+)"
-        if not resources:
-            return "ERROR: resize requires a non-empty 'resources' argument"
-        namespace = ns or ""
-        summary = resize_summary(resources)
-        return (
-            meta,
-            ns,
-            lambda uid: ops.resize_pod(namespace, name, resources, uid=uid),
-            f"PATCH pods/{name}/resize: {summary}{write_locus(ns)}",
-            f"{summary}; requested by agent",
-        )
-
-    async def _wait_until_surfaceable(self, deadline: float) -> bool:
-        """Poll until an approval dialog may surface (panel expanded, no other
-        screen on top); False when the deadline passes first."""
-        loop = asyncio.get_running_loop()
-        if self._can_surface_approval():
-            return True
-        pending_msg = "Agent write approval pending - open the agent panel (Ctrl-A) to review"
-        self.notify(pending_msg, severity="warning", timeout=10)
-        last_reminder = loop.time()
-        while not self._can_surface_approval():
-            if loop.time() >= deadline:
-                return False
-            if loop.time() - last_reminder >= 30:
-                # The first toast fades after 10s: keep reminding so the
-                # request does not silently expire.
-                self.notify(pending_msg, severity="warning", timeout=10)
-                last_reminder = loop.time()
-            await asyncio.sleep(0.05)
-        return True
-
-    async def _await_user_approval(
-        self,
-        title: str,
-        operation: str,
-        *,
-        require_name: str | None = None,
-        preview: list[str] | None = None,
-        managed_note: str | None = None,
-        impact_lines: tuple[str, ...] | None = None,
-    ) -> Literal["approved", "declined", "expired"]:
-        """Show a ConfirmScreen and wait for the user's decision. Only real key
-        input can resolve it. While the agent panel is collapsed, or another
-        screen (a user dialog, describe, picker) is on top, the request stays
-        pending instead of pushing a modal (spec 6.1: approval dialogs are
-        never auto-opened from the collapsed state, and never stacked over an
-        active dialog where a stray keystroke could approve it); it surfaces
-        when the panel is expanded with a clear screen. Pending and on-screen
-        time share one deadline, so an unanswered or never-surfaced request
-        resolves as "expired" (distinct from an explicit "declined", so the
-        agent is never told the user declined when nobody answered) and an
-        agent turn can never hang forever."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _APPROVAL_TIMEOUT
-        if not await self._wait_until_surfaceable(deadline):
-            return "expired"
-        fut: asyncio.Future[bool] = loop.create_future()
-
-        def _done(confirmed: bool | None) -> None:
-            if not fut.done():
-                fut.set_result(bool(confirmed))
-
-        screen = self._writes.confirm_screen(
-            title,
-            operation,
-            require_name=require_name,
-            preview=preview,
-            managed_note=managed_note,
-            impact_lines=impact_lines,
-        )
-        try:
-            await self.push_screen(screen, _done)
-            # Recheck after mounting: surfacing the dialog (or push_screen
-            # itself) can consume the last of the budget, and a fixed minimum
-            # here would quietly extend the expiry contract past
-            # _APPROVAL_TIMEOUT.
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise TimeoutError
-            confirmed = await asyncio.wait_for(fut, timeout=remaining)
-            return "approved" if confirmed else "declined"
-        except asyncio.CancelledError:
-            # Turn interrupted (issue #170): never leave an orphaned dialog
-            # whose 'y' would resolve a dead future. The write cannot run.
-            # push_screen is inside the guarded region so a cancel landing
-            # during the mount itself still dismisses the dialog.
-            if self.screen is screen:
-                with contextlib.suppress(Exception):
-                    self.pop_screen()
-            raise
-        except TimeoutError:
-            # Late keystrokes are a no-op (the future is already resolved),
-            # but clear the dialog when possible so it doesn't linger.
-            if self.screen is screen:
-                with contextlib.suppress(Exception):
-                    self.pop_screen()
-            elif screen in self.screen_stack:
-                self.notify(
-                    "Agent write request expired - dismiss the pending dialog with Esc",
-                    severity="warning",
-                )
-            return "expired"
-
-    async def _show_describe(
-        self,
-        share: bool,
-        title: str,
-        manifest: dict[str, Any],
-        events: list[dict[str, Any]],
-    ) -> None:
-        """Present a describe view: non-modal pane when sharing with the chat
-        panel (modal screens would steal focus from the chat input)."""
-        if manifest.get("kind") == "Secret":
-            # Masking pipeline (design §7): this path is agent-driven, so the
-            # rendered body is LLM-adjacent — secret values must never appear.
-            manifest = mask_secret_manifest(manifest)
-        footer = self._provider_footer(manifest)
-        if share:
-            self._describe_pane.show(title, manifest, events, footer_note=footer)
-        else:
-            await self.push_screen(DescribeScreen(title, manifest, events, footer_note=footer))
-
     def _provider_footer(self, manifest: dict[str, Any]) -> str | None:
-        """One-line describe footer for Service/Ingress on a detected provider.
-
-        A pointer, not a catalog (issue #30): the CSP annotation knowledge
-        lives in the agent, so the footer just says where to ask.
-        """
-        if self._provider_hint is None:
-            return None
-        if manifest.get("kind") not in ("Service", "Ingress"):
-            return None
-        return (
-            f"provider: {self._provider_hint} — ask the agent about "
-            "load balancer annotations (ctrl+a)"
-        )
+        """Describe footer for the user-triggered views (issue #30); the
+        agent's own describe renders the identical note."""
+        return provider_footer_note(manifest, self._provider_hint)
 
     def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
         """Show guidance instead of a silent blank table (empty ns or no filter match)."""
@@ -5262,36 +3948,13 @@ class KorvidApp(App[None]):
         empty.update(Text(message))
         empty.display = True
 
-    async def _reap_dispatches(self) -> None:
-        """Refuse new foreign UI work and reap in-flight bridge dispatches
-        (issue #165): the MCP server stays live until after run_async()
-        returns, so a request racing teardown could otherwise spawn work
-        (log streams) after the unmount sweeps and leave it alive against
-        an unmounted app."""
-        self._app_context = None
-        for pending in [t for t in self._dispatch_tasks if not t.done()]:
-            pending.cancel()
-        if self._dispatch_tasks:
-            await asyncio.gather(*self._dispatch_tasks, return_exceptions=True)
-        self._dispatch_tasks.clear()
-
-    async def _settle_agent_task(self) -> None:
-        """Shutdown teardown of the agent turn: mark the app shutting down
-        (finalization must not touch the torn-down transcript or start a
-        replacement) and let the task drain. An explicit stop may already
-        have the task cancelling — re-injecting cancellation would abort
-        that cleanup mid-flight."""
-        self._shutting_down = True
-        if self._agent_task is None:
-            return
-        if self._agent_task.cancelling() == 0:
-            self._agent_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._agent_task
-
     async def on_unmount(self) -> None:
-        self._shutting_down = True
-        await self._reap_dispatches()
+        # Refuse new foreign UI work and reap in-flight bridge dispatches
+        # (issue #165): the MCP server stays live until after run_async()
+        # returns, so a request racing teardown could otherwise spawn work
+        # (log streams) after the unmount sweeps and leave it alive against
+        # an unmounted app.
+        await self._bridge_dispatch.shutdown()
         # Cancel any active log stream tasks before the event loop shuts down.
         # A proposal must never outlive the session that previewed it; close
         # the store first so an in-flight submission cannot land after the
@@ -5303,7 +3966,7 @@ class KorvidApp(App[None]):
             self._ns_prefetch_task.cancel()
         if self._ctx_prefetch_task is not None:
             self._ctx_prefetch_task.cancel()
-        await self._settle_agent_task()
+        await self._agent_ui.shutdown()
         await self._logs.shutdown()
         if self._metrics is not None:
             await self._metrics.stop()
@@ -5315,87 +3978,163 @@ class KorvidApp(App[None]):
         await self.watch_manager.stop_all()
 
 
-class AppUIBridge(UIBridge):
-    """Nominal `UIBridge` adapter over `KorvidApp`.
+class AppUIBridge(AgentUIBridge):
+    """The app's `UIBridge`: `AgentUiController` plus the app's dispatcher.
 
     The layer-boundary interface must be an `abc.ABC` (AGENTS.md), but
     Textual's `App` metaclass conflicts with `ABCMeta`, so the app cannot
-    inherit `UIBridge` directly — this thin adapter conforms nominally and
-    delegates to the app's bridge methods.
+    inherit `UIBridge` directly. The behaviour lives in `AgentUIBridge`; this
+    subclass exists only so the composition root can name one bridge for one
+    app - it holds no app reference and routes no agent operation through app
+    methods.
+    """
 
-    Every call is marshaled onto the app-owned execution context (issue
-    #165): MCP requests (and the follow mirrors they spawn) arrive in
-    tasks whose context lacks Textual's `active_app` ContextVar, and
-    composing a widget tree there (`DescribeScreen`'s `VerticalScroll`)
-    raised `NoActiveAppError` and terminated the app. Marshaling at this
-    single boundary also fixes the downstream-task hazard: log-stream
-    tasks spawned inside a dispatched call inherit the app context instead
-    of carrying the MCP request context for the stream's lifetime.
+    def __init__(self, app: KorvidApp) -> None:
+        super().__init__(app._agent_ui, app._bridge_dispatch)
+
+
+class AppAgentPanel(AgentPanelPort):
+    """Nominal `AgentPanelPort` adapter over `KorvidApp`'s chat panel.
+
+    Adapter for the same metaclass reason as the other app surfaces. Every
+    call is a live widget lookup: the panel is composed only when the [agent]
+    extra is wired (issue #73), and `NoMatches` there means "no panel", not
+    an error the agent session must handle.
     """
 
     def __init__(self, app: KorvidApp) -> None:
         self._app = app
 
-    async def _dispatch(self, coro: Coroutine[Any, Any, str]) -> str:
-        """Run one bridge coroutine inside a copy of the app context.
+    def expanded(self) -> bool:
+        panels = self._app.query(AgentPanel)
+        return bool(panels) and panels.first(AgentPanel).display
 
-        A fresh copy per call: a `contextvars.Context` cannot be entered
-        concurrently, and the serialized proxy is not the only caller
-        (the in-app agent path may overlap a queued MCP call's dispatch).
-        Cancellation propagates into the inner task so shutdown never
-        strands UI work.
-        """
-        snapshot = self._app._app_context
-        if snapshot is None:
-            # Reachable in production on both edges: the MCP endpoint goes
-            # live before app.run_async() (pre-mount), and on_unmount
-            # invalidates the snapshot so a request racing teardown cannot
-            # spawn work against an unmounted app. Refuse instead (and
-            # close the coroutine so it never warns as un-awaited).
-            coro.close()
-            return "ERROR: UI not ready — the app is starting or shutting down; retry shortly"
-        task = asyncio.get_running_loop().create_task(
-            coro, context=snapshot.run(contextvars.copy_context)
-        )
-        self._app._dispatch_tasks.add(task)
-        task.add_done_callback(self._app._dispatch_tasks.discard)
-        try:
-            return await task
-        except asyncio.CancelledError:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-            raise
+    def show(self) -> None:
+        self._app._agent_panel.display = True
 
-    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
-        return await self._dispatch(self._app.agent_navigate(view, namespace))
+    def hide(self) -> None:
+        self._app._agent_panel.display = False
+        self._app._focused_table().focus()
 
-    async def agent_set_filter(self, pattern: str) -> str:
-        return await self._dispatch(self._app.agent_set_filter(pattern))
+    def focus_input(self) -> None:
+        self._app._agent_panel.query_one("#agent-input").focus()
 
-    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
-        return await self._dispatch(self._app.agent_open_logs(pod, namespace, container))
+    def enable_input(self) -> None:
+        self._app._agent_panel.query_one("#agent-input").disabled = False
 
-    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
-        return await self._dispatch(self._app.agent_open_describe(kind, name, namespace))
-
-    async def agent_drill_down(self, name: str) -> str:
-        return await self._dispatch(self._app.agent_drill_down(name))
-
-    async def agent_request_write(
+    def set_header(
         self,
-        action: str,
-        kind: str,
-        name: str,
-        namespace: str | None = None,
-        replicas: int | None = None,
-        resources: dict[str, dict[str, dict[str, str]]] | None = None,
-    ) -> str:
-        return await self._dispatch(
-            self._app.agent_request_write(action, kind, name, namespace, replicas, resources)
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        *,
+        estimated: bool,
+        profile: str,
+    ) -> None:
+        self._app._agent_panel.set_header(
+            model, input_tokens, output_tokens, estimated=estimated, profile=profile
         )
 
-    async def agent_submit_write_proposal(
+    def show_setup_hint(self) -> None:
+        self._app._agent_panel.show_setup_hint()
+
+    def show_reconnect_hint(self) -> None:
+        self._app._agent_panel.show_reconnect_hint()
+
+    def set_stop_key(self, key: str) -> None:
+        self._app._agent_panel.stop_key = key
+
+    def interrupt_key(self) -> str:
+        """The effective stop key's name, resolved by action from the active
+        bindings so an `interrupt_agent` remap moves the advertised hint."""
+        for active in self._app.screen.active_bindings.values():
+            if active.binding.action == "interrupt_agent":
+                return active.binding.key
+        return "ctrl+x"
+
+    def begin_turn(self, text: str, *, echo: bool) -> None:
+        self._app._agent_panel.begin_turn(text, echo=echo)
+
+    def echo_user(self, text: str) -> None:
+        self._app._agent_panel.echo_user(text)
+
+    def apply_event(self, event: AgentEvent) -> None:
+        self._app._agent_panel.apply_event(event)
+
+
+class AppAgentScreens(AgentScreens):
+    """Nominal `AgentScreens` adapter over `KorvidApp`'s screen stack.
+
+    The two guards here are security-relevant: an approval dialog (or a
+    write-parameter wizard, each of which feeds a cluster write) is confirmed
+    only by user keystrokes, and a describe screen the user is reading is
+    never covered by an agent- or follow-driven view.
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    def approval_dialog_active(self) -> bool:
+        return isinstance(
+            self._app.screen,
+            (
+                ConfirmScreen,
+                ReplicasPrompt,
+                ImagePrompt,
+                ResizePrompt,
+                OperatorInstallPrompt,
+                HelmInstallPrompt,
+            ),
+        )
+
+    def describe_screen_open(self) -> bool:
+        return isinstance(self._app.screen, DescribeScreen)
+
+    def top_screen(self) -> object | None:
+        stack = self._app.screen_stack
+        return stack[-1] if stack else None
+
+    def is_stacked(self, screen: Screen[Any]) -> bool:
+        return screen in self._app.screen_stack
+
+    def dismiss_if_current(self, screen: Screen[Any]) -> None:
+        if self._app.screen is screen:
+            with contextlib.suppress(Exception):
+                self._app.pop_screen()
+
+    def selected_row_key(self) -> str | None:
+        table = self._app._focused_table()
+        if table.row_count == 0:
+            return None
+        ordered = table.ordered_rows
+        if table.cursor_row >= len(ordered):
+            return None
+        return str(ordered[table.cursor_row].key.value)
+
+    def show_describe_pane(
+        self,
+        title: str,
+        manifest: dict[str, Any],
+        events: list[dict[str, Any]],
+        *,
+        footer_note: str | None,
+    ) -> None:
+        self._app._describe_pane.show(title, manifest, events, footer_note=footer_note)
+
+
+class AppProposalOps(AgentProposals):
+    """Nominal `AgentProposals` adapter over `KorvidApp`.
+
+    External write proposals (issue #110) keep their store, TTL, review loop
+    and execution path on the app for now; the agent session reaches them
+    only through this port, so the two can be separated without touching the
+    agent's own flows.
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    async def submit_write_proposal(
         self,
         action: str,
         kind: str,
@@ -5408,27 +4147,23 @@ class AppUIBridge(UIBridge):
         client_name: str = "",
         client_version: str = "",
     ) -> str:
-        return await self._dispatch(
-            self._app.agent_submit_write_proposal(
-                action,
-                kind,
-                name,
-                namespace,
-                replicas,
-                resources,
-                session_id=session_id,
-                client_name=client_name,
-                client_version=client_version,
-            )
+        return await self._app.agent_submit_write_proposal(
+            action,
+            kind,
+            name,
+            namespace,
+            replicas,
+            resources,
+            session_id=session_id,
+            client_name=client_name,
+            client_version=client_version,
         )
 
-    async def agent_get_write_proposal(self, proposal_id: str) -> str:
-        return await self._dispatch(self._app.agent_get_write_proposal(proposal_id))
+    async def get_write_proposal(self, proposal_id: str) -> str:
+        return await self._app.agent_get_write_proposal(proposal_id)
 
-    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
-        return await self._dispatch(
-            self._app.agent_cancel_write_proposal(proposal_id, session_id=session_id)
-        )
+    async def cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        return await self._app.agent_cancel_write_proposal(proposal_id, session_id=session_id)
 
 
 class AppViewState(ViewState):

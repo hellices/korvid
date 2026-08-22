@@ -371,7 +371,7 @@ async def test_agent_drill_down_from_deployments_view() -> None:
             lambda: app.current_kind == "deployments" and table.row_count == 2,
             label="deployments rendered",
         )
-        out = await app.agent_drill_down("web")
+        out = await app._agent_ui.agent_drill_down("web")
         await until(
             pilot,
             lambda: app.current_kind == "replicasets" and table.row_count == 2,
@@ -397,7 +397,7 @@ async def test_agent_drill_down_unknown_name_is_error() -> None:
             lambda: app.current_kind == "deployments" and _row_names(table) == ["api", "web"],
             label="deployments rendered",
         )
-        out = await app.agent_drill_down("nope")
+        out = await app._agent_ui.agent_drill_down("nope")
         assert out.startswith("ERROR:")
         assert app.current_kind == "deployments"
 
@@ -410,7 +410,7 @@ async def test_agent_drill_down_without_child_kind_is_error() -> None:
             lambda: app.query_one(ResourceTable).row_count == 2,
             label="pod rows visible",
         )  # pods view: containers need a picker, not a kind
-        out = await app.agent_drill_down("web-6d9f88-aaa")
+        out = await app._agent_ui.agent_drill_down("web-6d9f88-aaa")
         assert out.startswith("ERROR:")
 
 
@@ -429,7 +429,7 @@ async def test_agent_drill_down_respects_visible_filter() -> None:
         )
         app.on_filter_command(FilterCommand("api"))  # the real filter path (#44)
         await until(pilot, lambda: table.row_count == 1, label="deployment filter applied")
-        out = await app.agent_drill_down("web")
+        out = await app._agent_ui.agent_drill_down("web")
         assert out.startswith("ERROR:")
         assert app.current_kind == "deployments"
 
@@ -517,7 +517,7 @@ async def test_agent_drill_down_rejected_while_describe_screen_open() -> None:
             lambda: app.screen.__class__ is DescribeScreen,
             label="describe screen opened",
         )
-        out = await app.agent_drill_down("web")
+        out = await app._agent_ui.agent_drill_down("web")
         assert out.startswith("ERROR:")
         assert app.current_kind == "deployments"
         assert isinstance(app.screen, DescribeScreen)
@@ -547,7 +547,7 @@ async def test_concurrent_drill_and_navigate_stay_consistent() -> None:
             await orig_stop(kind, scope)
 
         app.watch_manager.stop = slow_stop  # type: ignore[method-assign]  # test seam to widen the race window
-        drill = asyncio.create_task(app.agent_drill_down("web"))
+        drill = asyncio.create_task(app._agent_ui.agent_drill_down("web"))
         # The drill pre-warms before taking the lock (issue #157): wait until
         # it is really inside the critical section, blocked in stop().
         await asyncio.wait_for(entered.wait(), timeout=5)

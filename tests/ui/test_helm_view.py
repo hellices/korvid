@@ -243,7 +243,7 @@ async def test_write_actions_reject_synthetic_helm_kinds(tmp_path: Path) -> None
             label="uninstall routed to helm, absence notified",
         )
         assert len(app.screen_stack) == 1  # no ConfirmScreen pushed
-        result = app._agent_write_op(
+        result = app._agent_ui.build_write_op(
             "delete", "helmreleases", "web", "default", None, None, restarted_at="s"
         )
         assert isinstance(result, str)

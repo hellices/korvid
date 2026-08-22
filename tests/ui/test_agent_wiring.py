@@ -184,8 +184,8 @@ async def test_screen_context_splits_selected_namespace_from_name() -> None:
         await until(
             pilot,
             lambda: (
-                "selected=web-1" in app._screen_context()
-                or "selected=default/web-1" in app._screen_context()
+                "selected=web-1" in app._agent_ui.screen_context()
+                or "selected=default/web-1" in app._agent_ui.screen_context()
             ),
             label="pod row selected",
         )
@@ -395,16 +395,17 @@ async def test_apply_agent_settings_enables_agent() -> None:
     app = make_app(runtime=None, model=None, rebuild_agent=lambda s: runtime)
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")  # open panel: setup hint, input disabled
-        app._apply_agent_settings(settings)
+        app._agent_ui.apply_settings(settings)
         await until(
             pilot,
             lambda: (
-                app._agent_runtime is runtime and "AI on" in str(app.query_one(StatusBar).render())
+                app._agent_ui._runtime is runtime
+                and "AI on" in str(app.query_one(StatusBar).render())
             ),
             label="agent runtime rebuilt and status bar updated",
         )
-        assert app._agent_runtime is runtime
-        assert app._agent_model_name == "llama3"
+        assert app._agent_ui._runtime is runtime
+        assert app._agent_ui._model_name == "llama3"
         assert "AI on" in str(app.query_one(StatusBar).render())
         assert app.query_one(AgentPanel).query_one("#agent-input", Input).disabled is False
 
@@ -447,11 +448,11 @@ async def test_model_command_swaps_model_and_saves() -> None:
         options={"tenant": "platform", "features": {"region": "apac"}},
     )
     async with app.run_test() as pilot:
-        app._apply_agent_settings(settings)
+        app._agent_ui.apply_settings(settings)
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
         await until(
             pilot,
-            lambda: app._agent_model_name == "gpt-4o",
+            lambda: app._agent_ui._model_name == "gpt-4o",
             label="model swap applied",
         )
         assert saved
@@ -473,7 +474,7 @@ async def test_model_command_without_config_does_not_crash() -> None:
             lambda: len(app._notifications) >= 2,
             label="not-configured model notifications shown",
         )
-        assert app._agent_model_name is None
+        assert app._agent_ui._model_name is None
 
 
 async def test_model_command_does_not_persist_when_apply_fails() -> None:
@@ -517,14 +518,14 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
         model="llama3",
     )
     async with app.run_test() as pilot:
-        app._apply_agent_settings(settings)
+        app._agent_ui.apply_settings(settings)
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
         await until(
             pilot,
             lambda: len(rebuilds) >= 2,
             label="rebuild attempted",
         )
-        assert app._agent_model_name == "llama3"  # old runtime kept
+        assert app._agent_ui._model_name == "llama3"  # old runtime kept
         assert not saved  # and nothing was persisted
 
 
@@ -561,14 +562,14 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
         model="llama3",
     )
     async with app.run_test() as pilot:
-        app._apply_agent_settings(settings)
+        app._agent_ui.apply_settings(settings)
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
         await until(
             pilot,
-            lambda: app._agent_model_name == "gpt-4o",
+            lambda: app._agent_ui._model_name == "gpt-4o",
             label="first model swap",
         )
-        assert app._agent_model_name == "gpt-4o"  # swap took effect
+        assert app._agent_ui._model_name == "gpt-4o"  # swap took effect
         notes = " ".join(str(n.message) for n in app._notifications)
         assert "disk full" in notes
         assert "revert" in notes.lower()
@@ -579,10 +580,10 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
         app.on_unknown_command(UnknownCommand("model claude-3"))
         await until(
             pilot,
-            lambda: app._agent_model_name == "claude-3",
+            lambda: app._agent_ui._model_name == "claude-3",
             label="second model swap",
         )
-        assert app._agent_model_name == "claude-3"
+        assert app._agent_ui._model_name == "claude-3"
         second = " ".join(
             str(n.message)
             for n in app._notifications
@@ -644,7 +645,7 @@ async def test_model_command_works_after_configured_startup() -> None:
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
         await until(
             pilot,
-            lambda: app._agent_model_name == "gpt-4o",
+            lambda: app._agent_ui._model_name == "gpt-4o",
             label="model swap from startup config",
         )
         assert saved
@@ -665,7 +666,7 @@ async def test_apply_agent_settings_notifies_on_rebuild_failure() -> None:
     )
     app = make_app(runtime=None, model=None, rebuild_agent=lambda s: None)
     async with app.run_test() as pilot:
-        app._apply_agent_settings(settings)
+        app._agent_ui.apply_settings(settings)
         await until(
             pilot,
             lambda: any("rebuild failed" in str(n.message).lower() for n in app._notifications),
@@ -687,7 +688,7 @@ async def test_apply_agent_settings_without_rebuild_agent_shows_literal_hint() -
     )
     app = make_app(runtime=None, model=None)
     async with app.run_test() as pilot:
-        app._apply_agent_settings(settings)
+        app._agent_ui.apply_settings(settings)
         await until(
             pilot,
             lambda: any("Agent rebuild unavailable" in str(n.message) for n in app._notifications),
@@ -723,7 +724,7 @@ async def test_apply_agent_settings_notifies_on_plugin_error() -> None:
 
     app = make_app(runtime=None, model=None, rebuild_agent=boom)
     async with app.run_test() as pilot:
-        app._apply_agent_settings(settings)
+        app._agent_ui.apply_settings(settings)
         await until(
             pilot,
             lambda: any(
@@ -753,7 +754,7 @@ async def test_apply_agent_settings_notifies_on_runtime_hint_rebuild_error() -> 
 
     app = make_app(runtime=None, model=None, rebuild_agent=boom)
     async with app.run_test() as pilot:
-        app._apply_agent_settings(settings)
+        app._agent_ui.apply_settings(settings)
         await until(
             pilot,
             lambda: any("rebuild failed" in str(n.message).lower() for n in app._notifications),
@@ -889,10 +890,10 @@ async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
             label="rebuild failure notification",
         )
         # Transactional swap: the working runtime and settings must survive.
-        assert app._agent_runtime is old_runtime
-        assert app._agent_model_name == "llama3"
-        assert app._agent_settings is not None
-        assert app._agent_settings.model == "llama3"
+        assert app._agent_ui._runtime is old_runtime
+        assert app._agent_ui._model_name == "llama3"
+        assert app._agent_ui._settings is not None
+        assert app._agent_ui._settings.model == "llama3"
         msgs = [n.message for n in app._notifications]
         assert not any("Agent model set" in m for m in msgs)  # no false success toast
         assert any("rebuild failed" in m.lower() for m in msgs)
@@ -914,20 +915,20 @@ async def test_model_switch_blocked_while_turn_running() -> None:
         provider="ollama", auth_method="none", base_url="http://x/v1", model="new-model"
     )
     async with app.run_test() as pilot:
-        app._agent_task = asyncio.create_task(asyncio.sleep(30))  # simulate a live turn
+        app._agent_ui._task = asyncio.create_task(asyncio.sleep(30))  # simulate a live turn
         try:
-            app._apply_agent_settings(settings)
+            app._agent_ui.apply_settings(settings)
             await until(
                 pilot,
                 lambda: any("busy" in str(n.message).lower() for n in app._notifications),
                 label="busy model-switch refusal shown",
             )
             assert not rebuilt  # swap must be blocked mid-turn
-            assert app._agent_runtime is old_runtime
+            assert app._agent_ui._runtime is old_runtime
             msgs = [n.message for n in app._notifications]
             assert any("busy" in m.lower() for m in msgs)
         finally:
-            app._agent_task.cancel()
+            app._agent_ui._task.cancel()
 
 
 async def test_input_reenabled_even_when_panel_closed() -> None:
@@ -941,10 +942,10 @@ async def test_input_reenabled_even_when_panel_closed() -> None:
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")  # open unconfigured: hint disables input
         await pilot.press("ctrl+a")  # close panel
-        app._apply_agent_settings(settings)
+        app._agent_ui.apply_settings(settings)
         await until(
             pilot,
-            lambda: app._agent_runtime is new_runtime,
+            lambda: app._agent_ui._runtime is new_runtime,
             label="agent runtime rebuilt while panel closed",
         )
         await pilot.press("ctrl+a")  # reopen: input must be usable again

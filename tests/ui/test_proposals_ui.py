@@ -903,13 +903,13 @@ async def test_submit_during_a_context_switch_is_rejected(tmp_path: Path) -> Non
     store = ProposalStore()
     app = make_app(rec, tmp_path / "a.jsonl", store)
     async with app.run_test():
-        original = app._preview_for_action
+        original = app._agent_ui.preview_for_action
 
         async def switching_preview(*args: Any, **kwargs: Any) -> list[str] | None:
             app._ctx_epoch += 1  # a context switch lands mid-intake
             return await original(*args, **kwargs)
 
-        app._preview_for_action = switching_preview  # type: ignore[method-assign]  # test seam
+        app._agent_ui.preview_for_action = switching_preview  # type: ignore[method-assign]  # test seam
         result = await _submit(app)
         assert result.startswith("ERROR:")
         assert "context" in result

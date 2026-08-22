@@ -326,7 +326,7 @@ async def test_agent_describe_path_masks_secret_values(tmp_path: Path) -> None:
     app = make_secret_app(audit=AuditLog(tmp_path / "audit.jsonl"))
     async with app.run_test() as pilot:
         manifest = json.loads(json.dumps(_SECRET_MANIFEST))
-        await app._show_describe(False, "secrets/default/db-creds", manifest, [])
+        await app._agent_ui._show_describe(False, "secrets/default/db-creds", manifest, [])
         from korvid.ui.widgets.describe_screen import DescribeScreen
 
         await until(pilot, lambda: isinstance(app.screen, DescribeScreen), label="describe")
@@ -359,8 +359,8 @@ async def test_screen_context_never_contains_secret_values(tmp_path: Path) -> No
             await pilot.press("down")
         await pilot.press("x")
         await until(pilot, lambda: "hunter2" in _screen_text(screen), label="revealed")
-        app._agent_runtime = FakeRuntime()  # type: ignore[assignment]  # duck-typed fake
-        await app._run_agent_turn("what do you see?")
+        app._agent_ui._runtime = FakeRuntime()  # type: ignore[assignment]  # duck-typed fake
+        await app._agent_ui.run_turn("what do you see?")
         assert captured, "run_turn was not invoked"
         context = captured[0]
         assert "hunter2" not in context

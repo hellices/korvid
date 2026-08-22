@@ -296,7 +296,9 @@ async def test_agent_write_dialog_shows_preview(tmp_path: Path) -> None:
         await _to_deployments(app, pilot)
         app.query_one(AgentPanel).display = True
         task = asyncio.ensure_future(
-            app.agent_request_write("scale", "deployments", "web", namespace="default", replicas=4)
+            app._agent_ui.agent_request_write(
+                "scale", "deployments", "web", namespace="default", replicas=4
+            )
         )
         await until(
             pilot,

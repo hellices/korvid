@@ -33,7 +33,7 @@ async def test_ai_off_disconnects_the_runtime_and_updates_the_status() -> None:
         assert "AI on" in _status(app)
         app.on_unknown_command(UnknownCommand("ai off"))
         await pilot.pause()
-        assert app._agent_runtime is None
+        assert app._agent_ui._runtime is None
         assert "AI off" in _status(app)
         assert closed == [True]  # the provider was released, not leaked
 
@@ -72,7 +72,7 @@ async def test_ai_off_is_idempotent_when_already_off() -> None:
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("ai off"))
         await pilot.pause()
-        assert app._agent_runtime is None  # no crash, still off
+        assert app._agent_ui._runtime is None  # no crash, still off
         assert any("off" in n.message for n in app._notifications)
 
 
@@ -87,7 +87,7 @@ async def test_ai_off_refuses_while_a_turn_is_running() -> None:
         await until(pilot, lambda: bool(runtime.calls), label="turn running")
         app.on_unknown_command(UnknownCommand("ai off"))
         await pilot.pause()
-        assert app._agent_runtime is not None  # unchanged: never cancels midway
+        assert app._agent_ui._runtime is not None  # unchanged: never cancels midway
         assert any("busy" in n.message.lower() for n in app._notifications)
 
 
@@ -108,9 +108,9 @@ async def test_reconnect_after_off_restores_the_agent() -> None:
             base_url="http://localhost:11434/v1",
             model="llama3",
         )
-        assert app._apply_agent_settings(settings) is True
+        assert app._agent_ui.apply_settings(settings) is True
         await pilot.pause()
-        assert app._agent_runtime is fresh
+        assert app._agent_ui._runtime is fresh
         assert "AI on" in _status(app)
         inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
         assert inp.disabled is False
@@ -125,7 +125,7 @@ async def test_ctrl_a_stays_a_pure_visibility_toggle() -> None:
         assert panel.display is True
         await pilot.press("ctrl+a")
         assert panel.display is False
-        assert app._agent_runtime is runtime  # visibility never touches state
+        assert app._agent_ui._runtime is runtime  # visibility never touches state
 
 
 async def test_ctrl_a_after_off_keeps_the_transcript() -> None:
@@ -185,7 +185,7 @@ async def test_bare_ai_after_off_prefills_the_wizard() -> None:
         base_url="http://my-ollama:11434/v1",
         model="qwen3:8b",
     )
-    app._agent_settings = settings
+    app._agent_ui._settings = settings
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("ai off"))
         await pilot.pause()

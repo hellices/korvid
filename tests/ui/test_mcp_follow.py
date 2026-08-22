@@ -163,7 +163,7 @@ async def test_describe_refuses_while_an_approval_dialog_is_up() -> None:
             lambda: isinstance(app.screen, ConfirmScreen),
             label="approval dialog up",
         )
-        result = await app.agent_open_describe("pods", "api-1", "default")
+        result = await app._agent_ui.agent_open_describe("pods", "api-1", "default")
         assert result.startswith("ERROR:")
         assert "approval" in result
         assert isinstance(app.screen, ConfirmScreen)  # the dialog kept focus
@@ -181,10 +181,10 @@ async def test_navigate_and_logs_refuse_while_an_approval_dialog_is_up() -> None
             lambda: isinstance(app.screen, ConfirmScreen),
             label="approval dialog up",
         )
-        nav = await app.agent_navigate("pods")
+        nav = await app._agent_ui.agent_navigate("pods")
         assert nav.startswith("ERROR:")
         assert "approval" in nav
-        logs = await app.agent_open_logs("api-1", "default")
+        logs = await app._agent_ui.agent_open_logs("api-1", "default")
         assert logs.startswith("ERROR:")
         assert "approval" in logs
         assert isinstance(app.screen, ConfirmScreen)  # the dialog kept focus
@@ -224,7 +224,7 @@ async def test_guard_covers_every_write_flow_modal() -> None:
             lambda: isinstance(app.screen, ResizePrompt),
             label="resize prompt up",
         )
-        result = await app.agent_open_describe("pods", "api-1", "default")
+        result = await app._agent_ui.agent_open_describe("pods", "api-1", "default")
         assert result.startswith("ERROR:")
         assert "approval" in result
         assert isinstance(app.screen, ResizePrompt)
@@ -244,8 +244,8 @@ async def test_logs_recheck_the_approval_guard_after_the_pod_lookup() -> None:
             await asyncio.sleep(0)
             return [(namespace, pod, "main")]
 
-        app._agent_pod_triples = lookup  # type: ignore[method-assign]  # test seam
-        result = await app.agent_open_logs("api-1", "default")
+        app._agent_ui._pod_triples = lookup  # type: ignore[method-assign]  # test seam
+        result = await app._agent_ui.agent_open_logs("api-1", "default")
         assert result.startswith("ERROR:")
         assert "approval" in result
         await pilot.pause()

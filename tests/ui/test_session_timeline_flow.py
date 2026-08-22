@@ -41,7 +41,7 @@ async def test_timeline_binding_opens_without_agent_and_enter_reuses_navigation(
     )
     # Timeline works fully independently of the AI agent — no agent
     # collaborator is wired here at all.
-    assert app._rebuild_agent is None
+    assert app._agent_ui._rebuild is None
     async with app.run_test() as pilot:
         await until(
             pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pods visible"

@@ -216,7 +216,7 @@ async def test_agent_screen_context_reports_focused_and_other_pane() -> None:
         await _split(app, pilot)
         await _type_command(pilot, "deploy")
         await until(pilot, lambda: app.current_kind == "deployments", label="pane 2 on deploys")
-        context = app._screen_context()
+        context = app._agent_ui.screen_context()
         assert "view=deployments" in context
         assert "other_pane=pods" in context
 
@@ -225,7 +225,7 @@ async def test_single_pane_context_has_no_other_pane_summary() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
         await _first_render(app, pilot)
-        assert "other_pane" not in app._screen_context()
+        assert "other_pane" not in app._agent_ui.screen_context()
 
 
 async def test_split_clones_active_filter() -> None:

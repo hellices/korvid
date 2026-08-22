@@ -26,7 +26,7 @@ async def test_agent_delete_approved_by_user_key(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await until(
             pilot,
@@ -53,7 +53,7 @@ async def test_agent_delete_denied_by_user_key(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await until(
             pilot,
@@ -75,11 +75,11 @@ async def test_agent_write_rejects_same_plural_custom_group(tmp_path: Path) -> N
         "Deployment", "deployments", "example.io", "v1", True, ("xdeploy",)
     )
     async with app.run_test():
-        scaled = await app.agent_request_write(
+        scaled = await app._agent_ui.agent_request_write(
             "scale", "xdeploy", "web", namespace="default", replicas=2
         )
         assert scaled == "ERROR: scale does not apply to deployments.example.io"
-        restarted = await app.agent_request_write(
+        restarted = await app._agent_ui.agent_request_write(
             "rollout_restart", "xdeploy", "web", namespace="default"
         )
         assert restarted == "ERROR: rollout restart does not apply to deployments.example.io"
@@ -90,7 +90,9 @@ async def test_agent_write_blocked_in_readonly(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl", readonly=True)
     async with app.run_test():
-        result = await app.agent_request_write("delete", "deployments", "web", namespace="default")
+        result = await app._agent_ui.agent_request_write(
+            "delete", "deployments", "web", namespace="default"
+        )
         assert result.startswith("ERROR:")
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
@@ -100,7 +102,9 @@ async def test_agent_scale_requires_replicas(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test():
-        result = await app.agent_request_write("scale", "deployments", "web", namespace="default")
+        result = await app._agent_ui.agent_request_write(
+            "scale", "deployments", "web", namespace="default"
+        )
         assert result.startswith("ERROR:")
         assert rec.calls == []
 
@@ -111,7 +115,9 @@ async def test_agent_scale_approved(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("scale", "deployments", "web", namespace="default", replicas=4)
+            app._agent_ui.agent_request_write(
+                "scale", "deployments", "web", namespace="default", replicas=4
+            )
         )
         await until(
             pilot,
@@ -127,7 +133,7 @@ async def test_agent_restart_rejected_for_wrong_kind(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test():
-        result = await app.agent_request_write("rollout_restart", "pods", "web-1")
+        result = await app._agent_ui.agent_request_write("rollout_restart", "pods", "web-1")
         assert result.startswith("ERROR:")
         assert rec.calls == []
 
@@ -136,7 +142,9 @@ async def test_agent_unknown_kind_is_error(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test():
-        result = await app.agent_request_write("delete", "frobnicators", "x", namespace="default")
+        result = await app._agent_ui.agent_request_write(
+            "delete", "frobnicators", "x", namespace="default"
+        )
         assert result.startswith("ERROR:")
         assert rec.calls == []
 
@@ -160,7 +168,7 @@ async def test_stalled_permission_check_times_out_fail_open(
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         # reaching the dialog proves the stalled check timed out fail-open
         await until(
@@ -177,7 +185,9 @@ async def test_agent_write_blocked_without_permission(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl", permitted=False)
     async with app.run_test():
-        result = await app.agent_request_write("delete", "deployments", "web", namespace="default")
+        result = await app._agent_ui.agent_request_write(
+            "delete", "deployments", "web", namespace="default"
+        )
         assert result.startswith("ERROR:")
         assert "permission" in result.lower()
         assert not isinstance(app.screen, ConfirmScreen)
@@ -190,14 +200,14 @@ async def test_agent_write_times_out_as_expired(
     """An unanswered approval dialog resolves as expired (never hangs the
     agent turn, and never claims the user declined), executes nothing,
     audits nothing, and clears the dialog."""
-    monkeypatch.setattr("korvid.ui.app._APPROVAL_TIMEOUT", 0.2)
+    monkeypatch.setattr("korvid.ui.agent_ui_controller.APPROVAL_TIMEOUT", 0.2)
     rec = Recorder()
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         # On a slow runner the 0.2s window can open AND expire between two
         # 0.05s polls, so waiting on the ConfirmScreen alone is a race:
@@ -226,7 +236,9 @@ async def test_agent_dialog_shows_namespace(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("scale", "deployments", "web", namespace="prod", replicas=2)
+            app._agent_ui.agent_request_write(
+                "scale", "deployments", "web", namespace="prod", replicas=2
+            )
         )
         await until(
             pilot,
@@ -254,7 +266,7 @@ async def test_agent_write_pending_while_panel_collapsed(tmp_path: Path) -> None
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await pilot.pause(0.3)  # issued while collapsed: no modal appears
         assert not isinstance(app.screen, ConfirmScreen)
@@ -276,11 +288,13 @@ async def test_agent_write_collapsed_panel_times_out_as_expired(
 ) -> None:
     """A request that is never surfaced (the panel stays collapsed) resolves
     as expired after the approval window without ever pushing a modal."""
-    monkeypatch.setattr("korvid.ui.app._APPROVAL_TIMEOUT", 0.3)
+    monkeypatch.setattr("korvid.ui.agent_ui_controller.APPROVAL_TIMEOUT", 0.3)
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test():
-        result = await app.agent_request_write("delete", "deployments", "web", namespace="default")
+        result = await app._agent_ui.agent_request_write(
+            "delete", "deployments", "web", namespace="default"
+        )
         assert "expired" in result.lower()
         assert "declined" not in result.lower()
         assert not isinstance(app.screen, ConfirmScreen)
@@ -296,7 +310,7 @@ async def test_agent_write_waits_for_user_modal_to_close(tmp_path: Path) -> None
         _expand_panel(app)
         await app.push_screen(PickScreen("pick a thing", ["a", "b"]))
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await pilot.pause(0.3)  # a user dialog is open: the approval waits
         assert isinstance(app.screen, PickScreen)
@@ -319,7 +333,7 @@ async def test_agent_write_rejects_empty_name(tmp_path: Path) -> None:
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test():
         for bad in ("", "   "):
-            result = await app.agent_request_write(
+            result = await app._agent_ui.agent_request_write(
                 "delete", "deployments", bad, namespace="default"
             )
             assert result.startswith("ERROR:")
@@ -337,7 +351,9 @@ async def test_agent_write_normalizes_whitespace_name(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "  web  ", namespace="default")
+            app._agent_ui.agent_request_write(
+                "delete", "deployments", "  web  ", namespace="default"
+            )
         )
         await until(
             pilot,
@@ -370,7 +386,7 @@ async def test_agent_write_executes_with_exact_validated_meta(tmp_path: Path) ->
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await until(
             pilot,
@@ -394,7 +410,7 @@ async def test_blocked_audit_result_omits_local_path(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await until(
             pilot,
@@ -427,7 +443,7 @@ async def test_write_403_reports_actionable_permission_message(tmp_path: Path) -
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await until(
             pilot,
@@ -448,12 +464,14 @@ async def test_agent_write_expired_budget_never_grants_extra_window(
     """The expiry contract is exact: if surfacing the dialog consumed the
     whole budget, the request expires instead of granting a minimum
     approval window past the deadline."""
-    monkeypatch.setattr("korvid.ui.app._APPROVAL_TIMEOUT", 0.0)
+    monkeypatch.setattr("korvid.ui.agent_ui_controller.APPROVAL_TIMEOUT", 0.0)
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         _expand_panel(app)
-        result = await app.agent_request_write("delete", "deployments", "web", namespace="default")
+        result = await app._agent_ui.agent_request_write(
+            "delete", "deployments", "web", namespace="default"
+        )
         assert "expired" in result
         await pilot.pause(0.1)
         assert not isinstance(app.screen, ConfirmScreen)  # nothing lingers
@@ -474,7 +492,7 @@ async def test_agent_write_binds_target_uid_as_precondition(tmp_path: Path) -> N
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await until(
             pilot,
@@ -498,7 +516,7 @@ async def test_agent_write_missing_target_errors_before_dialog(tmp_path: Path) -
     app = make_app(rec, tmp_path / "audit.jsonl", get_manifest=get_manifest)
     async with app.run_test():
         _expand_panel(app)
-        result = await app.agent_request_write(
+        result = await app._agent_ui.agent_request_write(
             "delete", "deployments", "ghost", namespace="default"
         )
         assert result.startswith("ERROR:")
@@ -522,7 +540,7 @@ async def test_agent_uid_lookup_uses_validated_alias(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "Deploy", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "Deploy", "web", namespace="default")
         )
         await until(
             pilot,
@@ -551,8 +569,8 @@ async def test_uid_lookup_times_out_fail_open(tmp_path: Path) -> None:
         return {}
 
     app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=hanging)
-    with patch("korvid.ui.app._UID_LOOKUP_TIMEOUT", 0.05):
-        assert await app._target_uid("pods", "default", "api-1") is None
+    with patch("korvid.ui.agent_ui_controller.UID_LOOKUP_TIMEOUT", 0.05):
+        assert await app._agent_ui.target_uid("pods", "default", "api-1") is None
     assert started.is_set()  # the lookup really ran and was cancelled by the bound
 
 
@@ -574,7 +592,7 @@ async def test_agent_write_dialog_shows_the_ownership_banner(tmp_path: Path) -> 
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await until(
             pilot,

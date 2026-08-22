@@ -78,7 +78,7 @@ async def test_explicit_stop_marks_partial_and_returns_to_idle() -> None:
         assert "✗" not in _panel_text(app)  # never rendered as an error
         assert inp.disabled is False
         assert app.focused is inp  # focus back in the input
-        assert app._agent_task is None or app._agent_task.done()
+        assert app._agent_ui._task is None or app._agent_ui._task.done()
 
 
 async def test_interrupt_and_submit_starts_exactly_one_replacement() -> None:
@@ -182,7 +182,7 @@ async def test_cancel_before_the_turn_coroutine_runs_still_starts_replacement() 
         # created but its coroutine has not run when the second arrives and
         # cancels it.
         app.on_agent_prompt_submitted(AgentPromptSubmitted("first"))
-        assert app._agent_task is not None
+        assert app._agent_ui._task is not None
         app.on_agent_prompt_submitted(AgentPromptSubmitted("second"))
         await until(
             pilot,
@@ -239,7 +239,7 @@ async def test_rapid_corrections_inject_cancellation_only_once() -> None:
     async with app.run_test() as pilot:
         await _start_turn(app, pilot, "first")
         await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
-        task = app._agent_task
+        task = app._agent_ui._task
         assert task is not None
         app.on_agent_prompt_submitted(AgentPromptSubmitted("second"))
         app.on_agent_prompt_submitted(AgentPromptSubmitted("third"))
@@ -258,7 +258,7 @@ async def test_immediate_stop_before_the_turn_first_runs_clears_busy_state() -> 
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")
         app.on_agent_prompt_submitted(AgentPromptSubmitted("first"))
-        task = app._agent_task
+        task = app._agent_ui._task
         assert task is not None
         app.action_interrupt_agent()  # same tick: the coroutine never ran
         await until(pilot, lambda: task.done(), label="task settled")
@@ -356,7 +356,7 @@ async def test_stop_while_a_replacement_is_queued_discards_it() -> None:
     async with app.run_test() as pilot:
         await _start_turn(app, pilot, "first")
         await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
-        task = app._agent_task
+        task = app._agent_ui._task
         assert task is not None
         drained = asyncio.Event()
         task.add_done_callback(lambda _done: drained.set())
@@ -364,7 +364,7 @@ async def test_stop_while_a_replacement_is_queued_discards_it() -> None:
         app.action_interrupt_agent()  # same tick: the queue must be dropped
         await until(pilot, lambda: drained.is_set(), label="queued replacement drain ran")
         assert runtime.calls == ["first"]  # the replacement never started
-        assert app._agent_replacement is None
+        assert app._agent_ui._replacement is None
 
 
 async def test_stale_done_callback_cannot_consume_the_replacement() -> None:
@@ -378,11 +378,11 @@ async def test_stale_done_callback_cannot_consume_the_replacement() -> None:
         await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
         stale = asyncio.create_task(asyncio.sleep(0))
         await stale
-        app._agent_replacement = "queued"
-        app._drain_agent_replacement(stale)  # not the current agent task
+        app._agent_ui._replacement = "queued"
+        app._agent_ui._drain_replacement(stale)  # not the current agent task
         await pilot.pause()
         assert len(runtime.calls) == 1  # no second turn was launched
-        assert app._agent_replacement == "queued"  # left for the real owner
+        assert app._agent_ui._replacement == "queued"  # left for the real owner
 
 
 # --- write safety (issue #170): interrupt vs the approval gate -------------
@@ -401,7 +401,7 @@ async def test_interrupt_while_awaiting_approval_dismisses_dialog(tmp_path: Any)
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog shown")
         task.cancel()
@@ -450,7 +450,7 @@ async def test_interrupt_after_approval_lets_the_write_finish(tmp_path: Any) -> 
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write("delete", "deployments", "web", namespace="default")
+            app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog shown")
         await pilot.press("y")
@@ -520,7 +520,9 @@ async def test_repeated_cancels_never_kill_an_approved_write(tmp_path: Any) -> N
         async with app.run_test() as pilot:
             _expand_panel(app)
             task = asyncio.ensure_future(
-                app.agent_request_write("delete", "deployments", "web", namespace="default")
+                app._agent_ui.agent_request_write(
+                    "delete", "deployments", "web", namespace="default"
+                )
             )
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog shown")
             await pilot.press("y")

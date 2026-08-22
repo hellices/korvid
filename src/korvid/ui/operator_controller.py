@@ -584,6 +584,10 @@ class OperatorController:
             lambda: ops.delete_object(sub_meta, ns, name, uid=uid),
             detail=f"csv={csv_name or '-'}",
         )
+        # Hand-off, not overlap: `run` above reserved the mutation
+        # synchronously and this release is synchronous too. Never insert an
+        # `await` between these two statements - a `:ctx` switch could then
+        # slip into the gap and find no write in flight.
         release()
         outcome = await write
         if outcome != "done" or csv_meta is None or not csv_name:

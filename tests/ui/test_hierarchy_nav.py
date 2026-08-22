@@ -453,7 +453,7 @@ async def test_return_origin_is_captured_at_tree_open_not_at_dismissal() -> None
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         # the agent switches the underlying pane while the tree is open
-        result = await app.agent_navigate("pods", None)
+        result = await app._agent_ui.agent_navigate("pods", None)
         assert result.startswith("switched")
         await pilot.press("down")
         await pilot.press("enter")  # goto Deployment/web-nginx
