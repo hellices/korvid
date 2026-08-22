@@ -14,7 +14,7 @@ Set TypingSpeed 120ms
 Set Shell bash
 
 Hide
-Type "uv run python docs/demo/demo.py"
+Type "uv run --frozen python docs/demo/demo.py"
 Enter
 Sleep 6s
 Show

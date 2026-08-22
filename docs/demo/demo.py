@@ -33,6 +33,7 @@ from korvid.k8s.relationship_facts import (
     RelationKind,
     RelationshipFacts,
     TargetReference,
+    extract_relationship_facts,
 )
 from korvid.ui.app import EventsFetcher, KorvidApp
 
@@ -55,6 +56,38 @@ ALIASES: dict[str, ResourceMeta] = {
 for alias in ("configmaps", "configmap", "cm"):
     ALIASES[alias] = _CONFIGMAP_META
 
+#: Every remaining kind `RelationshipSnapshotLoader` LISTs for a snapshot.
+#:
+#: The loader reports each catalog kind the discovery aliases do not offer
+#: as `unavailable` before it issues a single LIST, so a four-kind fixture
+#: renders a truthful — but wholly unrepresentative — "Coverage: incomplete"
+#: panel over fourteen missing kinds. Publishing them here lets
+#: `list_relationship_objects` answer with an empty list, which is a
+#: complete answer for a synthetic cluster that genuinely has none of them.
+#: One Gateway API kind is included because the loader groups "no Gateway
+#: API resource was discovered at all" into its own unavailable record.
+_RELATIONSHIP_ONLY_METAS: tuple[ResourceMeta, ...] = (
+    ResourceMeta("Secret", "secrets", "", "v1", True, ("sec",)),
+    ResourceMeta("PersistentVolumeClaim", "persistentvolumeclaims", "", "v1", True, ("pvc",)),
+    ResourceMeta("PersistentVolume", "persistentvolumes", "", "v1", False, ("pv",)),
+    ResourceMeta("Node", "nodes", "", "v1", False, ("no",)),
+    ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True, ("rs",)),
+    ResourceMeta("StatefulSet", "statefulsets", "apps", "v1", True, ("sts",)),
+    ResourceMeta("DaemonSet", "daemonsets", "apps", "v1", True, ("ds",)),
+    ResourceMeta("Job", "jobs", "batch", "v1", True),
+    ResourceMeta("CronJob", "cronjobs", "batch", "v1", True, ("cj",)),
+    ResourceMeta("EndpointSlice", "endpointslices", "discovery.k8s.io", "v1", True),
+    ResourceMeta("Ingress", "ingresses", "networking.k8s.io", "v1", True, ("ing",)),
+    ResourceMeta("PodDisruptionBudget", "poddisruptionbudgets", "policy", "v1", True, ("pdb",)),
+    ResourceMeta("HTTPRoute", "httproutes", "gateway.networking.k8s.io", "v1", True),
+)
+
+RELATIONSHIP_ALIASES: dict[str, ResourceMeta] = dict(ALIASES)
+for _meta in _RELATIONSHIP_ONLY_METAS:
+    RELATIONSHIP_ALIASES[_meta.plural] = _meta
+    for _alias in (_meta.kind.lower(), *_meta.shortnames):
+        RELATIONSHIP_ALIASES.setdefault(_alias, _meta)
+
 
 def _pod(
     name: str,
@@ -68,6 +101,7 @@ def _pod(
     mem: str = "128Mi",
     *,
     uid: str = "",
+    labels: tuple[tuple[str, str], ...] = (),
     relationships: RelationshipFacts | None = None,
 ) -> PodSummary:
     return PodSummary(
@@ -82,8 +116,13 @@ def _pod(
         mem_request=mem,
         containers=("app",),
         uid=uid,
+        labels=labels,
         relationships=relationships or RelationshipFacts(),
     )
+
+
+_PAYMENT_LABELS = (("app", "payment-worker"), ("tier", "backend"))
+_PAYMENT_SELECTOR = {"app": "payment-worker"}
 
 
 _PAYMENT_RELATIONSHIPS = RelationshipFacts(
@@ -116,6 +155,7 @@ PODS = [
         restarts=17,
         node="node-2",
         uid="pod-payment",
+        labels=_PAYMENT_LABELS,
         relationships=_PAYMENT_RELATIONSHIPS,
     ),
     _pod("checkout-svc-84c5d6-ln7wk", "shop", restarts=2),
@@ -137,9 +177,37 @@ def _deploy(name: str, ns: str, desired: int, days: int) -> GenericSummary:
     )
 
 
-def _svc(name: str, ns: str, days: int) -> GenericSummary:
+def _svc(
+    name: str,
+    ns: str,
+    days: int,
+    *,
+    uid: str = "",
+    selector: dict[str, str] | None = None,
+) -> GenericSummary:
+    """One synthetic Service summary.
+
+    A `selector` is run through the product's own
+    `extract_relationship_facts` against a real Service manifest shape, so
+    the resulting `SELECTS` fact is exactly what korvid would derive from a
+    live cluster — the relationship screen then has a genuine dependent
+    edge to render, not a hand-written one.
+    """
     created = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-    return GenericSummary(name=name, namespace=ns, kind="Service", created=created)
+    facts = RelationshipFacts()
+    if selector is not None:
+        facts = extract_relationship_facts(
+            "Service",
+            "",
+            "v1",
+            {
+                "metadata": {"name": name, "namespace": ns},
+                "spec": {"selector": dict(selector)},
+            },
+        )
+    return GenericSummary(
+        name=name, namespace=ns, kind="Service", created=created, uid=uid, relationships=facts
+    )
 
 
 EXTRA: dict[str, list[Summary]] = {
@@ -155,6 +223,13 @@ EXTRA: dict[str, list[Summary]] = {
         _svc("web-frontend", "shop", 41),
         _svc("cart-api", "shop", 41),
         _svc("checkout-svc", "shop", 33),
+        _svc(
+            "payment-worker",
+            "shop",
+            12,
+            uid="svc-payment",
+            selector=dict(_PAYMENT_SELECTOR),
+        ),
         _svc("grafana", "monitoring", 90),
         _svc("prometheus", "monitoring", 90),
     ],
@@ -253,7 +328,7 @@ SVC_MANIFEST: dict[str, Any] = {
     "spec": {
         "type": "ClusterIP",
         "clusterIP": "10.96.114.23",
-        "selector": {"app": "payment-worker"},
+        "selector": dict(_PAYMENT_SELECTOR),
         "ports": [{"name": "http", "port": 80, "targetPort": 8080, "protocol": "TCP"}],
     },
     "status": {"loadBalancer": {}},
@@ -423,7 +498,7 @@ def main() -> None:
         store=store,
         watch_manager=WatchManager(store, source),
         list_namespaces=list_namespaces,
-        aliases=ALIASES,
+        aliases=RELATIONSHIP_ALIASES if scene == "relationships" else ALIASES,
         get_manifest=get_manifest,
         get_events=DemoEvents(),
         stream_logs=stream_logs,

@@ -13,7 +13,7 @@ graph, or anything the screen renders. See [Secret safety](#secret-safety)
 below for what that guarantee does and does not cover.
 
 <figure class="docs-visual">
-  <img src="../assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a synthetic Pod dependency on a ConfigMap">
+  <img src="../assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen listing a synthetic Pod's declared ConfigMap dependency and the Service that selects it">
   <figcaption>The two sections separate dependencies from dependents; every row preserves relation direction, confidence, state, and source field.</figcaption>
 </figure>
 

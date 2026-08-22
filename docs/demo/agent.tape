@@ -8,7 +8,7 @@ Set TypingSpeed 70ms
 Set Shell bash
 
 Hide
-Type "uv run python docs/demo/demo.py --scene agent"
+Type "uv run --frozen python docs/demo/demo.py --scene agent"
 Enter
 Sleep 20s
 Show

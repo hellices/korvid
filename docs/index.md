@@ -124,7 +124,7 @@ hide:
       <a href="tui/">Browse the cockpit</a>
     </article>
     <article class="evidence-card">
-      <figure><img src="assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a pod dependency on a ConfigMap"><figcaption>Relationship graph</figcaption></figure>
+      <figure><img src="assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a pod's declared ConfigMap dependency and the Service that depends on the pod"><figcaption>Relationship graph</figcaption></figure>
       <p>Follow metadata-only dependencies without exposing Secret values.</p>
       <a href="resource-relationships/">Follow relationships</a>
     </article>
