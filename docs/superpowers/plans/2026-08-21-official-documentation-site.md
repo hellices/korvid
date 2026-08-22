@@ -47,6 +47,8 @@ site_dir: site
 strict: true
 exclude_docs: |
   overrides/
+  dev/plans/
+  superpowers/
 
 theme:
   name: material
@@ -128,7 +130,8 @@ extra_css:
 
 - [ ] **Step 2: Add the documentation dependency and commands**
 
-Append `docs = ["mkdocs-material>=9.7.7,<10"]` under `[dependency-groups]`.
+Append `docs = ["mkdocs-material==9.7.7"]` under `[dependency-groups]`. The
+exact pin must move atomically with the vendored hashed bundle override.
 Add `docs-build` and `docs-serve` to `.PHONY`, then add:
 
 ```make

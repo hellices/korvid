@@ -1148,7 +1148,7 @@ dev = [
     { name = "types-pyyaml" },
     { name = "types-regex", specifier = ">=2026.7.19.20260720" },
 ]
-docs = [{ name = "mkdocs-material", specifier = ">=9.7.7,<10" }]
+docs = [{ name = "mkdocs-material", specifier = "==9.7.7" }]
 
 [[package]]
 name = "kubernetes-asyncio"

@@ -90,7 +90,8 @@ Primary navigation is organized by user intent:
    - Contributor documentation
 
 Historical implementation plans and superseded design documents remain in the
-repository for traceability but are excluded from site navigation. Current
+repository for traceability but `dev/plans/` and `superpowers/` are excluded
+from the site build and search index. Current
 architecture, engineering standards, quality gates, and contributor guidance
 remain reachable under the contributor section.
 
@@ -187,6 +188,8 @@ documentation build and rewrites pages to serve that generated vendor asset
 locally. The Material bundle is vendored at its theme asset path only to pin
 Mermaid to immutable version `11.17.0` and its ResizeObserver fallback to
 immutable version `1.5.1`; a checksum test guards the reviewed bytes.
+The docs dependency pins Material `9.7.7` exactly, and that pin must move
+atomically with the hashed bundle override.
 Generated local/vendor assets are allowed; browser
 runtime requests to third-party asset hosts are not. No custom JavaScript
 application or manually configured Mermaid pin is added. The site must preserve

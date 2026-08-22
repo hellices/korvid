@@ -45,6 +45,12 @@ def test_makefile_docs_serve_uses_frozen() -> None:
     )
 
 
+def test_docs_dependency_matches_the_vendored_material_bundle() -> None:
+    """The hashed bundle override is specific to Material 9.7.7."""
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    assert pyproject["dependency-groups"]["docs"] == ["mkdocs-material==9.7.7"]
+
+
 def test_gitignore_excludes_site_dir() -> None:
     """/site/ must be in .gitignore to prevent committing generated output."""
     gitignore = (ROOT / ".gitignore").read_text()
@@ -312,3 +318,13 @@ def test_theme_custom_dir_resolves_to_the_overrides_directory() -> None:
     assert (resolved / "home.html").is_file(), (
         f"{custom_dir}/home.html must exist: docs/index.md selects it via `template:`"
     )
+
+
+def test_mkdocs_excludes_repository_only_history_from_site_search() -> None:
+    """Historical executable plans stay in Git, not in public product search."""
+    config = _load_mkdocs_config()
+    excluded = config.get("exclude_docs")
+    assert isinstance(excluded, str)
+    excluded_paths = {line.strip().rstrip("/") for line in excluded.splitlines() if line.strip()}
+    assert "dev/plans" in excluded_paths
+    assert "superpowers" in excluded_paths

@@ -8,6 +8,8 @@ site_dir: site
 strict: true
 exclude_docs: |
   overrides/
+  dev/plans/
+  superpowers/
 
 theme:
   name: material
