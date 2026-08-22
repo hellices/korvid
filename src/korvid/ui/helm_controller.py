@@ -2,17 +2,18 @@
 
 `HelmController` owns the install / upgrade / rollback / uninstall
 workflows: the view guard that keeps a helm write on the helm view, the
-write gate, the chart-search and values-editing wizard, the target capture
+write-gate orchestration, the chart-search and values-editing wizard, the target capture
 each keypress makes, the bounded dry-run preview with its render-failure
 recovery, and the mapping from a user's choices to an audited mutation. The
 revision-history drill (`h`) lives here too and is performed by the
 navigation owner.
 
 What it deliberately does *not* own is the security perimeter. Approval
-still goes through the app's `push_write_confirmation`, context
-revalidation through `write_context_intact`, and the mutation itself
-through the app's `_run_write` worker — so the approval gate and the
-fail-closed audit rule keep exactly one implementation each.
+and context/identity revalidation go through `WriteGate`, whose
+`WriteCoordinator` implementation also owns reservation, mutation execution,
+and fail-closed audit ordering. The controller supplies Helm-specific previews,
+metadata, and operation factories to that boundary; none of those security
+steps route back through app methods.
 
 The controller receives named boundaries — `WriteGate`, `ViewState`,
 `UiSurface` — plus the few helm-specific getters, rather than the app. That

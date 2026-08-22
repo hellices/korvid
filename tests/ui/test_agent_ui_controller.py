@@ -546,7 +546,7 @@ async def test_agent_commands_reject_unknown_or_trailing_arguments(tmp_path: Pat
     env.controller.handle_command(["follow", "off", "extra"])
     env.controller.handle_command(["payload", "extra"])
     env.controller.handle_command(["sideways"])
-    assert env.controller.runtime is runtime
+    assert env.controller.runtime is cast(Any, runtime)
     assert env.controller.follow_enabled is initial_follow
     assert sum("Usage: :ai" in message for message in env.ui.messages()) == 4
 
