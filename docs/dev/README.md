@@ -2,7 +2,7 @@
 
 Internal documents for people (and agents) working **on** korvid, as
 opposed to the user-facing feature docs that live directly under
-[`docs/`](../).
+[`docs/`](../index.md).
 
 **Start here if you are new:**
 [`specs/2026-08-12-korvid-architecture.md`](specs/2026-08-12-korvid-architecture.md)
@@ -11,10 +11,10 @@ provider boundary, and the evidence system, with diagrams. It documents the
 system as built (and names the tensions it still has), where the 2026-07-23
 design document states the original intent.
 
-- [`specs/`](specs/) — the product design document and the engineering
+- [`specs/`](https://github.com/hellices/korvid/tree/main/docs/dev/specs) — the product design document and the engineering
   standards. These are the durable references: layer rules, quality
   gates, and the security invariants that code must never weaken.
-- [`plans/`](plans/) — dated implementation plans for individual phases
+- [`plans/`](https://github.com/hellices/korvid/tree/main/docs/dev/plans) — dated implementation plans for individual phases
   and slices. Historical once executed; kept for traceability, not
   updated retroactively.
 - [`quality-gates.md`](quality-gates.md) — which checks run locally, in CI,

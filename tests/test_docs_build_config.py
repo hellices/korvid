@@ -250,9 +250,11 @@ def test_material_bundle_pins_the_resize_observer_fallback() -> None:
     )
     bundle = MATERIAL_BUNDLE.read_bytes()
     assert b"https://unpkg.com/resize-observer-polyfill@1.5.1/dist/ResizeObserver.js" in bundle
+    assert b"https://unpkg.com/mermaid@11.17.0/dist/mermaid.min.js" in bundle
     assert b'"https://unpkg.com/resize-observer-polyfill"' not in bundle
+    assert b"https://unpkg.com/mermaid@11/dist/mermaid.min.js" not in bundle
     assert hashlib.sha256(bundle).hexdigest() == (
-        "34cdcb4beeb2350814efd5345fd43cdd1f0170967004c29c160ad7fe44842c74"
+        "72f6ab94668b5cebcf2dfaf0517d9e412ee3c117ce180db9b44bb77a7504eb9c"
     ), "the reviewed Material bundle override must not drift without an explicit update"
 
 

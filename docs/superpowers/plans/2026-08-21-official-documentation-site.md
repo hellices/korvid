@@ -269,9 +269,11 @@ hero, responsive two-column demo layout above 960px, a three-card feature grid,
 visible keyboard focus, reduced-motion handling, and standard readable
 documentation widths. Vendor Material 9.7.7's
 `assets/javascripts/bundle.d7400e89.min.js` at the same docs asset path,
-replacing only the extensionless ResizeObserver fallback with
-`https://unpkg.com/resize-observer-polyfill@1.5.1/dist/ResizeObserver.js`, and
-pin the reviewed bundle bytes with a SHA-256 regression test.
+pinning Mermaid to
+`https://unpkg.com/mermaid@11.17.0/dist/mermaid.min.js` and replacing the
+extensionless ResizeObserver fallback with
+`https://unpkg.com/resize-observer-polyfill@1.5.1/dist/ResizeObserver.js`.
+Pin the reviewed bundle bytes with a SHA-256 regression test.
 
 - [ ] **Step 4: Run the green build**
 

@@ -30,7 +30,7 @@ hide:
       <dt><kbd>g</kbd></dt><dd>relationship graph for the selection</dd>
       <dt><kbd>Ctrl-A</kbd></dt><dd>ask the agent about what you see</dd>
     </dl>
-    <p class="hero-panel__note">Every key is remappable, and <kbd>?</kbd> always shows the effective set.</p>
+    <p class="hero-panel__note">App-level actions are remappable; confirmation keys stay fixed, and <kbd>?</kbd> always shows the effective set.</p>
   </aside>
 </section>
 

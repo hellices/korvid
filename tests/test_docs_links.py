@@ -38,3 +38,13 @@ def test_scoreboard_source_directories_use_strict_safe_github_urls() -> None:
     for url in expected:
         assert f"]({url})" in scoreboard
     assert "](../../src/korvid/evals/" not in scoreboard
+
+
+def test_dev_readme_does_not_link_missing_directory_indexes() -> None:
+    """MkDocs does not create index pages for bare specs/ and plans/ directories."""
+    dev_readme = (DOCS / "dev" / "README.md").read_text()
+    for broken in ("](../)", "](specs/)", "](plans/)"):
+        assert broken not in dev_readme
+    assert "](../index.md)" in dev_readme
+    assert "https://github.com/hellices/korvid/tree/main/docs/dev/specs" in dev_readme
+    assert "https://github.com/hellices/korvid/tree/main/docs/dev/plans" in dev_readme

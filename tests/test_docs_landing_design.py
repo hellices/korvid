@@ -281,6 +281,20 @@ def test_hero_panel_is_not_a_second_copy_of_the_demo_asset() -> None:
     assert "<img" not in panel or "korvid-mark.svg" in panel
 
 
+def test_hero_key_note_preserves_fixed_confirmation_keys() -> None:
+    """Only app-level actions are remappable; approval confirmation stays fixed."""
+    index = _index()
+    panel_start = index.index("<aside")
+    panel = index[panel_start : index.index("</aside>", panel_start)]
+    note_start = panel.index('class="hero-panel__note"')
+    note = panel[note_start : panel.index("</p>", note_start)]
+    lowered = note.lower()
+    assert "app-level actions are remappable" in lowered
+    assert "confirmation keys stay fixed" in lowered
+    assert "always shows the effective set" in lowered
+    assert "every key is remappable" not in lowered
+
+
 def test_product_demo_has_native_motion_controls() -> None:
     """A demo longer than five seconds must be pausable without custom JavaScript."""
     index = _index()
