@@ -182,6 +182,18 @@ async def test_follow_rejects_an_unknown_argument() -> None:
     assert "Usage: :mcp follow [on|off]" in h.ui.messages()
 
 
+async def test_mcp_state_commands_reject_trailing_arguments() -> None:
+    mcp = FakeMCP(running=True)
+    h = Harness(mcp=mcp)
+    h.controller.handle_mcp_command(["off", "extra"])
+    h.controller.handle_mcp_command(["follow", "on", "extra"])
+    await h.ui.settle()
+    assert mcp.running is True
+    assert h.controller.follow_enabled is False
+    assert h.proposals.reasons == []
+    assert sum("Usage: :mcp" in message for message in h.ui.messages()) == 2
+
+
 async def test_activity_notes_never_raise_into_the_caller() -> None:
     h = Harness()
 

@@ -581,17 +581,23 @@ class AgentUiController:
 
     def handle_command(self, args: list[str]) -> None:
         """`:ai` / `:agent` — wizard, payload inspector, follow, disconnect."""
+        if not args:
+            self._open_setup()
+            return
         subcommand = args[0].lower() if args else ""
-        if subcommand == "payload":
+        if subcommand == "payload" and len(args) == 1:
             self._open_payload_inspector()
             return
         if subcommand == "follow":
             self._handle_follow_command(args[1:])
             return
-        if subcommand == "off":
+        if subcommand == "off" and len(args) == 1:
             self._handle_off()
             return
-        self._open_setup()
+        self._ui.notify(
+            "Usage: :ai [off|payload] | :ai follow [on|off]",
+            severity="warning",
+        )
 
     def _open_payload_inspector(self) -> None:
         """Open the latest stable redacted provider payload, if available."""
@@ -659,6 +665,9 @@ class AgentUiController:
 
     def handle_model_command(self, args: list[str]) -> None:
         """`:model` shows the current model; `:model <name>` switches and persists it."""
+        if len(args) > 1:
+            self._ui.notify("Usage: :model [name]", severity="warning")
+            return
         if not args:
             # Report only a live model: at startup config may carry a model
             # name even though provider creation failed (runtime is None).
@@ -697,7 +706,7 @@ class AgentUiController:
     def _handle_follow_command(self, args: list[str]) -> None:
         """`:ai follow [on|off]`: toggle mirroring of the built-in agent's
         cluster reads on screen. Bare `:ai follow` flips the state."""
-        if args and args[0].lower() not in ("on", "off"):
+        if len(args) > 1 or (args and args[0].lower() not in ("on", "off")):
             self._ui.notify("Usage: :ai follow [on|off]", severity="warning")
             return
         self._follow = args[0].lower() == "on" if args else not self._follow

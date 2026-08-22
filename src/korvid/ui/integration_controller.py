@@ -136,7 +136,7 @@ class IntegrationController:
         if action == "follow":
             self.handle_follow_command(args[1:])
             return
-        if action not in ("on", "off"):
+        if len(args) != 1 or action not in ("on", "off"):
             self._ui.notify("Usage: :mcp [on|off] | :mcp follow [on|off]", severity="warning")
             return
         self._toggle_server(mcp, action)
@@ -144,7 +144,7 @@ class IntegrationController:
     def handle_follow_command(self, args: list[str]) -> None:
         """`:mcp follow [on|off]` (issue #153): toggle mirroring of external
         cluster reads in the TUI. Bare `:mcp follow` flips the state."""
-        if args and args[0].lower() not in ("on", "off"):
+        if len(args) > 1 or (args and args[0].lower() not in ("on", "off")):
             self._ui.notify("Usage: :mcp follow [on|off]", severity="warning")
             return
         self._follow = args[0].lower() == "on" if args else not self._follow

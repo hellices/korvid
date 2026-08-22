@@ -538,6 +538,25 @@ async def test_agent_setup_without_a_configurator_reports_the_install_hint(env: 
     assert any("Agent setup unavailable" in message for message in env.ui.messages())
 
 
+async def test_agent_commands_reject_unknown_or_trailing_arguments(tmp_path: Path) -> None:
+    runtime = ScriptedRuntime()
+    env = Env(tmp_path=tmp_path, runtime=runtime)
+    initial_follow = env.controller.follow_enabled
+    env.controller.handle_command(["off", "extra"])
+    env.controller.handle_command(["follow", "off", "extra"])
+    env.controller.handle_command(["payload", "extra"])
+    env.controller.handle_command(["sideways"])
+    assert env.controller.runtime is runtime
+    assert env.controller.follow_enabled is initial_follow
+    assert sum("Usage: :ai" in message for message in env.ui.messages()) == 4
+
+
+async def test_model_command_rejects_trailing_arguments(env: Env) -> None:
+    env.controller.handle_model_command(["m-2", "extra"])
+    assert env.ui.workers == []
+    assert "Usage: :model [name]" in env.ui.messages()
+
+
 async def test_applying_settings_swaps_the_runtime_and_the_profile(tmp_path: Path) -> None:
     fresh = ScriptedRuntime()
     env = Env(tmp_path=tmp_path, rebuild=lambda settings: fresh)
