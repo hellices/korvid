@@ -19,7 +19,7 @@ MKDOCS = ROOT / "mkdocs.yml"
 _INDEX_STEMS = frozenset({"index", "README"})
 
 _FENCE = re.compile(r"^(?P<fence>`{3,}|~{3,}).*?^(?P=fence)", re.DOTALL | re.MULTILINE)
-_MEDIA_ATTRIBUTE = re.compile(r"\b(?:src|poster)=\"([^\"]+)\"")
+_MEDIA_ATTRIBUTE = re.compile(r"(?<![-\w])(?:src|poster|data-poster)=\"([^\"]+)\"")
 
 
 def _load_mkdocs_config() -> dict[str, Any]:
@@ -81,7 +81,12 @@ def _built_directory_url(source: Path) -> str:
 
 
 def _local_media_urls(source: Path) -> Iterator[str]:
-    """Local raw-HTML `src`/`poster` URLs on a page, ignoring code samples."""
+    """Local raw-HTML media URLs on a page, ignoring code samples.
+
+    Covers `src`, `poster`, and the deferred `data-poster` the scene
+    controller promotes on selection — a typo in the deferred attribute
+    would otherwise 404 only after a visitor picks that scene.
+    """
     text = _FENCE.sub("", source.read_text(encoding="utf-8"))
     for raw in _MEDIA_ATTRIBUTE.findall(text):
         parsed = urlsplit(raw)

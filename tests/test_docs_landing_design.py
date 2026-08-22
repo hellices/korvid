@@ -455,6 +455,86 @@ def test_scene_switcher_uses_the_aria_tab_contract() -> None:
     assert switcher.count('aria-selected="false"') == 2
 
 
+def test_only_the_visible_scene_ships_an_eagerly_fetched_poster() -> None:
+    """`preload="none"` suppresses video bytes but never the poster image.
+
+    The preload scanner fetches every `<video poster>` before the
+    end-of-body controller can hide the inactive panels, so the two
+    below-fold scene posters were downloaded at first paint. They move to
+    `data-poster`, which the controller promotes to a real `poster` when
+    that scene is actually selected; only the default scene keeps an
+    attribute the browser may act on immediately.
+    """
+    switcher = _scene_switcher()
+    videos = re.findall(r"<video[^>]*>", switcher)
+    assert len(videos) == 3, "each scene keeps its own controllable video"
+    eager = [video for video in videos if re.search(r'(?<![-\w])poster="', video)]
+    assert len(eager) == 1, (
+        "only the default scene may carry a `poster` attribute the preload "
+        f"scanner can act on; found {len(eager)}"
+    )
+    assert 'poster="assets/scenes/cockpit-poster.png"' in eager[0]
+    deferred = [video for video in videos if "data-poster=" in video]
+    assert len(deferred) == 2
+    for video in deferred:
+        assert not re.search(r'(?<![-\w])poster="', video), (
+            f"a deferred scene must not also declare an eager poster: {video}"
+        )
+    assert 'data-poster="assets/scenes/agent-poster.png"' in switcher
+    assert 'data-poster="assets/scenes/mcp-poster.png"' in switcher
+
+
+def test_deferred_scene_posters_keep_a_local_no_javascript_image() -> None:
+    """A visitor without JavaScript must still see each scene's real frame.
+
+    `<noscript>` content is parsed as text — never as DOM — while scripting
+    is enabled, so this fallback costs the enhanced rendering nothing and
+    cannot double-fetch a poster the controller will promote.
+    """
+    switcher = _scene_switcher()
+    fallbacks = re.findall(r"<noscript>(.*?)</noscript>", switcher, re.DOTALL)
+    assert len(fallbacks) == 2, "exactly the two deferred scenes need a no-JavaScript poster image"
+    assets = []
+    for fallback in fallbacks:
+        match = re.fullmatch(r'\s*<img src="([^"]+)"[^>]*alt="[^"]+"[^>]*>\s*', fallback)
+        assert match is not None, f"the fallback must be one described local image: {fallback!r}"
+        source = match.group(1)
+        assert source.startswith("assets/"), "no-JS fallbacks must stay local, never remote"
+        assets.append(source)
+    assert sorted(assets) == [
+        "assets/scenes/agent-poster.png",
+        "assets/scenes/mcp-poster.png",
+    ]
+
+
+def test_controller_promotes_a_deferred_poster_only_when_its_scene_is_selected() -> None:
+    """The deferred posters are worthless if the controller never promotes them."""
+    script = STORYTELLING_JS.read_text(encoding="utf-8")
+    assert "data-poster" in script, "the controller must read the deferred attribute"
+    assert re.search(
+        r"if \(selected\) \{\s*promotePoster\(panel\);\s*\}",
+        script,
+    ), "poster promotion must be gated on the panel actually being selected"
+    assert re.search(
+        r'video\.setAttribute\("poster", poster\);\s*video\.removeAttribute\("data-poster"\);',
+        script,
+    ), "promotion must set the real attribute once and stop deferring it"
+
+
+def test_scene_videos_never_autoplay_and_below_fold_media_preloads_nothing() -> None:
+    """Bandwidth and motion are the visitor's choice on every landing video."""
+    videos = re.findall(r"<video[^>]*>", _index())
+    assert len(videos) == 4, "the hero video plus one per scene"
+    for video in videos:
+        assert "autoplay" not in video, f"no landing video may autoplay: {video}"
+    hero, *scenes = videos
+    assert 'preload="metadata"' in hero, (
+        "the hero video is the page's lead evidence, so its metadata may load"
+    )
+    for video in scenes:
+        assert 'preload="none"' in video, f"below-fold scene media must fetch nothing: {video}"
+
+
 def test_product_contract_map_keeps_the_read_paths_truthful() -> None:
     contract = _section('<section class="contract-map"', "</section>")
     lowered = " ".join(re.sub(r"<[^>]+>", " ", contract).lower().split())

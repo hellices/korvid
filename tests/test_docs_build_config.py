@@ -332,8 +332,12 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
     config = _load_mkdocs_config()
     assert config.get("extra_javascript") == ["assets/javascripts/visual-storytelling.js"]
     assert VISUAL_STORYTELLING.is_file()
-    assert hashlib.sha256(VISUAL_STORYTELLING.read_bytes()).hexdigest() == (
-        "bf2abf3e16c1b1997445f1966e36eea88363b7c0ac495ca8dd912a7ae1609f8f"
+    script = VISUAL_STORYTELLING.read_bytes()
+    assert hashlib.sha256(script).hexdigest() == (
+        "0957ad0d71a0aeb2a20ba55b99fb3108932ff1e61a806b2e30b6d6e6f1097390"
+    )
+    assert b"\r" not in script, (
+        "the reviewed bytes are LF-only; a CRLF checkout would break the pin above"
     )
 
 

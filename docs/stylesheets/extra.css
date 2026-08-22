@@ -368,6 +368,25 @@
   border-radius: calc(var(--korvid-radius) - 0.15rem);
 }
 
+/* Only rendered when scripting is off: the two deferred scenes hand their
+   poster to `data-poster` so the preload scanner cannot fetch it, and the
+   controller promotes it on selection. With no controller there is no
+   promotion, so the frame is served here instead. While scripting is
+   enabled the browser parses this content as text, so it costs the
+   enhanced rendering nothing. */
+.md-typeset .scene-panel noscript {
+  grid-column: 1 / -1;
+  display: block;
+}
+
+.md-typeset .scene-panel noscript img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: calc(var(--korvid-radius) - 0.15rem);
+}
+
 .md-typeset .scene-panel > div {
   color: var(--korvid-ink-dim);
   font-size: 0.75rem;

@@ -803,9 +803,11 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
         "assets/javascripts/visual-storytelling.js"
     ]
     assert VISUAL_STORYTELLING.is_file()
-    assert hashlib.sha256(VISUAL_STORYTELLING.read_bytes()).hexdigest() == (
-        "bf2abf3e16c1b1997445f1966e36eea88363b7c0ac495ca8dd912a7ae1609f8f"
+    script = VISUAL_STORYTELLING.read_bytes()
+    assert hashlib.sha256(script).hexdigest() == (
+        "0957ad0d71a0aeb2a20ba55b99fb3108932ff1e61a806b2e30b6d6e6f1097390"
     )
+    assert b"\r" not in script
 
 
 def test_storytelling_script_checkout_preserves_reviewed_bytes() -> None:
@@ -854,7 +856,8 @@ with:
       <a href="tui/">Explore the TUI</a>
     </article>
     <article id="scene-agent" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-agent" tabindex="0">
-      <video src="assets/scenes/agent-demo.mp4" poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="The embedded agent diagnoses the failing payment worker and cites its evidence">Your browser does not support this embedded-agent demo.</video>
+      <video src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="The embedded agent diagnoses the failing payment worker and cites its evidence">Your browser does not support this embedded-agent demo.</video>
+      <noscript><img src="assets/scenes/agent-poster.png" width="1280" height="720" alt="Korvid embedded agent diagnosing a synthetic failing payment worker with cited evidence"></noscript>
       <div><strong>Input</strong> Current selection + prompt</div>
       <div><strong>Evidence</strong> Bounded fresh reads + citations</div>
       <div><strong>Result</strong> Answer and UI drive</div>
@@ -862,7 +865,8 @@ with:
       <a href="agent/">Explore the embedded agent</a>
     </article>
     <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
-      <video src="assets/scenes/mcp-follow-demo.mp4" poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
+      <video src="assets/scenes/mcp-follow-demo.mp4" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
+      <noscript><img src="assets/scenes/mcp-poster.png" width="1280" height="710" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></noscript>
       <div><strong>Input</strong> External assistant</div>
       <div><strong>Evidence</strong> Tool-specific bounded fresh reads</div>
       <div><strong>Result</strong> MCP response + optional follow</div>
@@ -949,6 +953,23 @@ Delete `.feature-grid*` rules and add:
   border-radius: calc(var(--korvid-radius) - 0.15rem);
 }
 
+.md-typeset .scene-panel noscript {
+  grid-column: 1 / -1;
+  display: block;
+}
+
+.md-typeset .scene-panel noscript img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: calc(var(--korvid-radius) - 0.15rem);
+}
+
+.md-typeset [data-scene-switcher]:not([data-enhanced]) .scene-tabs {
+  display: none;
+}
+
 .md-typeset .scene-panel > div {
   color: var(--korvid-ink-dim);
   font-size: 0.75rem;
@@ -1004,6 +1025,15 @@ final newline:
       ]),
     );
 
+    const promotePoster = (panel) => {
+      for (const video of panel.querySelectorAll("video[data-poster]")) {
+        const poster = video.dataset.poster;
+        if (!poster) continue;
+        video.setAttribute("poster", poster);
+        video.removeAttribute("data-poster");
+      }
+    };
+
     const select = (nextTab, focus) => {
       for (const tab of tabs) {
         const selected = tab === nextTab;
@@ -1014,6 +1044,9 @@ final newline:
           throw new Error(`Missing scene panel for ${tab.id}`);
         }
         panel.hidden = !selected;
+        if (selected) {
+          promotePoster(panel);
+        }
         if (!selected) {
           for (const video of panel.querySelectorAll("video")) {
             video.pause();
@@ -1480,6 +1513,8 @@ Add:
 }
 
 .md-typeset .evidence-card figure {
+  display: block;
+  width: 100%;
   margin: 0;
 }
 
@@ -1981,6 +2016,23 @@ At 390x844, 768x1024, and 1440x900 verify:
 7. evidence images are not loaded before scrolling near them;
 8. all focus indicators are visible; and
 9. with reduced motion enabled, no decorative transition occurs.
+
+Run these in a **visible** window: `document.visibilityState === "hidden"`
+suppresses `loading="lazy"` entirely, so a background tab reports every lazy
+image as already loaded and hides both the eager-poster and layout-shift
+classes of defect. Capture the cold, cache-disabled request log at scroll 0
+and assert on it directly:
+
+```js
+performance.getEntriesByType("resource")
+  .map((entry) => entry.name.split("/").pop())
+  .filter((name) => /\.(png|mp4)$/.test(name));
+```
+
+Expected at scroll 0: the active scene's poster and the hero video only —
+never `agent-poster.png` or `mcp-poster.png`, which the controller promotes
+from `data-poster` when their scene is selected. Selecting each scene must
+then add exactly that scene's poster to the log.
 
 If any item fails, add a focused regression assertion where possible, return
 to the owning task, fix it, and rerun Steps 1-6. Do not collect unrelated

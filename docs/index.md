@@ -49,7 +49,8 @@ hide:
       <a href="tui/">Explore the TUI</a>
     </article>
     <article id="scene-agent" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-agent" tabindex="0">
-      <video src="assets/scenes/agent-demo.mp4" poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="The embedded agent diagnoses the failing payment worker and cites its evidence">Your browser does not support this embedded-agent demo.</video>
+      <video src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="The embedded agent diagnoses the failing payment worker and cites its evidence">Your browser does not support this embedded-agent demo.</video>
+      <noscript><img src="assets/scenes/agent-poster.png" width="1280" height="720" alt="Korvid embedded agent diagnosing a synthetic failing payment worker with cited evidence"></noscript>
       <div><strong>Input</strong> Current selection + prompt</div>
       <div><strong>Evidence</strong> Bounded fresh reads + citations</div>
       <div><strong>Result</strong> Answer and UI drive</div>
@@ -57,7 +58,8 @@ hide:
       <a href="agent/">Explore the embedded agent</a>
     </article>
     <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
-      <video src="assets/scenes/mcp-follow-demo.mp4" poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
+      <video src="assets/scenes/mcp-follow-demo.mp4" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
+      <noscript><img src="assets/scenes/mcp-poster.png" width="1280" height="710" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></noscript>
       <div><strong>Input</strong> External assistant</div>
       <div><strong>Evidence</strong> Tool-specific bounded fresh reads</div>
       <div><strong>Result</strong> MCP response + optional follow</div>

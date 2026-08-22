@@ -14,6 +14,15 @@
       ]),
     );
 
+    const promotePoster = (panel) => {
+      for (const video of panel.querySelectorAll("video[data-poster]")) {
+        const poster = video.dataset.poster;
+        if (!poster) continue;
+        video.setAttribute("poster", poster);
+        video.removeAttribute("data-poster");
+      }
+    };
+
     const select = (nextTab, focus) => {
       for (const tab of tabs) {
         const selected = tab === nextTab;
@@ -24,6 +33,9 @@
           throw new Error(`Missing scene panel for ${tab.id}`);
         }
         panel.hidden = !selected;
+        if (selected) {
+          promotePoster(panel);
+        }
         if (!selected) {
           for (const video of panel.querySelectorAll("video")) {
             video.pause();
