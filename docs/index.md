@@ -65,19 +65,47 @@ hide:
   </div>
 </section>
 
-## Sharp tools. Human hands.
+<section class="contract-map" aria-labelledby="contract-title">
+  <div class="section-heading">
+    <p class="eyebrow">ONE PRODUCT CONTRACT</p>
+    <h2 id="contract-title">Different reads. Shared context and safety.</h2>
+    <p>Korvid keeps each surface honest about where its evidence came from while preserving the same operational frame.</p>
+  </div>
+  <div class="contract-map__drivers">
+    <article><span>Human operator</span><strong>Watch-backed TUI snapshot</strong></article>
+    <article><span>Model / provider</span><strong>Bounded fresh reads</strong></article>
+    <article><span>Editor / external assistant</span><strong>Bounded fresh reads over MCP</strong></article>
+  </div>
+  <div class="contract-map__shared" aria-label="Shared operational contract">
+    <strong>Active cluster context</strong>
+    <strong>Navigation semantics</strong>
+    <strong>Approval gate</strong>
+    <strong>Fail-closed audit</strong>
+  </div>
+  <p class="contract-map__truth">Fresh tool reads and the watch-backed TUI snapshot can differ in time, so snapshots can differ without splitting the product contract.</p>
+  <a href="overview/">Inspect the complete architecture</a>
+</section>
 
-Every mutation requires a fresh keystroke confirmation — whether you
-triggered it directly, the embedded agent proposed it after reading the
-evidence, or an MCP client submitted a request when MCP is enabled. MCP
-write proposals are opt-in and never executed automatically. Whoever
-initiates it, the write converges on the same in-TUI confirmation and the
-same fail-closed audit path. Embedded-agent provider calls pass through
-credential-pattern masking. MCP
-results instead follow the per-tool disclosure boundaries documented for
-external clients and their models. `--readonly` removes the write path entirely.
-
-[Read the safety model](ops.md){ .md-button .korvid-button } [Inspect the threat model](threat-model.md){ .md-button .korvid-button }
+<section class="write-path" aria-labelledby="write-path-title">
+  <div class="section-heading">
+    <p class="eyebrow">SHARP TOOLS. HUMAN HANDS.</p>
+    <h2 id="write-path-title">Every mutation stops at the same gate.</h2>
+  </div>
+  <div class="write-path__origins" aria-label="Write initiators">
+    <span>Direct action</span>
+    <span>Agent proposal</span>
+    <span>Opt-in MCP proposal</span>
+  </div>
+  <ol class="write-path__stages">
+    <li data-stage="observe"><span>01</span><strong>Observe</strong><small>Gather bounded evidence</small></li>
+    <li data-stage="propose"><span>02</span><strong>Propose</strong><small>Render the intended change</small></li>
+    <li data-stage="confirm"><span>03</span><strong>Confirm</strong><small>Fresh human keystroke</small></li>
+    <li data-stage="audit"><span>04</span><strong>Audit</strong><small>Append must succeed</small></li>
+    <li data-stage="execute"><span>05</span><strong>Execute</strong><small>Validate and mutate</small></li>
+  </ol>
+  <p class="write-path__blocked"><strong>Audit write failed</strong><span aria-hidden="true">→</span> action blocked. The audit path is fail-closed.</p>
+  <p class="write-path__boundary">Embedded provider payloads are masked; MCP result disclosure is tool-specific. <a href="threat-model/">Inspect both boundaries.</a></p>
+</section>
 
 ## Find your flight path
 

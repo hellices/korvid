@@ -95,9 +95,7 @@ def _section(opening: str, closing: str) -> str:
     start = source.find(opening)
     assert start != -1, f"missing opening marker: {opening!r}"
     end = source.find(closing, start)
-    assert end != -1, (
-        f"missing closing marker: {closing!r} after opening marker {opening!r}"
-    )
+    assert end != -1, f"missing closing marker: {closing!r} after opening marker {opening!r}"
     return source[start : end + len(closing)]
 
 
@@ -383,36 +381,43 @@ def test_scene_switcher_uses_the_aria_tab_contract() -> None:
     assert switcher.count('aria-selected="false"') == 2
 
 
-def test_safety_section_converges_every_actor_on_one_write_path() -> None:
-    """Whoever initiates a write, the gate and the audit path are the same one."""
-    index = _index()
-    section_start = index.index("## Sharp tools. Human hands.")
-    section = index[section_start : index.index("[Read the safety model]", section_start)]
-    lowered = section.lower()
-    assert "agent" in lowered, (
-        "the safety paragraph must name the actors it is making a claim about"
-    )
-    assert "mcp" in lowered, "the safety paragraph must name the actors it is making a claim about"
-    assert "same" in lowered, (
-        "the point of the paragraph is convergence: one confirmation path, one "
-        "audit path, regardless of which actor initiated the operation"
-    )
-    assert "confirmation" in lowered or "confirm" in lowered
-    assert "fail-closed" in lowered, "the audit path must still be described as fail-closed"
-    assert "proposal" in lowered, (
-        "MCP writes are proposals, never executed writes — the page must stay "
-        "factually precise about that"
-    )
-    assert "when mcp is enabled" in lowered or "opt-in" in lowered, (
-        "the landing page must not imply the optional MCP server is always enabled"
-    )
-    assert "embedded-agent provider" in lowered
-    assert "mask" in lowered, "credential-pattern masking applies to embedded provider calls"
-    assert "mcp" in lowered
-    assert "disclosure" in lowered, "MCP results follow a separate per-tool disclosure boundary"
-    assert "secret values are masked before model calls" not in lowered, (
-        "that unqualified claim incorrectly includes MCP client models"
-    )
+def test_product_contract_map_keeps_the_read_paths_truthful() -> None:
+    contract = _section('<section class="contract-map"', "</section>")
+    lowered = " ".join(re.sub(r"<[^>]+>", " ", contract).lower().split())
+    for fact in (
+        "human operator",
+        "watch-backed tui snapshot",
+        "model / provider",
+        "bounded fresh reads",
+        "editor / external assistant",
+        "active cluster context",
+        "navigation semantics",
+        "snapshots can differ",
+    ):
+        assert fact in lowered
+    assert "same evidence" not in lowered
+
+
+def test_guarded_write_path_orders_confirmation_audit_and_execution() -> None:
+    path = _section('<section class="write-path"', "</section>")
+    lowered = " ".join(re.sub(r"<[^>]+>", " ", path).lower().split())
+    for origin in ("direct action", "agent proposal", "opt-in mcp proposal"):
+        assert origin in lowered
+    stages = ["observe", "propose", "confirm", "audit", "execute"]
+    positions = [path.index(f'data-stage="{stage}"') for stage in stages]
+    assert positions == sorted(positions)
+    assert "fresh human keystroke" in lowered
+    assert "audit write failed" in lowered
+    assert "action blocked" in lowered
+    assert "fail-closed" in lowered
+
+
+def test_landing_keeps_agent_masking_distinct_from_mcp_disclosure() -> None:
+    path = _section('<section class="write-path"', "</section>")
+    lowered = " ".join(re.sub(r"<[^>]+>", " ", path).lower().split())
+    assert "embedded provider payloads are masked" in lowered
+    assert "mcp result disclosure is tool-specific" in lowered
+    assert "secret values are masked before model calls" not in lowered
 
 
 def test_plan_preserves_the_mcp_disclosure_boundary() -> None:

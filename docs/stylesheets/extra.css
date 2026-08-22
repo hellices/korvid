@@ -371,6 +371,125 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Contract map — truthful read paths and shared semantics             */
+/* ------------------------------------------------------------------ */
+
+.md-typeset .contract-map,
+.md-typeset .write-path {
+  margin: 4rem 0;
+  padding: clamp(1.25rem, 3vw, 2.5rem);
+  background: var(--korvid-charcoal);
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+}
+
+.md-typeset .contract-map__drivers {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.md-typeset .contract-map__drivers article {
+  padding: 1rem;
+  background: var(--korvid-charcoal-raised);
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+}
+
+.md-typeset .contract-map__drivers span,
+.md-typeset .contract-map__drivers strong {
+  display: block;
+}
+
+.md-typeset .contract-map__drivers span {
+  color: var(--korvid-amber);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.md-typeset .contract-map__shared {
+  display: grid;
+  gap: 0.5rem;
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 2px solid var(--korvid-amber);
+  border-radius: var(--korvid-radius);
+}
+
+.md-typeset .contract-map__truth,
+.md-typeset .write-path__boundary {
+  color: var(--korvid-ink-dim);
+  font-size: 0.8rem;
+}
+
+.md-typeset .write-path__origins {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.md-typeset .write-path__origins span {
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: 999px;
+}
+
+.md-typeset .write-path__stages {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.md-typeset .write-path__stages li {
+  min-width: 0;
+  padding: 1rem;
+  background: var(--korvid-charcoal-raised);
+  border-top: 3px solid var(--korvid-amber);
+}
+
+.md-typeset .write-path__stages span,
+.md-typeset .write-path__stages strong,
+.md-typeset .write-path__stages small {
+  display: block;
+}
+
+.md-typeset .write-path__stages span {
+  color: var(--korvid-amber);
+  font-size: 0.68rem;
+}
+
+.md-typeset .write-path__stages small {
+  margin-top: 0.4rem;
+  color: var(--korvid-ink-dim);
+}
+
+.md-typeset .write-path__blocked {
+  margin: 1rem 0 0;
+  padding: 0.75rem 1rem;
+  border: 1px dashed var(--korvid-amber);
+}
+
+@media (min-width: 720px) {
+  .md-typeset .contract-map__drivers {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .md-typeset .contract-map__shared {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 799px) {
+  .md-typeset .write-path__stages {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Footer — korvid identity instead of the bare theme default          */
 /* ------------------------------------------------------------------ */
 
