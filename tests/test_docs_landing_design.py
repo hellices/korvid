@@ -690,7 +690,86 @@ def test_evidence_copy_claims_only_what_its_capture_actually_shows() -> None:
         assert signal in cockpit.lower()
 
 
-def test_flight_paths_are_four_compact_user_destinations() -> None:
+def test_generic_grouped_containers_carry_a_role_aria_can_use() -> None:
+    """`aria-label` is ignored on `role=generic`, so the label needs a role.
+
+    Both containers are bare `div`s that group several related items and
+    name that grouping for assistive technology. Without an explicit role
+    the name is silently dropped and the group reads as loose text.
+    """
+    index = _index()
+    for class_name in ("contract-map__shared", "write-path__origins"):
+        match = re.search(rf'<div class="{class_name}"([^>]*)>', index)
+        assert match is not None, f"the landing page must keep the {class_name} grouping"
+        attributes = match.group(1)
+        assert "aria-label=" in attributes
+        assert 'role="group"' in attributes, (
+            f"{class_name} carries an aria-label, so it needs an explicit role "
+            f"assistive technology can name; found: {attributes.strip()!r}"
+        )
+
+
+def test_every_evidence_capture_links_to_its_full_resolution_asset() -> None:
+    """A 1280x720 terminal capture is unreadable at a third of its size.
+
+    Each mosaic tile renders at ~374px wide, which shrinks 15px terminal
+    text to about 4px. Wrapping the image in a plain link to the asset
+    itself keeps the evidence checkable without a lightbox, a framework, or
+    any additional runtime code.
+    """
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    cards = re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.DOTALL)
+    assert len(cards) == 6
+    for card in cards:
+        image = re.search(r'<img src="(assets/scenes/[^"]+)"', card)
+        assert image is not None
+        link = re.search(
+            r'<a class="evidence-card__full" href="([^"]+)" aria-label="([^"]+)">\s*<img',
+            card,
+        )
+        assert link is not None, (
+            f"the capture in this tile must be a link to its own full-resolution "
+            f"asset with an accessible label: {card[:120]!r}"
+        )
+        assert link.group(1) == image.group(1), "the link must open the very asset the tile renders"
+        assert "full-resolution" in link.group(2).lower()
+
+
+def test_landing_provenance_matches_every_captures_real_source() -> None:
+    """One tile was captured against a disposable local cluster, not a fixture.
+
+    `mcp-poster.png` comes from a real k3d cluster (`ctx:k3d-korvid-demo`),
+    which `docs/demo/visual-storytelling.md` states plainly. A blanket
+    "synthetic cluster data" claim above it is not true of every tile.
+    """
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    heading = mosaic[: mosaic.index('<div class="evidence-mosaic__grid">')]
+    assert "synthetic or disposable local cluster" in heading.lower(), (
+        "the mosaic's provenance line must cover the disposable-cluster capture "
+        f"as well as the in-memory ones; found: {heading.strip()[-160:]!r}"
+    )
+
+
+def test_single_pod_log_evidence_is_not_labelled_as_a_merged_stream() -> None:
+    """`merged-logs.png` shows the single-pod `l` view, not the merged `L` view.
+
+    Its header reads `payment-worker-.../app [json] - streaming`, one pod and
+    one container. Korvid does have a multi-log view; this capture is not it,
+    so the tile must not be named for a screen it does not show.
+    """
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    card = next(
+        card
+        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
+        if "merged-logs.png" in card
+    )
+    text = re.sub(r"<[^>]+>", " ", card).lower()
+    for overclaim in ("merged logs", "merge"):
+        assert overclaim not in text, (
+            f"this capture is a single-pod stream, so it must not claim {overclaim!r}"
+        )
+    assert "stream" in text
+
     paths = _section('<nav class="flight-paths"', "</nav>")
     for label, href in (
         ("Operate a cluster", "getting-started/"),

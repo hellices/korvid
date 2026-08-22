@@ -81,7 +81,14 @@ class _DemoLister:
         return list(objects)
 
 
-def test_storytelling_pngs_are_real_readable_terminal_captures() -> None:
+def test_storytelling_pngs_meet_their_declared_size_and_byte_budget() -> None:
+    """Binary/dimension/byte contract only — it says nothing about content.
+
+    The declared `width`/`height` attributes on the site must match the real
+    intrinsic size or the reserved box is wrong, and the byte budget keeps
+    the page light. Whether a capture is legible or shows the right screen
+    is verified by looking at it, not here.
+    """
     for name, (width, min_height, max_height) in PNG_ASSETS.items():
         path = SCENES / name
         assert path.is_file(), f"{path} is required by the visual narrative"

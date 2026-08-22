@@ -1209,7 +1209,7 @@ paragraph:
     <article><span>Model / provider</span><strong>Bounded fresh reads</strong></article>
     <article><span>Editor / external assistant</span><strong>Bounded fresh reads over MCP</strong></article>
   </div>
-  <div class="contract-map__shared" aria-label="Shared operational contract">
+  <div class="contract-map__shared" role="group" aria-label="Shared operational contract">
     <strong>Active cluster context</strong>
     <strong>Navigation semantics</strong>
     <strong>Approval gate</strong>
@@ -1224,7 +1224,7 @@ paragraph:
     <p class="eyebrow">SHARP TOOLS. HUMAN HANDS.</p>
     <h2 id="write-path-title">Every mutation stops at the same gate.</h2>
   </div>
-  <div class="write-path__origins" aria-label="Write initiators">
+  <div class="write-path__origins" role="group" aria-label="Write initiators">
     <span>Direct action</span>
     <span>Agent proposal</span>
     <span>Opt-in MCP proposal</span>
@@ -1446,36 +1446,36 @@ Delete the old “Find your flight path” list and add:
   <div class="section-heading">
     <p class="eyebrow">PRODUCT EVIDENCE</p>
     <h2 id="evidence-title">Built for the incident, not the screenshot.</h2>
-    <p>Each surface below is a real korvid view captured against synthetic cluster data.</p>
+    <p>Each surface below is a real korvid view captured against synthetic or disposable local cluster data.</p>
   </div>
   <div class="evidence-mosaic__grid">
     <article class="evidence-card evidence-card--wide">
-      <figure><img src="assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table for a synthetic shop namespace with the crash-looping payment worker selected and its BackOff warning in the ops hint strip"><figcaption>Resource cockpit</figcaption></figure>
+      <figure><a class="evidence-card__full" href="assets/scenes/cockpit-poster.png" aria-label="Open the full-resolution resource cockpit capture"><img src="assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table for a synthetic shop namespace with the crash-looping payment worker selected and its BackOff warning in the ops hint strip"></a><figcaption>Resource cockpit</figcaption></figure>
       <p>Browse and filter live resources, keeping status, scope, and restart signals in one keyboard path.</p>
       <a href="tui/">Browse the cockpit</a>
     </article>
     <article class="evidence-card">
-      <figure><img src="assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a pod dependency on a ConfigMap"><figcaption>Relationship graph</figcaption></figure>
+      <figure><a class="evidence-card__full" href="assets/scenes/relationship-graph.png" aria-label="Open the full-resolution relationship graph capture"><img src="assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a pod's declared ConfigMap dependency and the Service that depends on the pod"></a><figcaption>Relationship graph</figcaption></figure>
       <p>Follow metadata-only dependencies without exposing Secret values.</p>
       <a href="resource-relationships/">Follow relationships</a>
     </article>
     <article class="evidence-card">
-      <figure><img src="assets/scenes/merged-logs.png" width="1280" height="720" loading="lazy" alt="Korvid log pane following synthetic payment worker logs"><figcaption>Merged logs</figcaption></figure>
-      <p>Stream, merge, filter, and reconnect without leaving the selected workload.</p>
+      <figure><a class="evidence-card__full" href="assets/scenes/merged-logs.png" aria-label="Open the full-resolution pod log stream capture"><img src="assets/scenes/merged-logs.png" width="1280" height="720" loading="lazy" alt="Korvid split workspace streaming one synthetic payment worker pod's logs beside the filtered table"></a><figcaption>Pod log stream</figcaption></figure>
+      <p>Follow, filter, and reconnect a selected pod's logs beside the table you started from.</p>
       <a href="tui/#log-viewer">Read the log workflow</a>
     </article>
     <article class="evidence-card">
-      <figure><img src="assets/scenes/diagnosis.png" width="1280" height="720" loading="lazy" alt="Korvid describe view showing a synthetic failing pod and warning events"><figcaption>Operational evidence</figcaption></figure>
+      <figure><a class="evidence-card__full" href="assets/scenes/diagnosis.png" aria-label="Open the full-resolution operational evidence capture"><img src="assets/scenes/diagnosis.png" width="1280" height="720" loading="lazy" alt="Korvid describe view showing a synthetic failing pod and warning events"></a><figcaption>Operational evidence</figcaption></figure>
       <p>Put manifests, warning events, and failure context beside the selected resource.</p>
       <a href="tui/#ops-hints">Inspect diagnosis surfaces</a>
     </article>
     <article class="evidence-card">
-      <figure><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic failing payment worker with cited evidence"><figcaption>Agent with citations</figcaption></figure>
+      <figure><a class="evidence-card__full" href="assets/scenes/agent-poster.png" aria-label="Open the full-resolution embedded agent capture"><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic failing payment worker with cited evidence"></a><figcaption>Agent with citations</figcaption></figure>
       <p>Ask from the current screen and keep checkable evidence in the answer.</p>
       <a href="agent/">Use the embedded agent</a>
     </article>
     <article class="evidence-card evidence-card--wide">
-      <figure><img src="assets/scenes/mcp-poster.png" width="1280" height="720" loading="lazy" alt="An external MCP client reading synthetic cluster data while korvid mirrors the navigation"><figcaption>MCP follow</figcaption></figure>
+      <figure><a class="evidence-card__full" href="assets/scenes/mcp-poster.png" aria-label="Open the full-resolution MCP follow capture"><img src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></a><figcaption>MCP follow</figcaption></figure>
       <p>Let an external assistant read bounded tools while korvid can mirror where it went.</p>
       <a href="mcp/#follow-mode">Connect over MCP</a>
     </article>
@@ -1532,6 +1532,16 @@ Add:
   object-fit: cover;
   object-position: top left;
   background: #07090c;
+}
+
+.md-typeset .evidence-card__full {
+  display: block;
+  color: inherit;
+}
+
+.md-typeset .evidence-card__full:focus-visible {
+  outline: 3px solid var(--korvid-amber-bright);
+  outline-offset: -3px;
 }
 
 .md-typeset .evidence-card figcaption,

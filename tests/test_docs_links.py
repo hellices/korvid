@@ -20,6 +20,9 @@ _INDEX_STEMS = frozenset({"index", "README"})
 
 _FENCE = re.compile(r"^(?P<fence>`{3,}|~{3,}).*?^(?P=fence)", re.DOTALL | re.MULTILINE)
 _MEDIA_ATTRIBUTE = re.compile(r"(?<![-\w])(?:src|poster|data-poster)=\"([^\"]+)\"")
+#: A raw-HTML link that points into the shared asset tree (e.g. the mosaic's
+#: full-resolution capture links) resolves exactly like `src` does.
+_ASSET_HREF = re.compile(r"(?<![-\w])href=\"([^\"]*assets/[^\"]+)\"")
 
 
 def _load_mkdocs_config() -> dict[str, Any]:
@@ -83,12 +86,13 @@ def _built_directory_url(source: Path) -> str:
 def _local_media_urls(source: Path) -> Iterator[str]:
     """Local raw-HTML media URLs on a page, ignoring code samples.
 
-    Covers `src`, `poster`, and the deferred `data-poster` the scene
-    controller promotes on selection — a typo in the deferred attribute
-    would otherwise 404 only after a visitor picks that scene.
+    Covers `src`, `poster`, the deferred `data-poster` the scene controller
+    promotes on selection, and any `href` into the asset tree — a typo in
+    the deferred attribute or in a full-resolution capture link would
+    otherwise 404 only after a visitor picks that scene or clicks through.
     """
     text = _FENCE.sub("", source.read_text(encoding="utf-8"))
-    for raw in _MEDIA_ATTRIBUTE.findall(text):
+    for raw in [*_MEDIA_ATTRIBUTE.findall(text), *_ASSET_HREF.findall(text)]:
         parsed = urlsplit(raw)
         if parsed.scheme or parsed.netloc or not parsed.path:
             continue

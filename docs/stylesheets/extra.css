@@ -567,6 +567,19 @@
   background: #07090c;
 }
 
+/* Each capture links to its own full-resolution asset so 15px terminal
+   text stays checkable; the link must not introduce its own box or
+   Material's link colour under the image. */
+.md-typeset .evidence-card__full {
+  display: block;
+  color: inherit;
+}
+
+.md-typeset .evidence-card__full:focus-visible {
+  outline: 3px solid var(--korvid-amber-bright);
+  outline-offset: -3px;
+}
+
 .md-typeset .evidence-card figcaption,
 .md-typeset .evidence-card p,
 .md-typeset .evidence-card > a {
