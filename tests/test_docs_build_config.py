@@ -128,6 +128,19 @@ def test_core_concept_pages_each_have_their_selected_visual_evidence() -> None:
             assert marker in source, f"{relative} must contain {marker!r}"
 
 
+def test_tui_annotation_pins_match_the_poster_layout() -> None:
+    """`tui.md` must keep the semantic labels aligned with the poster pins."""
+    source = (ROOT / "docs" / "tui.md").read_text(encoding="utf-8")
+    assert (
+        '<span class="docs-visual__pin" style="--x: 12%; --y: 92%;" aria-hidden="true">1</span>'
+        in source
+    ), "pin 1 must point to the bottom context/status row at --y: 92%"
+    assert (
+        '<span class="docs-visual__pin" style="--x: 50%; --y: 8%;" aria-hidden="true">3</span>'
+        in source
+    ), "pin 3 must point to the top keybinding hint row at --y: 8%"
+
+
 def test_getting_started_matches_current_project_and_readme_release() -> None:
     """The offline release sources must agree on every intentionally pinned install."""
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))

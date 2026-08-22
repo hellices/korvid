@@ -14,7 +14,7 @@ below for what that guarantee does and does not cover.
 
 <figure class="docs-visual">
   <img src="assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a synthetic Pod dependency on a ConfigMap">
-  <figcaption>The two panes separate dependencies from dependents; every row preserves relation direction, confidence, state, and source field.</figcaption>
+  <figcaption>The two sections separate dependencies from dependents; every row preserves relation direction, confidence, state, and source field.</figcaption>
 </figure>
 
 ## Opening the view
