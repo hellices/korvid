@@ -39,6 +39,7 @@ COPYRIGHT_PARTIAL = OVERRIDES / "partials" / "copyright.html"
 MARK = DOCS / "assets" / "korvid-mark.svg"
 DEMO_README = DOCS / "demo" / "README.md"
 STORYTELLING_JS = DOCS / "assets" / "javascripts" / "visual-storytelling.js"
+VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
 
 MATERIAL_ATTRIBUTION = "https://squidfunk.github.io/mkdocs-material/"
 
@@ -49,6 +50,10 @@ def _index() -> str:
 
 def _css() -> str:
     return EXTRA_CSS.read_text(encoding="utf-8")
+
+
+def _plan() -> str:
+    return VISUAL_STORYTELLING_PLAN.read_text(encoding="utf-8")
 
 
 def _scene_switcher() -> str:
@@ -128,6 +133,18 @@ def _section(opening: str, closing: str) -> str:
     end = source.find(closing, start)
     assert end != -1, f"missing closing marker: {closing!r} after opening marker {opening!r}"
     return source[start : end + len(closing)]
+
+
+def _fenced_block_after(source: str, marker: str, language: str) -> str:
+    start = source.index(marker)
+    fence = f"```{language}\n"
+    body_start = source.index(fence, start) + len(fence)
+    body_end = source.index("\n```", body_start)
+    return source[body_start:body_end]
+
+
+def _compact(text: str) -> str:
+    return " ".join(text.split())
 
 
 # --- 1. the install command never breaks mid-token ---------------------------
@@ -683,7 +700,7 @@ def test_concept_visual_containers_keep_the_full_content_width() -> None:
         )
 
 
-def test_visual_storytelling_plan_snippets_match_the_shipped_sources() -> None:
+def test_visual_storytelling_plan_relationship_snippet_matches_the_shipped_sources() -> None:
     """The plan embeds its markup and CSS verbatim, so drift reproduces old defects.
 
     `docs/superpowers/plans/2026-08-22-visual-storytelling.md` is written as
@@ -692,9 +709,7 @@ def test_visual_storytelling_plan_snippets_match_the_shipped_sources() -> None:
     `docs-visual` CSS predates the Material `figure`/`figcaption` overrides —
     a contributor following it would reintroduce both.
     """
-    plan = (
-        ROOT / "docs" / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
-    ).read_text(encoding="utf-8")
+    plan = _plan()
     relationships = (DOCS / "resource-relationships.md").read_text(encoding="utf-8")
 
     shipped_alt = re.search(r'relationship-graph\.png"[^>]*alt="([^"]+)"', relationships)
@@ -718,6 +733,99 @@ def test_visual_storytelling_plan_snippets_match_the_shipped_sources() -> None:
         assert declaration in plan, (
             f"the plan's core-visual CSS must include `{declaration}`, or following it "
             "reintroduces Material's centred italic caption defaults"
+        )
+
+
+def test_visual_storytelling_plan_scene_switcher_markup_matches_the_shipped_sources() -> None:
+    plan_markup = _fenced_block_after(
+        _plan(),
+        "- [ ] **Step 3: Replace the numbered cards with complete scene markup**",
+        "html",
+    )
+    shipped_switcher = _scene_switcher()
+
+    for poster in ("agent-poster.png", "mcp-poster.png"):
+        shipped = re.search(
+            rf"<noscript><img[^>]*{re.escape(poster)}[^>]*></noscript>",
+            shipped_switcher,
+        )
+        assert shipped is not None
+        planned = re.search(
+            rf"<noscript><img[^>]*{re.escape(poster)}[^>]*></noscript>",
+            plan_markup,
+        )
+        assert planned is not None, f"the plan must keep the {poster} noscript poster snippet"
+        assert 'loading="lazy"' in planned.group(0), (
+            f"the plan's deferred {poster} noscript poster must stay lazy so the "
+            "fallback matches the shipped source"
+        )
+        assert _compact(planned.group(0)) == _compact(shipped.group(0))
+
+
+def test_visual_storytelling_plan_evidence_markup_matches_the_shipped_sources() -> None:
+    plan_markup = _fenced_block_after(
+        _plan(),
+        "Delete the old “Find your flight path” list and add:",
+        "html",
+    )
+    shipped_mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    shipped_links = re.findall(
+        r'<a class="evidence-card__full" href="([^"]+)"([^>]*)>\s*<img[^>]*alt="([^"]+)"',
+        shipped_mosaic,
+        re.DOTALL,
+    )
+    planned_links = re.findall(
+        r'<a class="evidence-card__full" href="([^"]+)"([^>]*)>\s*<img[^>]*alt="([^"]+)"',
+        plan_markup,
+        re.DOTALL,
+    )
+    assert len(planned_links) == len(shipped_links) == 6
+    for shipped, planned in zip(shipped_links, planned_links, strict=True):
+        assert planned[0] == shipped[0]
+        assert planned[2] == shipped[2]
+        assert "aria-label" not in planned[1], (
+            "the plan's evidence links must let the nested image alt remain the "
+            f"accessible name instead of overriding it: {planned[1]!r}"
+        )
+
+
+def test_visual_storytelling_plan_evidence_css_matches_the_shipped_rules() -> None:
+    plan_css = _fenced_block_after(
+        _plan(),
+        "- [ ] **Step 4: Add the evidence mosaic and destination-card CSS**",
+        "css",
+    )
+    shipped_css = _css()
+
+    figure = _rule(plan_css, ".md-typeset .evidence-card figure")
+    shipped_figure = _rule(shipped_css, ".md-typeset .evidence-card figure")
+    assert _compact(figure) == _compact(shipped_figure)
+    for declaration in ("display: block", "width: 100%", "margin: 0", "text-align: left"):
+        assert declaration in figure, (
+            "the plan's `.evidence-card figure` snippet must reserve the full tile box "
+            f"before lazy images load; missing `{declaration}` in {' '.join(figure.split())!r}"
+        )
+
+    caption_gutter = _rule(plan_css, ".md-typeset .evidence-card figcaption,")
+    shipped_caption_gutter = _rule(shipped_css, ".md-typeset .evidence-card figcaption,")
+    assert _compact(caption_gutter) == _compact(shipped_caption_gutter)
+    for declaration in ("margin-right: 1rem", "margin-left: 1rem"):
+        assert declaration in caption_gutter, (
+            "the plan's figcaption gutter must match the shipped card layout; missing "
+            f"`{declaration}` in {' '.join(caption_gutter.split())!r}"
+        )
+
+    figcaption = _rule(plan_css, ".md-typeset .evidence-card figcaption {")
+    shipped_figcaption = _rule(shipped_css, ".md-typeset .evidence-card figcaption {")
+    assert _compact(figcaption) == _compact(shipped_figcaption)
+    for declaration in (
+        "margin-top: 0.85rem",
+        "max-width: none",
+        "font-style: normal",
+    ):
+        assert declaration in figcaption, (
+            "the plan's `.evidence-card figcaption` rule must match the shipped source; "
+            f"missing `{declaration}` in {' '.join(figcaption.split())!r}"
         )
 
 
