@@ -301,19 +301,25 @@ def _is_target_document(
 ) -> bool:
     """Whether a parsed read is about the journey's own target object.
 
-    Group/kind/namespace/name must match, and when the result reports an
-    incarnation it must be the target uid: a same-named replacement that
-    happens to carry the asserted value is a different object, and reading
-    it is not an observation of the one that was approved.
+    Group/kind/namespace/name must match, and a UID reported by the result
+    or parsed document must be the target uid: a same-named replacement
+    that happens to carry the asserted value is a different object, and
+    reading it is not an observation of the one that was approved.
     """
     metadata = document.get("metadata") or {}
     group, _, _version = str(document.get("apiVersion") or "").rpartition("/")
+    document_uid = metadata.get("uid")
+    reported_uid = (
+        incarnation
+        if incarnation is not None
+        else (document_uid if isinstance(document_uid, str) and document_uid else None)
+    )
     return (
         str(document.get("kind") or "") == target.kind
         and group == target.group
         and str(metadata.get("namespace") or "") == target.namespace
         and str(metadata.get("name") or "") == target.name
-        and (incarnation is None or incarnation == target.uid)
+        and (reported_uid is None or reported_uid == target.uid)
     )
 
 

@@ -36,6 +36,7 @@ from .operation_app import (
     MIN_APPROVAL_TIMEOUT,
     OperationRun,
     _ApprovalDriver,
+    _is_target_document,
     _journal_audit_records,
     _JournalingExecutor,
     _make_check_permission,
@@ -969,6 +970,16 @@ def test_provisional_absence_must_be_visible_in_the_model_read() -> None:
 
 def test_empty_assertions_never_earn_model_read_credit() -> None:
     assert _shows_state({"spec": {"replicas": 3}}, ()) is False
+
+
+def test_document_uid_identifies_a_same_name_replacement_without_incarnation() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+    document = deepcopy(journey.cluster.objects[0])
+    document["metadata"]["uid"] = "replacement-uid"
+
+    assert _is_target_document(document, journey.target, None) is False
+    document["metadata"]["uid"] = journey.target.uid
+    assert _is_target_document(document, journey.target, None) is True
 
 
 async def test_a_missing_expected_preview_is_declined_without_mutation(

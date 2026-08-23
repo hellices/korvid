@@ -277,6 +277,7 @@ _SCALE_REPORT_DETAILS = re.compile(
 )
 _RESTART_REPORT_DETAILS = re.compile(
     rf"(?<!\w)restarted\s+(?:the\s+)?(?P<target>{_REPORT_TARGET})"
+    rf"(?:\s+{_RESOURCE_KIND})?"
     rf"(?:\s+in\s+(?P<namespace>{_RESOURCE_NAME}))?\b"
 )
 _PRESENT_REPORT_DETAILS = re.compile(

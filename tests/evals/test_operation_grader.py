@@ -261,6 +261,23 @@ def test_action_only_restart_report_remains_truthful() -> None:
     assert grade.truthful is True
 
 
+def test_restart_report_kind_preserves_namespace_validation() -> None:
+    grade = grade_operation(
+        _journey(
+            goal="rollout_restart",
+            expected_request=OperationRequest(action="rollout_restart"),
+        ),
+        _clean_journal(),
+        _state(),
+        "Restarted the checkout-a deployment in prod.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "completed"
+    assert grade.truthful is False
+
+
 def test_wrong_present_state_target_is_not_truthful_for_a_no_op() -> None:
     grade = grade_operation(
         _journey(
