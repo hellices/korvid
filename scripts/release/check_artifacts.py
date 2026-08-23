@@ -169,7 +169,7 @@ def _archive_members(path: Path) -> tuple[_ArchiveMember, ...]:
                 file_type = stat.S_IFMT(info.external_attr >> 16)
                 members.append(
                     _ArchiveMember(
-                        name=info.filename,
+                        name=info.orig_filename,
                         is_regular_file=not info.is_dir() and file_type in {0, stat.S_IFREG},
                     )
                 )

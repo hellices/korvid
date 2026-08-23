@@ -953,11 +953,13 @@ def test_artifacts_reject_nested_decoys_for_required_root_members(
 )
 def test_artifacts_reject_backslash_separated_required_root_members(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     wheel_members: tuple[str, ...],
     sdist_members: tuple[str, ...],
     include_wheel_package: bool,
     include_sdist_project: bool,
 ) -> None:
+    monkeypatch.setattr(os, "sep", "/")
     dist = _fake_dist(
         tmp_path,
         _metadata_text(),
@@ -966,9 +968,26 @@ def test_artifacts_reject_backslash_separated_required_root_members(
         include_wheel_package=include_wheel_package,
         include_sdist_project=include_sdist_project,
     )
+    monkeypatch.setattr(os, "sep", "\\")
 
     with pytest.raises(ValueError, match="missing required production member"):
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_wheel_member_scan_preserves_the_raw_archive_name_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wheel_path = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    raw_name = r"korvid\__init__.py"
+    monkeypatch.setattr(os, "sep", "/")
+    with zipfile.ZipFile(wheel_path, "w") as wheel:
+        wheel.writestr(raw_name, "")
+    monkeypatch.setattr(os, "sep", "\\")
+
+    members = check_artifacts._archive_members(wheel_path)
+
+    assert [member.name for member in members] == [raw_name]
 
 
 @pytest.mark.parametrize("member_type", ["directory", "symlink"])
