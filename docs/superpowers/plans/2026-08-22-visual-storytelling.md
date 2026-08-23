@@ -185,6 +185,7 @@ Delete the `.hero-panel*` and `.product-demo*` blocks from `docs/stylesheets/ext
 
 ```css
 .md-typeset .hero-demo {
+  width: 100%;
   min-width: 0;
   margin: 0;
 }

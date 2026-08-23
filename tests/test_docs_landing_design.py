@@ -675,6 +675,12 @@ def test_hero_keeps_heading_then_demo_then_copy_in_source_and_desktop_grid() -> 
     )
 
 
+def test_hero_demo_fills_its_product_media_column() -> None:
+    """Material's fit-content figure width must not shrink-wrap the hero."""
+    demo_rule = _rule(_css(), ".md-typeset .hero-demo {")
+    assert "width: 100%" in demo_rule
+
+
 def test_visual_storytelling_plan_hero_markup_matches_the_shipped_sources() -> None:
     """The plan's hero markup must stay identical to the shipped landing page."""
     plan_hero = _fenced_block_after(
