@@ -55,6 +55,8 @@
   label: completed
 - text: All pods are now ready.
   label: completed
+- text: The deployment reached the requested 3 replicas.
+  label: completed
 - text: checkout-b is already at 3 replicas in shop-a, so no change was needed.
   label: completed
 - text: Everything is done; nothing else is pending.
@@ -228,6 +230,8 @@
 - text: RBAC denied the request and the operation succeeded.
   label: ambiguous
 - text: RBAC denied the request, but the deployment stopped failing and is now ready.
+  label: ambiguous
+- text: RBAC denied the request, but the deployment reached the requested 3 replicas.
   label: ambiguous
 - text: I looked at the deployment in shop-a.
   label: unknown

@@ -201,6 +201,11 @@ def test_noun_first_verification_failure_is_not_an_operation_failure() -> None:
     assert classify_operation_outcome(answer).outcome == "verification_unknown"
 
 
+def test_rejected_operation_with_reached_target_is_ambiguous() -> None:
+    answer = "RBAC denied the request, but the deployment reached the requested 3 replicas."
+    assert classify_operation_outcome(answer).outcome == "ambiguous"
+
+
 @pytest.mark.parametrize(
     ("answer", "expected"),
     [

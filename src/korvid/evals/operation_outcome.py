@@ -136,6 +136,7 @@ _PHRASES: dict[str, tuple[str, ...]] = {
         "successfully",
         "success",
         "succeeded",
+        "target replicas reached",
         "is now",
         "are now",
         "now at",
@@ -345,6 +346,11 @@ def _outcome_phrase(phrase: str) -> re.Pattern[str]:
             r"(?<!\w)(?:will|would)\s+"
             r"(?:(?:eventually|possibly|probably)\s+)?"
             r"(?:(?:be|have(?:\s+been)?)\s+)?(?:complete|completed)\b"
+        )
+    if phrase == "target replicas reached":
+        return re.compile(
+            r"(?<!\w)(?:applied|reached)\s+(?:the\s+)?"
+            r"(?:desired|requested)\s+\d+\s+replicas?\b"
         )
     recovery_guard = r"(?<!ceased )(?<!stopped )" if phrase == "failing" else ""
     verification_prefix_guard = r"(?<!verification )" if phrase in {"failed", "failure"} else ""
