@@ -1251,6 +1251,58 @@ async def test_aclose_from_inside_the_running_turn_does_not_deadlock() -> None:
     assert harness.conversation.turn_active is False
 
 
+async def test_a_driver_closing_in_its_finally_joins_a_close_already_in_flight() -> None:
+    """Two closes of one session must not wait for each other.
+
+    The ordinary shape of a screen's turn task is `finally: await
+    session.aclose()`. When something else — a context switch, a teardown
+    — closes the same session while that turn is parked in a provider
+    await, the close stops the turn by cancelling its driver, and the
+    driver's `finally` then asks for the very close that is waiting for
+    it. That driver has already given the turn back by the time it asks,
+    so recognising it by the *live* driver alone is not enough: the close
+    must still see the task it is waiting for, or the two park on each
+    other forever.
+
+    Every wait here is on an event or on the tasks themselves; the
+    `wait_for` bounds exist only so a regression fails the test instead
+    of hanging the suite.
+    """
+    stall = asyncio.Event()
+    provider = ScriptedProvider([[text_delta("thinking"), stall, text_delta("more")]])
+    harness = build_session(provider=provider)
+    seen: list[AgentEvent] = []
+
+    async def drive() -> None:
+        try:
+            async for event in harness.session.run_turn("what is wrong?"):
+                seen.append(event)
+        finally:
+            await harness.session.aclose()
+
+    driver = asyncio.create_task(drive())
+    await asyncio.wait_for(provider.stalled.wait(), timeout=5)
+    closer = asyncio.create_task(harness.session.aclose())
+    outcomes = await asyncio.wait_for(
+        asyncio.gather(driver, closer, return_exceptions=True), timeout=5
+    )
+    events, history = list(seen), copy.deepcopy(harness.conversation.messages)
+    stall.set()
+    await _settle()
+
+    assert outcomes[1] is None
+    assert seen == events
+    assert harness.conversation.messages == history
+    assert harness.engine.closes == 1
+    assert provider.closed == 1
+    assert harness.conversation.turn_active is False
+    assert str(harness.conversation.messages[-1]["content"]).endswith(INTERRUPT_MARKER)
+    with pytest.raises(RuntimeError, match="no interrupted turn"):
+        harness.session.finalize_interrupt()
+    with pytest.raises(RuntimeError, match="closed"):
+        harness.session.run_turn("second")
+
+
 async def test_closing_a_partially_consumed_turn_iterator_releases_the_session() -> None:
     """The iterator `run_turn` returns is the session's, and closing it says so.
 
