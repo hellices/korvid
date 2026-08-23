@@ -17,11 +17,11 @@ from types import MappingProxyType
 from typing import Any
 
 import pytest
-from korvid.agent.request_gateway import PreparedGatewayRequest, RequestGateway
 
 from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.outbound import OutboundPolicy
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
+from korvid.agent.request_gateway import PreparedGatewayRequest, RequestGateway
 from korvid.core.redaction import RedactionRecord
 
 
