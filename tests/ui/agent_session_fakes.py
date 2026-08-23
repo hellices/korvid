@@ -19,7 +19,7 @@ import asyncio
 import copy
 from collections.abc import AsyncIterator, Sequence
 
-from korvid.agent.events import AgentEvent, TurnInterrupted
+from korvid.agent.events import AgentEvent, TurnComplete, TurnInterrupted
 from korvid.agent.evidence import EvidenceLedger
 from korvid.agent.interaction import ClusterFacts
 from korvid.agent.model_policy import (
@@ -133,9 +133,24 @@ class FakeSession(AgentSession):
         return self._drive()
 
     async def _drive(self) -> AsyncIterator[AgentEvent]:
+        # A script that ends on `TurnComplete` and parks nowhere afterwards
+        # models a turn the engine really completed. The real engine closes
+        # the conversation turn *before* it emits that terminal event, so
+        # from there on there is nothing left to finalize — even if the
+        # consumer raises on the event and never resumes this generator.
+        last = len(self.events) - 1
+        completes = (
+            self._turn_error is None
+            and self._gate is None
+            and not self._block
+            and bool(self.events)
+            and isinstance(self.events[last], TurnComplete)
+        )
         finished = False
         try:
-            for event in self.events:
+            for index, event in enumerate(self.events):
+                if completes and index == last:
+                    finished = True
                 yield event
             if self._turn_error is not None:
                 raise self._turn_error

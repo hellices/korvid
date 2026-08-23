@@ -768,8 +768,10 @@ def _resolve_agent_policy(
     return ModelRouter(MODEL_CATALOG).resolve(
         descriptor=provider.descriptor,
         provider_capabilities=provider.capabilities,
-        # The router validates the string itself and reports an unusable
-        # one as a fallback route, which the header then shows as such.
+        # Config parsing already rejected anything but `low`/`high`/absent,
+        # so the router is handed a tier it can route: it takes an explicit
+        # tier as the user's own decision (route source `user`) rather than
+        # validating or falling back, and the header shows it as theirs.
         explicit_tier=model_tier or None,
         environment=environment,
     )
@@ -1074,13 +1076,24 @@ def _make_retarget_agent(
 
     The policy is re-resolved from the *current* provider's facts and the
     new cluster's environment, so the switch picks up capabilities the new
-    cluster has (resize) without changing the routed model — which
-    `AgentSession.retarget` refuses outright. Conversation history
-    survives; what the next turn is looking at does not.
+    cluster has (resize) without changing the routed model — a retarget
+    that would move the routed model is refused by
+    `AgentSession.retarget`, because the model is the wizard's to change,
+    not a context switch's. Conversation history survives; what the next
+    turn is looking at does not.
 
     The boxes are updated even when there is no live session: a later
     wizard rebuild must arm the agent for the cluster the user is on, not
     the one korvid started against.
+
+    A failure here — re-resolution or the session's own refusal — is
+    raised, not logged. Retargeting is one step of the `:ctx` transaction,
+    and that transaction owns rollback and telling the user (it records a
+    failed switch, notifies, and returns to the previous context). Absorbing
+    the failure would report a successful switch while the session still
+    holds the *previous* cluster's policy and evidence, and the agent would
+    answer questions about the new cluster from the old one's facts. Failing
+    closed keeps the agent's idea of the cluster and the UI's the same one.
     """
 
     def retarget_agent(
@@ -1095,15 +1108,8 @@ def _make_retarget_agent(
         if session is None or live_provider is None:
             return
         environment = _agent_environment(config, pod_resize_supported, obs.backends)
-        try:
-            policy = _resolve_agent_policy(live_provider, config, tier_box[0], environment)
-            session.retarget(policy, cluster_box[0])
-        except Exception:
-            # A refused retarget leaves the session exactly as it was — the
-            # old cluster's surface is wrong but usable, and the user can
-            # rebuild through `:ai`. Fixed message only: a provider plugin's
-            # error text is not safe to log.
-            logger.warning("agent retarget refused; the session keeps its previous policy")
+        policy = _resolve_agent_policy(live_provider, config, tier_box[0], environment)
+        session.retarget(policy, cluster_box[0])
 
     return retarget_agent
 

@@ -71,6 +71,16 @@ class AgentWorkspaceBridge(AgentUiBridge):
 
     `AgentToolUIBridge` (the `UIBridge` write surface) is **not** composed
     here; they share no authority and must remain separate.
+
+    Args:
+        timeline_cursor: Reads the timeline entry the user has selected.
+            No production caller passes one — korvid has no user-visible
+            timeline selection yet, so the default (always `None`) is the
+            production behaviour, not an oversight. Inventing a cursor
+            (the newest entry, for instance) would tell the agent the user
+            is looking at something they never chose. Tests pass a reader
+            to exercise the cursor path; the composition root will wire a
+            real one when a selection exists to read.
     """
 
     def __init__(

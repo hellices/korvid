@@ -111,6 +111,23 @@ WriteOpBuild = tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[
 Triple = tuple[str, str, str]
 
 
+async def _aclose(iterator: object) -> None:
+    """Close an async generator the controller stopped consuming.
+
+    Whoever abandons an `async for` owns the generator it left suspended.
+    An agent turn is driven by a generator that releases the session in
+    its `finally`, so dropping it without closing it would hold the turn
+    open forever. Closing is best-effort: it runs the producer's cleanup,
+    and any failure in that cleanup must not displace the reason we
+    stopped consuming in the first place.
+    """
+    closer = getattr(iterator, "aclose", None)
+    if closer is None:
+        return
+    with contextlib.suppress(BaseException):
+        await closer()
+
+
 class AgentPanelPort(ABC):
     """The chat panel, as the controller is allowed to drive it.
 
@@ -516,9 +533,14 @@ class AgentUiController:
         #: the `:ai` wizard's tier step and `:model` rebuilds so an
         #: explicit low/high override survives across them.
         self._configured_tier = settings.agent_model_tier
-        # A session built from config.yaml at startup must seed the settings
-        # snapshot so :model works without running the :ai wizard first.
-        if session is not None and settings.agent_provider and settings.agent_model:
+        # config.yaml naming a provider and a model is enough to seed the
+        # settings snapshot, whether or not the composition root managed to
+        # build a session from it. A startup that degraded (a provider the
+        # router refuses, say `supports_tools=False`) still has to be
+        # recoverable with a single `:model <name>` — and reconnect and the
+        # `:ai` wizard have to open on what is configured — instead of
+        # asking the operator to retype a configuration korvid already has.
+        if settings.agent_provider and settings.agent_model:
             self._settings = AgentSettings(
                 provider=settings.agent_provider,
                 auth_method=settings.agent_auth_method or "none",
@@ -606,9 +628,16 @@ class AgentUiController:
     def workspace_bridge(self) -> AgentWorkspaceBridge:
         """The typed workspace-action bridge (`AgentUiBridge`) for this session.
 
-        Created once and cached; no timeline-cursor wiring at this level —
-        callers that need it should construct `AgentWorkspaceBridge` directly
-        through the composition root.
+        Created once and cached. `timeline_cursor` is deliberately left at
+        its default (always `None`) here, and that is the production
+        behaviour: a cursor names *the timeline entry the user is looking
+        at*, and korvid has no user-visible timeline selection to read it
+        from yet. Synthesising one — "the newest entry", say — would hand
+        the agent a cursor no user ever placed, so `timeline_cursor=None`
+        is the honest answer until such a selection exists. The parameter
+        stays on `AgentWorkspaceBridge` for the tests that exercise cursor
+        handling and for the composition root to wire on the day the
+        selection lands.
         """
         bridge = self._workspace_bridge
         if bridge is None:
@@ -1003,13 +1032,20 @@ class AgentUiController:
             # Close the generator first: if the cancel landed between
             # yields the generator is still suspended, and finalize must
             # not race a later resume that appends to the history.
-            closer = getattr(gen, "aclose", None)
-            if closer is not None:
-                with contextlib.suppress(BaseException):
-                    await closer()
+            await _aclose(gen)
             self._finish_interrupted_turn(session)
             raise
         except Exception as exc:
+            # The failure is ours (a panel/follow error), not the
+            # session's: the session is still suspended at its `yield`,
+            # holding the turn. Abandoning it there would strand the turn
+            # and every later prompt would be refused as "a turn is
+            # already running". So close the generator, let the session
+            # repair the half-written history if it has one to repair,
+            # and only then surface the error.
+            await _aclose(gen)
+            if session.finalization_pending:
+                session.finalize_interrupt()
             self._panel.apply_event(AgentError(message=str(exc)))
 
     def _finish_interrupted_turn(self, session: AgentSession | None) -> None:
@@ -1023,24 +1059,26 @@ class AgentUiController:
         the session untouched, and demanding a repair it has no record of
         would raise. The panel still leaves its running state either way —
         the transcript belongs to the UI, not to the session.
+
+        `TurnInterrupted` carries what *this* turn spent, not what the
+        session has spent so far. The panel adds each turn's usage to the
+        running total it shows, so a stop with nothing to finalize reports
+        a zero delta: the session's cumulative totals would be counted a
+        second time and the header would double after every stop.
         """
         self._turn_finalized = True
-        event: TurnInterrupted | None = None
-        if session is not None and session.finalization_pending:
+        if session is None:
+            event = TurnInterrupted(input_tokens=0, output_tokens=0, estimated=False)
+        elif session.finalization_pending:
             event = session.finalize_interrupt()
-        elif session is not None:
-            # Nothing to repair, but the usage already committed is still
-            # the truth the header should keep showing.
-            spent_in, spent_out = session.total_tokens
+        else:
+            # The turn never ran, so it spent nothing. Whatever the
+            # session has already committed is on the header already.
             event = TurnInterrupted(
-                input_tokens=spent_in, output_tokens=spent_out, estimated=session.usage_estimated
+                input_tokens=0, output_tokens=0, estimated=session.usage_estimated
             )
         if not self._shutting_down:
-            self._panel.apply_event(
-                event
-                if event is not None
-                else TurnInterrupted(input_tokens=0, output_tokens=0, estimated=False)
-            )
+            self._panel.apply_event(event)
 
     async def _maybe_follow_read(
         self,
