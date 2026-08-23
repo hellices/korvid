@@ -82,7 +82,7 @@ Entra ID authentication for Azure OpenAI is a separate extra —
 Entra users need. `[all]` does *not* include it.
 
 (`pipx` works the same way. Pin a version for a reproducible install — see the
-[README](../README.md) for the current one.)
+[README](https://github.com/hellices/korvid/blob/main/README.md) for the current one.)
 
 A missing extra is not an error. korvid starts, and the feature it powers is
 simply absent — unless you *asked* for it on the command line, in which case it
@@ -303,7 +303,7 @@ scoreboard exist so that choice is informed rather than hopeful.
 
 | You want to | Read |
 |---|---|
-| Install and start using it | [README](../README.md) |
+| Install and start using it | [README](https://github.com/hellices/korvid/blob/main/README.md) |
 | Learn the keys | [`keybindings.md`](keybindings.md) |
 | Set up the agent | [`agent.md`](agent.md) |
 | Connect an editor over MCP | [`mcp.md`](mcp.md) |

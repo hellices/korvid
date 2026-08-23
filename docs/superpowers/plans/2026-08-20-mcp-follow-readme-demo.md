@@ -1,0 +1,396 @@
+# MCP Follow README Demo Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Add a 15-second-or-shorter README animation that shows real VS Code Copilot MCP reads driving korvid through pods, diagnosis, logs, and Helm releases.
+
+**Architecture:** A tiny local Helm chart creates a disposable, non-sensitive recording workload with one intentionally crash-looping pod and one Helm release. A manual VS Code recording captures genuine MCP tool cards beside korvid follow-mode transitions; ffmpeg removes idle time and exports a bounded GIF, while pytest contracts pin the README embed and asset envelope.
+
+**Tech Stack:** Kubernetes YAML, Helm 3, korvid Streamable HTTP MCP, VS Code Copilot Chat, macOS screen recording, ffmpeg/ffprobe, Markdown, pytest.
+
+## Global Constraints
+
+- The final animation must run for at most 15 seconds.
+- The final GIF must be 1280 pixels wide, 12 to 15 frames per second, and no larger than 8 MB.
+- The korvid TUI must occupy approximately 75% of the window and Copilot Chat approximately 25%.
+- The recording must show real MCP requests and real follow-mode transitions; only idle time may be removed.
+- The visible sequence is pod list, unhealthy-pod describe, live logs, then Helm release browser.
+- The `MCP ·follow` status must remain visible whenever the main TUI is visible.
+- The animation demonstrates reads only and must not imply MCP-driven Helm installation.
+- No production resources, credentials, customer identifiers, or sensitive logs may appear.
+- Keep `docs/assets/demo.gif` and the existing VHS regeneration workflow unchanged.
+
+---
+
+### Task 1: Add a deterministic, disposable MCP recording fixture
+
+**Files:**
+- Create: `docs/demo/mcp-follow-fixture/Chart.yaml`
+- Create: `docs/demo/mcp-follow-fixture/values.yaml`
+- Create: `docs/demo/mcp-follow-fixture/templates/deployment.yaml`
+- Create: `docs/demo/mcp-follow-fixture/templates/service.yaml`
+- Create: `docs/demo/mcp-follow.md`
+- Modify: `docs/demo/README.md:1-26`
+
+**Interfaces:**
+- Consumes: a disposable local Kubernetes context named `kind-*`, `k3d-*`, `minikube`, or `docker-desktop`; Helm 3; `korvid[mcp]`.
+- Produces: Helm release `shop-demo` in namespace `shop`, a Deployment and crash-looping pod named from `payment-worker`, deterministic non-sensitive log lines, and exact recording instructions consumed by Task 2.
+
+- [ ] **Step 1: Create the chart metadata and values**
+
+Create `docs/demo/mcp-follow-fixture/Chart.yaml`:
+
+```yaml
+apiVersion: v2
+name: korvid-mcp-follow-demo
+description: Disposable workload for the korvid MCP follow README recording
+type: application
+version: 0.1.0
+appVersion: "1.0"
+```
+
+Create `docs/demo/mcp-follow-fixture/values.yaml`:
+
+```yaml
+image:
+  repository: busybox
+  tag: "1.36.1"
+```
+
+- [ ] **Step 2: Create the intentionally unhealthy workload**
+
+Create `docs/demo/mcp-follow-fixture/templates/deployment.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-worker
+  labels:
+    app.kubernetes.io/name: payment-worker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payment-worker
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: payment-worker
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "INFO payment-worker starting"
+              echo "WARN gateway request timed out"
+              echo "ERROR startup probe failed: upstream unavailable"
+              sleep 2
+              exit 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 8Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+```
+
+Create `docs/demo/mcp-follow-fixture/templates/service.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-worker
+  labels:
+    app.kubernetes.io/name: payment-worker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    app.kubernetes.io/name: payment-worker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+```
+
+- [ ] **Step 3: Verify the chart renders and lints**
+
+Run:
+
+```bash
+helm lint docs/demo/mcp-follow-fixture
+helm template shop-demo docs/demo/mcp-follow-fixture \
+  --namespace shop >/tmp/korvid-mcp-follow-fixture.yaml
+kubectl apply --dry-run=client -f /tmp/korvid-mcp-follow-fixture.yaml >/dev/null
+```
+
+Expected:
+
+```text
+1 chart(s) linted, 0 chart(s) failed
+```
+
+The template and client-side dry-run commands exit with status 0.
+
+- [ ] **Step 4: Write the recording runbook**
+
+Create `docs/demo/mcp-follow.md` with this content:
+
+````markdown
+# MCP follow README recording
+
+This recording uses a disposable local cluster. Never record a production
+context: MCP log results are not credential-pattern masked by korvid.
+
+## Prepare the fixture
+
+The guard accepts only common local-cluster context names:
+
+```sh
+context="$(kubectl config current-context)"
+case "$context" in
+  kind-*|k3d-*|minikube|docker-desktop) ;;
+  *) echo "Refusing to seed non-local context: $context" >&2; exit 1 ;;
+esac
+
+helm upgrade --install shop-demo docs/demo/mcp-follow-fixture \
+  --namespace shop --create-namespace --wait=false
+kubectl -n shop get pods --watch
+```
+
+Stop the watch with Ctrl-C after the `payment-worker` pod shows
+`CrashLoopBackOff`.
+
+## Connect VS Code
+
+Start korvid:
+
+```sh
+korvid --mcp --namespace shop
+```
+
+In korvid, run `:mcp follow on`. Configure `.vscode/mcp.json`:
+
+```json
+{"servers": {"korvid": {"type": "http", "url": "http://127.0.0.1:7878/mcp"}}}
+```
+
+Allow the korvid read-only tools for this recording session. Move the terminal
+into the editor area, place Copilot Chat in the secondary side bar, and size
+the regions approximately 75% TUI / 25% Chat. Keep `MCP ·follow` visible.
+
+Enter this prompt before capture:
+
+> In the shop namespace, find the unhealthy pod, inspect the cause and open
+> its logs, then show me the Helm releases.
+
+Start the visible capture with Enter. The target sequence is:
+
+1. `list_resources` — pod list;
+2. `diagnose_pod` — pod describe;
+3. `get_logs` — live logs;
+4. `helm_list_releases` — Helm release browser.
+
+Repeat the take if the model chooses another order. Do not fake or reorder
+tool cards.
+
+## Export
+
+Trim only idle regions from the screen recording and save the result as
+`/tmp/korvid-mcp-follow.mov`. Export the GIF:
+
+```sh
+ffmpeg -y -i /tmp/korvid-mcp-follow.mov \
+  -filter_complex \
+  "fps=12,scale=1280:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
+  -loop 0 docs/assets/mcp-follow-demo.gif
+```
+
+Verify the result:
+
+```sh
+ffprobe -v error -show_entries format=duration \
+  -of default=noprint_wrappers=1:nokey=1 docs/assets/mcp-follow-demo.gif
+sips -g pixelWidth -g pixelHeight docs/assets/mcp-follow-demo.gif
+stat -f '%z bytes' docs/assets/mcp-follow-demo.gif
+```
+
+The duration must be at most 15 seconds, width exactly 1280 pixels, and file
+size at most 8,388,608 bytes. Inspect the GIF at README width and confirm the
+pod list, describe, logs, and Helm views are each readable.
+
+## Clean up
+
+```sh
+helm uninstall shop-demo --namespace shop
+kubectl delete namespace shop
+```
+````
+
+- [ ] **Step 5: Link the MCP runbook from the existing demo documentation**
+
+Append this paragraph to `docs/demo/README.md`:
+
+```markdown
+The separate [MCP follow recording](mcp-follow.md) uses a disposable local
+cluster and VS Code Copilot Chat to capture real external tool calls alongside
+the TUI. It has its own fixture and does not change the canned VHS demo.
+```
+
+- [ ] **Step 6: Run focused documentation and chart checks**
+
+Run:
+
+```bash
+helm lint docs/demo/mcp-follow-fixture
+git diff --check
+```
+
+Expected: Helm reports one chart linted with zero failures and
+`git diff --check` exits with status 0.
+
+- [ ] **Step 7: Commit the reproducible fixture and runbook**
+
+```bash
+git add docs/demo/mcp-follow-fixture docs/demo/mcp-follow.md docs/demo/README.md
+git commit -m "docs: add reproducible MCP follow recording fixture" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+```
+
+---
+
+### Task 2: Record, validate, and embed the MCP follow animation
+
+**Files:**
+- Create: `tests/test_mcp_follow_demo_asset.py`
+- Create: `docs/assets/mcp-follow-demo.gif`
+- Modify: `README.md:145-149`
+
+**Interfaces:**
+- Consumes: the `shop-demo` fixture and recording/export contract from Task 1.
+- Produces: a bounded GIF at the permanent raw-GitHub URL and a README section that explains the read-only follow sequence without implying Helm writes.
+
+- [ ] **Step 1: Write failing README and asset contract tests**
+
+Create `tests/test_mcp_follow_demo_asset.py`:
+
+```python
+"""README contract for the short MCP follow recording."""
+
+from pathlib import Path
+
+ROOT = Path(__file__).parents[1]
+ASSET = ROOT / "docs" / "assets" / "mcp-follow-demo.gif"
+ASSET_URL = (
+    "https://raw.githubusercontent.com/hellices/korvid/main/"
+    "docs/assets/mcp-follow-demo.gif"
+)
+
+
+def test_readme_embeds_mcp_follow_demo() -> None:
+    readme = (ROOT / "README.md").read_text()
+    assert "## Watch MCP follow" in readme
+    assert f"]({ASSET_URL})" in readme
+    assert "**One prompt. Korvid follows.**" in readme
+
+
+def test_mcp_follow_demo_asset_fits_readme_budget() -> None:
+    payload = ASSET.read_bytes()
+    assert payload[:6] in {b"GIF87a", b"GIF89a"}
+    assert int.from_bytes(payload[6:8], "little") == 1280
+    assert len(payload) <= 8 * 1024 * 1024
+```
+
+- [ ] **Step 2: Run the contract tests to verify RED**
+
+Run:
+
+```bash
+uv run pytest -p no:tach -p no:randomly -q tests/test_mcp_follow_demo_asset.py
+```
+
+Expected: two failures because the README section and
+`docs/assets/mcp-follow-demo.gif` do not exist.
+
+- [ ] **Step 3: Capture and export the real MCP session**
+
+Follow `docs/demo/mcp-follow.md` exactly. Record the 75/25 VS Code composition,
+retain the real Copilot MCP tool cards, remove idle time, and export
+`docs/assets/mcp-follow-demo.gif` with the documented ffmpeg command.
+
+Run:
+
+```bash
+test -f docs/assets/mcp-follow-demo.gif
+ffprobe -v error -show_entries format=duration \
+  -of default=noprint_wrappers=1:nokey=1 docs/assets/mcp-follow-demo.gif
+sips -g pixelWidth docs/assets/mcp-follow-demo.gif
+stat -f '%z' docs/assets/mcp-follow-demo.gif
+```
+
+Expected: the file exists; duration is no greater than `15.000000`; width is
+`1280`; size is no greater than `8388608`.
+
+- [ ] **Step 4: Add the README MCP follow section**
+
+Insert this block after the complete Features list and before the Status
+section:
+
+```markdown
+## Watch MCP follow
+
+**One prompt. Korvid follows.** A VS Code assistant uses real read-only MCP
+calls while the TUI moves from the unhealthy pod to its diagnosis and logs,
+then finishes in the Helm release browser.
+
+![korvid MCP follow — one prompt drives pods, diagnosis, logs, and Helm](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/mcp-follow-demo.gif)
+
+*Recorded against a disposable local cluster — see [docs/demo/mcp-follow.md](https://github.com/hellices/korvid/blob/main/docs/demo/mcp-follow.md) to reproduce it.*
+```
+
+- [ ] **Step 5: Run the focused tests to verify GREEN**
+
+Run:
+
+```bash
+uv run pytest -p no:tach -p no:randomly -q \
+  tests/test_mcp_follow_demo_asset.py \
+  tests/test_release_scripts.py::test_every_absolute_repository_link_resolves_to_a_real_path \
+  tests/test_release_scripts.py::test_readme_has_no_relative_links_because_pypi_cannot_follow_them
+uv run ruff check tests/test_mcp_follow_demo_asset.py
+uv run ruff format --check tests/test_mcp_follow_demo_asset.py
+git diff --check
+```
+
+Expected: four tests pass, ruff check and format pass, and no whitespace errors
+are reported.
+
+- [ ] **Step 6: Inspect the final README rendering**
+
+Open the README preview at its normal content width and confirm:
+
+```text
+MCP ·follow is readable
+Copilot tool cards match list → diagnose → logs → Helm
+all four TUI destinations are distinguishable
+the animation loops without a long blank pause
+the caption does not claim MCP can install Helm
+```
+
+- [ ] **Step 7: Commit the asset and README contract**
+
+```bash
+git add README.md docs/assets/mcp-follow-demo.gif tests/test_mcp_follow_demo_asset.py
+git commit -m "docs: show MCP follow in the README" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+```

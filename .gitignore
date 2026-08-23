@@ -10,3 +10,5 @@ dist/
 .coverage
 htmlcov/
 .config/
+/site/
+/.cache/plugin/privacy/

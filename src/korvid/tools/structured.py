@@ -142,7 +142,7 @@ def load_structured_document(text: str) -> Any:
     try:
         return loader.get_single_data()
     finally:
-        loader.dispose()  # type: ignore[no-untyped-call]  # PyYAML leaves Reader.dispose unannotated
+        loader.dispose()
 
 
 class _NoAliasDumper(yaml.SafeDumper):
