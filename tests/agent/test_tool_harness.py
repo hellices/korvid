@@ -638,3 +638,91 @@ async def test_reject_does_not_spend_the_iteration_budget() -> None:
 
     assert execution.calls == [("get_logs", {"pod": "api-1", "namespace": "default"})]
     assert result.outcome.error is False
+
+
+# --- policy validation and retarget -----------------------------------------
+
+
+def _unregistered_policy() -> ResolvedAgentPolicy:
+    """A policy arming a name the registry does not define."""
+    schema = copy.deepcopy(TOOLS_BY_NAME["get_logs"].schema)
+    schema["function"]["name"] = "not_a_registered_tool"
+    armed = _policy(["get_logs"], max_tool_calls=None)
+    object.__setattr__(armed, "tools", (schema,))
+    return armed
+
+
+def test_validate_policy_accepts_a_registry_backed_surface() -> None:
+    assert ToolHarness.validate_policy(_policy(["get_logs", "navigate"], max_tool_calls=1)) is None
+
+
+def test_validate_policy_rejects_an_armed_name_the_registry_does_not_define() -> None:
+    with pytest.raises(ValueError, match="not_a_registered_tool"):
+        ToolHarness.validate_policy(_unregistered_policy())
+
+
+def test_validate_policy_rejects_a_malformed_schema() -> None:
+    armed = _policy(["get_logs"], max_tool_calls=None)
+    object.__setattr__(armed, "tools", ({"type": "function", "function": {}},))
+
+    with pytest.raises(ValueError, match="name a function"):
+        ToolHarness.validate_policy(armed)
+
+
+def test_constructing_a_harness_rejects_an_unreachable_armed_tool() -> None:
+    """An armed name with no definition would only ever be a runtime error."""
+    with pytest.raises(ValueError, match="not_a_registered_tool"):
+        _harness(_unregistered_policy())
+
+
+async def test_retarget_arms_the_new_surface_on_the_same_harness() -> None:
+    execution = _RecordingExecution()
+    harness = _harness(_policy(["get_logs"], max_tool_calls=None), execution=execution)
+
+    harness.retarget(_policy(["get_events"], max_tool_calls=None))
+    armed = await harness.execute("c1", "get_events", {"namespace": "default"})
+    disarmed = await harness.execute("c2", "get_logs", {"pod": "api-1", "namespace": "default"})
+
+    assert armed.outcome.error is False
+    assert disarmed.outcome.error is True
+    assert "not armed" in disarmed.outcome.text
+    assert execution.calls == [("get_events", {"namespace": "default"})]
+
+
+async def test_retarget_installs_the_new_per_iteration_cap() -> None:
+    execution = _RecordingExecution()
+    harness = _harness(_policy(["get_logs"], max_tool_calls=None), execution=execution)
+    harness.begin_iteration()
+
+    harness.retarget(_policy(["get_logs"], max_tool_calls=1))
+    harness.begin_iteration()
+    first = await harness.execute("c1", "get_logs", {"pod": "api-1", "namespace": "default"})
+    second = await harness.execute("c2", "get_logs", {"pod": "api-2", "namespace": "default"})
+
+    assert first.outcome.error is False
+    assert second.outcome.error is True
+    assert "budget exhausted" in second.outcome.text
+
+
+async def test_retarget_installs_the_new_result_bound() -> None:
+    execution = _RecordingExecution(ToolOutcome(text="y" * 5_000))
+    harness = _harness(
+        _policy(["get_logs"], max_tool_calls=None, max_result_chars=None), execution=execution
+    )
+
+    harness.retarget(_policy(["get_logs"], max_tool_calls=None, max_result_chars=100))
+    result = await harness.execute("c1", "get_logs", {"pod": "api-1", "namespace": "default"})
+
+    assert len(result.outcome.text) <= 200
+
+
+async def test_a_refused_retarget_leaves_the_previous_surface_armed() -> None:
+    execution = _RecordingExecution()
+    harness = _harness(_policy(["get_logs"], max_tool_calls=None), execution=execution)
+
+    with pytest.raises(ValueError, match="not_a_registered_tool"):
+        harness.retarget(_unregistered_policy())
+    result = await harness.execute("c1", "get_logs", {"pod": "api-1", "namespace": "default"})
+
+    assert result.outcome.error is False
+    assert execution.calls == [("get_logs", {"pod": "api-1", "namespace": "default"})]

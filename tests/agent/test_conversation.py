@@ -721,3 +721,47 @@ def test_two_calls_sharing_an_id_take_two_results() -> None:
 
     assert convo.has_unmatched_tool_calls is False
     assert convo.complete_turn() == (0, 0, False)
+
+
+# --- turn-active reporting (task 11 decides whether to finalize) -------------
+
+
+def test_turn_active_is_false_before_any_turn() -> None:
+    assert ConversationState(max_history_chars=LOOSE_BUDGET).turn_active is False
+
+
+def test_turn_active_is_true_between_start_and_complete() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+
+    convo.start_turn("why?")
+
+    assert convo.turn_active is True
+
+
+def test_a_completed_turn_is_no_longer_active() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    _text_turn(convo, "why?", "because")
+
+    assert convo.turn_active is False
+
+
+def test_an_abandoned_turn_stays_active_until_it_is_finalized() -> None:
+    """The session reads this to decide whether a stopped turn needs repair."""
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("why?")
+    convo.start_iteration()
+    convo.record_stream_text("thinking")
+
+    assert convo.turn_active is True
+    convo.finalize_interrupt()
+    assert convo.turn_active is False
+
+
+def test_a_rolled_back_turn_is_no_longer_active() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("why?")
+    convo.start_iteration()
+
+    convo.rollback_turn()
+
+    assert convo.turn_active is False
