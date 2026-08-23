@@ -868,6 +868,56 @@ async def test_agent_wiring_applies_the_low_tier(monkeypatch: object) -> None:
     assert full_runtime._max_iterations != SMALL_MAX_ITERATIONS
 
 
+def test_tier_to_legacy_profile_maps_automatic_and_explicit_tiers() -> None:
+    """Automatic routing stays conservative while explicit tiers keep intent."""
+    from korvid.__main__ import _tier_to_legacy_profile
+
+    assert _tier_to_legacy_profile(None) == "small"
+    assert _tier_to_legacy_profile("low") == "small"
+    assert _tier_to_legacy_profile("high") == "full"
+
+
+async def test_agent_wiring_defaults_to_the_low_tier_for_automatic(
+    monkeypatch: object,
+) -> None:
+    """Automatic tier selection should keep the legacy runtime on the small surface."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.profiles import SMALL_MAX_HISTORY_CHARS, SMALL_MAX_ITERATIONS
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+    )
+    kube_stub = cast("Any", object())
+    runtime, _, _, _, _, _, _ = _build_agent_wiring(
+        config, kube_stub, {}, pod_resize_supported=True
+    )
+    assert runtime is not None
+    names = [t["function"]["name"] for t in runtime._tools]
+    assert "diagnose_pod" in names
+    assert "open_logs" in names
+    assert "delete_resource" in names
+    assert "resize_pod" in names
+    assert "navigate" not in names
+    assert "set_filter" not in names
+    assert "drill_down" not in names
+    assert runtime._max_iterations == SMALL_MAX_ITERATIONS
+    assert runtime._max_history_chars == SMALL_MAX_HISTORY_CHARS
+    assert runtime._max_result_chars is not None
+    assert "one tool at a time" in runtime._messages[0]["content"]
+
+
 async def test_ctx_retarget_keeps_the_low_tier_surface(monkeypatch: object) -> None:
     """A `:ctx` switch recomposes the tool set from the *active* internal
     profile (issues #36 + #71): retargeting a low-tier runtime picks up the
