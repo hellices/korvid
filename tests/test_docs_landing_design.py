@@ -581,6 +581,43 @@ def test_controller_promotes_a_deferred_poster_only_when_its_scene_is_selected()
     ), "promotion must set the real attribute once and stop deferring it"
 
 
+def test_controller_pauses_off_screen_switcher_media_via_intersection_observer() -> None:
+    """Scrolling a playing switcher off-screen must not leave it decoding forever.
+
+    The controller already pauses a panel's video when a visitor switches
+    tabs, but a visitor who presses play on the *selected* scene and then
+    scrolls the whole switcher out of the viewport keeps that video decoding
+    indefinitely — nothing watches the switcher's own visibility. The
+    controller must observe each `[data-scene-switcher]`'s intersection with
+    the viewport, and when it stops intersecting, pause every video inside
+    it (selected or not). It must never call `play()` itself; only a user
+    keystroke or click may resume playback. `IntersectionObserver` support
+    must be feature-detected so its absence cannot break the switcher.
+    """
+    script = STORYTELLING_JS.read_text(encoding="utf-8")
+    assert re.search(r'typeof IntersectionObserver === "function"', script), (
+        "IntersectionObserver support must be feature-detected so unsupported "
+        "browsers still get a working, if never-paused-by-scroll, switcher"
+    )
+    start = script.index("new IntersectionObserver(")
+    end = script.index("observer.observe(switcher);", start) + len("observer.observe(switcher);")
+    observer_block = script[start:end]
+    assert "isIntersecting" in observer_block, (
+        "the observer callback must branch on the switcher's own intersection state"
+    )
+    assert 'switcher.querySelectorAll("video")' in observer_block, (
+        "an off-screen switcher must pause every video it contains, not only "
+        "the panels that were already inactive"
+    )
+    assert ".pause()" in observer_block
+    assert "observer.observe(switcher)" in observer_block, (
+        "every switcher instance must register itself with the observer"
+    )
+    assert ".play(" not in script, (
+        "the controller must never resume playback itself; user control is authoritative"
+    )
+
+
 def test_scene_videos_never_autoplay_and_below_fold_media_preloads_nothing() -> None:
     """Bandwidth and motion are the visitor's choice on every landing video."""
     videos = re.findall(r"<video[^>]*>", _index())
@@ -883,6 +920,23 @@ def test_visual_storytelling_plan_scene_switcher_markup_matches_the_shipped_sour
             "fallback matches the shipped source"
         )
         assert _compact(planned.group(0)) == _compact(shipped.group(0))
+
+
+def test_visual_storytelling_plan_scene_controller_matches_the_shipped_script() -> None:
+    """The plan's embedded controller must stay byte-identical to the shipped one.
+
+    A contributor replaying `Step 5` verbatim must reproduce the exact script
+    that ships today, including the off-screen pause behaviour, or the plan
+    silently drifts from the checksum-pinned source it claims to build.
+    """
+    plan_script = _fenced_block_after(
+        _plan(),
+        "Create `docs/assets/javascripts/visual-storytelling.js` with LF endings and a\n"
+        "final newline:",
+        "javascript",
+    )
+    shipped_script = STORYTELLING_JS.read_text(encoding="utf-8")
+    assert _compact(plan_script) == _compact(shipped_script)
 
 
 def test_visual_storytelling_plan_contract_snippets_match_the_shipped_evidence_lanes() -> None:

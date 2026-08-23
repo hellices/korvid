@@ -67,5 +67,17 @@
       tabs.find((tab) => tab.getAttribute("aria-selected") === "true") ?? tabs[0],
       false,
     );
+
+    if (typeof IntersectionObserver === "function") {
+      const observer = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) continue;
+          for (const video of switcher.querySelectorAll("video")) {
+            video.pause();
+          }
+        }
+      });
+      observer.observe(switcher);
+    }
   }
 })();
