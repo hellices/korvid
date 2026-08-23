@@ -227,8 +227,9 @@ def test_revision_is_captured_before_artifact_directory_creation(
     artifacts = tmp_path / "artifacts"
     observed: list[bool] = []
 
-    def fake_revision() -> str:
+    def fake_revision(*, excluded_paths: tuple[Path, ...] = ()) -> str:
         observed.append(artifacts.exists())
+        assert set(excluded_paths) == {artifacts}
         return "revision"
 
     monkeypatch.setattr(operation_campaign, "_korvid_revision", fake_revision)
@@ -245,6 +246,33 @@ def test_revision_is_captured_before_artifact_directory_creation(
     )
     assert code == 0
     assert observed == [False]
+
+
+def test_revision_probe_excludes_configured_campaign_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Path(operation_campaign.__file__).resolve().parents[2]
+    outputs = (
+        root / "operation-artifacts",
+        root / "operations.json",
+        root / "operations.md",
+    )
+    expected_pathspecs = {f":(exclude){path.relative_to(root).as_posix()}" for path in outputs}
+    status_commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        if command[1:3] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="a" * 40 + "\n")
+        status_commands.append(command)
+        stdout = "" if expected_pathspecs <= set(command) else "?? operation-artifacts/\n"
+        return SimpleNamespace(stdout=stdout)
+
+    monkeypatch.delenv("KORVID_EVAL_REVISION", raising=False)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert _korvid_revision(excluded_paths=outputs) == "a" * 40
+    assert len(status_commands) == 1
+    assert expected_pathspecs <= set(status_commands[0])
 
 
 def test_a_live_campaign_records_the_serving_environment(

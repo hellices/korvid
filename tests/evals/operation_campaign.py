@@ -73,7 +73,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _korvid_revision() -> str:
+def _git_exclusion_pathspec(root: Path, path: Path) -> str | None:
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    try:
+        relative = absolute.resolve().relative_to(root)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+    return f":(exclude){relative.as_posix()}"
+
+
+def _korvid_revision(*, excluded_paths: tuple[Path, ...] = ()) -> str:
     override = os.environ.get("KORVID_EVAL_REVISION", "").strip()
     if override:
         return override
@@ -86,8 +97,14 @@ def _korvid_revision() -> str:
             capture_output=True,
             text=True,
         ).stdout.strip()
+        status_command = ["git", "status", "--porcelain", "--untracked-files=normal", "--", "."]
+        status_command.extend(
+            pathspec
+            for path in excluded_paths
+            if (pathspec := _git_exclusion_pathspec(root, path)) is not None
+        )
         dirty = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            status_command,
             cwd=root,
             check=True,
             capture_output=True,
@@ -420,7 +437,10 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    revision = _korvid_revision()
+    excluded_paths = tuple(
+        path for path in (args.artifacts, args.json, args.out) if path is not None
+    )
+    revision = _korvid_revision(excluded_paths=excluded_paths)
     run_id, run_dir = _create_run_dir(args.artifacts)
     serving = None
     if not args.scripted:
