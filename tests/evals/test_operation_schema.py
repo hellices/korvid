@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -472,6 +473,25 @@ def test_an_exists_assertion_may_not_carry_an_expected_value(tmp_path: Path) -> 
         "expected": 3,
     }
     with pytest.raises(ValueError, match="takes no 'expected' value"):
+        load_operation_journey(_write(tmp_path, data))
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="infinity"),
+        pytest.param(datetime(2026, 8, 23, tzinfo=UTC), id="timestamp"),
+        pytest.param({"replicas": 3}, id="mapping"),
+    ],
+)
+def test_assertion_expected_values_must_be_finite_json_scalars(
+    tmp_path: Path, expected: object
+) -> None:
+    data = _minimal()
+    data["operation"]["postconditions"][0]["expected"] = expected
+
+    with pytest.raises(ValueError, match="expected must be a finite JSON scalar"):
         load_operation_journey(_write(tmp_path, data))
 
 

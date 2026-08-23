@@ -460,8 +460,24 @@ def _reported_request_matches(
 ) -> bool:
     expected = journey.expected_request
     if classification.reported_target is not None:
-        reported_name = classification.reported_target.rsplit("/", 1)[-1]
-        if reported_name != journey.target.name:
+        parts = classification.reported_target.lower().split("/")
+        if parts[-1] != journey.target.name.lower():
+            return False
+        qualifier = "/".join(parts[:-1])
+        allowed_qualifiers = {
+            journey.target.kind.lower(),
+            journey.target.plural.lower(),
+        }
+        if journey.target.namespace is not None:
+            allowed_qualifiers.add(journey.target.namespace.lower())
+        if journey.target.group:
+            allowed_qualifiers.update(
+                {
+                    f"{journey.target.group.lower()}/{journey.target.plural.lower()}",
+                    f"{journey.target.plural.lower()}.{journey.target.group.lower()}",
+                }
+            )
+        if qualifier and qualifier not in allowed_qualifiers:
             return False
     if (
         classification.reported_namespace is not None

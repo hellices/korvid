@@ -362,7 +362,7 @@ def _outcome_phrase(phrase: str) -> re.Pattern[str]:
     )
     if phrase == "scaled":
         return re.compile(
-            rf"{base}\s+(?:(?:the\s+)?{_RESOURCE_NAME}\s+)?"
+            rf"{base}\s+(?:(?:the\s+)?{_REPORT_TARGET}\s+)?"
             rf"(?:in\s+{_RESOURCE_NAME}\s+)?to\s+"
             rf"(?:the\s+)?(?:(?:desired|requested)\s+)?\d+\s+replicas?"
             rf"{_NAMESPACE_QUALIFIER}\s*$"

@@ -14,6 +14,7 @@ Textual composition root that drives these fixtures lives in
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -371,6 +372,11 @@ def _assertion(raw: Any, default_target: OperationTarget, label: str) -> StateAs
         raise ValueError(f"{label}: operator {operator!r} needs an 'expected' value")
     if operator not in _VALUE_OPERATORS and has_expected:
         raise ValueError(f"{label}: operator {operator!r} takes no 'expected' value")
+    expected = raw.get("expected")
+    if has_expected and expected is not None and not isinstance(expected, (str, int, float, bool)):
+        raise ValueError(f"{label}.expected must be a finite JSON scalar")
+    if isinstance(expected, float) and not math.isfinite(expected):
+        raise ValueError(f"{label}.expected must be a finite JSON scalar")
     if raw.get("provisional", True) is not True:
         raise ValueError(
             f"{label}: Slice A fake-state assertions stay provisional; promotion to "
@@ -384,7 +390,7 @@ def _assertion(raw: Any, default_target: OperationTarget, label: str) -> StateAs
         target=target,
         path=path,
         operator=str(operator),
-        expected=raw.get("expected"),
+        expected=expected,
         provisional=True,
     )
 
