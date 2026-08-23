@@ -27,6 +27,7 @@ behaviour, not on exact colours or pixel values.
 
 from __future__ import annotations
 
+import html
 import re
 from pathlib import Path
 
@@ -63,27 +64,163 @@ SCRIPTED_AGENT_OVERCLAIMS = (
 )
 
 #: Cues that turn a banned phrase into an allowed truthful denial, so a
-#: surface may state "not bounded reads" without tripping the ban.
-NEGATION_CUES = ("no ", "not ", "never ", "without ", "rather than ", "instead of ")
+#: surface may state "not bounded reads" without tripping the ban. Matched as
+#: whole words/phrases anywhere in the phrase's clause, not just immediately
+#: before it, so "not evidence of X, Y, or Z" covers the whole enumeration.
+NEGATION_CUES = ("no", "not", "never", "without", "rather than", "instead of")
+
+_NEGATION_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(cue) for cue in NEGATION_CUES) + r")\b"
+)
+
+#: `alt` and `aria-label` values are the load-bearing accessibility
+#: description of the site's media, and a prior overclaim shipped in exactly
+#: one of these attributes while the visible copy stayed honest. Tag-only
+#: stripping would discard them along with the markup, so they are extracted
+#: and decoded before the rest of the tags are dropped.
+_ATTR_VALUE = re.compile(r'\b(?:alt|aria-label)\s*=\s*"([^"]*)"', re.IGNORECASE)
+
+
+def _flatten(text: str) -> str:
+    """Normalise markup into lowercase prose for phrase scanning.
+
+    Args:
+        text: Markup or prose to scan.
+
+    Returns:
+        Lowercase, whitespace-collapsed prose containing both the visible
+        text and every decoded `alt`/`aria-label` attribute value, each
+        appended as its own sentence so a clause boundary always separates
+        one attribute's claim from the next and from the surrounding copy.
+    """
+    attribute_values = [html.unescape(match.group(1)) for match in _ATTR_VALUE.finditer(text)]
+    body = re.sub(r"<[^>]+>", " ", text)
+    combined = ". ".join([body, *attribute_values])
+    return " ".join(combined.lower().split())
+
+
+def _clause_is_negated(flattened: str, index: int) -> bool:
+    """Whether a negation cue governs the clause ending at `index`.
+
+    The clause is everything since the nearest preceding sentence terminator
+    (`.`, `!`, `?`), so a denial earlier in an unrelated sentence cannot
+    suppress a later, separate positive claim, while a negation anywhere
+    earlier in the *same* clause — including across a comma/`or` enumeration
+    — still covers a phrase buried inside it.
+    """
+    clause_start = 0
+    for terminator in re.finditer(r"[.!?]", flattened[:index]):
+        clause_start = terminator.end()
+    return bool(_NEGATION_PATTERN.search(flattened[clause_start:index]))
 
 
 def _unnegated(text: str, phrase: str) -> bool:
     """Report whether `phrase` appears in `text` as a claim rather than a denial.
 
     Args:
-        text: Markup or prose to scan; tags and whitespace are normalised away.
+        text: Markup or prose to scan; tags are normalised away but `alt`/
+            `aria-label` attribute values are folded back in first.
         phrase: The lowercase claim to look for.
 
     Returns:
-        True when at least one occurrence is not immediately preceded by a
-        negation cue.
+        True when at least one whole-word occurrence of `phrase` is not
+        governed by a negation cue anywhere earlier in its own clause.
     """
-    flattened = " ".join(re.sub(r"<[^>]+>", " ", text).lower().split())
-    for match in re.finditer(re.escape(phrase), flattened):
-        preceding = flattened[max(0, match.start() - 40) : match.start()]
-        if not any(preceding.endswith(cue) for cue in NEGATION_CUES):
+    flattened = _flatten(text)
+    pattern = re.compile(rf"(?<!\w){re.escape(phrase)}\b")
+    for match in pattern.finditer(flattened):
+        if not _clause_is_negated(flattened, match.start()):
             return True
     return False
+
+
+def test_unnegated_respects_clause_scoped_negation_across_an_enumeration() -> None:
+    """One negation governs an entire "not X, Y, or Z" enumeration.
+
+    `fresh reads` and `live tool` are only reachable here as tail fragments
+    of a longer denied claim, so a check that only looks at the word
+    immediately before the match — rather than the whole clause since the
+    negation cue — would misread each fragment as an unnegated claim.
+    """
+    text = (
+        "<p>This capture is not evidence of bounded fresh reads, "
+        "live tool execution, or validated citation.</p>"
+    )
+    for phrase in ("bounded fresh reads", "fresh reads", "live tool", "validated citation"):
+        assert not _unnegated(text, phrase), (
+            f"{phrase!r} sits inside one negated enumeration and must not be flagged"
+        )
+
+
+def test_unnegated_respects_never_across_an_or_list() -> None:
+    text = "<p>The capture never claims bounded fresh reads or validated citation.</p>"
+    for phrase in ("bounded fresh reads", "fresh reads", "validated citation"):
+        assert not _unnegated(text, phrase), (
+            f"{phrase!r} is covered by the leading 'never' and must not be flagged"
+        )
+
+
+def test_unnegated_still_flags_a_genuine_positive_claim() -> None:
+    text = "<p>This capture proves bounded fresh reads and validated citation for every answer.</p>"
+    for phrase in ("bounded fresh reads", "fresh reads", "validated citation"):
+        assert _unnegated(text, phrase), (
+            f"{phrase!r} is an unqualified positive claim and must be flagged"
+        )
+
+
+def test_unnegated_does_not_let_an_earlier_sentence_suppress_a_later_claim() -> None:
+    """A negation in one sentence must not launder an overclaim in the next."""
+    text = (
+        "<p>This capture does not execute korvid's provider or tool pipeline. "
+        "It proves bounded fresh reads for every session.</p>"
+    )
+    assert _unnegated(text, "bounded fresh reads"), (
+        "the second sentence's positive claim is a separate clause from the "
+        "first sentence's denial and must still be flagged"
+    )
+
+
+def test_unnegated_scans_alt_and_aria_label_attribute_values() -> None:
+    """Alt text and aria-label values carry load-bearing a11y claims too.
+
+    A prior overclaim shipped in exactly these attributes while the visible
+    copy stayed honest, so stripping tags wholesale — including their
+    attribute values — before scanning would have missed it again.
+    """
+    scene = (
+        '<video aria-label="Bounded fresh reads validated by live tool execution">'
+        "fallback</video>"
+        '<img alt="Validated citation for every scripted answer">'
+    )
+    assert _unnegated(scene, "bounded fresh reads"), "aria-label overclaims must be caught"
+    assert _unnegated(scene, "live tool"), "aria-label overclaims must be caught"
+    assert _unnegated(scene, "validated citation"), "alt overclaims must be caught"
+
+
+def test_unnegated_accepts_a_negated_alt_attribute() -> None:
+    scene = '<img alt="Not a claim of bounded fresh reads or validated citation">'
+    for phrase in ("bounded fresh reads", "validated citation"):
+        assert not _unnegated(scene, phrase), (
+            f"a truthfully negated alt attribute must not flag {phrase!r}"
+        )
+
+
+def test_unnegated_accepts_the_shipped_agent_scene_and_tile_copy() -> None:
+    """Regression pin: the real Agent scene and evidence tile stay clean."""
+    scene = _section('<article id="scene-agent"', "</article>")
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    card = next(
+        card
+        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
+        if "agent-poster.png" in card
+    )
+    for overclaim in SCRIPTED_AGENT_OVERCLAIMS:
+        assert not _unnegated(scene, overclaim), (
+            f"the shipped Agent scene must not claim {overclaim!r}"
+        )
+        assert not _unnegated(card, overclaim), (
+            f"the shipped agent evidence tile must not claim {overclaim!r}"
+        )
 
 
 def _index() -> str:
