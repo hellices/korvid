@@ -978,10 +978,14 @@ Delete `.feature-grid*` rules and add:
   border-color: var(--korvid-amber);
 }
 
-.md-typeset .scene-tabs button:focus-visible,
-.md-typeset .scene-panel:focus-visible {
+.md-typeset .scene-tabs button:focus-visible {
   outline: 3px solid var(--korvid-amber-bright);
   outline-offset: 3px;
+}
+
+.md-typeset .scene-panel:focus-visible {
+  outline: 3px solid var(--korvid-amber-bright);
+  outline-offset: -3px;
 }
 
 .md-typeset .scene-panels {

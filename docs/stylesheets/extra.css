@@ -334,10 +334,14 @@
   border-color: var(--korvid-amber);
 }
 
-.md-typeset .scene-tabs button:focus-visible,
-.md-typeset .scene-panel:focus-visible {
+.md-typeset .scene-tabs button:focus-visible {
   outline: 3px solid var(--korvid-amber-bright);
   outline-offset: 3px;
+}
+
+.md-typeset .scene-panel:focus-visible {
+  outline: 3px solid var(--korvid-amber-bright);
+  outline-offset: -3px;
 }
 
 .md-typeset .scene-panels {
@@ -883,10 +887,14 @@
 
 .md-typeset .hero a:focus-visible,
 .md-typeset .hero .install-command:focus-visible,
-.md-typeset .hero-demo video:focus-visible,
 .md-footer .korvid-footer a:focus-visible {
   outline: 3px solid var(--korvid-amber);
   outline-offset: 2px;
+}
+
+.md-typeset .hero-demo video:focus-visible {
+  outline: 3px solid var(--korvid-amber);
+  outline-offset: -3px;
 }
 
 /* ------------------------------------------------------------------ */

@@ -356,6 +356,36 @@ def _rule(css: str, selector: str) -> str:
     return stripped[open_brace + 1 : close_brace]
 
 
+def _selector_list(css: str, anchor: str) -> str:
+    """Return the full comma-separated selector list (prelude) for `anchor`'s rule.
+
+    Unlike `_rule`, which returns the declaration block, this returns the
+    text between the *previous* rule's closing brace and this rule's opening
+    brace — the complete prelude, including every selector the rule is
+    grouped with, regardless of where `anchor` falls in that list.
+
+    Args:
+        css: Full stylesheet text.
+        anchor: A selector substring that appears somewhere in the target
+            rule's prelude.
+
+    Returns:
+        The full selector list text for the rule containing `anchor`.
+    """
+    stripped = _strip_css_comments(css)
+    index = stripped.index(anchor)
+    open_brace = stripped.index("{", index)
+    prev_close = stripped.rfind("}", 0, index)
+    return stripped[prev_close + 1 : open_brace]
+
+
+def _outline_offset_px(rule_block: str) -> float:
+    """Parse the numeric `outline-offset` value (in px) out of a declaration block."""
+    match = re.search(r"outline-offset:\s*(-?[\d.]+)px", rule_block)
+    assert match is not None, f"expected an outline-offset declaration in {rule_block!r}"
+    return float(match.group(1))
+
+
 def _media_blocks(css: str, query: str) -> list[str]:
     """Return the brace-balanced body of every `@media <query> { … }` block.
 
@@ -461,6 +491,49 @@ def test_install_command_scroll_region_has_a_visible_focus_ring() -> None:
     css = _css()
     assert ".install-command:focus-visible" in css, (
         "the focusable install command needs a visible focus indicator"
+    )
+
+
+def test_hero_demo_video_focus_outline_is_inset_to_avoid_clipping() -> None:
+    """The frame that hosts the hero video clips overflow, so its ring must sit inside it.
+
+    `.hero-demo__frame` sets `overflow: hidden` to keep the rounded corners
+    and drop shadow tidy. A positive `outline-offset` on the video draws the
+    ring *outside* the video's border box, and the frame's clip silently
+    swallows it — a keyboard user tabs to the video and sees no focus
+    indicator at all. The video needs its own inset ring, split out of the
+    selector group that still serves the un-clipped hero links, install
+    command, and footer links (those keep their outward ring).
+    """
+    css = _css()
+    frame = _rule(css, ".md-typeset .hero-demo__frame {")
+    assert "overflow: hidden" in frame, "this test only makes sense while the frame still clips"
+
+    video_rule = _rule(css, ".md-typeset .hero-demo video:focus-visible")
+    assert re.search(r"outline\s*:\s*none\b", video_rule) is None, (
+        "the inset ring must still be a visible outline, not `outline: none`"
+    )
+    assert _outline_offset_px(video_rule) < 0, (
+        "the clipped video's focus ring must be inset (negative outline-offset), got "
+        f"{_compact(video_rule)!r}"
+    )
+
+    video_prelude = _selector_list(css, ".md-typeset .hero-demo video:focus-visible")
+    assert ".hero a:focus-visible" not in video_prelude, (
+        "the video must no longer share a selector group with the outward-focused hero "
+        "links/install-command/footer links, or their positive offset would clip it too"
+    )
+
+    outward_rule = _rule(css, ".md-typeset .hero a:focus-visible")
+    assert _outline_offset_px(outward_rule) > 0, (
+        "the un-clipped hero links must keep their outward focus ring"
+    )
+    outward_prelude = _selector_list(css, ".md-typeset .hero a:focus-visible")
+    assert ".install-command:focus-visible" in outward_prelude, (
+        "the install command must still share the outward hero focus ring"
+    )
+    assert ".korvid-footer a:focus-visible" in outward_prelude, (
+        "the footer links must still share the outward hero focus ring"
     )
 
 
@@ -767,6 +840,73 @@ def test_scene_switcher_uses_the_aria_tab_contract() -> None:
     assert switcher.count('role="tabpanel"') == 3
     assert switcher.count('aria-selected="true"') == 1
     assert switcher.count('aria-selected="false"') == 2
+
+
+def test_scene_panel_focus_outline_is_inset_to_avoid_clipping() -> None:
+    """`.scene-panels` clips overflow the same way the hero frame does.
+
+    A positive `outline-offset` on `.scene-panel:focus-visible` draws the
+    ring outside the panel's border box, and `.scene-panels { overflow:
+    hidden }` silently swallows it. The panel needs its own inset ring,
+    split out of the selector group it currently shares with the (un-clipped)
+    scene-tab buttons, which keep their outward ring.
+    """
+    css = _css()
+    container = _rule(css, ".md-typeset .scene-panels {")
+    assert "overflow: hidden" in container, (
+        "this test only makes sense while the container still clips"
+    )
+
+    panel_rule = _rule(css, ".md-typeset .scene-panel:focus-visible")
+    assert re.search(r"outline\s*:\s*none\b", panel_rule) is None, (
+        "the inset ring must still be a visible outline, not `outline: none`"
+    )
+    assert _outline_offset_px(panel_rule) < 0, (
+        "the clipped panel's focus ring must be inset (negative outline-offset), got "
+        f"{_compact(panel_rule)!r}"
+    )
+
+    panel_prelude = _selector_list(css, ".md-typeset .scene-panel:focus-visible")
+    assert ".scene-tabs button:focus-visible" not in panel_prelude, (
+        "the panel must no longer share a selector group with the outward-focused tab "
+        "buttons, or their positive offset would clip it too"
+    )
+
+    tabs_rule = _rule(css, ".md-typeset .scene-tabs button:focus-visible")
+    assert _outline_offset_px(tabs_rule) > 0, (
+        "the un-clipped scene-tab buttons must keep their outward focus ring"
+    )
+
+
+def test_visual_storytelling_plan_scene_focus_css_matches_the_shipped_rules() -> None:
+    """The plan's scene-switcher CSS snippet must stay synced with the shipped focus rules.
+
+    Step 4 of the plan embeds the scene-tabs/scene-panel focus-visible rules
+    verbatim; if the shipped stylesheet ungroups them to fix outline
+    clipping, the plan's executable snippet must ungroup identically or a
+    future re-run of the plan would reintroduce the clipped ring.
+    """
+    plan_css = _fenced_block_after(
+        _plan(),
+        "- [ ] **Step 4: Add responsive switcher styling**",
+        "css",
+    )
+    shipped_css = _css()
+
+    plan_tabs = _rule(plan_css, ".md-typeset .scene-tabs button:focus-visible")
+    shipped_tabs = _rule(shipped_css, ".md-typeset .scene-tabs button:focus-visible")
+    assert _compact(plan_tabs) == _compact(shipped_tabs)
+    assert _outline_offset_px(plan_tabs) > 0
+
+    plan_panel = _rule(plan_css, ".md-typeset .scene-panel:focus-visible")
+    shipped_panel = _rule(shipped_css, ".md-typeset .scene-panel:focus-visible")
+    assert _compact(plan_panel) == _compact(shipped_panel)
+    assert _outline_offset_px(plan_panel) < 0
+
+    plan_prelude = _selector_list(plan_css, ".md-typeset .scene-panel:focus-visible")
+    assert ".scene-tabs button:focus-visible" not in plan_prelude, (
+        "the plan snippet must not re-group the panel with the tab buttons"
+    )
 
 
 def test_only_the_visible_scene_ships_an_eagerly_fetched_poster() -> None:
