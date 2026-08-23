@@ -449,6 +449,22 @@ def _checkpoints(raw: Any, mandatory: frozenset[str], label: str) -> tuple[str, 
     return tuple(names)
 
 
+def _require_satisfiable_read_checkpoints(
+    checkpoints: tuple[str, ...],
+    preconditions: tuple[StateAssertion, ...],
+    postconditions: tuple[StateAssertion, ...],
+    label: str,
+) -> None:
+    for checkpoint, assertions, assertion_label in (
+        ("precondition_read", preconditions, "precondition"),
+        ("postcondition_read", postconditions, "postcondition"),
+    ):
+        if checkpoint in checkpoints and not assertions:
+            raise ValueError(
+                f"{label}: {checkpoint} requires at least one {assertion_label} assertion"
+            )
+
+
 def _forbidden(raw: Any, label: str) -> tuple[str, ...]:
     if raw is None:
         return ()
@@ -790,6 +806,29 @@ def load_operation_journey(path: Path) -> OperationJourney:
     cluster = _cluster(data.get("cluster"), f"{path.name}: cluster")
     if _target_count(cluster, target) != 1:
         raise ValueError(f"{path.name}: cluster must contain the exact operation target once")
+    required_checkpoints = _checkpoints(
+        operation["required_checkpoints"],
+        _mandatory_checkpoints(operation, requests, dialogs),
+        f"{path.name}: required_checkpoints",
+    )
+    preconditions = _assertions(
+        operation["preconditions"],
+        target,
+        f"{path.name}: preconditions",
+        minimum=1,
+    )
+    postconditions = _assertions(
+        operation["postconditions"],
+        target,
+        f"{path.name}: postconditions",
+        minimum=int(requests > 0 and operation["expected_outcome"] == "completed"),
+    )
+    _require_satisfiable_read_checkpoints(
+        required_checkpoints,
+        preconditions,
+        postconditions,
+        f"{path.name}: required_checkpoints",
+    )
     return OperationJourney(
         schema_version=OPERATION_SCHEMA_VERSION,
         id=_journey_id(data, f"{path.name}: journey"),
@@ -815,23 +854,9 @@ def load_operation_journey(path: Path) -> OperationJourney:
         efficiency_budget=_positive_int(
             operation["efficiency_budget"], f"{path.name}: efficiency_budget", minimum=1
         ),
-        required_checkpoints=_checkpoints(
-            operation["required_checkpoints"],
-            _mandatory_checkpoints(operation, requests, dialogs),
-            f"{path.name}: required_checkpoints",
-        ),
-        preconditions=_assertions(
-            operation["preconditions"],
-            target,
-            f"{path.name}: preconditions",
-            minimum=1,
-        ),
-        postconditions=_assertions(
-            operation["postconditions"],
-            target,
-            f"{path.name}: postconditions",
-            minimum=int(requests > 0 and operation["expected_outcome"] == "completed"),
-        ),
+        required_checkpoints=required_checkpoints,
+        preconditions=preconditions,
+        postconditions=postconditions,
         forbidden=_forbidden(operation["forbidden"], f"{path.name}: forbidden"),
         dialog_intervention=_dialog_intervention(
             operation["dialog_intervention"],

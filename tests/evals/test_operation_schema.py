@@ -539,8 +539,21 @@ def test_expected_failure_may_omit_postcondition_assertions(tmp_path: Path) -> N
     data = _minimal()
     data["operation"]["expected_outcome"] = "failed"
     data["operation"]["postconditions"] = []
+    data["operation"]["required_checkpoints"].remove("postcondition_read")
 
     assert load_operation_journey(_write(tmp_path, data)).postconditions == ()
+
+
+def test_required_postcondition_read_needs_a_postcondition_assertion(tmp_path: Path) -> None:
+    data = _minimal()
+    data["operation"]["expected_outcome"] = "failed"
+    data["operation"]["postconditions"] = []
+
+    with pytest.raises(
+        ValueError,
+        match="postcondition_read requires at least one postcondition assertion",
+    ):
+        load_operation_journey(_write(tmp_path, data))
 
 
 def test_required_checkpoints_must_be_known_and_ordered(tmp_path: Path) -> None:

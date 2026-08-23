@@ -294,6 +294,24 @@ async def test_a_sub_second_approval_window_is_refused(tmp_path: Path) -> None:
         )
 
 
+async def test_an_expired_approval_window_must_fit_inside_the_turn_timeout(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="turn_timeout must exceed approval_timeout_seconds for expired approval",
+    ):
+        await run_operation_journey(
+            _JOURNEYS["restart-approval-expired"],
+            audit_path=tmp_path / "audit.jsonl",
+            provider_factory=lambda: ScriptedProvider(
+                OPERATION_SCRIPTS["restart-approval-expired"]
+            ),
+            approval_timeout_seconds=MIN_APPROVAL_TIMEOUT,
+            turn_timeout=MIN_APPROVAL_TIMEOUT,
+        )
+
+
 async def test_a_partial_answer_from_a_failed_turn_is_not_graded(tmp_path: Path) -> None:
     run = await run_operation_journey(
         _JOURNEYS["scale-deployment-up"],

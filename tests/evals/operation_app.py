@@ -1175,13 +1175,16 @@ async def run_operation_journey(
     Raises:
         ValueError: `approval_timeout_seconds` is below
             `MIN_APPROVAL_TIMEOUT`, which would make expiry a race between
-            the dialog and the 0.05s poll rather than an observed outcome.
+            the dialog and the 0.05s poll rather than an observed outcome,
+            or an expired approval cannot fit inside `turn_timeout`.
     """
     if approval_timeout_seconds < MIN_APPROVAL_TIMEOUT:
         raise ValueError(
             f"approval_timeout_seconds must be at least {MIN_APPROVAL_TIMEOUT}s: a shorter"
             f" window can be created and expire between two 0.05s polls"
         )
+    if journey.approval == "expired" and turn_timeout <= approval_timeout_seconds:
+        raise ValueError("turn_timeout must exceed approval_timeout_seconds for expired approval")
     started = time.monotonic()
     kube = StatefulFakeKubeClient(journey.cluster)
     journal = ActionJournal()
@@ -1223,7 +1226,7 @@ async def run_operation_journey(
         journey,
         journal,
         kube.state,
-        expiry_timeout=approval_timeout_seconds * 10 + 2.0,
+        expiry_timeout=min(approval_timeout_seconds * 10 + 2.0, turn_timeout),
     )
     try:
         async with app.run_test() as pilot:
