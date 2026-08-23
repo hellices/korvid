@@ -142,9 +142,8 @@ class AgentPanelPort(ABC):
         output_tokens: int,
         *,
         estimated: bool,
-        profile: str,
     ) -> None:
-        """Render the live runtime's model, usage and capability profile."""
+        """Render the live runtime's model and token usage."""
 
     @abstractmethod
     def show_setup_hint(self) -> None:
@@ -502,12 +501,10 @@ class AgentUiController:
         self._available = available
         settings = config()
         self._settings: AgentSettings | None = None
-        #: capability profile of the live runtime (issue #71); shown in the
-        #: agent panel header so users know which mode the agent runs in.
-        self._profile = settings.agent_profile or "full"
-        #: profile as explicitly configured (None = unset) — the `:ai`
-        #: wizard only suggests `small` for Ollama when this is unset.
-        self._configured_profile = settings.agent_profile
+        #: model tier as explicitly configured (None = Automatic) — seeds
+        #: the `:ai` wizard's tier step and `:model` rebuilds so an
+        #: explicit low/high override survives across them.
+        self._configured_tier = settings.agent_model_tier
         # A runtime built from config.yaml at startup must seed the settings
         # snapshot so :model works without running the :ai wizard first.
         if runtime is not None and settings.agent_provider and settings.agent_model:
@@ -517,7 +514,7 @@ class AgentUiController:
                 base_url=settings.agent_base_url,
                 model=settings.agent_model,
                 api_key_env=settings.agent_api_key_env,
-                profile=settings.agent_profile or "full",
+                model_tier=settings.agent_model_tier,
                 options=settings.agent_options,
             )
         #: Agent follow: mirror the built-in agent's cluster reads on screen
@@ -565,9 +562,10 @@ class AgentUiController:
         return self._model_name
 
     @property
-    def profile(self) -> str:
-        """Capability profile the live runtime runs in (issue #71)."""
-        return self._profile
+    def configured_model_tier(self) -> str | None:
+        """Explicitly configured model tier (None = Automatic), as last set
+        by config.yaml or the `:ai` wizard."""
+        return self._configured_tier
 
     @property
     def settings(self) -> AgentSettings | None:
@@ -713,7 +711,7 @@ class AgentUiController:
             AgentSetupScreen(
                 self._configurator,
                 apply_settings=self.apply_settings,
-                current_profile=self._configured_profile,
+                current_tier=self._configured_tier,
                 current_settings=self._settings,
             )
         )
@@ -804,10 +802,9 @@ class AgentUiController:
         self._disconnected = False  # reconnected (issue #167)
         self._model_name = settings.model
         self._settings = settings
-        self._profile = settings.profile
-        # Once applied (and persisted by the wizard) the profile is an
-        # explicit choice — reopening :ai must preserve it.
-        self._configured_profile = settings.profile
+        # Once applied (and persisted by the wizard) the tier is an explicit
+        # choice — reopening :ai must preserve it.
+        self._configured_tier = settings.model_tier
         self._refresh_status()
         # Always re-enable: the hint may have disabled the input while the
         # panel was open earlier; only focus/header rendering depends on
@@ -820,7 +817,6 @@ class AgentUiController:
                 in_tok,
                 out_tok,
                 estimated=runtime.usage_estimated,
-                profile=settings.profile,
             )
             self._panel.focus_input()
         return True
@@ -853,7 +849,6 @@ class AgentUiController:
                 in_tok,
                 out_tok,
                 estimated=self._runtime.usage_estimated,
-                profile=self._profile,
             )
         self._panel.focus_input()
 

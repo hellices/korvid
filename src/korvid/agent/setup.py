@@ -33,8 +33,9 @@ class AgentSettings:
     base_url: str | None
     model: str
     api_key_env: str | None = None
-    #: Model-capability profile (issue #71): `full` or `small`.
-    profile: str = "full"
+    #: Explicit model-capability tier override: `low`, `high`, or `None`
+    #: for automatic routing (replaces the old `full`/`small` profile).
+    model_tier: str | None = None
     options: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

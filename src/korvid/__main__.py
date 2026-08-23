@@ -28,6 +28,7 @@ from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
+    ConfigMigrationError,
     KorvidConfig,
     ObservabilityBackend,
     context_is_protected,
@@ -78,7 +79,7 @@ if TYPE_CHECKING:
     # Embedded-agent types appear only in annotations here: an MCP-only or
     # base install must never import the agent runtime or provider ABC at
     # startup (issue #73 acceptance criterion).
-    from korvid.agent.profiles import AgentProfile, PromptOverrides
+    from korvid.agent.profiles import AgentProfile
     from korvid.agent.provider import LLMProvider
     from korvid.agent.runtime import AgentRuntime
 
@@ -651,37 +652,36 @@ def _create_initial_provider(
         return None
 
 
-def _prompt_overrides(config: KorvidConfig) -> PromptOverrides:
-    """Configured prompt slots (`agent.prompts`) as the agent layer wants them."""
-    from korvid.agent.profiles import PromptOverrides
+def _tier_to_legacy_profile(model_tier: str | None) -> str:
+    """Temporary bridge (Task 5) from `agent.model_tier` to the old
+    full/small profile split in `agent/profiles.py`.
 
-    return PromptOverrides(
-        system=config.agent_prompt_system,
-        append=config.agent_prompt_append,
-        tool_descriptions=config.agent_prompt_tool_descriptions,
-    )
+    `high` and unset/Automatic both mean "run at full capability" — today's
+    default, unchanged for anyone who never opts into a tier; only `low`
+    reduces the tool surface, budgets, and prompt for small local models.
+    Task 12/14 replace this with real tier-aware routing and this function
+    should be deleted then; it is deliberately private (not exported).
+    """
+    return "small" if model_tier == "low" else "full"
 
 
 def _initial_profile(
     config: KorvidConfig,
-    overrides: PromptOverrides,
     pod_resize_supported: bool,
     startup_warnings: list[str] | None,
     observability_backends: frozenset[str] = frozenset(),
 ) -> AgentProfile:
-    """The starting capability profile, reporting advisory prompt warnings.
+    """The starting capability profile (see `_tier_to_legacy_profile`).
 
-    Unusable slots have already fallen back to the shipped prompt during
-    config parsing. What is reported here is advisory and leaves the
-    configured prompt **active**: an override naming an unknown tool (the
-    remaining overrides still apply), and a prompt large enough to crowd
-    the profile's history budget, which is used as configured. Neither is
-    ever fatal.
+    `agent.prompts` was removed (issue: agent.rules replaces it), so the
+    old-runtime profile is always built with empty prompt overrides here;
+    `agent.rules` consumption is a later task's scope.
     """
-    from korvid.agent.profiles import build_profile, validate_prompt_overrides
+    from korvid.agent.profiles import PromptOverrides, build_profile, validate_prompt_overrides
 
+    overrides = PromptOverrides()
     profile = build_profile(
-        config.agent_profile or "full",
+        _tier_to_legacy_profile(config.agent_model_tier),
         readonly=config.readonly,
         resize_supported=pod_resize_supported,
         observability_backends=observability_backends,
@@ -732,7 +732,7 @@ def _build_agent_wiring(
     # Deferred behind the capability probe: the embedded-agent loop is only
     # composed when this wiring is actually built (issue #73 requires
     # MCP-only startups not to import AgentRuntime at all).
-    from korvid.agent.profiles import build_profile
+    from korvid.agent.profiles import PromptOverrides, build_profile
     from korvid.agent.runtime import AgentRuntime
     from korvid.providers.configurator import ProviderConfigurator
     from korvid.providers.ollama import OllamaOptions
@@ -746,13 +746,11 @@ def _build_agent_wiring(
     # prompts come from one place so the initial build and every wizard
     # rebuild stay consistent. In readonly mode the model is never even
     # told write tools exist; resize is offered only when discovery found
-    # pods/resize (1.35 GA). `agent.prompts` swaps the role statement and
-    # tool wording only — the write/no-write and UI clauses stay conditional
-    # on what is actually armed.
-    prompt_overrides = _prompt_overrides(config)
-    profile = _initial_profile(
-        config, prompt_overrides, pod_resize_supported, startup_warnings, obs.backends
-    )
+    # pods/resize (1.35 GA). `agent.model_tier` (see `_tier_to_legacy_profile`)
+    # is the only knob left for the old full/small split; prompt overrides
+    # are always empty now that `agent.prompts` is gone.
+    prompt_overrides = PromptOverrides()
+    profile = _initial_profile(config, pod_resize_supported, startup_warnings, obs.backends)
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     ollama_options = OllamaOptions(
         num_ctx=config.agent_ollama_num_ctx,
@@ -811,7 +809,7 @@ def _build_agent_wiring(
             base_url=settings.base_url,
             model=settings.model,
             api_key_env=settings.api_key_env,
-            profile=settings.profile,
+            model_tier=settings.model_tier,
         )
 
     configurator = ProviderConfigurator(
@@ -849,7 +847,7 @@ def _build_agent_wiring(
         # raises, close the new provider exactly once and leave old state live.
         try:
             new_profile = build_profile(
-                settings.profile,
+                _tier_to_legacy_profile(settings.model_tier),
                 readonly=config.readonly,
                 resize_supported=resize_box[0],
                 observability_backends=obs.backends,
@@ -958,7 +956,13 @@ def _validate_ca_bundle(path: str | None) -> None:
 def _load_startup_config(
     readonly: bool, mcp: bool = False, namespace: str | None = None
 ) -> KorvidConfig:
-    config = load_config()
+    try:
+        config = load_config()
+    except ConfigMigrationError as exc:
+        # One clear, actionable line — never an unfiltered traceback — and
+        # unconditional: a stale removed key must fail startup even when
+        # the agent block would otherwise be disabled.
+        raise SystemExit(f"korvid: {exc}") from exc
     _validate_ca_bundle(config.network_ca_bundle)
     if readonly:
         config = dataclasses.replace(config, readonly=True)
