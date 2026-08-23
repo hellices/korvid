@@ -27,6 +27,11 @@ Users who do not need conversational control must be able to install and run the
 complete non-agent TUI without agent frameworks, provider clients, or credential
 dependencies.
 
+Implementation may use temporary adapters and side-by-side contract tests on the
+development branch, but the pull request represents a complete replacement. It
+is opened only after Agent v2 is the sole optional agent implementation and the
+old runtime plus transition scaffolding have been deleted.
+
 ## Representative Journeys
 
 ### Direct control to conversation
@@ -84,6 +89,39 @@ This refactor builds a korvid-specific control harness with five responsibilitie
 
 Prompt composition, high/low routing, and framework selection serve those
 responsibilities. None is the product goal by itself.
+
+## Pre-1.0 Change Policy
+
+korvid and its agent feature are still pre-1.0. This work may make deliberate
+breaking changes when preserving the current shape would compromise the
+interaction harness:
+
+- replace agent-facing Python interfaces rather than wrap every legacy method;
+- change provider capability and backend plugin contracts;
+- change agent configuration keys and accepted values;
+- change internal event, prompt-pack, tool-schema, transcript, and eval formats;
+- reorganize TUI/controller boundaries needed for shared human-agent state;
+- remove `AgentProfile`, `build_profile`, `AgentRuntime`, and temporary v1
+  adapters without a long deprecation period.
+
+Compatibility shims are optional migration tools, not architectural
+requirements. Retain one only when it is small, explicit, tested, and scheduled
+for removal. Obsolete configuration must fail with an actionable migration
+message rather than silently selecting different behavior.
+
+This permission does **not** relax product and security invariants:
+
+- the non-agent TUI must remain usable without agent dependencies;
+- air-gapped local-model operation must not acquire a cloud dependency;
+- writes still require keystroke approval, context/UID revalidation, and
+  fail-closed audit;
+- Secret masking, outbound sanitization, exact payload inspection, cancellation
+  repair, and evidence identity remain mandatory;
+- changes to direct TUI behavior must serve the shared interaction model and be
+  covered by user-journey tests.
+
+The project should prefer the clean target contract over compatibility layers,
+then document breaking changes in release and migration notes.
 
 ## Non-goals
 
@@ -347,9 +385,11 @@ Routing precedence is:
 No online catalog lookup occurs. No model-name substring or parameter-count
 heuristic participates in routing.
 
-Legacy `full` maps to `high` and `small` maps to `low` during migration. A model
-change always re-runs routing; it cannot silently keep a stale tier from the
-previous model.
+The temporary v1 adapter may map legacy `full` to `high` and `small` to `low` so
+existing behavior can be compared during development. Agent v2 may replace
+those values with explicit `low` and `high` configuration. A removed value must
+produce an actionable migration error. A model change always re-runs routing;
+it cannot silently keep a stale tier from the previous model.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -478,20 +518,17 @@ Textual app, Kubernetes client, or write adapter.
 An engine framework that cannot operate through this gateway without
 reimplementing most of itself is not suitable.
 
-### 9. Optional backend wiring
+### 9. Optional agent wiring
 
 `__main__.py` lazily constructs the agent feature when enabled. Base UI modules
 may reference agent interfaces only behind existing type-checking/lazy import
 patterns.
 
-The first release uses explicit shipped backend IDs rather than third-party
-discovery:
-
-- `v1`: compatibility adapter around the current implementation;
-- `v2`: the selected replacement engine.
-
-The backend is selected at startup. Model changes rebuild a session using the
-same backend and a newly resolved policy. Runtime hot-plug is unnecessary.
+During branch development, a temporary v1 adapter may let shared contracts run
+against the old implementation. It is test scaffolding, not a shipped backend.
+The replacement PR contains one Agent v2 implementation selected when the
+optional agent feature is enabled. Model changes rebuild a session using a newly
+resolved policy. Runtime hot-plug is unnecessary.
 
 If the agent extra is missing and the user explicitly enabled it, startup shows
 an install hint. If the agent was not requested, the TUI starts without loading
@@ -673,9 +710,11 @@ Subprocess tests prove:
 - local-provider scenarios perform no external network request;
 - the TUI remains usable with the agent entirely absent.
 
-## Migration and Cutover
+## Implementation and Cutover
 
-Each step is a separate reviewable PR under #316.
+The steps below are checkpoints on one branch. Commit and review them
+independently, but do not open a pull request while both implementations,
+temporary adapters, opt-in flags, or migration-only backend selection remain.
 
 1. **Interaction contracts and v1 adapter**
    - Add typed interaction context, UI bridge, session, engine, policy, and
@@ -699,17 +738,22 @@ Each step is a separate reviewable PR under #316.
      usage, rebuild, retarget, and close behavior.
    - Keep all UI and cluster effects on retained korvid ports.
 
-5. **Opt-in and journey parity**
-   - Expose `agent.backend = "v2"` as an explicit opt-in.
+5. **Replacement rehearsal and journey parity**
+   - Exercise v2 as the only runtime in test and local-run configurations.
    - Run interaction, safety, optional-install, offline, and low/high eval gates.
    - Fix v2 rather than adding new behavior to v1.
 
-6. **Default and deletion**
-   - Make v2 the default after every gate passes.
-   - Remove v1, `AgentProfile`, `build_profile`, and `AgentRuntime`.
+6. **Pre-PR deletion and final gate**
+   - Remove v1, temporary adapters, opt-in flags, migration backend selection,
+     `AgentProfile`, `build_profile`, and `AgentRuntime`.
+   - Make Agent v2 the sole implementation whenever the optional agent feature
+     is enabled.
    - Retain public behavior, safety, journey, and eval tests.
-   - Keep documented `full`/`small` configuration aliases for the migration
-     window.
+   - Remove obsolete aliases and compatibility shims; document exact
+     configuration and plugin migration steps.
+   - Run the complete repository gate and a real local TUI/Ollama journey.
+   - Open the pull request only after the worktree contains no old
+     implementation and every gate passes.
 
 The old implementation receives only correctness or security fixes during the
 replacement.
@@ -730,5 +774,6 @@ replacement.
 - Prompt/model specialization is exact-match, versioned, and eval-backed.
 - Every backend is forced through the same request, tool, UI, approval, masking,
   and audit boundaries.
-- Agent v2 becomes the default and the current profile/runtime implementation is
-  deleted.
+- The pull request contains Agent v2 as the sole optional agent implementation;
+  the current profile/runtime implementation and all transition scaffolding are
+  deleted before review begins.
