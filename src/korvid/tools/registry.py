@@ -391,7 +391,7 @@ def mcp_tool_schemas(
 
 
 _ALL_SURFACES: frozenset[Surface] = frozenset({"high_agent", "low_agent", "mcp"})
-_FULL_AND_MCP: frozenset[Surface] = frozenset({"high_agent", "mcp"})
+_HIGH_AND_MCP: frozenset[Surface] = frozenset({"high_agent", "mcp"})
 #: Surfaces an embedded-agent profile can offer. Public because callers
 #: outside this module need to tell "not armed on this cluster" apart from
 #: "no agent profile can ever offer this" (e.g. the MCP-only proposal tools).
@@ -746,7 +746,7 @@ TOOL_DEFS: list[ToolDef] = [
         name="query_metrics",
         effect="external_read",
         dispatch="_query_metrics",
-        surfaces=_FULL_AND_MCP,
+        surfaces=_HIGH_AND_MCP,
         result_format="untrusted_text",
         capability="metrics_backend",
         schema={
@@ -806,7 +806,7 @@ TOOL_DEFS: list[ToolDef] = [
         name="search_logs",
         effect="external_read",
         dispatch="_search_logs",
-        surfaces=_FULL_AND_MCP,
+        surfaces=_HIGH_AND_MCP,
         result_format="untrusted_text",
         capability="logs_backend",
         schema={
@@ -870,7 +870,7 @@ TOOL_DEFS: list[ToolDef] = [
         name="navigate",
         effect="ui_only",
         dispatch="agent_navigate",
-        surfaces=_FULL_AND_MCP,
+        surfaces=_HIGH_AND_MCP,
         result_format="untrusted_text",
         schema={
             "type": "function",
@@ -907,7 +907,7 @@ TOOL_DEFS: list[ToolDef] = [
         name="set_filter",
         effect="ui_only",
         dispatch="agent_set_filter",
-        surfaces=_FULL_AND_MCP,
+        surfaces=_HIGH_AND_MCP,
         result_format="untrusted_text",
         schema={
             "type": "function",
@@ -1002,7 +1002,7 @@ TOOL_DEFS: list[ToolDef] = [
         name="drill_down",
         effect="ui_only",
         dispatch="agent_drill_down",
-        surfaces=_FULL_AND_MCP,
+        surfaces=_HIGH_AND_MCP,
         result_format="untrusted_text",
         schema={
             "type": "function",
