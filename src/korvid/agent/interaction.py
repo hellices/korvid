@@ -17,9 +17,9 @@ class ResourceIdentity:
     """Stable identity for a selected Kubernetes resource."""
 
     kind: str
-    namespace: str
+    namespace: str | None
     name: str
-    uid: str
+    uid: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +56,7 @@ class Navigate:
     """Change the primary resource view."""
 
     view: str
-    namespace: str = ""
+    namespace: str | None = None
 
     def __post_init__(self) -> None:
         _require_nonblank(self.view, "view")
@@ -78,9 +78,9 @@ class SelectResource:
     """Select a specific resource in the focused pane."""
 
     kind: str
-    namespace: str = ""
-    name: str = ""
-    uid: str = ""
+    name: str
+    namespace: str | None = None
+    uid: str | None = None
 
     def __post_init__(self) -> None:
         _require_nonblank(self.kind, "kind")
@@ -100,22 +100,48 @@ class FocusPane:
 
 @dataclass(frozen=True, slots=True)
 class OpenLogs:
-    """Open logs for the current selection."""
+    """Open logs for an exact pod target."""
+
+    pod: str
+    namespace: str
+    container: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_nonblank(self.pod, "pod")
+        _require_nonblank(self.namespace, "namespace")
 
 
 @dataclass(frozen=True, slots=True)
 class OpenDescribe:
-    """Open the describe pane for the current selection."""
+    """Open the describe pane for an exact resource target."""
+
+    kind: str
+    name: str
+    namespace: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_nonblank(self.kind, "kind")
+        _require_nonblank(self.name, "name")
 
 
 @dataclass(frozen=True, slots=True)
 class DrillDown:
-    """Drill into the current selection."""
+    """Drill into a named item."""
+
+    name: str
+
+    def __post_init__(self) -> None:
+        _require_nonblank(self.name, "name")
 
 
 @dataclass(frozen=True, slots=True)
 class OpenEvidence:
-    """Open evidence linked to the current timeline cursor."""
+    """Open evidence linked to an exact reference."""
+
+    ref: str
+
+    def __post_init__(self) -> None:
+        _require_nonblank(self.ref, "ref")
 
 
 UiAction: TypeAlias = (
@@ -149,22 +175,3 @@ class AgentUiBridge(ABC):
     @abstractmethod
     async def apply(self, action: UiAction) -> UiActionResult:
         """Apply one typed action to the workspace."""
-
-
-__all__ = [
-    "AgentUiBridge",
-    "ClusterFacts",
-    "DrillDown",
-    "FocusPane",
-    "InteractionContext",
-    "Navigate",
-    "OpenDescribe",
-    "OpenEvidence",
-    "OpenLogs",
-    "PaneContext",
-    "ResourceIdentity",
-    "SelectResource",
-    "SetFilter",
-    "UiAction",
-    "UiActionResult",
-]
