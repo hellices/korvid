@@ -228,6 +228,48 @@ def test_low_tier_never_allows_parallel_even_if_reported() -> None:
     assert policy.allow_parallel_tool_calls is False
 
 
+def test_high_tier_catalog_parallel_true_with_unknown_provider_denies_parallel() -> None:
+    """Parallel permission reads the provider fact directly, not the merged one.
+
+    A catalog `supports_parallel_tools=True` still fills the *merged*
+    capability (and its provenance stays CATALOG) when the provider is
+    silent, but `allow_parallel_tool_calls` must not honor that catalog
+    provenance: only a provider-confirmed `True` unlocks parallel calls.
+    """
+    r = router(
+        catalog_capabilities=ModelCapabilities(
+            recommended_tier=ModelTier.HIGH, supports_parallel_tools=True
+        )
+    )
+    policy = r.resolve(
+        descriptor=ModelDescriptor("test", "model"),
+        provider_capabilities=capabilities(supports_parallel_tools=None),
+        explicit_tier=None,
+        environment=environment(),
+    )
+    assert policy.capabilities.supports_parallel_tools is True
+    assert policy.capabilities.provenance["supports_parallel_tools"] is CapabilitySource.CATALOG
+    assert policy.allow_parallel_tool_calls is False
+
+
+def test_high_tier_catalog_parallel_true_with_provider_false_denies_parallel() -> None:
+    """A provider-confirmed `False` still wins over a catalog `True`."""
+    r = router(
+        catalog_capabilities=ModelCapabilities(
+            recommended_tier=ModelTier.HIGH, supports_parallel_tools=True
+        )
+    )
+    policy = r.resolve(
+        descriptor=ModelDescriptor("test", "model"),
+        provider_capabilities=capabilities(supports_parallel_tools=False),
+        explicit_tier=None,
+        environment=environment(),
+    )
+    assert policy.capabilities.supports_parallel_tools is False
+    assert policy.capabilities.provenance["supports_parallel_tools"] is CapabilitySource.PROVIDER
+    assert policy.allow_parallel_tool_calls is False
+
+
 # ---------------------------------------------------------------------------
 # deep immutability
 # ---------------------------------------------------------------------------
