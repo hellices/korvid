@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.util
+import math
 import re
 import struct
 import sys
@@ -110,21 +111,32 @@ def _png_size(path: Path) -> tuple[int, int]:
     return struct.unpack(">II", payload[16:24])
 
 
-def _png_pixel_aspect(path: Path) -> tuple[int, int]:
-    """The pixel aspect ratio a PNG declares, defaulting to square.
+def _png_pixel_aspect(path: Path) -> tuple[int, int, int]:
+    """The pixel aspect ratio a PNG declares, reduced to lowest terms.
 
     A `pHYs` chunk with unit specifier 0 declares an aspect ratio rather than
-    a physical density (RFC 2083 section 4.2.4.2), and either form scales the
-    rendered image the same way. ffmpeg copies the decoded frame's sample
-    aspect ratio into it, so a poster cut from a non-square-pixel clip
+    a physical density (RFC 2083 section 4.2.4.2); unit 1 declares a physical
+    density in pixels per metre instead. Either form scales the rendered
+    image the same way as long as the horizontal and vertical values are
+    equal, so `(2835, 2835, unit=1)` (72 dpi) and `(2, 2, unit=0)` are both
+    square, exactly like the default. ffmpeg copies the decoded frame's
+    sample aspect ratio into it, so a poster cut from a non-square-pixel clip
     inherits the same disagreement with its own `width`/`height`. An absent
     chunk means square pixels.
+
+    Returns:
+        `(horizontal, vertical, unit)` with `horizontal`/`vertical` divided
+        by their GCD, so square declarations always reduce to `(1, 1, ...)`
+        regardless of the raw density or aspect-ratio values used to state
+        them. `unit` is `0` when the chunk is absent, matching an aspect
+        ratio's own "no physical unit" meaning.
     """
     for kind, body in _png_chunks(path.read_bytes()):
         if kind == b"pHYs":
-            horizontal, vertical, _ = struct.unpack(">IIB", body)
-            return horizontal, vertical
-    return 1, 1
+            horizontal, vertical, unit = struct.unpack(">IIB", body)
+            divisor = math.gcd(horizontal, vertical) or 1
+            return horizontal // divisor, vertical // divisor, unit
+    return 1, 1, 0
 
 
 def _png_chunks(payload: bytes) -> Iterator[tuple[bytes, bytes]]:
@@ -339,6 +351,16 @@ def _band_deviation(rows: list[bytearray], top: int, bottom: int, channels: int)
     return worst
 
 
+def _png_chunk(kind: bytes, body: bytes) -> bytes:
+    """Frame one PNG chunk with its length and CRC (RFC 2083 section 3.2)."""
+    return (
+        struct.pack(">I", len(body))
+        + kind
+        + body
+        + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+    )
+
+
 def _encode_png(width: int, rows: Sequence[Sequence[int]], *, colour: int) -> bytes:
     """Encode 8-bit non-interlaced rows as a PNG stream (filter type 0).
 
@@ -350,22 +372,31 @@ def _encode_png(width: int, rows: Sequence[Sequence[int]], *, colour: int) -> by
     Returns:
         The PNG stream `_decode_png_bytes` reads back.
     """
-
-    def chunk(kind: bytes, body: bytes) -> bytes:
-        return (
-            struct.pack(">I", len(body))
-            + kind
-            + body
-            + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
-        )
-
     header = struct.pack(">IIBBBBB", width, len(rows), 8, colour, 0, 0, 0)
     raw = b"".join(b"\x00" + bytes(row) for row in rows)
     return (
         b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", header)
-        + chunk(b"IDAT", zlib.compress(raw))
-        + chunk(b"IEND", b"")
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(raw))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _png_with_pixel_aspect(*, horizontal: int, vertical: int, unit: int) -> bytes:
+    """A minimal valid 1x1 RGB PNG carrying a `pHYs` chunk before its `IDAT`.
+
+    Used to prove `_png_pixel_aspect` reads declared axes/unit correctly
+    without depending on any real asset in `docs/assets/scenes`.
+    """
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    raw = b"\x00\xff\xff\xff"
+    phys = struct.pack(">IIB", horizontal, vertical, unit)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"pHYs", phys)
+        + _png_chunk(b"IDAT", zlib.compress(raw))
+        + _png_chunk(b"IEND", b"")
     )
 
 
@@ -668,12 +699,70 @@ def test_storytelling_pngs_meet_their_declared_size_and_byte_budget() -> None:
         assert actual_width == width
         assert min_height <= actual_height <= max_height
         assert path.stat().st_size <= 900_000
-        assert _png_pixel_aspect(path) == (1, 1), (
-            f"{name} declares non-square pixels {_png_pixel_aspect(path)}, so the "
-            f"{actual_width}x{actual_height} box the site reserves is not the box a "
-            "browser draws; cut the frame from a square-pixel source instead of "
-            "widening the reservation"
+        horizontal, vertical, unit = _png_pixel_aspect(path)
+        assert horizontal == vertical, (
+            f"{name} declares non-square pixels {horizontal}:{vertical} "
+            f"(pHYs unit={unit}), so the {actual_width}x{actual_height} box the "
+            "site reserves is not the box a browser draws; cut the frame from a "
+            "square-pixel source instead of widening the reservation"
         )
+
+
+def test_png_pixel_aspect_accepts_square_pixels_declared_as_a_density(
+    tmp_path: Path,
+) -> None:
+    """A 72 dpi `pHYs` chunk (unit=1, physical density) is still square.
+
+    `(2835, 2835)` pixels-per-metre is the common 72 dpi density ffmpeg (and
+    many other encoders) writes for "no particular density"; it must not be
+    mistaken for a non-square declaration just because the raw values are
+    not literally `1`.
+    """
+    path = tmp_path / "dpi-square.png"
+    path.write_bytes(_png_with_pixel_aspect(horizontal=2835, vertical=2835, unit=1))
+
+    assert _png_pixel_aspect(path) == (1, 1, 1), (
+        f"{_png_pixel_aspect(path)} should reduce a 72 dpi density to a square ratio"
+    )
+
+
+def test_png_pixel_aspect_accepts_square_pixels_declared_as_a_ratio(
+    tmp_path: Path,
+) -> None:
+    """A small `(2, 2, unit=0)` aspect-ratio declaration is also square."""
+    path = tmp_path / "ratio-square.png"
+    path.write_bytes(_png_with_pixel_aspect(horizontal=2, vertical=2, unit=0))
+
+    assert _png_pixel_aspect(path) == (1, 1, 0), (
+        f"{_png_pixel_aspect(path)} should reduce a (2, 2) aspect ratio to (1, 1)"
+    )
+
+
+def test_png_pixel_aspect_rejects_a_genuinely_non_square_declaration(
+    tmp_path: Path,
+) -> None:
+    """The regression this contract exists for: unequal axes must still fail."""
+    path = tmp_path / "non-square.png"
+    path.write_bytes(_png_with_pixel_aspect(horizontal=2485, vertical=2528, unit=0))
+
+    horizontal, vertical, unit = _png_pixel_aspect(path)
+    assert horizontal != vertical, (
+        f"{horizontal}:{vertical} (unit={unit}) is genuinely non-square and must "
+        "not be reported as square"
+    )
+
+
+def test_png_pixel_aspect_defaults_to_square_without_a_phys_chunk(
+    tmp_path: Path,
+) -> None:
+    """A PNG with no `pHYs` chunk at all is the implicit square-pixel case."""
+    path = tmp_path / "no-phys.png"
+    path.write_bytes(_encode_png(1, [[255, 255, 255]], colour=2))
+    assert not any(kind == b"pHYs" for kind, _ in _png_chunks(path.read_bytes())), (
+        "this fixture must not carry a pHYs chunk for the default to be exercised"
+    )
+
+    assert _png_pixel_aspect(path) == (1, 1, 0)
 
 
 def test_storytelling_motion_assets_are_local_mp4_files_with_a_size_budget() -> None:
