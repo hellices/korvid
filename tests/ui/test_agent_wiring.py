@@ -650,6 +650,119 @@ async def test_model_command_works_after_configured_startup() -> None:
         assert dict(saved[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
 
 
+async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
+    """A startup that degraded to "AI off" is recoverable through `:model`.
+
+    Composing the session at startup can fail on a model the router
+    refuses (a provider reporting `supports_tools=False`) while config.yaml
+    still names a perfectly good provider, endpoint and auth method. The
+    settings snapshot the recovery edits comes from *config*, so the fix
+    is one `:model <name>` — not a full re-run of the `:ai` wizard, which
+    would ask the operator to retype everything korvid already knows.
+    """
+    from korvid.agent.setup import AgentConfigurator, AgentSettings
+    from korvid.ui.messages import UnknownCommand
+
+    saved: list[AgentSettings] = []
+
+    class Cfg(AgentConfigurator):
+        async def begin_device_login(self) -> Any:
+            raise NotImplementedError
+
+        async def finish_device_login(self) -> None:
+            raise NotImplementedError
+
+        async def test(self, settings: Any) -> str:
+            return "ok"
+
+        async def list_models(self, settings: Any) -> list[str]:
+            return []
+
+        async def save(self, settings: AgentSettings) -> None:
+            saved.append(settings)
+
+    rebuilt = StubSession([])
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        yield ("ADDED", _pod("web-1"))
+        while True:
+            await asyncio.sleep(0.01)
+
+    app = KorvidApp(
+        config=KorvidConfig(
+            namespace="default",
+            agent_enabled=True,
+            agent_provider="ollama",
+            agent_base_url="http://localhost:11434/v1",
+            agent_model="text-only-model",
+            agent_auth_method="none",
+            agent_model_tier="low",
+        ),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        # The composition root degraded: a provider it could not route.
+        agent_session=None,
+        agent_model_name=None,
+        agent_configurator=Cfg(),
+        rebuild_agent=lambda s: rebuilt,
+    )
+    async with app.run_test() as pilot:
+        assert app._agent_ui.session is None
+        app.on_unknown_command(UnknownCommand("model llama3"))
+        await until(
+            pilot,
+            lambda: app._agent_ui.session is rebuilt,
+            label="degraded startup recovered by :model",
+        )
+        assert app._agent_ui._model_name == "llama3"
+        assert saved
+        assert saved[-1].provider == "ollama"
+        assert saved[-1].base_url == "http://localhost:11434/v1"
+        assert saved[-1].model_tier == "low"  # the configured override survives
+        assert not any("not configured" in str(n.message).lower() for n in app._notifications)
+
+
+async def test_a_degraded_startup_shows_a_usable_panel_after_recovery() -> None:
+    """And the panel comes back as a working agent: header rendered, input
+    enabled — never the never-configured setup wipe."""
+    rebuilt = StubSession([], policy=fake_policy(tier=ModelTier.LOW))
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        yield ("ADDED", _pod("web-1"))
+        while True:
+            await asyncio.sleep(0.01)
+
+    app = KorvidApp(
+        config=KorvidConfig(
+            namespace="default",
+            agent_enabled=True,
+            agent_provider="ollama",
+            agent_base_url="http://localhost:11434/v1",
+            agent_model="text-only-model",
+            agent_auth_method="none",
+        ),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        agent_session=None,
+        agent_model_name=None,
+        rebuild_agent=lambda s: rebuilt,
+    )
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")
+        settings = app._agent_ui.settings
+        assert settings is not None
+        assert app._agent_ui.apply_settings(settings) is True
+        await until(
+            pilot,
+            lambda: "text-only-model" in _header_text(app),
+            label="header rendered after recovery",
+        )
+        inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
+        assert inp.disabled is False
+
+
 async def test_apply_agent_settings_notifies_on_rebuild_failure() -> None:
     from korvid.agent.setup import AgentSettings
 

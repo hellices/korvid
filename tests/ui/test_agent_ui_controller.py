@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from korvid.agent.events import (
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
+    TurnComplete,
     TurnInterrupted,
 )
 from korvid.agent.evidence import EvidenceLedger
@@ -362,6 +364,54 @@ class ScriptedSession(FakeSession):
         super().__init__(events or [], gate=gate, tokens=(1, 2), **kwargs)
 
 
+class StrictSession(ScriptedSession):
+    """A scripted session that enforces the live idle contract.
+
+    `DefaultAgentSession.run_turn` refuses a turn while the previous one
+    still holds the session — the turn is given back only when its
+    generator is driven to the end *or* closed. A fake that lets the next
+    turn start regardless would hide exactly the failure this pins: a
+    consumer that raises mid-stream abandons the generator suspended at
+    its yield, and every later turn is then refused for the life of the
+    session.
+    """
+
+    def __init__(
+        self,
+        events: list[AgentEvent] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(events, **kwargs)
+        self.started = 0
+
+    def run_turn(self, user_text: str) -> AsyncIterator[AgentEvent]:
+        if self.started != self.iterators_released or self.finalization_pending:
+            raise RuntimeError("a turn is already running")
+        self.started += 1
+        return super().run_turn(user_text)
+
+
+class ExplodingPanel(FakePanel):
+    """A panel that fails while rendering one streamed event.
+
+    Models the real failure mode: a widget operation raising deep inside
+    `apply_event` (a torn-down node, a broken markup render) while the
+    session's generator is suspended at the yield that produced it.
+    """
+
+    def __init__(self, *, on: type[AgentEvent], error: Exception | None = None) -> None:
+        super().__init__()
+        self._on = on
+        self._error = error if error is not None else RuntimeError("panel exploded")
+        self.exploded = 0
+
+    def apply_event(self, event: AgentEvent) -> None:
+        if isinstance(event, self._on):
+            self.exploded += 1
+            raise self._error
+        super().apply_event(event)
+
+
 class Env:
     """An `AgentUiController` plus every fake it was built from."""
 
@@ -383,9 +433,10 @@ class Env:
         disconnect: Any = None,
         with_manifest: bool = True,
         with_logs: bool = True,
+        panel: FakePanel | None = None,
     ) -> None:
         self.ui = FakeUi()
-        self.panel = FakePanel()
+        self.panel = panel if panel is not None else FakePanel()
         self.screens = FakeScreens()
         self.context = FakeContext()
         self.timeline = FakeTimeline()
@@ -580,6 +631,118 @@ async def test_a_failed_rebuild_keeps_the_previous_session(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
+# Degraded startup: configured on disk, but no session was composed
+# ---------------------------------------------------------------------------
+
+
+_DEGRADED_CONFIG = KorvidConfig(
+    namespace="default",
+    agent_enabled=True,
+    agent_provider="ollama",
+    agent_auth_method="none",
+    agent_base_url="http://localhost:11434/v1",
+    agent_model="llama3",
+    agent_model_tier="low",
+)
+
+
+async def test_settings_are_seeded_from_config_even_without_a_session(tmp_path: Path) -> None:
+    """What the operator configured is a fact about *config*, not about
+    whether the composition root managed to build a session from it.
+
+    A startup that degrades — a model the router refuses for reporting no
+    tool support, a provider that failed to build — leaves the agent off
+    with the same config.yaml on disk. Seeding the snapshot only when a
+    session exists makes that state unrecoverable except by re-running the
+    whole `:ai` wizard.
+    """
+    env = Env(tmp_path=tmp_path, session=None, config=_DEGRADED_CONFIG)
+    settings = env.controller.settings
+    assert settings is not None
+    assert settings.provider == "ollama"
+    assert settings.model == "llama3"
+    assert settings.auth_method == "none"
+    assert settings.base_url == "http://localhost:11434/v1"
+    assert settings.model_tier == "low"
+
+
+async def test_an_unconfigured_agent_seeds_no_settings(env: Env) -> None:
+    """The seed is config's, not an invention: with nothing configured
+    `:model` must still say "run :ai first" rather than rebuild a blank."""
+    assert env.controller.settings is None
+
+
+async def test_model_recovers_a_degraded_startup_without_the_wizard(tmp_path: Path) -> None:
+    """`:model <name>` is the whole recovery: the seeded snapshot names the
+    provider, so only the model has to change."""
+
+    class _Configurator:
+        def __init__(self) -> None:
+            self.saved: list[AgentSettings] = []
+
+        async def save(self, settings: AgentSettings) -> None:
+            self.saved.append(settings)
+
+    fresh = ScriptedSession()
+    configurator = _Configurator()
+    env = Env(
+        tmp_path=tmp_path,
+        session=None,
+        config=_DEGRADED_CONFIG,
+        configurator=configurator,
+        rebuild=lambda settings: fresh,
+    )
+    env.controller.handle_model_command(["llama3.2"])
+    await asyncio.gather(*env.ui.workers)
+    assert env.controller.session is fresh
+    assert env.controller.model_name == "llama3.2"
+    assert configurator.saved
+    assert configurator.saved[-1].provider == "ollama"
+    assert configurator.saved[-1].model == "llama3.2"
+    await env.close()
+
+
+async def test_a_degraded_startup_reconnects_into_the_configured_state(tmp_path: Path) -> None:
+    """After the recovery the panel is a working agent again: the input is
+    enabled and the header renders, never the setup hint."""
+    fresh = ScriptedSession()
+    env = Env(
+        tmp_path=tmp_path,
+        session=None,
+        config=_DEGRADED_CONFIG,
+        rebuild=lambda settings: fresh,
+    )
+    env.panel.visible = True
+    settings = env.controller.settings
+    assert settings is not None
+    assert env.controller.apply_settings(settings) is True
+    assert env.controller.session is fresh
+    assert "setup_hint" not in env.panel.calls
+    assert env.panel.headers[-1] == "llama3"
+    await env.close()
+
+
+async def test_the_setup_wizard_opens_on_the_configured_snapshot(tmp_path: Path) -> None:
+    """`:ai` after a degraded startup must prefill what is on disk instead
+    of asking for every answer again."""
+
+    class _Configurator:
+        async def save(self, settings: AgentSettings) -> None:  # pragma: no cover - unused
+            raise NotImplementedError
+
+    env = Env(
+        tmp_path=tmp_path,
+        session=None,
+        config=_DEGRADED_CONFIG,
+        configurator=_Configurator(),
+    )
+    env.controller.handle_command([])
+    screen, _callback = env.ui.screens[-1]
+    assert screen._current_settings is not None
+    assert screen._current_settings.model == "llama3"
+
+
+# ---------------------------------------------------------------------------
 # Turn lifecycle: start, interrupt, replacement drain, finalization
 # ---------------------------------------------------------------------------
 
@@ -701,7 +864,31 @@ async def test_a_turn_cancelled_before_it_ran_settles_without_finalizing(
     await env.close()
 
 
-async def test_a_stop_signals_the_session_before_cancelling_the_task(tmp_path: Path) -> None:
+async def test_a_turn_cancelled_before_it_ran_reports_no_usage_for_itself(
+    tmp_path: Path,
+) -> None:
+    """The fallback interrupt is a *per-turn* delta, and a turn that never
+    ran spent nothing.
+
+    The panel adds an interrupt event's numbers to the totals it already
+    shows, so minting the fallback from `session.total_tokens` would add
+    the whole conversation's usage a second time on every pre-start
+    cancel. `estimated` is still the session's own answer: the totals the
+    header keeps showing may well be estimates.
+    """
+    gate = asyncio.Event()
+    session = ScriptedSession(gate=gate, estimated=True)
+    session.total_tokens = (120, 45)
+    env = Env(tmp_path=tmp_path, session=session)
+    env.controller.submit_prompt("first")
+    env.controller.interrupt()  # before the first step of the coroutine
+    await env.controller.wait_for_turn()
+    await settle()
+    interrupted = [event for event in env.panel.events if isinstance(event, TurnInterrupted)]
+    assert interrupted == [TurnInterrupted(input_tokens=0, output_tokens=0, estimated=True)]
+    gate.set()
+    await env.close()
+
     """`interrupt()` is cooperative: the session is told first, so it can
     wind the turn down itself rather than only learning about the stop
     through a `CancelledError` it cannot attribute."""
@@ -746,6 +933,91 @@ async def test_a_session_error_is_reported_in_the_panel(tmp_path: Path) -> None:
     env.controller.submit_prompt("hi")
     await env.controller.wait_for_turn()
     assert any(isinstance(event, AgentError) for event in env.panel.events)
+
+
+# ---------------------------------------------------------------------------
+# A consumer that raises: the turn is still the session's until it is closed
+# ---------------------------------------------------------------------------
+
+
+async def test_a_panel_failure_mid_stream_releases_the_turn_before_reporting_it(
+    tmp_path: Path,
+) -> None:
+    """A raising consumer leaves the generator suspended at its yield.
+
+    `async for` propagates a body failure without touching the iterator,
+    so nothing has given the turn back at that point: the session still
+    counts it as running and its history is still mid-turn. The
+    controller must close the generator first (its `finally` releases the
+    turn), then finalize the history the abandoned turn left open, and
+    only then report the failure — the same order the cancellation path
+    already uses.
+    """
+    panel = ExplodingPanel(on=TextDelta)
+    session = StrictSession([TextDelta(text="partial")])
+    env = Env(tmp_path=tmp_path, session=session, panel=panel)
+    env.controller.submit_prompt("hi")
+    await env.controller.wait_for_turn()
+    await settle()
+    assert panel.exploded == 1
+    assert session.iterators_released == 1  # the generator was closed, not abandoned
+    assert session.finalized == 1  # the mid-flight history was repaired
+    assert session.finalization_pending is False
+    assert any(isinstance(event, AgentError) for event in env.panel.events)
+    await env.close()
+
+
+async def test_a_panel_failure_leaves_the_session_ready_for_the_next_turn(
+    tmp_path: Path,
+) -> None:
+    """The failure costs one turn, not the session.
+
+    A session whose turn was never released refuses every later one for
+    the rest of its life, so the user's next prompt would die with "a
+    turn is already running" and the agent would be dead until `:ai`
+    rebuilt it.
+    """
+    panel = ExplodingPanel(on=TextDelta)
+    session = StrictSession([TextDelta(text="partial")])
+    env = Env(tmp_path=tmp_path, session=session, panel=panel)
+    env.controller.submit_prompt("first")
+    await env.controller.wait_for_turn()
+    await settle()
+
+    panel.calls.clear()
+    env.controller.submit_prompt("second")
+    await env.controller.wait_for_turn()
+    await settle()
+    assert session.prompts == ["first", "second"]
+    assert session.iterators_released == 2
+    assert not any(
+        "a turn is already running" in str(getattr(event, "message", ""))
+        for event in env.panel.events
+    )
+    await env.close()
+
+
+async def test_a_panel_failure_after_the_turn_ended_needs_no_finalization(
+    tmp_path: Path,
+) -> None:
+    """Nothing to repair, nothing repaired.
+
+    When the consumer fails on a terminal event the generator has already
+    finished and given the turn back, so `finalize_interrupt` — which
+    raises without a pending turn — must not be called at all.
+    """
+    panel = ExplodingPanel(on=TurnComplete)
+    session = StrictSession(
+        [TurnComplete(input_tokens=1, output_tokens=2, estimated=False)],
+    )
+    env = Env(tmp_path=tmp_path, session=session, panel=panel)
+    env.controller.submit_prompt("hi")
+    await env.controller.wait_for_turn()
+    await settle()
+    assert panel.exploded == 1
+    assert session.finalized == 0
+    assert any(isinstance(event, AgentError) for event in env.panel.events)
+    await env.close()
 
 
 # ---------------------------------------------------------------------------

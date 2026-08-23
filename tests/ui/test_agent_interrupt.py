@@ -9,7 +9,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from textual.widgets import Input
+from textual.widgets import Input, Static
 
 from korvid.agent.events import AgentEvent, TextDelta, ToolCallStarted, TurnComplete
 from korvid.ui.app import KorvidApp
@@ -32,6 +32,11 @@ class BlockingSession(FakeSession):
 
 def _panel_text(app: KorvidApp) -> str:
     return "\n".join(entry.raw for entry in app.query_one(AgentPanel).query(ChatEntry))
+
+
+def _header(app: KorvidApp) -> str:
+    """The panel header exactly as the user reads it."""
+    return str(app.query_one(AgentPanel).query_one("#agent-header", Static).render())
 
 
 async def _start_turn(app: KorvidApp, pilot: Any, text: str) -> Input:
@@ -252,6 +257,38 @@ async def test_immediate_stop_before_the_turn_first_runs_clears_busy_state() -> 
         await until(pilot, lambda: panel.status_text == "", label="status cleared")
         assert not session.prompts  # the turn never reached the session
         assert "interrupted" in _panel_text(app)
+
+
+async def test_a_stop_before_the_turn_first_runs_does_not_recount_usage() -> None:
+    """The header must not grow when nothing was spent.
+
+    The panel adds a terminal event's token counts to the totals it
+    already shows, so the fallback the controller mints for a turn
+    cancelled before its first step has to be a *zero delta*. Minting it
+    from the session's running totals adds the whole conversation a second
+    time — after one 40/12 turn the header would read 80/24 for a turn
+    that never reached the provider.
+    """
+    from korvid.ui.messages import AgentPromptSubmitted
+
+    session = StubSession([TurnComplete(input_tokens=40, output_tokens=12, estimated=False)])
+    app = make_app(session)
+    async with app.run_test() as pilot:
+        await _start_turn(app, pilot, "how many pods?")
+        await until(pilot, lambda: "40" in _header(app), label="first turn counted")
+        # A live session books the completed turn into its running totals.
+        session.total_tokens = (40, 12)
+        settled = _header(app)
+
+        app.on_agent_prompt_submitted(AgentPromptSubmitted("and the nodes?"))
+        task = app._agent_ui._task
+        assert task is not None
+        app.action_interrupt_agent()  # same tick: the coroutine never ran
+        await until(pilot, lambda: task.done(), label="task settled")
+        panel = app.query_one(AgentPanel)
+        await until(pilot, lambda: panel.status_text == "", label="status cleared")
+        assert _header(app) == settled
+        assert "80" not in _header(app)
 
 
 async def test_stop_then_immediate_shutdown_injects_cancellation_once() -> None:

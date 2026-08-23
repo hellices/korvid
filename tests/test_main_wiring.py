@@ -263,17 +263,29 @@ def test_the_wiring_exposes_both_ports_separately() -> None:
 def test_the_composition_root_never_names_the_old_runtime() -> None:
     """Production cutover (issue #316 task 12): `AgentRuntime`, its profile
     builder and its prompt-override plumbing are eval/test-only now. A
-    reference here would mean two agent objects are still wired."""
-    source = Path(korvid.__main__.__file__).read_text()
-    for banned in (
+    reference here would mean two agent objects are still wired.
+
+    The scan covers the whole production TUI, not just the composition
+    root: the old runtime was reachable from `ui/` too, so a leftover
+    import, type hint or fallback in any screen, widget or controller
+    would re-introduce the second agent object this task removed —
+    somewhere `__main__.py` alone would never show it.
+    """
+    banned = (
         "AgentRuntime",
         "build_profile",
         "AgentProfile",
         "PromptOverrides",
         "cluster_context_note",
         "_tier_to_legacy_profile",
-    ):
-        assert banned not in source, banned
+    )
+    ui_package = Path(korvid.__file__).parent / "ui"
+    sources = [Path(korvid.__main__.__file__), *sorted(ui_package.rglob("*.py"))]
+    assert len(sources) > 1  # the ui package really was scanned
+    for path in sources:
+        source = path.read_text(encoding="utf-8")
+        for name in banned:
+            assert name not in source, f"{path}: {name}"
 
 
 def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
@@ -1067,6 +1079,129 @@ async def test_a_ctx_retarget_re_arms_a_later_rebuild(monkeypatch: object) -> No
     )
     assert rebuilt is not None
     assert "resize_pod" in [t["function"]["name"] for t in rebuilt.policy.tools]
+
+
+async def test_a_refused_retarget_fails_the_switch_instead_of_keeping_the_old_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retarget the session refuses must fail the `:ctx` switch.
+
+    Swallowing it leaves an agent armed with the *previous* cluster's tool
+    surface and prompt facts while the TUI, the audit log and the write
+    perimeter have all moved to the new one — the agent would answer about
+    a cluster nobody is looking at, and cite evidence read from it. The
+    context-switch transaction owns rollback and the user-visible failure,
+    so the composition root's job is to let the error reach it.
+    """
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.interaction import ClusterFacts
+    from korvid.agent.model_policy import ModelDescriptor
+    from korvid.agent.session import SessionRetargetError
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    providers = _stub_providers(monkeypatch)
+    wiring = _build_agent_wiring(
+        _agent_config(agent_model_tier="low"), cast("Any", object()), {}, pod_resize_supported=False
+    )
+    session = wiring.session
+    assert session is not None
+    before = session.policy
+    reference = session.evidence.record(
+        "get_logs", {"namespace": "prod", "name": "api"}, "OOMKilled"
+    )
+    assert reference is not None
+
+    # The live provider now serves a different model, so re-resolving
+    # produces a policy only a rebuilt session can adopt.
+    providers[0]._descriptor = ModelDescriptor("test", "another-model")
+
+    with pytest.raises(SessionRetargetError, match="rebuild the session"):
+        wiring.retarget(session, True, ClusterFacts(provider="aws", distribution="eks"))
+
+    # Nothing half-moved: the session still holds the cluster it was on,
+    # which is exactly why the caller must not present the switch as done.
+    assert session.policy is before
+    assert session.evidence.resolve(reference) is not None
+    await session.aclose()
+
+
+async def test_a_failed_policy_resolution_propagates_out_of_the_retarget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router refusing the new environment is the same failure: the
+    composition root re-raises instead of logging and carrying on."""
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.interaction import ClusterFacts
+    from korvid.agent.model_policy import ModelRoutingError
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    _stub_providers(monkeypatch)
+    wiring = _build_agent_wiring(_agent_config(), cast("Any", object()), {})
+    session = wiring.session
+    assert session is not None
+
+    def _refuse(*args: Any, **kwargs: Any) -> Any:
+        raise ModelRoutingError("no tool support in this environment")
+
+    monkeypatch.setattr(korvid.__main__, "_resolve_agent_policy", _refuse)
+    with pytest.raises(ModelRoutingError, match="no tool support"):
+        wiring.retarget(session, True, ClusterFacts(provider="aws", distribution="eks"))
+    await session.aclose()
+
+
+async def test_a_refused_retarget_aborts_the_context_switch_closure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure has to reach the `:ctx` transaction, which owns rollback
+    and the user-visible error — `switch_context` must not return a result
+    describing a switch whose agent half never happened."""
+    import contextlib
+
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _make_switch_context
+    from korvid.agent.session import SessionRetargetError
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.csp import ProviderInfo
+
+    class FakeKube:
+        async def switch_context(self, name: str | None) -> None:
+            return None
+
+        async def supports_pod_resize(self) -> bool:
+            return False
+
+        async def detect_cloud_provider(self) -> ProviderInfo:
+            return ProviderInfo("azure", "aks")
+
+        async def discover_resources(self) -> list[Any]:
+            return []
+
+    monkeypatch.setattr(main_mod, "resolve_context_namespace", lambda name: None)
+    startup = KorvidConfig(namespace="default")
+    app_stub = SimpleNamespace(agent_session=object(), config=startup)
+    discovery_box: list[asyncio.Task[None]] = []
+
+    def _refuse(session: Any, resize: bool, cluster: Any) -> None:
+        raise SessionRetargetError(
+            "cannot retarget a live session onto a policy that changes model"
+        )
+
+    switch = _make_switch_context(
+        startup,
+        cast("Any", FakeKube()),
+        {},
+        cast("Any", [app_stub]),
+        discovery_box,
+        _refuse,
+    )
+    try:
+        with pytest.raises(SessionRetargetError, match="cannot retarget"):
+            await switch("ctx-b")
+    finally:
+        for task in discovery_box:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
 
 
 async def test_a_switch_retargets_the_session_with_typed_cluster_facts(
@@ -2385,6 +2520,36 @@ def _stub_providers(monkeypatch: pytest.MonkeyPatch) -> list[_RecordingProvider]
     return built
 
 
+def _provider_closed(monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
+    """An event the background provider close sets when it completes.
+
+    Rebuild and disconnect hand the old pair to background tasks, so the
+    close order only exists once those tasks have run. Awaiting the event
+    they set is the outcome itself; polling the clock for it would test
+    how fast this machine happens to be, and flake on a loaded runner.
+    """
+    finished = asyncio.Event()
+    original = _RecordingProvider.aclose
+
+    async def _closed(self: _RecordingProvider) -> None:
+        await original(self)
+        finished.set()
+
+    monkeypatch.setattr(_RecordingProvider, "aclose", _closed)
+    return finished
+
+
+async def _await_closes(finished: asyncio.Event) -> None:
+    """Wait for the background close, bounded so a regression fails fast."""
+    await asyncio.wait_for(finished.wait(), timeout=_CLOSE_TIMEOUT)
+
+
+#: Upper bound on a background close, generous enough that only a real
+#: regression (a close that never happens) can reach it. Nothing asserts
+#: on how long the close actually took.
+_CLOSE_TIMEOUT = 10.0
+
+
 def _agent_config(**overrides: Any) -> Any:
     from korvid.core.config import KorvidConfig
 
@@ -2511,6 +2676,7 @@ async def test_rebuild_swaps_both_boxes_and_closes_the_session_first(
     monkeypatch.setenv("KORVID_TEST_KEY", "k")
     _RecordingProvider.order.clear()
     _stub_providers(monkeypatch)
+    closed = _provider_closed(monkeypatch)
     wiring = _build_agent_wiring(_agent_config(), cast("Any", object()), {})
     old_session = wiring.session
     old_provider = wiring.provider_box[0]
@@ -2533,10 +2699,7 @@ async def test_rebuild_swaps_both_boxes_and_closes_the_session_first(
     assert wiring.session_box[0] is new_session
     assert wiring.provider_box[0] is not old_provider
 
-    for _ in range(20):
-        if _RecordingProvider.order[:2] == ["session", "provider"]:
-            break
-        await asyncio.sleep(0.01)
+    await _await_closes(closed)
     assert _RecordingProvider.order[:2] == ["session", "provider"]
     assert closes == ["session"]
     await new_session.aclose()
@@ -2550,6 +2713,7 @@ async def test_disconnect_clears_both_boxes_and_closes_session_then_provider(
     monkeypatch.setenv("KORVID_TEST_KEY", "k")
     _RecordingProvider.order.clear()
     _stub_providers(monkeypatch)
+    closed = _provider_closed(monkeypatch)
     wiring = _build_agent_wiring(_agent_config(), cast("Any", object()), {})
     session = wiring.session
     assert session is not None
@@ -2565,10 +2729,7 @@ async def test_disconnect_clears_both_boxes_and_closes_session_then_provider(
     assert wiring.provider_box[0] is None
     assert wiring.session_box[0] is None
 
-    for _ in range(20):
-        if _RecordingProvider.order[:2] == ["session", "provider"]:
-            break
-        await asyncio.sleep(0.01)
+    await _await_closes(closed)
     assert _RecordingProvider.order[:2] == ["session", "provider"]
     wiring.disconnect()  # idempotent when already off
     assert wiring.session_box[0] is None
