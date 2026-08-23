@@ -54,7 +54,9 @@ MATERIAL_ATTRIBUTION = "https://squidfunk.github.io/mkdocs-material/"
 #: handed, contacts no provider, runs no read tool, and yields a fixed
 #: tool/citation event sequence, so the capture shows scripted events — not
 #: the bounded fresh reads the product performs against a cluster.
-AGENT_SCENE_EVIDENCE = "Scripted tool and citation events, not bounded reads"
+AGENT_SCENE_EVIDENCE = (
+    "Scripted tool events and an E1 marker the panel flags as unsupported, not bounded reads"
+)
 
 #: Claims no surface built on `agent-poster.png`/`agent-demo.mp4` may make.
 SCRIPTED_AGENT_OVERCLAIMS = (
@@ -1366,6 +1368,103 @@ def test_agent_evidence_tile_claims_only_the_scripted_panel_rendering() -> None:
         assert not _unnegated(card, overclaim), (
             f"the agent evidence tile must not claim {overclaim!r}"
         )
+
+
+def test_agent_capture_surfaces_explain_the_flagged_scripted_citation() -> None:
+    """The frame shows korvid's unsupported-citation warning; the copy must own it.
+
+    `ScriptedAgentRuntime` mints no evidence, so its `[E1]` is reported in
+    `TurnComplete.uncited` and the real panel renders its yellow
+    "unsupported citation" note beneath the scripted answer. Publishing that
+    frame while describing "a cited answer" would make korvid look broken in
+    its own screenshot, so every capture-specific surface — the landing
+    scene, the landing evidence tile and the `docs/agent.md` storyboard —
+    says the marker is unsupported and that the panel flags it.
+
+    The production turn flow beside the capture is untouched: real turns do
+    validate citations, and that claim stays exactly as strong.
+    """
+    scene = _section('<article id="scene-agent"', "</article>")
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    tile = next(
+        card
+        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
+        if "agent-poster.png" in card
+    )
+    agent_page = (DOCS / "agent.md").read_text(encoding="utf-8")
+    storyboard = agent_page[
+        agent_page.index('<section class="docs-storyboard"') : agent_page.index("</section>")
+        + len("</section>")
+    ]
+    figure = storyboard[storyboard.index("<figure>") : storyboard.index("</figure>")]
+
+    for name, surface in (("scene", scene), ("tile", tile), ("storyboard figure", figure)):
+        flattened = _flatten(surface)
+        assert "unsupported" in flattened, (
+            f"the {name} must say the scripted marker is unsupported: {flattened!r}"
+        )
+        assert "e1" in flattened, f"the {name} must name the marker the panel flags"
+        assert not _unnegated(surface, "cited answer"), (
+            f"the {name} must not describe a flagged marker as a cited answer"
+        )
+        for overclaim in SCRIPTED_AGENT_OVERCLAIMS:
+            assert not _unnegated(surface, overclaim), (
+                f"the {name} must not claim {overclaim!r} from a scripted capture"
+            )
+
+    ordered_list = storyboard[storyboard.index("<ol>") :]
+    assert "Evidence references remain selectable and validated." in ordered_list, (
+        "the production turn flow must keep its validated-citation claim: only "
+        "what the capture shows is narrowed"
+    )
+    assert "unsupported" not in ordered_list.lower(), (
+        "the capture's flagged marker must not be written into the description "
+        "of what a real turn does"
+    )
+
+    design = (
+        DOCS / "superpowers" / "specs" / "2026-08-22-visual-storytelling-design.md"
+    ).read_text(encoding="utf-8")
+    lowered_design = " ".join(design.lower().split())
+    assert "uncited" in lowered_design, (
+        "the design must record which field the scripted harness reports, since "
+        "that is what makes the frame's warning correct rather than a defect"
+    )
+    assert "unsupported citation" in lowered_design
+    assert "the agent performs bounded reads" in lowered_design, (
+        "the production capability statement stays exactly as strong"
+    )
+
+
+def test_agent_capture_never_presents_the_selected_row_as_grounding() -> None:
+    """The demo's highlighted row is not context the scripted answer used.
+
+    `ScriptedAgentRuntime` discards the screen context it is handed, so any
+    resemblance between the selected pod and the scripted answer is
+    coincidence. No capture-specific surface may present it as the grounding
+    for the answer.
+    """
+    scene = _section('<article id="scene-agent"', "</article>")
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    tile = next(
+        card
+        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
+        if "agent-poster.png" in card
+    )
+    for surface in (scene, tile):
+        flattened = _flatten(surface)
+        for grounding in ("selected row", "selected pod", "screen context", "context grounding"):
+            assert grounding not in flattened, (
+                f"the capture must not offer {grounding!r} as evidence: {flattened!r}"
+            )
+
+    provenance = (DOCS / "demo" / "visual-storytelling.md").read_text(encoding="utf-8")
+    section = provenance.split("## Embedded agent", 1)[1].split("\n## ", 1)[0]
+    lowered = " ".join(section.lower().split())
+    assert "selected row" in lowered, (
+        "the provenance page must state plainly that the capture's selected row "
+        "is not grounding for the scripted answer"
+    )
 
 
 def test_guarded_write_path_orders_confirmation_audit_and_execution() -> None:

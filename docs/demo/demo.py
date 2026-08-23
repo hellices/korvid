@@ -449,7 +449,11 @@ class ScriptedAgentRuntime:
             input_tokens=612,
             output_tokens=43,
             estimated=False,
-            cited=("E1",),
+            # Nothing was read this turn and no evidence was minted, so `[E1]`
+            # is an unsourced marker. Reporting it as `cited` would suppress
+            # the panel's own unsupported-citation warning (issue #192) and
+            # publish a frame that contradicts the product's behaviour.
+            uncited=("E1",),
         )
 
 

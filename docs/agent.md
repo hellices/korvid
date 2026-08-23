@@ -56,8 +56,8 @@ agent-requested — is recorded in the fail-closed
 
 <section class="docs-storyboard" aria-labelledby="agent-storyboard-title">
   <figure>
-    <img src="../assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer carrying an E1 citation marker">
-    <figcaption id="agent-storyboard-title">Illustrative capture: a deterministic scripted AgentPanel walkthrough. Capture note — the recording runs no provider and no real read tool, so it shows the panel rendering scripted events, not the turn flow listed with it.</figcaption>
+    <img src="../assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer whose E1 marker the panel flags as an unsupported citation">
+    <figcaption id="agent-storyboard-title">Illustrative capture: a deterministic scripted AgentPanel walkthrough. Capture note — the recording runs no provider and no real read tool, so the panel flags its scripted E1 marker as an unsupported citation; it shows the panel rendering scripted events, not the turn flow listed with it.</figcaption>
   </figure>
   <div>
     <p><strong>What a real turn does</strong></p>

@@ -13,6 +13,7 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from types import ModuleType
 
+from korvid.agent.events import AgentEvent, TextDelta, TurnComplete
 from korvid.core.relationships import GraphResource, SummaryLike
 from korvid.k8s.discovery import ResourceMeta
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader, graph_source_metas
@@ -427,6 +428,81 @@ def test_visual_storytelling_plan_tape_snippets_match_the_shipped_cold_start() -
     )
     assert 'Type "uv run python docs/demo/demo.py' not in plan, (
         "no plan snippet may launch the harness without `--frozen`"
+    )
+
+
+def test_scripted_agent_runtime_reports_its_hard_coded_marker_as_unsupported() -> None:
+    """The scripted turn mints no evidence, so its `[E1]` must not read as cited.
+
+    `TurnComplete.cited` means "the ledger actually minted this reference".
+    `ScriptedAgentRuntime` reads nothing, executes no tool and mints no
+    evidence — its `[E1]` is a string in a hard-coded answer. Reporting it as
+    `cited` made the panel treat an unsourced claim as a supported one and
+    suppressed the very warning korvid ships for this case (issue #192), so
+    the capture published a frame that contradicts the product's own
+    behaviour. `uncited` is what the panel is owed, and what it renders as
+    the yellow "unsupported citation" note.
+
+    This runs the real runtime rather than reading its source: the event is
+    the contract.
+    """
+    harness = _demo_harness()
+
+    async def drain() -> list[AgentEvent]:
+        return [
+            event
+            async for event in harness.ScriptedAgentRuntime().run_turn(
+                "Why is the payment worker failing?", "selected: shop/payment-worker"
+            )
+        ]
+
+    events = asyncio.run(drain())
+    completions = [event for event in events if isinstance(event, TurnComplete)]
+    assert len(completions) == 1, f"the scripted turn ends exactly once: {events}"
+    complete = completions[0]
+
+    assert complete.uncited == ("E1",), (
+        "the scripted marker must be reported as unsupported, so the panel renders "
+        f"its citation warning; found uncited={complete.uncited!r}"
+    )
+    assert complete.cited == (), (
+        "nothing was read this turn, so no reference may be reported as minted "
+        f"evidence; found cited={complete.cited!r}"
+    )
+
+    answer = "".join(event.text for event in events if isinstance(event, TextDelta))
+    assert "[E1]" in answer, (
+        "the warning is only meaningful beside the marker it flags, so the "
+        f"scripted answer must keep it: {answer!r}"
+    )
+
+
+def test_agent_capture_copy_says_the_scripted_marker_is_flagged_unsupported() -> None:
+    """Every surface that publishes this frame must explain the yellow note.
+
+    The recording now shows korvid's own unsupported-citation warning under
+    the scripted answer. A visitor who is not told why would read it as a
+    product defect instead of the product working exactly as designed on an
+    unsourced claim, so the provenance page states it and the embedding
+    pages inherit it.
+    """
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    section = instructions.split("## Embedded agent", 1)[1].split("\n## ", 1)[0]
+    lowered = " ".join(section.lower().split())
+
+    assert "uncited" in lowered, (
+        "the provenance page must name the field the scripted runtime reports"
+    )
+    assert "unsupported citation" in lowered, (
+        "and the warning the panel renders from it, so the frame is explainable"
+    )
+    for fact in ("no evidence", "yellow"):
+        assert fact in lowered, (
+            f"the provenance must say why the marker is unsupported and what the "
+            f"capture shows; {fact!r} is missing"
+        )
+    assert "validated citation" not in lowered.replace("not validated", ""), (
+        "the capture still validates nothing"
     )
 
 

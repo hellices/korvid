@@ -199,7 +199,7 @@ Show six representative product scenes in an asymmetric mosaic:
 3. a filtered, live single-pod log stream;
 4. diagnosis with events and evidence;
 5. an agent panel walkthrough rendering a prompt, a scripted tool event, and a
-   cited answer; and
+   scripted answer whose citation marker the panel flags as unsupported; and
 6. an MCP-driven follow or navigation sequence.
 
 Use real screens captured from the deterministic in-memory synthetic harness
@@ -213,12 +213,16 @@ utilization.
 
 The agent media likewise comes from a scripted harness runtime rather than the
 product's agent pipeline: it discards the prompt and screen context and emits
-fixed tool and citation events. Every surface that ships it labels it a
-deterministic scripted AgentPanel walkthrough, and no tile, scene label,
-caption, or criterion may present it otherwise: the capture is **not evidence
-of bounded fresh reads, live tool execution, or validated citations**.
-Documenting those production capabilities on the linked agent page is
-unaffected.
+fixed tool and citation events. Because that turn mints no evidence, the
+harness reports its `[E1]` marker as **uncited**, so the recording shows
+korvid's own yellow **unsupported citation** note under the scripted answer —
+the product behaving correctly on an unsourced claim. Every surface that ships
+it labels it a deterministic scripted AgentPanel walkthrough whose citation the
+panel flags, and no tile, scene label, caption, or criterion may present it
+otherwise: the capture is **not evidence of bounded fresh reads, live tool
+execution, or validated citations**, and the row the demo happens to have
+selected is not grounding for the scripted answer. Documenting those production
+capabilities on the linked agent page is unaffected.
 
 The mosaic is not a feature dump. Every tile has the same structure:
 
