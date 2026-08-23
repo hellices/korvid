@@ -1368,7 +1368,7 @@ paragraph:
     <li data-stage="audit"><span>04</span><strong>Audit</strong><small>Append must succeed</small></li>
     <li data-stage="execute"><span>05</span><strong>Execute</strong><small>Validate and mutate</small></li>
   </ol>
-  <p class="write-path__blocked"><strong>Audit write failed</strong><span aria-hidden="true">→</span> action blocked. The audit path is fail-closed.</p>
+  <p class="write-path__blocked"><strong>Audit write failed</strong> <span aria-hidden="true">→</span> action blocked. The audit path is fail-closed.</p>
   <p class="write-path__boundary">Embedded provider payloads are masked; MCP result disclosure is tool-specific. <a href="threat-model/">Inspect both boundaries.</a></p>
 </section>
 ```

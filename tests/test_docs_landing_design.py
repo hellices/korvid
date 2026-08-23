@@ -1631,6 +1631,13 @@ def test_guarded_write_path_orders_confirmation_audit_and_execution() -> None:
     assert "fail-closed" in lowered
 
 
+def test_guarded_write_failure_arrow_keeps_readable_spacing() -> None:
+    """Inline tags must not collapse the failure copy around the arrow."""
+    pattern = re.compile(r"</strong>\s+<span aria-hidden=\"true\">→</span>\s+action blocked")
+    for label, source in (("landing", _index()), ("plan", _plan())):
+        assert pattern.search(source), f"{label} must render spaces around the visual arrow"
+
+
 def test_write_path_stage_grid_targets_the_ordered_list_specificity() -> None:
     """The write-path grid must keep targeting the ordered list element directly.
 
