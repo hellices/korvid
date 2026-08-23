@@ -1,9 +1,9 @@
 """Compose deterministic, versioned agent prompts (issue #316 task 6).
 
 `PromptHarness` binds a `ResolvedAgentPolicy` (task 3), a workspace
-`InteractionContext` and `ClusterFacts` snapshot (task 1), and turn-scoped
-evidence/handoff notes into one `ComposedPrompt`, in the exact layer order
-the design doc pins (§7):
+`InteractionContext` and `ClusterFacts` snapshot (task 1), and a
+turn-scoped handoff note into one `ComposedPrompt`, in the exact layer
+order the design doc pins (§7):
 
 1. immutable korvid safety, evidence, and control-handoff contract;
 2. common role: operate the current korvid session, not an abstract
@@ -13,7 +13,12 @@ the design doc pins (§7):
 5. optional exact-model overlay;
 6. validated additive user rules;
 7. armed tool and UI capability clauses;
-8. bounded cluster, evidence, and interaction context.
+8. bounded cluster, handoff, and interaction context.
+
+The composed system message is *static for the whole turn*: the engine
+sends it on every round and appends the evidence table itself, so nothing
+turn-scoped that changes between rounds — the evidence table above all —
+is composed in here.
 
 `PromptHarness` owns final system/user message construction. It never
 imports the v1 `runtime`/`prompts` modules it will outlive (issue #316
@@ -115,17 +120,23 @@ class PromptInputs:
 
     `user_rules` is `config.agent_rules` (already parsed and bounded to at
     most 16 entries of at most 1000 characters each — this harness does
-    not re-validate that). `evidence_note` and `handoff_note` are
-    turn-scoped strings the caller (task 11's `AgentSession`) supplies;
-    both default to "nothing to add" values so a first turn composes
-    without either.
+    not re-validate that). `handoff_note` is a turn-scoped string the
+    caller (task 11's `AgentSession`) supplies, defaulting to a "nothing
+    to add" value so a first turn composes without one.
+
+    There is deliberately no evidence field. A `ComposedPrompt` is
+    composed once and its system message is sent on *every* round of the
+    turn, while the evidence ledger grows with each read — so a table
+    composed in here would name the reads of the round it was composed
+    for, next to the current table the engine appends per round. The
+    engine (`native_engine.NativeAgentEngine`) is the single source of
+    that table.
     """
 
     policy: ResolvedAgentPolicy
     interaction: InteractionContext
     cluster: ClusterFacts
     user_rules: tuple[str, ...] = ()
-    evidence_note: str = ""
     handoff_note: str | None = None
 
 
@@ -233,7 +244,6 @@ class PromptHarness:
             note
             for note in (
                 cluster_context_note(inputs.cluster),
-                inputs.evidence_note,
                 inputs.handoff_note,
             )
             if note

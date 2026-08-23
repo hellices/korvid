@@ -33,6 +33,7 @@ provider protocol's one-result-per-call rule holds by construction.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -61,6 +62,10 @@ logger = logging.getLogger(__name__)
 #: errors can quote arbitrary payload, so every message is cut to a size
 #: that cannot become an exfiltration channel or flood the panel.
 ERROR_CHARS = 500
+
+#: Longest exception class name shown for a failed provider request. A
+#: class name is code, but a dynamically built one need not be.
+TYPE_NAME_CHARS = 60
 
 #: How much of a tool result the UI row summarizes.
 SUMMARY_CHARS = 120
@@ -117,22 +122,27 @@ class NativeAgentEngine(AgentEngine):
         self._closed = False
         self._gateway_closed = False
         self._interrupted = False
+        #: The task driving the live turn, recorded when iteration starts
+        #: so `aclose` can stop a turn that is blocked in a provider await
+        #: rather than suspended at a yield it will never be resumed from.
+        self._driver: asyncio.Task[Any] | None = None
 
     # -- AgentEngine -------------------------------------------------------
 
     def run(self, request: AgentTurnRequest) -> AsyncIterator[AgentEvent]:
         """Start one turn. See `AgentEngine.run`.
 
+        The rejection is checked here so a caller learns immediately, and
+        again when iteration really starts: an iterator that is created
+        and then abandoned never claimed anything, so it cannot leave the
+        engine latched against the next turn.
+
         Raises:
             RuntimeError: The engine is closed, or a turn is already
                 running — the gateway drives one provider iterator at a
                 time, and a second turn would clobber it.
         """
-        if self._closed:
-            raise RuntimeError("the engine is closed")
-        if self._running:
-            raise RuntimeError("a turn is already running")
-        self._running = True
+        self._reject_if_unavailable()
         self._interrupted = False
         return self._run(request)
 
@@ -141,9 +151,28 @@ class NativeAgentEngine(AgentEngine):
         self._interrupted = True
 
     async def aclose(self) -> None:
-        """Close the gateway's stream state once and refuse later turns."""
+        """Stop the live turn, close the gateway's stream state once.
+
+        Closing is a hard stop, not a request: the turn is marked
+        interrupted so every boundary check ends it, and a turn whose
+        driver is parked in a provider await — where no boundary check
+        can run and no `aclose` on a running generator is legal — has
+        that driver cancelled.
+
+        **Driver-cancel ownership.** The engine does not create the task
+        that drives a turn; it cancels one only here, and only a task
+        that is neither the caller's own nor already done. That is the
+        same hard interrupt the UI performs, so the same rule applies
+        after it: the conversation is left mid-turn, and the session
+        repairs it with `ConversationState.finalize_interrupt`. Called
+        from inside the turn's own loop, nothing is cancelled — the
+        generator stops itself at the next resumption instead.
+        """
         self._closed = True
-        self._running = False
+        self._interrupted = True
+        driver = self._driver
+        if driver is not None and driver is not asyncio.current_task() and not driver.done():
+            driver.cancel()
         if self._gateway_closed:
             return
         self._gateway_closed = True
@@ -151,13 +180,40 @@ class NativeAgentEngine(AgentEngine):
 
     # -- the turn ----------------------------------------------------------
 
+    def _reject_if_unavailable(self) -> None:
+        """Refuse a turn this engine cannot run.
+
+        Raises:
+            RuntimeError: The engine is closed, or a turn is already
+                running.
+        """
+        if self._closed:
+            raise RuntimeError("the engine is closed")
+        if self._running:
+            raise RuntimeError("a turn is already running")
+
     async def _run(self, request: AgentTurnRequest) -> AsyncGenerator[AgentEvent, None]:
-        """Drive one turn, releasing the single-flight latch on every exit."""
+        """Claim the engine for this turn and release it on every exit.
+
+        The claim is taken here rather than in `run` so it belongs to a
+        turn that actually started. `_closed` is re-read after every
+        event: a close that lands while this generator is suspended must
+        end the turn at that exact point, before another event or another
+        history append.
+        """
+        self._reject_if_unavailable()
+        self._running = True
+        self._driver = asyncio.current_task()
         try:
-            async for event in self._turn(request):
-                yield event
+            turn = self._turn(request)
+            async with contextlib.aclosing(turn) as events:
+                async for event in events:
+                    yield event
+                    if self._closed:
+                        return
         finally:
             self._running = False
+            self._driver = None
 
     async def _turn(self, request: AgentTurnRequest) -> AsyncGenerator[AgentEvent, None]:
         """Open the durable turn, run its rounds, and fail closed if blocked."""
@@ -186,6 +242,18 @@ class NativeAgentEngine(AgentEngine):
             logger.warning("turn rolled back: %s", exc.headline)
             yield AgentError(message=_bounded(f"{exc.headline}: {exc}"))
             yield TurnComplete(input_tokens=turn_in, output_tokens=turn_out, estimated=estimated)
+        except Exception as exc:
+            # Nothing expected this: a collaborator raised something this
+            # loop has no answer for. The failure is the session's to
+            # render, but the *state* is this engine's to leave usable —
+            # an active turn, or an assistant call no result can ever
+            # pair with, would make every later turn fail to start. Only
+            # `Exception`: a cancellation is the hard interrupt, and the
+            # turn must stay active for the session to finalize.
+            logger.warning("turn rolled back after an unexpected %s", type(exc).__name__)
+            with contextlib.suppress(Exception):
+                self._conversation.rollback_turn()
+            raise
 
     async def _iterate(self, request: AgentTurnRequest) -> AsyncGenerator[AgentEvent, None]:
         """Run provider rounds until one answers, ends, or the cap is hit."""
@@ -295,7 +363,10 @@ class NativeAgentEngine(AgentEngine):
         self, prepared: PreparedGatewayRequest, round_: _Round
     ) -> AsyncGenerator[AgentEvent, None]:
         """Stream one request, accumulating text, calls and usage."""
-        seen: set[str] = set()
+        # Seeded from history, not empty: an id a previous iteration or a
+        # previous turn already spent is still unusable, because the call
+        # that spent it is still stored and still has its own result.
+        seen: set[str] = set(self._conversation.retained_tool_call_ids)
         # `RequestGateway.stream` is an async generator function; its
         # declared return type is the narrower `AsyncIterator`, so the cast
         # names what the object already is. Closing it matters: an early
@@ -327,8 +398,9 @@ class NativeAgentEngine(AgentEngine):
         """Validate one streamed call and file it as kept or discarded.
 
         A call the protocol cannot pair — no id, no name, or an id already
-        used in this response — is discarded here, before it can be stored
-        or dispatched: two results for one id, or a result for no id, make
+        spent by this response, by an earlier iteration, or by a retained
+        earlier turn — is discarded here, before it can be stored or
+        dispatched: two results for one id, or a result for no id, make
         every later request invalid.
         """
         call = _Call(
@@ -447,7 +519,7 @@ class NativeAgentEngine(AgentEngine):
         self._conversation.abandon_iteration()
         self._conversation.complete_turn()
         logger.warning("provider stream failed: %s", type(exc).__name__)
-        return AgentError(message=_bounded(str(exc) or type(exc).__name__))
+        return AgentError(message=_failure_message(exc))
 
 
 def _stored_calls(calls: list[_Call]) -> list[dict[str, str]]:
@@ -464,13 +536,30 @@ def _apply_call_cap(round_: _Round, policy: ResolvedAgentPolicy) -> None:
     turn. The model learns the rule from a fixed notice on the last kept
     result instead.
     """
-    limit = policy.max_tool_calls_per_iteration
+    limit = _call_limit(policy)
     if limit is None or len(round_.calls) <= limit:
         return
     excess = round_.calls[limit:]
     round_.calls = round_.calls[:limit]
     round_.excess = len(excess)
     round_.discarded.extend((call, _DISCARD_EXCESS) for call in excess)
+
+
+def _call_limit(policy: ResolvedAgentPolicy) -> int | None:
+    """How many calls of one response this policy may actually run.
+
+    `allow_parallel_tool_calls` is not a cap but a routing fact: the model
+    router sets it only where the *provider itself* confirmed parallel
+    tool calling on a high-tier route, so a policy without it runs one
+    call per response whatever its numeric cap says (a tier may leave the
+    cap unset entirely). Where it is granted, the explicit cap still
+    bounds it — permission to batch is not permission to batch without
+    limit.
+    """
+    limit = policy.max_tool_calls_per_iteration
+    if policy.allow_parallel_tool_calls:
+        return limit
+    return 1 if limit is None else min(limit, 1)
 
 
 def _excess_notice(count: int) -> str:
@@ -514,3 +603,27 @@ def _bounded(message: str) -> str:
     if len(text) <= ERROR_CHARS:
         return text
     return f"{text[:ERROR_CHARS]}…"
+
+
+def _failure_message(exc: Exception) -> str:
+    """Name a failed request by its type, never by what it said.
+
+    A transport, adapter or protocol error routinely carries the
+    provider's response body: an HTTP client quotes the failing request,
+    an auth error quotes the credential it was refused for, a validation
+    error quotes the prompt. Truncating that is not enough — the first
+    500 characters of a 401 body are exactly the part that identifies the
+    key — so nothing derived from `str(exc)` reaches the panel. The class
+    name is korvid's or the library's own code, not payload, and is
+    bounded anyway in case a dynamically built class carries one.
+    """
+    return (
+        f"the provider request failed ({_safe_type_name(exc)}) — its own message is "
+        "withheld because provider errors can quote the request or a credential"
+    )
+
+
+def _safe_type_name(exc: Exception) -> str:
+    """An exception's class name, reduced to identifier characters."""
+    name = "".join(char for char in type(exc).__name__ if char.isalnum() or char == "_")
+    return name[:TYPE_NAME_CHARS] or "unknown error"

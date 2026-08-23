@@ -341,13 +341,15 @@ class ExplodingBridge(RecordingBridge):
 
 
 async def test_an_unexpected_gateway_failure_leaves_the_turn_recoverable() -> None:
-    harness = build_harness([text_turn(), text_turn("recovered")], gateway_class=ExplodingGateway)
+    harness = build_harness([text_turn("recovered")], gateway_class=ExplodingGateway)
 
     with pytest.raises(RuntimeError, match="gateway exploded"):
         await harness.run("first")
     events = await harness.run("second")
 
     assert isinstance(events[-1], TurnComplete)
+    # The turn that exploded never reached the provider, and left nothing.
+    assert len(harness.provider.calls) == 1
     assert [message["content"] for message in harness.conversation.messages] == [
         "second",
         "recovered",

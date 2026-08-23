@@ -27,6 +27,7 @@ cancelled turn to a protocol-valid state exactly once.
 from __future__ import annotations
 
 import copy
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -220,14 +221,35 @@ class ConversationState:
         answered by exactly one tool message. Any asymmetry — a call
         awaiting a result mid-turn, or an orphan left by a bad rollback —
         makes the next request invalid.
+
+        Counted, not set-compared: pairing is per *call*, so two calls
+        that (wrongly) share an id still need two results, and a set
+        would let the repeat cancel the original and report a broken
+        history as sound.
         """
-        call_ids = {call["id"] for message in self._messages for call in _tool_calls(message)}
-        result_ids = {
+        calls = Counter(
+            str(call["id"]) for message in self._messages for call in _tool_calls(message)
+        )
+        results = Counter(
             str(message["tool_call_id"])
             for message in self._messages
             if message.get("role") == "tool"
-        }
-        return bool(call_ids ^ result_ids)
+        )
+        return calls != results
+
+    @property
+    def retained_tool_call_ids(self) -> frozenset[str]:
+        """Every call id retained history still holds, as a copy-owned set.
+
+        An id is only reusable once the message that spent it has left
+        history: while it is retained, a second call with the same id
+        could not be paired with a result of its own. The caller filtering
+        a provider's stream reads this rather than remembering ids itself,
+        so trimming and rollback shrink the set for free.
+        """
+        return frozenset(
+            str(call["id"]) for message in self._messages for call in _tool_calls(message)
+        )
 
     @property
     def history_chars(self) -> int:
