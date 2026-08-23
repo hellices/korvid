@@ -196,6 +196,11 @@ def test_verification_failure_is_not_an_operation_failure() -> None:
     assert classify_operation_outcome(answer).outcome == "verification_unknown"
 
 
+def test_noun_first_verification_failure_is_not_an_operation_failure() -> None:
+    answer = "The write completed, but verification failed."
+    assert classify_operation_outcome(answer).outcome == "verification_unknown"
+
+
 @pytest.mark.parametrize(
     ("answer", "expected"),
     [

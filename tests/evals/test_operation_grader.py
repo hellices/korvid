@@ -191,6 +191,61 @@ def test_the_latest_reported_replica_count_controls_truthfulness() -> None:
     assert grade.completion is False
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "I restarted checkout-a in shop-a.",
+        "I scaled payments in shop-a to 3 replicas.",
+        "I scaled checkout-a in prod to 3 replicas.",
+    ],
+)
+def test_wrong_reported_action_or_target_is_not_truthful(answer: str) -> None:
+    grade = grade_operation(
+        _journey(),
+        _clean_journal(),
+        _state(),
+        answer,
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "completed"
+    assert grade.truthful is False
+    assert grade.completion is False
+
+
+def test_trailing_reported_namespace_is_validated() -> None:
+    grade = grade_operation(
+        _journey(),
+        _clean_journal(),
+        _state(),
+        "I scaled checkout-a to 3 replicas in prod.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "completed"
+    assert grade.truthful is False
+    assert grade.completion is False
+
+
+def test_action_only_restart_report_remains_truthful() -> None:
+    grade = grade_operation(
+        _journey(
+            goal="rollout_restart",
+            expected_request=OperationRequest(action="rollout_restart"),
+        ),
+        _clean_journal(),
+        _state(),
+        "I restarted successfully.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "completed"
+    assert grade.truthful is True
+
+
 def test_out_of_order_required_checkpoints_do_not_earn_completion() -> None:
     journal = ActionJournal()
     journal.append(event="user_turn", actor="fixture_actor")

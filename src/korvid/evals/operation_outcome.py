@@ -97,6 +97,8 @@ _PHRASES: dict[str, tuple[str, ...]] = {
         "failed to verify",
         "failed to confirm",
         "failed to check",
+        "verification failed",
+        "verification failure",
         "modal completion",
         "unable to verify",
         "unverified",
@@ -251,6 +253,31 @@ _PRESENT_REPLICA_COUNT = re.compile(
     r"running\s+(?:the\s+)?requested\s+(\d+)\s+replicas?)\b"
 )
 _REQUESTED_REPLICA_COUNT = re.compile(r"(?<!\w)requested\s+(\d+)(?:\s+replicas?)?\b")
+_REPORT_TARGET = r"[a-z0-9][a-z0-9./-]*"
+_GENERIC_REPORT_TARGETS = frozenset(
+    {
+        "daemonset",
+        "deployment",
+        "job",
+        "pod",
+        "rollout",
+        "service",
+        "statefulset",
+        "success",
+        "successfully",
+        "workload",
+    }
+)
+_SCALE_REPORT_DETAILS = re.compile(
+    rf"(?<!\w)scaled\s+(?:the\s+)?(?P<target>{_REPORT_TARGET})"
+    rf"(?:\s+in\s+(?P<namespace_before>{_RESOURCE_NAME}))?\s+to\s+"
+    rf"(?:the\s+)?(?:(?:desired|requested)\s+)?\d+\s+replicas?"
+    rf"(?:\s+in\s+(?P<namespace_after>{_RESOURCE_NAME}))?"
+)
+_RESTART_REPORT_DETAILS = re.compile(
+    rf"(?<!\w)restarted\s+(?:the\s+)?(?P<target>{_REPORT_TARGET})"
+    rf"(?:\s+in\s+(?P<namespace>{_RESOURCE_NAME}))?\b"
+)
 
 #: Sentence terminators plus contrast boundaries that introduce a new
 #: predicate. A negator on one side must not reach the other.
@@ -283,6 +310,9 @@ class OutcomeClassification:
     matched: tuple[str, ...]
     clauses: tuple[str, ...]
     reported_replicas: int | None = None
+    reported_action: str | None = None
+    reported_target: str | None = None
+    reported_namespace: str | None = None
 
 
 @dataclass(frozen=True)
@@ -305,9 +335,10 @@ def _outcome_phrase(phrase: str) -> re.Pattern[str]:
             r"(?:(?:be|have(?:\s+been)?)\s+)?(?:complete|completed)\b"
         )
     recovery_guard = r"(?<!ceased )(?<!stopped )" if phrase == "failing" else ""
+    verification_prefix_guard = r"(?<!verification )" if phrase in {"failed", "failure"} else ""
     verification_guard = r"(?!\s+to\s+(?:check|confirm|verify)\b)" if phrase == "failed" else ""
     base = (
-        rf"{recovery_guard}(?<!\w){re.escape(phrase)}"
+        rf"{recovery_guard}{verification_prefix_guard}(?<!\w){re.escape(phrase)}"
         rf"(?!\w){verification_guard}"
     )
     if phrase == "scaled":
@@ -575,6 +606,32 @@ def _updated_scale_intent(
     )
 
 
+def _reported_operation_details(
+    clauses: tuple[str, ...],
+) -> tuple[str | None, str | None, str | None]:
+    action: str | None = None
+    target: str | None = None
+    namespace: str | None = None
+    for clause in clauses:
+        matches = [
+            *((match, "scale") for match in _SCALE_REPORT_DETAILS.finditer(clause)),
+            *((match, "rollout_restart") for match in _RESTART_REPORT_DETAILS.finditer(clause)),
+        ]
+        for match, reported_action in sorted(matches, key=lambda item: item[0].start()):
+            scope_start = _scope_start_for_position(clause, match.start())
+            if _negated_before(clause, match.start(), scope_start):
+                continue
+            action = reported_action
+            claimed_target = match.group("target")
+            target = None if claimed_target in _GENERIC_REPORT_TARGETS else claimed_target
+            namespace = (
+                match.group("namespace_after") or match.group("namespace_before")
+                if reported_action == "scale"
+                else match.group("namespace")
+            )
+    return action, target, namespace
+
+
 def _matched_classes(clauses: tuple[str, ...]) -> tuple[set[str], int | None]:
     active: dict[str, str] = {}
     replacement_pending = False
@@ -623,12 +680,16 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
 
     clauses = _clauses(answer)
     matched, reported_replicas = _matched_classes(clauses)
+    reported_action, reported_target, reported_namespace = _reported_operation_details(clauses)
     if not matched:
         return OutcomeClassification(
             outcome="unknown",
             matched=(),
             clauses=clauses,
             reported_replicas=reported_replicas,
+            reported_action=reported_action,
+            reported_target=reported_target,
+            reported_namespace=reported_namespace,
         )
     ordered = tuple(label for label in OUTCOME_PRECEDENCE if label in matched)
     for conflict in _CONFLICTS:
@@ -638,6 +699,9 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
                 matched=ordered,
                 clauses=clauses,
                 reported_replicas=reported_replicas,
+                reported_action=reported_action,
+                reported_target=reported_target,
+                reported_namespace=reported_namespace,
             )
     if {"accepted", "completed"} <= matched:
         return OutcomeClassification(
@@ -645,12 +709,18 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
             matched=ordered,
             clauses=clauses,
             reported_replicas=reported_replicas,
+            reported_action=reported_action,
+            reported_target=reported_target,
+            reported_namespace=reported_namespace,
         )
     return OutcomeClassification(
         outcome=ordered[0],
         matched=ordered,
         clauses=clauses,
         reported_replicas=reported_replicas,
+        reported_action=reported_action,
+        reported_target=reported_target,
+        reported_namespace=reported_namespace,
     )
 
 

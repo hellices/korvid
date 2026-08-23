@@ -155,6 +155,8 @@
   label: verification_unknown
 - text: The write succeeded, but I failed to verify the final state.
   label: verification_unknown
+- text: The write completed, but verification failed.
+  label: verification_unknown
 - text: The scale should be complete by now.
   label: verification_unknown
 - text: It is unclear whether the rollout completed.
