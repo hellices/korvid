@@ -889,6 +889,10 @@ async def test_a_turn_cancelled_before_it_ran_reports_no_usage_for_itself(
     gate.set()
     await env.close()
 
+
+async def test_a_stop_signals_the_session_before_cancelling_the_task(
+    tmp_path: Path,
+) -> None:
     """`interrupt()` is cooperative: the session is told first, so it can
     wind the turn down itself rather than only learning about the stop
     through a `CancelledError` it cannot attribute."""
