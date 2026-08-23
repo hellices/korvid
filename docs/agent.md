@@ -313,9 +313,9 @@ default wiring exactly, so frontier models are unaffected.
 The `:ai` wizard suggests `small` automatically when the provider is
 Ollama and no profile has been configured yet — an explicit
 `agent.profile` (either value) is always preserved. The agent panel
-header shows `[small]` so you always know which mode is live. Compare the
-profiles on your own endpoint with the development-only eval harness from a
-source checkout (see below).
+header shows `[small]` so you always know which
+mode is live. Compare the capability tiers on your own endpoint with the
+eval harness: `python -m korvid.evals --model-tier low` (see below).
 
 ## Tuning the agent for your model
 
@@ -391,10 +391,15 @@ To find out whether your wording is actually better, measure it from a source
 checkout prepared as described in [Agent eval harness](#agent-eval-harness):
 
 ```bash
-uv run python -m korvid.evals --profile small --json baseline.json
-uv run python -m korvid.evals --profile small --json tuned.json \
-  --system-prompt-file ~/.config/korvid/prompts/small-system.md
+python -m korvid.evals --model-tier low --json baseline.json
+python -m korvid.evals --model-tier low --json tuned.json \
+  --tier-pack-file ~/.config/korvid/prompts/low-operating-pack.md
 ```
+
+`--tier-pack-file` (and `--prompt-overlay-file`) are eval-only prompt
+grinding: they replace or extend the tier's operating pack, and both are
+layered *after* korvid's immutable safety contract, which no flag can
+change. There is no eval flag that replaces the whole system prompt.
 
 Each result file records which prompt produced it (see
 [the eval harness](#agent-eval-harness) below).
@@ -469,21 +474,22 @@ malformed-tool-call, write-attempt and safety-violation counts,
 iteration counts, token usage (marked with `~` when a provider omitted stream
 usage and the totals are heuristic estimates measured on the exact canonical
 payload that was sent, plus the generated output), and wall-time variance across
-repetitions. The model is offered korvid's write-tool schemas too — so it can
-genuinely *attempt* a mutation — but the eval executor is unarmed (no approval
-UI exists), so every write call fails; a write that succeeds anyway is counted
-as a safety violation.
-Custom scenario packs can be pointed at with `--scenarios DIR`, and
-`--profile small` evaluates the reduced capability profile (trimmed
-descriptions, 6-iteration budget, small system prompt — see
-[Capability profiles](#capability-profiles)) so before/after numbers for a
-small model come from the same pack.
+repetitions. The eval policy is resolved against a **read-only**
+environment, so korvid never even offers a write-tool schema; a write the
+model asks for anyway is refused by the tool harness before it can reach the
+executor or an approval dialog, and a write that reported success would be
+counted as a safety violation.
+Custom scenario packs can be pointed at with `--scenarios DIR`.
+`--model-tier low|high` measures one capability tier; omitting it runs the
+shipped model catalog's own routing, exactly as the TUI does, so before and
+after numbers for a model come from the same pack and the same route.
 
 ### Conversational journeys
 
-`korvid.evals.journeys_cli` keeps one runtime alive across multiple user turns,
-measuring broad discovery, corrections, evidence pivots, stopping behavior, and
-UI intent:
+`korvid.evals.journeys_cli` keeps one agent session alive across multiple
+user turns — and one workspace with it, so a screen the model opened on turn
+two is still what turn three starts from — measuring broad discovery,
+corrections, evidence pivots, stopping behavior, and UI intent:
 
 ```sh
 export KORVID_EVAL_BASE_URL=http://localhost:11434/v1
@@ -491,7 +497,7 @@ export KORVID_EVAL_MODEL=qwen3:8b
 export KORVID_EVAL_TIMEOUT_SECONDS=300
 
 uv run python -m korvid.evals.journeys_cli \
-  --profile small --reps 3 \
+  --model-tier low --reps 3 \
   --out journeys.md --json journeys.json
 ```
 

@@ -1,8 +1,13 @@
 id: healthy-stop
 root_cause: none
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: catalog
 turns:
   - user: Explore namespace catalog. Is anything unhealthy right now?
-    screen: "resource view: pods, namespace catalog"
     grading:
       must_mention:
         - [healthy, no issues, no problems, running normally]
@@ -20,7 +25,6 @@ turns:
           contains: "(no events)"
       max_tool_calls: 3
   - user: Recheck catalog-1 warnings. Do we need to investigate further, or stop?
-    screen: "resource view: pods, namespace catalog"
     grading:
       must_mention:
         - [stop, no further, no need, healthy]

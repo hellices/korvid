@@ -128,8 +128,8 @@ Safety controls:
 - context must be exactly `aks-korvid-contract-test`;
 - namespace must start with `korvid-agent-eval-`;
 - fixtures carry `app.kubernetes.io/managed-by=korvid-agent-eval`;
-- the model receives the read-only profile; fixture writes happen before the
-  model starts;
+- the eval policy is resolved against a read-only environment, so no write
+  schema is ever armed; fixture writes happen before the model starts;
 - cleanup deletes only the run namespace;
 - the contract cluster returns to its stopped-at-rest state.
 
@@ -153,14 +153,14 @@ Task pack:
 export KORVID_EVAL_BASE_URL=http://127.0.0.1:11435/v1
 export KORVID_EVAL_MODEL=qwen3:8b
 export KORVID_EVAL_TIMEOUT_SECONDS=300
-uv run python -m korvid.evals --profile small --reps 3 \
+uv run python -m korvid.evals --model-tier low --reps 3 \
   --out report.md --json report.json
 ```
 
 Offline journeys:
 
 ```sh
-uv run python -m korvid.evals.journeys_cli --profile small --reps 3 \
+uv run python -m korvid.evals.journeys_cli --model-tier low --reps 3 \
   --out journeys.md --json journeys.json
 ```
 
@@ -173,7 +173,7 @@ uv run python -m korvid.evals.journeys_cli \
   --context aks-korvid-contract-test \
   --namespace korvid-agent-eval-<run-id> \
   --journeys src/korvid/evals/live_journeys \
-  --profile small --reps 3 \
+  --model-tier low --reps 3 \
   --out live.md --json live.json
 ```
 
@@ -181,7 +181,9 @@ uv run python -m korvid.evals.journeys_cli \
 
 - serving engine: Ollama 0.32.5, OpenAI-compatible endpoint;
 - model node: zone-2 `Standard_D32s_v5` Spot, 30 CPU / 112Gi limit;
-- profile: `small`, six iterations, one tool call per iteration;
+- capability arm: the `small` profile of the time — six iterations, one tool
+  call per iteration — which is the budget the `low` model tier now carries
+  (see *Migrating pre-tier campaigns* below);
 - result timeout: 300 seconds;
 - model quantization: Q4_K_M;
 - task source revision: `25649a3`;
@@ -196,7 +198,9 @@ uv run python -m korvid.evals.journeys_cli \
 - models: Qwen3 1.7B, Qwen3 8B, Qwen3-Coder 30B-A3B;
 - serving engine: Ollama 0.32.5, OpenAI-compatible endpoint;
 - model node: zone-2 `Standard_D32s_v5` Spot, 30 CPU / 112Gi limit;
-- profile: `small`, six iterations, one tool call per iteration;
+- capability arm: the `small` profile of the time — six iterations, one tool
+  call per iteration — which is the budget the `low` model tier now carries
+  (see *Migrating pre-tier campaigns* below);
 - task pack: 23 scenarios ×3 repetitions;
 - offline pack: 3 journeys ×3 repetitions;
 - live pack: 1 guarded real-cluster journey ×3 repetitions;
@@ -221,47 +225,178 @@ uv run python -m korvid.evals.journeys_cli \
 - final state: contract cluster Stopped, `modeleval` zero nodes, Ollama Ready
   on its default pool.
 
-## Prompt Provenance
+## Run Provenance
 
-A score is only comparable when the prompt that produced it is known.
-`--json` therefore writes a metadata envelope alongside the per-scenario
-results:
+A score is only comparable when the model routing, the budgets, the armed
+tools, the prompt and the screen that produced it are all known. `--json`
+therefore writes a metadata envelope alongside the per-scenario results:
 
 ```json
 {
   "meta": {
-    "profile": "small",
-    "prompts": {"source": "default", "sha256": "9f2c…"}
+    "policy": {
+      "provider": "ollama",
+      "model": "qwen3:8b",
+      "tier": "low",
+      "route_source": "catalog",
+      "prompt_pack": "low-korvid-operator",
+      "overlays": []
+    },
+    "limits": {
+      "max_iterations": 6,
+      "max_history_chars": 24000,
+      "max_result_chars": 3000,
+      "max_tool_calls_per_iteration": 1,
+      "allow_parallel_tool_calls": false,
+      "strict_history_budget": true
+    },
+    "capabilities": {
+      "context_window_tokens": 16384,
+      "supports_tools": true,
+      "supports_parallel_tools": false,
+      "supports_reasoning": null,
+      "recommended_tier": "low",
+      "provenance": {
+        "context_window_tokens": "provider",
+        "recommended_tier": "catalog",
+        "supports_parallel_tools": "provider",
+        "supports_tools": "catalog"
+      }
+    },
+    "catalog_version": 1,
+    "prompts": {
+      "pack": "low-korvid-operator",
+      "overlays": [],
+      "source": "default",
+      "sha256": "9f2c…"
+    },
+    "tools": {"armed": ["diagnose_pod", "…"], "count": 12, "omitted": []}
   },
-  "scenarios": [ … ]
+  "scenarios": [
+    {
+      "scenario": "oom-killed",
+      "interaction": {
+        "kube_context": "eval-fixture",
+        "context_epoch": 1,
+        "focused_pane": {
+          "kind": "pods",
+          "scope": "jobs",
+          "filter": null,
+          "selected": {
+            "kind": "Pod", "namespace": "jobs",
+            "name": "worker-1", "uid": "pod-oom-1"
+          }
+        },
+        "secondary_pane": null,
+        "timeline_cursor": null
+      },
+      "max_tool_calls": 1,
+      "runs": [{"outcome": "success", "failure_class": null, "…": "…"}]
+    }
+  ]
 }
 ```
 
 Journey runs (`korvid.evals.journeys_cli --json`) carry the same envelope
-under a `journeys` key. They cannot yet be swept from the CLI, so their
-`source` is always `default`; the digest still makes a profile or
-tool-schema change visible.
+under a `journeys` key.
 
-`source` is `default` when the run used the prompts korvid ships, and
-`override` when `--system-prompt-file` or `--prompt-append-file` changed
-them. The eval CLI does **not** read `~/.config/korvid/config.yaml`: a
-configured `agent.prompts` block affects the running TUI, never this JSON,
-so a sweep is reproducible from its command line alone.
+### `model_tier`
+
+`--model-tier low|high` names the capability tier to measure. Omitting it
+runs the shipped model catalog's own routing, exactly as the TUI does, and
+`meta.policy.route_source` says who decided:
+
+- `user` — the tier came from `--model-tier`;
+- `catalog` — an exact `(provider, model)` entry in `MODEL_CATALOG`
+  recommended it, and `meta.catalog_version` says which catalog version;
+- `provider` — the adapter reported it;
+- `fallback` — nothing knew, so the conservative low tier was used.
+
+`meta.limits` publishes every budget in force, because a tier's budgets can
+change between releases and a reader outside this repository cannot infer
+them from the tier name alone. `meta.tools.armed` publishes the exact tool
+names the run offered — never a count alone.
+
+### Starting interaction
+
+Every scenario and journey records the workspace its first turn starts
+from: the kube context, the context epoch, the focused pane's kind, scope
+and filter, and the selected resource's identity including its uid. It is
+authored fixture data, never derived from the question — the agent reads it
+as typed state through the UI bridge, so a change in phrasing cannot
+silently change the screen the model was shown. Journey turns may restate
+it, which is the fixture saying the *operator* moved the screen between
+turns; a turn that does not restate it keeps whatever the previous turn
+left, including wherever the model navigated itself.
+
+### Prompt pack and grinding
+
+`meta.prompts` names the tier pack, any overlays, whether the wording was
+korvid's own (`source`), and the digest. `source` is `default` when the run
+used the prompts korvid ships, and `override` when `--tier-pack-file` or
+`--prompt-overlay-file` changed them.
+
+Both flags are **eval-only prompt grinding** and both layer *after* the
+immutable safety contract, which is always the first text in the composed
+system message: grinding can change how the model operates, never what it
+is permitted to do. There is no flag that replaces the whole system prompt.
+
+The eval CLI does **not** read `~/.config/korvid/config.yaml`: a configured
+`agent.prompts` block affects the running TUI, never this JSON, so a sweep
+is reproducible from its command line alone.
 
 The digest covers what the model actually receives — the composed system
-prompt for the eval surface, including the write/no-write clause, plus the
-complete tool schemas that are retransmitted on every request. Rewording a
-tool or editing a parameter description therefore changes the digest,
-because both change the model's input.
+message (safety contract, common role, tier pack, overlays, armed
+capability clauses) plus the complete tool schemas that are retransmitted
+on every request. Rewording a tool or editing a parameter description
+therefore changes the digest, because both change the model's input.
 
 Rules that follow from this:
 
 - a **publishable scoreboard row must carry `"source": "default"`**; a run
-  measured under an override is a tuning artifact, not a comparable score;
+  measured under a grind is a tuning artifact, not a comparable score;
 - a prompt experiment reports the baseline and the variant together, from
   two runs that differ *only* in the prompt file;
 - a changed digest with an unchanged prompt file means something else moved
-  — a profile change or a tool-schema edit — and the comparison is void.
+  — a tier change, a catalog change, or a tool-schema edit — and the
+  comparison is void.
+
+### Outcome and failure class
+
+Each run records one `outcome` (`success`, `failure`, `error`) and, when it
+was not a success, one `failure_class`, in this precedence:
+
+| `failure_class` | Meaning |
+|---|---|
+| `safety_violation` | a write tool call reported success — must never happen |
+| `provider_error` | the turn errored before it produced a graded answer |
+| `missing_evidence` | the answer was not backed by any expected evidence |
+| `misdiagnosis` | evidence was fetched, but the answer was wrong |
+
+### Migrating pre-tier campaigns
+
+Campaigns run before issue #316 recorded `meta.profile` (`full` or `small`)
+instead of `meta.policy`. They are still readable, with these equivalences:
+
+| Pre-tier field | Today |
+|---|---|
+| `"profile": "small"` | `"tier": "low"` — six iterations, one call per iteration, 3,000-character results |
+| `"profile": "full"` | closest to `"tier": "high"`, but the surfaces differ: `full` offered write schemas and no screen actions |
+| `meta.prompts.source` | unchanged in meaning |
+| (absent) | `meta.limits`, `meta.capabilities`, `meta.tools.armed`, `catalog_version`, per-scenario `interaction`, per-run `outcome`/`failure_class` |
+
+Two differences make a pre-tier row **not** directly comparable to a
+post-tier row of the same model:
+
+1. pre-tier runs offered write schemas to the model (safety came from an
+   unarmed executor); the eval environment is now read-only, so no write
+   schema is armed at all;
+2. pre-tier runs dropped every screen action from the surface; the low tier
+   arms `open_logs` and `open_describe`, and the model can now drive the
+   eval workspace.
+
+Published pre-tier scores are therefore kept as historical rows and are not
+restated under a tier label.
 
 ## Serving Provenance
 
@@ -314,23 +449,25 @@ Rules that follow:
 
 `--without-tool NAME` (repeatable) drops a tool from the measured surface.
 It exists for the controlled arms of #221: `diagnose_service` and
-`diagnose_pvc` were added to the `small` profile, whose whole premise is a
+`diagnose_pvc` were added to the small surface, whose whole premise is a
 small selection space for 3B-14B models, and that cost was never measured.
 Deciding it needs the same models, scenarios and prompts with the surface as
 the only variable.
 
 ```bash
-# arm 2 - the shipped small surface
-python -m korvid.evals --profile small --json arm2.json
+# arm 2 - the shipped low surface
+python -m korvid.evals --model-tier low --json arm2.json
 
 # arm 3 - the same run without the two diagnostics
-python -m korvid.evals --profile small   --without-tool diagnose_service --without-tool diagnose_pvc --json arm3.json
+python -m korvid.evals --model-tier low --without-tool diagnose_service --without-tool diagnose_pvc --json arm3.json
 ```
 
 Rules:
 
-- an unknown name is **refused**, because a typo would silently measure the
-  full surface and publish it as the reduced arm;
+- a name the resolved tier does not arm is **refused** — a typo, a write
+  tool (no eval ever arms one) or a high-tier-only tool named without
+  `--model-tier high` would silently measure the unreduced surface and
+  publish it as the reduced arm;
 - the omission reaches the prompt fingerprint, so two arms can never claim
   the same digest;
 - `meta.tools` records `omitted` and `count` by name. Recovering the arm from
@@ -338,11 +475,11 @@ Rules:
   which is the bookkeeping that made the 2026-08-05 rows unusable;
 - dropping a tool is **not** a prompt override: `prompts.source` stays
   `default`, because the shipped prompts are still the ones in effect;
-- the tool is **removed, not hidden**. Withholding only the schema would
-  leave the arm open to contamination: the runtime dispatches whatever name
-  the provider returns and the executor resolves every registry read, so a
-  model that remembered the tool would still get its answer and the run
-  would credit the call. An omitted call is refused at execution, and it
+- the tool is **removed, not hidden**: it is dropped from the *resolved
+  policy*, so the production tool harness reports it as not armed and the
+  executor is never reached. Withholding only the schema would leave the
+  arm open to contamination, because a model that remembered the tool would
+  still get its answer and the run would credit the call. An omitted call
   counts as a **malformed** call — which is itself the measurement, since
   the question is whether a small model reaches for a tool it was not
   given.

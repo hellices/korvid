@@ -1,9 +1,16 @@
-"""Eval runner: drives the real AgentRuntime over scenario fixtures (issue #69).
+"""Eval runner: drives the production agent session over scenario fixtures.
 
-The unit under test is the **model + runtime**: the provider is live (or
-scripted in CI smoke tests), the cluster is simulated, and every run is
-scored by the deterministic grader plus behavioral metrics captured from
-the typed AgentEvent stream.
+The unit under test is the **model + the session korvid actually runs**
+(issue #69, issue #316 task 13): the provider is live (or scripted in CI
+smoke tests), the graph is the one `korvid.__main__` composes, the cluster
+is simulated, and every run is scored by the deterministic grader plus
+behavioral metrics captured from the typed AgentEvent stream.
+
+Two things an eval decides, both as inputs to that graph: the workspace
+each scenario starts from (its authored `interaction`, applied through an
+`EvalUiBridge`) and the resolved policy (`--model-tier`, or automatic
+routing). Writes are never armed, so a write request is refused by the
+tool harness and never reaches the executor or an approval dialog.
 """
 
 from __future__ import annotations
@@ -12,7 +19,7 @@ import json
 import statistics
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from korvid.agent.events import (
@@ -21,9 +28,9 @@ from korvid.agent.events import (
     ToolCallFinished,
     ToolCallStarted,
 )
+from korvid.agent.interaction import ClusterFacts, InteractionContext
+from korvid.agent.model_policy import ResolvedAgentPolicy
 from korvid.agent.outbound import sanitize_recorded_tool_result
-from korvid.agent.profiles import AgentProfile, PromptOverrides, build_profile
-from korvid.agent.runtime import AgentRuntime
 from korvid.evals.grader import (
     CitationReport,
     GradeResult,
@@ -32,106 +39,102 @@ from korvid.evals.grader import (
     grade,
     matches_target,
 )
+from korvid.evals.harness import (
+    EVAL_CLUSTER,
+    NO_GRIND,
+    EvalHarness,
+    PromptGrind,
+    build_eval_harness,
+    resolve_eval_policy,
+)
+from korvid.evals.interaction import EvalUiBridge
 from korvid.evals.scenario import Scenario
 from korvid.tools.executor import (
-    READ_TOOLS,
-    UI_TOOL_NAMES,
     WRITE_TOOL_NAMES,
     RecordedExecution,
     ToolOutcome,
     as_recorded,
 )
+from korvid.tools.registry import tool_def
 
 #: Runs per scenario per configuration (issue #69: report variance, not means).
 DEFAULT_REPETITIONS = 3
 
 
-def _eval_tools(profile: AgentProfile, omit: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
-    """Schemas offered to the model for one capability profile (issue #71).
-
-    Write schemas are included so a live structured-tool provider can
-    actually *choose* a write (making the write-attempt/safety metrics
-    meaningful); safety comes from the executor, which has no UI bridge in
-    eval runs, so every write call fails at dispatch. UI tools are excluded
-    for the same reason — there is no screen to drive, and the grader
-    counts names outside the read/write surface as malformed.
-
-    `omit` removes named tools on top of that, so a campaign can measure the
-    same models and scenarios against a deliberately smaller surface (#221).
-    It is the only variable that separates those arms, so it also has to
-    reach the prompt fingerprint - see `prompt_fingerprint(tools=...)`.
-    """
-    excluded = UI_TOOL_NAMES | omit
-    return [t for t in profile.tools if t["function"]["name"] not in excluded]
-
-
 class _RecordingExecutor(RecordedExecution):
     """Wraps the real executor to keep full tool results for evidence grading
-    (the runtime's ToolCallFinished summary is truncated to 120 chars).
+    (the engine's ToolCallFinished summary is truncated to 120 chars).
 
-    The runtime's own sanitize-and-bound step is applied *before*
-    recording: grading must only credit evidence the model could actually
-    have seen, so the recorded content matches what reaches the
-    conversation (and carries the same redactions). That step is
-    idempotent, so the runtime re-applying it changes nothing; the
-    runtime's discard notice (excess parallel calls) is appended after
-    its own bounding step, so it never re-truncates the recorded content.
+    The tool harness's own sanitize-and-bound step is applied *before*
+    recording, with the same registry result format and the same result
+    budget the harness will use: grading must only credit evidence the
+    model could actually have seen, so the recorded content matches what
+    reaches the conversation (and carries the same redactions). That step
+    is idempotent, so the harness re-applying it changes nothing; the
+    engine's discard notice (excess parallel calls) is appended after its
+    own bounding step, so it never re-truncates the recorded content.
 
-    It sits between the real executor and the runtime, so it is on the
-    path that carries producer redaction records — and the path a blocked
-    result has to travel to stop the turn. Both pass through: an eval
-    run's boundary behaviour is the behaviour under test, down to the
+    It sits between the real executor and the tool harness, so it is on
+    the path that carries producer redaction records — and the path a
+    blocked result has to travel to stop the turn. Both pass through: an
+    eval run's boundary behaviour is the behaviour under test, down to the
     inventory the payload inspector would export.
+
+    It does *not* hide tools. A tool dropped from a controlled arm (#221)
+    is dropped from the resolved policy itself, so the production tool
+    harness refuses the call and this executor is never reached.
     """
 
     def __init__(
         self,
         executor: object,
         max_result_chars: int | None = None,
-        omit: frozenset[str] = frozenset(),
     ) -> None:
         # Scenario and journey packs hand over whatever they built; this is
-        # the composition point that turns it into the contract the runtime
-        # requires, so the runtime itself never has to guess (PR #197).
+        # the composition point that turns it into the contract the tool
+        # harness requires, so the harness itself never has to guess.
         self._executor = as_recorded(executor)
         self._max_result_chars = max_result_chars
-        # Names dropped from the offered surface for this run (#221).
-        # Hiding a schema is not removing a tool: the runtime dispatches
-        # whatever name the provider returns and the executor resolves
-        # every registry read, so a model that remembers the tool would
-        # otherwise still get its answer and contaminate the reduced arm.
-        self._omit = omit
         self.records: list[ToolRecord] = []
+
+    def record_action(self, name: str, arguments: dict[str, Any], result: str) -> None:
+        """File a screen action in the same ordered stream as the reads.
+
+        The eval bridge reports here so a journey that grades "and it put
+        that on screen" sees the action where the model made it, without
+        the agent minting evidence for a screen move.
+        """
+        self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         return (await self.execute_recorded(name, arguments)).text
 
     async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
-        if name in self._omit:
-            # Answered exactly as an unknown tool would be, and the real
-            # executor is never reached, so the model cannot observe that
-            # the tool exists elsewhere.
-            # error=True, or the runtime reports ok and the run records a
-            # write that landed - `--without-tool` accepts write tools, and
-            # a safety violation is the most load-bearing number published.
-            return ToolOutcome(text=f"ERROR: unknown tool {name}", error=True)
         outcome = await self._executor.execute_recorded(name, arguments)
         # This pass's own redactions are kept, not dropped. It runs before
-        # the runtime's and is idempotent, so a redaction made here is one
-        # the runtime's re-run can no longer find — discarding the records
+        # the harness's and is idempotent, so a redaction made here is one
+        # the harness's re-run can no longer find — discarding the records
         # left an eval run's inventory thinner than production's for the
-        # same content. Merged the way the runtime merges them: the
+        # same content. Merged the way the harness merges them: the
         # producer's trail re-rooted onto this result, so a mask both
         # passes saw is reported once (PR #197 review).
+        definition = tool_def(name)
         result, redactions = sanitize_recorded_tool_result(
             name,
             outcome.text,
             outcome.redactions,
             max_chars=self._max_result_chars,
             error=outcome.error,
+            result_format=None if definition is None else definition.result_format,
         )
         self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
-        return ToolOutcome(text=result, redactions=redactions, error=outcome.error)
+        return ToolOutcome(
+            text=result,
+            redactions=redactions,
+            error=outcome.error,
+            incarnation=outcome.incarnation,
+            container=outcome.container,
+        )
 
 
 class _CountingProvider:
@@ -191,6 +194,13 @@ class RunMetrics:
     tokens_estimated: bool
     wall_time_s: float
     error: str | None
+    #: `success`, `failure`, or `error` — one word per run, so a
+    #: scoreboard row does not have to re-derive the verdict from five
+    #: counters that each mean something slightly different.
+    outcome: str = "success"
+    #: Why a run was not a success: `provider_error`, `safety_violation`,
+    #: `missing_evidence`, or `misdiagnosis`. `None` for a success.
+    failure_class: str | None = None
 
 
 @dataclass(frozen=True)
@@ -200,6 +210,10 @@ class ScenarioReport:
     scenario_id: str
     root_cause: str
     runs: list[RunMetrics]
+    #: The workspace every repetition started from. Published with the
+    #: results: a diagnostic score is not reproducible without the screen
+    #: the question was asked from.
+    interaction: InteractionContext | None = None
 
     @property
     def successes(self) -> int:
@@ -209,22 +223,46 @@ class ScenarioReport:
     def evidence_hits(self) -> int:
         return sum(1 for run in self.runs if run.grade.evidence_fetched)
 
+    @property
+    def max_tool_calls(self) -> int:
+        """The most tool calls any repetition of this scenario made."""
+        return max((run.tool_calls for run in self.runs), default=0)
 
-#: Required parameters per read tool, from the schemas the model is offered.
-_READ_REQUIRED: dict[str, frozenset[str]] = {
-    tool["function"]["name"]: frozenset(tool["function"]["parameters"].get("required", ()))
-    for tool in READ_TOOLS
-}
-
-_READ_PROPERTY_TYPES: dict[str, dict[str, str]] = {
-    tool["function"]["name"]: {
-        prop: spec.get("type", "string")
-        for prop, spec in tool["function"]["parameters"].get("properties", {}).items()
-    }
-    for tool in READ_TOOLS
-}
 
 _JSON_TYPES: dict[str, type | tuple[type, ...]] = {"string": str, "integer": int}
+
+#: One armed surface, indexed for schema validation.
+_ArmedSchemas = dict[str, dict[str, Any]]
+
+
+def _armed_schemas(policy: ResolvedAgentPolicy) -> _ArmedSchemas:
+    """The schemas this run actually offered, keyed by tool name.
+
+    Derived from the resolved policy rather than a second static list, so
+    a controlled arm that unarms a tool (#221) and a tier that never
+    offered it are the same fact to every metric below.
+    """
+    return {
+        str(tool["function"]["name"]): {
+            "required": frozenset(tool["function"]["parameters"].get("required", ())),
+            "types": {
+                prop: spec.get("type", "string")
+                for prop, spec in tool["function"]["parameters"].get("properties", {}).items()
+            },
+        }
+        for tool in policy.tools
+    }
+
+
+def _read_names(armed: _ArmedSchemas) -> frozenset[str]:
+    """Armed names whose results are evidence, not screen moves or writes."""
+    return frozenset(
+        name
+        for name in armed
+        if name not in WRITE_TOOL_NAMES
+        and (definition := tool_def(name)) is not None
+        and definition.effect in ("cluster_read", "external_read")
+    )
 
 
 def _value_matches_schema(value: Any, json_type: str) -> bool:
@@ -237,49 +275,60 @@ def _value_matches_schema(value: Any, json_type: str) -> bool:
     return isinstance(value, expected)
 
 
-def _is_malformed(name: str, raw_arguments: str, omit: frozenset[str] = frozenset()) -> bool:
+def _is_malformed(name: str, raw_arguments: str, armed: _ArmedSchemas) -> bool:
     """Schema-level validation of one tool call, from the raw call the model
     emitted: undecodable or non-mapping arguments, a tool name that was never
-    offered (offered write tools are exempt — they are tracked separately as
-    write attempts), a missing required parameter, or a declared parameter of
-    the wrong type.
+    armed (write tools are exempt — they are tracked separately as write
+    attempts), a missing required parameter, or a declared parameter of the
+    wrong type.
 
-    A name dropped from this run's surface counts as never offered, which
-    is the signal the reduced arm exists to capture: whether the model
-    still reaches for a tool it was not given (#221)."""
-    if name in omit:
-        return True
+    A name this run did not arm counts as never offered, which is the signal
+    a reduced arm exists to capture: whether the model still reaches for a
+    tool it was not given (#221)."""
     try:
         parsed = json.loads(raw_arguments or "{}")
     except json.JSONDecodeError:
         return True
     if not isinstance(parsed, dict):
         return True
-    required = _READ_REQUIRED.get(name)
-    if required is None:
+    schema = armed.get(name)
+    if schema is None:
         return name not in WRITE_TOOL_NAMES
-    if not required <= parsed.keys():
+    if not schema["required"] <= parsed.keys():
         return True
-    property_types = _READ_PROPERTY_TYPES[name]
+    property_types = schema["types"]
     return any(
         key in property_types and not _value_matches_schema(value, property_types[key])
         for key, value in parsed.items()
     )
 
 
+@dataclass(frozen=True)
+class EvalRunConfig:
+    """Everything a run needs beyond the scenario and its two factories.
+
+    One value rather than six parameters threaded through three
+    functions: the CLI resolves it once, and every repetition of every
+    scenario is composed against exactly the same policy and prompt.
+    """
+
+    policy: ResolvedAgentPolicy | None = None
+    model_tier: str | None = None
+    omit_tools: frozenset[str] = frozenset()
+    grind: PromptGrind = NO_GRIND
+    cluster: ClusterFacts = EVAL_CLUSTER
+    user_rules: tuple[str, ...] = ()
+
+
 async def _run_once(
     scenario: Scenario,
     provider_factory: Callable[[], Any],
     executor_factory: Callable[[], Any],
-    profile_name: str = "full",
-    overrides: PromptOverrides | None = None,
-    omit_tools: frozenset[str] = frozenset(),
+    config: EvalRunConfig,
 ) -> RunMetrics:
     raw_provider = provider_factory()
     try:
-        return await _drive_turn(
-            scenario, raw_provider, executor_factory(), profile_name, overrides, omit_tools
-        )
+        return await _drive_turn(scenario, raw_provider, executor_factory(), config)
     finally:
         # Live providers own an httpx client; close it per repetition or a
         # full pack run leaks one client per run (the app calls aclose()
@@ -293,21 +342,19 @@ async def _run_once(
 class _TurnTally:
     """Mutable accumulator for one turn's event stream."""
 
+    armed: _ArmedSchemas = field(default_factory=dict)
     answer: str = ""
     tool_calls: int = 0
     malformed: int = 0
     write_attempts: int = 0
     safety_violations: int = 0
     error: str | None = None
-    #: Names dropped from this run's surface; calling one is a malformed
-    #: call, because the model was never offered it (#221).
-    omit: frozenset[str] = frozenset()
 
     def note(self, event: Any) -> None:
         if isinstance(event, TextDelta):
             self.answer += event.text
         elif isinstance(event, ToolCallStarted):
-            if _is_malformed(event.name, event.arguments, self.omit):
+            if _is_malformed(event.name, event.arguments, self.armed):
                 self.malformed += 1
         elif isinstance(event, ToolCallFinished):
             self.tool_calls += 1
@@ -322,77 +369,105 @@ class _TurnTally:
             self.error = event.message
 
 
+def _classify(result: GradeResult, tally: _TurnTally) -> tuple[str, str | None]:
+    """One word for what happened, plus why it was not a success.
+
+    Ordered by how much the reader needs to know first: a write that
+    landed is the single most load-bearing number published, an errored
+    turn never graded an answer at all, and an answer with no evidence
+    behind it is a different failure from a wrong answer with evidence.
+    """
+    if tally.safety_violations:
+        return "failure", "safety_violation"
+    if tally.error is not None:
+        return "error", "provider_error"
+    if not result.evidence_fetched:
+        return "failure", "missing_evidence"
+    if not result.diagnosis_success:
+        return "failure", "misdiagnosis"
+    return "success", None
+
+
+def _build_harness(
+    bridge: EvalUiBridge,
+    provider: Any,
+    executor: Any,
+    config: EvalRunConfig,
+) -> EvalHarness:
+    """Compose the production session this repetition runs on."""
+    return build_eval_harness(
+        provider=provider,
+        execution=executor,
+        bridge=bridge,
+        policy=config.policy,
+        model_tier=config.model_tier,
+        omit_tools=config.omit_tools,
+        cluster=config.cluster,
+        user_rules=config.user_rules,
+        grind=config.grind,
+    )
+
+
 async def _drive_turn(
     scenario: Scenario,
     raw_provider: Any,
     raw_executor: Any,
-    profile_name: str = "full",
-    overrides: PromptOverrides | None = None,
-    omit_tools: frozenset[str] = frozenset(),
+    config: EvalRunConfig,
 ) -> RunMetrics:
     provider = _CountingProvider(raw_provider)
-    profile = build_profile(
-        profile_name, readonly=False, resize_supported=True, overrides=overrides
+    policy = config.policy or resolve_eval_policy(
+        provider, model_tier=config.model_tier, omit_tools=config.omit_tools
     )
-    executor = _RecordingExecutor(
-        raw_executor, max_result_chars=profile.max_result_chars, omit=omit_tools
-    )
-    runtime = AgentRuntime(
-        provider,
-        executor,
-        tools=_eval_tools(profile, omit_tools),
-        max_iterations=profile.max_iterations,
-        max_history_chars=profile.max_history_chars,
-        max_result_chars=profile.max_result_chars,
-        max_tool_calls_per_iteration=profile.max_tool_calls_per_iteration,
-        strict_history_budget=profile.strict_history_budget,
-        system_prompt=profile.system_prompt,
-    )
-    tally = _TurnTally(omit=omit_tools)
+    executor = _RecordingExecutor(raw_executor, max_result_chars=policy.max_result_chars)
+    bridge = EvalUiBridge(scenario.interaction)
+    bridge.record_into(executor.record_action)
+    harness = _build_harness(bridge, provider, executor, replace(config, policy=policy))
+    armed = _armed_schemas(harness.policy)
+    tally = _TurnTally(armed=armed)
     started = time.monotonic()
-    async for event in runtime.run_turn(scenario.question, scenario.screen):
-        tally.note(event)
+    try:
+        async for event in harness.session.run_turn(scenario.question):
+            tally.note(event)
+    finally:
+        await harness.session.aclose()
     wall_time = time.monotonic() - started
     grade_result = grade(scenario, tally.answer, executor.records)
     if tally.error is not None:
         # A provider may stream a plausible answer and then fail; an
         # errored turn never counts as a diagnostic success.
         grade_result = replace(grade_result, diagnosis_success=False)
-    # The runtime is fresh per run, so its cumulative totals equal this
-    # run's spend — and unlike TurnComplete (never emitted on a provider
-    # error) they include tokens paid for before a mid-turn failure.
-    in_tokens, out_tokens = runtime.total_tokens
-    # A call is resolvable when it is an offered *read* tool (a write call
-    # is a policy failure regardless of outcome), is schema-valid, AND its
+    in_tokens, out_tokens = harness.session.total_tokens
+    reads = _read_names(armed)
+    # A call is resolvable when it is an armed *read* (a write call is a
+    # policy failure regardless of outcome), is schema-valid, AND its
     # arguments resolved in the cluster (the executor returns 'ERROR: ...'
     # otherwise). Diagnostic relevance is graded via expected_evidence.
     resolvable_calls = sum(
         1
         for record in executor.records
-        if record.name in _READ_REQUIRED
-        and record.name not in omit_tools
+        if record.name in reads
         and not record.result.startswith("ERROR:")
-        and not _is_malformed(record.name, json.dumps(record.arguments), omit_tools)
+        and not _is_malformed(record.name, json.dumps(record.arguments), armed)
     )
     # Issue #69's correct-tool + correct-argument rate: a call is on-target
-    # when it is an offered *read* tool whose arguments name one of the
-    # scenario's evidence targets, regardless of what its result contained.
-    # Writes never count — matches_target ignores the tool name, and a
-    # mutation aimed at the right object is a policy failure, not evidence.
+    # when it is an armed *read* whose arguments name one of the scenario's
+    # evidence targets, regardless of what its result contained. Writes
+    # never count — matches_target ignores the tool name, and a mutation
+    # aimed at the right object is a policy failure, not evidence.
     on_target_calls = sum(
         1
         for record in executor.records
-        if record.name in _READ_REQUIRED
-        and record.name not in omit_tools
+        if record.name in reads
         and any(
             matches_target(alt, record) for group in scenario.expected_evidence for alt in group
         )
     )
+    outcome, failure_class = _classify(grade_result, tally)
     return RunMetrics(
         grade=grade_result,
-        # Measured against what the runtime actually minted, so an
+        # Measured against what the session actually minted, so an
         # invented reference scores worse than citing nothing (#192).
-        citations=citation_report(tally.answer, minted=runtime.evidence.references()),
+        citations=citation_report(tally.answer, minted=harness.session.evidence.references()),
         answer=tally.answer,
         iterations=provider.completions,
         tool_calls=tally.tool_calls,
@@ -403,9 +478,11 @@ async def _drive_turn(
         safety_violations=tally.safety_violations,
         input_tokens=in_tokens,
         output_tokens=out_tokens,
-        tokens_estimated=runtime.usage_estimated,
+        tokens_estimated=harness.session.usage_estimated,
         wall_time_s=wall_time,
         error=tally.error,
+        outcome=outcome,
+        failure_class=failure_class,
     )
 
 
@@ -415,18 +492,46 @@ async def run_scenario(
     provider_factory: Callable[[], Any],
     executor_factory: Callable[[], Any],
     repetitions: int = DEFAULT_REPETITIONS,
-    profile: str = "full",
-    overrides: PromptOverrides | None = None,
+    policy: ResolvedAgentPolicy | None = None,
+    model_tier: str | None = None,
     omit_tools: frozenset[str] = frozenset(),
+    grind: PromptGrind = NO_GRIND,
+    cluster: ClusterFacts = EVAL_CLUSTER,
+    user_rules: tuple[str, ...] = (),
 ) -> ScenarioReport:
-    """Run one scenario ``repetitions`` times with fresh state per run."""
+    """Run one scenario ``repetitions`` times with fresh state per run.
+
+    Args:
+        scenario: The fixture, including the workspace it starts from.
+        provider_factory: Builds one provider per repetition.
+        executor_factory: Builds one tool executor per repetition.
+        repetitions: How many times to run it (variance, not means).
+        policy: An already-resolved policy; when `None` one is resolved
+            per repetition from `model_tier` and `omit_tools`.
+        model_tier: `"low"`, `"high"`, or `None` for automatic routing.
+        omit_tools: Names to drop from the armed surface (#221).
+        grind: The eval-only prompt levers.
+        cluster: Cluster facts composed into every turn.
+        user_rules: Operator rules composed into every turn.
+    """
+    config = EvalRunConfig(
+        policy=policy,
+        model_tier=model_tier,
+        omit_tools=omit_tools,
+        grind=grind,
+        cluster=cluster,
+        user_rules=user_rules,
+    )
     runs = [
-        await _run_once(
-            scenario, provider_factory, executor_factory, profile, overrides, omit_tools
-        )
+        await _run_once(scenario, provider_factory, executor_factory, config)
         for _ in range(repetitions)
     ]
-    return ScenarioReport(scenario_id=scenario.id, root_cause=scenario.root_cause, runs=runs)
+    return ScenarioReport(
+        scenario_id=scenario.id,
+        root_cause=scenario.root_cause,
+        runs=runs,
+        interaction=scenario.interaction,
+    )
 
 
 def _fmt_seconds(values: list[float]) -> str:

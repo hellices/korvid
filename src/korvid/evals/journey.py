@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from korvid.agent.interaction import InteractionContext
+from korvid.evals.interaction import load_interaction
 from korvid.evals.scenario import (
     ContainerLogs,
     Evidence,
@@ -20,8 +22,8 @@ from korvid.evals.scenario import (
     _require_str,
 )
 
-_TOP_LEVEL_KEYS = frozenset({"id", "root_cause", "turns", "cluster"})
-_TURN_KEYS = frozenset({"user", "screen", "grading", "forbidden_targets"})
+_TOP_LEVEL_KEYS = frozenset({"id", "root_cause", "interaction", "turns", "cluster"})
+_TURN_KEYS = frozenset({"user", "interaction", "grading", "forbidden_targets"})
 _GRADING_KEYS = frozenset(
     {
         "must_mention",
@@ -38,12 +40,16 @@ class JourneyTurn:
     """One scripted user turn and its deterministic acceptance assertions."""
 
     user: str
-    screen: str
     must_mention: tuple[tuple[str, ...], ...]
     must_not_mention: tuple[tuple[str, ...], ...]
     expected_evidence: tuple[tuple[Evidence, ...], ...]
     forbidden_targets: tuple[dict[str, Any], ...] = ()
     max_tool_calls: int | None = None
+    #: The workspace the *operator* moved to before this turn, when the
+    #: fixture says they did. `None` keeps whatever the previous turn left
+    #: on screen — including wherever the model itself navigated, which is
+    #: what a live session would show.
+    interaction: InteractionContext | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +58,8 @@ class ConversationJourney:
 
     id: str
     root_cause: str
+    #: The workspace the conversation starts from.
+    interaction: InteractionContext
     turns: tuple[JourneyTurn, ...]
     objects: tuple[dict[str, Any], ...]
     events: tuple[dict[str, Any], ...]
@@ -165,15 +173,20 @@ def _turn(raw: Any, path: Path, index: int) -> JourneyTurn:
         raise ValueError(f"{label} needs at least one must_mention entry")
     if not expected_evidence:
         raise ValueError(f"{label} needs at least one expected_evidence entry")
+    raw_interaction = raw.get("interaction")
     return JourneyTurn(
         user=_require_str(raw, "user"),
-        screen=_require_str(raw, "screen"),
         must_mention=must_mention,
         must_not_mention=_alt_groups(grading.get("must_not_mention"), "must_not_mention"),
         expected_evidence=expected_evidence,
         forbidden_targets=_targets(raw.get("forbidden_targets"), f"{label} forbidden_targets"),
         max_tool_calls=_positive_int_or_none(
             grading.get("max_tool_calls"), f"{label} max_tool_calls"
+        ),
+        interaction=(
+            None
+            if raw_interaction is None
+            else load_interaction(raw_interaction, f"{label} 'interaction'")
         ),
     )
 
@@ -195,9 +208,12 @@ def load_journey(path: Path) -> ConversationJourney:
     events = _manifests(cluster.get("events"), "events")
     _reject_future_timestamps(objects, f"{path.name}: objects")
     _reject_future_timestamps(events, f"{path.name}: events")
+    if "interaction" not in data:
+        raise ValueError(f"{path.name}: journey needs an 'interaction' mapping")
     return ConversationJourney(
         id=_require_str(data, "id"),
         root_cause=_require_str(data, "root_cause"),
+        interaction=load_interaction(data["interaction"], f"{path.name}: 'interaction'"),
         turns=tuple(_turn(raw, path, index) for index, raw in enumerate(raw_turns, 1)),
         objects=objects,
         events=events,

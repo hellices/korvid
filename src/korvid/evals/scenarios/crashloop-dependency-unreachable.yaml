@@ -2,7 +2,13 @@ id: crashloop-dependency-unreachable
 question: >-
   The billing pod in namespace shop keeps crashing shortly after start.
   What is causing the crashes?
-screen: "resource view: pods, namespace shop, selected: shop/billing-1 (CrashLoopBackOff)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: shop
+    selected: {kind: Pod, namespace: shop, name: billing-1, uid: pod-billing-1}
 root_cause: dependency_unreachable
 grading:
   must_mention:

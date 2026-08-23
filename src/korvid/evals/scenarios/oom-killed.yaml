@@ -1,6 +1,12 @@
 id: oom-killed
 question: Why does the worker pod in namespace jobs keep dying?
-screen: "resource view: pods, namespace jobs, selected: jobs/worker-1 (CrashLoopBackOff)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: jobs
+    selected: {kind: Pod, namespace: jobs, name: worker-1, uid: pod-oom-1}
 root_cause: oom_killed
 grading:
   must_mention:

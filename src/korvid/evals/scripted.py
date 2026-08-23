@@ -1,7 +1,8 @@
 """ScriptedProvider: deterministic provider for harness smoke tests (issue #69).
 
 Replays a fixed sequence of completions so CI can exercise the real
-AgentRuntime + ToolExecutor path without a live model.
+agent session (engine, gateway, tool harness, executor) without a live
+model.
 """
 
 from __future__ import annotations

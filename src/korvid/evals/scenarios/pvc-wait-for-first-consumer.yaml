@@ -2,7 +2,13 @@ id: pvc-wait-for-first-consumer
 question: >-
   The PersistentVolumeClaim cache-data in namespace platform has been Pending
   since it was created. Is provisioning broken?
-screen: "resource view: persistentvolumeclaims, namespace platform, selected: platform/cache-data (Pending)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: persistentvolumeclaims
+    scope: platform
+    selected: {kind: PersistentVolumeClaim, namespace: platform, name: cache-data, uid: pvc-cache-1}
 root_cause: none
 grading:
   # A negative control for the PVC analyzer: Pending is the *correct* state

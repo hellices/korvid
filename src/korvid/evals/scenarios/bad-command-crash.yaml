@@ -1,6 +1,12 @@
 id: bad-command-crash
 question: The exporter pod in namespace metrics crashes instantly on every start. Why?
-screen: "resource view: pods, namespace metrics, selected: metrics/exporter-1 (CrashLoopBackOff)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: metrics
+    selected: {kind: Pod, namespace: metrics, name: exporter-1, uid: pod-exporter-1}
 root_cause: bad_command
 grading:
   must_mention:

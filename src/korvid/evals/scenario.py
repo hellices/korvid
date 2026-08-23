@@ -17,6 +17,9 @@ from typing import Any
 
 import yaml
 
+from korvid.agent.interaction import InteractionContext
+from korvid.evals.interaction import load_interaction
+
 #: The instant scenario fixture timestamps are authored against. Every
 #: fixture timestamp must be at or before this instant — the fake cluster
 #: rebases it to the wall clock at construction, so a later instant would
@@ -56,7 +59,11 @@ class Scenario:
 
     id: str
     question: str
-    screen: str
+    #: The exact workspace the turn starts from — the typed replacement
+    #: for the prose `screen` string this schema used to carry. The agent
+    #: reads it through an `AgentUiBridge`, never from the question, so a
+    #: fixture that does not author it cannot be reproduced.
+    interaction: InteractionContext
     #: Canonical root-cause label (e.g. ``oom_killed``); ``none`` for
     #: negative controls where the correct answer is "nothing is wrong".
     root_cause: str
@@ -216,7 +223,7 @@ def bundled_scenarios_dir() -> Path:
     return Path(__file__).parent / "scenarios"
 
 
-_TOP_LEVEL_KEYS = frozenset({"id", "question", "screen", "root_cause", "grading", "cluster"})
+_TOP_LEVEL_KEYS = frozenset({"id", "question", "interaction", "root_cause", "grading", "cluster"})
 _GRADING_KEYS = frozenset({"must_mention", "must_not_mention", "expected_evidence"})
 _CLUSTER_KEYS = frozenset({"objects", "events", "logs"})
 
@@ -262,10 +269,12 @@ def load_scenario(path: Path) -> Scenario:
     events = _manifests(cluster.get("events"), "events")
     _reject_future_timestamps(objects, f"{path.name}: 'objects'")
     _reject_future_timestamps(events, f"{path.name}: 'events'")
+    if "interaction" not in data:
+        raise ValueError(f"{path.name}: scenario needs an 'interaction' mapping")
     return Scenario(
         id=_require_str(data, "id"),
         question=_require_str(data, "question"),
-        screen=_require_str(data, "screen"),
+        interaction=load_interaction(data["interaction"], f"{path.name}: 'interaction'"),
         root_cause=root_cause,
         must_mention=must_mention,
         must_not_mention=must_not_mention,

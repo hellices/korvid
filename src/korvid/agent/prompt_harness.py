@@ -203,6 +203,11 @@ class PromptHarness:
     """Compose the deterministic layer order (design doc §7) into one prompt.
 
     Args:
+        packs: Layer-3 registry, keyed by prompt pack id. Defaults to the
+            shipped `PROMPT_PACKS`. Injectable for exactly one reason:
+            the eval harness grinds tier-pack wording to find better text
+            (issue #316 task 13). A ground pack still layers *after* the
+            immutable safety contract and never replaces it.
         provider_overlays: Layer-4 registry, keyed by normalized provider
             id. Defaults to the shipped `PROVIDER_PROMPT_OVERLAYS`
             (empty); tests inject exact overlays here.
@@ -214,9 +219,11 @@ class PromptHarness:
     def __init__(
         self,
         *,
+        packs: Mapping[str, str] | None = None,
         provider_overlays: Mapping[str, str] | None = None,
         model_overlays: Mapping[str, str] | None = None,
     ) -> None:
+        self._packs = packs if packs is not None else PROMPT_PACKS
         self._provider_overlays = (
             provider_overlays if provider_overlays is not None else PROVIDER_PROMPT_OVERLAYS
         )
@@ -286,7 +293,7 @@ class PromptHarness:
         static_layers = [
             SAFETY_CONTRACT,
             COMMON_ROLE,
-            _tier_pack(policy.prompt_pack_id),
+            self._tier_pack(policy.prompt_pack_id),
             *self._overlay_layers(policy),
             *_user_rule_layer(user_rules),
             _capability_clauses(policy.tools),
@@ -294,6 +301,14 @@ class PromptHarness:
         static_prompt = "\n\n".join(layer for layer in static_layers if layer)
         _check_static_budget(static_prompt, policy.max_history_chars)
         return static_prompt
+
+    def _tier_pack(self, prompt_pack_id: str) -> str:
+        try:
+            return self._packs[prompt_pack_id]
+        except KeyError:
+            raise UnknownPromptPackError(
+                f"prompt pack {prompt_pack_id!r} is not a shipped pack"
+            ) from None
 
     def _overlay_layers(self, policy: ResolvedAgentPolicy) -> list[str]:
         layers: list[str] = []
@@ -351,15 +366,6 @@ def _context_label(kube_context: str | None) -> str:
     if not bounded:
         return "an unnamed context"
     return _encode(bounded)
-
-
-def _tier_pack(prompt_pack_id: str) -> str:
-    try:
-        return PROMPT_PACKS[prompt_pack_id]
-    except KeyError:
-        raise UnknownPromptPackError(
-            f"prompt pack {prompt_pack_id!r} is not a shipped pack"
-        ) from None
 
 
 def _user_rule_layer(user_rules: tuple[str, ...]) -> list[str]:

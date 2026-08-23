@@ -1,6 +1,12 @@
 id: job-backoff-limit-exceeded
 question: The nightly-report job in namespace jobs shows Failed. What happened to it?
-screen: "resource view: jobs, namespace jobs, selected: jobs/nightly-report (Failed)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: jobs
+    scope: jobs
+    selected: {kind: Job, namespace: jobs, name: nightly-report, uid: job-report-1}
 root_cause: job_backoff_limit
 grading:
   must_mention:

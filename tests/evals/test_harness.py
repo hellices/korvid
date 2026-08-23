@@ -11,18 +11,10 @@ boundary stays shut.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
-from korvid.evals.harness import (
-    EVAL_CLUSTER,
-    EVAL_ENVIRONMENT,
-    EvalHarness,
-    PromptGrind,
-    build_eval_harness,
-    resolve_eval_policy,
-)
-from korvid.evals.interaction import EvalUiBridge, load_interaction
 
 from korvid.agent.conversation import ConversationState
 from korvid.agent.interaction import ClusterFacts
@@ -40,6 +32,15 @@ from korvid.agent.prompt_harness import PromptHarness
 from korvid.agent.request_gateway import RequestGateway
 from korvid.agent.session import DefaultAgentSession
 from korvid.agent.tool_harness import ToolHarness
+from korvid.evals.harness import (
+    EVAL_CLUSTER,
+    EVAL_ENVIRONMENT,
+    EvalHarness,
+    PromptGrind,
+    build_eval_harness,
+    resolve_eval_policy,
+)
+from korvid.evals.interaction import EvalUiBridge, load_interaction
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import WRITE_TOOL_NAMES
 
@@ -264,8 +265,10 @@ async def test_the_turn_starts_from_the_authored_interaction() -> None:
         pass
     snapshot = harness.session.latest_outbound_payload
     assert snapshot is not None
-    assert '"kube_context":"eval-cluster"' in snapshot.payload_json
-    assert '"scope":"jobs"' in snapshot.payload_json
+    sent = json.loads(snapshot.payload_json)
+    user = sent["messages"][-1]["content"]
+    assert '"kube_context":"eval-cluster"' in user
+    assert '"scope":"jobs"' in user
 
 
 def test_cluster_facts_are_explicit_and_not_probed() -> None:

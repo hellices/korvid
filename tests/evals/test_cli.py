@@ -13,9 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from korvid.evals.harness import PromptGrind, resolve_eval_policy
 
-from korvid.agent import prompt_packs
+from korvid.agent import prompt_harness, prompt_packs
 from korvid.evals.__main__ import (
     _parse_args,
     _positive_int,
@@ -31,6 +30,7 @@ from korvid.evals.__main__ import (
     warn_if_unpinned,
 )
 from korvid.evals.grader import CitationReport, GradeResult, citation_report
+from korvid.evals.harness import PromptGrind, resolve_eval_policy
 from korvid.evals.runner import RunMetrics, ScenarioReport
 from korvid.evals.scripted import ScriptedProvider
 from korvid.evals.serving import ProbeResult, serving_metadata
@@ -316,7 +316,7 @@ def test_prompt_fingerprint_covers_the_composed_prompt_not_just_the_pack(
     """
     policy = _policy()
     before = prompt_fingerprint(policy)["sha256"]
-    monkeypatch.setattr(prompt_packs, "SAFETY_CONTRACT", "Reworded safety contract.")
+    monkeypatch.setattr(prompt_harness, "SAFETY_CONTRACT", "Reworded safety contract.")
     assert prompt_fingerprint(policy)["sha256"] != before
 
 

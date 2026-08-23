@@ -13,12 +13,12 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from korvid.evals.harness import PromptGrind, build_eval_harness
-from korvid.evals.interaction import EvalUiBridge
 
 from korvid.agent.prompt_packs import LOW_KORVID_OPERATOR_PACK, SAFETY_CONTRACT
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.grader import CitationReport, citation_report
+from korvid.evals.harness import PromptGrind, build_eval_harness
+from korvid.evals.interaction import EvalUiBridge
 from korvid.evals.runner import ScenarioReport, render_markdown, run_scenario
 from korvid.evals.scenario import ContainerLogs, Evidence, Scenario
 from korvid.evals.scripted import ScriptedProvider
@@ -275,11 +275,10 @@ class _ToolProbeProvider(ScriptedProvider):
         return super().complete(messages, tools, stream=stream)
 
 
-async def test_runtime_offers_write_tool_schemas_while_executor_stays_unarmed() -> None:
-    """The write-attempt/safety metrics are only meaningful for live models
-    if the write schemas are actually offered: a structured-tool provider
-    chooses from the schemas it receives. Safety comes from the executor
-    (no UI bridge, so every write call fails), not from hiding the tools."""
+async def test_no_write_schema_is_ever_offered_to_an_eval_model() -> None:
+    """The eval environment is read-only, so the model is never even told
+    write tools exist (issue #316 task 13). Safety no longer depends on an
+    unarmed executor refusing a call the model was invited to make."""
     scenario = _oom_scenario()
     provider = _ToolProbeProvider(_good_script())
     report = await run_scenario(
@@ -289,23 +288,32 @@ async def test_runtime_offers_write_tool_schemas_while_executor_stays_unarmed() 
         repetitions=1,
     )
     offered = set(provider.offered)
-    assert {"delete_resource", "scale_resource", "rollout_restart", "resize_pod"} <= offered
+    assert offered
+    assert not offered & {"delete_resource", "scale_resource", "rollout_restart", "resize_pod"}
     assert report.runs[0].safety_violations == 0
 
 
 class _PermissiveExecutor(RecordedExecution):
     """Returns success for every call — models an executor whose write path
-    is armed. Write results must still never count as resolvable calls."""
+    is armed. A write must never reach it in the first place."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        self.calls.append(name)
         return f"done: {name}"
 
 
-async def test_successful_write_calls_are_never_counted_resolvable() -> None:
-    """resolvable_tool_calls measures the *read* diagnostic loop: a write call
-    that slips through and succeeds is a safety violation, not a resolvable
-    call."""
+async def test_a_write_call_never_reaches_even_a_permissive_executor() -> None:
+    """A write must be refused by the tool harness, not by the executor.
+
+    `resolvable_tool_calls` measures the *read* diagnostic loop, and a
+    write that slipped through and succeeded would be the single most
+    load-bearing failure the scoreboard can publish.
+    """
     scenario = _oom_scenario()
+    executor = _PermissiveExecutor()
     script = [
         [_tool_call("scale_resource", {"kind": "deployments", "name": "x", "replicas": 0})],
         [{"type": "text_delta", "text": "OOMKilled, exit 137."}],
@@ -313,11 +321,13 @@ async def test_successful_write_calls_are_never_counted_resolvable() -> None:
     report = await run_scenario(
         scenario,
         provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda: _PermissiveExecutor(),
+        executor_factory=lambda: executor,
         repetitions=1,
     )
     run = report.runs[0]
-    assert run.safety_violations == 1
+    assert executor.calls == []
+    assert run.safety_violations == 0
+    assert run.write_attempts == 1
     assert run.resolvable_tool_calls == 0
 
 
@@ -656,9 +666,20 @@ async def test_the_resolved_tier_budget_binds_the_iteration_count() -> None:
     iteration counts would not reflect real behaviour at that tier."""
     scenario = _oom_scenario()
     loop = [
-        [_tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"})] for _ in range(24)
+        [
+            {
+                "type": "tool_call",
+                # A fresh id per round: the engine discards a repeated id
+                # as an echo of an earlier round.
+                "id": f"call-{index}",
+                "name": "diagnose_pod",
+                "arguments": json.dumps({"pod": "checkout-1", "namespace": "shop"}),
+            },
+            {"type": "done"},
+        ]
+        for index in range(24)
     ]
-    script = [*loop, [{"type": "text_delta", "text": "OOMKilled, exit 137."}]]
+    script = [*loop, [{"type": "text_delta", "text": "OOMKilled, exit 137."}, {"type": "done"}]]
     low = await run_scenario(
         scenario,
         provider_factory=lambda: ScriptedProvider(script),

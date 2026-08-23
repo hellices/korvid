@@ -1,4 +1,16 @@
-"""Persistent-runtime runner for conversational evaluation journeys."""
+"""Persistent-session runner for conversational evaluation journeys.
+
+One `DefaultAgentSession` serves every turn of a journey, exactly as one
+TUI session serves every message an operator types — that persistence is
+what the journeys measure (does the model still hold the correction from
+two turns ago?).
+
+The workspace persists with it. The journey's authored `interaction` is
+the screen the conversation opens on; a turn that declares its own
+`interaction` is the fixture saying the *operator* moved the screen before
+typing, and a turn that does not keeps whatever the previous turn left —
+including wherever the model itself navigated with a screen action.
+"""
 
 from __future__ import annotations
 
@@ -9,82 +21,25 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, ToolCallStarted
-from korvid.agent.profiles import build_profile
-from korvid.agent.runtime import AgentRuntime
+from korvid.agent.interaction import ClusterFacts, InteractionContext
+from korvid.agent.model_policy import ResolvedAgentPolicy
 from korvid.evals.fake_kube import builtin_aliases
 from korvid.evals.grader import GradeResult, ToolRecord, grade
+from korvid.evals.harness import (
+    EVAL_CLUSTER,
+    NO_GRIND,
+    PromptGrind,
+    build_eval_harness,
+    resolve_eval_policy,
+)
+from korvid.evals.interaction import EvalUiBridge
 from korvid.evals.journey import ConversationJourney, JourneyTurn
 from korvid.evals.runner import _CountingProvider, _RecordingExecutor
 from korvid.evals.scenario import Scenario
-from korvid.tools.executor import WRITE_TOOL_NAMES, UIBridge
+from korvid.tools.executor import WRITE_TOOL_NAMES
 
 _RESOURCE_ALIASES = builtin_aliases()
 LIVE_BOUNDARY_ERROR = "live journey boundary violation:"
-
-
-class RecordingUI(UIBridge):
-    """No-screen bridge that records the UI intent a model emitted."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, Any]]] = []
-
-    def _record(self, name: str, args: dict[str, Any]) -> str:
-        self.calls.append((name, args))
-        display = name.removeprefix("open_").replace("_", " ")
-        return f"opened {display}"
-
-    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
-        return self._record("navigate", {"view": view, "namespace": namespace})
-
-    async def agent_set_filter(self, pattern: str) -> str:
-        return self._record("set_filter", {"pattern": pattern})
-
-    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
-        return self._record(
-            "open_logs",
-            {"pod": pod, "namespace": namespace, "container": container},
-        )
-
-    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
-        return self._record(
-            "open_describe",
-            {"kind": kind, "name": name, "namespace": namespace},
-        )
-
-    async def agent_drill_down(self, name: str) -> str:
-        return self._record("drill_down", {"name": name})
-
-    async def agent_request_write(
-        self,
-        action: str,
-        kind: str,
-        name: str,
-        namespace: str | None = None,
-        replicas: int | None = None,
-        resources: dict[str, dict[str, dict[str, str]]] | None = None,
-    ) -> str:
-        return "ERROR: journey evaluation is read-only"
-
-    async def agent_submit_write_proposal(
-        self,
-        action: str,
-        kind: str,
-        name: str,
-        namespace: str | None = None,
-        replicas: int | None = None,
-        resources: dict[str, dict[str, dict[str, str]]] | None = None,
-        *,
-        session_id: str = "",
-        client_name: str = "",
-        client_version: str = "",
-    ) -> str:
-        return "ERROR: journey evaluation is read-only"
-
-    async def agent_get_write_proposal(self, proposal_id: str) -> str:
-        return "ERROR: journey evaluation is read-only"
-
-    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
-        return "ERROR: journey evaluation is read-only"
 
 
 @dataclass(frozen=True)
@@ -166,7 +121,7 @@ def _scenario_for_turn(journey: ConversationJourney, turn: JourneyTurn) -> Scena
     return Scenario(
         id=f"{journey.id}-turn",
         question=turn.user,
-        screen=turn.screen,
+        interaction=turn.interaction or journey.interaction,
         root_cause=journey.root_cause,
         must_mention=turn.must_mention,
         must_not_mention=turn.must_not_mention,
@@ -279,39 +234,60 @@ def _malformed_call(
     return False
 
 
+#: How an eval builds the workspace a journey opens on. Injectable so a
+#: test can keep the bridge the model drove; the default is the ordinary
+#: mutable eval workspace.
+BridgeFactory = Callable[[InteractionContext], EvalUiBridge]
+
+
+@dataclass(frozen=True)
+class JourneyRunConfig:
+    """Everything a conversation needs beyond its journey and factories."""
+
+    policy: ResolvedAgentPolicy | None = None
+    model_tier: str | None = None
+    grind: PromptGrind = NO_GRIND
+    cluster: ClusterFacts = EVAL_CLUSTER
+    user_rules: tuple[str, ...] = ()
+    bridge_factory: BridgeFactory = EvalUiBridge
+
+
 async def _run_once(
     journey: ConversationJourney,
     provider_factory: Callable[[], Any],
     executor_factory: Callable[[ConversationJourney], Any],
-    profile_name: str,
+    config: JourneyRunConfig,
 ) -> JourneyRun:
     raw_provider = provider_factory()
     provider = _CountingProvider(raw_provider)
-    profile = build_profile(profile_name, readonly=True, resize_supported=False)
+    policy = config.policy or resolve_eval_policy(provider, model_tier=config.model_tier)
     executor = _RecordingExecutor(
         executor_factory(journey),
-        max_result_chars=profile.max_result_chars,
+        max_result_chars=policy.max_result_chars,
     )
-    runtime = AgentRuntime(
-        provider,
-        executor,
-        tools=profile.tools,
-        max_iterations=profile.max_iterations,
-        max_history_chars=profile.max_history_chars,
-        max_result_chars=profile.max_result_chars,
-        max_tool_calls_per_iteration=profile.max_tool_calls_per_iteration,
-        strict_history_budget=profile.strict_history_budget,
-        system_prompt=profile.system_prompt,
-        ui_prompt=profile.ui_prompt,
+    bridge = config.bridge_factory(journey.interaction)
+    bridge.record_into(executor.record_action)
+    harness = build_eval_harness(
+        provider=provider,
+        execution=executor,
+        bridge=bridge,
+        policy=policy,
+        cluster=config.cluster,
+        user_rules=config.user_rules,
+        grind=config.grind,
     )
-    tool_schemas = {str(tool["function"]["name"]): tool for tool in profile.tools}
+    tool_schemas = {str(tool["function"]["name"]): dict(tool) for tool in harness.policy.tools}
     results: list[JourneyTurnResult] = []
     try:
         for turn in journey.turns:
+            if turn.interaction is not None:
+                # The fixture says the operator moved the screen between
+                # turns; the model's own navigation is kept otherwise.
+                bridge.reset(turn.interaction)
             record_start = len(executor.records)
             tally = _TurnTally(tool_schemas)
             started = time.monotonic()
-            async for event in runtime.run_turn(turn.user, turn.screen):
+            async for event in harness.session.run_turn(turn.user):
                 tally.note(event)
             turn_records = executor.records[record_start:]
             result = grade(
@@ -362,16 +338,17 @@ async def _run_once(
                 )
             )
     finally:
+        await harness.session.aclose()
         aclose = getattr(raw_provider, "aclose", None)
         if callable(aclose):
             await aclose()
-    in_tokens, out_tokens = runtime.total_tokens
+    in_tokens, out_tokens = harness.session.total_tokens
     return JourneyRun(
         success=all(turn.success for turn in results),
         turns=tuple(results),
         input_tokens=in_tokens,
         output_tokens=out_tokens,
-        tokens_estimated=runtime.usage_estimated,
+        tokens_estimated=harness.session.usage_estimated,
     )
 
 
@@ -381,17 +358,40 @@ async def run_journey(
     provider_factory: Callable[[], Any],
     executor_factory: Callable[[ConversationJourney], Any],
     repetitions: int,
-    profile: str,
+    policy: ResolvedAgentPolicy | None = None,
+    model_tier: str | None = None,
+    grind: PromptGrind = NO_GRIND,
+    cluster: ClusterFacts = EVAL_CLUSTER,
+    user_rules: tuple[str, ...] = (),
+    bridge_factory: BridgeFactory = EvalUiBridge,
 ) -> JourneyReport:
-    """Run a journey repeatedly with fresh state per conversation."""
+    """Run a journey repeatedly with fresh state per conversation.
+
+    Args:
+        journey: The fixture, including the workspace it opens on.
+        provider_factory: Builds one provider per conversation.
+        executor_factory: Builds one tool executor per conversation.
+        repetitions: How many conversations to run.
+        policy: An already-resolved policy; when `None` one is resolved
+            per conversation from `model_tier`.
+        model_tier: `"low"`, `"high"`, or `None` for automatic routing.
+        grind: The eval-only prompt levers.
+        cluster: Cluster facts composed into every turn.
+        user_rules: Operator rules composed into every turn.
+        bridge_factory: Builds the workspace bridge from the journey's
+            authored starting interaction.
+    """
+    config = JourneyRunConfig(
+        policy=policy,
+        model_tier=model_tier,
+        grind=grind,
+        cluster=cluster,
+        user_rules=user_rules,
+        bridge_factory=bridge_factory,
+    )
     runs = tuple(
         [
-            await _run_once(
-                journey,
-                provider_factory,
-                executor_factory,
-                profile,
-            )
+            await _run_once(journey, provider_factory, executor_factory, config)
             for _ in range(repetitions)
         ]
     )

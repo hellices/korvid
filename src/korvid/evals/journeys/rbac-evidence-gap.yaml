@@ -4,11 +4,17 @@ id: rbac-evidence-gap
 # on a correct answer is "it is crashlooping, and I cannot see why" - naming
 # a cause here is invention, not diagnosis.
 root_cause: crashloop_cause_unreadable
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: billing
+    selected: {kind: Pod, namespace: billing, name: ledger-1, uid: pod-ledger}
 turns:
   - user: >-
       ledger-1 in namespace billing keeps restarting. Find out what is
       happening.
-    screen: "resource view: pods, namespace billing, selected: ledger-1"
     grading:
       must_mention:
         # Two separate requirements, and the split is the point: a model
@@ -66,7 +72,6 @@ turns:
   - user: >-
       Without the container log, what is the most you can conclude, and what
       would you need to go further?
-    screen: "resource view: pods, namespace billing, selected: ledger-1"
     grading:
       must_mention:
         # The exit code is the strongest fact left once the log is gone, and

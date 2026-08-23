@@ -1,6 +1,12 @@
 id: init-container-failing
 question: Pod api-1 in namespace shop is stuck in Init:CrashLoopBackOff. Why does it never start?
-screen: "resource view: pods, namespace shop, selected: shop/api-1 (Init:CrashLoopBackOff)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: shop
+    selected: {kind: Pod, namespace: shop, name: api-1, uid: pod-init-1}
 root_cause: init_container_failing
 grading:
   must_mention:

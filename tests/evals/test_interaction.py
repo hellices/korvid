@@ -13,12 +13,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from korvid.evals.interaction import (
-    ALL_NAMESPACES_SCOPE,
-    EvalUiBridge,
-    interaction_payload,
-    load_interaction,
-)
 
 from korvid.agent.interaction import (
     DrillDown,
@@ -32,6 +26,12 @@ from korvid.agent.interaction import (
     ResourceIdentity,
     SelectResource,
     SetFilter,
+)
+from korvid.evals.interaction import (
+    ALL_NAMESPACES_SCOPE,
+    EvalUiBridge,
+    interaction_payload,
+    load_interaction,
 )
 
 _FULL: dict[str, Any] = {

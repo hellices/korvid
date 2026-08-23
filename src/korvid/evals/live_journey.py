@@ -6,8 +6,9 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
 
+from korvid.agent.interaction import InteractionContext, PaneContext
 from korvid.evals.journey import ConversationJourney, JourneyTurn
-from korvid.evals.journey_runner import LIVE_BOUNDARY_ERROR, RecordingUI
+from korvid.evals.journey_runner import LIVE_BOUNDARY_ERROR
 from korvid.evals.scenario import Evidence
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta, build_alias_map
@@ -78,6 +79,50 @@ def _retarget_evidence(
     )
 
 
+def _retarget_pane(pane: PaneContext, source: str, namespace: str) -> PaneContext:
+    selected = pane.selected
+    return replace(
+        pane,
+        scope=namespace if pane.scope == source else pane.scope,
+        selected=(
+            None
+            if selected is None
+            else replace(
+                selected,
+                namespace=namespace if selected.namespace == source else selected.namespace,
+            )
+        ),
+    )
+
+
+def _retarget_interaction(
+    interaction: InteractionContext, source: str, namespace: str
+) -> InteractionContext:
+    """Point an authored workspace at the live run's own namespace.
+
+    The guarded live adapter refuses every read outside the run namespace,
+    so a starting pane still scoped to the fixture namespace would tell
+    the model to look somewhere it is not allowed to look.
+    """
+    secondary = interaction.secondary_pane
+    return replace(
+        interaction,
+        focused_pane=_retarget_pane(interaction.focused_pane, source, namespace),
+        secondary_pane=(
+            None if secondary is None else _retarget_pane(secondary, source, namespace)
+        ),
+    )
+
+
+def _retarget_optional(
+    interaction: InteractionContext | None, source: str, namespace: str
+) -> InteractionContext | None:
+    """`_retarget_interaction` for a turn that may not restate the screen."""
+    if interaction is None:
+        return None
+    return _retarget_interaction(interaction, source, namespace)
+
+
 def _source_namespace(journey: ConversationJourney) -> str:
     for turn in journey.turns:
         for group in turn.expected_evidence:
@@ -100,7 +145,7 @@ def retarget_journey_namespace(
             replace(
                 turn,
                 user=turn.user.replace(source, namespace),
-                screen=turn.screen.replace(source, namespace),
+                interaction=_retarget_optional(turn.interaction, source, namespace),
                 expected_evidence=_retarget_evidence(turn.expected_evidence, source, namespace),
                 forbidden_targets=tuple(
                     {
@@ -111,7 +156,11 @@ def retarget_journey_namespace(
                 ),
             )
         )
-    return replace(journey, turns=tuple(turns))
+    return replace(
+        journey,
+        turns=tuple(turns),
+        interaction=_retarget_interaction(journey.interaction, source, namespace),
+    )
 
 
 def build_live_aliases(resources: list[ResourceMeta]) -> dict[str, ResourceMeta]:
@@ -226,12 +275,13 @@ class LiveJourneyEnvironment:
         return cls(client, build_live_aliases(resources), namespace)
 
     def executor_factory(self, _fixture: Any) -> ToolExecutor:
-        """Read-only tool executor; profile construction omits every write."""
-        return ToolExecutor(
-            self._reads,
-            self._aliases,
-            ui=RecordingUI(),
-        )
+        """Read-only tool executor; the eval policy arms no write at all.
+
+        No UI bridge either: screen actions are typed `UiAction` values
+        applied to the eval workspace bridge, never routed through the
+        tool executor.
+        """
+        return ToolExecutor(self._reads, self._aliases)
 
     async def close(self) -> None:
         await self._client.close()
