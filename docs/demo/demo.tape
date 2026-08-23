@@ -16,7 +16,9 @@ Set Shell bash
 Hide
 Type "uv run --frozen python docs/demo/demo.py"
 Enter
-Sleep 6s
+# Hidden cold-start allowance shared by every tape; see the reason in
+# docs/demo/visual-storytelling.md ("Running the tapes reproducibly").
+Sleep 20s
 Show
 
 # Browse the pod table

@@ -580,17 +580,19 @@ Set TypingSpeed 70ms
 Set Shell bash
 
 Hide
-Type "uv run python docs/demo/demo.py --scene agent"
+Type "uv run --frozen python docs/demo/demo.py --scene agent"
 Enter
-Sleep 6s
+# Hidden cold-start allowance shared by every tape; see the reason in
+# docs/demo/visual-storytelling.md ("Running the tapes reproducibly").
+Sleep 20s
 Show
-Ctrl+A
-Sleep 1s
+# The demo harness already auto-opened and focused the real AgentPanel
+# `#agent-input` widget by this point; type straight into it and press
+# Enter through the genuine Input/on_input_submitted path.
 Type "Why is the payment worker failing?"
 Enter
-Sleep 6s
+Sleep 8s
 Hide
-Ctrl+A
 Type "q"
 ```
 
@@ -607,9 +609,11 @@ Set TypingSpeed 90ms
 Set Shell bash
 
 Hide
-Type "uv run python docs/demo/demo.py --scene relationships"
+Type "uv run --frozen python docs/demo/demo.py --scene relationships"
 Enter
-Sleep 6s
+# Hidden cold-start allowance shared by every tape; see the reason in
+# docs/demo/visual-storytelling.md ("Running the tapes reproducibly").
+Sleep 20s
 Show
 Type "/"
 Type "payment-worker"

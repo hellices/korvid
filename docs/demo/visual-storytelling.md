@@ -14,12 +14,13 @@ Each tape then sleeps inside a `Hide` block before `Show`. That sleep is the
 cold-start allowance: `uv run` can spend tens of seconds resolving and
 installing the project before the TUI paints its first frame, and every
 keystroke the tape sends in the meantime lands in the shell instead of the
-app. `agent.tape` and `relationships.tape` allow **20 seconds**; `demo.tape`
-allows 6, which is enough only for an already-warm environment. Because the
-sleep is inside `Hide`, it costs the recording nothing — the output timeline
-still starts at `Show`, so the `ffmpeg -ss` offsets below are unaffected. Warm
-the environment first (`uv run --frozen python -c "import korvid"`) if a tape
-still opens on a shell prompt.
+app. `demo.tape`, `agent.tape` and `relationships.tape` therefore all allow
+the same **20 seconds**, and none of them repeats the reason — they point
+here. Because the sleep is inside `Hide`, it costs the recording nothing: the
+output timeline still starts at `Show`, so the `ffmpeg -ss` offsets below are
+unaffected by the allowance. Warm the environment first
+(`uv run --frozen python -c "import korvid"`) if a tape still opens on a shell
+prompt.
 
 ## Base cockpit and feature frames
 

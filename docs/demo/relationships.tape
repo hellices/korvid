@@ -10,10 +10,8 @@ Set Shell bash
 Hide
 Type "uv run --frozen python docs/demo/demo.py --scene relationships"
 Enter
-# 20s, not the 6s a warm shell needs: `uv run` may resolve and install the
-# project's dependencies on a cold cache before the TUI ever starts, and
-# every keystroke below would otherwise land in the shell. The sleep is
-# inside `Hide`, so it costs the recording nothing.
+# Hidden cold-start allowance shared by every tape; see the reason in
+# docs/demo/visual-storytelling.md ("Running the tapes reproducibly").
 Sleep 20s
 Show
 Type "/"

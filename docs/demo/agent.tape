@@ -10,6 +10,8 @@ Set Shell bash
 Hide
 Type "uv run --frozen python docs/demo/demo.py --scene agent"
 Enter
+# Hidden cold-start allowance shared by every tape; see the reason in
+# docs/demo/visual-storytelling.md ("Running the tapes reproducibly").
 Sleep 20s
 Show
 # The demo harness already auto-opened and focused the real AgentPanel

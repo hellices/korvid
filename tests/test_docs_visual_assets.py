@@ -20,11 +20,22 @@ from korvid.ui.relationship_controller import RelationshipSnapshotLoader, graph_
 ROOT = Path(__file__).parent.parent
 DOCS = ROOT / "docs"
 SCENES = ROOT / "docs" / "assets" / "scenes"
-INSTRUCTIONS = ROOT / "docs" / "demo" / "visual-storytelling.md"
+DEMO_DIR = ROOT / "docs" / "demo"
+INSTRUCTIONS = DEMO_DIR / "visual-storytelling.md"
 LANDING = DOCS / "index.md"
-AGENT_TAPE = ROOT / "docs" / "demo" / "agent.tape"
+AGENT_TAPE = DEMO_DIR / "agent.tape"
 AGENT_PAGE = DOCS / "agent.md"
-DEMO_HARNESS = ROOT / "docs" / "demo" / "demo.py"
+DEMO_HARNESS = DEMO_DIR / "demo.py"
+VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
+
+#: Every tape that starts the TUI through `uv run` before it records.
+TUI_TAPES = ("demo.tape", "agent.tape", "relationships.tape")
+#: The cold-start allowance each of them hides behind `Hide`. `uv run` may
+#: resolve and install the project on a cold cache before the TUI paints its
+#: first frame, and any keystroke sent in the meantime lands in the shell.
+COLD_START_SLEEP = "Sleep 20s"
+#: Where that reason is written down once, instead of in three tapes.
+COLD_START_REFERENCE = "docs/demo/visual-storytelling.md"
 
 #: The synthetic pod the relationship tape opens the graph on.
 DEMO_ROOT = GraphResource(
@@ -304,6 +315,119 @@ def test_band_deviation_cannot_be_satisfied_by_alpha_variation_alone() -> None:
         f"alpha channel; got {deviation}"
     )
     assert not deviation > 100, "alpha alone must never satisfy the evidence contract"
+
+
+def _hidden_launch_block(tape: str, source: str) -> tuple[str, list[str]]:
+    """Split a tape into its launch line and the hidden block containing it.
+
+    Args:
+        tape: The full VHS script.
+        source: The tape's name, used in assertion messages.
+
+    Returns:
+        `(launch_line, hidden_lines)` — the `Type "uv run …"` line and every
+        stripped line from the `Hide` that precedes it up to the next
+        `Show`. Everything in that block is executed while VHS records
+        nothing, so it cannot change the captured timeline.
+    """
+    lines = [line.strip() for line in tape.splitlines()]
+    launches = [index for index, line in enumerate(lines) if line.startswith('Type "uv run')]
+    assert len(launches) == 1, f"{source} must launch the harness exactly once"
+    launch = launches[0]
+    hides = [index for index, line in enumerate(lines[:launch]) if line == "Hide"]
+    assert hides, f"{source} must launch the harness inside a Hide block"
+    shows = [index for index, line in enumerate(lines) if index > launch and line == "Show"]
+    assert shows, f"{source} must reveal the terminal with Show once the TUI is up"
+    return lines[launch], lines[hides[-1] : shows[0]]
+
+
+def test_every_tui_tape_hides_the_same_frozen_cold_start_allowance() -> None:
+    """All three tapes start the TUI the same way, or one of them records a shell.
+
+    `uv run` can spend tens of seconds resolving and installing the project
+    on a cold cache before korvid paints its first frame; whatever the tape
+    types before then lands in the shell. `demo.tape` allowed six seconds
+    while `agent.tape` and `relationships.tape` allowed twenty, so the same
+    cold cache that the other two tolerate produced a recording of bash
+    echoing `0`, `/payment`, `d`, `l` and `:deploy`. The allowance sits
+    inside the tape's `Hide` block, so raising it costs the captured
+    animation nothing — the output timeline still starts at `Show`, and the
+    poster/`ffmpeg -ss` offsets cut from it are unaffected.
+
+    `--frozen` is part of the same contract: recording a screenshot must
+    never re-resolve and rewrite `uv.lock` as a side effect.
+    """
+    for name in TUI_TAPES:
+        tape = (DEMO_DIR / name).read_text(encoding="utf-8")
+        launch, hidden = _hidden_launch_block(tape, name)
+
+        assert launch.startswith('Type "uv run --frozen python docs/demo/demo.py'), (
+            f"{name} must launch the harness with `uv run --frozen`, or recording a "
+            f"capture can re-resolve and rewrite uv.lock: {launch!r}"
+        )
+        sleeps = [line for line in hidden if line.startswith("Sleep")]
+        assert sleeps == [COLD_START_SLEEP], (
+            f"{name} must hide exactly the shared cold-start allowance "
+            f"{COLD_START_SLEEP!r} before Show; found {sleeps}"
+        )
+        assert COLD_START_REFERENCE in tape, (
+            f"{name} must point at {COLD_START_REFERENCE} for the reason behind the "
+            "allowance instead of restating it, so the three tapes cannot drift apart"
+        )
+
+
+def test_cold_start_allowance_is_documented_once_in_the_provenance_page() -> None:
+    """The reason lives in one place; the tapes reference it.
+
+    A per-tape comment is how the tapes drifted to two different allowances
+    in the first place. The provenance page states the allowance, the reason
+    and the fact that hiding it keeps the recorded timeline unchanged, and
+    must not describe any tape as needing less.
+    """
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    section = instructions.split("## Running the tapes reproducibly", 1)[1].split("\n## ", 1)[0]
+    lowered = " ".join(section.lower().split())
+
+    assert "uv run --frozen" in section
+    assert "**20 seconds**" in section, (
+        "the provenance page must state the single cold-start allowance every tape hides"
+    )
+    for tape in TUI_TAPES:
+        assert tape in section, f"the shared allowance must name {tape}"
+    for reason in ("cold", "resolv", "shell", "hide"):
+        assert reason in lowered, (
+            f"the centralized reason must explain the allowance; {reason!r} is missing"
+        )
+    assert "starts at `show`" in lowered, (
+        "the page must say the recorded timeline still starts at Show, so the "
+        "hidden allowance cannot be read as padding the captured duration"
+    )
+    assert "allows 6" not in lowered, "no tape may still document a shorter allowance"
+
+
+def test_visual_storytelling_plan_tape_snippets_match_the_shipped_cold_start() -> None:
+    """The plan is an executable recipe, so its tapes must be the shipped tapes.
+
+    A contributor replaying `Step 4` verbatim would otherwise recreate the
+    unfrozen `uv run` and the six-second allowance this change removes.
+    """
+    plan = VISUAL_STORYTELLING_PLAN.read_text(encoding="utf-8")
+    for name in ("agent.tape", "relationships.tape"):
+        marker = f"Create `docs/demo/{name}`:"
+        assert marker in plan, f"the plan must still create {name}"
+        snippet = plan.split(marker, 1)[1].split("```", 2)[1]
+        snippet = snippet.split("\n", 1)[1]
+        shipped = (DEMO_DIR / name).read_text(encoding="utf-8")
+        assert snippet.strip() == shipped.strip(), (
+            f"the plan's {name} snippet must be the shipped tape, cold-start "
+            "allowance and `--frozen` included"
+        )
+    assert "Sleep 6s" not in plan, (
+        "no plan snippet may still ship the six-second cold-start allowance"
+    )
+    assert 'Type "uv run python docs/demo/demo.py' not in plan, (
+        "no plan snippet may launch the harness without `--frozen`"
+    )
 
 
 def test_storytelling_pngs_meet_their_declared_size_and_byte_budget() -> None:
