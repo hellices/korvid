@@ -58,8 +58,8 @@ hide:
       <a href="agent/">Explore the embedded agent</a>
     </article>
     <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
-      <video src="assets/scenes/mcp-follow-demo.mp4" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
-      <noscript><img src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></noscript>
+      <video src="assets/scenes/mcp-follow-demo.mp4" class="mcp-media" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
+      <noscript><img src="assets/scenes/mcp-poster.png" class="mcp-media" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></noscript>
       <div><strong>Input</strong> External assistant</div>
       <div><strong>Evidence</strong> Tool-specific bounded fresh reads</div>
       <div><strong>Result</strong> MCP response + optional follow</div>
@@ -144,7 +144,7 @@ hide:
       <a href="agent/">Use the embedded agent</a>
     </article>
     <article class="evidence-card evidence-card--wide">
-      <figure><a class="evidence-card__full" href="assets/scenes/mcp-poster.png"><img src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></a><figcaption>MCP follow</figcaption></figure>
+      <figure><a class="evidence-card__full" href="assets/scenes/mcp-poster.png"><img src="assets/scenes/mcp-poster.png" class="mcp-media" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></a><figcaption>MCP follow</figcaption></figure>
       <p>Let an external assistant read bounded tools while korvid can mirror where it went.</p>
       <a href="mcp/#follow-mode">Connect over MCP</a>
     </article>

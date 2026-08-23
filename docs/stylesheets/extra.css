@@ -577,6 +577,20 @@
   background: #07090c;
 }
 
+/* Every capture on this page is 1280×720 except the MCP pair, which is
+   1280×710 — the reviewed recording's own terminal geometry, declared on the
+   elements as `width="1280" height="710"`. Under the two 16/9 rules above the
+   reserved box is 4px taller than the media at full width, so the `<video>`
+   letterboxes inside a box that is not its own and the poster tile's
+   `object-fit: cover` crops the external client's prompt. These selectors
+   qualify the same elements with the class the MCP media carries, so they win
+   on specificity rather than on source order, and restate the real ratio. */
+.md-typeset .scene-panel video.mcp-media,
+.md-typeset .scene-panel noscript img.mcp-media,
+.md-typeset .evidence-card img.mcp-media {
+  aspect-ratio: 1280 / 710;
+}
+
 /* Each capture links to its own full-resolution asset so 15px terminal
    text stays checkable; the link must not introduce its own box or
    Material's link colour under the image. */

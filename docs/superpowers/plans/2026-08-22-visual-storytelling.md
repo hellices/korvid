@@ -909,8 +909,8 @@ with:
       <a href="agent/">Explore the embedded agent</a>
     </article>
     <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
-      <video src="assets/scenes/mcp-follow-demo.mp4" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
-      <noscript><img src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></noscript>
+      <video src="assets/scenes/mcp-follow-demo.mp4" class="mcp-media" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
+      <noscript><img src="assets/scenes/mcp-poster.png" class="mcp-media" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></noscript>
       <div><strong>Input</strong> External assistant</div>
       <div><strong>Evidence</strong> Tool-specific bounded fresh reads</div>
       <div><strong>Result</strong> MCP response + optional follow</div>
@@ -1568,7 +1568,7 @@ Delete the old “Find your flight path” list and add:
       <a href="agent/">Use the embedded agent</a>
     </article>
     <article class="evidence-card evidence-card--wide">
-      <figure><a class="evidence-card__full" href="assets/scenes/mcp-poster.png"><img src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></a><figcaption>MCP follow</figcaption></figure>
+      <figure><a class="evidence-card__full" href="assets/scenes/mcp-poster.png"><img src="assets/scenes/mcp-poster.png" class="mcp-media" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></a><figcaption>MCP follow</figcaption></figure>
       <p>Let an external assistant read bounded tools while korvid can mirror where it went.</p>
       <a href="mcp/#follow-mode">Connect over MCP</a>
     </article>
@@ -1626,6 +1626,20 @@ Add:
   object-fit: cover;
   object-position: top left;
   background: #07090c;
+}
+
+/* Every capture on this page is 1280×720 except the MCP pair, which is
+   1280×710 — the reviewed recording's own terminal geometry, declared on the
+   elements as `width="1280" height="710"`. Under the two 16/9 rules above the
+   reserved box is 4px taller than the media at full width, so the `<video>`
+   letterboxes inside a box that is not its own and the poster tile's
+   `object-fit: cover` crops the external client's prompt. These selectors
+   qualify the same elements with the class the MCP media carries, so they win
+   on specificity rather than on source order, and restate the real ratio. */
+.md-typeset .scene-panel video.mcp-media,
+.md-typeset .scene-panel noscript img.mcp-media,
+.md-typeset .evidence-card img.mcp-media {
+  aspect-ratio: 1280 / 710;
 }
 
 .md-typeset .evidence-card__full {

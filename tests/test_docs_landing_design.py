@@ -1008,6 +1008,132 @@ def test_shipped_controller_is_syntactically_valid_javascript() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_mcp_media_reserves_its_own_intrinsic_ratio_not_the_generic_16_9() -> None:
+    """1280x710 is the MCP recording's real geometry, so its box must be 1280x710.
+
+    Every other capture on this page is 1280x720, so both media rules
+    reserve `16 / 9`. The MCP clip and poster are 1280x710 — the terminal
+    geometry of the reviewed recording — and a 16:9 box is 4px taller than
+    their content at full width: the `<video>` letterboxes inside a box that
+    does not match it, and the poster tile's `object-fit: cover` crops the
+    top or bottom of the client's own prompt. Both also declare
+    `width="1280" height="710"`, so a 16:9 box makes the reserved space
+    disagree with the attributes the browser lays out from.
+
+    The two MCP elements therefore carry a class, and a class-qualified rule
+    restates their real ratio with higher specificity than the generic
+    element rules.
+    """
+    css = _strip_css_comments(_css())
+    switcher = _scene_switcher()
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+
+    mcp_video = re.search(r"<video[^>]*mcp-follow-demo\.mp4[^>]*>", switcher)
+    assert mcp_video is not None, "the MCP scene keeps its video"
+    assert 'class="mcp-media"' in mcp_video.group(0), (
+        f"the MCP scene video must claim its own ratio class: {mcp_video.group(0)}"
+    )
+
+    mcp_tile = next(
+        card
+        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
+        if "mcp-poster.png" in card
+    )
+    tile_image = re.search(r"<img[^>]*>", mcp_tile)
+    assert tile_image is not None
+    assert 'class="mcp-media"' in tile_image.group(0), (
+        f"the MCP evidence tile image must claim its own ratio class: {tile_image.group(0)}"
+    )
+    assert 'width="1280" height="710"' in tile_image.group(0)
+
+    ratio_rule = _rule(css, "video.mcp-media")
+    assert "aspect-ratio: 1280 / 710" in ratio_rule, (
+        "the MCP override must reserve the capture's real intrinsic ratio; found "
+        f"{_compact(ratio_rule)!r}"
+    )
+
+    prelude = css[
+        css.rindex("}", 0, css.index("video.mcp-media")) + 1 : css.index(
+            "{", css.index("video.mcp-media")
+        )
+    ]
+    for generic in (".md-typeset .scene-panel video", ".md-typeset .evidence-card img"):
+        qualified = f"{generic}.mcp-media"
+        assert qualified in prelude, (
+            f"the override must qualify `{generic}` with the class so it wins on "
+            f"specificity, not on source order alone; prelude was {_compact(prelude)!r}"
+        )
+        assert css.index(generic + " {") < css.index("video.mcp-media"), (
+            f"the generic `{generic}` rule must come first so the MCP override "
+            "cannot be undone by a later declaration"
+        )
+
+    assert "aspect-ratio: 16 / 9" in _rule(css, ".md-typeset .scene-panel video {"), (
+        "the 1280x720 captures keep the generic 16:9 reservation"
+    )
+    assert "aspect-ratio: 16 / 9" in _rule(css, ".md-typeset .evidence-card img {")
+
+
+def test_no_landing_media_declares_a_box_its_asset_cannot_fill() -> None:
+    """Declared attributes and reserved CSS box must agree for every capture.
+
+    The `width`/`height` attributes are what the browser reserves before an
+    image loads; a CSS `aspect-ratio` that disagrees with them silently wins
+    and re-crops or letterboxes the asset. This walks every landing image
+    with declared dimensions and requires a 16:9 asset to sit under the
+    generic rule and a non-16:9 asset to carry an override class.
+    """
+    css = _strip_css_comments(_css())
+    for image in re.findall(r"<img[^>]*>", _index()):
+        declared = re.search(r'width="(\d+)" height="(\d+)"', image)
+        if declared is None:
+            continue
+        width, height = int(declared.group(1)), int(declared.group(2))
+        if (width, height) == (1280, 720):
+            assert "mcp-media" not in image, f"a 16:9 capture needs no override: {image}"
+            continue
+        assert (width, height) == (1280, 710), f"unexpected capture geometry: {image}"
+        assert 'class="mcp-media"' in image, (
+            f"a capture that is not 16:9 must reserve its own ratio: {image}"
+        )
+        assert f"aspect-ratio: {width} / {height}" in _rule(css, "video.mcp-media"), (
+            "the override rule must reserve exactly the declared geometry"
+        )
+
+
+def test_visual_storytelling_plan_mcp_ratio_snippets_match_the_shipped_sources() -> None:
+    """A plan replay must not restore the stretched 16:9 MCP box."""
+    plan = _plan()
+    scene_markup = _fenced_block_after(
+        plan,
+        "- [ ] **Step 3: Replace the numbered cards with complete scene markup**",
+        "html",
+    )
+    shipped_scene = _section('<article id="scene-mcp"', "</article>")
+    assert _compact(shipped_scene) in _compact(scene_markup), (
+        "the plan's MCP scene snippet must be the shipped one, ratio class included"
+    )
+
+    mosaic_markup = _fenced_block_after(
+        plan,
+        "Delete the old “Find your flight path” list and add:",
+        "html",
+    )
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    shipped_tile = next(
+        card
+        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
+        if "mcp-poster.png" in card
+    )
+    assert _compact(shipped_tile) in _compact(mosaic_markup), (
+        "the plan's MCP evidence tile must carry the shipped ratio class"
+    )
+
+    assert "aspect-ratio: 1280 / 710" in plan, (
+        "the plan's CSS must ship the MCP ratio override it tells contributors to build"
+    )
+
+
 def test_scene_videos_never_autoplay_and_below_fold_media_preloads_nothing() -> None:
     """Bandwidth and motion are the visitor's choice on every landing video."""
     videos = re.findall(r"<video[^>]*>", _index())
