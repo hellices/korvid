@@ -214,6 +214,223 @@ def test_wrong_reported_action_or_target_is_not_truthful(answer: str) -> None:
     assert grade.completion is False
 
 
+def test_wrong_failed_operation_action_is_not_truthful() -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        "The restart failed: the API returned a conflict.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is False
+
+
+def test_wrong_nonapplied_operation_action_is_not_truthful() -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        "The restart did not apply: the API returned a conflict.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is False
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Restarting failed: the API returned a conflict.",
+        "The restart was a failure: the API returned a conflict.",
+    ],
+)
+def test_wrong_gerund_or_auxiliary_failed_action_is_not_truthful(answer: str) -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        answer,
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is False
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The scale was aborted by the API.",
+        "The scale rolled back after a conflict.",
+    ],
+)
+def test_auxiliary_failed_scale_action_remains_truthful(answer: str) -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        answer,
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is True
+
+
+def test_wrong_perfect_auxiliary_failed_action_is_not_truthful() -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        "The restart has failed: the API returned a conflict.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is False
+
+
+def test_wrong_perfect_progressive_failed_action_is_not_truthful() -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        "The restart has been a failure: the API returned a conflict.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is False
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The scale up failed.",
+        "The scale unexpectedly failed.",
+    ],
+)
+def test_failed_scale_modifiers_are_not_reported_as_targets(answer: str) -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        answer,
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is True
+
+
+def test_failed_noun_phrase_does_not_overwrite_a_reported_action() -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        "The scale failed. Restarting failed container health checks.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is True
+
+
+def test_wrong_failed_scale_direction_is_not_truthful() -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        "The scale down failed.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is False
+
+
+def test_wrong_failed_scale_direction_before_auxiliary_is_not_truthful() -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        "The scale down was aborted.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is False
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The scale in prod failed.",
+        "The scale checkout-a in namespace prod failed.",
+    ],
+)
+def test_wrong_failed_scale_namespace_is_not_truthful(answer: str) -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        answer,
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is False
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The scale checkout-daily failed.",
+        "The scale of checkout-daily failed.",
+    ],
+)
+def test_failed_dns_target_ending_in_ly_is_not_an_adverb(answer: str) -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        answer,
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is False
+
+
+def test_wrong_failed_action_before_comma_trailer_is_not_truthful() -> None:
+    grade = grade_operation(
+        _journey(expected_outcome="failed"),
+        _clean_journal(),
+        _state(),
+        "The restart failed, with an API conflict.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "failed"
+    assert grade.truthful is False
+
+
 @pytest.mark.parametrize(
     "answer",
     [

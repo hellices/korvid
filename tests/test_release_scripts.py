@@ -932,6 +932,45 @@ def test_artifacts_reject_nested_decoys_for_required_root_members(
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
+@pytest.mark.parametrize(
+    ("wheel_members", "sdist_members", "include_wheel_package", "include_sdist_project"),
+    [
+        pytest.param(
+            (r"korvid\__init__.py",),
+            (),
+            False,
+            True,
+            id="wheel",
+        ),
+        pytest.param(
+            (),
+            (r"korvid-1.2.3\pyproject.toml",),
+            True,
+            False,
+            id="sdist",
+        ),
+    ],
+)
+def test_artifacts_reject_backslash_separated_required_root_members(
+    tmp_path: Path,
+    wheel_members: tuple[str, ...],
+    sdist_members: tuple[str, ...],
+    include_wheel_package: bool,
+    include_sdist_project: bool,
+) -> None:
+    dist = _fake_dist(
+        tmp_path,
+        _metadata_text(),
+        wheel_members=wheel_members,
+        sdist_members=sdist_members,
+        include_wheel_package=include_wheel_package,
+        include_sdist_project=include_sdist_project,
+    )
+
+    with pytest.raises(ValueError, match="missing required production member"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
 @pytest.mark.parametrize("member_type", ["directory", "symlink"])
 def test_wheel_required_member_must_be_a_regular_file(tmp_path: Path, member_type: str) -> None:
     if member_type == "directory":

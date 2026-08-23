@@ -264,6 +264,30 @@ async def test_harness_resource_aliases_are_normalized_consistently() -> None:
     assert summary.name == journey.target.name
 
 
+async def test_write_target_binding_uses_authoritative_manifest_identity() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+    credential = "ghp_" + "a" * 36
+
+    class RedirectingKube:
+        async def get_object(
+            self,
+            meta: Any,
+            namespace: str | None,
+            name: str,
+        ) -> dict[str, Any]:
+            return deepcopy(journey.cluster.objects[0])
+
+    journal = ActionJournal()
+    get_manifest = _make_get_manifest(cast(Any, RedirectingKube()), journal, journey)
+
+    await get_manifest("deployments", credential, credential)
+
+    binding = journal.payload()[0]
+    assert binding["target"]["namespace"] == journey.target.namespace
+    assert binding["target"]["name"] == journey.target.name
+    assert credential not in json.dumps(binding, sort_keys=True)
+
+
 def test_write_target_projection_matches_production_normalization() -> None:
     journey = _JOURNEYS["scale-deployment-up"]
     target = _write_request_target(
@@ -280,6 +304,37 @@ def test_write_target_projection_matches_production_normalization() -> None:
         journey.target.namespace,
         journey.target.name,
     )
+
+
+def test_wrong_write_target_projection_redacts_untrusted_identifiers() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+    credential = "ghp_" + "a" * 36
+
+    target = _write_request_target(
+        journey,
+        {
+            "kind": "deployments",
+            "namespace": credential,
+            "name": credential,
+        },
+    )
+
+    assert target is None
+
+
+def test_wrong_kind_write_target_projection_fails_closed() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+
+    target = _write_request_target(
+        journey,
+        {
+            "kind": "statefulsets",
+            "namespace": journey.target.namespace,
+            "name": journey.target.name,
+        },
+    )
+
+    assert target is None
 
 
 async def test_a_sub_second_approval_window_is_refused(tmp_path: Path) -> None:
@@ -830,10 +885,10 @@ async def test_a_malformed_delete_call_still_reaches_the_real_executor(tmp_path:
     tool_events = [entry for entry in run.journal if entry["event"] == "tool_call"]
     write_events = [entry for entry in run.journal if entry["event"] == "write_requested"]
     assert [entry["detail"] for entry in tool_events] == [
-        "tool=delete_resource kind=deployments name=api dropped=1"
+        "tool=delete_resource kind=redacted name=redacted dropped=1"
     ]
     assert [entry["detail"] for entry in write_events] == [
-        "tool=delete_resource kind=deployments name=api dropped=1"
+        "tool=delete_resource kind=redacted name=redacted dropped=1"
     ]
     assert all("namespace" not in entry["detail"] for entry in (*tool_events, *write_events))
     assert [entry for entry in run.journal if entry["event"] == "mutation_started"] == []
@@ -846,7 +901,7 @@ async def test_a_malformed_delete_call_still_reaches_the_real_executor(tmp_path:
         (
             'de"lete_resource',
             {"kind": "deployments", "name": '"api"', "namespace": '"shop-a"'},
-            "kind=deployments dropped=3",
+            "kind=redacted dropped=3",
         ),
         (
             'sc"ale_resource',
@@ -856,7 +911,12 @@ async def test_a_malformed_delete_call_still_reaches_the_real_executor(tmp_path:
                 "namespace": '"shop-a"',
                 "replicas": 3,
             },
-            "kind=deployments replicas=3 dropped=3",
+            "kind=redacted replicas=3 dropped=3",
+        ),
+        (
+            "ghp_" + "a" * 36,
+            {"kind": "deployments"},
+            "kind=redacted dropped=1",
         ),
     ],
 )
@@ -1053,10 +1113,34 @@ async def test_a_wildcard_rbac_refusal_drops_a_hostile_namespace_without_aliasin
     )
     assert allowed is False
     denied = journal.payload()[0]
-    assert denied["detail"] == "group=apps resource=deployments dropped=1"
+    assert denied["detail"] == "group=apps resource=deployments namespace=all dropped=0"
     payload = json.dumps(denied, sort_keys=True)
     assert namespace not in payload
     assert "namespace=-" not in denied["detail"]
+
+
+async def test_a_wildcard_rbac_refusal_redacts_a_bounded_untrusted_namespace() -> None:
+    journal = ActionJournal()
+    journey = replace(
+        _JOURNEYS["scale-rbac-denied"],
+        permission_denials=(PermissionDenial("patch", "deployments", "scale", None),),
+    )
+    check_permission = _make_check_permission(journey, journal)
+    credential = "ghp_" + "a" * 36
+
+    allowed = await check_permission(
+        "patch",
+        "deployments",
+        "scale",
+        credential,
+        "apps",
+        "payments-b",
+    )
+
+    assert allowed is False
+    denied = journal.payload()[0]
+    assert denied["detail"] == "group=apps resource=deployments namespace=all dropped=0"
+    assert credential not in json.dumps(denied, sort_keys=True)
 
 
 async def test_a_wildcard_rbac_refusal_with_a_hostile_namespace_stays_on_the_product_path(
@@ -1118,7 +1202,7 @@ async def test_a_wildcard_rbac_refusal_with_a_hostile_namespace_stays_on_the_pro
     ]
     assert tool_results[-1] == "ERROR: missing permission: patch deployments/scale"
     denied = next(entry for entry in run.journal if entry["event"] == "permission_denied")
-    assert denied["detail"] == "group=apps resource=deployments dropped=1"
+    assert denied["detail"] == "group=apps resource=deployments namespace=all dropped=0"
     payload = json.dumps(run.journal, sort_keys=True)
     assert namespace not in payload
     assert "namespace=-" not in payload

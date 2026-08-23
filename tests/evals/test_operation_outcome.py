@@ -118,6 +118,14 @@ def test_transitive_scale_report_is_completed() -> None:
     assert classify_operation_outcome("I scaled checkout-a to 3 replicas.").outcome == "completed"
 
 
+def test_nested_failed_target_does_not_overwrite_the_enclosing_action() -> None:
+    classification = classify_operation_outcome("The scale of restart failed.")
+
+    assert classification.outcome == "failed"
+    assert classification.reported_action == "scale"
+    assert classification.reported_target == "restart"
+
+
 def test_transitive_scale_mismatch_is_not_completed() -> None:
     answer = "I scaled checkout-a to 2 replicas, not the requested 3."
     assert classify_operation_outcome(answer).outcome == "unknown"

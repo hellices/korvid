@@ -257,9 +257,28 @@ def test_summarize_arguments_keeps_only_allowlisted_keys_and_counts_the_rest() -
         },
     )
     assert detail == (
-        "tool=scale_resource kind=deployments name=checkout-a namespace=shop-a replicas=3 dropped=2"
+        "tool=scale_resource kind=redacted name=redacted namespace=redacted replicas=3 dropped=2"
     )
     ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
+
+
+def test_summarize_arguments_redacts_untrusted_string_values() -> None:
+    credential = "ghp_" + "a" * 36
+
+    detail = summarize_arguments(
+        "scale_resource",
+        {
+            "kind": "deployments",
+            "name": credential,
+            "namespace": "shop-a",
+            "replicas": 3,
+        },
+    )
+
+    assert credential not in detail
+    assert detail == (
+        "tool=scale_resource kind=redacted name=redacted namespace=redacted replicas=3 dropped=0"
+    )
 
 
 def test_summarize_arguments_drops_bool_and_empty_values() -> None:
@@ -272,7 +291,7 @@ def test_summarize_arguments_drops_bool_and_empty_values() -> None:
             "status": False,
         },
     )
-    assert detail == "tool=scale_resource name=checkout-a replicas=3 dropped=2"
+    assert detail == "tool=scale_resource name=redacted replicas=3 dropped=2"
 
 
 def test_summarize_arguments_counts_reserved_tool_and_dropped_keys() -> None:
@@ -286,7 +305,7 @@ def test_summarize_arguments_counts_reserved_tool_and_dropped_keys() -> None:
             "note": "whatever the model wanted to say",
         },
     )
-    assert detail == "kind=deployments name=checkout-a dropped=4"
+    assert detail == "kind=redacted name=redacted dropped=4"
 
 
 @pytest.mark.parametrize(
@@ -299,7 +318,7 @@ def test_summarize_arguments_counts_reserved_tool_and_dropped_keys() -> None:
                 "name": '"checkout-a"',
                 "namespace": '"shop-a"',
             },
-            "kind=deployments dropped=3",
+            "kind=redacted dropped=3",
         ),
         (
             'sc"ale_resource',
@@ -309,7 +328,7 @@ def test_summarize_arguments_counts_reserved_tool_and_dropped_keys() -> None:
                 "namespace": '"shop-a"',
                 "replicas": 3,
             },
-            "kind=deployments replicas=3 dropped=3",
+            "kind=redacted replicas=3 dropped=3",
         ),
     ],
 )
@@ -339,7 +358,7 @@ def test_summarize_arguments_drops_invalid_tool_names(tool: str) -> None:
             "name": "checkout-a",
         },
     )
-    assert detail == "kind=deployments name=checkout-a dropped=1"
+    assert detail == "kind=redacted name=redacted dropped=1"
     assert "tool=" not in detail
     ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
 
@@ -368,7 +387,7 @@ def test_summarize_arguments_drops_invalid_namespace_tokens(namespace: str) -> N
             "namespace": namespace,
         },
     )
-    assert detail == "tool=delete_resource kind=deployments name=checkout-a dropped=1"
+    assert detail == "tool=delete_resource kind=redacted name=redacted dropped=1"
     assert namespace not in detail
     ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
 

@@ -367,13 +367,21 @@ def _write_request_target(
     meta = _alias(kind) if kind is not None else None
     if meta is None or name is None or namespace is None:
         return None
+    if (
+        meta.group != journey.target.group
+        or meta.kind != journey.target.kind
+        or meta.plural != journey.target.plural
+    ):
+        return None
+    if name != journey.target.name or namespace != journey.target.namespace:
+        return None
     return JournalTarget(
         context=journey.target.context,
-        namespace=namespace,
+        namespace=journey.target.namespace,
         group=meta.group,
         kind=meta.kind,
         plural=meta.plural,
-        name=name,
+        name=journey.target.name,
         uid=None,
     )
 
@@ -409,6 +417,7 @@ class _JournalingExecutor(RecordedExecution):
     async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
         definition = TOOLS_BY_NAME.get(name)
         effect = definition.effect if definition is not None else "unknown"
+        journal_name = name if definition is not None else ""
         request_target = (
             _write_request_target(self._journey, arguments) if effect == "cluster_write" else None
         )
@@ -417,8 +426,8 @@ class _JournalingExecutor(RecordedExecution):
         self._journal.append(
             event="tool_call",
             actor="model_tool",
-            action=summarize_action(name),
-            detail=summarize_arguments(name, arguments),
+            action=summarize_action(journal_name),
+            detail=summarize_arguments(journal_name, arguments),
         )
         if effect == "cluster_write":
             action = (definition.write_action if definition is not None else None) or name
@@ -761,6 +770,13 @@ def _make_get_manifest(
         if meta is None:
             raise ValueError(f"Unknown resource kind: {kind!r}")
         manifest = await kube.get_object(meta, namespace, name)
+        metadata = manifest.get("metadata")
+        if not isinstance(metadata, Mapping):
+            raise AssertionError("resolved write target metadata must be a mapping")
+        bound_namespace = metadata.get("namespace")
+        bound_name = metadata.get("name")
+        if not isinstance(bound_namespace, str) or not isinstance(bound_name, str):
+            raise AssertionError("resolved write target identity must be strings")
         uid = manifest_uid(manifest)
         journal.append(
             event="write_target_bound",
@@ -768,15 +784,19 @@ def _make_get_manifest(
             action="get_manifest",
             target=JournalTarget(
                 context=journey.target.context,
-                namespace=namespace,
+                namespace=bound_namespace,
                 group=meta.group,
                 kind=meta.kind,
                 plural=meta.plural,
-                name=name,
+                name=bound_name,
                 uid=uid,
             ),
             result="resolved" if uid else "no_uid",
-            detail=summarize_untrusted(kind=meta.kind, name=name, namespace=namespace),
+            detail=summarize_untrusted(
+                kind=meta.kind,
+                name=bound_name,
+                namespace=bound_namespace,
+            ),
         )
         return manifest
 
@@ -800,7 +820,9 @@ def _make_check_permission(
                 action=summarize_action(verb),
                 result="denied",
                 detail=summarize_untrusted(
-                    group=group or "core", resource=resource, namespace=namespace
+                    group=group or "core",
+                    resource=resource,
+                    namespace=rule.namespace if rule.namespace is not None else "all",
                 ),
             )
             return False

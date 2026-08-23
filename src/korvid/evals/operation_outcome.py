@@ -297,6 +297,42 @@ _REJECTED_REPORT_DETAILS = re.compile(
     rf"(?P<verb>scale|restart)\s+(?:the\s+)?(?P<target>{_REPORT_TARGET})"
     rf"(?:\s+in\s+(?P<namespace>{_RESOURCE_NAME}))?"
 )
+_FAILED_ACTION = r"(?P<verb>scale|restart|scaling|restarting)"
+_FAILED_SUFFIX = (
+    r"(?:failed|failure|did\s+not\s+apply|was\s+not\s+applied|"
+    r"did\s+not\s+go\s+through|rolled\s+back|aborted)"
+)
+_FAILED_AUXILIARY = (
+    r"(?:(?:(?:has|had)(?:\s+been)?(?:\s+a)?|"
+    r"(?:is|was)(?:\s+(?:a|being))?)\s+)?"
+)
+_FAILED_ADVERB = (
+    r"(?:eventually|explicitly|finally|immediately|subsequently|unexpectedly|ultimately)"
+)
+_FAILED_ADVERBS = rf"(?:{_FAILED_ADVERB}\s+)*"
+_FAILED_DIRECTION = r"(?:(?P<direction>down|up)\s+)?"
+_FAILED_BRIDGE = (
+    rf"{_FAILED_AUXILIARY}{_FAILED_ADVERBS}{_FAILED_DIRECTION}"
+    rf"{_FAILED_ADVERBS}{_FAILED_AUXILIARY}"
+)
+_FAILED_REPORT_END = r"(?=$|,?\s+(?:after|because|by|due(?:\s+to)?|in|to|when|while|with)\b)"
+_FAILED_ACTION_REPORT_DETAILS = re.compile(
+    rf"(?<!\w)(?:the\s+)?{_FAILED_ACTION}\s+"
+    rf"{_FAILED_BRIDGE}{_FAILED_SUFFIX}\b{_FAILED_REPORT_END}"
+)
+_FAILED_TARGET_REPORT_DETAILS = re.compile(
+    rf"(?<!\w)(?:the\s+)?{_FAILED_ACTION}\s+"
+    rf"(?:of\s+)?(?:the\s+)?(?P<target>"
+    rf"(?!(?:aborted|did|down|failed|failure|had|has|in|is|rolled|up|was|"
+    rf"{_FAILED_ADVERB})\b){_REPORT_TARGET})"
+    rf"(?:\s+in\s+(?:namespace\s+)?(?P<namespace>{_RESOURCE_NAME}))?\s+"
+    rf"{_FAILED_BRIDGE}{_FAILED_SUFFIX}\b{_FAILED_REPORT_END}"
+)
+_FAILED_NAMESPACE_REPORT_DETAILS = re.compile(
+    rf"(?<!\w)(?:the\s+)?{_FAILED_ACTION}\s+in\s+"
+    rf"(?:namespace\s+)?(?P<namespace>{_RESOURCE_NAME})\s+"
+    rf"{_FAILED_BRIDGE}{_FAILED_SUFFIX}\b{_FAILED_REPORT_END}"
+)
 
 #: Sentence terminators plus contrast boundaries that introduce a new
 #: predicate. A negator on one side must not reach the other.
@@ -631,6 +667,22 @@ def _updated_scale_intent(
     )
 
 
+def _outermost_operation_details(
+    matches: list[tuple[re.Match[str], str | None]],
+) -> tuple[tuple[re.Match[str], str | None], ...]:
+    selected: list[tuple[re.Match[str], str | None]] = []
+    covered_until = -1
+    for match, action in sorted(
+        matches,
+        key=lambda item: (item[0].start(), -item[0].end()),
+    ):
+        if match.start() < covered_until:
+            continue
+        selected.append((match, action))
+        covered_until = match.end()
+    return tuple(selected)
+
+
 def _reported_operation_details(
     clauses: tuple[str, ...],
 ) -> tuple[str | None, str | None, str | None, str | None]:
@@ -651,18 +703,32 @@ def _reported_operation_details(
                 )
                 for match in _REJECTED_REPORT_DETAILS.finditer(clause)
             ),
+            *(
+                (
+                    match,
+                    "scale" if match.group("verb") in {"scale", "scaling"} else "rollout_restart",
+                )
+                for pattern in (
+                    _FAILED_ACTION_REPORT_DETAILS,
+                    _FAILED_TARGET_REPORT_DETAILS,
+                    _FAILED_NAMESPACE_REPORT_DETAILS,
+                )
+                for match in pattern.finditer(clause)
+            ),
         ]
-        for match, reported_action in sorted(matches, key=lambda item: item[0].start()):
+        for match, reported_action in _outermost_operation_details(matches):
             scope_start = _scope_start_for_position(clause, match.start())
             if _negated_before(clause, match.start(), scope_start):
                 continue
             if reported_action is not None:
                 action = reported_action
-            claimed_target = match.group("target")
-            explicit_target = claimed_target not in _GENERIC_REPORT_TARGETS
+            groups = match.groupdict()
+            claimed_target = groups.get("target")
+            explicit_target = (
+                claimed_target is not None and claimed_target not in _GENERIC_REPORT_TARGETS
+            )
             if explicit_target:
                 target = claimed_target
-            groups = match.groupdict()
             claimed_namespace = (
                 groups.get("namespace_after")
                 or groups.get("namespace_before")

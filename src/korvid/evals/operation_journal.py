@@ -111,6 +111,7 @@ _DETAIL_KEYS = frozenset(JOURNAL_DETAIL_KEYS)
 _RESULTS = frozenset(JOURNAL_RESULTS)
 _SUMMARY_VALUE = re.compile(r"[A-Za-z0-9._:/@=+-]{1,120}")
 _UNKNOWN_TOOL = "unknown_tool"
+_REDACTED_VALUE = "redacted"
 
 
 def _summary_text(key: str, value: Any, *, strip_quotes: bool) -> str:
@@ -142,7 +143,10 @@ def summarize(**fields: Any) -> str:
 
 
 def _project_untrusted_fields(
-    fields: Iterable[tuple[str, object]], *, reserved_keys: frozenset[str]
+    fields: Iterable[tuple[str, object]],
+    *,
+    reserved_keys: frozenset[str],
+    redact_strings: bool = False,
 ) -> tuple[list[str], int]:
     parts: list[str] = []
     dropped = 0
@@ -155,6 +159,8 @@ def _project_untrusted_fields(
         except ValueError:
             dropped += 1
             continue
+        if redact_strings and isinstance(value, str):
+            text = _REDACTED_VALUE
         parts.append(f"{key}={text}")
     return parts, dropped
 
@@ -176,7 +182,7 @@ def summarize_action(value: str) -> str:
 
 
 def summarize_arguments(tool: str, arguments: Mapping[str, Any]) -> str:
-    """Project raw tool arguments onto the detail allowlist best-effort."""
+    """Project raw tool arguments without publishing untrusted string values."""
 
     parts: list[str] = []
     dropped = 0
@@ -185,7 +191,9 @@ def summarize_arguments(tool: str, arguments: Mapping[str, Any]) -> str:
     except ValueError:
         dropped += 1
     arg_parts, arg_dropped = _project_untrusted_fields(
-        sorted(arguments.items()), reserved_keys=frozenset({"tool", "dropped"})
+        sorted(arguments.items()),
+        reserved_keys=frozenset({"tool", "dropped"}),
+        redact_strings=True,
     )
     parts.extend(arg_parts)
     parts.append(f"dropped={dropped + arg_dropped}")
