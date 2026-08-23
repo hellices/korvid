@@ -21,6 +21,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
+from korvid.agent.evidence import EvidenceLedger
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -423,6 +424,8 @@ class ScriptedAgentRuntime:
     def __init__(self) -> None:
         self.total_tokens = (0, 0)
         self.usage_estimated = False
+        self.evidence = EvidenceLedger()
+        self.latest_outbound_payload = None
 
     async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
         del user_text, screen_context

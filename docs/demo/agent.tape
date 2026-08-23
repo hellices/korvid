@@ -21,4 +21,7 @@ Type "Why is the payment worker failing?"
 Enter
 Sleep 8s
 Hide
+# The focused input owns printable keys; close the panel through its
+# priority binding before sending the app-level quit key.
+Ctrl+A
 Type "q"

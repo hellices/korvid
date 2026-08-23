@@ -654,6 +654,32 @@ def test_scripted_agent_runtime_reports_its_hard_coded_marker_as_unsupported() -
     )
 
 
+def test_scripted_agent_runtime_exposes_an_empty_evidence_ledger() -> None:
+    """Opening the scripted `[E1]` must report missing evidence, not crash."""
+    runtime = _demo_harness().ScriptedAgentRuntime()
+    assert hasattr(runtime, "evidence"), "the Agent UI reads runtime.evidence directly"
+    assert runtime.evidence.resolve("E1") is None
+
+
+def test_scripted_agent_runtime_exposes_no_outbound_payload() -> None:
+    """Opening the payload inspector must see an empty snapshot, not crash."""
+    runtime = _demo_harness().ScriptedAgentRuntime()
+    assert hasattr(runtime, "latest_outbound_payload"), (
+        "the Agent UI reads runtime.latest_outbound_payload directly"
+    )
+    assert runtime.latest_outbound_payload is None
+
+
+def test_visual_storytelling_plan_keeps_the_scripted_runtime_safety_contract() -> None:
+    """Replaying the executable plan must preserve the demo runtime boundary."""
+    plan = VISUAL_STORYTELLING_PLAN.read_text(encoding="utf-8")
+    runtime = plan.split("class ScriptedAgentRuntime:", 1)[1].split("\n```", 1)[0]
+    assert "self.evidence = EvidenceLedger()" in runtime
+    assert "self.latest_outbound_payload = None" in runtime
+    assert 'uncited=("E1",)' in runtime
+    assert not any(line.strip().startswith('cited=("E1",)') for line in runtime.splitlines())
+
+
 def test_agent_capture_copy_says_the_scripted_marker_is_flagged_unsupported() -> None:
     """Every surface that publishes this frame must explain the yellow note.
 
@@ -995,6 +1021,20 @@ def test_agent_tape_types_the_real_prompt_and_presses_enter() -> None:
     following_lines = tape.splitlines()[prompt_line_index + 1 :]
     assert following_lines, "Enter must follow the typed prompt"
     assert following_lines[0].strip() == "Enter"
+
+
+def test_agent_tape_closes_the_focused_panel_before_quitting() -> None:
+    """The final `q` must reach the app binding instead of the Agent input."""
+    commands = [
+        line.strip()
+        for line in AGENT_TAPE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    quit_index = commands.index('Type "q"')
+    assert commands[quit_index - 1] == "Ctrl+A", (
+        "the Agent input still owns printable keys after the turn; close the "
+        "panel with its priority binding before typing q"
+    )
 
 
 def test_demo_harness_never_synthesizes_the_agent_prompt_submission() -> None:

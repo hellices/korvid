@@ -396,6 +396,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
+from korvid.agent.evidence import EvidenceLedger
 from korvid.k8s.relationship_facts import (
     FactConfidence,
     ReferenceFact,
@@ -491,6 +492,8 @@ class ScriptedAgentRuntime:
     def __init__(self) -> None:
         self.total_tokens = (0, 0)
         self.usage_estimated = False
+        self.evidence = EvidenceLedger()
+        self.latest_outbound_payload = None
 
     async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
         del user_text, screen_context
@@ -517,7 +520,9 @@ class ScriptedAgentRuntime:
             input_tokens=612,
             output_tokens=43,
             estimated=False,
-            cited=("E1",),
+            # Nothing was read this turn and no evidence was minted, so `[E1]`
+            # remains an unsupported marker in the real AgentPanel.
+            uncited=("E1",),
         )
 
 
@@ -593,6 +598,9 @@ Type "Why is the payment worker failing?"
 Enter
 Sleep 8s
 Hide
+# The focused input owns printable keys; close the panel through its
+# priority binding before sending the app-level quit key.
+Ctrl+A
 Type "q"
 ```
 
