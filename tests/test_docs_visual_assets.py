@@ -709,6 +709,10 @@ def test_visual_storytelling_plan_keeps_the_scripted_runtime_safety_contract() -
     assert "self.latest_outbound_payload = None" in runtime
     assert 'uncited=("E1",)' in runtime
     assert not any(line.strip().startswith('cited=("E1",)') for line in runtime.splitlines())
+    assert "class DemoKorvidApp(KorvidApp):" in plan
+    assert "self.set_timer(0.2, self.action_toggle_agent)" in plan
+    assert "app = DemoKorvidApp(" in plan
+    assert "demo_scene=scene" in plan
 
 
 def test_agent_capture_copy_says_the_scripted_marker_is_flagged_unsupported() -> None:
@@ -1285,6 +1289,7 @@ def test_visual_storytelling_plan_uses_the_extracted_configmap_fact() -> None:
         r'extract_relationship_facts\(\s*"Pod",\s*"",\s*"v1",\s*POD_MANIFEST\s*\)',
         plan,
     )
+    assert 'RELATIONSHIP_ALIASES if scene == "relationships" else ALIASES' in plan
     assert 'field="spec.volumes[0].configMap.name"' not in plan
 
 

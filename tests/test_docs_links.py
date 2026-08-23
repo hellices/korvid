@@ -171,6 +171,17 @@ def _built_directory_url(source: Path) -> str:
     return f"{parent}{relative.stem}/"
 
 
+def _resolve_media_path(page_url: str, url: str) -> str:
+    """Resolve a relative media URL without clamping above the site root."""
+    assert not url.startswith("/"), f"raw media URL {url!r} must stay site-relative"
+    resolved = posixpath.normpath(posixpath.join(page_url, url))
+    escapes_site = resolved == ".." or resolved.startswith("../")
+    assert not escapes_site, (
+        f"raw media URL {url!r} from /{page_url} escapes the deployed site root"
+    )
+    return resolved
+
+
 def _local_media_urls(source: Path) -> Iterator[str]:
     """Local raw-HTML media URLs on a page, ignoring code samples.
 
@@ -236,6 +247,12 @@ def test_raw_html_hero_primary_cta_resolves_to_a_docs_source() -> None:
     assert target.is_file(), f"hero CTA {href!r} has no documentation source at {target}"
 
 
+def test_media_path_resolution_rejects_deployment_root_escape() -> None:
+    assert _resolve_media_path("tui/", "../assets/scenes/demo.png") == ("assets/scenes/demo.png")
+    with pytest.raises(AssertionError, match="escapes the deployed site root"):
+        _resolve_media_path("tui/", "../../assets/scenes/demo.png")
+
+
 def test_raw_html_media_resolves_from_every_published_page_url() -> None:
     """Every raw-HTML `src`/`poster` must resolve from the page's built URL.
 
@@ -258,7 +275,7 @@ def test_raw_html_media_resolves_from_every_published_page_url() -> None:
     for source in _public_markdown_sources():
         page_url = _built_directory_url(source)
         for url in _local_media_urls(source):
-            resolved = posixpath.normpath(posixpath.join(f"/{page_url}", url)).lstrip("/")
+            resolved = _resolve_media_path(page_url, url)
             asset = (DOCS / resolved).resolve()
             assert asset.is_relative_to(DOCS.resolve()), (
                 f"{source.relative_to(ROOT)} references {url!r}, which escapes docs/"

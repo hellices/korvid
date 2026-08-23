@@ -534,6 +534,19 @@ class ScriptedAgentRuntime:
         )
 
 
+class DemoKorvidApp(KorvidApp):
+    """KorvidApp with documentation-only scene choreography."""
+
+    def __init__(self, *args: Any, demo_scene: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._demo_scene = demo_scene
+
+    async def on_mount(self) -> None:
+        await super().on_mount()
+        if self._demo_scene == "agent":
+            self.set_timer(0.2, self.action_toggle_agent)
+
+
 async def list_relationship_objects(
     meta: ResourceMeta,
     namespace: str | None,
@@ -560,12 +573,12 @@ Replace `main()` with:
 def main() -> None:
     scene = _parse_scene()
     store = ResourceStore()
-    app = KorvidApp(
+    app = DemoKorvidApp(
         config=KorvidConfig(namespace="shop"),
         store=store,
         watch_manager=WatchManager(store, source),
         list_namespaces=list_namespaces,
-        aliases=ALIASES,
+        aliases=RELATIONSHIP_ALIASES if scene == "relationships" else ALIASES,
         get_manifest=get_manifest,
         get_events=DemoEvents(),
         stream_logs=stream_logs,
@@ -574,6 +587,7 @@ def main() -> None:
         list_relationship_objects=(
             list_relationship_objects if scene == "relationships" else None
         ),
+        demo_scene=scene,
     )
     app.run()
 ```
@@ -1949,10 +1963,9 @@ Insert after the two guarantees in `docs/ops.md`:
 ````markdown
 ```mermaid
 flowchart LR
-    DIRECT["Direct action"] --> PREVIEW["Validate + preview"]
-    AGENT["Agent proposal"] --> PREVIEW
-    MCP["Opt-in MCP proposal"] --> PREVIEW
-    PREVIEW --> CONFIRM["Fresh user keystroke"]
+    DIRECT["Direct action"] --> CONFIRM["Fresh user keystroke"]
+    AGENT["Agent proposal"] --> CONFIRM
+    MCP["Opt-in MCP proposal"] --> CONFIRM
     CONFIRM --> AUDIT["Audit append"]
     AUDIT -->|success| EXECUTE["Execute mutation"]
     AUDIT -->|failure| BLOCK["Action blocked"]

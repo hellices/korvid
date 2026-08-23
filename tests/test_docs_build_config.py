@@ -152,6 +152,13 @@ def test_ops_safety_diagram_shows_only_universal_write_gates() -> None:
     assert 'AUDIT -->|success| EXECUTE["Execute mutation"]' in diagram
     assert 'AUDIT -->|failure| BLOCK["Action blocked"]' in diagram
 
+    plan = (
+        ROOT / "docs" / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
+    ).read_text(encoding="utf-8")
+    planned = plan.split("- [ ] **Step 7: Add the full operations safety flow**", 1)[1]
+    planned = planned.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert " ".join(planned.split()) == " ".join(diagram.split())
+
 
 def test_tui_annotation_pins_match_the_poster_layout() -> None:
     """`tui.md`'s pins must land on what their captions claim.
