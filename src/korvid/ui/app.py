@@ -40,6 +40,7 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, WorkerError, WorkerState
 
 from korvid.agent.events import AgentEvent
+from korvid.agent.interaction import ResourceIdentity
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -79,7 +80,7 @@ from korvid.tools.proposals import ProposalStore, WriteProposal
 from korvid.ui.agent_ui_controller import (
     AgentPanelPort,
     AgentScreens,
-    AgentUIBridge,
+    AgentToolUIBridge,
     AgentUiController,
 )
 from korvid.ui.bridge_dispatch import AppContextDispatch
@@ -2056,15 +2057,15 @@ class KorvidApp(App[None]):
         await self.watch_manager.stop_all()
 
 
-class AppUIBridge(AgentUIBridge):
+class AppUIBridge(AgentToolUIBridge):
     """The app's `UIBridge`: `AgentUiController` plus the app's dispatcher.
 
     The layer-boundary interface must be an `abc.ABC` (AGENTS.md), but
     Textual's `App` metaclass conflicts with `ABCMeta`, so the app cannot
-    inherit `UIBridge` directly. The behaviour lives in `AgentUIBridge`; this
-    subclass exists only so the composition root can name one bridge for one
-    app - it holds no app reference and routes no agent operation through app
-    methods.
+    inherit `UIBridge` directly. The behaviour lives in `AgentToolUIBridge`;
+    this subclass exists only so the composition root can name one bridge for
+    one app - it holds no app reference and routes no agent operation through
+    app methods.
     """
 
     def __init__(self, app: KorvidApp) -> None:
@@ -2198,6 +2199,44 @@ class AppAgentScreens(AgentScreens):
         footer_note: str | None,
     ) -> None:
         self._app._describe_pane.show(title, manifest, events, footer_note=footer_note)
+
+    def selected_identity(self, table_id: str, kind: str) -> ResourceIdentity | None:
+        """The resource under the cursor in the named pane table.
+
+        Reads the row key from the table widget identified by *table_id*,
+        parses the namespace and name from it, then looks up the uid from the
+        current store bucket so the identity is complete.  Returns None when
+        the table is absent, has no rows, or the cursor is out of range.
+        """
+        try:
+            table = self._app.query_one(f"#{table_id}", ResourceTable)
+        except Exception:
+            return None
+        if table.row_count == 0:
+            return None
+        ordered = table.ordered_rows
+        if table.cursor_row >= len(ordered):
+            return None
+        row_key = str(ordered[table.cursor_row].key.value)
+        # Row keys use the 'namespace/name' composite when namespaced.
+        if "/" in row_key:
+            namespace, _, name = row_key.partition("/")
+        else:
+            namespace, name = "", row_key
+        # Look up the uid from the live store for the pane's current scope.
+        pane_state = next((p for p in self._app._workspace.panes if p.table_id == table_id), None)
+        scope = pane_state.scope if pane_state is not None else ""
+        uid: str | None = None
+        for summary in self._app._view.resources(kind, scope):
+            if summary.name == name and (not namespace or summary.namespace == namespace):
+                uid = getattr(summary, "uid", None) or None
+                break
+        return ResourceIdentity(
+            kind=kind,
+            namespace=namespace or None,
+            name=name,
+            uid=uid,
+        )
 
 
 class AppProposalScreens(ProposalScreens):

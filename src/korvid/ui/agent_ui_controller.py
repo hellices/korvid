@@ -44,6 +44,7 @@ from textual.screen import Screen
 
 from korvid.agent.events import AgentError, AgentEvent, ToolCallFinished, ToolCallStarted
 from korvid.agent.install_hint import isolated_install_hint
+from korvid.agent.interaction import ResourceIdentity
 from korvid.agent.navigation import EvidenceTarget, target_for
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
@@ -80,6 +81,7 @@ if TYPE_CHECKING:
     # runtime at startup (issue #73) — the composition root injects it only
     # when the [agent] extra is installed and wired.
     from korvid.agent.runtime import AgentRuntime
+    from korvid.ui.agent_workspace_bridge import AgentWorkspaceBridge
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +220,15 @@ class AgentScreens(ABC):
     ) -> None:
         """Show a describe view in the non-modal pane beside the chat panel."""
 
+    @abstractmethod
+    def selected_identity(self, table_id: str, kind: str) -> ResourceIdentity | None:
+        """The resource under the cursor in the named pane, or None.
+
+        Reads the pane's current selection by its widget table-id without
+        changing focus.  The *kind* hint names the resource kind rendered in
+        that pane so the identity can carry it even when the row key does not.
+        """
+
 
 class WorkspaceOps(Protocol):
     """The workspace transitions the agent's read tools drive.
@@ -238,6 +249,19 @@ class WorkspaceOps(Protocol):
 
     async def drill_into(self, namespace: str, name: str) -> str | None:
         """Drill into a row; None on success, else the reason."""
+
+    def focused_row_data(self, name: str, namespace: str | None) -> tuple[str, str | None] | None:
+        """Find (row_key, uid) for the named resource in the focused view.
+
+        Returns None when the resource is not in the current visible rows.
+        Used by `AgentWorkspaceBridge` to validate and move to a resource.
+        """
+
+    def select_row(self, row_key: str) -> bool:
+        """Move the focused table's cursor to *row_key*; False when absent."""
+
+    def focus_pane(self, index: int) -> None:
+        """Switch workspace focus to the pane at *index*."""
 
 
 class AgentLogOps(Protocol):
@@ -315,7 +339,7 @@ class AppLoopTurnTasks(TurnTasks):
         return asyncio.create_task(coro)
 
 
-class AgentUIBridge(UIBridge):
+class AgentToolUIBridge(UIBridge):
     """`UIBridge` adapter over an `AgentUiController` and a dispatch surface.
 
     The layer-boundary interface must be an `abc.ABC` (AGENTS.md); this is
@@ -516,7 +540,9 @@ class AgentUiController:
         self._context_note: str | None = None
         #: Identity of the object the last evidence open actually displayed.
         self._displayed_incarnation: str | None = None
-        self._bridge = AgentUIBridge(self, dispatch)
+        self._bridge = AgentToolUIBridge(self, dispatch)
+        #: Lazily created typed workspace bridge (see `workspace_bridge`).
+        self._workspace_bridge: AgentWorkspaceBridge | None = None
 
     # ------------------------------------------------------------------
     # Session state, observable but not mutable from outside
@@ -567,6 +593,29 @@ class AgentUiController:
     def bridge(self) -> UIBridge:
         """This controller as a serialized `UIBridge` (the follow fallback)."""
         return self._bridge
+
+    @property
+    def workspace_bridge(self) -> AgentWorkspaceBridge:
+        """The typed workspace-action bridge (`AgentUiBridge`) for this session.
+
+        Created once and cached; no timeline-cursor wiring at this level —
+        callers that need it should construct `AgentWorkspaceBridge` directly
+        through the composition root.
+        """
+        if self._workspace_bridge is None:
+            from korvid.ui.agent_workspace_bridge import (
+                AgentWorkspaceBridge,  # type: ignore[import]  # circular avoided via lazy import
+            )
+
+            self._workspace_bridge = AgentWorkspaceBridge(
+                config=self._config,
+                context=self._context,
+                workspace=self._workspace,
+                screens=self._screens,
+                navigation=self._navigation,
+                controller=self,
+            )
+        return self._workspace_bridge  # type: ignore[return-value]
 
     def blocked_in_protected(self) -> bool:
         """`agent.disable_in_protected` (issue #83): agent turns are refused

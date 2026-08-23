@@ -44,7 +44,7 @@ from korvid.ui.agent_ui_controller import (
     AgentPanelPort,
     AgentProposals,
     AgentScreens,
-    AgentUIBridge,
+    AgentToolUIBridge,
     AgentUiController,
 )
 from korvid.ui.bridge_dispatch import AppContextDispatch
@@ -200,6 +200,9 @@ class FakeScreens(AgentScreens):
     ) -> None:
         self.panes.append((title, manifest, footer_note))
 
+    def selected_identity(self, table_id: str, kind: str) -> None:
+        return None
+
 
 class FakeNavigation:
     """The workspace transitions the agent's read tools drive."""
@@ -232,6 +235,17 @@ class FakeNavigation:
     async def drill_into(self, namespace: str, name: str) -> str | None:
         self.drills.append((namespace, name))
         return self.drill_error
+
+    def focused_row_data(
+        self, name: str, namespace: str | None
+    ) -> tuple[str, str | None] | None:
+        return None
+
+    def select_row(self, row_key: str) -> bool:
+        return True
+
+    def focus_pane(self, index: int) -> None:
+        pass
 
 
 class FakeLogs:
@@ -827,10 +841,12 @@ async def test_a_context_switch_note_is_delivered_once(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-class RecordingBridge(AgentUIBridge):
+class RecordingBridge(AgentToolUIBridge):
     """A UIBridge that records the mirrored calls instead of driving the UI."""
 
     def __init__(self) -> None:
+        # Skip AgentToolUIBridge.__init__: all used methods are overridden
+        # below, so neither _agent nor _dispatch is accessed at runtime.
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
 
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
@@ -1238,7 +1254,7 @@ def test_the_controller_module_imports_nothing_from_the_app_module() -> None:
 async def test_the_bridge_refuses_dispatch_before_the_app_is_mounted(tmp_path: Path) -> None:
     env = Env(tmp_path=tmp_path)
     dispatch = AppContextDispatch()  # never activated: pre-mount
-    bridge = AgentUIBridge(env.controller, dispatch)
+    bridge = AgentToolUIBridge(env.controller, dispatch)
     out = await bridge.agent_navigate("deployments")
     assert out.startswith("ERROR: UI not ready")
     assert env.navigation.navigations == []
@@ -1246,7 +1262,7 @@ async def test_the_bridge_refuses_dispatch_before_the_app_is_mounted(tmp_path: P
 
 async def test_the_bridge_refuses_dispatch_after_shutdown(tmp_path: Path) -> None:
     env = Env(tmp_path=tmp_path)
-    bridge = AgentUIBridge(env.controller, env.dispatch)
+    bridge = AgentToolUIBridge(env.controller, env.dispatch)
     await env.dispatch.shutdown()
     out = await bridge.agent_navigate("deployments")
     assert out.startswith("ERROR: UI not ready")
@@ -1296,7 +1312,7 @@ async def test_shutdown_cancels_an_in_flight_dispatch(tmp_path: Path) -> None:
 
 async def test_the_bridge_delegates_every_ui_tool_to_the_controller(tmp_path: Path) -> None:
     env = Env(tmp_path=tmp_path)
-    bridge = AgentUIBridge(env.controller, env.dispatch)
+    bridge = AgentToolUIBridge(env.controller, env.dispatch)
     assert await bridge.agent_set_filter("web") == "filter set to 'web' on the pods view"
     assert (await bridge.agent_get_write_proposal("p-1")).startswith("proposal p-1")
     await env.close()

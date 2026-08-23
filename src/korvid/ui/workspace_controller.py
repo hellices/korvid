@@ -706,6 +706,43 @@ class WorkspaceController:
         self._surface.refresh_status()
 
     # ------------------------------------------------------------------
+    # Agent workspace-action helpers (AgentWorkspaceBridge)
+    # ------------------------------------------------------------------
+
+    def focused_row_data(
+        self, name: str, namespace: str | None
+    ) -> tuple[str, str | None] | None:
+        """Find (row_key, uid) for the named resource in the focused view.
+
+        Searches the focused pane's current store bucket. Returns None when the
+        resource is absent (not found or filtered out at the view level).
+        """
+        pane = self._state.focused
+        rows: list[Summary] = self._store.get(pane.kind, pane.scope)
+        for row in rows:
+            if row.name == name and (namespace is None or row.namespace == namespace):
+                row_key = f"{row.namespace}/{row.name}" if row.namespace else row.name
+                uid: str | None = getattr(row, "uid", None) or None
+                return (row_key, uid)
+        return None
+
+    def select_row(self, row_key: str) -> bool:
+        """Move the focused table's cursor to *row_key*; False when absent."""
+        return self._surface.focus_row(row_key)
+
+    def focus_pane(self, index: int) -> None:
+        """Switch workspace focus to the pane at *index* (no-op when invalid)."""
+        if not 0 <= index < self._state.pane_count:
+            return
+        if self._state.focused_index == index:
+            return
+        self._state.focus_index(index)
+        self._surface.update_pane_focus_classes()
+        self._surface.focus_table(self._state.focused.table_id)
+        self._hints.refresh_for_focus()
+        self._surface.refresh_status()
+
+    # ------------------------------------------------------------------
     # Sort (issue #37 / #45 / #138)
     # ------------------------------------------------------------------
 
