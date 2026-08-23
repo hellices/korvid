@@ -149,6 +149,8 @@ def test_base_import_does_not_load_the_agent_loop(module: str) -> None:
         "    'korvid.agent.profiles',\n"
         "    'korvid.agent.native_engine',\n"
         "    'korvid.agent.request_gateway',\n"
+        "    'korvid.agent.tool_harness',\n"
+        "    'korvid.agent.conversation',\n"
         ")\n"
         "leaked = [m for m in watched if m in sys.modules]\n"
         "if leaked:\n"
@@ -204,3 +206,99 @@ if leaked:
         [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
     )
     assert result.returncode == 0, result.stderr
+
+
+#: The embedded-agent turn machinery. None of it may be imported by a base
+#: or MCP-only installation, and none of it may be imported when the agent
+#: extra is missing — the TUI still has to start (issue #316 task 13).
+_AGENT_SESSION_MODULES = (
+    "korvid.agent.native_engine",
+    "korvid.agent.session",
+    "korvid.agent.request_gateway",
+    "korvid.agent.tool_harness",
+    "korvid.agent.prompt_harness",
+    "korvid.agent.conversation",
+)
+
+_MISSING_AGENT_EXTRA = (
+    "import importlib.metadata as metadata\n"
+    "import importlib.util\n"
+    "import sys\n"
+    "real_find_spec = importlib.util.find_spec\n"
+    "def fake_find_spec(name, *args, **kwargs):\n"
+    "    if name in {'httpx', 'keyring'}:\n"
+    "        return None\n"
+    "    return real_find_spec(name, *args, **kwargs)\n"
+    "importlib.util.find_spec = fake_find_spec\n"
+)
+
+
+def test_the_agent_session_graph_stays_out_of_a_base_import() -> None:
+    """A base/MCP-only TUI never imports the engine, session, or gateway."""
+    probe = (
+        "import sys\n"
+        "import korvid.__main__  # noqa: F401\n"
+        "import korvid.ui.app  # noqa: F401\n"
+        f"watched = {_AGENT_SESSION_MODULES!r}\n"
+        "leaked = [m for m in watched if m in sys.modules]\n"
+        "if leaked:\n"
+        "    raise SystemExit(f'agent session graph leaked into base import: {leaked}')\n"
+    )
+    _run_subprocess_probe(probe)
+
+
+def test_a_missing_agent_extra_leaves_the_session_graph_unimported() -> None:
+    """The wiring degrades to no session; it must not import the loop to find out."""
+    probe = (
+        _MISSING_AGENT_EXTRA + "from korvid.__main__ import _build_agent_wiring\n"
+        "from korvid.core.config import KorvidConfig\n"
+        "wiring = _build_agent_wiring(KorvidConfig(), object(), {})\n"
+        "assert wiring.session is None\n"
+        f"watched = {_AGENT_SESSION_MODULES!r}\n"
+        "leaked = [m for m in watched if m in sys.modules]\n"
+        "if leaked:\n"
+        "    raise SystemExit(f'agentless wiring imported the session graph: {leaked}')\n"
+    )
+    _run_subprocess_probe(probe)
+
+
+def test_a_disabled_agent_leaves_the_session_graph_unimported() -> None:
+    """The extra is installed, but the operator did not enable the agent."""
+    probe = (
+        "import sys\n"
+        "from korvid.__main__ import _build_agent_wiring\n"
+        "from korvid.core.config import KorvidConfig\n"
+        "wiring = _build_agent_wiring(KorvidConfig(), object(), {})\n"
+        "assert wiring.session is None\n"
+        f"watched = {_AGENT_SESSION_MODULES!r}\n"
+        "leaked = [m for m in watched if m in sys.modules]\n"
+        "if leaked:\n"
+        "    raise SystemExit(f'a disabled agent imported the session graph: {leaked}')\n"
+    )
+    _run_subprocess_probe(probe)
+
+
+def test_the_mcp_only_tui_still_starts_without_the_agent_extra() -> None:
+    """MCP is a separate extra: its adapter must not need the agent's."""
+    probe = (
+        _MISSING_AGENT_EXTRA + "import korvid.mcp.server  # noqa: F401\n"
+        "import korvid.ui.app  # noqa: F401\n"
+        f"watched = {_AGENT_SESSION_MODULES!r}\n"
+        "leaked = [m for m in watched if m in sys.modules]\n"
+        "if leaked:\n"
+        "    raise SystemExit(f'the MCP adapter pulled in the agent session: {leaked}')\n"
+    )
+    _run_subprocess_probe(probe)
+
+
+def test_the_observability_boundary_needs_no_agent_session() -> None:
+    probe = (
+        "import sys\n"
+        "import korvid.obs.connector  # noqa: F401\n"
+        "import korvid.tools.registry  # noqa: F401\n"
+        f"watched = {_AGENT_SESSION_MODULES!r}\n"
+        "leaked = [m for m in watched if m in sys.modules]\n"
+        "if leaked:\n"
+        "    raise SystemExit(f'the observability boundary pulled in the agent: {leaked}')\n"
+    )
+    _run_subprocess_probe(probe)

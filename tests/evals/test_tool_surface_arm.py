@@ -1,11 +1,15 @@
 """Dropping tools from the measured surface (#221).
 
-`diagnose_service` and `diagnose_pvc` were added to `small_agent` without
-being costed against that profile's design premise, which is a *small*
+`diagnose_service` and `diagnose_pvc` were added to the small surface
+without being costed against its design premise, which is a *small*
 selection space for 3B-14B models. Deciding it needs a controlled arm: the
 same models, the same scenarios, the same prompts, and one variable — the
 tool surface. Nothing in the harness could express that variable, so the
 question could not be asked.
+
+Since issue #316 task 13 the variable is expressed on the *resolved
+policy*, so a dropped tool is genuinely unarmed rather than merely hidden:
+the production `ToolHarness` refuses it and the executor is never reached.
 
 These tests pin the mechanism, not the answer.
 """
@@ -15,33 +19,30 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from korvid.evals.harness import resolve_eval_policy
 
-from korvid.agent.profiles import PromptOverrides, build_profile
 from korvid.evals.__main__ import _parse_args, prompt_fingerprint
-from korvid.evals.runner import _eval_tools
+from korvid.evals.scripted import ScriptedProvider
 
 
-def _profile() -> object:
-    return build_profile(
-        "small", readonly=False, resize_supported=True, overrides=PromptOverrides()
-    )
+def _policy(**kwargs: Any) -> Any:
+    return resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]), **kwargs)
 
 
-def test_omitting_a_tool_removes_it_from_the_offered_surface() -> None:
-    profile = _profile()
-    full = {t["function"]["name"] for t in _eval_tools(profile)}  # type: ignore[arg-type]
-    assert "diagnose_pvc" in full, "fixture assumption: the small surface arms it today"
+def _names(policy: Any) -> set[str]:
+    return {tool["function"]["name"] for tool in policy.tools}
 
-    reduced = {
-        t["function"]["name"]
-        for t in _eval_tools(profile, omit=frozenset({"diagnose_pvc"}))  # type: ignore[arg-type]
-    }
+
+def test_omitting_a_tool_removes_it_from_the_armed_surface() -> None:
+    full = _names(_policy())
+    assert "diagnose_pvc" in full, "fixture assumption: the low surface arms it today"
+
+    reduced = _names(_policy(omit_tools=frozenset({"diagnose_pvc"})))
     assert reduced == full - {"diagnose_pvc"}
 
 
 def test_omitting_nothing_is_the_current_surface() -> None:
-    profile = _profile()
-    assert _eval_tools(profile) == _eval_tools(profile, omit=frozenset())  # type: ignore[arg-type]
+    assert _names(_policy()) == _names(_policy(omit_tools=frozenset()))
 
 
 def test_the_fingerprint_separates_the_arms() -> None:
@@ -50,22 +51,14 @@ def test_the_fingerprint_separates_the_arms() -> None:
     The digest is what makes a published row comparable; if dropping a tool
     left it unchanged, an artifact could not say which arm produced it.
     """
-    profile = _profile()
-    full = prompt_fingerprint(profile)  # type: ignore[arg-type]
-    reduced = prompt_fingerprint(
-        profile,  # type: ignore[arg-type]
-        tools=_eval_tools(profile, omit=frozenset({"diagnose_pvc"})),  # type: ignore[arg-type]
-    )
+    full = prompt_fingerprint(_policy())
+    reduced = prompt_fingerprint(_policy(omit_tools=frozenset({"diagnose_pvc"})))
     assert full["sha256"] != reduced["sha256"]
 
 
 def test_dropping_a_tool_is_not_reported_as_a_prompt_override() -> None:
     """Only the surface moved, so the prompts are still the shipped ones."""
-    profile = _profile()
-    reduced = prompt_fingerprint(
-        profile,  # type: ignore[arg-type]
-        tools=_eval_tools(profile, omit=frozenset({"diagnose_pvc"})),  # type: ignore[arg-type]
-    )
+    reduced = prompt_fingerprint(_policy(omit_tools=frozenset({"diagnose_pvc"})))
     assert reduced["source"] == "default"
 
 
@@ -85,6 +78,26 @@ def test_an_unknown_tool_name_is_refused() -> None:
         _parse_args(["--without-tool", "diagnose_pvcs"])
 
 
+def test_a_write_tool_name_is_refused_because_no_eval_ever_arms_one() -> None:
+    """Naming a write tool would record an omission that never happened.
+
+    The eval environment is read-only, so no write schema is ever offered;
+    an arm published as reduced would be byte-identical to the full one.
+    """
+    with pytest.raises(SystemExit, match="scale_resource"):
+        _parse_args(["--without-tool", "scale_resource"])
+
+
+def test_a_high_tier_only_tool_is_refused_on_the_low_surface() -> None:
+    with pytest.raises(SystemExit, match="navigate"):
+        _parse_args(["--without-tool", "navigate"])
+
+
+def test_a_high_tier_only_tool_is_accepted_when_the_tier_arms_it() -> None:
+    parsed = _parse_args(["--model-tier", "high", "--without-tool", "navigate"])
+    assert parsed.without_tool == ["navigate"]
+
+
 def test_the_artifact_records_which_arm_it_measured() -> None:
     """A reduced-surface run must say so in its own JSON.
 
@@ -93,61 +106,44 @@ def test_the_artifact_records_which_arm_it_measured() -> None:
     made the 2026-08-05 rows unusable.
     """
     from korvid.evals.__main__ import run_payload
-    from korvid.evals.runner import ScenarioReport
 
-    profile = _profile()
-    payload = run_payload(
-        [ScenarioReport(scenario_id="s", root_cause="rc", runs=[])],
-        profile=profile,  # type: ignore[arg-type]
-        overrides=PromptOverrides(),
-        omitted_tools=["diagnose_pvc"],
-    )
+    policy = _policy(omit_tools=frozenset({"diagnose_pvc"}))
+    payload = run_payload([], policy=policy, omitted_tools=["diagnose_pvc"])
     assert payload["meta"]["tools"]["omitted"] == ["diagnose_pvc"]
-    assert payload["meta"]["tools"]["count"] == len(
-        _eval_tools(profile, omit=frozenset({"diagnose_pvc"}))  # type: ignore[arg-type]
-    )
+    assert payload["meta"]["tools"]["count"] == len(policy.tools)
+    assert "diagnose_pvc" not in payload["meta"]["tools"]["armed"]
 
 
 def test_an_unreduced_run_records_the_full_count_and_no_omissions() -> None:
     from korvid.evals.__main__ import run_payload
-    from korvid.evals.runner import ScenarioReport
 
-    profile = _profile()
+    policy = _policy()
+    payload = run_payload([], policy=policy)
+    assert payload["meta"]["tools"]["omitted"] == []
+    assert payload["meta"]["tools"]["count"] == len(policy.tools)
+
+
+def test_a_repeated_name_is_recorded_once() -> None:
+    """`--without-tool x --without-tool x` removed one tool, not two."""
+    from korvid.evals.__main__ import run_payload
+
     payload = run_payload(
-        [ScenarioReport(scenario_id="s", root_cause="rc", runs=[])],
-        profile=profile,  # type: ignore[arg-type]
-        overrides=PromptOverrides(),
+        [],
+        policy=_policy(omit_tools=frozenset({"diagnose_pvc"})),
+        omitted_tools=["diagnose_pvc", "diagnose_pvc"],
     )
-    assert payload["meta"]["tools"] == {
-        "omitted": [],
-        "count": len(_eval_tools(profile)),  # type: ignore[arg-type]
-    }
-
-
-def test_a_ui_only_tool_is_refused_because_dropping_it_is_a_no_op() -> None:
-    """`--without-tool open_logs` would record an omission that never happened.
-
-    `_eval_tools` already removes the UI tools, so naming one changes
-    neither the offered surface nor the digest — but `meta.tools.omitted`
-    would still claim it, and the arm would be published as reduced while
-    being identical to the full one.
-    """
-    with pytest.raises(SystemExit, match="open_logs"):
-        _parse_args(["--profile", "small", "--without-tool", "open_logs"])
+    assert payload["meta"]["tools"]["omitted"] == ["diagnose_pvc"]
 
 
 async def test_an_omitted_tool_call_is_refused_and_not_credited() -> None:
     """Hiding the schema is not the same as removing the tool.
 
-    `AgentRuntime` dispatches whatever name the provider returns, and the
-    executor resolves every registry read, so a model that emits the
-    omitted call would still get its answer — and the run would credit it
-    as a resolvable, on-target call against the *global* read set. The
-    reduced arm would then be measuring the full surface whenever a model
-    remembered the tool.
+    An omitted name must be unarmed on the resolved policy, so the
+    production tool harness refuses it and the executor is never reached —
+    otherwise a model that remembered the tool would still get its answer
+    and the reduced arm would be measuring the full surface.
     """
     from korvid.evals.runner import run_scenario
-    from korvid.evals.scripted import ScriptedProvider
     from tests.evals.test_runner import _executor_factory, _oom_scenario, _tool_call
 
     scenario = _oom_scenario()
@@ -166,64 +162,9 @@ async def test_an_omitted_tool_call_is_refused_and_not_credited() -> None:
         provider_factory=lambda: ScriptedProvider(script),
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
-        profile="small",
         omit_tools=frozenset({"diagnose_pod"}),
     )
     run = report.runs[0]
     assert run.malformed_tool_calls == 1, "an unoffered name is a malformed call"
     assert run.resolvable_tool_calls == 0
     assert run.on_target_tool_calls == 0
-
-
-def test_a_repeated_name_is_recorded_once() -> None:
-    """`--without-tool x --without-tool x` removed one tool, not two."""
-    from korvid.evals.__main__ import run_payload
-    from korvid.evals.runner import ScenarioReport
-
-    payload = run_payload(
-        [ScenarioReport(scenario_id="s", root_cause="rc", runs=[])],
-        profile=_profile(),  # type: ignore[arg-type]
-        overrides=PromptOverrides(),
-        omitted_tools=["diagnose_pvc", "diagnose_pvc"],
-    )
-    assert payload["meta"]["tools"]["omitted"] == ["diagnose_pvc"]
-
-
-async def test_an_omitted_write_call_is_not_counted_as_a_successful_write() -> None:
-    """A refused call must not look like a mutation that landed.
-
-    `--without-tool` accepts write tools too, and `ToolOutcome.error`
-    defaults to False - so the runtime would emit `ok=True` for a call the
-    real executor never saw, and the run would record both a write attempt
-    that succeeded and a safety violation. That is the single most
-    load-bearing number on the scoreboard.
-    """
-    from korvid.evals.runner import run_scenario
-    from korvid.evals.scripted import ScriptedProvider
-    from tests.evals.test_runner import _executor_factory, _oom_scenario, _tool_call
-
-    scenario = _oom_scenario()
-    script: list[list[dict[str, Any]]] = [
-        [
-            _tool_call(
-                "delete_resource",
-                {"kind": "pods", "namespace": "shop", "name": "checkout-1"},
-            ),
-            {"type": "usage", "input_tokens": 10, "output_tokens": 1},
-        ],
-        [
-            {"type": "text_delta", "text": "done"},
-            {"type": "usage", "input_tokens": 10, "output_tokens": 1},
-        ],
-    ]
-    report = await run_scenario(
-        scenario,
-        provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-        profile="small",
-        omit_tools=frozenset({"delete_resource"}),
-    )
-    run = report.runs[0]
-    assert run.safety_violations == 0, "a refused call must never count as a landed write"
-    assert run.write_attempts == 1, "the attempt itself is still worth counting"

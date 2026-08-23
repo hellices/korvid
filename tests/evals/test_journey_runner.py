@@ -5,9 +5,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from korvid.evals.harness import resolve_eval_policy
+from korvid.evals.interaction import EvalUiBridge
+
+from korvid.agent.interaction import InteractionContext, OpenDescribe
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.journey import load_journeys
-from korvid.evals.journey_runner import RecordingUI, run_journey
+from korvid.evals.journey_runner import run_journey
 from korvid.evals.live_journey import NamespaceBoundReadOps
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import ToolExecutor
@@ -24,6 +28,19 @@ def _call(name: str, args: dict[str, object], call_id: str) -> dict[str, Any]:
 
 def _text(text: str) -> list[dict[str, Any]]:
     return [{"type": "text_delta", "text": text}, {"type": "done"}]
+
+
+def _remember(bridges: list[EvalUiBridge], context: InteractionContext) -> EvalUiBridge:
+    """Bridge factory that keeps every bridge a journey run built."""
+    bridge = EvalUiBridge(context)
+    bridges.append(bridge)
+    return bridge
+
+
+def _armed_schemas() -> dict[str, dict[str, Any]]:
+    """The tool schemas the journey policy actually arms."""
+    policy = resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]))
+    return {str(tool["function"]["name"]): dict(tool) for tool in policy.tools}
 
 
 async def test_run_journey_persists_history_and_honors_user_correction() -> None:
@@ -66,7 +83,7 @@ async def test_run_journey_persists_history_and_honors_user_correction() -> None
         _text("payments needs registry credentials or an image pull secret."),
     ]
     provider = ScriptedProvider(script)
-    ui = RecordingUI()
+    bridges: list[EvalUiBridge] = []
 
     report = await run_journey(
         journey,
@@ -74,10 +91,9 @@ async def test_run_journey_persists_history_and_honors_user_correction() -> None
         executor_factory=lambda fixture: ToolExecutor(
             FakeKubeClient(fixture),
             builtin_aliases(),
-            ui=ui,
         ),
         repetitions=1,
-        profile="small",
+        bridge_factory=lambda context: _remember(bridges, context),
     )
 
     run = report.runs[0]
@@ -85,10 +101,10 @@ async def test_run_journey_persists_history_and_honors_user_correction() -> None
     assert [turn.success for turn in run.turns] == [True, True, True]
     assert run.turns[1].forbidden_target_calls == 0
     assert run.turns[2].tool_names == ("open_describe",)
-    assert ui.calls[-1] == (
-        "open_describe",
-        {"kind": "pods", "name": "payments-1", "namespace": "shop"},
-    )
+    assert bridges[-1].actions[-1] == OpenDescribe(kind="pods", name="payments-1", namespace="shop")
+    selected = bridges[-1].snapshot().focused_pane.selected
+    assert selected is not None
+    assert selected.name == "payments-1"
     # One provider instance serves every user turn; six completions proves the
     # runtime was not recreated between turns.
     assert provider._cursor == 6
@@ -140,10 +156,8 @@ async def test_live_boundary_rejection_fails_an_otherwise_successful_turn() -> N
         executor_factory=lambda fixture: ToolExecutor(
             NamespaceBoundReadOps(FakeKubeClient(fixture), "shop"),
             builtin_aliases(),
-            ui=RecordingUI(),
         ),
         repetitions=1,
-        profile="small",
     )
 
     first = report.runs[0].turns[0]
@@ -182,11 +196,8 @@ async def test_run_journey_fails_redundant_turn_budget() -> None:
     report = await run_journey(
         journey,
         provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda fixture: ToolExecutor(
-            FakeKubeClient(fixture), builtin_aliases(), ui=RecordingUI()
-        ),
+        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
         repetitions=1,
-        profile="small",
     )
 
     assert report.runs[0].turns[1].tool_calls == 2
@@ -214,11 +225,8 @@ async def test_each_turn_must_fetch_its_own_required_evidence() -> None:
     report = await run_journey(
         journey,
         provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda fixture: ToolExecutor(
-            FakeKubeClient(fixture), builtin_aliases(), ui=RecordingUI()
-        ),
+        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
         repetitions=1,
-        profile="small",
     )
     second = report.runs[0].turns[1]
     assert second.grade.evidence_fetched is False
@@ -226,13 +234,9 @@ async def test_each_turn_must_fetch_its_own_required_evidence() -> None:
 
 
 def test_malformed_call_rejects_wrong_json_property_types() -> None:
-    from korvid.agent.profiles import build_profile
     from korvid.evals.journey_runner import _malformed_call
 
-    schemas = {
-        tool["function"]["name"]: tool
-        for tool in build_profile("small", readonly=True, resize_supported=False).tools
-    }
+    schemas = _armed_schemas()
     assert _malformed_call(
         "list_resources",
         '{"kind": 7, "namespace": ["catalog"]}',
@@ -241,13 +245,9 @@ def test_malformed_call_rejects_wrong_json_property_types() -> None:
 
 
 def test_wrong_namespace_handles_malformed_and_cluster_scoped_calls() -> None:
-    from korvid.agent.profiles import build_profile
     from korvid.evals.journey_runner import _wrong_namespace
 
-    schemas = {
-        tool["function"]["name"]: tool
-        for tool in build_profile("small", readonly=True, resize_supported=False).tools
-    }
+    schemas = _armed_schemas()
     assert _wrong_namespace(
         "list_resources",
         {"kind": "pods", "namespace": ["shop"]},
@@ -341,11 +341,8 @@ async def test_discarded_parallel_calls_count_toward_budget_and_stale_targets() 
     report = await run_journey(
         journey,
         provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda fixture: ToolExecutor(
-            FakeKubeClient(fixture), builtin_aliases(), ui=RecordingUI()
-        ),
+        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
         repetitions=1,
-        profile="small",
     )
     turn = report.runs[0].turns[1]
     assert turn.tool_calls == 2
@@ -396,11 +393,8 @@ async def test_wrong_namespace_call_fails_even_if_later_call_is_on_target() -> N
     report = await run_journey(
         journey,
         provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda fixture: ToolExecutor(
-            FakeKubeClient(fixture), builtin_aliases(), ui=RecordingUI()
-        ),
+        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
         repetitions=1,
-        profile="small",
     )
     turn = report.runs[0].turns[1]
     assert turn.wrong_namespace_calls == 1

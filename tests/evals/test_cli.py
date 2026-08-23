@@ -13,13 +13,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from korvid.evals.harness import PromptGrind, resolve_eval_policy
 
-from korvid.agent import prompts
-from korvid.agent.profiles import AgentProfile, PromptOverrides, build_profile
+from korvid.agent import prompt_packs
 from korvid.evals.__main__ import (
     _parse_args,
     _positive_int,
-    _sweep_overrides,
+    _prompt_grind,
     capture_serving,
     exit_code,
     probe_serving,
@@ -32,8 +32,10 @@ from korvid.evals.__main__ import (
 )
 from korvid.evals.grader import CitationReport, GradeResult, citation_report
 from korvid.evals.runner import RunMetrics, ScenarioReport
+from korvid.evals.scripted import ScriptedProvider
 from korvid.evals.serving import ProbeResult, serving_metadata
 from korvid.providers.openai_compat import OpenAICompatProvider
+from tests.evals.fixtures import EVAL_INTERACTION
 
 
 def _no_citations() -> CitationReport:
@@ -119,8 +121,15 @@ def _report(error: str | None = None) -> ScenarioReport:
         tokens_estimated=False,
         wall_time_s=1.5,
         error=error,
+        outcome="error" if error else "success",
+        failure_class="provider_error" if error else None,
     )
-    return ScenarioReport(scenario_id="oom-killed", root_cause="oom_killed", runs=[run])
+    return ScenarioReport(
+        scenario_id="oom-killed",
+        root_cause="oom_killed",
+        runs=[run],
+        interaction=EVAL_INTERACTION,
+    )
 
 
 def test_report_payload_is_json_serializable_with_summary_counts() -> None:
@@ -145,152 +154,253 @@ def test_exit_code_is_nonzero_when_any_run_errored(capsys: pytest.CaptureFixture
     assert "oom-killed: connection refused" in stderr
 
 
-def test_profile_flag_defaults_to_full_and_rejects_unknown_values() -> None:
-    """`--profile` selects which capability tier the pack measures
-    (issue #71); anything but the two real profiles is a usage error."""
-    assert _parse_args([]).profile == "full"
-    assert _parse_args(["--profile", "small"]).profile == "small"
+# --- resolved-tier routing --------------------------------------------------
+#
+# There is no capability "profile" any more: the eval CLI names a model
+# tier or lets the production router decide, exactly as the TUI does.
+
+
+def test_model_tier_defaults_to_automatic_routing() -> None:
+    assert _parse_args([]).model_tier is None
+
+
+@pytest.mark.parametrize("tier", ["low", "high"])
+def test_model_tier_accepts_the_two_real_tiers(tier: str) -> None:
+    assert _parse_args(["--model-tier", tier]).model_tier == tier
+
+
+@pytest.mark.parametrize("value", ["full", "small", "huge"])
+def test_model_tier_rejects_retired_profile_names(value: str) -> None:
+    """`full`/`small` were capability profiles; they are not tiers."""
     with pytest.raises(SystemExit, match="2"):
-        _parse_args(["--profile", "huge"])
+        _parse_args(["--model-tier", value])
+
+
+def test_the_profile_flag_is_gone() -> None:
+    with pytest.raises(SystemExit, match="2"):
+        _parse_args(["--profile", "small"])
+
+
+def _policy(**kwargs: Any) -> Any:
+    return resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]), **kwargs)
 
 
 # --- prompt provenance ------------------------------------------------------
 #
 # A scoreboard row that does not say which prompt produced it is not a
-# comparable score. Every run records a fingerprint.
+# comparable score. Every run records the resolved policy and a fingerprint.
 
 
-def _built(**kwargs: Any) -> tuple[AgentProfile, PromptOverrides]:
-    overrides = PromptOverrides(**kwargs)
-    profile = build_profile("small", readonly=True, resize_supported=False, overrides=overrides)
-    return profile, overrides
-
-
-def test_run_payload_wraps_scenarios_with_run_metadata() -> None:
-    profile, overrides = _built()
-    payload = run_payload([_report()], profile=profile, overrides=overrides)
-    assert payload["meta"]["profile"] == "small"
+def test_run_payload_records_the_resolved_policy() -> None:
+    policy = _policy()
+    payload = run_payload([_report()], policy=policy)
+    assert payload["meta"]["policy"] == {
+        "provider": "scripted",
+        "model": "scripted",
+        "tier": "low",
+        "route_source": "fallback",
+        "prompt_pack": "low-korvid-operator",
+        "overlays": [],
+    }
     assert payload["scenarios"][0]["scenario"] == "oom-killed"
     json.dumps(payload)
 
 
+def test_run_payload_records_every_budget_the_policy_imposes() -> None:
+    payload = run_payload([_report()], policy=_policy())
+    assert payload["meta"]["limits"] == {
+        "max_iterations": 6,
+        "max_history_chars": 24_000,
+        "max_result_chars": 3_000,
+        "max_tool_calls_per_iteration": 1,
+        "allow_parallel_tool_calls": False,
+        "strict_history_budget": True,
+    }
+
+
+def test_run_payload_records_the_high_tier_budgets_when_routed_high() -> None:
+    payload = run_payload([_report()], policy=_policy(model_tier="high"))
+    assert payload["meta"]["policy"]["tier"] == "high"
+    assert payload["meta"]["policy"]["route_source"] == "user"
+    assert payload["meta"]["limits"]["max_iterations"] == 15
+    assert payload["meta"]["limits"]["max_tool_calls_per_iteration"] is None
+
+
+def test_run_payload_records_the_catalog_version_and_capability_provenance() -> None:
+    payload = run_payload([_report()], policy=_policy())
+    assert payload["meta"]["catalog_version"] is None
+    capabilities = payload["meta"]["capabilities"]
+    assert set(capabilities) == {
+        "context_window_tokens",
+        "supports_tools",
+        "supports_parallel_tools",
+        "supports_reasoning",
+        "recommended_tier",
+        "provenance",
+    }
+    json.dumps(payload)
+
+
+def test_run_payload_names_the_exact_armed_tools() -> None:
+    policy = _policy()
+    payload = run_payload([_report()], policy=policy)
+    armed = payload["meta"]["tools"]["armed"]
+    assert armed == sorted(tool["function"]["name"] for tool in policy.tools)
+    assert payload["meta"]["tools"]["count"] == len(armed)
+    assert "scale_resource" not in armed
+
+
+def test_run_payload_records_the_starting_interaction_per_scenario() -> None:
+    payload = run_payload([_report()], policy=_policy())
+    interaction = payload["scenarios"][0]["interaction"]
+    assert interaction["kube_context"] == "eval-cluster"
+    assert interaction["focused_pane"]["kind"] == "pods"
+
+
+def test_run_payload_records_outcome_and_failure_class_per_run() -> None:
+    payload = run_payload([_report(), _report(error="connection refused")], policy=_policy())
+    assert payload["scenarios"][0]["runs"][0]["outcome"] == "success"
+    assert payload["scenarios"][0]["runs"][0]["failure_class"] is None
+    assert payload["scenarios"][1]["runs"][0]["outcome"] == "error"
+    assert payload["scenarios"][1]["runs"][0]["failure_class"] == "provider_error"
+
+
+def test_run_payload_records_the_maximum_calls_a_scenario_made() -> None:
+    payload = run_payload([_report()], policy=_policy())
+    assert payload["scenarios"][0]["max_tool_calls"] == 1
+
+
 def test_run_payload_marks_the_shipped_prompts_as_default() -> None:
-    profile, overrides = _built()
-    payload = run_payload([_report()], profile=profile, overrides=overrides)
+    payload = run_payload([_report()], policy=_policy())
     assert payload["meta"]["prompts"]["source"] == "default"
+    assert payload["meta"]["prompts"]["pack"] == "low-korvid-operator"
+    assert payload["meta"]["prompts"]["overlays"] == []
 
 
 @pytest.mark.parametrize(
-    "override",
+    "grind",
     [
-        {"system": "You are terse."},
-        {"append": "Never name nodes."},
-        {"tool_descriptions": {"get_logs": "Mine."}},
+        PromptGrind(tier_pack="Answer in one sentence."),
+        PromptGrind(overlay="Always name the namespace."),
     ],
 )
-def test_run_payload_marks_any_override_as_override(override: dict[str, Any]) -> None:
-    profile, overrides = _built(**override)
-    payload = run_payload([_report()], profile=profile, overrides=overrides)
+def test_run_payload_marks_a_ground_prompt_as_override(grind: PromptGrind) -> None:
+    payload = run_payload([_report()], policy=_policy(), grind=grind)
     assert payload["meta"]["prompts"]["source"] == "override"
 
 
+def test_run_payload_names_the_eval_overlay_it_layered() -> None:
+    payload = run_payload(
+        [_report()], policy=_policy(), grind=PromptGrind(overlay="Always cite the namespace.")
+    )
+    assert payload["meta"]["prompts"]["overlays"] == ["eval-overlay"]
+
+
 def test_prompt_fingerprint_is_stable_and_changes_with_the_prompt() -> None:
-    first = prompt_fingerprint(_built()[0])["sha256"]
-    again = prompt_fingerprint(_built()[0])["sha256"]
-    changed = prompt_fingerprint(_built(system="You are terse.")[0])["sha256"]
+    policy = _policy()
+    first = prompt_fingerprint(policy)["sha256"]
+    again = prompt_fingerprint(policy)["sha256"]
+    changed = prompt_fingerprint(policy, grind=PromptGrind(tier_pack="Be terse."))["sha256"]
     assert first == again
     assert first != changed
 
 
-def test_prompt_fingerprint_notices_a_reworded_tool_description() -> None:
-    """Tool wording is a measured lever, so it must be part of the identity."""
-    plain = prompt_fingerprint(_built()[0])["sha256"]
-    reworded = prompt_fingerprint(_built(tool_descriptions={"get_logs": "Mine."})[0])["sha256"]
-    assert plain != reworded
-
-
-def test_prompt_sweep_flags_default_to_unset() -> None:
-    args = _parse_args([])
-    assert args.system_prompt_file is None
-    assert args.prompt_append_file is None
-
-
-def test_prompt_sweep_flags_accept_paths() -> None:
-    args = _parse_args(["--system-prompt-file", "a.md", "--prompt-append-file", "b.md"])
-    assert args.system_prompt_file == Path("a.md")
-    assert args.prompt_append_file == Path("b.md")
-
-
-def test_prompt_fingerprint_covers_the_composed_prompt_not_just_the_role(
+def test_prompt_fingerprint_covers_the_composed_prompt_not_just_the_pack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The digest must identify the actual model input.
 
-    `AgentRuntime` composes the write/no-write clause onto the role
-    statement at request time. That clause is not part of
-    `profile.system_prompt`, so a digest over the role statement alone
-    would call two behaviourally different runs comparable.
+    The safety contract and the armed-capability clauses are composed onto
+    every request; a digest over the tier pack alone would call two
+    behaviourally different runs comparable.
     """
-    profile, _ = _built()
-    before = prompt_fingerprint(profile)["sha256"]
-    monkeypatch.setattr(prompts, "NO_WRITE_PROMPT", "Reworded read-only guidance.")
-    assert prompt_fingerprint(profile)["sha256"] != before
+    policy = _policy()
+    before = prompt_fingerprint(policy)["sha256"]
+    monkeypatch.setattr(prompt_packs, "SAFETY_CONTRACT", "Reworded safety contract.")
+    assert prompt_fingerprint(policy)["sha256"] != before
 
 
 def test_prompt_fingerprint_covers_parameter_schemas() -> None:
     """A parameter-schema edit changes what the model sees, so it must
     change the digest — the methodology promises exactly this."""
-    profile, _ = _built()
-    before = prompt_fingerprint(profile)["sha256"]
-    target = next(t for t in profile.tools if t["function"]["name"] == "get_logs")
-    target["function"]["parameters"]["properties"]["namespace"]["description"] = "changed"
-    assert prompt_fingerprint(profile)["sha256"] != before
+    policy = _policy()
+    before = prompt_fingerprint(policy)["sha256"]
+    narrowed = _policy(omit_tools=frozenset({"get_logs"}))
+    assert prompt_fingerprint(narrowed)["sha256"] != before
 
 
-def test_prompt_sweep_file_with_invalid_utf8_exits_cleanly(tmp_path: Path) -> None:
+def test_a_low_and_a_high_tier_run_are_never_confused() -> None:
+    assert (
+        prompt_fingerprint(_policy())["sha256"]
+        != (prompt_fingerprint(_policy(model_tier="high"))["sha256"])
+    )
+
+
+def test_source_is_default_when_a_grind_reproduces_the_shipped_pack() -> None:
+    """`source` decides publishability, so it must reflect the *effect* of
+    the configuration, not merely that some was supplied."""
+    same = PromptGrind(tier_pack=prompt_packs.LOW_KORVID_OPERATOR_PACK)
+    assert prompt_fingerprint(_policy(), grind=same)["source"] == "default"
+
+
+def test_source_is_override_when_the_prompt_actually_differs() -> None:
+    ground = PromptGrind(tier_pack="You are terse.")
+    assert prompt_fingerprint(_policy(), grind=ground)["source"] == "override"
+
+
+# --- prompt grinding flags --------------------------------------------------
+
+
+def test_prompt_grind_flags_default_to_unset() -> None:
+    args = _parse_args([])
+    assert args.tier_pack_file is None
+    assert args.prompt_overlay_file is None
+
+
+def test_prompt_grind_flags_accept_paths() -> None:
+    args = _parse_args(["--tier-pack-file", "a.md", "--prompt-overlay-file", "b.md"])
+    assert args.tier_pack_file == Path("a.md")
+    assert args.prompt_overlay_file == Path("b.md")
+
+
+def test_the_retired_replace_system_flags_are_gone() -> None:
+    for flag in ("--system-prompt-file", "--prompt-append-file"):
+        with pytest.raises(SystemExit, match="2"):
+            _parse_args([flag, "a.md"])
+
+
+def test_prompt_grind_reads_both_layers(tmp_path: Path) -> None:
+    pack = tmp_path / "pack.md"
+    pack.write_text("Answer in one sentence.", encoding="utf-8")
+    overlay = tmp_path / "overlay.md"
+    overlay.write_text("Always name the namespace.", encoding="utf-8")
+    grind = _prompt_grind(
+        _parse_args(["--tier-pack-file", str(pack), "--prompt-overlay-file", str(overlay)])
+    )
+    assert grind == PromptGrind(
+        tier_pack="Answer in one sentence.", overlay="Always name the namespace."
+    )
+
+
+def test_prompt_grind_file_with_invalid_utf8_exits_cleanly(tmp_path: Path) -> None:
     """A non-UTF-8 file must produce the CLI's actionable error, not a
     traceback: `UnicodeDecodeError` is not an `OSError`."""
     bad = tmp_path / "prompt.md"
     bad.write_bytes(b"\xff\xfe not utf-8")
-    args = _parse_args(["--system-prompt-file", str(bad)])
-    with pytest.raises(SystemExit, match="--system-prompt-file"):
-        _sweep_overrides(args)
-
-
-def test_source_is_default_when_an_override_reproduces_the_shipped_prompt() -> None:
-    """`source` decides publishability, so it must reflect the *effect* of
-    the configuration, not merely that some was supplied. Pointing at a
-    file holding korvid's own prompt yields a comparable run."""
-    profile, _ = _built()
-    same = PromptOverrides(system=profile.system_prompt)
-    rebuilt = build_profile("small", readonly=True, resize_supported=False, overrides=same)
-    assert prompt_fingerprint(rebuilt)["source"] == "default"
-
-
-def test_source_is_default_for_a_tool_description_that_changes_nothing() -> None:
-    profile, _ = _built()
-    current = {t["function"]["name"]: t["function"]["description"] for t in profile.tools}
-    echo = PromptOverrides(tool_descriptions={"get_logs": current["get_logs"]})
-    rebuilt = build_profile("small", readonly=True, resize_supported=False, overrides=echo)
-    assert prompt_fingerprint(rebuilt)["source"] == "default"
-
-
-def test_source_is_override_when_the_prompt_actually_differs() -> None:
-    profile, _ = _built(system="You are terse.")
-    assert prompt_fingerprint(profile)["source"] == "override"
+    args = _parse_args(["--tier-pack-file", str(bad)])
+    with pytest.raises(SystemExit, match="--tier-pack-file"):
+        _prompt_grind(args)
 
 
 def test_run_payload_omits_serving_when_it_was_not_captured() -> None:
     """Older artifacts have no serving block; absence must stay meaningful."""
-    profile, overrides = _built()
-    payload = run_payload([_report()], profile=profile, overrides=overrides)
+    payload = run_payload([_report()], policy=_policy())
     assert "serving" not in payload["meta"]
 
 
 def test_run_payload_records_the_serving_block_when_captured() -> None:
-    profile, overrides = _built()
     serving = serving_metadata(model="qwen3:8b", probe=ProbeResult(version={"version": "0.5.1"}))
-    payload = run_payload([_report()], profile=profile, overrides=overrides, serving=serving)
+    payload = run_payload([_report()], policy=_policy(), serving=serving)
     assert payload["meta"]["serving"]["engine"] == {"name": "ollama", "version": "0.5.1"}
     json.dumps(payload)
 

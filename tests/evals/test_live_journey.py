@@ -99,7 +99,7 @@ def test_live_corrective_turn_requires_an_invalid_image_claim() -> None:
     scenario = Scenario(
         id="corrective",
         question=turn.user,
-        screen=turn.screen,
+        interaction=journey.interaction,
         root_cause=journey.root_cause,
         must_mention=turn.must_mention,
         must_not_mention=turn.must_not_mention,

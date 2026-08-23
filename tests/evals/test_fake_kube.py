@@ -11,13 +11,14 @@ from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.scenario import ContainerLogs, Scenario
 from korvid.k8s.errors import ApiStatusError
 from korvid.tools.executor import ToolExecutor
+from tests.evals.fixtures import EVAL_INTERACTION
 
 
 def _scenario(**overrides: Any) -> Scenario:
     fields: dict[str, Any] = {
         "id": "s1",
         "question": "q",
-        "screen": "pods view",
+        "interaction": EVAL_INTERACTION,
         "root_cause": "oom_killed",
         "must_mention": (("oom",),),
         "objects": (
@@ -360,7 +361,7 @@ async def test_diagnose_service_works_against_the_fake_cluster() -> None:
     scenario = Scenario(
         id="svc",
         question="q",
-        screen="s",
+        interaction=EVAL_INTERACTION,
         root_cause="none",
         must_mention=(),
         must_not_mention=(),
@@ -399,7 +400,7 @@ async def test_endpointslices_are_readable_through_ordinary_reads() -> None:
     scenario = Scenario(
         id="svc",
         question="q",
-        screen="s",
+        interaction=EVAL_INTERACTION,
         root_cause="none",
         must_mention=(),
         must_not_mention=(),

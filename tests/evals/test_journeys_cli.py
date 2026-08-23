@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import copy
 import json
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
+from korvid.evals.harness import resolve_eval_policy
 
-from korvid.agent.profiles import build_profile
-from korvid.evals.__main__ import prompt_fingerprint
 from korvid.evals.grader import GradeResult
 from korvid.evals.journey_runner import (
     JourneyReport,
@@ -18,13 +16,33 @@ from korvid.evals.journey_runner import (
     JourneyTurnResult,
 )
 from korvid.evals.journeys_cli import _parse_args, _run, exit_code, journey_run_payload
+from korvid.evals.scripted import ScriptedProvider
+
+
+def _policy(**kwargs: Any) -> Any:
+    return resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]), **kwargs)
 
 
 def test_journey_cli_defaults_to_bundled_pack_and_three_reps() -> None:
     args = _parse_args([])
     assert args.reps == 3
-    assert args.profile == "small"
+    assert args.model_tier is None
     assert args.live is False
+
+
+def test_journey_cli_accepts_an_explicit_model_tier() -> None:
+    assert _parse_args(["--model-tier", "high"]).model_tier == "high"
+
+
+@pytest.mark.parametrize("value", ["full", "small"])
+def test_journey_cli_rejects_retired_profile_names(value: str) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        _parse_args(["--model-tier", value])
+
+
+def test_the_journey_profile_flag_is_gone() -> None:
+    with pytest.raises(SystemExit, match="2"):
+        _parse_args(["--profile", "small"])
 
 
 def test_journey_cli_accepts_live_mode_and_outputs() -> None:
@@ -62,9 +80,12 @@ async def test_live_cli_closes_environment_when_retargeting_fails(
         """
 id: cluster-wide
 root_cause: none
+interaction:
+  kube_context: eval-cluster
+  context_epoch: 1
+  focused_pane: {kind: pods, scope: shop}
 turns:
   - user: inspect
-    screen: nodes
     grading:
       must_mention: [healthy]
       must_not_mention: [broken]
@@ -73,7 +94,6 @@ turns:
           args: {kind: nodes}
           contains: node
   - user: stop
-    screen: nodes
     grading:
       must_mention: [stop]
       must_not_mention: [broken]
@@ -154,39 +174,48 @@ def test_journey_exit_code_prints_turn_errors(
     assert "triage run 1 turn 1: ReadTimeout" in capsys.readouterr().err
 
 
-def test_journey_json_records_prompt_provenance(tmp_path: Path) -> None:
+def test_journey_json_records_the_resolved_policy(tmp_path: Path) -> None:
     """Journey runs become published scoreboard rows too (#176 tier 2), so
-    they must say which prompt and tool schemas produced them."""
-    payload = journey_run_payload([], profile_name="small")
-    assert payload["meta"]["profile"] == "small"
+    they must say which model tier, prompt and tool schemas produced them."""
+    payload = journey_run_payload([], policy=_policy())
+    assert payload["meta"]["policy"] == {
+        "provider": "scripted",
+        "model": "scripted",
+        "tier": "low",
+        "route_source": "fallback",
+        "prompt_pack": "low-korvid-operator",
+        "overlays": [],
+    }
+    assert payload["meta"]["limits"]["max_tool_calls_per_iteration"] == 1
     assert payload["meta"]["prompts"]["source"] == "default"
     assert len(payload["meta"]["prompts"]["sha256"]) == 64
     assert payload["journeys"] == []
     json.dumps(payload)
 
 
-def test_journey_digest_covers_the_ui_tools_it_actually_offers() -> None:
-    """Journeys run the full profile surface, UI tools included, so a UI
-    schema change must move the digest — the task pack's surface drops
-    those tools and would not see it."""
-    profile = build_profile("small", readonly=True, resize_supported=False)
-    before = prompt_fingerprint(profile, tools=profile.tools)["sha256"]
-    # Mutate a copy: relying on `_trim`'s deepcopy would leak this edit into
-    # other tests the moment that copy is optimised away.
-    tools = copy.deepcopy(profile.tools)
-    ui = next(t for t in tools if t["function"]["name"] == "open_logs")
-    ui["function"]["description"] = "changed"
-    after = prompt_fingerprint(profile, tools=tools)["sha256"]
-    assert before != after
+def test_journey_json_names_the_exact_armed_tools() -> None:
+    """A journey arms the screen actions the task pack also arms, so a UI
+    schema change must be visible in the artifact."""
+    policy = _policy()
+    payload = journey_run_payload([], policy=policy)
+    armed = payload["meta"]["tools"]["armed"]
+    assert "open_describe" in armed
+    assert not {"scale_resource", "delete_resource"} & set(armed)
+
+
+def test_journey_digest_separates_the_two_tiers() -> None:
+    low = journey_run_payload([], policy=_policy())["meta"]["prompts"]["sha256"]
+    high = journey_run_payload([], policy=_policy(model_tier="high"))["meta"]["prompts"]["sha256"]
+    assert low != high
 
 
 def test_journey_payload_records_the_serving_block_when_captured() -> None:
     """Journeys are published rows too, so they need the same pinning (#235)."""
     serving = {"model": "m", "engine": {"name": "ollama", "version": "0.5.1"}, "unavailable": []}
-    payload = journey_run_payload([], profile_name="small", serving=serving)
+    payload = journey_run_payload([], policy=_policy(), serving=serving)
     assert payload["meta"]["serving"]["engine"]["version"] == "0.5.1"
 
 
 def test_journey_payload_omits_serving_when_it_was_not_captured() -> None:
-    payload = journey_run_payload([], profile_name="small")
+    payload = journey_run_payload([], policy=_policy())
     assert "serving" not in payload["meta"]

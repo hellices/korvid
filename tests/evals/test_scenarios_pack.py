@@ -299,3 +299,47 @@ def test_scoreboard_only_names_scenarios_and_journeys_that_exist() -> None:
         f"scoreboard cites pack ids that do not exist: {missing}\n"
         f"known scenarios: {sorted(scenarios)}\nknown journeys: {sorted(journeys)}"
     )
+
+
+def test_every_bundled_scenario_records_a_starting_interaction() -> None:
+    """Issue #316 task 13: the starting workspace is fixture data, not prose."""
+    for scenario in BUNDLED:
+        pane = scenario.interaction.focused_pane
+        assert scenario.interaction.kube_context, scenario.id
+        assert scenario.interaction.context_epoch >= 0, scenario.id
+        assert pane.kind, scenario.id
+        assert pane.scope, scenario.id
+
+
+def test_a_scenario_that_names_one_target_selects_it_on_screen() -> None:
+    """A scenario whose evidence all points at one object starts focused on it.
+
+    Otherwise the fixture claims the operator asked about a pod they were
+    not looking at, and the interaction context stops describing the run.
+    """
+    for scenario in BUNDLED:
+        targets = {
+            (
+                str(evidence.args.get("pod") or evidence.args.get("name") or ""),
+                str(evidence.args.get("namespace") or ""),
+            )
+            for group in scenario.expected_evidence
+            for evidence in group
+        }
+        named = {target for target in targets if target[0]}
+        if len(named) != 1:
+            continue
+        (name, namespace) = next(iter(named))
+        selected = scenario.interaction.focused_pane.selected
+        assert selected is not None, scenario.id
+        assert selected.name == name, scenario.id
+        if namespace:
+            assert selected.namespace == namespace, scenario.id
+
+
+def test_every_selected_resource_carries_a_uid() -> None:
+    """A selection without a uid cannot survive a same-named replacement."""
+    for scenario in BUNDLED:
+        selected = scenario.interaction.focused_pane.selected
+        if selected is not None:
+            assert selected.uid, scenario.id

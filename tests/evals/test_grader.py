@@ -8,6 +8,7 @@ import pytest
 
 from korvid.evals.grader import GradeResult, ToolRecord, citation_report, grade, matches_target
 from korvid.evals.scenario import Evidence, Scenario
+from tests.evals.fixtures import EVAL_INTERACTION
 
 _EVIDENCE = Evidence(
     tool="diagnose_pod",
@@ -20,7 +21,7 @@ def _scenario(**overrides: Any) -> Scenario:
     fields: dict[str, Any] = {
         "id": "s1",
         "question": "q",
-        "screen": "pods view",
+        "interaction": EVAL_INTERACTION,
         "root_cause": "oom_killed",
         "must_mention": (("oomkilled", "oom killed"), ("137",)),
         "must_not_mention": (("image pull", "imagepull"),),
