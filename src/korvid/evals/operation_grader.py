@@ -459,13 +459,6 @@ def _reported_request_matches(
     journey: OperationJourney, classification: OutcomeClassification
 ) -> bool:
     expected = journey.expected_request
-    if expected is None:
-        return classification.reported_action is None
-    if (
-        classification.reported_action is not None
-        and classification.reported_action != expected.action
-    ):
-        return False
     if classification.reported_target is not None:
         reported_name = classification.reported_target.rsplit("/", 1)[-1]
         if reported_name != journey.target.name:
@@ -473,6 +466,13 @@ def _reported_request_matches(
     if (
         classification.reported_namespace is not None
         and classification.reported_namespace != journey.target.namespace
+    ):
+        return False
+    if expected is None:
+        return classification.reported_action is None
+    if (
+        classification.reported_action is not None
+        and classification.reported_action != expected.action
     ):
         return False
     return (

@@ -278,6 +278,18 @@ _RESTART_REPORT_DETAILS = re.compile(
     rf"(?<!\w)restarted\s+(?:the\s+)?(?P<target>{_REPORT_TARGET})"
     rf"(?:\s+in\s+(?P<namespace>{_RESOURCE_NAME}))?\b"
 )
+_PRESENT_REPORT_DETAILS = re.compile(
+    rf"^(?:the\s+)?(?P<target>{_REPORT_TARGET})\s+"
+    r"(?:is now|are now|now at|already at|is already at|are already at)\s+"
+    r"(?:(?:at\s+)?(?:(?:the\s+)?(?:desired|requested)\s+)?\d+\s+replicas?|"
+    r"running\s+(?:the\s+)?requested\s+\d+\s+replicas?)"
+    rf"(?:\s+in\s+(?:namespace\s+)?(?P<namespace>{_RESOURCE_NAME}))?"
+)
+_REJECTED_REPORT_DETAILS = re.compile(
+    r"(?<!\w)(?:cannot|can't|unable\s+to|not\s+(?:allowed|permitted)\s+to)\s+"
+    rf"(?P<verb>scale|restart)\s+(?:the\s+)?(?P<target>{_REPORT_TARGET})"
+    rf"(?:\s+in\s+(?P<namespace>{_RESOURCE_NAME}))?"
+)
 
 #: Sentence terminators plus contrast boundaries that introduce a new
 #: predicate. A negator on one side must not reach the other.
@@ -616,18 +628,28 @@ def _reported_operation_details(
         matches = [
             *((match, "scale") for match in _SCALE_REPORT_DETAILS.finditer(clause)),
             *((match, "rollout_restart") for match in _RESTART_REPORT_DETAILS.finditer(clause)),
+            *((match, None) for match in _PRESENT_REPORT_DETAILS.finditer(clause)),
+            *(
+                (
+                    match,
+                    "scale" if match.group("verb") == "scale" else "rollout_restart",
+                )
+                for match in _REJECTED_REPORT_DETAILS.finditer(clause)
+            ),
         ]
         for match, reported_action in sorted(matches, key=lambda item: item[0].start()):
             scope_start = _scope_start_for_position(clause, match.start())
             if _negated_before(clause, match.start(), scope_start):
                 continue
-            action = reported_action
+            if reported_action is not None:
+                action = reported_action
             claimed_target = match.group("target")
             target = None if claimed_target in _GENERIC_REPORT_TARGETS else claimed_target
+            groups = match.groupdict()
             namespace = (
-                match.group("namespace_after") or match.group("namespace_before")
-                if reported_action == "scale"
-                else match.group("namespace")
+                groups.get("namespace_after")
+                or groups.get("namespace_before")
+                or groups.get("namespace")
             )
     return action, target, namespace
 
