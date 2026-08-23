@@ -235,6 +235,13 @@ class PaneContext:
 
 ```python
 @dataclass(frozen=True, slots=True)
+class ClusterFacts:
+    provider: str
+    distribution: str | None
+```
+
+```python
+@dataclass(frozen=True, slots=True)
 class InteractionContext:
     kube_context: str | None
     context_epoch: int
@@ -244,7 +251,9 @@ class InteractionContext:
 ```
 
 The workspace/controller layer owns the live state. The agent receives snapshots
-and cannot mutate their fields.
+and cannot mutate their fields. The composition root converts the Kubernetes
+probe's `ProviderInfo` into `ClusterFacts`; it never passes a preformatted
+cluster prompt string across the boundary.
 
 `context_epoch` changes when the active Kubernetes context changes. Resource UID
 is carried when known. These identities support the existing write revalidation
@@ -283,6 +292,11 @@ strings, or the Textual `App`.
 An applied action updates the real workspace. The next direct keystroke and the
 next context snapshot therefore observe the same state.
 
+The existing tools-layer `UIBridge` used by `ToolExecutor` and MCP remains a
+separate approval/write port. Its UI adapter is named `AgentToolUIBridge`;
+`AgentUiBridge` refers only to this snapshot and typed workspace-action
+contract.
+
 ### 3. Agent session and handoff
 
 `AgentSession` coordinates one conversation with one live TUI workspace.
@@ -299,7 +313,11 @@ class AgentSession(ABC):
     def finalize_interrupt(self) -> TurnInterrupted: ...
 
     @abstractmethod
-    def retarget(self, policy: ResolvedAgentPolicy) -> None: ...
+    def retarget(
+        self,
+        policy: ResolvedAgentPolicy,
+        cluster: ClusterFacts,
+    ) -> None: ...
 
     @abstractmethod
     async def aclose(self) -> None: ...
@@ -311,8 +329,10 @@ serialize context and pass an ad hoc string.
 Direct user navigation between turns needs no transcript event because the next
 snapshot is authoritative. A Kubernetes context switch creates a one-shot typed
 handoff note and a new context epoch, clears stale evidence, and recomposes the
-system message. Context changes during an active turn remain blocked by the
-existing coordinator.
+system message. Retarget installs the new policy and cluster facts atomically,
+so the new tool surface cannot be paired with the previous cluster-provider
+prompt. Context changes during an active turn remain blocked by the existing
+coordinator.
 
 Agent navigation actions are emitted as typed events and applied through the
 bridge. The transcript can describe them, while the workspace itself remains
