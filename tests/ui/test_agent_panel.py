@@ -431,34 +431,35 @@ async def test_turn_complete_updates_header_cumulatively() -> None:
         assert "75" in text
 
 
-async def test_header_shows_small_profile_marker() -> None:
-    """Users must be able to see which capability mode the agent runs in
-    (issue #71); full stays unmarked so the frontier look is unchanged."""
+async def test_header_shows_the_low_tier_marker() -> None:
+    """Users must be able to see which model-tier override the agent runs
+    with (design doc §6); automatic (None) stays unmarked so the frontier
+    look is unchanged."""
     app = PanelApp()
     async with app.run_test():
         panel = app.query_one(AgentPanel)
-        panel.set_header("qwen3:8b", 100, 20, estimated=False, profile="small")
+        panel.set_header("qwen3:8b", 100, 20, estimated=False, model_tier="low")
         header = str(app.query_one("#agent-header", Static).render())
-        assert "qwen3:8b [small]" in header
+        assert "qwen3:8b [low]" in header
 
-        panel.set_header("gpt-4o", 100, 20, estimated=False, profile="full")
+        panel.set_header("gpt-4o", 100, 20, estimated=False, model_tier=None)
         header = str(app.query_one("#agent-header", Static).render())
-        assert "[full]" not in header
+        assert "[" not in header
         assert "gpt-4o" in header
 
 
-async def test_header_profile_marker_survives_turn_complete() -> None:
-    """TurnComplete re-renders the header from panel state; the profile
+async def test_header_tier_marker_survives_turn_complete() -> None:
+    """TurnComplete re-renders the header from panel state; the tier
     marker must not disappear after the first turn."""
     app = PanelApp()
     async with app.run_test() as pilot:
         panel = app.query_one(AgentPanel)
-        panel.set_header("qwen3:8b", 0, 0, estimated=False, profile="small")
+        panel.set_header("qwen3:8b", 0, 0, estimated=False, model_tier="low")
         panel.begin_turn("q")
         panel.apply_event(TurnComplete(input_tokens=7, output_tokens=3, estimated=False))
         await pilot.pause()
         header = str(app.query_one("#agent-header", Static).render())
-        assert "[small]" in header
+        assert "[low]" in header
 
 
 async def test_unsupported_citations_are_marked_after_the_answer() -> None:

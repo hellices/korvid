@@ -3,9 +3,9 @@
 `AgentUiController` owns everything about the embedded agent that used to
 live directly on `KorvidApp`:
 
-- the session state — runtime, model, settings, capability profile, the
-  configurator/rebuild/disconnect seams, the `:ai off` disconnect marker and
-  the follow flag;
+- the session state — runtime, model, settings, the requested model-tier
+  override, the configurator/rebuild/disconnect seams, the `:ai off`
+  disconnect marker and the follow flag;
 - the turn lifecycle — the bare app-loop task, its cancellation, the
   interrupt-and-submit replacement queue, the finalization of an interrupted
   turn, and the shutdown drain;
@@ -142,9 +142,9 @@ class AgentPanelPort(ABC):
         output_tokens: int,
         *,
         estimated: bool,
-        profile: str,
+        model_tier: str | None,
     ) -> None:
-        """Render the live runtime's model, usage and capability profile."""
+        """Render the live runtime's model, usage and requested model-tier override."""
 
     @abstractmethod
     def show_setup_hint(self) -> None:
@@ -502,12 +502,14 @@ class AgentUiController:
         self._available = available
         settings = config()
         self._settings: AgentSettings | None = None
-        #: capability profile of the live runtime (issue #71); shown in the
-        #: agent panel header so users know which mode the agent runs in.
-        self._profile = settings.agent_profile or "full"
-        #: profile as explicitly configured (None = unset) — the `:ai`
-        #: wizard only suggests `small` for Ollama when this is unset.
-        self._configured_profile = settings.agent_profile
+        #: Requested model-tier override (design doc §6): `None` means
+        #: automatic routing. Drives the panel header marker and the `:ai`
+        #: wizard's pre-filled tier choice on reopen. Replaces the old
+        #: full/small capability profile (issue #71); the *resolved*
+        #: session tier and route source will replace this display once
+        #: Task 12 wires a real session — until then this is only the
+        #: override, not a resolved fact.
+        self._model_tier: str | None = settings.agent_model_tier
         # A runtime built from config.yaml at startup must seed the settings
         # snapshot so :model works without running the :ai wizard first.
         if runtime is not None and settings.agent_provider and settings.agent_model:
@@ -517,7 +519,7 @@ class AgentUiController:
                 base_url=settings.agent_base_url,
                 model=settings.agent_model,
                 api_key_env=settings.agent_api_key_env,
-                profile=settings.agent_profile or "full",
+                model_tier=settings.agent_model_tier,
                 options=settings.agent_options,
             )
         #: Agent follow: mirror the built-in agent's cluster reads on screen
@@ -565,9 +567,9 @@ class AgentUiController:
         return self._model_name
 
     @property
-    def profile(self) -> str:
-        """Capability profile the live runtime runs in (issue #71)."""
-        return self._profile
+    def model_tier(self) -> str | None:
+        """Requested model-tier override (`None` means automatic routing)."""
+        return self._model_tier
 
     @property
     def settings(self) -> AgentSettings | None:
@@ -675,7 +677,7 @@ class AgentUiController:
     def _handle_off(self) -> None:
         """`:ai off` (issue #167): disconnect the runtime for this session.
 
-        Keeps the configured provider/model/profile/credentials so bare
+        Keeps the configured provider/model/tier/credentials so bare
         `:ai` reconnects without re-entry; never rewrites `agent.enabled`
         or the persisted config. Refused while a turn runs — cancelling
         midway is the interrupt key's job, not a state command's.
@@ -713,7 +715,7 @@ class AgentUiController:
             AgentSetupScreen(
                 self._configurator,
                 apply_settings=self.apply_settings,
-                current_profile=self._configured_profile,
+                current_model_tier=self._model_tier,
                 current_settings=self._settings,
             )
         )
@@ -804,10 +806,9 @@ class AgentUiController:
         self._disconnected = False  # reconnected (issue #167)
         self._model_name = settings.model
         self._settings = settings
-        self._profile = settings.profile
-        # Once applied (and persisted by the wizard) the profile is an
-        # explicit choice — reopening :ai must preserve it.
-        self._configured_profile = settings.profile
+        # Once applied (and persisted by the wizard) the tier override is a
+        # deliberate choice — reopening :ai must preserve it.
+        self._model_tier = settings.model_tier
         self._refresh_status()
         # Always re-enable: the hint may have disabled the input while the
         # panel was open earlier; only focus/header rendering depends on
@@ -820,7 +821,7 @@ class AgentUiController:
                 in_tok,
                 out_tok,
                 estimated=runtime.usage_estimated,
-                profile=settings.profile,
+                model_tier=settings.model_tier,
             )
             self._panel.focus_input()
         return True
@@ -853,7 +854,7 @@ class AgentUiController:
                 in_tok,
                 out_tok,
                 estimated=self._runtime.usage_estimated,
-                profile=self._profile,
+                model_tier=self._model_tier,
             )
         self._panel.focus_input()
 

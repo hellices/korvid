@@ -168,7 +168,7 @@ class AgentPanel(Vertical):
     def __init__(self) -> None:
         super().__init__()
         self._model = "agent"
-        self._profile = "full"
+        self._model_tier: str | None = None
         self._tok_in = 0
         self._tok_out = 0
         self._estimated = False
@@ -208,18 +208,19 @@ class AgentPanel(Vertical):
         input_tokens: int,
         output_tokens: int,
         estimated: bool,
-        profile: str = "full",
+        model_tier: str | None = None,
     ) -> None:
         self._model = model
-        self._profile = profile
+        self._model_tier = model_tier
         self._tok_in = input_tokens
         self._tok_out = output_tokens
         self._estimated = estimated
         prefix = "~" if estimated else ""
-        # The capability profile is visible so users know which mode the
-        # agent runs in (issue #71); full stays unmarked. The bracket is
-        # escaped so Rich does not read it as a markup tag.
-        label = model if profile == "full" else f"{model} \\[{profile}]"
+        # The requested model-tier override is visible so users know which
+        # mode the agent runs in (issue #71/design doc §6); automatic
+        # (None) stays unmarked. The bracket is escaped so Rich does not
+        # read it as a markup tag.
+        label = model if model_tier is None else f"{model} \\[{model_tier}]"
         self.query_one("#agent-header", Static).update(
             f"⚡ {label} · {prefix}↑{_fmt_tokens(input_tokens)} ↓{_fmt_tokens(output_tokens)} tok"
         )
@@ -333,7 +334,7 @@ class AgentPanel(Vertical):
                 self._tok_in + event.input_tokens,
                 self._tok_out + event.output_tokens,
                 self._estimated or event.estimated,
-                profile=self._profile,
+                model_tier=self._model_tier,
             )
         elif isinstance(event, TurnInterrupted):
             # A stop is a normal outcome, not an error: the partial answer
@@ -356,7 +357,7 @@ class AgentPanel(Vertical):
                 self._tok_in + event.input_tokens,
                 self._tok_out + event.output_tokens,
                 self._estimated or event.estimated,
-                profile=self._profile,
+                model_tier=self._model_tier,
             )
 
     # --- internals ----------------------------------------------------------

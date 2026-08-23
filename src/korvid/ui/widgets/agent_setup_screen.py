@@ -43,6 +43,25 @@ _PROVIDER_LABELS: dict[str, str] = {
 # pre-highlight and prefill the wizard on reconnect (issue #167).
 _OPENAI_COMPAT_ALIASES = frozenset({"openai", "vllm", "github", "anthropic", "claude"})
 
+# Model-tier options (design doc §6), in the order shown/highlighted; option
+# id is `None` for automatic routing or the explicit override string
+# `_parse_model_tier` in `core.config` accepts. Automatic is always the
+# default highlight for every provider — no Ollama heuristic (issue #71).
+_TIER_OPTIONS: tuple[tuple[str, str | None], ...] = (
+    ("Automatic", None),
+    ("Low", "low"),
+    ("High", "high"),
+)
+_TIER_OPTION_INDEX: dict[str | None, int] = {
+    tier: index for index, (_, tier) in enumerate(_TIER_OPTIONS)
+}
+_TIER_OPTION_ID: dict[str | None, str] = {
+    tier: (tier if tier is not None else "automatic") for _, tier in _TIER_OPTIONS
+}
+_TIER_OPTION_FROM_ID: dict[str, str | None] = {
+    option_id: tier for tier, option_id in _TIER_OPTION_ID.items()
+}
+
 
 def _canonical_provider(name: str | None) -> str | None:
     """The wizard entry a configured provider name maps onto, or None."""
@@ -92,16 +111,18 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
         self,
         configurator: AgentConfigurator,
         apply_settings: Callable[[AgentSettings], bool] | None = None,
-        current_profile: str | None = None,
+        current_model_tier: str | None = None,
         current_settings: AgentSettings | None = None,
     ) -> None:
         super().__init__()
         self._configurator = configurator
         self._apply_settings = apply_settings
-        # Explicitly configured capability profile (None = unset): an
-        # explicit choice is preserved; only an unset profile receives the
-        # Ollama `small` suggestion (issue #71).
-        self._current_profile = current_profile
+        # Explicitly configured model-tier override (None = automatic): an
+        # explicit choice is preserved on reopen (design doc §6); the
+        # wizard never suggests a tier based on the provider (no Ollama
+        # heuristic — replaces the old full/small capability profile,
+        # issue #71).
+        self._current_model_tier = current_model_tier
         # Kept settings from a configured (possibly :ai off'd) agent
         # (issue #167): the wizard starts from them so reconnecting is
         # confirm-through, not re-entry. Registry aliases normalize onto
@@ -115,6 +136,9 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
         self._base_url: str | None = None
         self._api_key_env: str | None = None
         self._models: list[str] = []
+        #: Model chosen in the model step, held until the tier step
+        #: completes settings drafting (design doc §6).
+        self._chosen_model = ""
         self._settings: AgentSettings | None = None
         self._done_steps: list[str] = []
 
@@ -132,6 +156,10 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             yield Input(id="setup-model-filter", placeholder="type to filter — Enter to select")
             yield OptionList(id="setup-model-list")
             yield Input(id="setup-model", placeholder="model")
+            yield OptionList(
+                *(Option(label, id=_TIER_OPTION_ID[tier]) for label, tier in _TIER_OPTIONS),
+                id="setup-tier",
+            )
             yield Static(id="setup-device-code")
             yield Static(id="setup-status")
 
@@ -143,6 +171,7 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             "#setup-model-filter",
             "#setup-model-list",
             "#setup-model",
+            "#setup-tier",
             "#setup-device-code",
         ):
             self.query_one(widget_id).display = False
@@ -212,6 +241,14 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             self._after_auth_method()
         elif event.option_list.id == "setup-model-list":
             self._choose_model(str(event.option.prompt))
+        elif event.option_list.id == "setup-tier":
+            tier_id = event.option.id or "automatic"
+            model_tier = _TIER_OPTION_FROM_ID.get(tier_id)
+            self.query_one("#setup-tier").display = False
+            label = "Automatic" if model_tier is None else model_tier.capitalize()
+            self._mark_done(f"Tier: {label}")
+            self._settings = self._draft_settings(self._chosen_model, model_tier)
+            self.run_worker(self._probe(), exclusive=True)
 
     def _after_auth_method(self) -> None:
         if self._provider == "github-copilot":
@@ -292,17 +329,14 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
     # Model step
     # ------------------------------------------------------------------
 
-    def _draft_settings(self, model: str) -> AgentSettings:
+    def _draft_settings(self, model: str, model_tier: str | None = None) -> AgentSettings:
         return AgentSettings(
             provider=self._provider,
             auth_method=self._auth_method,
             base_url=self._base_url,
             model=model,
             api_key_env=self._api_key_env,
-            # An explicitly configured profile always wins; otherwise local
-            # Ollama endpoints usually serve 3B-14B models, so suggest the
-            # reduced capability profile (issue #71).
-            profile=self._current_profile or ("small" if self._provider == "ollama" else "full"),
+            model_tier=model_tier,
             options=self._current_settings.options if self._current_settings is not None else {},
         )
 
@@ -340,8 +374,18 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
         self.query_one("#setup-model-filter", Input).display = False
         self.query_one("#setup-model-list", OptionList).display = False
         self._mark_done(f"Model: {model}")
-        self._settings = self._draft_settings(model)
-        self.run_worker(self._probe(), exclusive=True)
+        self._chosen_model = model
+        self._show_tier_step()
+
+    def _show_tier_step(self) -> None:
+        self._ask("Which model tier should korvid use?")
+        tier_list = self.query_one("#setup-tier", OptionList)
+        tier_list.display = True
+        # An explicit prior choice is preserved on reopen; every provider
+        # (including Ollama) otherwise defaults to Automatic — the wizard
+        # never infers a tier from the provider (issue #71/design doc §6).
+        tier_list.highlighted = _TIER_OPTION_INDEX.get(self._current_model_tier, 0)
+        tier_list.focus()
 
     # ------------------------------------------------------------------
     # Workers

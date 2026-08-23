@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from korvid.core.config import KorvidConfig, load_config, save_agent_config
+from korvid.core.config import (
+    ConfigMigrationError,
+    KorvidConfig,
+    load_config,
+    save_agent_config,
+)
 from tests.platforms import POSIX
 
 
@@ -1324,53 +1329,129 @@ def test_views_non_mapping_top_level_warned(tmp_path: Path) -> None:
     assert any(w.startswith("views") and "mapping" in w for w in config.warnings)
 
 
-def test_agent_profile_unset_is_none(tmp_path: Path) -> None:
-    """Unset stays distinguishable from an explicit `profile: full` so the
-    `:ai` wizard only suggests `small` for Ollama when the user never chose."""
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n")
-    cfg = load_config(p)
-    assert cfg.agent_profile is None
+def write_config(tmp_path: Path, text: str) -> Path:
+    """Write `config.yaml` under `tmp_path` and return its path."""
+    path = tmp_path / "config.yaml"
+    path.write_text(text)
+    return path
 
 
-def test_agent_profile_parsed(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  profile: small\n")
-    cfg = load_config(p)
-    assert cfg.agent_profile == "small"
+def test_removed_agent_profile_is_actionable(tmp_path: Path) -> None:
+    """`agent.profile` changed meaning (design doc §6): it named a
+    full/small prompt-and-tool-surface switch, while `agent.model_tier`
+    only overrides the automatic capability router. Reinterpreting the old
+    key would silently run with the wrong surface, so it is a hard,
+    actionable startup failure rather than a warning."""
+    path = write_config(tmp_path, "agent:\n  profile: small\n")
+
+    with pytest.raises(
+        ConfigMigrationError,
+        match=r"agent\.profile was removed.*agent\.model_tier",
+    ):
+        load_config(path)
 
 
-def test_agent_profile_explicit_full_is_preserved(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  profile: full\n")
-    cfg = load_config(p)
-    assert cfg.agent_profile == "full"
+def test_removed_agent_prompts_is_actionable(tmp_path: Path) -> None:
+    """`agent.prompts` (replace-style overrides) was replaced by additive
+    `agent.rules` plus `agent.model_tier` for capability routing."""
+    path = write_config(tmp_path, "agent:\n  prompts:\n    system: You are terse.\n")
+
+    with pytest.raises(
+        ConfigMigrationError,
+        match=r"agent\.prompts was removed.*agent\.rules",
+    ):
+        load_config(path)
 
 
-def test_agent_profile_invalid_values_fall_back_to_full(tmp_path: Path) -> None:
-    """A present-but-unknown profile must not crash startup or half-configure
-    the agent — it falls back to `full` (not unset) so a typo keeps today's
-    runtime behavior and the wizard never silently turns it into `small`."""
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  profile: tiny\n")
-    cfg = load_config(p)
-    assert cfg.agent_profile == "full"
+def test_model_tier_and_additive_rules_load(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        "agent:\n  model_tier: low\n  rules:\n    - Prefer workload owner evidence.\n",
+    )
+
+    config = load_config(path)
+
+    assert config.agent_model_tier == "low"
+    assert config.agent_rules == ("Prefer workload owner evidence.",)
 
 
-def test_agent_profile_null_is_invalid_not_unset(tmp_path: Path) -> None:
-    """`profile: null` is a present-but-invalid value: it falls back to
-    `full` like any other, rather than becoming the unset state that would
-    let the wizard silently apply the Ollama `small` suggestion."""
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  profile: null\n")
-    cfg = load_config(p)
-    assert cfg.agent_profile == "full"
+def test_agent_model_tier_unset_is_none(tmp_path: Path) -> None:
+    """Omitting `agent.model_tier` means automatic routing, not a stale
+    tier — the router decides from provider-reported/catalog facts."""
+    path = write_config(tmp_path, "agent:\n  provider: ollama\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_tier is None
 
 
-def test_save_agent_config_persists_the_small_profile(tmp_path: Path) -> None:
-    """The wizard's profile suggestion must survive a restart (issue #71):
-    saving `small` writes agent.profile so the next start rebuilds the same
-    reduced surface the user just tested."""
+def test_agent_model_tier_accepts_high(tmp_path: Path) -> None:
+    path = write_config(tmp_path, "agent:\n  provider: ollama\n  model_tier: high\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_tier == "high"
+
+
+@pytest.mark.parametrize("value", ["full", "small", "auto", "typo"])
+def test_agent_model_tier_rejects_old_profile_names_and_unknown_values(
+    tmp_path: Path, value: str
+) -> None:
+    """Old profile names and typos must fail startup loudly (design doc
+    §6) rather than silently falling back to a tier the user never chose."""
+    path = write_config(tmp_path, f"agent:\n  provider: ollama\n  model_tier: {value}\n")
+    with pytest.raises(ConfigMigrationError, match=r"agent\.model_tier"):
+        load_config(path)
+
+
+def test_agent_model_tier_null_is_invalid_not_unset(tmp_path: Path) -> None:
+    """`model_tier: null` is a present-but-invalid value, distinct from the
+    key being absent entirely."""
+    path = write_config(tmp_path, "agent:\n  provider: ollama\n  model_tier: null\n")
+    with pytest.raises(ConfigMigrationError, match=r"agent\.model_tier"):
+        load_config(path)
+
+
+def test_agent_rules_default_is_empty(tmp_path: Path) -> None:
+    path = write_config(tmp_path, "agent:\n  provider: ollama\n")
+    cfg = load_config(path)
+    assert cfg.agent_rules == ()
+
+
+def test_agent_rules_drops_non_string_and_blank_entries(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        "agent:\n  rules:\n    - Prefer owner evidence.\n    - ''\n    - 42\n    - '   '\n",
+    )
+    cfg = load_config(path)
+    assert cfg.agent_rules == ("Prefer owner evidence.",)
+    assert any("agent.rules" in w for w in cfg.warnings)
+
+
+def test_agent_rules_drops_entries_over_the_character_limit(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    long_rule = "x" * 1001
+    path.write_text(f"agent:\n  rules:\n    - {long_rule}\n    - short rule\n")
+    cfg = load_config(path)
+    assert cfg.agent_rules == ("short rule",)
+    assert any("1000" in w for w in cfg.warnings)
+
+
+def test_agent_rules_truncates_to_sixteen_entries(tmp_path: Path) -> None:
+    rules_yaml = "\n".join(f"    - rule {i}" for i in range(20))
+    path = write_config(tmp_path, f"agent:\n  rules:\n{rules_yaml}\n")
+    cfg = load_config(path)
+    assert len(cfg.agent_rules) == 16
+    assert cfg.agent_rules[0] == "rule 0"
+    assert any("16" in w for w in cfg.warnings)
+
+
+def test_agent_rules_ignores_a_non_list_value(tmp_path: Path) -> None:
+    path = write_config(tmp_path, "agent:\n  rules: not a list\n")
+    cfg = load_config(path)
+    assert cfg.agent_rules == ()
+    assert any("agent.rules" in w for w in cfg.warnings)
+
+
+def test_save_agent_config_writes_an_explicit_low_tier(tmp_path: Path) -> None:
+    """An explicit tier override is a deliberate choice and must survive a
+    restart (design doc §6)."""
     p = tmp_path / "c.yaml"
     save_agent_config(
         p,
@@ -1379,17 +1460,17 @@ def test_save_agent_config_persists_the_small_profile(tmp_path: Path) -> None:
         base_url="http://localhost:11434",
         model="qwen3:8b",
         api_key_env=None,
-        profile="small",
+        model_tier="low",
     )
-    assert load_config(p).agent_profile == "small"
+    assert load_config(p).agent_model_tier == "low"
+    assert "model_tier: low" in p.read_text()
 
 
-def test_save_agent_config_writes_full_explicitly(tmp_path: Path) -> None:
-    """Saving `full` writes the key: after the wizard runs the profile is a
-    deliberate choice, and an explicit `full` must survive so reopening
-    `:ai` never re-suggests `small` over it."""
+def test_save_agent_config_removes_the_tier_for_automatic_routing(tmp_path: Path) -> None:
+    """Saving with `model_tier=None` (automatic) must remove any stale
+    explicit override rather than persisting the old choice."""
     p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n  model: qwen3:8b\n  profile: small\n")
+    p.write_text("agent:\n  provider: ollama\n  model: qwen3:8b\n  model_tier: low\n")
     save_agent_config(
         p,
         provider="openai-compat",
@@ -1397,10 +1478,10 @@ def test_save_agent_config_writes_full_explicitly(tmp_path: Path) -> None:
         base_url="https://api.openai.com/v1",
         model="gpt-4o-mini",
         api_key_env="OPENAI_API_KEY",
-        profile="full",
+        model_tier=None,
     )
-    assert load_config(p).agent_profile == "full"
-    assert "profile: full" in p.read_text()
+    assert load_config(p).agent_model_tier is None
+    assert "model_tier" not in p.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -1544,106 +1625,27 @@ def test_canonicalize_provider_name_parity() -> None:
         )
 
 
-# --- agent.prompts overrides (configurable agent prompts) -------------------
+# --- agent.prompts removal (replaced by agent.rules, design doc §6) --------
 
 
-def _load_prompts_config(tmp_path: Path, prompts: object) -> KorvidConfig:
-    path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump({"agent": {"prompts": prompts}}, sort_keys=False))
-    return load_config(path)
-
-
-def test_prompts_absent_leaves_every_slot_unset(tmp_path: Path) -> None:
-    """No `agent.prompts` block means korvid's shipped prompts, untouched."""
-    cfg = load_config(tmp_path / "missing.yaml")
-    assert cfg.agent_prompt_system is None
-    assert cfg.agent_prompt_append is None
-    assert cfg.agent_prompt_tool_descriptions == {}
-
-
-def test_prompts_read_inline_values(tmp_path: Path) -> None:
-    cfg = _load_prompts_config(
-        tmp_path,
+def test_removed_agent_prompts_rejects_every_slot_shape(tmp_path: Path) -> None:
+    """Any `agent.prompts` block — inline, file-referenced, or tool
+    description overrides — is the same removed contract; all shapes must
+    fail the same actionable way rather than some silently parsing."""
+    for prompts in (
         {"system": "You are terse.", "append": "Never name nodes."},
-    )
-    assert cfg.agent_prompt_system == "You are terse."
-    assert cfg.agent_prompt_append == "Never name nodes."
-    assert cfg.warnings == ()
+        {"system_file": "system.md"},
+        {"tool_descriptions": {"get_logs": "Read pod logs."}},
+        "nonsense",
+    ):
+        path = tmp_path / "config.yaml"
+        path.write_text(yaml.safe_dump({"agent": {"prompts": prompts}}, sort_keys=False))
+        with pytest.raises(ConfigMigrationError, match=r"agent\.prompts"):
+            load_config(path)
 
 
-def test_prompts_read_a_referenced_file(tmp_path: Path) -> None:
-    prompt = tmp_path / "system.md"
-    prompt.write_text("You are terse.\n")
-    cfg = _load_prompts_config(tmp_path, {"system_file": str(prompt)})
-    assert cfg.agent_prompt_system == "You are terse."
-
-
-def test_prompts_expand_a_user_relative_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`~/...` is how the documented example is written, so it must resolve."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    (tmp_path / "system.md").write_text("You are terse.")
-    cfg = _load_prompts_config(tmp_path, {"system_file": "~/system.md"})
-    assert cfg.agent_prompt_system == "You are terse."
-
-
-def test_prompts_reject_inline_and_file_for_the_same_slot(tmp_path: Path) -> None:
-    """Ambiguous configuration falls back rather than silently picking one."""
-    prompt = tmp_path / "system.md"
-    prompt.write_text("from the file")
-    cfg = _load_prompts_config(tmp_path, {"system": "inline", "system_file": str(prompt)})
-    assert cfg.agent_prompt_system is None
-    assert any("system" in w and "system_file" in w for w in cfg.warnings), cfg.warnings
-
-
-def test_prompts_warn_when_the_referenced_file_is_missing(tmp_path: Path) -> None:
-    cfg = _load_prompts_config(tmp_path, {"system_file": str(tmp_path / "nope.md")})
-    assert cfg.agent_prompt_system is None
-    assert any("nope.md" in w for w in cfg.warnings), cfg.warnings
-
-
-def test_prompts_warn_on_a_blank_value(tmp_path: Path) -> None:
-    cfg = _load_prompts_config(tmp_path, {"system": "   \n  "})
-    assert cfg.agent_prompt_system is None
-    assert any("system" in w for w in cfg.warnings), cfg.warnings
-
-
-def test_prompts_warn_on_a_non_string_value(tmp_path: Path) -> None:
-    cfg = _load_prompts_config(tmp_path, {"append": ["a", "b"]})
-    assert cfg.agent_prompt_append is None
-    assert any("append" in w for w in cfg.warnings), cfg.warnings
-
-
-def test_prompts_read_tool_description_overrides(tmp_path: Path) -> None:
-    cfg = _load_prompts_config(tmp_path, {"tool_descriptions": {"get_logs": "Read pod logs."}})
-    assert cfg.agent_prompt_tool_descriptions == {"get_logs": "Read pod logs."}
-
-
-def test_prompts_drop_non_string_tool_descriptions_but_keep_the_rest(
-    tmp_path: Path,
-) -> None:
-    cfg = _load_prompts_config(
-        tmp_path,
-        {"tool_descriptions": {"get_logs": "Read pod logs.", "get_events": 7}},
-    )
-    assert cfg.agent_prompt_tool_descriptions == {"get_logs": "Read pod logs."}
-    assert any("get_events" in w for w in cfg.warnings), cfg.warnings
-
-
-def test_prompts_ignore_a_non_mapping_block(tmp_path: Path) -> None:
-    """A scalar where a mapping belongs is treated as absent, as elsewhere."""
-    cfg = _load_prompts_config(tmp_path, "nonsense")
-    assert cfg.agent_prompt_system is None
-    assert cfg.agent_prompt_append is None
-
-
-def test_prompts_warn_when_the_referenced_file_is_not_utf8(tmp_path: Path) -> None:
-    """`UnicodeDecodeError` is not an `OSError`, so a non-UTF-8 prompt file
-    would otherwise crash config loading instead of falling back."""
-    prompt = tmp_path / "system.md"
-    prompt.write_bytes(b"\xff\xfe not utf-8")
-    cfg = _load_prompts_config(tmp_path, {"system_file": str(prompt)})
-    assert cfg.agent_prompt_system is None
-    assert any("system.md" in w for w in cfg.warnings), cfg.warnings
+def test_agent_without_a_prompts_block_loads_normally(tmp_path: Path) -> None:
+    """No `agent.prompts` key at all means korvid's shipped prompts,
+    untouched — only the key's *presence* is a migration error."""
+    cfg = load_config(tmp_path / "missing.yaml")
+    assert cfg.agent_rules == ()
