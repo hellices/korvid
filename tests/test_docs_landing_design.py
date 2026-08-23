@@ -600,7 +600,8 @@ def test_product_contract_map_keeps_the_read_paths_truthful() -> None:
     lowered = " ".join(re.sub(r"<[^>]+>", " ", contract).lower().split())
     for fact in (
         "human operator",
-        "watch-backed tui snapshot",
+        "watch-backed table",
+        "fresh describe and log reads",
         "model / provider",
         "bounded fresh reads",
         "editor / external assistant",
@@ -610,6 +611,72 @@ def test_product_contract_map_keeps_the_read_paths_truthful() -> None:
     ):
         assert fact in lowered
     assert "same evidence" not in lowered
+
+
+def test_human_lane_and_direct_scene_name_the_fresh_tui_reads_the_demo_shows() -> None:
+    """The TUI lane is not one watch-backed snapshot from end to end.
+
+    The Direct recording filters the watch-backed pod table, then presses
+    Describe — which fetches the manifest and that object's events in
+    `KorvidApp.action_describe` — and opens a live log stream in
+    `KorvidApp._live_log_stream`. Labelling either the scene or the human
+    contract lane "watch-backed TUI snapshot" hides the very freshness
+    distinction this page exists to explain, and it makes the contract map
+    factually incomplete by showing fresh reads only for agent and MCP.
+
+    The fix must stay honest in the other direction too: korvid's own
+    describe/log reads are not the agent's tool reads and not MCP's
+    tool-specific reads, so the three lanes keep three distinct labels and
+    none of them may collapse into one shared snapshot.
+    """
+    mixed = "watch-backed table + fresh describe and log reads"
+    watch_only = "watch-backed tui snapshot"
+
+    scene = _section('<article id="scene-direct"', "</article>")
+    scene_evidence = re.search(r"<div><strong>Evidence</strong>\s*([^<]+)</div>", scene)
+    assert scene_evidence is not None, "the Direct scene must keep an Evidence label"
+    assert " ".join(scene_evidence.group(1).lower().split()) == mixed, (
+        "the Direct scene shows a watch-backed table, a fresh Describe read, and a "
+        f"live log stream; its Evidence label must say so, found: {scene_evidence.group(1)!r}"
+    )
+
+    contract = _section('<section class="contract-map"', "</section>")
+    human_lane = re.search(
+        r"<article><span>Human operator</span><strong>([^<]+)</strong></article>", contract
+    )
+    assert human_lane is not None, "the contract map must keep the human operator lane"
+    assert " ".join(human_lane.group(1).lower().split()) == mixed, (
+        "the human contract lane must carry the same mixed evidence claim as the "
+        f"Direct scene, found: {human_lane.group(1)!r}"
+    )
+
+    truth = re.search(r'<p class="contract-map__truth">(.*?)</p>', contract, re.DOTALL)
+    assert truth is not None, "the contract map must keep its freshness truth sentence"
+    truth_text = " ".join(re.sub(r"<[^>]+>", " ", truth.group(1)).lower().split())
+    assert watch_only not in truth_text, (
+        "the truth sentence must not reduce the TUI to a single watch-backed "
+        f"snapshot either, found: {truth_text!r}"
+    )
+    assert "snapshots can differ" in truth_text
+    for shared_snapshot in ("same snapshot", "one snapshot", "identical"):
+        assert shared_snapshot not in truth_text, (
+            f"the lanes must not be described as sharing a snapshot: {shared_snapshot!r}"
+        )
+
+    index_lowered = _index().lower()
+    assert watch_only not in index_lowered, (
+        "no landing surface may still label the TUI's evidence as watch-backed only"
+    )
+
+    agent = _section('<article id="scene-agent"', "</article>")
+    assert "Bounded fresh reads + citations" in agent, (
+        "the agent scene keeps its own distinct bounded-fresh-read language"
+    )
+    mcp = _section('<article id="scene-mcp"', "</article>")
+    assert "Tool-specific bounded fresh reads" in mcp, (
+        "the MCP scene keeps its own distinct tool-specific bounded-fresh-read language"
+    )
+    assert "Bounded fresh reads over MCP" in contract
 
 
 def test_guarded_write_path_orders_confirmation_audit_and_execution() -> None:
@@ -816,6 +883,64 @@ def test_visual_storytelling_plan_scene_switcher_markup_matches_the_shipped_sour
             "fallback matches the shipped source"
         )
         assert _compact(planned.group(0)) == _compact(shipped.group(0))
+
+
+def test_visual_storytelling_plan_contract_snippets_match_the_shipped_evidence_lanes() -> None:
+    """The plan is an executable recipe, so its snippets carry the same claim.
+
+    `docs/superpowers/plans/2026-08-22-visual-storytelling.md` embeds the
+    scene markup, the contract-map markup, and the contract test verbatim. A
+    contributor replaying those blocks would reintroduce the watch-only
+    "Watch-backed TUI snapshot" label the shipped page no longer makes, so
+    the plan has to move with `docs/index.md`.
+    """
+    plan = _plan()
+    mixed = "Watch-backed table + fresh describe and log reads"
+
+    scene_markup = _fenced_block_after(
+        plan,
+        "- [ ] **Step 3: Replace the numbered cards with complete scene markup**",
+        "html",
+    )
+    assert f"<div><strong>Evidence</strong> {mixed}</div>" in scene_markup, (
+        "the plan's Direct scene snippet must carry the shipped mixed evidence label"
+    )
+    assert "<div><strong>Evidence</strong> Bounded fresh reads + citations</div>" in scene_markup
+    assert "<div><strong>Evidence</strong> Tool-specific bounded fresh reads</div>" in scene_markup
+
+    contract_markup = _fenced_block_after(
+        plan,
+        "- [ ] **Step 3: Replace the long safety paragraph with the two visual flows**",
+        "html",
+    )
+    shipped_contract = _section('<section class="contract-map"', "</section>")
+    for lane in re.findall(
+        r"<article><span>[^<]+</span><strong>[^<]+</strong></article>", shipped_contract
+    ):
+        assert lane in contract_markup, f"the plan's contract map must ship the lane {lane!r}"
+    shipped_truth = re.search(
+        r'<p class="contract-map__truth">.*?</p>', shipped_contract, re.DOTALL
+    )
+    assert shipped_truth is not None
+    assert _compact(shipped_truth.group(0)) in _compact(contract_markup), (
+        "the plan's contract map must carry the shipped freshness truth sentence"
+    )
+
+    contract_test = _fenced_block_after(
+        plan,
+        "Replace `test_safety_section_converges_every_actor_on_one_write_path` with:",
+        "python",
+    )
+    for fact in ('"watch-backed table"', '"fresh describe and log reads"'):
+        assert fact in contract_test, (
+            f"the plan's embedded contract test must assert on {fact}, or replaying the "
+            "plan reproduces the watch-only claim"
+        )
+
+    assert "watch-backed tui snapshot" not in plan.lower(), (
+        "no plan snippet or constraint may still reduce the TUI's evidence to a "
+        "watch-backed snapshot"
+    )
 
 
 def test_visual_storytelling_plan_evidence_markup_matches_the_shipped_sources() -> None:
@@ -1207,3 +1332,70 @@ def test_design_and_css_describe_build_localized_runtime_assets_truthfully() -> 
     css_intro = " ".join("\n".join(_css().splitlines()[:12]).lower().split())
     assert "generated local/vendor assets are allowed" in css_intro
     assert "browser runtime third-party requests are not" in css_intro
+
+
+def test_visual_storytelling_design_matches_the_shipped_media_and_provenance() -> None:
+    """The visual design doc must not outlive the media the PR actually ships.
+
+    Three of its requirements went stale against the checked-in captures:
+
+    1. the cockpit poster comes from an in-memory fixture with no metrics
+       source, so every CPU/MEM column renders an em-dash — the landing
+       contract in `test_evidence_copy_claims_only_what_its_capture_actually_shows`
+       forbids selling that frame as utilization evidence, and the design
+       must not require it either;
+    2. `merged-logs.png` is the single-pod `l` view, which
+       `test_single_pod_log_evidence_is_not_labelled_as_a_merged_stream`
+       pins as a stream rather than a merge; and
+    3. only the MCP scene comes from a disposable local cluster — the base,
+       agent, relationship, diagnosis, and log frames come from the
+       deterministic in-memory harness in `docs/demo/demo.py`, so a
+       disposable-cluster-only rule contradicts the checked-in provenance
+       and the landing page's own "synthetic or disposable" wording.
+
+    Its privacy and real-UI requirements are not relaxed by any of that, so
+    they are pinned here alongside.
+    """
+    design = (
+        DOCS / "superpowers" / "specs" / "2026-08-22-visual-storytelling-design.md"
+    ).read_text(encoding="utf-8")
+    lowered = " ".join(design.lower().split())
+
+    for claim in ("live utilization", "status and live utilization", "utilisation"):
+        assert claim not in lowered, (
+            "the demo has no metrics source, so no design requirement may promise "
+            f"{claim!r} from the shipped cockpit capture"
+        )
+    assert "as evidence of utilization" in lowered, (
+        "the design must state the prohibition the landing contract already "
+        "enforces: a harness capture is not utilization evidence"
+    )
+    assert "resource browsing with status, scope, and restart signals" in lowered, (
+        "the mosaic's cockpit criterion must name the signals the capture shows"
+    )
+
+    assert "merged, filtered logs" not in lowered, (
+        "the shipped log capture is a single-pod stream, not the merged view"
+    )
+    assert "a filtered, live single-pod log stream" in lowered, (
+        "the mosaic criterion must describe the single-pod live log stream that ships"
+    )
+
+    assert "disposable local cluster" in lowered, (
+        "the MCP capture really does come from a disposable local cluster"
+    )
+    assert lowered.count("in-memory synthetic harness") >= 2, (
+        "both the mosaic capture rule and the asset-production rule must accept "
+        "the deterministic in-memory harness that produced most of the media"
+    )
+    for anchor in (
+        "use real screens captured from the deterministic in-memory synthetic harness",
+        "reproducible demo scenarios against the deterministic in-memory synthetic harness",
+    ):
+        assert anchor in lowered, f"the design must state the supported provenance: {anchor!r}"
+
+    assert "real screens" in lowered, "captures must still come from the real product UI"
+    assert "no runtime third-party" in lowered, "the privacy requirement stays intact"
+    assert "no capture may contain a real cluster" in lowered, (
+        "the design must keep the privacy rule that no capture shows real cluster data"
+    )

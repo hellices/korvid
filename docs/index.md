@@ -43,7 +43,7 @@ hide:
     <article id="scene-direct" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-direct" tabindex="0">
       <video src="assets/demo.mp4" poster="assets/scenes/cockpit-poster.png" controls muted loop playsinline preload="none" aria-label="An operator filters to a failing pod, describes it, and opens its logs in korvid">Your browser does not support this direct-operation demo.</video>
       <div><strong>Input</strong> Keyboard intent</div>
-      <div><strong>Evidence</strong> Watch-backed TUI snapshot</div>
+      <div><strong>Evidence</strong> Watch-backed table + fresh describe and log reads</div>
       <div><strong>Result</strong> The real korvid view</div>
       <p>You stay on the live cockpit and choose every next step.</p>
       <a href="tui/">Explore the TUI</a>
@@ -76,7 +76,7 @@ hide:
     <p>Korvid keeps each surface honest about where its evidence came from while preserving the same operational frame.</p>
   </div>
   <div class="contract-map__drivers">
-    <article><span>Human operator</span><strong>Watch-backed TUI snapshot</strong></article>
+    <article><span>Human operator</span><strong>Watch-backed table + fresh describe and log reads</strong></article>
     <article><span>Model / provider</span><strong>Bounded fresh reads</strong></article>
     <article><span>Editor / external assistant</span><strong>Bounded fresh reads over MCP</strong></article>
   </div>
@@ -86,7 +86,7 @@ hide:
     <strong>Approval gate</strong>
     <strong>Fail-closed audit</strong>
   </div>
-  <p class="contract-map__truth">Fresh tool reads and the watch-backed TUI snapshot can differ in time, so snapshots can differ without splitting the product contract.</p>
+  <p class="contract-map__truth">The watch-backed table, korvid's own describe and log reads, and each tool's fresh reads are taken at different moments, so snapshots can differ without splitting the product contract.</p>
   <a href="overview/">Inspect the complete architecture</a>
 </section>
 

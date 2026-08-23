@@ -38,6 +38,7 @@ The page is successful when:
 - the write path is shown as an ordered approval and audit sequence;
 - major capabilities are represented by annotated product screens rather than
   a list of feature claims;
+- every capability claim is limited to what its capture actually contains;
 - every visual has an equivalent caption, transcript, or semantic text path;
   and
 - the page remains a static, self-hosted MkDocs site with no runtime third-party
@@ -140,11 +141,13 @@ The diagram has two explicit lanes:
 
 **Read and navigation lane**
 
-- Human operator -> TUI -> watch-backed `ResourceStore` snapshot
+- Human operator -> TUI -> watch-backed `ResourceStore` table, plus korvid's
+  own fresh describe and log reads
 - Model/provider -> embedded agent -> bounded fresh tool reads
 - Editor/external assistant -> MCP -> bounded fresh tool reads
 - All three retain the active cluster context and shared navigation semantics
-- Fresh tool reads may differ in time from the watch-backed TUI snapshot
+- The watch-backed table, korvid's own describe and log reads, and each tool's
+  fresh reads are taken at different moments, so snapshots can differ
 
 **Write lane**
 
@@ -186,16 +189,21 @@ model pages.
 
 Show six representative product scenes in an asymmetric mosaic:
 
-1. resource browsing with status and live utilization;
+1. resource browsing with status, scope, and restart signals;
 2. relationship graph navigation;
-3. merged, filtered logs;
+3. a filtered, live single-pod log stream;
 4. diagnosis with events and evidence;
 5. embedded-agent answers with validated citations; and
 6. an MCP-driven follow or navigation sequence.
 
-Use real screens captured from a disposable local cluster. Annotation text
+Use real screens captured from the deterministic in-memory synthetic harness
+in `docs/demo/demo.py` or from a disposable local cluster. Annotation text
 must be HTML overlays or adjacent captions, not text burned into an image.
 This preserves readability, responsive layout, and accessible alternatives.
+
+The harness has no metrics source, so its CPU/MEM columns render placeholders.
+No tile, caption, or criterion may present a capture from it as evidence of
+utilization.
 
 The mosaic is not a feature dump. Every tile has the same structure:
 
@@ -278,9 +286,12 @@ layer.
 
 ## Asset production and performance
 
-Visuals must come from reproducible demo scenarios against a disposable local
-cluster. Record the scenario, commands, fixture versions, and capture steps
-under `docs/demo/` so a future behavior change can regenerate the assets.
+Visuals must come from reproducible demo scenarios against the deterministic
+in-memory synthetic harness or a disposable local cluster. Whichever path a
+scene uses, no capture may contain a real cluster, credential, customer, or
+production identifier. Record the scenario, commands, fixture versions, and
+capture steps under `docs/demo/` so a future behavior change can regenerate
+the assets.
 
 Asset rules:
 

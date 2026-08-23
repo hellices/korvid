@@ -63,7 +63,9 @@ def _parse_exclude_docs(block: str) -> tuple[str, ...]:
     uses plain entries — a directory (`superpowers/`) or a single page
     (`dev/scratch.md`) — and gitignore matches a slash-less entry as both a
     file and a directory, so every entry is normalised to one path that
-    excludes itself and everything beneath it.
+    excludes itself and everything beneath it. Whether that path is anchored
+    to the docs root or matched at any segment is decided by `_is_published`,
+    which follows gitignore's own slash rule.
 
     Anything using wildcard or negation syntax cannot be resolved to a
     concrete docs path here. Such a line is rejected rather than dropped:
@@ -91,6 +93,28 @@ def _parse_exclude_docs(block: str) -> tuple[str, ...]:
     return tuple(entries)
 
 
+def _matches_exclude_entry(relative: str, entry: str) -> bool:
+    """Whether one normalised `exclude_docs` entry unpublishes a page.
+
+    Gitignore anchors a pattern that carries an internal separator to the
+    file the pattern was declared in, and matches a slash-less pattern
+    against every path segment. `dev/plans` therefore only removes the
+    docs-root `dev/plans/**`, while a bare `superpowers` removes
+    `superpowers/**` *and* `guide/superpowers/**` — and a bare `scratch.md`
+    removes that filename at any depth.
+
+    Args:
+        relative: A page path relative to `docs/`, e.g. `dev/README.md`.
+        entry: One normalised entry from `_parse_exclude_docs`.
+
+    Returns:
+        `True` when the entry matches the page itself or one of its parents.
+    """
+    if "/" in entry:
+        return relative == entry or relative.startswith(f"{entry}/")
+    return entry in relative.split("/")
+
+
 def _is_published(relative: str, excluded: tuple[str, ...]) -> bool:
     """Whether a docs-relative page survives the `exclude_docs` entries.
 
@@ -101,7 +125,7 @@ def _is_published(relative: str, excluded: tuple[str, ...]) -> bool:
     Returns:
         `True` when no entry matches the page itself or one of its parents.
     """
-    return not any(relative == entry or relative.startswith(f"{entry}/") for entry in excluded)
+    return not any(_matches_exclude_entry(relative, entry) for entry in excluded)
 
 
 def _excluded_prefixes() -> tuple[str, ...]:
@@ -233,6 +257,50 @@ def test_exclude_docs_honours_single_page_entries_not_just_directories() -> None
     )
     assert _is_published("dev/scratch.md.md", excluded), (
         "prefix matching must respect path segments"
+    )
+
+
+def test_exclude_docs_matches_slash_less_entries_at_every_path_segment() -> None:
+    """Gitignore matches a slash-less entry at any depth, not only at the root.
+
+    `mkdocs.yml` excludes a bare `superpowers`, so MkDocs drops both
+    `superpowers/**` and any nested `**/superpowers/**` page. Anchoring the
+    entry to the docs root left the nested pages in this walk's published
+    set, which would then assert on raw HTML MkDocs never builds.
+
+    An entry that carries an internal separator stays anchored to the docs
+    root, exactly as gitignore anchors a pattern containing a slash — so the
+    two behaviours have to be distinguished rather than merged.
+    """
+    excluded = _parse_exclude_docs("superpowers/\ndev/plans/\nscratch.md\n")
+    assert excluded == ("superpowers", "dev/plans", "scratch.md")
+
+    assert not _is_published("superpowers/specs/design.md", excluded), (
+        "a slash-less entry still excludes the directory it names at the root"
+    )
+    assert not _is_published("guide/superpowers/page.md", excluded), (
+        "gitignore matches a slash-less entry at any path segment, so a nested "
+        "superpowers/ directory is unpublished too"
+    )
+    assert not _is_published("a/b/c/superpowers/deep/page.md", excluded)
+    assert not _is_published("superpowers", excluded), (
+        "the entry must keep matching the path it names exactly"
+    )
+    assert not _is_published("dev/notes/scratch.md", excluded), (
+        "a slash-less file entry matches that filename at any depth as well"
+    )
+    assert not _is_published("scratch.md", excluded), (
+        "segment matching must not weaken the root file exclusion"
+    )
+
+    assert _is_published("superpowers-guide/page.md", excluded), (
+        "segment matching must not fire on a longer sibling directory name"
+    )
+    assert _is_published("guide/superpowers-guide/page.md", excluded)
+    assert _is_published("guide/my-superpowers/page.md", excluded)
+    assert _is_published("guide/scratch.md.bak.md", excluded)
+    assert _is_published("guide/dev/plans/page.md", excluded), (
+        "an entry containing a slash stays anchored at the docs root, as gitignore does"
     )
 
 
