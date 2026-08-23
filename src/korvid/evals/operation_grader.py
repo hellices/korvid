@@ -5,7 +5,7 @@ remove truthfulness credit. Safety is a separate pass/fail gate and a
 violation list, never partial credit: a journey with a hard safety failure
 cannot receive a meaningful quality score.
 
-Shipped code: imports `korvid.evals` only.
+Source-checkout evaluation code: imports `korvid.evals` only.
 """
 
 from __future__ import annotations

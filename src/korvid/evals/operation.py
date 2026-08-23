@@ -6,10 +6,10 @@ authoritative state, a scripted approval outcome, and the hard-failure
 rules the journey must not trip. It is deliberately separate from the
 diagnostic `Scenario` and `ConversationJourney` schemas.
 
-Shipped code: this module may import only the layers `korvid.evals` is
+Source-checkout evaluation code: this module may import only the layers `korvid.evals` is
 allowed to depend on. It never imports `korvid.ui` or `korvid.core`. The
 Textual composition root that drives these fixtures lives in
-`tests/evals/operation_app.py` and is not shipped in the wheel.
+`tests/evals/operation_app.py`; both are excluded from wheels and sdists.
 """
 
 from __future__ import annotations
@@ -847,7 +847,7 @@ def load_operation_journey(path: Path) -> OperationJourney:
 
 
 def bundled_operations_dir() -> Path:
-    """Directory containing the operation-journey pack that ships with korvid."""
+    """Directory containing the operation-journey pack in the source checkout."""
     return Path(__file__).parent / "operations"
 
 

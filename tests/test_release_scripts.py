@@ -994,6 +994,18 @@ def test_wheel_and_sdist_metadata_match_version_and_extras(tmp_path: Path) -> No
             "korvid-1.2.3.tar.gz",
             id="sdist-tests-evals",
         ),
+        pytest.param(
+            (r"korvid\evals\runner.py",),
+            (),
+            "korvid-1.2.3-py3-none-any.whl",
+            id="wheel-backslash",
+        ),
+        pytest.param(
+            (),
+            (r"korvid-1.2.3\src\korvid\evals\runner.py",),
+            "korvid-1.2.3.tar.gz",
+            id="sdist-backslash",
+        ),
     ],
 )
 def test_artifacts_reject_the_evaluation_harness(

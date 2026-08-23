@@ -1,4 +1,4 @@
-"""The shipped operation-eval modules must never reach `ui` or `core`.
+"""The source-checkout operation-eval modules must never reach `ui` or `core`.
 
 Textual stays confined to `ui/` (AGENTS.md) and `tach.toml` gives
 `korvid.evals` no `korvid.core` dependency. The check runs in a subprocess
@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-_SHIPPED_OPERATION_MODULES = (
+_SOURCE_OPERATION_MODULES = (
     "korvid.evals.operation",
     "korvid.evals.operation_journal",
     "korvid.evals.operation_outcome",
@@ -37,12 +37,12 @@ forbidden = [
     or name.startswith("korvid.core.")
 ]
 if forbidden:
-    raise SystemExit(f"shipped operation eval module reached forbidden layers: {{forbidden}}")
+    raise SystemExit(f"operation eval module reached forbidden layers: {{forbidden}}")
 """
 
 
-@pytest.mark.parametrize("module", _SHIPPED_OPERATION_MODULES)
-def test_shipped_operation_modules_do_not_import_ui_or_core(module: str) -> None:
+@pytest.mark.parametrize("module", _SOURCE_OPERATION_MODULES)
+def test_source_operation_modules_do_not_import_ui_or_core(module: str) -> None:
     result = subprocess.run(
         [sys.executable, "-c", _PROBE.format(module=module)],
         capture_output=True,

@@ -182,7 +182,7 @@ def _archive_members(path: Path) -> tuple[_ArchiveMember, ...]:
 
 
 def _has_contiguous_parts(name: str, expected: tuple[str, ...]) -> bool:
-    parts = PurePosixPath(name).parts
+    parts = PurePosixPath(name.replace("\\", "/")).parts
     width = len(expected)
     return any(parts[index : index + width] == expected for index in range(len(parts) - width + 1))
 

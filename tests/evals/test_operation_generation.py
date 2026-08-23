@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+import re
 from copy import deepcopy
 from dataclasses import replace
 
@@ -17,6 +19,9 @@ from korvid.evals.operation_generation import generate_instance
 from korvid.evals.scenario import ContainerLogs
 
 _TEMPLATES = {journey.id: journey for journey in load_operation_journeys(bundled_operations_dir())}
+_DNS1123_SUBDOMAIN = re.compile(
+    r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*"
+)
 
 
 def test_the_same_seed_reproduces_the_same_instance() -> None:
@@ -124,6 +129,23 @@ def test_generated_target_name_does_not_collide_with_an_existing_peer() -> None:
         for manifest in instance.cluster.objects
     ]
     assert len(identities) == len(set(identities))
+
+
+def test_generated_target_name_respects_the_dns_subdomain_limit() -> None:
+    target = replace(_TEMPLATES["scale-deployment-up"].target, name="a" * 250)
+
+    generated = operation_generation._generated_name(random.Random(7), target, set())
+
+    assert len(generated) <= 253
+
+
+def test_generated_target_name_remains_a_dns_subdomain_after_truncation() -> None:
+    prefix = ".".join(("a" * 60,) * 4)
+    target = replace(_TEMPLATES["scale-deployment-up"].target, name=f"{prefix}.suffix")
+
+    generated = operation_generation._generated_name(random.Random(7), target, set())
+
+    assert _DNS1123_SUBDOMAIN.fullmatch(generated) is not None
 
 
 def test_generated_name_is_unique_in_every_renamed_namespace() -> None:

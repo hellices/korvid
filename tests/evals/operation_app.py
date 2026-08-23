@@ -638,6 +638,10 @@ class _ApprovalDriver:
             result="replaced" if replaced else "missing",
             detail=summarize_untrusted(uid=uid, reason="dialog_intervention"),
         )
+        if not replaced:
+            raise AssertionError(
+                f"{self._journey.id}: dialog_intervention replacement did not apply"
+            )
 
     async def handle(self, pilot: Any) -> None:
         screen = self._app.screen

@@ -11,7 +11,7 @@ its verb), negation aware within a bounded window, and precedence ordered.
 Conflicting positive/negative classes produce `ambiguous`, which earns no
 truthfulness credit.
 
-Shipped code: imports only `korvid.evals.operation` and stdlib/PyYAML.
+Source-checkout evaluation code: imports only `korvid.evals.operation` and stdlib/PyYAML.
 """
 
 from __future__ import annotations
@@ -778,7 +778,7 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
 
 
 def bundled_outcome_corpus_path() -> Path:
-    """The reviewed corpus that ships with korvid."""
+    """The reviewed corpus bundled with the source checkout."""
 
     return Path(__file__).parent / "operation_outcome_corpus.yaml"
 

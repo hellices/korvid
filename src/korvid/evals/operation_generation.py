@@ -12,7 +12,7 @@ outcomes, and phrasing families stay fixed here so a generated instance
 keeps a deterministic script; widening the generator is a later change
 that must be made together with the scripts that drive it.
 
-Shipped code: imports `korvid.evals.operation` and stdlib only.
+Source-checkout evaluation code: imports `korvid.evals.operation` and stdlib only.
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ _NAMESPACE_POOL = (
 )
 _NAME_SUFFIXES = ("blue", "green", "teal", "amber", "slate", "ivory", "coral", "onyx")
 _MAX_DISTRACTORS = 2
+_MAX_RESOURCE_NAME_LENGTH = 253
 
 
 @dataclass(frozen=True)
@@ -255,9 +256,9 @@ def _generated_name(rng: random.Random, old: OperationTarget, used: set[str]) ->
     for offset in range(len(_NAME_SUFFIXES)):
         suffix = _NAME_SUFFIXES[(start + offset) % len(_NAME_SUFFIXES)]
         candidate = f"{old.name}-{suffix}"
-        if candidate not in used:
+        if len(candidate) <= _MAX_RESOURCE_NAME_LENGTH and candidate not in used:
             return candidate
-    base = old.name[:244].rstrip("-") or "object"
+    base = old.name[: _MAX_RESOURCE_NAME_LENGTH - 9].rstrip(".-") or "object"
     while True:
         candidate = f"{base}-{rng.getrandbits(32):08x}"
         if candidate not in used:

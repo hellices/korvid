@@ -15,7 +15,7 @@ The write fake also observes the production audit boundary: an injected
 mutation, so the fail-closed ordering is provable from persisted evidence
 instead of from a subclassed or wrapped `AuditLog`.
 
-Shipped code: imports `korvid.evals` and `korvid.k8s` only.
+Source-checkout evaluation code: imports `korvid.evals` and `korvid.k8s` only.
 """
 
 from __future__ import annotations

@@ -197,6 +197,26 @@ async def test_expired_dialog_closure_between_poll_and_handle_is_observed() -> N
     assert journal.events[-1].approval == "expired"
 
 
+def test_declared_intervention_fails_when_target_replacement_is_missing() -> None:
+    journal = ActionJournal()
+    state = SimpleNamespace(replace_incarnation=lambda **_kwargs: False)
+    driver = _ApprovalDriver(
+        cast(Any, SimpleNamespace()),
+        _JOURNEYS["scale-same-name-replacement"],
+        journal,
+        cast(Any, state),
+        expiry_timeout=MIN_APPROVAL_TIMEOUT,
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match="dialog_intervention replacement did not apply",
+    ):
+        driver._apply_intervention()
+
+    assert journal.events[-1].event == "target_replacement_missing"
+
+
 async def test_a_dialog_left_open_after_turn_end_is_declined(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
