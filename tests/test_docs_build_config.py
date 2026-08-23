@@ -140,6 +140,25 @@ def test_overview_diagram_keeps_provider_masking_out_of_the_mcp_contract() -> No
     assert "tool-specific disclosure" in mcp.lower()
 
 
+def test_mcp_diagram_routes_observability_reads_to_their_own_backends() -> None:
+    """Prometheus/Loki queries must not appear to call the Kubernetes API."""
+    source = (ROOT / "docs" / "mcp.md").read_text(encoding="utf-8")
+    diagram = source.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert 'READ["Bounded Kubernetes read tools"]' in diagram
+    assert 'OBS_READ["Bounded observability tools<br/>activity note only"]' in diagram
+    assert 'OBS[("Prometheus / Loki")]' in diagram
+    assert "CLIENT --> READ --> KUBE" in diagram
+    assert "CLIENT --> OBS_READ --> OBS" in diagram
+    assert "OBS_READ -. successful read .-> FOLLOW" not in diagram
+
+    plan = (
+        ROOT / "docs" / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
+    ).read_text(encoding="utf-8")
+    planned = plan.split("- [ ] **Step 6: Add the MCP boundary flow**", 1)[1]
+    planned = planned.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert " ".join(planned.split()) == " ".join(diagram.split())
+
+
 def test_ops_safety_diagram_shows_only_universal_write_gates() -> None:
     """Optional previews must not appear as a prerequisite for every write."""
     source = (ROOT / "docs" / "ops.md").read_text(encoding="utf-8")

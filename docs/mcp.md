@@ -71,14 +71,17 @@ those tools return.
 ```mermaid
 flowchart LR
     CLIENT["External MCP client"]
-    READ["Bounded read tools"]
+    READ["Bounded Kubernetes read tools"]
+    OBS_READ["Bounded observability tools<br/>activity note only"]
     FOLLOW["Optional follow<br/>UI navigation only"]
     PROPOSE["Opt-in write proposal"]
     CONFIRM["In-TUI human confirmation"]
     AUDIT["Fail-closed audit"]
     KUBE[("Kubernetes API")]
+    OBS[("Prometheus / Loki")]
 
     CLIENT --> READ --> KUBE
+    CLIENT --> OBS_READ --> OBS
     READ -. successful read .-> FOLLOW
     CLIENT -. disabled by default .-> PROPOSE --> CONFIRM --> AUDIT --> KUBE
 
@@ -88,7 +91,9 @@ flowchart LR
 
 The external client owns its model/data boundary. Follow never changes the
 tool result, and a proposal never becomes a mutation until the TUI receives a
-fresh user keystroke and the audit append succeeds.
+fresh user keystroke and the audit append succeeds. Prometheus and Loki reads
+have no korvid screen to mirror, so follow records an activity note instead of
+navigating the TUI.
 
 The live endpoint is also published to
 `$XDG_STATE_HOME/korvid/mcp-endpoint.json` (defaulting to
