@@ -12,6 +12,8 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any, Final
 
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
+
 REQUEST_SENT: Final = "request_sent"
 """Event type a built-in adapter yields once its request is on the wire.
 
@@ -35,13 +37,30 @@ that the request ran.
 class LLMProvider(ABC):
     @property
     @abstractmethod
-    def name(self) -> str:
-        """Identifier of the model this adapter talks to.
+    def descriptor(self) -> ModelDescriptor:
+        """Identify the model this adapter talks to by provider and model tag.
 
-        Shown in the status bar and recorded as `OutboundSnapshot.model`,
-        so it must name the *model* — every built-in returns its model tag
-        (`qwen3:8b`, `gpt-4o`), and a plugin may qualify it
-        (`company-llm:v2`). It is not the endpoint or the vendor.
+        `descriptor.model` is shown in the status bar and recorded as
+        `OutboundSnapshot.model`, so it must name the *model* — every
+        built-in returns its model tag (`qwen3:8b`, `gpt-4o`), and a
+        plugin may qualify it (`company-llm:v2`). It is not the endpoint.
+
+        `descriptor.provider` is the canonical provider id (`ollama`,
+        `openai-compat`, `github-copilot`, or a plugin's registered name)
+        — a built-in adapter never guesses it from the base URL or model
+        name; the registry/factory that constructed it passes it in.
+        """
+
+    @property
+    @abstractmethod
+    def capabilities(self) -> ModelCapabilities:
+        """Report the model facts this adapter directly knows.
+
+        Any fact the adapter cannot directly prove — from an explicit
+        per-request option (e.g. Ollama's `num_ctx`) or explicit config —
+        stays unknown (`None`). Adapters must never infer capability from
+        the model or provider name; `ModelCapabilities.unknown()` is the
+        correct answer absent direct evidence.
         """
 
     @abstractmethod

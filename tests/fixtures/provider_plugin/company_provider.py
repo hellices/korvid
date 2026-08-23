@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
@@ -32,8 +33,12 @@ class _CompanyLLMProvider(LLMProvider):
         self.close_calls = 0
 
     @property
-    def name(self) -> str:
-        return "company-llm"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("company-llm", "company-llm-v1")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,

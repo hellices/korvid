@@ -10,6 +10,7 @@ from korvid.agent.events import (
     TurnComplete,
     TurnInterrupted,
 )
+from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.prompts import NO_WRITE_PROMPT
 from korvid.agent.provider import REQUEST_SENT
 from korvid.agent.runtime import AgentRuntime
@@ -264,8 +265,8 @@ async def test_the_snapshot_is_available_before_the_first_event() -> None:
             self.observed: list[Any] = []
 
         @property
-        def name(self) -> str:
-            return "observing"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "observing")
 
         async def complete(
             self,
@@ -296,8 +297,8 @@ async def test_a_stream_that_dies_mid_flight_still_recorded_its_handoff() -> Non
 
     class _DyingProvider:
         @property
-        def name(self) -> str:
-            return "dying"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "dying")
 
         async def complete(
             self,
@@ -337,8 +338,8 @@ async def test_a_turn_cancelled_right_after_the_handoff_is_still_charged() -> No
 
     class _AckThenHang:
         @property
-        def name(self) -> str:
-            return "hang"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "hang")
 
         async def complete(
             self,
@@ -362,8 +363,8 @@ async def test_a_turn_cancelled_right_after_the_handoff_is_still_charged() -> No
 async def test_a_turn_cancelled_before_the_handoff_is_charged_nothing() -> None:
     class _HangBeforeAck:
         @property
-        def name(self) -> str:
-            return "hang"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "hang")
 
         async def complete(
             self,

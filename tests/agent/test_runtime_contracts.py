@@ -11,6 +11,7 @@ from korvid.agent.events import (
     TextDelta,
     ToolCallFinished,
 )
+from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.provider import REQUEST_SENT
 from korvid.agent.runtime import AgentRuntime
 from korvid.k8s.discovery import PODS_META
@@ -82,8 +83,8 @@ async def test_latest_snapshot_is_set_before_each_call_and_tracks_last_iteration
             self.observed: list[Any] = []
 
         @property
-        def name(self) -> str:
-            return "observing"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "observing")
 
         async def complete(
             self,
@@ -208,8 +209,8 @@ async def test_provider_and_executor_mutation_cannot_change_history_or_snapshot(
             self.calls = 0
 
         @property
-        def name(self) -> str:
-            return "mutating"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "mutating")
 
         async def complete(
             self,
@@ -743,7 +744,7 @@ async def test_a_plugin_style_provider_is_recorded_on_its_first_event() -> None:
 
 async def test_a_stream_that_dies_midway_keeps_the_payload_it_sent() -> None:
     class _Dying:
-        name = "dying"
+        descriptor = ModelDescriptor("test", "dying")
 
         async def complete(
             self,
@@ -812,8 +813,8 @@ async def test_a_plugin_style_first_event_is_enough_to_charge_the_prompt() -> No
 
     class _OneEventThenDies:
         @property
-        def name(self) -> str:
-            return "plugin"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "plugin")
 
         async def complete(
             self,

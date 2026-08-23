@@ -11,6 +11,7 @@ from korvid.agent.events import (
     ToolCallFinished,
     TurnComplete,
 )
+from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.profiles import build_profile
 from korvid.agent.runtime import MAX_HISTORY_TURNS, AgentRuntime
 from korvid.tools.executor import (
@@ -272,8 +273,8 @@ async def test_missing_usage_estimates_measure_the_prepared_payload() -> None:
 
     class DialectProvider(ScriptedProvider):
         @property
-        def name(self) -> str:
-            return "dialect"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "dialect")
 
         def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return [

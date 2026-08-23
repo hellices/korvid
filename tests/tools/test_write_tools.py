@@ -7,6 +7,7 @@ ConfirmScreen the *user* must approve with a real keystroke.
 
 from typing import Any
 
+from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.prompts import SYSTEM_PROMPT, WRITE_PROMPT
 from korvid.agent.runtime import AgentRuntime
 from korvid.tools.executor import (
@@ -158,8 +159,8 @@ async def test_executor_write_without_ui_is_error() -> None:
 
 class _NullProvider:
     @property
-    def name(self) -> str:
-        return "null"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "null")
 
     def complete(self, messages: Any, tools: Any, *, stream: bool = True) -> Any:
         raise NotImplementedError

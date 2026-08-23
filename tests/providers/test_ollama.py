@@ -5,6 +5,7 @@ import httpx
 import pytest
 import yaml
 
+from korvid.agent.model_policy import CapabilitySource, ModelDescriptor
 from korvid.agent.outbound import OutboundPolicy
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.agent.runtime import AgentRuntime
@@ -227,9 +228,30 @@ async def test_aclose_closes_owned_client_only() -> None:
     assert client.is_closed
 
 
-def test_name_is_the_model() -> None:
+def test_descriptor_is_ollama_and_the_model_tag() -> None:
     provider = OllamaProvider(base_url="http://x:11434", model="qwen3:8b")
-    assert provider.name == "qwen3:8b"
+    assert provider.descriptor == ModelDescriptor("ollama", "qwen3:8b")
+
+
+def test_capabilities_report_configured_context_window_and_no_parallel_tools() -> None:
+    """Ollama reports only what it directly knows: the configured `num_ctx`
+    and that it cannot dispatch multiple tool calls per turn (issue #189).
+    It must never infer tier or reasoning from the model tag."""
+    provider = OllamaProvider(
+        base_url="http://localhost:11434",
+        model="qwen3:8b",
+        credentials=None,
+        options=OllamaOptions(num_ctx=16_384),
+    )
+
+    assert provider.descriptor == ModelDescriptor("ollama", "qwen3:8b")
+    assert provider.capabilities.context_window_tokens == 16_384
+    assert provider.capabilities.supports_parallel_tools is False
+    assert provider.capabilities.provenance["context_window_tokens"] is CapabilitySource.PROVIDER
+    assert provider.capabilities.provenance["supports_parallel_tools"] is CapabilitySource.PROVIDER
+    assert provider.capabilities.supports_tools is None
+    assert provider.capabilities.supports_reasoning is None
+    assert provider.capabilities.recommended_tier is None
 
 
 async def test_mid_stream_error_object_raises() -> None:

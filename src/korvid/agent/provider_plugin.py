@@ -10,13 +10,28 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import CapabilitySource, ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import LLMProvider
 
-PROVIDER_PLUGIN_API_VERSION: Final[int] = 1
+PROVIDER_PLUGIN_API_VERSION: Final[int] = 2
 _MAX_TEXT_DELTA_BYTES: Final[int] = 65_536
 _MAX_TOOL_CALL_FIELD_LENGTH: Final[int] = 256
 _MAX_TOOL_ARGUMENTS_BYTES: Final[int] = 65_536
 _MAX_USAGE_TOKENS: Final[int] = 1_000_000_000
+_MAX_MODEL_ID_LENGTH: Final[int] = 256
+
+#: Capability fact names `ModelCapabilities.provenance` may name — kept in
+#: sync with Task 3's `model_policy._CAPABILITY_FACTS` by hand since that
+#: name is private to its module.
+_KNOWN_CAPABILITY_FACTS: Final[frozenset[str]] = frozenset(
+    {
+        "context_window_tokens",
+        "supports_tools",
+        "supports_parallel_tools",
+        "supports_reasoning",
+        "recommended_tier",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -60,18 +75,78 @@ class ProviderPluginContractError(Exception):
 _MAX_EXCEPTION_BYTES: Final[int] = 2048
 
 
+def _validate_plugin_descriptor(descriptor: object, provider_id: str | None) -> ModelDescriptor:
+    """Validate and copy-own a plugin-reported `ModelDescriptor`.
+
+    `provider_id` is the plugin's normalized, registered name — when the
+    caller (the plugin registry) supplies it, a mismatching
+    `descriptor.provider` means the plugin is claiming to be a different
+    provider than the one it was loaded as, which is rejected.
+    """
+    if not isinstance(descriptor, ModelDescriptor):
+        raise ProviderPluginContractError(
+            "provider plugin descriptor must be a ModelDescriptor instance"
+        )
+    if provider_id is not None and descriptor.provider != provider_id:
+        raise ProviderPluginContractError(
+            "provider plugin descriptor's provider id does not match its registered name"
+        )
+    if not descriptor.model or len(descriptor.model) > _MAX_MODEL_ID_LENGTH:
+        raise ProviderPluginContractError(
+            f"provider plugin descriptor model id must be non-empty and at most "
+            f"{_MAX_MODEL_ID_LENGTH} characters"
+        )
+    return ModelDescriptor(descriptor.provider, descriptor.model)
+
+
+def _validate_plugin_capabilities(capabilities: object) -> ModelCapabilities:
+    """Validate and copy-own a plugin-reported `ModelCapabilities`.
+
+    Every provenance key must name a known capability fact and every value
+    must be a real `CapabilitySource` member — a plugin's own object is
+    never trusted; a fresh instance is built from its (validated) fields.
+    """
+    if not isinstance(capabilities, ModelCapabilities):
+        raise ProviderPluginContractError(
+            "provider plugin capabilities must be a ModelCapabilities instance"
+        )
+    for fact, source in capabilities.provenance.items():
+        if fact not in _KNOWN_CAPABILITY_FACTS:
+            raise ProviderPluginContractError(
+                "provider plugin capabilities provenance names an unknown fact"
+            )
+        if not isinstance(source, CapabilitySource):
+            raise ProviderPluginContractError(
+                "provider plugin capabilities provenance values must be CapabilitySource"
+            )
+    return ModelCapabilities(
+        context_window_tokens=capabilities.context_window_tokens,
+        supports_tools=capabilities.supports_tools,
+        supports_parallel_tools=capabilities.supports_parallel_tools,
+        supports_reasoning=capabilities.supports_reasoning,
+        recommended_tier=capabilities.recommended_tier,
+        provenance=dict(capabilities.provenance),
+    )
+
+
 class ValidatedPluginProvider(LLMProvider):
     """LLMProvider wrapper that enforces the provider plugin event contract."""
 
-    def __init__(self, provider: object) -> None:
+    def __init__(self, provider: object, *, provider_id: str | None = None) -> None:
         if not isinstance(provider, LLMProvider):
             raise ProviderPluginContractError("provider plugin must return an LLMProvider instance")
         self._provider = provider
         self._closed = False
+        self._descriptor = _validate_plugin_descriptor(provider.descriptor, provider_id)
+        self._capabilities = _validate_plugin_capabilities(provider.capabilities)
 
     @property
-    def name(self) -> str:
-        return self._provider.name
+    def descriptor(self) -> ModelDescriptor:
+        return self._descriptor
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return self._capabilities
 
     async def complete(
         self,

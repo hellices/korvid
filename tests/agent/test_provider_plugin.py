@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
@@ -24,8 +25,12 @@ class _ScriptedProvider(LLMProvider):
         self.close_calls = 0
 
     @property
-    def name(self) -> str:
-        return "scripted-provider"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "scripted-provider")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,
@@ -97,13 +102,63 @@ def test_provider_plugin_is_abstract() -> None:
         ProviderPlugin()  # type: ignore[abstract]  # instantiating the ABC is the test
 
 
-def test_provider_plugin_api_version_is_v1() -> None:
-    assert PROVIDER_PLUGIN_API_VERSION == 1
+def test_provider_plugin_api_version_is_v2() -> None:
+    """The plugin contract is bumped to v2 for descriptor/capabilities
+    reporting (issue #189) — every third-party plugin metadata must match."""
+    assert PROVIDER_PLUGIN_API_VERSION == 2
 
 
 def test_validated_plugin_provider_requires_llm_provider_instance() -> None:
     with pytest.raises(ProviderPluginContractError, match="LLMProvider"):
         ValidatedPluginProvider(object())
+
+
+def test_validated_plugin_provider_exposes_descriptor_and_capabilities() -> None:
+    """Step 3: the wrapper delegates both facts after validating them."""
+    wrapped = ValidatedPluginProvider(_ScriptedProvider([{"type": "done"}]))
+    assert wrapped.descriptor == ModelDescriptor("test", "scripted-provider")
+    assert wrapped.capabilities == ModelCapabilities.unknown()
+
+
+def test_validated_plugin_provider_rejects_descriptor_provider_id_mismatch() -> None:
+    """The descriptor's provider id must match the plugin's registered
+    (normalized) name — a plugin cannot claim to be a different provider."""
+    with pytest.raises(ProviderPluginContractError, match="provider id"):
+        ValidatedPluginProvider(
+            _ScriptedProvider([{"type": "done"}]), provider_id="a-different-plugin"
+        )
+
+
+def test_validated_plugin_provider_rejects_empty_model_id() -> None:
+    class _EmptyModelProvider(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "")
+
+    with pytest.raises(ProviderPluginContractError, match="model"):
+        ValidatedPluginProvider(_EmptyModelProvider([{"type": "done"}]))
+
+
+def test_validated_plugin_provider_rejects_oversized_model_id() -> None:
+    class _HugeModelProvider(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "m" * 10_000)
+
+    with pytest.raises(ProviderPluginContractError, match="model"):
+        ValidatedPluginProvider(_HugeModelProvider([{"type": "done"}]))
+
+
+def test_validated_plugin_provider_rejects_unknown_provenance_fact() -> None:
+    from korvid.agent.model_policy import CapabilitySource
+
+    class _BadProvenanceProvider(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities(provenance={"not_a_real_fact": CapabilitySource.PROVIDER})
+
+    with pytest.raises(ProviderPluginContractError, match="provenance"):
+        ValidatedPluginProvider(_BadProvenanceProvider([{"type": "done"}]))
 
 
 def test_concrete_plugin_returns_provider_instance() -> None:
@@ -141,7 +196,8 @@ async def test_validated_plugin_provider_normalizes_all_event_shapes() -> None:
         )
     )
 
-    assert wrapped.name == "scripted-provider"
+    assert wrapped.descriptor == ModelDescriptor("test", "scripted-provider")
+    assert wrapped.capabilities == ModelCapabilities.unknown()
     assert await _collect_events(wrapped) == [
         {"type": "text_delta", "text": "hello"},
         {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": '{"pod":"web-1"}'},
@@ -250,8 +306,12 @@ class _ExplodingProvider(LLMProvider):
         self._exc = exc
 
     @property
-    def name(self) -> str:
-        return "exploding-provider"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "exploding-provider")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,
@@ -312,8 +372,12 @@ async def test_validated_aclose_translates_secret_exception() -> None:
 
     class _ExplodingCloseProvider(LLMProvider):
         @property
-        def name(self) -> str:
-            return "boom-closer"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "boom-closer")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -343,8 +407,12 @@ async def test_validated_aclose_preserves_exactly_once_guard() -> None:
             self.close_calls = 0
 
         @property
-        def name(self) -> str:
-            return "one-shot"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "one-shot")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -486,8 +554,12 @@ class _SecretContractErrorProvider(LLMProvider):
     """Provider that raises ProviderPluginContractError with secret payload."""
 
     @property
-    def name(self) -> str:
-        return "secret-error-provider"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "secret-error-provider")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,
@@ -547,8 +619,12 @@ class _TrackingCloseProvider(LLMProvider):
         self.close_exception: Exception | None = None
 
     @property
-    def name(self) -> str:
-        return "tracking-close"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "tracking-close")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,
@@ -613,8 +689,12 @@ async def test_iterator_closed_on_consumer_cancellation() -> None:
             self.close_calls = 0
 
         @property
-        def name(self) -> str:
-            return "blocking"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "blocking")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -656,8 +736,12 @@ async def test_close_raises_secret_primary_error_preserved() -> None:
             self.close_calls = 0
 
         @property
-        def name(self) -> str:
-            return "after-done-close-raises"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "after-done-close-raises")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -694,8 +778,12 @@ async def test_normal_close_failure_becomes_contract_error() -> None:
             self.close_calls = 0
 
         @property
-        def name(self) -> str:
-            return "close-fails-exhaust"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "close-fails-exhaust")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -738,8 +826,12 @@ class _CreationFailsProvider(LLMProvider):
         self._exc = exc
 
     @property
-    def name(self) -> str:
-        return "creation-fails"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "creation-fails")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     def complete(
         self,
@@ -845,8 +937,12 @@ async def test_hostile_mapping_iterator_still_closed() -> None:
             self.close_calls = 0
 
         @property
-        def name(self) -> str:
-            return "track-close"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "track-close")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -883,8 +979,12 @@ async def test_plugin_message_hook_is_not_forwarded() -> None:
             self.hook_calls = 0
 
         @property
-        def name(self) -> str:
-            return "hook-plugin"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "hook-plugin")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             self.hook_calls += 1

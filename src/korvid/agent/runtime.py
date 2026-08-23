@@ -18,6 +18,7 @@ from korvid.agent.events import (
     TurnInterrupted,
 )
 from korvid.agent.evidence import Evidence, EvidenceLedger
+from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.outbound import (
     OutboundPolicy,
     OutboundPolicyError,
@@ -64,7 +65,7 @@ INTERRUPT_PARTIAL_CHARS = 2_000
 
 class _Provider(Protocol):
     @property
-    def name(self) -> str: ...
+    def descriptor(self) -> ModelDescriptor: ...
 
     def complete(
         self,
@@ -847,7 +848,7 @@ class AgentRuntime:
             ingress, tool_errors = self._provenance_by_index()
             try:
                 return self._outbound.prepare(
-                    self._provider.name,
+                    self._provider.descriptor.model,
                     provider_prepared_messages(self._provider, self._messages),
                     self._tools,
                     iteration=iteration,

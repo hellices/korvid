@@ -5,6 +5,7 @@ from typing import Any, cast
 import httpx
 import pytest
 
+from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.outbound import OutboundPolicy, OutboundPolicyError
 from korvid.agent.setup import AgentSettings
 from korvid.providers.configurator import _PROBE_MESSAGE, ProviderConfigurator
@@ -40,8 +41,8 @@ class ScriptedProvider:
         self.calls: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
 
     @property
-    def name(self) -> str:
-        return "scripted"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "scripted")
 
     def complete(
         self,

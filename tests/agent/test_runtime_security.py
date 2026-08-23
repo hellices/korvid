@@ -10,6 +10,7 @@ from korvid.agent.events import (
     TextDelta,
     TurnComplete,
 )
+from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.runtime import AgentRuntime
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
@@ -1159,8 +1160,8 @@ class _RefusingProvider:
         self.calls = 0
 
     @property
-    def name(self) -> str:
-        return "refusing"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "refusing")
 
     def complete(
         self,

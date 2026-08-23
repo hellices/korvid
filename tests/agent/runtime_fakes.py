@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.profiles import build_profile
 from korvid.agent.runtime import AgentRuntime
 from korvid.k8s.discovery import PODS_META
@@ -22,8 +23,8 @@ class ScriptedProvider:
         self.tool_surfaces: list[list[dict[str, Any]]] = []
 
     @property
-    def name(self) -> str:
-        return "scripted"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "scripted")
 
     async def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, stream: bool = True

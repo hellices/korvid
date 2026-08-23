@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
@@ -244,7 +245,39 @@ class TestMetadataValidation:
             return_value=_BadVersionPlugin,
         ):
             reg = ProviderPluginRegistry()
-            with pytest.raises(ProviderPluginError, match="api_version"):
+            with pytest.raises(ProviderPluginError, match="unsupported"):
+                reg.load_selected("company-llm")
+
+    def test_api_v1_plugin_is_rejected_with_the_fixed_migration_message(
+        self, plugin_site: Any
+    ) -> None:
+        """A plugin still declaring API v1 gets a fixed, actionable message
+        naming both the version it declared and the version required."""
+
+        class _ApiV1Plugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=1,
+                    name="company-llm",
+                    display_name="Legacy",
+                    auth_methods=("api_key",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_ApiV1Plugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(
+                ProviderPluginError,
+                match="provider plugin API 1 is unsupported; expected 2",
+            ):
                 reg.load_selected("company-llm")
 
     def test_huge_int_api_version_bounded_no_stringify(self, plugin_site: Any) -> None:
@@ -272,7 +305,7 @@ class TestMetadataValidation:
             return_value=_HugeVersionPlugin,
         ):
             reg = ProviderPluginRegistry()
-            with pytest.raises(ProviderPluginError, match="api_version") as exc_info:
+            with pytest.raises(ProviderPluginError, match="unsupported") as exc_info:
                 reg.load_selected("company-llm")
             msg = str(exc_info.value)
             # Must not contain the raw huge int representation
@@ -887,8 +920,12 @@ class TestMetadataBoundary:
 
         class _InlineProvider(LLMProvider):
             @property
-            def name(self) -> str:
-                return "inline"
+            def descriptor(self) -> ModelDescriptor:
+                return ModelDescriptor("company-llm", "inline")
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                return ModelCapabilities.unknown()
 
             async def complete(
                 self,

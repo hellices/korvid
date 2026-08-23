@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.providers.net import make_client
 
@@ -33,6 +34,7 @@ class OpenAICompatProvider(LLMProvider):
         *,
         ca_bundle: str | None = None,
         timeout_seconds: float = 60.0,
+        provider_id: str = "openai-compat",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
@@ -41,10 +43,21 @@ class OpenAICompatProvider(LLMProvider):
         self._owns_client = client is None
         self._ca_bundle = ca_bundle
         self._timeout_seconds = timeout_seconds
+        self._provider_id = provider_id
 
     @property
-    def name(self) -> str:
-        return self._model
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor(self._provider_id, self._model)
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        """No OpenAI-compatible config today proves any capability fact.
+
+        The registry/factory passes only `base_url`/`model`/auth — none of
+        which is evidence of context window, tool support, or tier, so
+        every fact stays unknown rather than guessed from the model name.
+        """
+        return ModelCapabilities.unknown()
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:

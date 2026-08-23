@@ -3,6 +3,7 @@ from typing import Any, cast
 
 import pytest
 
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.outbound import OutboundPolicyError, provider_prepared_messages
 from korvid.agent.provider import LLMProvider
 
@@ -16,8 +17,12 @@ class _ConcreteProvider(LLMProvider):
     """Minimal concrete subclass that lets mypy --strict validate the override seam."""
 
     @property
-    def name(self) -> str:
-        return "test-provider"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "test-provider")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,
@@ -31,7 +36,8 @@ class _ConcreteProvider(LLMProvider):
 
 async def test_concrete_provider_yields_event() -> None:
     provider = _ConcreteProvider()
-    assert provider.name == "test-provider"
+    assert provider.descriptor == ModelDescriptor("test", "test-provider")
+    assert provider.capabilities == ModelCapabilities.unknown()
     events: list[dict[str, Any]] = []
     async for event in provider.complete([], []):
         events.append(event)

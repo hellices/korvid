@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.runtime import AgentRuntime
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -665,8 +666,8 @@ def _with_runtime(app: KorvidApp) -> AgentRuntime:
 
 class _SilentProvider:
     @property
-    def name(self) -> str:
-        return "silent"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "silent")
 
     async def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, stream: bool = True

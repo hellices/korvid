@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.outbound import OutboundPolicy
 from korvid.agent.provider import REQUEST_SENT
 from korvid.core.secrets import MASK_PLACEHOLDER
@@ -38,6 +39,21 @@ def _provider(
         credentials=credentials or StaticHeaderSource("sk-test"),
         client=client,
     )
+
+
+def test_descriptor_uses_the_canonical_provider_id_passed_by_the_registry() -> None:
+    """The registry/factory passes the canonical id explicitly; the adapter
+    must never guess it from the base_url or model tag (issue #189)."""
+    provider = OpenAICompatProvider(base_url="http://x/v1", model="gpt-4o", provider_id="azure")
+    assert provider.descriptor == ModelDescriptor("azure", "gpt-4o")
+
+
+def test_capabilities_are_unknown_without_explicit_config() -> None:
+    """OpenAI-compatible config carries no capability facts today, so every
+    fact stays unknown (`None`) rather than being guessed from the model
+    name or vendor."""
+    provider = OpenAICompatProvider(base_url="http://x/v1", model="m1")
+    assert provider.capabilities == ModelCapabilities.unknown()
 
 
 async def test_streams_text_deltas_and_done() -> None:

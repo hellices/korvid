@@ -140,6 +140,20 @@ def _validate_auth_methods(
         )
 
 
+def _safe_api_version_label(value: int) -> str:
+    """Render a declared api_version for an error message, never raising.
+
+    `str()` on a pathologically huge int (e.g. `10**5000`) raises
+    `ValueError` under Python's integer-string conversion limit — this
+    always returns a short, bounded label instead.
+    """
+    try:
+        text = str(value)
+    except ValueError:
+        return "<unrepresentable>"
+    return _bounded(text, max_length=20)
+
+
 def _validate_metadata_fields(
     meta: ProviderPluginMetadata,
     normalized: str,
@@ -150,10 +164,12 @@ def _validate_metadata_fields(
     if isinstance(meta.api_version, bool) or not isinstance(meta.api_version, int):
         raise _bounded_error(f"provider plugin {safe_name!r}: api_version must be int")
     if meta.api_version != PROVIDER_PLUGIN_API_VERSION:
-        # Never stringify the supplied value — a huge int (e.g. 10**5000)
-        # would blow up repr/format before truncation could bound it.
+        # A fixed, actionable migration message naming both the version the
+        # plugin declared and the version required — never stringify the
+        # raw value without bounding it first (a huge int would blow up).
         raise _bounded_error(
-            f"provider plugin {safe_name!r}: api_version must be {PROVIDER_PLUGIN_API_VERSION}"
+            f"provider plugin API {_safe_api_version_label(meta.api_version)} "
+            f"is unsupported; expected {PROVIDER_PLUGIN_API_VERSION}"
         )
 
     # name: non-empty string, bounded
@@ -351,5 +367,7 @@ class ProviderPluginRegistry:
                 f"provider plugin {safe_name!r} must return an LLMProvider instance"
             )
 
-        # Wrap in ValidatedPluginProvider for event contract enforcement
-        return ValidatedPluginProvider(provider)
+        # Wrap in ValidatedPluginProvider for event contract enforcement.
+        # `normalized` is this plugin's registered id — the wrapper checks
+        # the provider's own descriptor claims the same one.
+        return ValidatedPluginProvider(provider, provider_id=normalized)

@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from korvid.agent.events import TurnComplete, TurnInterrupted
+from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.runtime import AgentRuntime
 from korvid.tools.executor import RecordedExecution
 
@@ -28,8 +29,8 @@ class StalledProvider:
         self.closed = asyncio.Event()
 
     @property
-    def name(self) -> str:
-        return "stalled"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "stalled")
 
     async def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, stream: bool = True
@@ -128,8 +129,8 @@ async def test_completed_iterations_survive_the_interrupt() -> None:
             self.calls = 0
 
         @property
-        def name(self) -> str:
-            return "two"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "two")
 
         async def complete(
             self,
@@ -166,8 +167,8 @@ async def test_usage_reported_before_interruption_is_committed() -> None:
 
     class UsageThenStall:
         @property
-        def name(self) -> str:
-            return "usage"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "usage")
 
         async def complete(
             self,
