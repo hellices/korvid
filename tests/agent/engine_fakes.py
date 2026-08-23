@@ -213,6 +213,22 @@ class RecordingBridge(AgentUiBridge):
         return UiActionResult(ok=self._ok, message=self._message, context=interaction())
 
 
+class ExplodingBridge(RecordingBridge):
+    """A UI bridge that fails the way a torn-down screen would.
+
+    The failure it raises is supplied by the test, so a case can prove the
+    engine names such a failure by type and never by what it said: a
+    bridge error can carry a selector, a resource body or an endpoint.
+    """
+
+    def __init__(self, error: Exception | None = None) -> None:
+        super().__init__()
+        self.error = error if error is not None else RuntimeError("bridge exploded")
+
+    async def apply(self, action: UiAction) -> UiActionResult:
+        raise self.error
+
+
 def interaction(epoch: int = 1) -> InteractionContext:
     """A workspace snapshot the engine only reads `context_epoch` from."""
     return InteractionContext(

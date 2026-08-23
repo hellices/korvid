@@ -41,6 +41,7 @@ from .engine_fakes import (
     DONE,
     SYSTEM_PROMPT,
     USER_TEXT,
+    ExplodingBridge,
     Harness,
     RecordingExecution,
     ScriptedProvider,
@@ -61,9 +62,13 @@ EngineFactory = Callable[..., Harness]
 
 LOGS_ARGS = '{"pod":"api-0","namespace":"prod"}'
 EVENTS_ARGS = '{"kind":"pods","name":"api-0"}'
+NAVIGATE_ARGS = '{"view":"pods","namespace":"prod"}'
 #: An exception message shaped like a provider that echoed the request it
 #: refused — the credential is the part that must never reach the panel.
 SECRET_RESPONSE = '401 {"error":"invalid api key sk-live-DEADBEEF0000"}'
+#: A tool failure shaped like a client that quoted the call it made: the
+#: internal endpoint and the token are exactly what a raw echo would leak.
+SECRET_TOOL_FAILURE = "GET https://10.0.0.5/apis failed: bearer sk-live-DEADBEEF0000"
 
 
 def _stored_call_ids(harness: Harness) -> list[str]:
@@ -688,39 +693,129 @@ async def test_a_provider_failure_message_is_bounded(engine_factory: EngineFacto
     assert len(error.message) <= 600
 
 
-# -- failures nothing expected -----------------------------------------------
+# -- failures nothing expected at the tool boundary ---------------------------
 
 
-async def test_an_unexpected_collaborator_failure_leaves_no_active_turn(
+def _surfaces(harness: Harness, events: list[Any]) -> list[str]:
+    """Everything a tool failure could leak into: events, history, payload."""
+    return [
+        repr(events),
+        json.dumps(harness.conversation.messages),
+        json.dumps(harness.provider.calls),
+    ]
+
+
+async def test_an_exploding_executor_becomes_that_calls_own_failure(
     engine_factory: EngineFactory,
 ) -> None:
-    """It reaches the session, but never with half a turn left behind."""
+    """A port that raises answers one call; the turn keeps going."""
     execution = RecordingExecution({"get_logs": RuntimeError("executor exploded")})
     harness = engine_factory([tool_turn(), text_turn("recovered")], execution=execution)
 
-    with pytest.raises(RuntimeError, match="executor exploded"):
-        await harness.run()
+    events = await harness.run()
+
+    finished = next(event for event in events if isinstance(event, ToolCallFinished))
+    assert finished.call_id == "c1"
+    assert finished.ok is False
+    assert TextDelta(text="recovered") in events
+    assert isinstance(events[-1], TurnComplete)
+    assert len(harness.provider.calls) == 2
+
+
+async def test_an_exploding_ui_bridge_becomes_that_calls_own_failure(
+    engine_factory: EngineFactory,
+) -> None:
+    """A torn-down screen fails its own call, not the whole turn."""
+    harness = engine_factory(
+        [[tool_call("c1", "navigate", NAVIGATE_ARGS), DONE], text_turn("recovered")],
+        policy=make_policy(tool_names=("navigate",)),
+        bridge=ExplodingBridge(RuntimeError("bridge exploded")),
+    )
+
+    events = await harness.run()
+
+    finished = next(event for event in events if isinstance(event, ToolCallFinished))
+    assert finished.ok is False
+    assert TextDelta(text="recovered") in events
+    assert isinstance(events[-1], TurnComplete)
+    assert len(harness.provider.calls) == 2
+
+
+@pytest.mark.parametrize("port", ["executor", "bridge"])
+async def test_a_contained_tool_failure_never_repeats_what_it_said(
+    engine_factory: EngineFactory, port: str
+) -> None:
+    """A tool failure quotes cluster data, an endpoint, or a credential."""
+    error = RuntimeError(SECRET_TOOL_FAILURE)
+    if port == "executor":
+        harness = engine_factory(
+            [tool_turn(), text_turn("recovered")],
+            execution=RecordingExecution({"get_logs": error}),
+        )
+    else:
+        harness = engine_factory(
+            [[tool_call("c1", "navigate", NAVIGATE_ARGS), DONE], text_turn("recovered")],
+            policy=make_policy(tool_names=("navigate",)),
+            bridge=ExplodingBridge(error),
+        )
+
+    events = await harness.run()
+
+    finished = next(event for event in events if isinstance(event, ToolCallFinished))
+    # Named by type, so an operator can still tell what broke.
+    assert "RuntimeError" in finished.summary
+    for surface in _surfaces(harness, events):
+        assert "sk-live-DEADBEEF0000" not in surface
+        assert "10.0.0.5" not in surface
+        assert "bearer" not in surface
+
+
+async def test_a_contained_tool_failure_still_answers_the_call_it_failed(
+    engine_factory: EngineFactory,
+) -> None:
+    """One result per stored call: the model is told, and can correct itself."""
+    execution = RecordingExecution({"get_logs": RuntimeError(SECRET_TOOL_FAILURE)})
+    harness = engine_factory([tool_turn(), text_turn("recovered")], execution=execution)
+
+    events = await harness.run()
 
     assert not harness.conversation.has_unmatched_tool_calls
-    assert harness.conversation.messages == []
+    assert [call["id"] for call in assistant_tool_calls(harness.provider.calls[1])] == ["c1"]
+    results = tool_results(harness.provider.calls[1])
+    assert [result["tool_call_id"] for result in results] == ["c1"]
+    assert str(results[0]["content"]).startswith("ERROR:")
+    assert "RuntimeError" in str(results[0]["content"])
+    assert isinstance(events[-1], TurnComplete)
 
 
-async def test_a_turn_after_an_unexpected_failure_still_runs(
+async def test_a_turn_after_a_contained_tool_failure_still_runs(
     engine_factory: EngineFactory,
 ) -> None:
     execution = RecordingExecution({"get_logs": RuntimeError("executor exploded")})
-    harness = engine_factory([tool_turn(), text_turn("recovered")], execution=execution)
+    harness = engine_factory(
+        [tool_turn(), text_turn("recovered"), text_turn("second answer")], execution=execution
+    )
 
-    with pytest.raises(RuntimeError, match="executor exploded"):
-        await harness.run("first")
+    await harness.run("first")
     events = await harness.run("second")
 
-    assert events[0] == TextDelta(text="recovered")
+    assert events[0] == TextDelta(text="second answer")
     assert isinstance(events[-1], TurnComplete)
-    assert [message["content"] for message in harness.conversation.messages] == [
-        "second",
-        "recovered",
-    ]
+
+
+async def test_a_cancellation_inside_a_tool_call_is_not_contained(
+    engine_factory: EngineFactory,
+) -> None:
+    """Containment is for failures; the hard interrupt still ends the turn."""
+    execution = RecordingExecution({"get_logs": asyncio.CancelledError("hard interrupt")})
+    harness = engine_factory([tool_turn(), text_turn("recovered")], execution=execution)
+
+    with pytest.raises(asyncio.CancelledError, match="hard interrupt"):
+        await harness.run()
+
+    assert len(harness.provider.calls) == 1
+    # Still the session's to repair, exactly as after any other cancellation.
+    assert isinstance(harness.conversation.finalize_interrupt(), TurnInterrupted)
 
 
 # -- interruption and close --------------------------------------------------
@@ -754,6 +849,26 @@ async def test_interrupting_an_idle_engine_does_not_disturb_the_next_turn(
     events = await harness.run()
 
     assert isinstance(events[-1], TurnComplete)
+
+
+async def test_interrupting_before_the_iterator_starts_is_inert(
+    engine_factory: EngineFactory,
+) -> None:
+    """The window between `run` and the first event belongs to no turn.
+
+    `run` only *returns* an iterator; the turn starts when that iterator
+    is first driven. An interrupt aimed at the idle engine in between is
+    aimed at nothing, so it must not silently end the turn that follows.
+    """
+    harness = engine_factory([text_turn()])
+
+    stream = harness.engine.run(harness.request())
+    harness.engine.interrupt()
+    events = [event async for event in stream]
+
+    assert events[0] == TextDelta(text="the pod is healthy")
+    assert isinstance(events[-1], TurnComplete)
+    assert len(harness.provider.calls) == 1
 
 
 async def test_cancelling_the_driving_task_closes_the_provider_stream(

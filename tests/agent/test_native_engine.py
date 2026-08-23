@@ -33,7 +33,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.interaction import Navigate, UiAction, UiActionResult
+from korvid.agent.interaction import Navigate
 from korvid.agent.native_engine import NativeAgentEngine
 from korvid.agent.request_gateway import PreparedGatewayRequest, RequestGateway
 from korvid.core.secrets import MASK_PLACEHOLDER
@@ -41,11 +41,13 @@ from korvid.tools.executor import ToolResultBlocked
 
 from .engine_fakes import (
     DONE,
+    ExplodingBridge,
     Harness,
     RecordingBridge,
     RecordingExecution,
     build_harness,
     make_policy,
+    system_message,
     text_delta,
     text_turn,
     tool_call,
@@ -56,10 +58,14 @@ from .engine_fakes import (
 
 LOGS_ARGS = '{"pod":"api-0","namespace":"prod"}'
 DELETE_ARGS = '{"kind":"pod","name":"api-0","namespace":"prod"}'
+NAVIGATE_ARGS = '{"view":"pods","namespace":"prod"}'
 SECRET_LOG = "starting up with password: hunter2-in-the-logs"
 #: A document the structured pass cannot parse — and that quotes a secret,
 #: so a refusal that echoed its input would leak one.
 SECRET_BLOB = "an unstructured dump carrying hunter2-in-the-logs"
+#: A tool failure that quotes what the call touched, the way a client
+#: error routinely does.
+SECRET_TOOL_ERROR = "GET https://10.0.0.5/apis failed: bearer sk-live-DEADBEEF0000"
 
 
 class CountingGateway(RequestGateway):
@@ -280,7 +286,7 @@ async def test_a_screen_tool_goes_to_the_bridge_and_not_to_the_cluster() -> None
     execution = RecordingExecution()
     bridge = RecordingBridge()
     harness = build_harness(
-        [[tool_call("c1", "navigate", '{"view":"pods","namespace":"prod"}'), DONE], text_turn()],
+        [[tool_call("c1", "navigate", NAVIGATE_ARGS), DONE], text_turn()],
         policy=make_policy(tool_names=("navigate",)),
         execution=execution,
         bridge=bridge,
@@ -333,14 +339,8 @@ class ExplodingGateway(RequestGateway):
         return super().prepare(*args, **kwargs)
 
 
-class ExplodingBridge(RecordingBridge):
-    """A UI bridge that fails the way a torn-down screen would."""
-
-    async def apply(self, action: UiAction) -> UiActionResult:
-        raise RuntimeError("bridge exploded")
-
-
 async def test_an_unexpected_gateway_failure_leaves_the_turn_recoverable() -> None:
+    """A failure outside the tool boundary still reaches the session."""
     harness = build_harness([text_turn("recovered")], gateway_class=ExplodingGateway)
 
     with pytest.raises(RuntimeError, match="gateway exploded"):
@@ -356,23 +356,58 @@ async def test_an_unexpected_gateway_failure_leaves_the_turn_recoverable() -> No
     ]
 
 
-async def test_an_unexpected_bridge_failure_leaves_the_turn_recoverable() -> None:
-    bridge = ExplodingBridge()
+async def test_an_exploding_bridge_is_answered_through_the_harness() -> None:
+    """A contained failure keeps the harness's one refusal format."""
+    execution = RecordingExecution()
     harness = build_harness(
         [
-            [tool_call("c1", "navigate", '{"view":"pods","namespace":"prod"}'), DONE],
+            [tool_call("c1", "navigate", NAVIGATE_ARGS), DONE],
             text_turn("recovered"),
         ],
         policy=make_policy(tool_names=("navigate",)),
-        bridge=bridge,
+        execution=execution,
+        bridge=ExplodingBridge(RuntimeError(SECRET_TOOL_ERROR)),
     )
 
-    with pytest.raises(RuntimeError, match="bridge exploded"):
-        await harness.run("first")
+    events = await harness.run()
 
+    finished = next(event for event in events if isinstance(event, ToolCallFinished))
+    assert finished.summary.startswith("ERROR:")
+    assert "RuntimeError" in finished.summary
+    # A UI failure never reaches the cluster, and the turn still answers.
+    assert execution.calls == []
+    assert isinstance(events[-1], TurnComplete)
+    assert str(tool_results(harness.provider.calls[1])[0]["content"]).startswith("ERROR:")
+
+
+async def test_a_read_that_explodes_mints_no_evidence() -> None:
+    """A failed read is not an observation anyone can go and check."""
+    execution = RecordingExecution({"get_logs": RuntimeError(SECRET_TOOL_ERROR)})
+    harness = build_harness([tool_turn(), text_turn("recovered")], execution=execution)
+
+    events = await harness.run()
+
+    complete = events[-1]
+    assert isinstance(complete, TurnComplete)
+    assert complete.cited == ()
+    assert "[E1]" not in system_message(harness.provider.calls[1])
+
+
+async def test_a_write_that_explodes_is_answered_once_and_never_retried() -> None:
+    """Containment answers the call; it never re-dispatches the write."""
+    execution = RecordingExecution({"delete_resource": RuntimeError(SECRET_TOOL_ERROR)})
+    harness = build_harness(
+        [[tool_call("c1", "delete_resource", DELETE_ARGS), DONE], text_turn("nothing further")],
+        policy=make_policy(tool_names=("delete_resource",)),
+        execution=execution,
+    )
+
+    events = await harness.run()
+
+    assert execution.names == ["delete_resource"]
     assert not harness.conversation.has_unmatched_tool_calls
-    assert harness.conversation.messages == []
-    assert isinstance((await harness.run("second"))[-1], TurnComplete)
+    assert isinstance(events[-1], TurnComplete)
+    assert SECRET_TOOL_ERROR not in json.dumps(harness.provider.calls)
 
 
 # -- cancellation ------------------------------------------------------------
