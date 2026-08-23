@@ -13,16 +13,19 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import replace
 from types import MappingProxyType
 from typing import Any
 
 import pytest
 
-from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
-from korvid.agent.outbound import OutboundPolicy
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor, ResolvedAgentPolicy
+from korvid.agent.outbound import OutboundPolicy, OutboundPolicyError, request_char_budget
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.agent.request_gateway import PreparedGatewayRequest, RequestGateway
 from korvid.core.redaction import RedactionRecord
+
+from .engine_fakes import make_policy
 
 
 class _Provenance:
@@ -487,3 +490,90 @@ async def test_gateway_aclose_closes_the_active_iterator() -> None:
     await gateway.aclose()
 
     assert provider.iterator_closed
+
+
+# --- arming the boundary for a new tool surface --------------------------
+
+
+def _armed(gateway: RequestGateway, policy: ResolvedAgentPolicy) -> None:
+    """Prepare and install `policy`'s outbound boundary, as a retarget does."""
+    gateway.install_policy(gateway.prepare_policy(policy))
+
+
+def _big_payload_messages() -> list[dict[str, Any]]:
+    """History no tight ceiling accepts, and a wide one does."""
+    return [{"role": "user", "content": "pod api-0 restarted; " * 400}]
+
+
+def test_prepare_policy_derives_the_ceiling_from_the_policys_own_surface() -> None:
+    provider = _StreamProvider([{"type": "done"}])
+    gateway = RequestGateway(provider, OutboundPolicy(max_request_chars=2_000))
+    policy = make_policy(tool_names=("get_logs",), max_history_chars=24_000)
+
+    _armed(gateway, policy)
+    prepared = gateway.prepare(
+        _big_payload_messages(), list(policy.tools), iteration=1, provenance=_Provenance()
+    )
+
+    expected = request_char_budget(
+        max_history_chars=policy.max_history_chars,
+        tools_chars=len(json.dumps([dict(schema) for schema in policy.tools])),
+    )
+    assert len(prepared.snapshot.payload_json) <= expected
+    assert len(prepared.snapshot.payload_json) > 2_000
+
+
+def test_prepare_policy_installs_nothing_by_itself() -> None:
+    """Preparation validates; only `install_policy` moves the boundary."""
+    provider = _StreamProvider([{"type": "done"}])
+    gateway = RequestGateway(provider, OutboundPolicy(max_request_chars=2_000))
+    policy = make_policy(tool_names=("get_logs",), max_history_chars=24_000)
+
+    gateway.prepare_policy(policy)
+
+    with pytest.raises(OutboundPolicyError, match="too large"):
+        gateway.prepare(
+            _big_payload_messages(), list(policy.tools), iteration=1, provenance=_Provenance()
+        )
+
+
+def test_prepare_policy_refuses_a_surface_whose_results_cannot_be_resolved() -> None:
+    provider = _StreamProvider([{"type": "done"}])
+    gateway = RequestGateway(provider, OutboundPolicy(max_request_chars=2_000))
+    policy = make_policy(tool_names=("get_logs",))
+    doubled = replace(policy, tools=(*policy.tools, *policy.tools))
+
+    with pytest.raises(ValueError, match="offered more than once"):
+        gateway.prepare_policy(doubled)
+
+    # Nothing moved: the boundary is still the tight one it was built with.
+    with pytest.raises(OutboundPolicyError, match="too large"):
+        gateway.prepare(
+            _big_payload_messages(), list(policy.tools), iteration=1, provenance=_Provenance()
+        )
+
+
+def test_prepare_policy_thaws_frozen_tool_schemas() -> None:
+    """A plugin's frozen schemas must not force the boundary to guess."""
+    provider = _StreamProvider([{"type": "done"}])
+    gateway = RequestGateway(provider, OutboundPolicy(max_request_chars=2_000))
+    policy = make_policy(tool_names=("get_resource",), max_history_chars=24_000)
+    frozen = tuple(_freeze(schema) for schema in policy.tools)
+
+    _armed(gateway, replace(policy, tools=frozen))
+    prepared = gateway.prepare(
+        [{"role": "user", "content": "hi"}], frozen, iteration=1, provenance=_Provenance()
+    )
+
+    payload = json.loads(prepared.snapshot.payload_json)
+    assert [tool["function"]["name"] for tool in payload["tools"]] == ["get_resource"]
+    assert isinstance(payload["tools"][0], dict)
+
+
+def _freeze(value: Any) -> Any:
+    """A schema as a plugin's frozen config would hand it over."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze(item) for item in value)
+    return value

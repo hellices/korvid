@@ -559,6 +559,30 @@ async def test_reset_evidence_clears_and_sets_context_epoch() -> None:
     assert second.evidence_ref == "E1"
 
 
+async def test_clear_evidence_drops_the_ledger_and_keeps_the_context_epoch() -> None:
+    """A retarget clears citations without claiming to know the live epoch.
+
+    The epoch a turn's evidence belongs to is read from the workspace by
+    the turn that starts, so an operation that only re-arms the surface
+    must not invent one — it drops what the old surface minted and leaves
+    the epoch to the next turn.
+    """
+    execution = _RecordingExecution(ToolOutcome(text="log excerpt"))
+    evidence = EvidenceLedger()
+    harness = _harness(
+        _policy(["get_logs"], max_tool_calls=None), execution=execution, evidence=evidence
+    )
+    harness.reset_evidence(7)
+    await harness.execute("c1", "get_logs", {"pod": "api-1", "namespace": "default"})
+    assert evidence.references() == ("E1",)
+
+    harness.clear_evidence()
+
+    assert harness.context_epoch == 7
+    assert evidence.references() == ()
+    assert evidence.resolve("E1") is None
+
+
 async def test_harness_exposes_its_evidence_ledger() -> None:
     evidence = EvidenceLedger()
     harness = _harness(_policy(["get_logs"], max_tool_calls=None), evidence=evidence)
