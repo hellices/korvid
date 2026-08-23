@@ -1,0 +1,297 @@
+"""Policy-aware tool execution harness for the agent engine (issue #316, Task 9).
+
+One seam sits between the agent engine and the ports a tool call may reach:
+the recorded tool executor and the typed UI bridge. Concentrating the routing
+here keeps the engine (Task 10) free of tool classification and keeps the
+security-relevant decisions — which tool is armed, which port it may reach,
+whether its result is evidence, how many calls one iteration may make — in a
+single place that reads them off the registry rather than re-deriving them.
+
+Routing is by the registry's validated *effect*, never a second hard-coded
+list:
+
+- `cluster_read` / `external_read` / `cluster_write` reach only
+  `RecordedExecution.execute_recorded`. Writes keep the executor's
+  approval / audit / revalidation path; the harness holds no raw
+  Kubernetes or write object and never retries or replays a write.
+- `ui_only` tools become closed Task-1 `UiAction` values and are applied
+  through `AgentUiBridge.apply`. Writes are never routed through that bridge.
+
+Every result is sanitized exactly once through
+`sanitize_recorded_tool_result`, using the registry's result format and the
+policy's result budget, into a copy-owned `ToolOutcome`. Only a successful
+cluster or external read mints evidence, from the *sanitized* text, so a
+citation's excerpt matches what the model was shown.
+"""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+from typing import Any
+
+from korvid.agent.evidence import EvidenceLedger
+from korvid.agent.interaction import (
+    AgentUiBridge,
+    DrillDown,
+    Navigate,
+    OpenDescribe,
+    OpenLogs,
+    SetFilter,
+    UiAction,
+)
+from korvid.agent.model_policy import ResolvedAgentPolicy
+from korvid.agent.outbound import ToolResultBlockedError, sanitize_recorded_tool_result
+from korvid.tools.executor import (
+    RecordedExecution,
+    ToolOutcome,
+    ToolResultBlocked,
+    cap_result,
+)
+from korvid.tools.registry import ToolDef, tool_def, tool_schema_names
+
+#: Effects whose successful results a claim may cite. A screen action or a
+#: write is not an observation someone can go and check, however successful
+#: it reports itself, so it never mints evidence (issue #192).
+_EVIDENCE_EFFECTS: frozenset[str] = frozenset({"cluster_read", "external_read"})
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExecution:
+    """The immutable outcome of dispatching one tool call through the harness.
+
+    Attributes:
+        call_id: The provider's id for this tool call, echoed back so the
+            engine can pair the result with the request that made it.
+        name: The tool name exactly as the model called it.
+        outcome: The copy-owned, sanitized result (text, merged redaction
+            trail, error verdict, and read identity).
+        evidence_ref: The reference minted for a successful read (`E<n>`),
+            or None for a UI action, a write, an error, or a rejected call.
+    """
+
+    call_id: str
+    name: str
+    outcome: ToolOutcome
+    evidence_ref: str | None
+
+
+class ToolHarness:
+    """Routes one tool call to its port under the resolved agent policy.
+
+    The harness owns two pieces of per-run state: the context epoch the
+    current turn's evidence belongs to, and the number of tool calls made in
+    the current iteration. `reset_evidence` starts a turn (clearing the
+    ledger); `begin_iteration` starts an iteration (clearing the call count).
+
+    Args:
+        policy: The resolved routing policy. Its `tools` schemas are the
+            only armed surface, and its `max_tool_calls_per_iteration` and
+            `max_result_chars` bound execution and result size.
+        execution: The recorded tool executor. Cluster/external reads and
+            every write dispatch here; writes keep its approval gate.
+        bridge: The typed UI bridge. UI-drive tools apply here as
+            `UiAction` values; nothing else reaches it.
+        evidence: The turn-scoped ledger successful reads mint into.
+    """
+
+    def __init__(
+        self,
+        *,
+        policy: ResolvedAgentPolicy,
+        execution: RecordedExecution,
+        bridge: AgentUiBridge,
+        evidence: EvidenceLedger,
+    ) -> None:
+        self._execution = execution
+        self._bridge = bridge
+        self._evidence = evidence
+        #: Names come only from the policy's own schemas, so a tool the
+        #: registry defines but this policy did not arm is unreachable.
+        self._armed: frozenset[str] = frozenset(tool_schema_names(list(policy.tools)))
+        self._max_calls = policy.max_tool_calls_per_iteration
+        self._max_result_chars = policy.max_result_chars
+        self._context_epoch = 0
+        self._calls_this_iteration = 0
+
+    @property
+    def evidence(self) -> EvidenceLedger:
+        """The turn-scoped evidence ledger this harness mints into."""
+        return self._evidence
+
+    @property
+    def context_epoch(self) -> int:
+        """The context epoch the current turn's evidence belongs to."""
+        return self._context_epoch
+
+    def begin_iteration(self) -> None:
+        """Start a new iteration, resetting the per-iteration call budget."""
+        self._calls_this_iteration = 0
+
+    def reset_evidence(self, context_epoch: int) -> None:
+        """Start a new turn: drop the previous turn's evidence and re-epoch.
+
+        A citation must resolve to a read fetched now, not to a stale read
+        from an earlier turn whose resource may since have changed, so the
+        ledger is cleared on every turn and epoch change (issue #192).
+        """
+        self._context_epoch = context_epoch
+        self._evidence.start_turn()
+
+    async def execute(self, call_id: str, name: str, arguments: dict[str, Any]) -> ToolExecution:
+        """Route one tool call to its port and return the sanitized outcome.
+
+        The per-iteration budget is checked before any port, so a low-tier
+        iteration never dispatches more calls than the policy permits. An
+        unarmed or unknown call returns a bounded deterministic error
+        without touching the executor or the bridge. Arguments are copied
+        before dispatch so neither the executor nor the evidence ledger can
+        be handed the caller's mutable dict.
+
+        Raises:
+            OutboundPolicyError: the result could not be sanitized safely
+                (fail-closed), stopping the turn before its next request.
+        """
+        arguments = copy.deepcopy(arguments)
+        if self._over_budget():
+            return self._error(
+                call_id, name, "iteration tool-call budget exhausted; no further calls this step"
+            )
+        self._calls_this_iteration += 1
+        if name not in self._armed:
+            return self._error(call_id, name, f"tool {name!r} is not armed for this policy")
+        definition = tool_def(name)
+        if definition is None:  # defensive: an armed built-in always resolves
+            return self._error(call_id, name, f"unknown tool {name!r}")
+        if definition.effect == "ui_only":
+            return await self._run_ui(call_id, definition, arguments)
+        return await self._run_recorded(call_id, definition, arguments)
+
+    def _over_budget(self) -> bool:
+        return self._max_calls is not None and self._calls_this_iteration >= self._max_calls
+
+    async def _run_recorded(
+        self, call_id: str, definition: ToolDef, arguments: dict[str, Any]
+    ) -> ToolExecution:
+        """Dispatch a read or write through the recorded executor only."""
+        try:
+            produced = await self._execution.execute_recorded(definition.name, arguments)
+        except ToolResultBlocked as exc:
+            # The executor could not vouch for its own result, so the turn
+            # stops here rather than sending an unvetted document onward.
+            raise ToolResultBlockedError(str(exc)) from exc
+        outcome = self._sanitize(definition, produced)
+        ref: str | None = None
+        if definition.effect in _EVIDENCE_EFFECTS and not outcome.error:
+            ref = self._evidence.record(
+                definition.name,
+                arguments,
+                outcome.text,
+                error=outcome.error,
+                incarnation=outcome.incarnation,
+                container=outcome.container,
+            )
+        return ToolExecution(
+            call_id=call_id, name=definition.name, outcome=outcome, evidence_ref=ref
+        )
+
+    async def _run_ui(
+        self, call_id: str, definition: ToolDef, arguments: dict[str, Any]
+    ) -> ToolExecution:
+        """Apply a UI-drive tool as a typed action; UI actions are not evidence."""
+        try:
+            action = _ui_action(definition, arguments)
+        except ValueError as exc:
+            return self._error(call_id, definition.name, f"invalid arguments: {exc}")
+        result = await self._bridge.apply(action)
+        outcome = self._sanitize(definition, ToolOutcome(text=result.message, error=not result.ok))
+        return ToolExecution(
+            call_id=call_id, name=definition.name, outcome=outcome, evidence_ref=None
+        )
+
+    def _sanitize(self, definition: ToolDef, produced: ToolOutcome) -> ToolOutcome:
+        """Sanitize once and return a copy-owned outcome.
+
+        The result is bounded and redacted in its registry format, the
+        producer's redaction trail is merged with this pass's, and the read
+        identity (`incarnation`, `container`) is carried through unchanged.
+        """
+        text, redactions = sanitize_recorded_tool_result(
+            definition.name,
+            produced.text,
+            produced.redactions,
+            max_chars=self._max_result_chars,
+            error=produced.error,
+            result_format=definition.result_format,
+        )
+        return ToolOutcome(
+            text=text,
+            redactions=redactions,
+            error=produced.error,
+            incarnation=produced.incarnation,
+            container=produced.container,
+        )
+
+    def _error(self, call_id: str, name: str, message: str) -> ToolExecution:
+        """A bounded deterministic error outcome that touches no port."""
+        return ToolExecution(
+            call_id=call_id,
+            name=name,
+            outcome=ToolOutcome(text=cap_result(f"ERROR: {message}"), error=True),
+            evidence_ref=None,
+        )
+
+
+def _ui_action(definition: ToolDef, arguments: dict[str, Any]) -> UiAction:
+    """Parse a UI-drive tool call into a closed Task-1 `UiAction`.
+
+    Keyed on the registry's validated dispatch target, not the tool name, so
+    a definition can never silently map to a different action. Invalid
+    arguments raise `ValueError`, which the caller turns into one bounded
+    deterministic error.
+    """
+    dispatch = definition.dispatch
+    if dispatch == "agent_navigate":
+        return Navigate(
+            view=_require_str(arguments, "view"), namespace=_optional_str(arguments, "namespace")
+        )
+    if dispatch == "agent_set_filter":
+        pattern = arguments.get("pattern")
+        if not isinstance(pattern, str):
+            raise ValueError("set_filter requires a string 'pattern'")
+        # An empty pattern clears the filter (grammar in the tool schema),
+        # which the typed action spells as a None pattern.
+        return SetFilter(filter_pattern=pattern or None)
+    if dispatch == "agent_open_logs":
+        return OpenLogs(
+            pod=_require_str(arguments, "pod"),
+            namespace=_require_str(arguments, "namespace"),
+            container=_optional_str(arguments, "container"),
+        )
+    if dispatch == "agent_open_describe":
+        return OpenDescribe(
+            kind=_require_str(arguments, "kind"),
+            name=_require_str(arguments, "name"),
+            namespace=_optional_str(arguments, "namespace"),
+        )
+    if dispatch == "agent_drill_down":
+        return DrillDown(name=_require_str(arguments, "name"))
+    raise ValueError(f"tool {definition.name!r}: no UI action mapping for {dispatch!r}")
+
+
+def _require_str(arguments: dict[str, Any], key: str) -> str:
+    """A required non-blank string argument, or a `ValueError`."""
+    value = arguments.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key!r} must be a non-empty string")
+    return value
+
+
+def _optional_str(arguments: dict[str, Any], key: str) -> str | None:
+    """An optional string argument: absent is None; wrong-typed is refused."""
+    value = arguments.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{key!r} must be a string when provided")
+    return value

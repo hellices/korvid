@@ -164,6 +164,19 @@ def tool_result_format(name: str) -> ResultFormat | None:
     return definition.result_format if definition is not None else None
 
 
+def tool_def(name: str) -> ToolDef | None:
+    """The frozen `ToolDef` registered under exactly `name`, or None.
+
+    The narrow lookup the agent tool harness (issue #316) uses to route a
+    call by its registered effect, result format and dispatch without
+    duplicating any of the registry's name or effect lists. It returns the
+    registry's own frozen definition — not a copy — so the registry stays
+    the single source and callers read metadata off it rather than
+    re-deriving a second classification that could drift.
+    """
+    return TOOLS_BY_NAME.get(name)
+
+
 @dataclass(frozen=True, slots=True)
 class CustomToolResult:
     """The result format of a tool this registry does not define.

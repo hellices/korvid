@@ -168,9 +168,7 @@ class _ApprovalBridge(UIBridge):
         replicas: int | None = None,
         resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
-        self.writes.append(
-            {"action": action, "kind": kind, "name": name, "namespace": namespace}
-        )
+        self.writes.append({"action": action, "kind": kind, "name": name, "namespace": namespace})
         return f"approved and executed: {action} {kind}/{name}"
 
     async def agent_submit_write_proposal(
@@ -216,7 +214,7 @@ def _harness(
 
 
 async def test_read_routes_only_to_recorded_execution() -> None:
-    execution = _RecordingExecution(ToolOutcome(text="log line"))
+    execution = _RecordingExecution(ToolOutcome(text="kind: Pod\nmetadata:\n  name: api-1\n"))
     bridge = _RecordingBridge()
     harness = _harness(
         _policy(["get_resource"], max_tool_calls=None), execution=execution, bridge=bridge
@@ -232,7 +230,9 @@ async def test_read_routes_only_to_recorded_execution() -> None:
 async def test_ui_tool_routes_only_to_bridge_as_typed_action() -> None:
     execution = _RecordingExecution()
     bridge = _RecordingBridge(message="switched to deployments")
-    harness = _harness(_policy(["navigate"], max_tool_calls=None), execution=execution, bridge=bridge)
+    harness = _harness(
+        _policy(["navigate"], max_tool_calls=None), execution=execution, bridge=bridge
+    )
 
     result = await harness.execute(
         "c1", "navigate", {"view": "deployments", "namespace": "default"}
@@ -382,30 +382,30 @@ async def test_unknown_tool_fails_before_any_port() -> None:
 async def test_low_tier_rejects_second_call_in_one_iteration() -> None:
     execution = _RecordingExecution(ToolOutcome(text="ok"))
     harness = _harness(
-        _policy(["get_resource"], max_tool_calls=1, tier=ModelTier.LOW), execution=execution
+        _policy(["list_resources"], max_tool_calls=1, tier=ModelTier.LOW), execution=execution
     )
     harness.begin_iteration()
 
-    first = await harness.execute("c1", "get_resource", {"kind": "pods", "name": "api-1"})
-    second = await harness.execute("c2", "get_resource", {"kind": "pods", "name": "api-2"})
+    first = await harness.execute("c1", "list_resources", {"kind": "pods"})
+    second = await harness.execute("c2", "list_resources", {"kind": "deployments"})
 
     assert first.outcome.error is False
     assert second.outcome.error is True
     assert second.outcome.text.startswith("ERROR:")
     # The rejected excess call never reaches the executor.
-    assert execution.calls == [("get_resource", {"kind": "pods", "name": "api-1"})]
+    assert execution.calls == [("list_resources", {"kind": "pods"})]
 
 
 async def test_begin_iteration_resets_the_budget() -> None:
     execution = _RecordingExecution(ToolOutcome(text="ok"))
     harness = _harness(
-        _policy(["get_resource"], max_tool_calls=1, tier=ModelTier.LOW), execution=execution
+        _policy(["list_resources"], max_tool_calls=1, tier=ModelTier.LOW), execution=execution
     )
 
     harness.begin_iteration()
-    await harness.execute("c1", "get_resource", {"kind": "pods", "name": "api-1"})
+    await harness.execute("c1", "list_resources", {"kind": "pods"})
     harness.begin_iteration()
-    second = await harness.execute("c2", "get_resource", {"kind": "pods", "name": "api-2"})
+    second = await harness.execute("c2", "list_resources", {"kind": "deployments"})
 
     assert second.outcome.error is False
     assert len(execution.calls) == 2
@@ -414,12 +414,12 @@ async def test_begin_iteration_resets_the_budget() -> None:
 async def test_high_tier_unlimited_budget_accepts_many_calls() -> None:
     execution = _RecordingExecution(ToolOutcome(text="ok"))
     harness = _harness(
-        _policy(["get_resource"], max_tool_calls=None, tier=ModelTier.HIGH), execution=execution
+        _policy(["list_resources"], max_tool_calls=None, tier=ModelTier.HIGH), execution=execution
     )
     harness.begin_iteration()
 
     for i in range(5):
-        result = await harness.execute("c", "get_resource", {"kind": "pods", "name": f"api-{i}"})
+        result = await harness.execute("c", "list_resources", {"kind": f"kind-{i}"})
         assert result.outcome.error is False
 
     assert len(execution.calls) == 5
@@ -428,13 +428,13 @@ async def test_high_tier_unlimited_budget_accepts_many_calls() -> None:
 async def test_high_tier_bounded_budget_rejects_beyond_the_limit() -> None:
     execution = _RecordingExecution(ToolOutcome(text="ok"))
     harness = _harness(
-        _policy(["get_resource"], max_tool_calls=2, tier=ModelTier.HIGH), execution=execution
+        _policy(["list_resources"], max_tool_calls=2, tier=ModelTier.HIGH), execution=execution
     )
     harness.begin_iteration()
 
-    await harness.execute("c1", "get_resource", {"kind": "pods", "name": "api-1"})
-    await harness.execute("c2", "get_resource", {"kind": "pods", "name": "api-2"})
-    third = await harness.execute("c3", "get_resource", {"kind": "pods", "name": "api-3"})
+    await harness.execute("c1", "list_resources", {"kind": "pods"})
+    await harness.execute("c2", "list_resources", {"kind": "deployments"})
+    third = await harness.execute("c3", "list_resources", {"kind": "services"})
 
     assert third.outcome.error is True
     assert len(execution.calls) == 2
@@ -489,9 +489,7 @@ async def test_successful_read_mints_evidence_from_sanitized_text() -> None:
         _policy(["get_logs"], max_tool_calls=None), execution=execution, evidence=evidence
     )
 
-    result = await harness.execute(
-        "c1", "get_logs", {"pod": "api-1", "namespace": "default"}
-    )
+    result = await harness.execute("c1", "get_logs", {"pod": "api-1", "namespace": "default"})
 
     assert result.evidence_ref == "E1"
     minted = evidence.resolve("E1")
@@ -537,9 +535,7 @@ async def test_external_read_mints_evidence() -> None:
         _policy(["query_metrics"], max_tool_calls=None), execution=execution, evidence=evidence
     )
 
-    result = await harness.execute(
-        "c1", "query_metrics", {"signal": "cpu", "namespace": "default"}
-    )
+    result = await harness.execute("c1", "query_metrics", {"signal": "cpu", "namespace": "default"})
 
     assert result.evidence_ref == "E1"
 
@@ -574,13 +570,13 @@ async def test_harness_exposes_its_evidence_ledger() -> None:
 
 async def test_inputs_are_copied_before_dispatch() -> None:
     execution = _MutatingExecution()
-    harness = _harness(_policy(["get_resource"], max_tool_calls=None), execution=execution)
-    arguments = {"kind": "pods", "name": "api-1"}
+    harness = _harness(_policy(["list_resources"], max_tool_calls=None), execution=execution)
+    arguments = {"kind": "pods"}
 
-    await harness.execute("c1", "get_resource", arguments)
+    await harness.execute("c1", "list_resources", arguments)
 
     # The executor mutated its copy, not the caller's dict.
-    assert arguments == {"kind": "pods", "name": "api-1"}
+    assert arguments == {"kind": "pods"}
 
 
 def test_cluster_facts_contract_available() -> None:

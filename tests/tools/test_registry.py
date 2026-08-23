@@ -105,6 +105,20 @@ def test_every_tool_declares_an_outbound_result_format() -> None:
     )
 
 
+def test_tool_def_returns_the_registry_definition_by_exact_name() -> None:
+    definition = registry_mod.tool_def("get_resource")
+    assert definition is not None
+    assert definition.name == "get_resource"
+    assert definition.effect == "cluster_read"
+    # The registry's own frozen object, not a copy, so it stays the single
+    # source callers read metadata off (issue #316).
+    assert definition is registry_mod.TOOLS_BY_NAME["get_resource"]
+
+
+def test_tool_def_unknown_name_returns_none() -> None:
+    assert registry_mod.tool_def("not_a_registered_tool") is None
+
+
 # --- derived surfaces ---------------------------------------------------
 
 
