@@ -271,6 +271,29 @@ const scenarios = {
     );
   },
 
+  "prototype-named keys are ignored as non-navigation input"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors } = run(document);
+    let prevented = false;
+
+    assert.doesNotThrow(() => {
+      built.tabs[0].dispatch("keydown", {
+        key: "constructor",
+        preventDefault() {
+          prevented = true;
+        },
+      });
+    });
+    assert.equal(prevented, false, "an unrelated key must keep its default behavior");
+    assert.deepEqual(errors, []);
+    assert.deepEqual(
+      built.panels.map((panel) => panel.hidden),
+      [false, true, true],
+      "an unrelated key must not change the selected scene",
+    );
+  },
+
   "a switcher whose tab controls no panel is left in the no-JavaScript state"() {
     const broken = buildSwitcher("a", { brokenTab: "mcp" });
     const healthy = buildSwitcher("b");

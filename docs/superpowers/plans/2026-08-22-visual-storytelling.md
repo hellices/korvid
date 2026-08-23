@@ -876,7 +876,7 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
     assert hashlib.sha256(script).hexdigest() == (
-        "0957ad0d71a0aeb2a20ba55b99fb3108932ff1e61a806b2e30b6d6e6f1097390"
+        "8e78da38e3e47ef2462fb6d0a3a1c57927799e407c234d0a9e901fb29b40098b"
     )
     assert b"\r" not in script
 
@@ -1171,13 +1171,13 @@ final newline:
       tab.addEventListener("click", () => select(tab, false));
       tab.addEventListener("keydown", (event) => {
         const index = tabs.indexOf(tab);
-        const keys = {
-          ArrowLeft: (index - 1 + tabs.length) % tabs.length,
-          ArrowRight: (index + 1) % tabs.length,
-          Home: 0,
-          End: tabs.length - 1,
-        };
-        const nextIndex = keys[event.key];
+        const keys = new Map([
+          ["ArrowLeft", (index - 1 + tabs.length) % tabs.length],
+          ["ArrowRight", (index + 1) % tabs.length],
+          ["Home", 0],
+          ["End", tabs.length - 1],
+        ]);
+        const nextIndex = keys.get(event.key);
         if (nextIndex === undefined) return;
         event.preventDefault();
         select(tabs[nextIndex], true);

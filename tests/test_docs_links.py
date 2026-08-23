@@ -20,10 +20,10 @@ MKDOCS = ROOT / "mkdocs.yml"
 _INDEX_STEMS = frozenset({"index", "README"})
 
 _FENCE = re.compile(r"^(?P<fence>`{3,}|~{3,}).*?^(?P=fence)", re.DOTALL | re.MULTILINE)
-_MEDIA_ATTRIBUTE = re.compile(r"(?<![-\w])(?:src|poster|data-poster)=\"([^\"]+)\"")
+_MEDIA_ATTRIBUTE = re.compile(r"""(?<![-\w])(?:src|poster|data-poster)=(?:"([^"]+)"|'([^']+)')""")
 #: A raw-HTML link that points into the shared asset tree (e.g. the mosaic's
 #: full-resolution capture links) resolves exactly like `src` does.
-_ASSET_HREF = re.compile(r"(?<![-\w])href=\"([^\"]*assets/[^\"]+)\"")
+_ASSET_HREF = re.compile(r"""(?<![-\w])href=(?:"([^"]*assets/[^"]+)"|'([^']*assets/[^']+)')""")
 
 
 def _load_mkdocs_config() -> dict[str, Any]:
@@ -175,11 +175,30 @@ def _local_media_urls(source: Path) -> Iterator[str]:
     otherwise 404 only after a visitor picks that scene or clicks through.
     """
     text = _FENCE.sub("", source.read_text(encoding="utf-8"))
-    for raw in [*_MEDIA_ATTRIBUTE.findall(text), *_ASSET_HREF.findall(text)]:
+    matches = (*_MEDIA_ATTRIBUTE.finditer(text), *_ASSET_HREF.finditer(text))
+    for match in matches:
+        raw = match.group(1) or match.group(2)
         parsed = urlsplit(raw)
         if parsed.scheme or parsed.netloc or not parsed.path:
             continue
         yield unquote(parsed.path)
+
+
+def test_local_media_urls_accepts_single_quoted_raw_html(tmp_path: Path) -> None:
+    """A quote-style change must not silently remove assets from the walk."""
+    source = tmp_path / "page.md"
+    source.write_text(
+        "<video src='assets/demo.mp4' poster='assets/poster.png' "
+        "data-poster='../assets/deferred.png'></video>"
+        "<a href='assets/full.png'>full size</a>",
+        encoding="utf-8",
+    )
+    assert list(_local_media_urls(source)) == [
+        "assets/demo.mp4",
+        "assets/poster.png",
+        "../assets/deferred.png",
+        "assets/full.png",
+    ]
 
 
 def test_raw_html_hero_primary_cta_resolves_to_a_docs_source() -> None:

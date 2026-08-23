@@ -368,11 +368,20 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
     assert hashlib.sha256(script).hexdigest() == (
-        "524d71a64240a5aa167e7c99f2a7bfea307d79017ed079c69aabd40746946480"
+        "8e78da38e3e47ef2462fb6d0a3a1c57927799e407c234d0a9e901fb29b40098b"
     )
     assert b"\r" not in script, (
         "the reviewed bytes are LF-only; a CRLF checkout would break the pin above"
     )
+
+
+def test_visual_storytelling_plan_pins_the_current_controller_bytes() -> None:
+    """Replaying the executable plan must retain the reviewed controller."""
+    plan = (
+        ROOT / "docs" / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
+    ).read_text(encoding="utf-8")
+    digest = hashlib.sha256(VISUAL_STORYTELLING.read_bytes()).hexdigest()
+    assert digest in plan
 
 
 def test_storytelling_script_checkout_preserves_reviewed_bytes() -> None:

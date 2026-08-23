@@ -1205,7 +1205,39 @@ def test_relationship_demo_graph_is_complete_with_both_directions_populated() ->
     )
     dependencies = graph.dependencies_of(root)
     dependents = graph.dependents_of(root)
-    assert any(edge.relation.value == "uses_config" for edge in dependencies), (
-        f"the declared ConfigMap dependency must survive: {dependencies}"
+    observed = {
+        (
+            edge.relation.value,
+            edge.subject.kind,
+            edge.subject.namespace,
+            edge.subject.name,
+            edge.target.kind,
+            edge.target.namespace,
+            edge.target.name,
+        )
+        for edge in (*dependencies, *dependents)
+    }
+    expected = {
+        (
+            "uses_config",
+            "Pod",
+            "shop",
+            DEMO_ROOT.name,
+            "ConfigMap",
+            "shop",
+            "payment-config",
+        ),
+        (
+            "selects",
+            "Service",
+            "shop",
+            "payment-worker",
+            "Pod",
+            "shop",
+            DEMO_ROOT.name,
+        ),
+    }
+    assert expected <= observed, (
+        "the capture must keep its promised ConfigMap dependency and Service "
+        f"dependent; missing: {expected - observed}"
     )
-    assert dependents, "at least one resource must depend on the demo pod"

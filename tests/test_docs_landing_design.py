@@ -1131,6 +1131,7 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
     assert "not ok" not in result.stdout, result.stdout
     for scenario in (
         "healthy switchers enhance",
+        "prototype-named keys are ignored",
         "left in the no-JavaScript state",
         "outside its own switcher is rejected",
         "without IntersectionObserver",

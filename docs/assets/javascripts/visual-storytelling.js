@@ -85,13 +85,13 @@
       tab.addEventListener("click", () => select(tab, false));
       tab.addEventListener("keydown", (event) => {
         const index = tabs.indexOf(tab);
-        const keys = {
-          ArrowLeft: (index - 1 + tabs.length) % tabs.length,
-          ArrowRight: (index + 1) % tabs.length,
-          Home: 0,
-          End: tabs.length - 1,
-        };
-        const nextIndex = keys[event.key];
+        const keys = new Map([
+          ["ArrowLeft", (index - 1 + tabs.length) % tabs.length],
+          ["ArrowRight", (index + 1) % tabs.length],
+          ["Home", 0],
+          ["End", tabs.length - 1],
+        ]);
+        const nextIndex = keys.get(event.key);
         if (nextIndex === undefined) return;
         event.preventDefault();
         select(tabs[nextIndex], true);
