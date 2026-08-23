@@ -1180,6 +1180,45 @@ def test_relationship_demo_serves_every_kind_the_real_loader_asks_for() -> None:
     )
 
 
+def test_configmap_discovery_is_scoped_to_the_relationship_scene() -> None:
+    """Base demos must not expose a kind whose manifest they cannot describe."""
+    harness = _demo_harness()
+    for alias in ("configmaps", "configmap", "cm"):
+        assert alias not in harness.ALIASES
+        assert harness.RELATIONSHIP_ALIASES[alias].kind == "ConfigMap"
+
+    manifest = asyncio.run(harness.get_manifest("configmaps", "shop", "payment-config"))
+    assert manifest["apiVersion"] == "v1"
+    assert manifest["kind"] == "ConfigMap"
+    assert manifest["metadata"]["name"] == "payment-config"
+
+
+def test_payment_relationship_facts_come_from_the_described_pod_manifest() -> None:
+    """The capture's evidence path must be one the production extractor emits."""
+    harness = _demo_harness()
+    extracted = harness.extract_relationship_facts("Pod", "", "v1", harness.POD_MANIFEST)
+    config_refs = [ref for ref in extracted.references if ref.relation.value == "uses_config"]
+    assert len(config_refs) == 1
+    config_ref = config_refs[0]
+    assert config_ref in harness._PAYMENT_RELATIONSHIPS.references
+    assert config_ref.target.kind == "ConfigMap"
+    assert config_ref.target.name == "payment-config"
+    assert config_ref.field == "spec.volumes[0].configMap"
+
+
+def test_visual_storytelling_plan_uses_the_extracted_configmap_fact() -> None:
+    """The executable recipe must recreate the truthful relationship fixture."""
+    plan = VISUAL_STORYTELLING_PLAN.read_text(encoding="utf-8")
+    assert "RELATIONSHIP_ALIASES[_alias] = _CONFIGMAP_META" in plan
+    assert "ALIASES[alias] = _CONFIGMAP_META" not in plan
+    assert '"configMap": {"name": "payment-config"}' in plan
+    assert re.search(
+        r'extract_relationship_facts\(\s*"Pod",\s*"",\s*"v1",\s*POD_MANIFEST\s*\)',
+        plan,
+    )
+    assert 'field="spec.volumes[0].configMap.name"' not in plan
+
+
 def test_relationship_demo_graph_is_complete_with_both_directions_populated() -> None:
     """The frame has to show a real dependency *and* a real dependent.
 

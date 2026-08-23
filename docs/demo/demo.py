@@ -29,11 +29,8 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.relationship_facts import (
-    FactConfidence,
-    ReferenceFact,
     RelationKind,
     RelationshipFacts,
-    TargetReference,
     extract_relationship_facts,
 )
 from korvid.ui.app import EventsFetcher, KorvidApp
@@ -54,8 +51,6 @@ ALIASES: dict[str, ResourceMeta] = {
     "service": _SVC_META,
     "svc": _SVC_META,
 }
-for alias in ("configmaps", "configmap", "cm"):
-    ALIASES[alias] = _CONFIGMAP_META
 
 #: Every remaining kind `RelationshipSnapshotLoader` LISTs for a snapshot.
 #:
@@ -84,6 +79,8 @@ _RELATIONSHIP_ONLY_METAS: tuple[ResourceMeta, ...] = (
 )
 
 RELATIONSHIP_ALIASES: dict[str, ResourceMeta] = dict(ALIASES)
+for _alias in ("configmaps", "configmap", "cm"):
+    RELATIONSHIP_ALIASES[_alias] = _CONFIGMAP_META
 for _meta in _RELATIONSHIP_ONLY_METAS:
     RELATIONSHIP_ALIASES[_meta.plural] = _meta
     for _alias in (_meta.kind.lower(), *_meta.shortnames):
@@ -125,20 +122,41 @@ def _pod(
 _PAYMENT_LABELS = (("app", "payment-worker"), ("tier", "backend"))
 _PAYMENT_SELECTOR = {"app": "payment-worker"}
 
+POD_MANIFEST: dict[str, Any] = {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+        "name": "payment-worker-6c9f7d-b3xnq",
+        "namespace": "shop",
+        "labels": {"app": "payment-worker", "tier": "backend"},
+    },
+    "spec": {
+        "containers": [
+            {
+                "name": "app",
+                "image": "registry.example.com/shop/payment-worker:2.4.1",
+                "resources": {
+                    "requests": {"cpu": "100m", "memory": "128Mi"},
+                    "limits": {"cpu": "500m", "memory": "256Mi"},
+                },
+                "env": [{"name": "PAYMENT_GATEWAY_URL", "value": "https://pay.example.com"}],
+            }
+        ],
+        "volumes": [{"name": "payment-config", "configMap": {"name": "payment-config"}}],
+        "nodeName": "node-2",
+        "restartPolicy": "Always",
+    },
+    "status": {
+        "phase": "Running",
+        "conditions": [{"type": "Ready", "status": "False", "reason": "ContainersNotReady"}],
+    },
+}
 
 _PAYMENT_RELATIONSHIPS = RelationshipFacts(
-    references=(
-        ReferenceFact(
-            relation=RelationKind.USES_CONFIG,
-            target=TargetReference(
-                group="",
-                kind="ConfigMap",
-                namespace="shop",
-                name="payment-config",
-            ),
-            confidence=FactConfidence.DECLARED,
-            field="spec.volumes[0].configMap.name",
-        ),
+    references=tuple(
+        reference
+        for reference in extract_relationship_facts("Pod", "", "v1", POD_MANIFEST).references
+        if reference.relation is RelationKind.USES_CONFIG
     ),
 )
 
@@ -259,35 +277,6 @@ async def list_namespaces() -> list[str]:
     return ["shop", "monitoring", "kube-system", "default"]
 
 
-POD_MANIFEST: dict[str, Any] = {
-    "apiVersion": "v1",
-    "kind": "Pod",
-    "metadata": {
-        "name": "payment-worker-6c9f7d-b3xnq",
-        "namespace": "shop",
-        "labels": {"app": "payment-worker", "tier": "backend"},
-    },
-    "spec": {
-        "containers": [
-            {
-                "name": "app",
-                "image": "registry.example.com/shop/payment-worker:2.4.1",
-                "resources": {
-                    "requests": {"cpu": "100m", "memory": "128Mi"},
-                    "limits": {"cpu": "500m", "memory": "256Mi"},
-                },
-                "env": [{"name": "PAYMENT_GATEWAY_URL", "value": "https://pay.example.com"}],
-            }
-        ],
-        "nodeName": "node-2",
-        "restartPolicy": "Always",
-    },
-    "status": {
-        "phase": "Running",
-        "conditions": [{"type": "Ready", "status": "False", "reason": "ContainersNotReady"}],
-    },
-}
-
 DEPLOY_MANIFEST: dict[str, Any] = {
     "apiVersion": "apps/v1",
     "kind": "Deployment",
@@ -335,15 +324,24 @@ SVC_MANIFEST: dict[str, Any] = {
     "status": {"loadBalancer": {}},
 }
 
+CONFIGMAP_MANIFEST: dict[str, Any] = {
+    "apiVersion": "v1",
+    "kind": "ConfigMap",
+    "metadata": {"name": "payment-config", "namespace": "shop"},
+    "data": {"gateway": "pay.example.com"},
+}
+
 _MANIFESTS: dict[str, dict[str, Any]] = {
     "pods": POD_MANIFEST,
     "deployments": DEPLOY_MANIFEST,
     "services": SVC_MANIFEST,
+    "configmaps": CONFIGMAP_MANIFEST,
 }
 
 
 async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
-    base = _MANIFESTS.get(ALIASES[kind].plural if kind in ALIASES else kind, POD_MANIFEST)
+    meta = RELATIONSHIP_ALIASES.get(kind)
+    base = _MANIFESTS.get(meta.plural if meta is not None else kind, POD_MANIFEST)
     manifest = dict(base)
     metadata = dict(base["metadata"])
     metadata["name"] = name

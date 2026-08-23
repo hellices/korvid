@@ -398,21 +398,21 @@ from korvid.agent.events import (
 )
 from korvid.agent.evidence import EvidenceLedger
 from korvid.k8s.relationship_facts import (
-    FactConfidence,
-    ReferenceFact,
     RelationKind,
     RelationshipFacts,
-    TargetReference,
+    extract_relationship_facts,
 )
 ```
 
-Add ConfigMap discovery beside the existing metadata and include it in `ALIASES`:
+Add ConfigMap discovery beside the existing metadata, but expose it only to
+the relationship scene:
 
 ```python
 _CONFIGMAP_META = ResourceMeta("ConfigMap", "configmaps", "", "v1", True, ("cm",))
 
-for alias in ("configmaps", "configmap", "cm"):
-    ALIASES[alias] = _CONFIGMAP_META
+RELATIONSHIP_ALIASES = dict(ALIASES)
+for _alias in ("configmaps", "configmap", "cm"):
+    RELATIONSHIP_ALIASES[_alias] = _CONFIGMAP_META
 ```
 
 Extend `_pod` with deterministic identity and relationship facts:
@@ -448,25 +448,29 @@ def _pod(
     )
 ```
 
-Give the payment pod a real metadata-only relationship:
+Move the existing `POD_MANIFEST` definition above `PODS`, add the matching
+ConfigMap volume, and derive the displayed relationship through the production
+extractor:
 
 ```python
+POD_MANIFEST["spec"]["volumes"] = [
+    {"name": "payment-config", "configMap": {"name": "payment-config"}}
+]
+
 _PAYMENT_RELATIONSHIPS = RelationshipFacts(
-    references=(
-        ReferenceFact(
-            relation=RelationKind.USES_CONFIG,
-            target=TargetReference(
-                group="",
-                kind="ConfigMap",
-                namespace="shop",
-                name="payment-config",
-            ),
-            confidence=FactConfidence.DECLARED,
-            field="spec.volumes[0].configMap.name",
-        ),
+    references=tuple(
+        reference
+        for reference in extract_relationship_facts(
+            "Pod", "", "v1", POD_MANIFEST
+        ).references
+        if reference.relation is RelationKind.USES_CONFIG
     ),
 )
 ```
+
+Add a matching `CONFIGMAP_MANIFEST` to `_MANIFESTS["configmaps"]`, and
+canonicalize `get_manifest` through `RELATIONSHIP_ALIASES` so `cm` and
+`configmap` describe the same synthetic object.
 
 Pass `uid="pod-payment"` and `relationships=_PAYMENT_RELATIONSHIPS` to the
 existing `payment-worker-6c9f7d-b3xnq` call. Add this entry to `EXTRA`:

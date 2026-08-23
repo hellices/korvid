@@ -68,10 +68,10 @@ def _parse_exclude_docs(block: str) -> tuple[str, ...]:
     to the docs root or matched at any segment is decided by `_is_published`,
     which follows gitignore's own slash rule.
 
-    Anything using wildcard or negation syntax cannot be resolved to a
-    concrete docs path here. Such a line is rejected rather than dropped:
-    silently ignoring it would leave the published-page walk asserting on a
-    page MkDocs never builds.
+    Anything using wildcard, negation, or root-anchoring syntax cannot be
+    resolved to a concrete docs path here. Such a line is rejected rather
+    than widened or dropped: silently misreading it would make this walk
+    disagree with the pages MkDocs builds.
 
     Args:
         block: The raw newline-separated `exclude_docs` value.
@@ -84,6 +84,10 @@ def _parse_exclude_docs(block: str) -> tuple[str, ...]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+        assert not line.startswith("/"), (
+            f"exclude_docs entry {line!r} is root-anchored, which this walk "
+            "does not model; preserve anchoring explicitly before using it"
+        )
         is_pattern = line.startswith("!") or any(char in line for char in "*?[")
         assert not is_pattern, (
             f"exclude_docs entry {line!r} uses gitignore pattern syntax this walk "
@@ -309,6 +313,12 @@ def test_exclude_docs_honours_single_page_entries_not_just_directories() -> None
     assert _is_published("dev/scratch.md.md", excluded), (
         "prefix matching must respect path segments"
     )
+
+
+def test_exclude_docs_rejects_root_anchored_entries() -> None:
+    """Unsupported anchoring must fail loudly instead of widening exclusion."""
+    with pytest.raises(AssertionError, match="root-anchored"):
+        _parse_exclude_docs("/drafts/\n")
 
 
 def test_exclude_docs_matches_slash_less_entries_at_every_path_segment() -> None:
