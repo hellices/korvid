@@ -106,21 +106,22 @@ def _unfilter(kind: int, line: bytearray, previous: bytes, stride: int) -> bytea
     return line
 
 
-def _decode_png_rgb(path: Path) -> tuple[int, int, list[bytearray]]:
-    """Decode a non-interlaced 8-bit RGB/RGBA PNG into scanlines.
+def _decode_png_bytes(payload: bytes, source: str) -> tuple[int, int, list[bytearray]]:
+    """Decode a non-interlaced 8-bit RGB/RGBA PNG stream into scanlines.
 
     The repository ships no image dependency, and these captures are the
     product's own evidence, so the few lines of PNG plumbing live here
     rather than in the runtime.
 
     Args:
-        path: A PNG file written by the capture pipeline.
+        payload: The raw PNG stream.
+        source: What produced `payload`, used in assertion messages.
 
     Returns:
         `(width, height, rows)` where each row holds `width * channels`
         bytes.
     """
-    payload = path.read_bytes()
+    path = source
     assert payload[:8] == b"\x89PNG\r\n\x1a\n", f"{path} is not a PNG"
     chunks = dict[bytes, bytes]()
     data = bytearray()
@@ -145,14 +146,69 @@ def _decode_png_rgb(path: Path) -> tuple[int, int, list[bytearray]]:
     return width, height, rows
 
 
+def _decode_png_rgb(path: Path) -> tuple[int, int, list[bytearray]]:
+    """Decode a PNG capture written by the pipeline. See `_decode_png_bytes`."""
+    return _decode_png_bytes(path.read_bytes(), str(path))
+
+
 def _band_deviation(rows: list[bytearray], top: int, bottom: int, channels: int) -> int:
-    """Largest per-channel distance from `#111111` inside the client pane."""
+    """Largest colour distance from `#111111` inside the client pane.
+
+    Only the red, green and blue samples of each pixel are compared. An
+    RGBA capture stores an opaque pixel's alpha as `0xFF`, which is 238
+    away from `0x11` as a raw byte: counting it would make a perfectly
+    cleared band read as legible content, and — worse — would let a fully
+    blanked pane clear the retained-evidence floor on opacity alone,
+    turning both halves of the redaction contract into noise.
+
+    Args:
+        rows: Decoded scanlines, each `width * channels` bytes.
+        top: First row of the band, inclusive.
+        bottom: Row the band stops before.
+        channels: Samples per pixel — 3 for RGB, 4 for RGBA.
+
+    Returns:
+        The largest absolute distance from `0x11` over every RGB sample in
+        the band's slice of the client pane.
+    """
     left, right = MCP_CLIENT_PANE
     worst = 0
     for row in rows[top:bottom]:
-        for value in row[left * channels : right * channels]:
-            worst = max(worst, abs(value - 0x11))
+        for pixel in range(left, right):
+            base = pixel * channels
+            for value in row[base : base + 3]:
+                worst = max(worst, abs(value - 0x11))
     return worst
+
+
+def _encode_png(width: int, rows: Sequence[Sequence[int]], *, colour: int) -> bytes:
+    """Encode 8-bit non-interlaced rows as a PNG stream (filter type 0).
+
+    Args:
+        width: Pixels per row.
+        rows: One sequence of `width * channels` samples per scanline.
+        colour: PNG colour type — 2 for RGB, 6 for RGBA.
+
+    Returns:
+        The PNG stream `_decode_png_bytes` reads back.
+    """
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(body))
+            + kind
+            + body
+            + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+        )
+
+    header = struct.pack(">IIBBBBB", width, len(rows), 8, colour, 0, 0, 0)
+    raw = b"".join(b"\x00" + bytes(row) for row in rows)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
 
 
 def _demo_harness() -> ModuleType:
@@ -184,6 +240,70 @@ class _DemoLister:
     ) -> Sequence[SummaryLike]:
         objects = await self._harness.list_relationship_objects(meta, namespace)
         return list(objects)
+
+
+def test_band_deviation_ignores_the_alpha_channel_of_a_cleared_rgba_capture() -> None:
+    """An opaque RGBA re-encode must still read as cleared, not as content.
+
+    `_decode_png_rgb` accepts colour type 6, so the capture pipeline may
+    hand this contract an RGBA poster at any time. In RGBA an opaque pixel
+    stores `0xFF` alpha, which is 238 away from the `0x11` background as a
+    raw byte — comparing it would report a perfectly cleared band as
+    legible third-party content and fail the redaction contract on a frame
+    that redacts everything it claims to.
+    """
+    width = 1280
+    left, _right = MCP_CLIENT_PANE
+    rows = []
+    for _ in range(8):
+        row = bytearray()
+        for pixel in range(width):
+            # korvid's own pane keeps bright content; the client pane is
+            # cleared to its `#111111` background and fully opaque.
+            row += b"\xd0\xd0\xd0\xff" if pixel < left else b"\x11\x11\x11\xff"
+        rows.append(row)
+
+    decoded_width, height, decoded = _decode_png_bytes(
+        _encode_png(width, rows, colour=6), "synthetic opaque RGBA capture"
+    )
+    channels = len(decoded[0]) // decoded_width
+    assert (decoded_width, height, channels) == (width, 8, 4)
+
+    assert _band_deviation(decoded, 0, height, channels) <= 16, (
+        "an opaque alpha sample is not legible content; the cleared-band check "
+        "must compare colour only"
+    )
+
+
+def test_band_deviation_cannot_be_satisfied_by_alpha_variation_alone() -> None:
+    """Alpha must never stand in for the retained band's evidence.
+
+    The retained band's floor (`> 100`) exists so a future "fix" cannot
+    satisfy the redaction contract by blanking the whole pane. If alpha
+    counted, an RGBA capture whose client pane was wiped to a flat
+    background would still clear that floor purely on varying opacity, and
+    the contract would pass on a frame with no prompt and no tool calls
+    left in it.
+    """
+    width = 1280
+    left, _right = MCP_CLIENT_PANE
+    rows = []
+    for index in range(8):
+        row = bytearray()
+        for pixel in range(width):
+            if pixel < left:
+                row += b"\xd0\xd0\xd0\xff"
+            else:
+                # Blanked colour, wildly varying opacity.
+                row += bytes((0x11, 0x11, 0x11, (pixel * 7 + index * 31) % 256))
+        rows.append(row)
+
+    deviation = _band_deviation(rows, 0, len(rows), 4)
+    assert deviation <= 16, (
+        "a blanked pane must not reach the retained-evidence floor through its "
+        f"alpha channel; got {deviation}"
+    )
+    assert not deviation > 100, "alpha alone must never satisfy the evidence contract"
 
 
 def test_storytelling_pngs_meet_their_declared_size_and_byte_budget() -> None:
