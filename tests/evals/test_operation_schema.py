@@ -622,6 +622,14 @@ def test_a_missing_operation_pack_directory_is_rejected(tmp_path: Path) -> None:
         load_operation_journeys(tmp_path / "missing")
 
 
+def test_malformed_operation_yaml_is_a_value_error(tmp_path: Path) -> None:
+    path = tmp_path / "malformed.yaml"
+    path.write_text("schema_version: [", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"malformed\.yaml: invalid YAML"):
+        load_operation_journey(path)
+
+
 def test_an_empty_operation_pack_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="operation pack must contain at least one journey"):
         load_operation_journeys(tmp_path)

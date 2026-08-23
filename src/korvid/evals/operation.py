@@ -776,7 +776,10 @@ def load_operation_journey(path: Path) -> OperationJourney:
             violation. A fixture that loads but cannot be honoured is the
             worst outcome available here, so every rule fails closed.
     """
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path.name}: invalid YAML") from exc
     if not isinstance(data, dict):
         raise ValueError(f"{path.name}: operation journey must be a mapping")
     _reject_unknown_keys(data, _TOP_LEVEL_KEYS, f"{path.name}: journey")

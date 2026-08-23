@@ -648,6 +648,32 @@ def test_a_malformed_seed_list_is_a_usage_error(
     assert "Traceback" not in stderr
 
 
+def test_malformed_operation_yaml_is_a_usage_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    operations = tmp_path / "operations"
+    operations.mkdir()
+    (operations / "malformed.yaml").write_text("schema_version: [", encoding="utf-8")
+    artifacts = tmp_path / "artifacts"
+
+    code = main(
+        [
+            "--operations",
+            str(operations),
+            "--scripted",
+            "--artifacts",
+            str(artifacts),
+        ]
+    )
+
+    assert code == 2
+    stderr = capsys.readouterr().err
+    assert "malformed.yaml: invalid YAML" in stderr
+    assert "Traceback" not in stderr
+    assert not artifacts.exists()
+
+
 def test_a_sub_second_approval_timeout_is_a_usage_error(tmp_path: Path) -> None:
     code = main(
         [
