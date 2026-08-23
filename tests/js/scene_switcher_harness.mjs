@@ -321,6 +321,15 @@ const scenarios = {
       [null, "-1", "-1"],
       "no runtime tabindex may be left behind on a rolled-back switcher",
     );
+    assert.deepEqual(
+      broken.videos.map((video) => video.getAttribute("poster")),
+      ["direct.png", "agent.png", "mcp.png"],
+      "every visible fallback scene must retain a product frame",
+    );
+    assert.ok(
+      broken.videos.every((video) => video.getAttribute("data-poster") === null),
+      "rollback must finish promoting every deferred poster",
+    );
     assert.equal(errors.length, 1, "the failure must be reported, not swallowed");
     assert.match(errors[0], /scene switcher/i);
 

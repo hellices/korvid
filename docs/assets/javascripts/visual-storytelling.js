@@ -34,6 +34,7 @@
     switcher.removeAttribute("data-enhanced");
     for (const panel of switcher.querySelectorAll(".scene-panel")) {
       panel.hidden = false;
+      promotePoster(panel);
     }
     for (const [tab, selected, tabIndex] of authoredTabState) {
       if (selected === null) tab.removeAttribute("aria-selected");
