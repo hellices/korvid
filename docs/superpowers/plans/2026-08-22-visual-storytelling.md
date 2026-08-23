@@ -1037,6 +1037,10 @@ Delete `.feature-grid*` rules and add:
   border-radius: calc(var(--korvid-radius) - 0.15rem);
 }
 
+.md-typeset .scene-switcher:not([data-enhanced]) .scene-panel video[data-poster] {
+  display: none;
+}
+
 .md-typeset .scene-panel noscript {
   grid-column: 1 / -1;
   display: block;

@@ -128,6 +128,18 @@ def test_core_concept_pages_each_have_their_selected_visual_evidence() -> None:
             assert marker in source, f"{relative} must contain {marker!r}"
 
 
+def test_overview_diagram_keeps_provider_masking_out_of_the_mcp_contract() -> None:
+    """MCP disclosure is tool-specific, not the embedded provider's masking."""
+    source = (ROOT / "docs" / "overview.md").read_text(encoding="utf-8")
+    diagram = source.split("```mermaid", 1)[1].split("```", 1)[0]
+    core = next(line for line in diagram.splitlines() if line.strip().startswith("CORE["))
+    agent = next(line for line in diagram.splitlines() if line.strip().startswith("AGENT["))
+    mcp = next(line for line in diagram.splitlines() if line.strip().startswith("MCP["))
+    assert "mask" not in core.lower()
+    assert "provider payload masking" in agent.lower()
+    assert "tool-specific disclosure" in mcp.lower()
+
+
 def test_ops_safety_diagram_shows_only_universal_write_gates() -> None:
     """Optional previews must not appear as a prerequisite for every write."""
     source = (ROOT / "docs" / "ops.md").read_text(encoding="utf-8")

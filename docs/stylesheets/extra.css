@@ -373,6 +373,10 @@
   border-radius: calc(var(--korvid-radius) - 0.15rem);
 }
 
+.md-typeset .scene-switcher:not([data-enhanced]) .scene-panel video[data-poster] {
+  display: none;
+}
+
 /* Only rendered when scripting is off: the two deferred scenes hand their
    poster to `data-poster` so the preload scanner cannot fetch it, and the
    controller promotes it on selection. With no controller there is no

@@ -973,6 +973,14 @@ def test_deferred_scene_posters_keep_a_local_no_javascript_image() -> None:
     ]
 
 
+def test_no_javascript_fallback_replaces_deferred_videos_with_posters() -> None:
+    """No-JS rendering must show one media surface per deferred scene."""
+    selector = ".md-typeset .scene-switcher:not([data-enhanced]) .scene-panel video[data-poster] {"
+    for label, source in (("stylesheet", _css()), ("plan", _plan())):
+        assert selector in source, f"{label} must target deferred unenhanced videos"
+        assert "display: none" in _rule(source, selector)
+
+
 def test_controller_promotes_a_deferred_poster_only_when_its_scene_is_selected() -> None:
     """The deferred posters are worthless if the controller never promotes them."""
     script = STORYTELLING_JS.read_text(encoding="utf-8")

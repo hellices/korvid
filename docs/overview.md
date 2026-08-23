@@ -28,9 +28,9 @@ flowchart LR
     subgraph KORVID["KORVID — product boundary"]
         direction LR
         TUI["TUI adapter<br/><b>INCLUDED</b><br/>browse · filter · describe<br/>logs · port-forward · exec"]
-        AGENT["Agent adapter<br/><b>OPTIONAL</b> korvid[agent]<br/>Ctrl-A chat panel<br/>context-aware reads"]
-        CORE["Observe · diagnose · navigate<br/>approval-gated operations<br/>audit log · secret masking"]
-        MCP["MCP adapter<br/><b>OPTIONAL</b> korvid[mcp]<br/>read + UI-drive over MCP<br/>write proposals opt-in"]
+        AGENT["Agent adapter<br/><b>OPTIONAL</b> korvid[agent]<br/>Ctrl-A chat panel<br/>context-aware reads<br/>provider payload masking"]
+        CORE["Observe · diagnose · navigate<br/>approval-gated operations<br/>audit log"]
+        MCP["MCP adapter<br/><b>OPTIONAL</b> korvid[mcp]<br/>read + UI-drive over MCP<br/>write proposals opt-in<br/>tool-specific disclosure"]
         K8S["Kubernetes adapter<br/><b>INCLUDED</b><br/>watch · read · apply"]
 
         TUI --> CORE
@@ -61,7 +61,8 @@ adapter shares cluster reads and UI control. Any write request that reaches
 korvid — from the TUI, the embedded agent, or an MCP write proposal — passes
 through the approval gate and is logged. MCP itself exposes read and UI-drive
 tools; write proposals are opt-in and handled inside korvid, not by the MCP
-client.
+client. Provider payload masking belongs to the embedded Agent boundary; MCP
+result disclosure remains tool-specific.
 
 Neither optional adapter is required, and neither implies the other.
 

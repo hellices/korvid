@@ -103,6 +103,7 @@ MCP_CLEARED_BANDS = ((22, 342), (578, 710))
 #: The rows that must keep carrying the evidence, so a future "fix" cannot
 #: satisfy the contract by blanking the whole pane.
 MCP_EVIDENCE_BAND = (342, 578)
+MCP_EVIDENCE_MIN_PIXELS = 5_000
 
 
 def _png_size(path: Path) -> tuple[int, int]:
@@ -349,6 +350,25 @@ def _band_deviation(rows: list[bytearray], top: int, bottom: int, channels: int)
             for value in row[base : base + 3]:
                 worst = max(worst, abs(value - 0x11))
     return worst
+
+
+def _band_contrast_pixels(
+    rows: list[bytearray],
+    top: int,
+    bottom: int,
+    channels: int,
+    *,
+    minimum_deviation: int,
+) -> int:
+    """Count client-pane pixels whose RGB contrast exceeds the floor."""
+    left, right = MCP_CLIENT_PANE
+    count = 0
+    for row in rows[top:bottom]:
+        for pixel in range(left, right):
+            base = pixel * channels
+            if max(abs(value - 0x11) for value in row[base : base + 3]) > minimum_deviation:
+                count += 1
+    return count
 
 
 def _png_chunk(kind: bytes, body: bytes) -> bytes:
@@ -909,11 +929,25 @@ def test_mcp_landing_media_carries_no_third_party_session_internals() -> None:
             "content, not codec noise"
         )
 
-    evidence = _band_deviation(rows, *MCP_EVIDENCE_BAND, channels)
-    assert evidence > 100, (
-        "the retained band must still show the external client's prompt and tool "
-        f"calls; peak contrast {evidence} means the pane was blanked instead of framed"
+    evidence_pixels = _band_contrast_pixels(
+        rows,
+        *MCP_EVIDENCE_BAND,
+        channels,
+        minimum_deviation=100,
     )
+    assert evidence_pixels >= MCP_EVIDENCE_MIN_PIXELS, (
+        "the retained band must still show the external client's prompt and tool "
+        f"calls; only {evidence_pixels} high-contrast pixels remain"
+    )
+
+
+def test_mcp_evidence_coverage_rejects_a_single_bright_pixel() -> None:
+    """Peak contrast alone must not make a blank evidence band pass."""
+    width = MCP_CLIENT_PANE[1]
+    rows = [bytearray([0x11] * width * 3)]
+    rows[0][MCP_CLIENT_PANE[0] * 3] = 0xFF
+    assert _band_deviation(rows, 0, 1, 3) > 100
+    assert _band_contrast_pixels(rows, 0, 1, 3, minimum_deviation=100) < MCP_EVIDENCE_MIN_PIXELS
 
 
 def test_mcp_capture_instructions_document_the_sanitising_pass() -> None:
