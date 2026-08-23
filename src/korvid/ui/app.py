@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     # Annotation-only: the base TUI must not import the embedded-agent
     # runtime at startup (issue #73) — the composition root injects it
     # only when the [agent] extra is installed and wired.
-    from korvid.agent.runtime import AgentRuntime
+    from korvid.agent.session import AgentSession
 
 from rich.text import Text
 from textual.app import App, ComposeResult, ScreenStackError
@@ -355,10 +355,10 @@ class KorvidApp(App[None]):
         get_helm_components: (Callable[[str, str], Awaitable[list[ComponentRef]]] | None) = None,
         get_events: EventsFetcher | None = None,
         stream_logs: Callable[..., AsyncIterator[LogLine]] | None = None,
-        agent_runtime: AgentRuntime | None = None,
+        agent_session: AgentSession | None = None,
         agent_model_name: str | None = None,
         agent_configurator: AgentConfigurator | None = None,
-        rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
+        rebuild_agent: Callable[[AgentSettings], AgentSession | None] | None = None,
         disconnect_agent: Callable[[], None] | None = None,
         agent_available: bool = True,
         write_ops: WriteOps | None = None,
@@ -847,12 +847,12 @@ class KorvidApp(App[None]):
             # patch `_refresh_status` after the app is constructed.
             refresh_status=lambda: self._refresh_status(),
             # Agent-follow mirrors route through the shared serialized bridge
-            # (the composition root's `_UIBridgeProxy`) so they serialize with
+            # (the composition root's tool-bridge proxy) so they serialize with
             # the agent's own UI tools and concurrent MCP UI calls - log-pane
             # swaps and describes must never interleave. None (tests, degraded
             # wiring) falls back to the controller's own adapter.
             follow_bridge=lambda: agent_follow_bridge,
-            runtime=agent_runtime,
+            session=agent_session,
             model_name=agent_model_name,
             configurator=agent_configurator,
             rebuild=rebuild_agent,
@@ -928,10 +928,20 @@ class KorvidApp(App[None]):
         return self._workspace.drill
 
     @property
-    def agent_runtime(self) -> AgentRuntime | None:
-        """The live runtime — the :ai wizard may have replaced the initial
+    def agent_session(self) -> AgentSession | None:
+        """The live session — the :ai wizard may have replaced the initial
         one, so per-cluster retargeting (issue #36) must read it here."""
-        return self._agent_ui.runtime
+        return self._agent_ui.session
+
+    @property
+    def agent_ui(self) -> AgentUiController:
+        """The agent's UI controller.
+
+        Exposed so the composition root can bind the session's workspace
+        port to the live controller after construction — the app owns the
+        controller, but the port has to point somewhere real.
+        """
+        return self._agent_ui
 
     @property
     def current_namespace(self) -> str:
@@ -1765,8 +1775,8 @@ class KorvidApp(App[None]):
         # Availability comes from the actual runtime, not the config flag —
         # create_provider may return None (unknown provider, missing base_url/
         # model) while agent_enabled is still true in config.
-        label = "AI on" if self._agent_ui.runtime is not None else "AI off"
-        if self._agent_ui.runtime is not None and self._agent_ui.blocked_in_protected():
+        label = "AI on" if self._agent_ui.session is not None else "AI off"
+        if self._agent_ui.session is not None and self._agent_ui.blocked_in_protected():
             label = "AI blocked"
         mcp_label = self._mcp.status() if self._mcp is not None else ""
         follow = self._integrations.follow_enabled
@@ -1882,7 +1892,7 @@ class KorvidApp(App[None]):
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,
-    # loop logic in AgentRuntime.
+    # loop logic in the agent session.
     # ------------------------------------------------------------------
 
     #: Resource identities — (group, plural), see `_RESTARTABLE` — where each
@@ -2108,8 +2118,11 @@ class AppAgentPanel(AgentPanelPort):
         output_tokens: int,
         *,
         estimated: bool,
+        tier: str | None = None,
     ) -> None:
-        self._app._agent_panel.set_header(model, input_tokens, output_tokens, estimated=estimated)
+        self._app._agent_panel.set_header(
+            model, input_tokens, output_tokens, estimated=estimated, tier=tier
+        )
 
     def show_setup_hint(self) -> None:
         self._app._agent_panel.show_setup_hint()

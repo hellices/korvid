@@ -211,6 +211,18 @@ class AgentSession(ABC):
     def policy(self) -> ResolvedAgentPolicy:
         """The policy turns are currently composed and run against."""
 
+    @property
+    @abstractmethod
+    def finalization_pending(self) -> bool:
+        """True when an interrupted turn is still waiting to be finalized.
+
+        A caller that stopped a turn has to repair the conversation before
+        the next one, but a caller that merely *might* have stopped one
+        cannot know that from the outside: a turn cancelled before it ever
+        started leaves nothing to repair, and `finalize_interrupt` refuses
+        it. This is the question to ask first.
+        """
+
 
 class DefaultAgentSession(AgentSession):
     """The session the TUI runs: live bridge, live policy, one engine.
@@ -318,6 +330,11 @@ class DefaultAgentSession(AgentSession):
     def policy(self) -> ResolvedAgentPolicy:
         """The policy turns are currently composed and run against."""
         return self._policy
+
+    @property
+    def finalization_pending(self) -> bool:
+        """True when an interrupted turn is still waiting to be finalized."""
+        return self._awaiting_finalization
 
     # -- turns -------------------------------------------------------------
 

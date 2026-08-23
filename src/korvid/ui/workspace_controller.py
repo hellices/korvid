@@ -709,9 +709,7 @@ class WorkspaceController:
     # Agent workspace-action helpers (AgentWorkspaceBridge)
     # ------------------------------------------------------------------
 
-    def focused_row_data(
-        self, name: str, namespace: str | None
-    ) -> tuple[str, str | None] | None:
+    def focused_row_data(self, name: str, namespace: str | None) -> tuple[str, str | None] | None:
         """Find (row_key, uid) for the named resource in the focused view.
 
         Searches the focused pane's current store bucket. Returns None when the

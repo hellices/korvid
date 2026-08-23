@@ -168,6 +168,7 @@ class AgentPanel(Vertical):
     def __init__(self) -> None:
         super().__init__()
         self._model = "agent"
+        self._tier: str | None = None
         self._tok_in = 0
         self._tok_out = 0
         self._estimated = False
@@ -207,17 +208,22 @@ class AgentPanel(Vertical):
         input_tokens: int,
         output_tokens: int,
         estimated: bool,
+        tier: str | None = None,
     ) -> None:
         self._model = model
         self._tok_in = input_tokens
         self._tok_out = output_tokens
         self._estimated = estimated
+        self._tier = tier
         prefix = "~" if estimated else ""
-        # The panel never shows a capability tier marker: a resolved
-        # *session* tier belongs here once Task 12 wires one up, not the
-        # requested override the setup wizard/config carry.
+        # The *resolved* tier and where the routing decision came from —
+        # never the requested override the wizard/config carry, so a
+        # request the catalogue could not honour reads as the fallback it
+        # became. No session, no marker: the panel invents nothing.
+        routed = f"{tier} · " if tier else ""
         self.query_one("#agent-header", Static).update(
-            f"⚡ {model} · {prefix}↑{_fmt_tokens(input_tokens)} ↓{_fmt_tokens(output_tokens)} tok"
+            f"⚡ {model} · {routed}"
+            f"{prefix}↑{_fmt_tokens(input_tokens)} ↓{_fmt_tokens(output_tokens)} tok"
         )
 
     # --- conversation -----------------------------------------------------
@@ -329,6 +335,7 @@ class AgentPanel(Vertical):
                 self._tok_in + event.input_tokens,
                 self._tok_out + event.output_tokens,
                 self._estimated or event.estimated,
+                tier=self._tier,
             )
         elif isinstance(event, TurnInterrupted):
             # A stop is a normal outcome, not an error: the partial answer
@@ -351,6 +358,7 @@ class AgentPanel(Vertical):
                 self._tok_in + event.input_tokens,
                 self._tok_out + event.output_tokens,
                 self._estimated or event.estimated,
+                tier=self._tier,
             )
 
     # --- internals ----------------------------------------------------------

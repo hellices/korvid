@@ -135,10 +135,16 @@ class RequestGateway:
         """
         return self._latest_outbound_payload
 
-    def prepare_policy(self, policy: ResolvedAgentPolicy) -> OutboundPolicy:
+    @staticmethod
+    def prepare_policy(policy: ResolvedAgentPolicy) -> OutboundPolicy:
         """Build the outbound boundary a policy's own tool surface needs.
 
-        Preparation only: nothing here touches this gateway, so a surface
+        Static because it reads nothing but the policy: the composition
+        root needs the boundary *before* it has a gateway to install it
+        into, and preparation that depended on a gateway could not serve
+        both that first build and every later retarget.
+
+        Preparation only: nothing here touches any gateway, so a surface
         that cannot be armed is refused while the boundary in force stays
         exactly as it was. `install_policy` is the half that moves.
 

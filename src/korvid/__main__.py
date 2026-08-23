@@ -22,8 +22,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from korvid import __version__
-from korvid.agent.context import cluster_context_note
 from korvid.agent.install_hint import isolated_install_hint
+from korvid.agent.interaction import (
+    AgentUiBridge,
+    ClusterFacts,
+    InteractionContext,
+    UiAction,
+    UiActionResult,
+)
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
@@ -77,11 +83,10 @@ from korvid.ui.widgets.resource_table import sanitize_views
 
 if TYPE_CHECKING:
     # Embedded-agent types appear only in annotations here: an MCP-only or
-    # base install must never import the agent runtime or provider ABC at
+    # base install must never import the agent loop or provider ABC at
     # startup (issue #73 acceptance criterion).
-    from korvid.agent.profiles import AgentProfile
     from korvid.agent.provider import LLMProvider
-    from korvid.agent.runtime import AgentRuntime
+    from korvid.agent.session import AgentSession
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +288,7 @@ def _custom_column_names(config: KorvidConfig) -> dict[str, tuple[str, ...]]:
 class _MCPAppHooks:
     """Late-bound app hooks for MCP follow mode (issue #153).
 
-    Built (like `_UIBridgeProxy`) before the app exists; the composition
+    Built (like `_AgentToolUIBridgeProxy`) before the app exists; the composition
     root points `app` at the live instance right after construction. Until
     then follow reads as off and activity notes are dropped - external
     reads simply stay response-only, never an error.
@@ -446,8 +451,8 @@ def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Task
     task.add_done_callback(_reap)
 
 
-class _UIBridgeProxy(UIBridge):
-    """Late-bound UI bridge: the ToolExecutor is built before the app exists,
+class _AgentToolUIBridgeProxy(UIBridge):
+    """Late-bound *tools-layer* UI bridge: the ToolExecutor is built before the app exists,
     so it holds this proxy and the composition root points ``target`` at the
     app's bridge adapter right after construction. Until then every UI tool
     degrades to an ERROR result instead of crashing the turn.
@@ -582,21 +587,89 @@ async def _probe_cloud_provider(kube: KubeClient) -> ProviderInfo:
         return detect_provider([])
 
 
+#: What the agent is told when the cloud-provider probe found nothing —
+#: an honest "unknown", never a guess dressed up as a fact.
+_UNKNOWN_CLUSTER = ClusterFacts(provider="unknown", distribution=None)
+
+
+def _cluster_facts(info: ProviderInfo) -> ClusterFacts:
+    """Convert a cloud-provider probe into the facts the agent reasons over.
+
+    The probe result is a display concern everywhere else; the session
+    takes it as data so the prompt harness — not the composition root —
+    decides how a cluster is described to a model.
+    """
+    return ClusterFacts(provider=info.provider, distribution=info.distribution)
+
+
+@dataclasses.dataclass(frozen=True)
+class AgentWiring:
+    """Everything the app and its teardown guard need from the agent wiring.
+
+    A record rather than a tuple because the pieces have different owners:
+    `session` is handed to the app, the two boxes are read by the teardown
+    guard, and the two bridges are bound to the app once it exists.
+    """
+
+    #: The live session, or None when the agent is off/unavailable.
+    session: AgentSession | None
+    #: The `:ai` wizard's provider configurator, or None when unavailable.
+    configurator: AgentConfigurator | None
+    #: Swap provider and session together, or None when unavailable.
+    rebuild: Callable[[AgentSettings], AgentSession | None] | None
+    #: Re-arm a live session for a new cluster (`:ctx`).
+    retarget: Callable[[AgentSession | None, bool, ClusterFacts | None], None]
+    #: `:ai off` — release provider and session for the session.
+    disconnect: Callable[[], None]
+    #: The live provider, shared with the teardown guard.
+    provider_box: list[LLMProvider | None]
+    #: The live session, shared with the teardown guard.
+    session_box: list[AgentSession | None]
+    #: The tools-layer port the executor, MCP and write approval share.
+    tool_bridge: _AgentToolUIBridgeProxy
+    #: The agent-layer port the session reads the workspace through.
+    ui_bridge: _AgentUiBridgeProxy
+
+
+class _AgentUiBridgeProxy(AgentUiBridge):
+    """Late-bound *agent-layer* workspace port.
+
+    The session is constructed before the app exists, so it holds this
+    proxy and the composition root points `target` at the app's workspace
+    bridge right after construction.
+
+    Unlike the tools-layer proxy, an unbound call here raises. A snapshot
+    invented before the UI exists would tell the model it is looking at a
+    screen that does not exist, and a fabricated action result would tell
+    it something happened that did not — both are worse than the wiring
+    bug they would hide.
+    """
+
+    _NOT_READY = "agent UI not ready"
+
+    def __init__(self) -> None:
+        self.target: AgentUiBridge | None = None
+
+    def snapshot(self) -> InteractionContext:
+        if self.target is None:
+            raise RuntimeError(self._NOT_READY)
+        return self.target.snapshot()
+
+    async def apply(self, action: UiAction) -> UiActionResult:
+        if self.target is None:
+            raise RuntimeError(self._NOT_READY)
+        return await self.target.apply(action)
+
+
 def _agent_unavailable_wiring(
     config: KorvidConfig,
     missing: list[str],
-    ui_proxy: _UIBridgeProxy,
+    ui_proxy: _AgentToolUIBridgeProxy,
+    agent_ui_proxy: _AgentUiBridgeProxy,
     provider_box: list[LLMProvider | None],
-) -> tuple[
-    None,
-    None,
-    None,
-    Callable[[AgentRuntime | None, bool, str | None], None],
-    Callable[[], None],
-    list[LLMProvider | None],
-    _UIBridgeProxy,
-]:
-    """Runtime-less wiring for installs without the [agent] extra.
+    session_box: list[AgentSession | None],
+) -> AgentWiring:
+    """Session-less wiring for installs without the [agent] extra.
 
     An explicitly enabled agent fails with an actionable install hint; an
     unrequested one degrades to a wiring the app renders as "unavailable".
@@ -608,13 +681,23 @@ def _agent_unavailable_wiring(
     )
 
     def _retarget_noop(
-        runtime: AgentRuntime | None,
+        session: AgentSession | None,
         pod_resize_supported: bool,
-        cluster_context: str | None,
+        cluster: ClusterFacts | None,
     ) -> None:
         return None
 
-    return None, None, None, _retarget_noop, lambda: None, provider_box, ui_proxy
+    return AgentWiring(
+        session=None,
+        configurator=None,
+        rebuild=None,
+        retarget=_retarget_noop,
+        disconnect=lambda: None,
+        provider_box=provider_box,
+        session_box=session_box,
+        tool_bridge=ui_proxy,
+        ui_bridge=agent_ui_proxy,
+    )
 
 
 def _create_initial_provider(
@@ -652,44 +735,138 @@ def _create_initial_provider(
         return None
 
 
-def _tier_to_legacy_profile(model_tier: str | None) -> str:
-    """Temporary bridge (Task 5) from `agent.model_tier` to the old
-    full/small profile split in `agent/profiles.py`.
-
-    `high` is the only explicit "full" setting; `low` and unset/Automatic
-    both map to the conservative small profile while the old runtime still
-    exists. Task 12/14 replace this with real tier-aware routing and this
-    function should be deleted then; it is deliberately private (not
-    exported).
-    """
-    return "full" if model_tier == "high" else "small"
-
-
-def _initial_profile(
+def _agent_environment(
     config: KorvidConfig,
     pod_resize_supported: bool,
-    startup_warnings: list[str] | None,
-    observability_backends: frozenset[str] = frozenset(),
-) -> AgentProfile:
-    """The starting capability profile (see `_tier_to_legacy_profile`).
+    observability_backends: frozenset[str],
+) -> Any:
+    """The capability facts a model policy is resolved against."""
+    from korvid.agent.model_policy import PolicyEnvironment
 
-    `agent.prompts` was removed (issue: agent.rules replaces it), so the
-    old-runtime profile is always built with empty prompt overrides here;
-    `agent.rules` consumption is a later task's scope.
-    """
-    from korvid.agent.profiles import PromptOverrides, build_profile, validate_prompt_overrides
-
-    overrides = PromptOverrides()
-    profile = build_profile(
-        _tier_to_legacy_profile(config.agent_model_tier),
+    return PolicyEnvironment(
         readonly=config.readonly,
         resize_supported=pod_resize_supported,
         observability_backends=observability_backends,
-        overrides=overrides,
     )
-    if startup_warnings is not None:
-        startup_warnings.extend(validate_prompt_overrides(profile, overrides))
-    return profile
+
+
+def _resolve_agent_policy(
+    provider: LLMProvider,
+    config: KorvidConfig,
+    model_tier: str | None,
+    environment: Any,
+) -> Any:
+    """Route one provider onto a resolved policy.
+
+    The catalogue decides the tier unless the operator named one, in which
+    case the choice is honoured and reported as theirs — the header shows
+    where the decision came from, so a silent fallback stays visible.
+    """
+    from korvid.agent.model_catalog import MODEL_CATALOG
+    from korvid.agent.model_policy import ModelRouter
+
+    return ModelRouter(MODEL_CATALOG).resolve(
+        descriptor=provider.descriptor,
+        provider_capabilities=provider.capabilities,
+        # The router validates the string itself and reports an unusable
+        # one as a fallback route, which the header then shows as such.
+        explicit_tier=model_tier or None,
+        environment=environment,
+    )
+
+
+def _build_session(
+    provider: LLMProvider,
+    policy: Any,
+    cluster: ClusterFacts,
+    *,
+    config: KorvidConfig,
+    kube: KubeClient,
+    aliases: dict[str, ResourceMeta],
+    tool_bridge: UIBridge,
+    ui_bridge: AgentUiBridge,
+    obs: ObservabilityWiring,
+) -> AgentSession:
+    """Compose one whole agent session over an already-built provider.
+
+    Every collaborator is created here and owned by the session that comes
+    out: a caller that drops the return value has dropped the whole graph,
+    which is what makes rebuild a transaction.
+    """
+    from korvid.agent.conversation import ConversationState
+    from korvid.agent.evidence import EvidenceLedger
+    from korvid.agent.native_engine import NativeAgentEngine
+    from korvid.agent.prompt_harness import PromptHarness
+    from korvid.agent.request_gateway import RequestGateway
+    from korvid.agent.session import DefaultAgentSession
+    from korvid.agent.tool_harness import ToolHarness
+
+    execution = ToolExecutor(
+        kube,
+        aliases,
+        ui=tool_bridge,
+        custom_columns=_custom_column_names(config),
+        metrics=obs.metrics,
+        logs=obs.logs,
+    )
+    tools = ToolHarness(
+        policy=policy,
+        execution=execution,
+        bridge=ui_bridge,
+        evidence=EvidenceLedger(),
+    )
+    conversation = ConversationState(
+        max_history_chars=policy.max_history_chars,
+        strict_history_budget=policy.strict_history_budget,
+    )
+    gateway = RequestGateway(provider, RequestGateway.prepare_policy(policy))
+    engine = NativeAgentEngine(conversation=conversation, gateway=gateway, tools=tools)
+    return DefaultAgentSession(
+        engine=engine,
+        bridge=ui_bridge,
+        prompt_harness=PromptHarness(),
+        conversation=conversation,
+        gateway=gateway,
+        tools=tools,
+        policy=policy,
+        cluster=cluster,
+        user_rules=config.agent_rules,
+    )
+
+
+def _close_agent_in_background(
+    session: AgentSession | None,
+    provider: LLMProvider | None,
+    tasks: set[asyncio.Task[None]],
+) -> None:
+    """Release a replaced session and its provider, in that order.
+
+    The session first: it may still be winding a turn down, and closing
+    the transport under it would turn an orderly stop into a torn stream.
+    Non-blocking, because a swap must not stall the UI on a provider that
+    is slow to close.
+    """
+
+    async def _close() -> None:
+        if session is not None:
+            try:
+                await session.aclose()
+            except Exception:
+                # Fixed message only — never the payload, which may carry
+                # secrets or unbounded text from a third-party plugin.
+                logger.debug("old agent session close failed")
+        if provider is not None:
+            await provider.aclose()
+
+    task = asyncio.get_running_loop().create_task(_close())
+    tasks.add(task)
+
+    def _reap(finished: asyncio.Task[None]) -> None:
+        tasks.discard(finished)
+        if not finished.cancelled() and finished.exception() is not None:
+            logger.debug("old provider close failed")
+
+    task.add_done_callback(_reap)
 
 
 def _build_agent_wiring(
@@ -698,42 +875,38 @@ def _build_agent_wiring(
     aliases: dict[str, ResourceMeta],
     *,
     pod_resize_supported: bool = False,
-    cluster_context: str | None = None,
+    cluster: ClusterFacts | None = None,
     provider_box: list[LLMProvider | None] | None = None,
+    session_box: list[AgentSession | None] | None = None,
     startup_warnings: list[str] | None = None,
     observability: ObservabilityWiring | None = None,
-) -> tuple[
-    AgentRuntime | None,
-    AgentConfigurator | None,
-    Callable[[AgentSettings], AgentRuntime | None] | None,
-    Callable[[AgentRuntime | None, bool, str | None], None],
-    Callable[[], None],
-    list[LLMProvider | None],
-    _UIBridgeProxy,
-]:
-    """Build the initial agent runtime plus the :ai wizard's configurator/rebuild hooks.
+) -> AgentWiring:
+    """Build the initial agent session plus the :ai wizard's configurator/rebuild hooks.
 
     Provider adapters and credential storage are optional (issue #73): a
-    base installation gets a runtime-less wiring whose `:ai` command reports
+    base installation gets a session-less wiring whose `:ai` command reports
     the feature as unavailable, while a config that explicitly enables the
     agent fails with an actionable install hint.
     """
-    ui_proxy = _UIBridgeProxy()
+    ui_proxy = _AgentToolUIBridgeProxy()
+    agent_ui_proxy = _AgentUiBridgeProxy()
     obs = observability or ObservabilityWiring()
-    # The caller may hand in the box that its teardown guard reads (issue
-    # #166): the provider is owned by that box from the moment it exists,
-    # so a failure in the *rest* of the agent wiring still cleans it up.
+    # The caller may hand in the boxes that its teardown guard reads (issue
+    # #166): provider and session are owned by those boxes from the moment
+    # they exist, so a failure in the *rest* of the wiring still cleans up.
     if provider_box is None:
         provider_box = [None]
+    if session_box is None:
+        session_box = [None]
     missing = _missing_extra_packages(_AGENT_EXTRA_ROOTS)
     if missing:
-        return _agent_unavailable_wiring(config, missing, ui_proxy, provider_box)
+        return _agent_unavailable_wiring(
+            config, missing, ui_proxy, agent_ui_proxy, provider_box, session_box
+        )
 
-    # Deferred behind the capability probe: the embedded-agent loop is only
-    # composed when this wiring is actually built (issue #73 requires
-    # MCP-only startups not to import AgentRuntime at all).
-    from korvid.agent.profiles import PromptOverrides, build_profile
-    from korvid.agent.runtime import AgentRuntime
+    # Deferred behind the capability probe: the agent loop is only composed
+    # when this wiring is actually built (issue #73 requires MCP-only
+    # startups not to import the session or the engine at all).
     from korvid.providers.configurator import ProviderConfigurator
     from korvid.providers.ollama import OllamaOptions
     from korvid.providers.plugin_registry import ProviderPluginRegistry
@@ -742,15 +915,6 @@ def _build_agent_wiring(
 
     plugin_registry = ProviderPluginRegistry()
     token_store = TokenStore()
-    # Model-capability profile (issue #71): tool surface, budgets, and
-    # prompts come from one place so the initial build and every wizard
-    # rebuild stay consistent. In readonly mode the model is never even
-    # told write tools exist; resize is offered only when discovery found
-    # pods/resize (1.35 GA). `agent.model_tier` (see `_tier_to_legacy_profile`)
-    # is the only knob left for the old full/small split; prompt overrides
-    # are always empty now that `agent.prompts` is gone.
-    prompt_overrides = PromptOverrides()
-    profile = _initial_profile(config, pod_resize_supported, startup_warnings, obs.backends)
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     ollama_options = OllamaOptions(
         num_ctx=config.agent_ollama_num_ctx,
@@ -762,59 +926,52 @@ def _build_agent_wiring(
     provider = _create_initial_provider(
         config, oauth, ollama_options, plugin_registry, startup_warnings
     )
-    # Ownership transfers immediately: if anything below raises (executor,
-    # runtime, configurator), the teardown guard still closes the provider
+    # Ownership transfers immediately: if anything below raises (tools,
+    # session, configurator), the teardown guard still closes the provider
     # (a GitHub Copilot provider eagerly holds a credential HTTP client).
     provider_box[0] = provider
-    agent_runtime = (
-        AgentRuntime(
-            provider,
-            ToolExecutor(
-                kube,
-                aliases,
-                ui=ui_proxy,
-                custom_columns=_custom_column_names(config),
-                metrics=obs.metrics,
-                logs=obs.logs,
-            ),
-            tools=profile.tools,
-            max_iterations=profile.max_iterations,
-            max_history_chars=profile.max_history_chars,
-            max_result_chars=profile.max_result_chars,
-            max_tool_calls_per_iteration=profile.max_tool_calls_per_iteration,
-            strict_history_budget=profile.strict_history_budget,
-            system_prompt=profile.system_prompt,
-            ui_prompt=profile.ui_prompt,
-            cluster_context=cluster_context,
-        )
-        if provider
-        else None
-    )
 
-    # Mutable holder (shared with the caller's teardown guard) so
-    # rebuild_agent/_shutdown always see the live provider.
     # Per-cluster agent inputs: a `:ctx` switch replaces both, so a wizard
-    # rebuild after the switch must not resurrect the old cluster's prompt
-    # note or capability-gated tool set. The profile name rides along so a
-    # retarget recomposes the same profile's surface (issue #71).
-    profile_box: list[str] = [profile.name]
+    # rebuild after the switch is armed for the cluster the user is on, not
+    # the one korvid started against. The requested tier rides along so a
+    # retarget re-resolves the same intent (issue #71).
     resize_box: list[bool] = [pod_resize_supported]
-    note_box: list[str | None] = [cluster_context]
+    cluster_box: list[ClusterFacts] = [cluster if cluster is not None else _UNKNOWN_CLUSTER]
+    tier_box: list[str | None] = [config.agent_model_tier]
 
-    def persist(settings: AgentSettings) -> None:
-        save_agent_config(
-            DEFAULT_CONFIG_PATH,
-            provider=settings.provider,
-            auth_method=settings.auth_method,
-            base_url=settings.base_url,
-            model=settings.model,
-            api_key_env=settings.api_key_env,
-            model_tier=settings.model_tier,
+    def compose(built: LLMProvider, model_tier: str | None) -> tuple[AgentSession, Any]:
+        environment = _agent_environment(config, resize_box[0], obs.backends)
+        policy = _resolve_agent_policy(built, config, model_tier, environment)
+        session = _build_session(
+            built,
+            policy,
+            cluster_box[0],
+            config=config,
+            kube=kube,
+            aliases=aliases,
+            tool_bridge=ui_proxy,
+            ui_bridge=agent_ui_proxy,
+            obs=obs,
         )
+        return session, policy
+
+    from korvid.agent.model_policy import ModelRoutingError
+
+    if provider is not None:
+        try:
+            session_box[0] = compose(provider, tier_box[0])[0]
+        except ModelRoutingError as error:
+            # A model that cannot call tools is a configuration problem,
+            # not a reason to refuse to start: korvid comes up with the
+            # agent off and a warning, and `:ai` can point it elsewhere.
+            # The provider stays in the box, so teardown still releases it.
+            if startup_warnings is not None:
+                startup_warnings.append(f"agent disabled: {error}")
+            logger.warning("agent session not built; the configured model reports no tool support")
 
     configurator = ProviderConfigurator(
         token_store,
-        persist,
+        _persist_agent_settings,
         # network.ca_bundle (issue #168): endpoint calls (probe + model
         # listing) share the live providers' trust; GitHub Copilot
         # discovery keeps default trust like the live copilot provider.
@@ -823,8 +980,8 @@ def _build_agent_wiring(
     )
     close_tasks: set[asyncio.Task[None]] = set()
 
-    def rebuild_agent(settings: AgentSettings) -> AgentRuntime | None:
-        new_provider = create_provider(
+    def build_provider(settings: AgentSettings) -> LLMProvider | None:
+        return create_provider(
             enabled=True,
             provider=settings.provider,
             auth_method=settings.auth_method,
@@ -840,100 +997,137 @@ def _build_agent_wiring(
             plugin_registry=plugin_registry,
             options=settings.options,
         )
-        if new_provider is None:
-            return None
-        # Fully transactional: build profile, executor, and runtime BEFORE
-        # swapping provider_box or scheduling old provider close. If anything
-        # raises, close the new provider exactly once and leave old state live.
-        try:
-            new_profile = build_profile(
-                _tier_to_legacy_profile(settings.model_tier),
-                readonly=config.readonly,
-                resize_supported=resize_box[0],
-                observability_backends=obs.backends,
-                overrides=prompt_overrides,
-            )
-            new_runtime = AgentRuntime(
-                new_provider,
-                ToolExecutor(
-                    kube,
-                    aliases,
-                    ui=ui_proxy,
-                    custom_columns=_custom_column_names(config),
-                    metrics=obs.metrics,
-                    logs=obs.logs,
-                ),
-                tools=new_profile.tools,
-                max_iterations=new_profile.max_iterations,
-                max_history_chars=new_profile.max_history_chars,
-                max_result_chars=new_profile.max_result_chars,
-                max_tool_calls_per_iteration=new_profile.max_tool_calls_per_iteration,
-                strict_history_budget=new_profile.strict_history_budget,
-                system_prompt=new_profile.system_prompt,
-                ui_prompt=new_profile.ui_prompt,
-                cluster_context=note_box[0],
-            )
-        except Exception:
-            _close_provider_in_background(new_provider, close_tasks)
-            raise
-        # Success — now atomically swap state.
-        old = provider_box[0]
-        provider_box[0] = new_provider
-        if old is not None:
-            _close_provider_in_background(old, close_tasks)
-        profile_box[0] = new_profile.name
-        return new_runtime
 
-    def retarget_agent(
-        runtime: AgentRuntime | None,
-        pod_resize_supported: bool,
-        cluster_context: str | None,
-    ) -> None:
-        """Re-arm the agent for a new cluster (issue #36, `:ctx`).
-
-        Recomposes the active profile's tool surface with the new cluster's
-        capabilities and updates the live runtime's system prompt in place —
-        conversation history survives the switch, but later turns must
-        describe the new environment, not the one the runtime was built
-        against.
-        """
-        resize_box[0] = pod_resize_supported
-        note_box[0] = cluster_context
-        if runtime is not None:
-            retarget_profile = build_profile(
-                profile_box[0],
-                readonly=config.readonly,
-                resize_supported=pod_resize_supported,
-                observability_backends=obs.backends,
-                overrides=prompt_overrides,
-            )
-            runtime.retarget(tools=retarget_profile.tools, cluster_context=cluster_context)
-
-    return (
-        agent_runtime,
-        configurator,
-        rebuild_agent,
-        retarget_agent,
-        _make_disconnect_agent(provider_box, close_tasks),
-        provider_box,
-        ui_proxy,
+    return AgentWiring(
+        session=session_box[0],
+        configurator=configurator,
+        rebuild=_make_rebuild_agent(
+            build_provider, compose, provider_box, session_box, tier_box, close_tasks
+        ),
+        retarget=_make_retarget_agent(config, obs, provider_box, resize_box, cluster_box, tier_box),
+        disconnect=_make_disconnect_agent(provider_box, session_box, close_tasks),
+        provider_box=provider_box,
+        session_box=session_box,
+        tool_bridge=ui_proxy,
+        ui_bridge=agent_ui_proxy,
     )
 
 
-def _make_disconnect_agent(
-    provider_box: list[LLMProvider | None], close_tasks: set[asyncio.Task[None]]
-) -> Callable[[], None]:
-    """`:ai off` (issue #167): release the live provider for the session.
+def _persist_agent_settings(settings: AgentSettings) -> None:
+    """Write what the `:ai` wizard chose back to config.yaml."""
+    save_agent_config(
+        DEFAULT_CONFIG_PATH,
+        provider=settings.provider,
+        auth_method=settings.auth_method,
+        base_url=settings.base_url,
+        model=settings.model,
+        api_key_env=settings.api_key_env,
+        model_tier=settings.model_tier,
+    )
 
-    Persisted configuration is untouched, so a later wizard rebuild
-    reconnects with the kept settings. Idempotent when already off.
+
+def _make_rebuild_agent(
+    build_provider: Callable[[AgentSettings], LLMProvider | None],
+    compose: Callable[[LLMProvider, str | None], tuple[AgentSession, Any]],
+    provider_box: list[LLMProvider | None],
+    session_box: list[AgentSession | None],
+    tier_box: list[str | None],
+    close_tasks: set[asyncio.Task[None]],
+) -> Callable[[AgentSettings], AgentSession | None]:
+    """The `:ai` wizard's swap, as one transaction.
+
+    Nothing the app can observe moves until the *whole* replacement —
+    provider and the entire session graph over it — exists. A build that
+    fails halfway releases only what it built and leaves the live agent
+    running, so a mistyped endpoint costs a notification, not the session.
+    """
+
+    def rebuild_agent(settings: AgentSettings) -> AgentSession | None:
+        new_provider = build_provider(settings)
+        if new_provider is None:
+            return None
+        try:
+            new_session, _policy = compose(new_provider, settings.model_tier)
+        except Exception:
+            _close_provider_in_background(new_provider, close_tasks)
+            raise
+        old_provider = provider_box[0]
+        old_session = session_box[0]
+        provider_box[0] = new_provider
+        session_box[0] = new_session
+        tier_box[0] = settings.model_tier
+        _close_agent_in_background(old_session, old_provider, close_tasks)
+        return new_session
+
+    return rebuild_agent
+
+
+def _make_retarget_agent(
+    config: KorvidConfig,
+    obs: ObservabilityWiring,
+    provider_box: list[LLMProvider | None],
+    resize_box: list[bool],
+    cluster_box: list[ClusterFacts],
+    tier_box: list[str | None],
+) -> Callable[[AgentSession | None, bool, ClusterFacts | None], None]:
+    """Re-arm the agent for a new cluster (issue #36, `:ctx`).
+
+    The policy is re-resolved from the *current* provider's facts and the
+    new cluster's environment, so the switch picks up capabilities the new
+    cluster has (resize) without changing the routed model — which
+    `AgentSession.retarget` refuses outright. Conversation history
+    survives; what the next turn is looking at does not.
+
+    The boxes are updated even when there is no live session: a later
+    wizard rebuild must arm the agent for the cluster the user is on, not
+    the one korvid started against.
+    """
+
+    def retarget_agent(
+        session: AgentSession | None,
+        pod_resize_supported: bool,
+        cluster: ClusterFacts | None,
+    ) -> None:
+        resize_box[0] = pod_resize_supported
+        if cluster is not None:
+            cluster_box[0] = cluster
+        live_provider = provider_box[0]
+        if session is None or live_provider is None:
+            return
+        environment = _agent_environment(config, pod_resize_supported, obs.backends)
+        try:
+            policy = _resolve_agent_policy(live_provider, config, tier_box[0], environment)
+            session.retarget(policy, cluster_box[0])
+        except Exception:
+            # A refused retarget leaves the session exactly as it was — the
+            # old cluster's surface is wrong but usable, and the user can
+            # rebuild through `:ai`. Fixed message only: a provider plugin's
+            # error text is not safe to log.
+            logger.warning("agent retarget refused; the session keeps its previous policy")
+
+    return retarget_agent
+
+
+def _make_disconnect_agent(
+    provider_box: list[LLMProvider | None],
+    session_box: list[AgentSession | None],
+    close_tasks: set[asyncio.Task[None]],
+) -> Callable[[], None]:
+    """`:ai off` (issue #167): release the live session and provider.
+
+    Both boxes are cleared first, so nothing can hand the released pair to
+    a caller while the close is in flight. Persisted configuration is
+    untouched, so a later wizard rebuild reconnects with the kept
+    settings. Idempotent when already off.
     """
 
     def disconnect_agent() -> None:
-        old = provider_box[0]
+        old_provider = provider_box[0]
+        old_session = session_box[0]
         provider_box[0] = None
-        if old is not None:
-            _close_provider_in_background(old, close_tasks)
+        session_box[0] = None
+        if old_provider is not None or old_session is not None:
+            _close_agent_in_background(old_session, old_provider, close_tasks)
 
     return disconnect_agent
 
@@ -999,23 +1193,36 @@ async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPControllerB
         logger.error("%s", startup_msg)
 
 
-async def _teardown(
-    controller: MCPControllerBase | None,
-    discovery_task: asyncio.Task[None] | None,
-    provider: LLMProvider | None,
-    kube: KubeClient,
-    observability: ObservabilityWiring | None = None,
-) -> None:
+async def _teardown(state: _RunState, kube: KubeClient) -> None:
     """Bounded graceful MCP stop first; anything still pending is awaited
-    only *after* the critical provider/kube cleanup, matching what
+    only *after* the critical session/provider/kube cleanup, matching what
     asyncio.run()'s final task-gathering would do anyway - but explicitly,
-    with the exception consumed instead of swallowed."""
+    with the exception consumed instead of swallowed.
+
+    Takes the whole state so the session is released before the provider
+    it speaks through, however far wiring got: an app that never got
+    constructed never had the chance to close its own session.
+    """
+    controller = state.mcp
     leftover = await controller.shutdown() if controller is not None else None
     try:
-        await _shutdown(discovery_task, provider, kube)
+        session = state.session_box[0] if state.session_box else None
+        # Idempotent by contract, so a normal shutdown that already closed
+        # the session and this guard can both run without a double-close.
+        state.session_box[0] = None
+        if session is not None:
+            try:
+                await session.aclose()
+            except Exception:
+                logger.debug("agent session close failed during teardown")
+        await _shutdown(
+            state.discovery_box[0] if state.discovery_box else None,
+            state.provider_box[0] if state.provider_box else None,
+            kube,
+        )
     finally:
-        if observability is not None:
-            await observability.aclose()
+        if state.observability is not None:
+            await state.observability.aclose()
     if leftover is not None:
         with contextlib.suppress(BaseException):
             await leftover
@@ -1073,7 +1280,7 @@ def _make_switch_context(
     aliases: dict[str, ResourceMeta],
     app_box: list[KorvidApp],
     discovery_box: list[asyncio.Task[None]],
-    retarget_agent: Callable[[AgentRuntime | None, bool, str | None], None],
+    retarget_agent: Callable[[AgentSession | None, bool, ClusterFacts | None], None],
 ) -> Callable[[str | None], Awaitable[ContextSwitchResult]]:
     """Build the `:ctx` retarget closure (issue #36).
 
@@ -1103,13 +1310,13 @@ def _make_switch_context(
         discovery_box[:] = [asyncio.create_task(_discover_in_background(kube, aliases, app_box[0]))]
         pod_resize_supported = await _probe_pod_resize(kube, readonly=config.readonly)
         provider_info = await _probe_cloud_provider(kube)
-        # The surviving conversation must be re-armed for this cluster: new
-        # provider note in the system prompt, resize tool gated by the new
-        # cluster's capability (issue #36 review).
+        # The surviving conversation must be re-armed for this cluster:
+        # typed cluster facts the prompt harness renders, and a tool
+        # surface gated by the new cluster's capabilities (issue #36).
         retarget_agent(
-            app_box[0].agent_runtime if app_box else None,
+            app_box[0].agent_session if app_box else None,
             pod_resize_supported,
-            cluster_context_note(provider_info),
+            _cluster_facts(provider_info),
         )
         # The startup `config` is a stale snapshot here: _apply_context_switch
         # folds each applied context's namespace into app.config.
@@ -1189,6 +1396,10 @@ class _RunState:
 
     mcp: MCPControllerBase | None = None
     provider_box: list[LLMProvider | None] = dataclasses.field(default_factory=lambda: [None])
+    #: The live agent session (issue #166): the teardown guard closes it
+    #: before the provider it speaks through, so a partially-wired startup
+    #: never tears the transport out from under a session.
+    session_box: list[AgentSession | None] = dataclasses.field(default_factory=lambda: [None])
     discovery_box: list[asyncio.Task[None]] = dataclasses.field(default_factory=list)
     #: Observability connectors (issue #193): each owns an HTTP client
     #: that teardown must close, however far wiring got.
@@ -1210,13 +1421,7 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
     try:
         await _wire_and_run(config, kube, state)
     finally:
-        await _teardown(
-            state.mcp,
-            state.discovery_box[0] if state.discovery_box else None,
-            state.provider_box[0],
-            kube,
-            state.observability,
-        )
+        await _teardown(state, kube)
 
 
 async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState) -> None:
@@ -1265,20 +1470,20 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
     state.observability = observability
 
     agent_warnings: list[str] = []
-    agent_runtime, configurator, rebuild_agent, retarget_agent, disconnect_agent, _, ui_proxy = (
-        _build_agent_wiring(
-            config,
-            kube,
-            aliases,
-            pod_resize_supported=pod_resize_supported,
-            cluster_context=cluster_context_note(provider_info),
-            # Ownership lands in the teardown guard's box the moment the
-            # provider exists, so partial agent wiring is also cleaned up.
-            provider_box=state.provider_box,
-            startup_warnings=agent_warnings,
-            observability=observability,
-        )
+    agent = _build_agent_wiring(
+        config,
+        kube,
+        aliases,
+        pod_resize_supported=pod_resize_supported,
+        cluster=_cluster_facts(provider_info),
+        # Ownership lands in the teardown guard's boxes the moment provider
+        # and session exist, so partial agent wiring is also cleaned up.
+        provider_box=state.provider_box,
+        session_box=state.session_box,
+        startup_warnings=agent_warnings,
+        observability=observability,
     )
+    ui_proxy = agent.tool_bridge
     if agent_warnings:
         config = dataclasses.replace(config, warnings=(*config.warnings, *agent_warnings))
 
@@ -1308,14 +1513,14 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         write_ops=kube,
         audit=AuditLog(default_audit_path(), context=config.kube_context),
         check_permission=kube.can_i,
-        agent_runtime=agent_runtime,
+        agent_session=agent.session,
         agent_model_name=config.agent_model,
-        agent_configurator=configurator,
-        rebuild_agent=rebuild_agent,
-        disconnect_agent=disconnect_agent,
+        agent_configurator=agent.configurator,
+        rebuild_agent=agent.rebuild,
+        disconnect_agent=agent.disconnect,
         # The wiring returns no configurator only when the [agent] extra is
         # absent — the app then hides the agent panel and its commands.
-        agent_available=configurator is not None,
+        agent_available=agent.configurator is not None,
         mcp=mcp_controller,
         metrics=MetricsPoller(kube.list_pod_metrics),
         pod_resize_supported=pod_resize_supported,
@@ -1326,7 +1531,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         list_contexts=list_context_names,
         probe_context=kube.probe_context,
         switch_context=_make_switch_context(
-            config, kube, aliases, app_box, discovery_box, retarget_agent
+            config, kube, aliases, app_box, discovery_box, agent.retarget
         ),
         helm=_build_helm(config),
         telepresence=_build_telepresence(config),
@@ -1346,9 +1551,11 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         watch_warning_events=kube.watch_warning_events,
     )
     app_box.append(app)
-    # Late-bind the UI bridge: from here on the agent's UI-control tools
-    # (navigate/set_filter/open_logs/open_describe) land in this app.
+    # Late-bind both ports: from here on the agent's UI-control tools
+    # (navigate/set_filter/open_logs/open_describe) land in this app, and
+    # the session reads its workspace snapshots from the live controller.
     ui_proxy.target = AppUIBridge(app)
+    agent.ui_bridge.target = app.agent_ui.workspace_bridge
     # Follow mode (issue #153): the MCP server reads follow state from and
     # sends activity notes to the live app.
     mcp_hooks.app = app

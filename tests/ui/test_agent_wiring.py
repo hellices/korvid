@@ -204,7 +204,7 @@ async def test_status_bar_on_when_a_session_is_present() -> None:
 def _header_text(app: KorvidApp) -> str:
     from textual.widgets import Static
 
-    return str(app.query_one(AgentPanel).query_one("#agent-header", Static).renderable)
+    return str(app.query_one(AgentPanel).query_one("#agent-header", Static).render())
 
 
 async def test_header_shows_the_resolved_tier_and_its_provenance() -> None:
@@ -238,10 +238,12 @@ async def test_header_tier_survives_a_completed_turn() -> None:
 
 
 async def test_header_has_no_tier_marker_without_a_session() -> None:
+    """No session, nothing to resolve a tier from — so the header keeps
+    its default and never invents a routing decision."""
     app = make_app(session=None, model="test-model")
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")
-        await until(pilot, lambda: "test-model" in _header_text(app), label="header rendered")
+        await pilot.pause()
         assert "(" not in _header_text(app)
 
 

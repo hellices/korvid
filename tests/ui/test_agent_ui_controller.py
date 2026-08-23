@@ -244,9 +244,7 @@ class FakeNavigation:
         self.drills.append((namespace, name))
         return self.drill_error
 
-    def focused_row_data(
-        self, name: str, namespace: str | None
-    ) -> tuple[str, str | None] | None:
+    def focused_row_data(self, name: str, namespace: str | None) -> tuple[str, str | None] | None:
         return None
 
     def select_row(self, row_key: str) -> bool:
@@ -1113,18 +1111,25 @@ async def test_open_evidence_rejects_a_reference_korvid_never_minted(tmp_path: P
 async def test_open_evidence_resolves_through_the_session_ledger(tmp_path: Path) -> None:
     """The UI reads evidence only through the session's ledger — the
     session owns it, the controller never keeps its own copy."""
+    manifest = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "web-1"}}
     ledger = EvidenceLedger()
     ledger.start_turn()
     ref = ledger.record(
-        "get_logs", {"pod": "web-1", "namespace": "default"}, "boom\n", container="main"
+        "get_resource",
+        {"kind": "pods", "name": "web-1", "namespace": "default"},
+        "kind: Pod\nmetadata:\n  name: web-1\n",
     )
     assert ref is not None
-    env = Env(tmp_path=tmp_path, session=ScriptedSession(evidence=ledger))
+    env = Env(
+        tmp_path=tmp_path,
+        session=ScriptedSession(evidence=ledger),
+        manifests={("pods", "default", "web-1"): manifest},
+    )
     env.panel.mounted = True
     env.panel.visible = True
     out = await env.controller.open_evidence(ref)
     assert not out.startswith("ERROR:")
-    assert env.screens.panes
+    assert [title for title, _m, _f in env.screens.panes] == ["pods/default/web-1"]
 
 
 # ---------------------------------------------------------------------------
@@ -1153,8 +1158,11 @@ async def test_the_header_reports_a_fallback_route_honestly(tmp_path: Path) -> N
 
 
 async def test_the_header_has_no_tier_without_a_session(env: Env) -> None:
+    """No session, no header at all — and therefore no invented tier. The
+    unconfigured panel shows the setup hint instead."""
     env.controller.toggle_panel()
-    assert env.panel.tiers[-1] is None
+    assert env.panel.tiers == []
+    assert "setup_hint" in env.panel.calls
 
 
 async def test_a_rebuild_refreshes_the_header_tier(tmp_path: Path) -> None:
@@ -1168,6 +1176,7 @@ async def test_a_rebuild_refreshes_the_header_tier(tmp_path: Path) -> None:
         session=ScriptedSession(policy=fake_policy(tier=ModelTier.LOW)),
         rebuild=lambda settings: fresh,
     )
+    env.panel.visible = True  # the header only renders while the panel is up
     settings = AgentSettings(
         provider="ollama", auth_method="none", base_url=None, model="m-2", model_tier="high"
     )

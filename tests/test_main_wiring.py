@@ -7,6 +7,7 @@ import dataclasses
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import pytest
@@ -195,13 +196,13 @@ async def test_the_agent_ui_proxy_refuses_before_the_app_exists() -> None:
     exists would be a lie about the screen, and a fabricated action result
     would tell the model something happened that did not."""
     from korvid.__main__ import _AgentUiBridgeProxy
-    from korvid.agent.interaction import UiAction
+    from korvid.agent.interaction import Navigate
 
     proxy = _AgentUiBridgeProxy()
     with pytest.raises(RuntimeError, match="agent UI not ready"):
         proxy.snapshot()
     with pytest.raises(RuntimeError, match="agent UI not ready"):
-        await proxy.apply(UiAction(kind="navigate", target="pods"))
+        await proxy.apply(Navigate(view="pods"))
 
 
 async def test_the_agent_ui_proxy_forwards_once_bound() -> None:
@@ -209,6 +210,7 @@ async def test_the_agent_ui_proxy_forwards_once_bound() -> None:
     from korvid.agent.interaction import (
         AgentUiBridge,
         InteractionContext,
+        Navigate,
         PaneContext,
         UiAction,
         UiActionResult,
@@ -217,7 +219,7 @@ async def test_the_agent_ui_proxy_forwards_once_bound() -> None:
     snapshot = InteractionContext(
         kube_context="kind-dev",
         context_epoch=3,
-        focused_pane=PaneContext(kind="pods", scope="default"),
+        focused_pane=PaneContext(kind="pods", scope="default", filter_pattern=None, selected=None),
         secondary_pane=None,
         timeline_cursor=None,
     )
@@ -231,15 +233,15 @@ async def test_the_agent_ui_proxy_forwards_once_bound() -> None:
 
         async def apply(self, action: UiAction) -> UiActionResult:
             self.applied.append(action)
-            return UiActionResult(ok=True, detail="done", context_epoch=3)
+            return UiActionResult(ok=True, message="done", context=self.snapshot())
 
     proxy = _AgentUiBridgeProxy()
     bridge = _Bridge()
     proxy.target = bridge
     assert proxy.snapshot() is snapshot
-    result = await proxy.apply(UiAction(kind="navigate", target="pods"))
+    result = await proxy.apply(Navigate(view="pods"))
     assert result.ok is True
-    assert [action.kind for action in bridge.applied] == ["navigate"]
+    assert [action.view for action in bridge.applied] == ["pods"]
 
 
 def test_the_wiring_exposes_both_ports_separately() -> None:
@@ -306,9 +308,7 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
     assert wiring.tool_bridge is proxy
 
     # readonly strips every write tool: the model is never told they exist.
-    wiring = _build_agent_wiring(
-        dataclasses.replace(config, readonly=True), kube_stub, {}
-    )
+    wiring = _build_agent_wiring(dataclasses.replace(config, readonly=True), kube_stub, {})
     ro_session = wiring.session
     assert ro_session is not None
     ro_names = [t["function"]["name"] for t in ro_session.policy.tools]
@@ -339,9 +339,7 @@ def test_agent_wiring_gates_resize_tool_on_discovery(monkeypatch: object) -> Non
     )
     kube_stub = cast("Any", object())
 
-    wiring = _build_agent_wiring(
-        config, kube_stub, {}, pod_resize_supported=True
-    )
+    wiring = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
     session = wiring.session
     assert session is not None
     assert "resize_pod" in [t["function"]["name"] for t in session.policy.tools]
@@ -818,7 +816,6 @@ async def test_ctx_switch_quiesces_discovery_before_swapping_connection() -> Non
     before the connection swap, not after (issue #36 review)."""
     import asyncio
     import contextlib
-    from types import SimpleNamespace
 
     from korvid.__main__ import _make_switch_context
     from korvid.core.config import KorvidConfig
@@ -1079,7 +1076,6 @@ async def test_a_switch_retargets_the_session_with_typed_cluster_facts(
     hands it to `retarget` — the session, not the composition root, decides
     what that means for the prompt."""
     import contextlib
-    from types import SimpleNamespace
 
     import korvid.__main__ as main_mod
     from korvid.__main__ import _make_switch_context
@@ -1133,7 +1129,6 @@ async def test_ctx_switch_result_carries_the_context_namespace(
     namespace set is derived from config (issue #108)."""
     import asyncio
     import contextlib
-    from types import SimpleNamespace
 
     import korvid.__main__ as main_mod
     from korvid.__main__ import _make_switch_context
@@ -1372,9 +1367,7 @@ def test_missing_agent_extra_degrades_when_not_enabled(
     from korvid.k8s.client import KubeClient
 
     _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
-    wiring = _build_agent_wiring(
-        KorvidConfig(), cast("KubeClient", object()), {}
-    )
+    wiring = _build_agent_wiring(KorvidConfig(), cast("KubeClient", object()), {})
     session = wiring.session
     configurator = wiring.configurator
     rebuild = wiring.rebuild
@@ -1463,9 +1456,7 @@ def test_httpx_without_keyring_does_not_compose_the_agent(
         if cached in ("korvid.agent.session", "korvid.agent.profiles"):
             monkeypatch.delitem(sys.modules, cached)
 
-    wiring = _build_agent_wiring(
-        KorvidConfig(), cast("KubeClient", object()), {}
-    )
+    wiring = _build_agent_wiring(KorvidConfig(), cast("KubeClient", object()), {})
     session = wiring.session
     configurator = wiring.configurator
     rebuild = wiring.rebuild
@@ -2209,9 +2200,15 @@ class _FakeAppCapturesKwargs:
         # after construction: the agent controller it delegates every UI
         # tool to, and the dispatcher that marshals the call onto the app
         # context. Sentinels are enough - the bridge only stores them.
-        self._agent_ui: Any = object()
+        # `agent_ui` is also read directly: the composition root binds the
+        # session's workspace port to the controller's bridge.
+        self._agent_ui: Any = SimpleNamespace(workspace_bridge=object())
         self._bridge_dispatch: Any = object()
         _FakeAppCapturesKwargs.instances.append(self)
+
+    @property
+    def agent_ui(self) -> Any:
+        return self._agent_ui
 
     def on_aliases_updated(self) -> None:
         pass
@@ -2427,7 +2424,9 @@ class _CountingBridge:
         return InteractionContext(
             kube_context="kind-dev",
             context_epoch=1,
-            focused_pane=PaneContext(kind="pods", scope="default"),
+            focused_pane=PaneContext(
+                kind="pods", scope="default", filter_pattern=None, selected=None
+            ),
             secondary_pane=None,
             timeline_cursor=None,
         )
@@ -2436,7 +2435,7 @@ class _CountingBridge:
         from korvid.agent.interaction import UiActionResult
 
         self.applied.append(action)
-        return UiActionResult(ok=True, detail="done", context_epoch=1)
+        return UiActionResult(ok=True, message="done", context=self.snapshot())
 
 
 async def test_a_turn_carries_the_cluster_facts_and_the_configured_rules(
@@ -2632,3 +2631,37 @@ async def test_teardown_after_a_normal_shutdown_is_idempotent(
     await main_mod._teardown(state, cast("Any", _Kube()))
     assert session.closed == 1  # the box is cleared after the first close
     assert closes == ["session"]
+
+
+async def test_a_model_that_reports_no_tool_support_warns_instead_of_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider that says it cannot call tools has no usable session — but
+    that is a configuration problem, not a reason to refuse to start korvid.
+
+    The wiring degrades to no session and a startup warning; the panel then
+    shows the setup hint and `:ai` can point the agent somewhere workable.
+    The provider is still owned by the box, so teardown releases it.
+    """
+    from korvid.__main__ import _build_agent_wiring
+
+    class _ToollessProvider(_RecordingProvider):
+        @property
+        def capabilities(self) -> Any:
+            from korvid.agent.model_policy import ModelCapabilities
+
+            return dataclasses.replace(ModelCapabilities.unknown(), supports_tools=False)
+
+    def _create(**kwargs: Any) -> Any:
+        return _ToollessProvider() if kwargs.get("enabled", False) else None
+
+    monkeypatch.setattr("korvid.providers.registry.create_provider", _create)
+    warnings: list[str] = []
+    wiring = _build_agent_wiring(
+        _agent_config(), cast("Any", object()), {}, startup_warnings=warnings
+    )
+
+    assert wiring.session is None
+    assert wiring.session_box == [None]
+    assert isinstance(wiring.provider_box[0], _ToollessProvider)
+    assert any("tool" in warning for warning in warnings)

@@ -286,12 +286,16 @@ class SwitchWrites(Protocol):
 
 
 class SwitchAgent(Protocol):
-    """The agent session's busy flag and its context-change note."""
+    """The agent session's busy flag — all the switch needs to know.
+
+    The cluster change itself is no longer announced as prose: the
+    session is retargeted with typed cluster facts by the composition
+    root, and its own epoch snapshot tells the next turn what it is
+    looking at.
+    """
 
     @property
     def busy(self) -> bool: ...
-
-    def note_context_switch(self, note: str) -> None: ...
 
 
 class ContextSwitchCoordinator(ContextGuard):
@@ -800,11 +804,6 @@ class ContextSwitchCoordinator(ContextGuard):
         # view-scoped binding refresh.
         self._workspace().reset_view_after_switch()
         self._session.retarget_tools(result)
-        if name != old:
-            self._agent().note_context_switch(
-                f"kube context switched from {old or '(default)'} to {name};"
-                " all cluster state was reset"
-            )
 
 
 def describe_context_error(exc: Exception) -> str:

@@ -27,9 +27,7 @@ class BlockingSession(FakeSession):
     """Streams a little text, then blocks until stopped."""
 
     def __init__(self, events: list[AgentEvent] | None = None) -> None:
-        super().__init__(
-            [TextDelta(text="let me check")] if events is None else events, block=True
-        )
+        super().__init__([TextDelta(text="let me check")] if events is None else events, block=True)
 
 
 def _panel_text(app: KorvidApp) -> str:
