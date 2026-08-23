@@ -152,6 +152,37 @@ class EvidenceLedger:
         """The evidence behind a reference, or None if it is not ours."""
         return self._items.get(ref)
 
+    def prompt_note(self) -> str:
+        """A bounded, korvid-authored reference table for the system prompt.
+
+        The prompt harness (issue #316 task 6) needs this ledger's own
+        fact - which references it minted, in read order - as its own
+        method, independent of `agent.runtime.evidence_note`: the harness
+        must not import the v1 runtime it is meant to outlive, so the two
+        are separate implementations of the same rule rather than one
+        shared helper. Each row names only the tool that produced the
+        reference, exactly as `runtime.evidence_note` does: `kind`,
+        `name`, and `namespace` are tool arguments the model supplied, and
+        this table lives in the one region of the prompt that is
+        korvid's own, so nothing the model wrote may appear in it.
+
+        Returns:
+            One short line per reference, in read order, or `""` when
+            nothing has been read yet - a turn that reads nothing pays no
+            prompt overhead for the citation protocol.
+        """
+        if not self._items:
+            return ""
+        lines = [
+            "Evidence you may cite, in the order you read it ([E1] is your"
+            " first read this turn). Cite these references for each"
+            " diagnostic claim; any other is shown to the user as"
+            " unsupported. Say so plainly when the evidence does not settle"
+            " a question."
+        ]
+        lines.extend(f"[{item.ref}] {item.tool}" for item in self._items.values())
+        return "\n".join(lines)
+
     def references(self) -> tuple[str, ...]:
         """Every reference minted this turn, in the order they were read."""
         return tuple(self._items)

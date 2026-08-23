@@ -1,34 +1,21 @@
-"""Cluster context notes injected into the agent system prompt (issue #30).
+"""Compatibility delegate for the cluster context note (issue #30).
 
-Pure formatting: turns a detected `ProviderInfo` into a one-sentence system
-prompt addition. No annotation catalog is shipped — the note only tells the
-model *which* provider to reason about; the model supplies the CSP-specific
-knowledge (annotations, LB classes, ingress flags) itself.
+The formatting logic moved to `korvid.agent.prompt_harness.cluster_context_note`
+as a pure function of Task 1's `ClusterFacts` (issue #316 task 6 / design
+doc §7), so the prompt harness can compose it without depending on the
+k8s-layer `ProviderInfo` type. This module survives only because
+`__main__.py` still probes a `ProviderInfo` at connection time and calls
+this exact name; it is deleted in issue #316 task 14 once the composition
+root converts that probe into `ClusterFacts` before crossing the
+boundary, per the design doc's "no preformatted prompt string crosses the
+boundary" rule.
 """
 
 from __future__ import annotations
 
+from korvid.agent.interaction import ClusterFacts
+from korvid.agent.prompt_harness import cluster_context_note as _cluster_context_note
 from korvid.k8s.csp import ProviderInfo
-
-#: Human-facing provider names for the prompt.
-_PROVIDER_NAMES: dict[str, str] = {
-    "azure": "Azure",
-    "aws": "AWS",
-    "gcp": "Google Cloud",
-    "openstack": "OpenStack",
-    "vsphere": "vSphere",
-    "digitalocean": "DigitalOcean",
-    "hetzner": "Hetzner",
-    "oracle": "Oracle Cloud",
-    "ibm": "IBM Cloud",
-    "alibaba": "Alibaba Cloud",
-}
-
-_DISTRIBUTION_NAMES: dict[str, str] = {
-    "aks": "AKS",
-    "eks": "EKS",
-    "gke": "GKE",
-}
 
 
 def cluster_context_note(info: ProviderInfo) -> str | None:
@@ -38,24 +25,8 @@ def cluster_context_note(info: ProviderInfo) -> str | None:
         info: Detection result from `korvid.k8s.csp.detect_provider`.
 
     Returns:
-        A one-sentence note naming the provider (and managed distribution
-        when known) and directing the model to answer provider-specific
-        requests with appropriate annotations — or None when the provider
-        is unknown (no note beats a wrong note).
+        See `korvid.agent.prompt_harness.cluster_context_note`.
     """
-    if not info.known:
-        return None
-    provider_name = _PROVIDER_NAMES.get(info.provider, info.provider)
-    if info.distribution:
-        dist_name = _DISTRIBUTION_NAMES.get(info.distribution, info.distribution)
-        where = f"{provider_name} ({dist_name} managed)"
-    else:
-        where = provider_name
-    return (
-        f"This cluster runs on {where}. When the user asks for "
-        "provider-specific behavior — exposing services publicly or "
-        "internally, load balancer or ingress annotations, storage classes — "
-        f"give {where}-appropriate annotations and settings without making "
-        "them name the cloud provider, and verify current resource state "
-        "with tools before suggesting changes."
+    return _cluster_context_note(
+        ClusterFacts(provider=info.provider, distribution=info.distribution)
     )

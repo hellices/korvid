@@ -4,6 +4,12 @@ The note tells the model which cloud provider the cluster runs on so
 provider-specific requests ("expose this service publicly") produce
 appropriate annotations without the user naming the CSP. No annotation
 catalog is shipped — the LLM supplies that knowledge.
+
+`korvid.agent.context.cluster_context_note` is now a thin compatibility
+delegate over `korvid.agent.prompt_harness.cluster_context_note` (issue
+#316 task 6): these tests pin the `ProviderInfo`-typed entry point
+`__main__.py` still calls; the equivalent `ClusterFacts`-typed assertions
+live in `tests/agent/test_prompt_harness.py`.
 """
 
 from korvid.agent.context import cluster_context_note
