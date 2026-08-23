@@ -341,7 +341,12 @@ _MANIFESTS: dict[str, dict[str, Any]] = {
 
 async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
     meta = RELATIONSHIP_ALIASES.get(kind)
-    base = _MANIFESTS.get(meta.plural if meta is not None else kind, POD_MANIFEST)
+    if meta is None:
+        raise KeyError(f"unknown demo kind: {kind}")
+    base = _MANIFESTS.get(meta.plural)
+    if base is None:
+        api_version = f"{meta.group}/{meta.version}" if meta.group else meta.version
+        base = {"apiVersion": api_version, "kind": meta.kind, "metadata": {}}
     manifest = dict(base)
     metadata = dict(base["metadata"])
     metadata["name"] = name

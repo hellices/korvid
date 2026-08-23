@@ -471,7 +471,10 @@ _PAYMENT_RELATIONSHIPS = RelationshipFacts(
 
 Add a matching `CONFIGMAP_MANIFEST` to `_MANIFESTS["configmaps"]`, and
 canonicalize `get_manifest` through `RELATIONSHIP_ALIASES` so `cm` and
-`configmap` describe the same synthetic object.
+`configmap` describe the same synthetic object. For known relationship-only
+kinds without a detailed fixture, return a minimal manifest with that meta's
+real `apiVersion` and `kind`; reject unknown kinds instead of falling back to a
+Pod.
 
 Pass `uid="pod-payment"` and `relationships=_PAYMENT_RELATIONSHIPS` to the
 existing `payment-worker-6c9f7d-b3xnq` call. Add this entry to `EXTRA`:

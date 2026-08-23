@@ -1193,6 +1193,21 @@ def test_configmap_discovery_is_scoped_to_the_relationship_scene() -> None:
     assert manifest["metadata"]["name"] == "payment-config"
 
 
+def test_every_relationship_kind_describes_a_matching_manifest() -> None:
+    """Known empty fixture kinds must never fall back to a Pod manifest."""
+    harness = _demo_harness()
+    metas = {meta.plural: meta for meta in harness.RELATIONSHIP_ALIASES.values()}
+    for plural, meta in metas.items():
+        namespace = "shop" if meta.namespaced else None
+        manifest = asyncio.run(harness.get_manifest(plural, namespace, f"demo-{plural}"))
+        expected_api_version = f"{meta.group}/{meta.version}" if meta.group else meta.version
+        assert manifest["apiVersion"] == expected_api_version
+        assert manifest["kind"] == meta.kind
+        assert manifest["metadata"]["name"] == f"demo-{plural}"
+        if namespace is not None:
+            assert manifest["metadata"]["namespace"] == namespace
+
+
 def test_payment_relationship_facts_come_from_the_described_pod_manifest() -> None:
     """The capture's evidence path must be one the production extractor emits."""
     harness = _demo_harness()
