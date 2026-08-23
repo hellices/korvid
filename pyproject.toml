@@ -162,6 +162,7 @@ extend-exclude = [
 
 [tool.typos.default.extend-words]
 aks = "aks"  # Azure Kubernetes Service — not a typo of "ask"
+paeth = "paeth"  # Alan W. Paeth, who defined PNG filter type 4 — not "path"
 
 [tool.deptry]
 known_first_party = ["korvid"]
