@@ -22,6 +22,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from korvid.agent.conversation import (
+    INTERRUPT_MARKER,
     MAX_HISTORY_TURNS,
     ConversationBudgetError,
     ConversationState,
@@ -516,3 +517,131 @@ def test_a_turn_runs_cleanly_after_an_interrupt() -> None:
     _text_turn(convo, "second", "answer")
     assert convo.messages[-1]["content"] == "answer"
     assert convo.has_unmatched_tool_calls is False
+
+
+# -- the engine's own mechanisms (Task 10) ------------------------------------
+
+
+def test_mark_transmitted_settles_a_request_that_streamed_nothing() -> None:
+    """Handoff proof, not stream content, is what makes a request cost."""
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("q")
+    convo.start_iteration(prompt_estimate=40)
+    convo.mark_transmitted()
+    convo.append_assistant("")
+    assert convo.complete_turn() == (40, 0, True)
+
+
+def test_mark_transmitted_requires_an_open_iteration() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("q")
+    with pytest.raises(RuntimeError, match="no open iteration"):
+        convo.mark_transmitted()
+
+
+def test_a_streamed_tool_call_is_output_even_when_no_text_streamed() -> None:
+    """A tool-only iteration generated the call it emitted (issue #316)."""
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("q")
+    convo.start_iteration(prompt_estimate=40)
+    convo.record_stream_tool_call("get_logs", '{"pod":"api-0"}')
+    event = convo.finalize_interrupt()
+    assert event.input_tokens == 40
+    assert event.output_tokens == (len("get_logs") + len('{"pod":"api-0"}')) // 4
+    assert event.estimated is True
+
+
+def test_a_streamed_tool_call_never_contaminates_the_partial_answer() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("q")
+    convo.start_iteration(prompt_estimate=40)
+    convo.record_stream_tool_call("get_logs", '{"pod":"api-0"}')
+    convo.finalize_interrupt()
+    assert convo.messages[-1]["content"] == INTERRUPT_MARKER
+
+
+def test_recording_a_streamed_tool_call_requires_an_open_iteration() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("q")
+    with pytest.raises(RuntimeError, match="no open iteration"):
+        convo.record_stream_tool_call("get_logs", "{}")
+
+
+def test_abandon_iteration_unwinds_only_what_that_iteration_appended() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    _tool_turn(convo, "q")
+    convo.start_turn("second")
+    convo.start_iteration(prompt_estimate=40)
+    convo.record_stream_text("partial")
+    convo.abandon_iteration()
+    assert [message["role"] for message in convo.messages] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "user",
+    ]
+    assert convo.has_unmatched_tool_calls is False
+    assert convo.complete_turn() == (40, 1, True)
+
+
+def test_abandon_iteration_charges_nothing_for_a_request_never_transmitted() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("q")
+    convo.start_iteration(prompt_estimate=40)
+    convo.abandon_iteration()
+    assert convo.complete_turn() == (0, 0, False)
+
+
+def test_abandon_iteration_requires_an_open_iteration() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("q")
+    with pytest.raises(RuntimeError, match="no open iteration"):
+        convo.abandon_iteration()
+
+
+def test_rollback_turn_drops_the_turn_and_keeps_the_cost_it_paid() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    _text_turn(convo, "first", "answer", input_tokens=5, output_tokens=1)
+    convo.start_turn("second")
+    convo.start_iteration(prompt_estimate=40)
+    convo.record_stream_text("")
+    convo.commit_usage(10, 2)
+    convo.append_assistant("", [{"id": "c1", "name": "get_logs", "arguments": "{}"}])
+    assert convo.rollback_turn() == (10, 2, False)
+    assert [message["content"] for message in convo.messages] == ["first", "answer"]
+    assert convo.has_unmatched_tool_calls is False
+    assert convo.total_tokens == (15, 3)
+
+
+def test_rollback_turn_counts_an_iteration_that_never_landed() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("q")
+    convo.start_iteration(prompt_estimate=40)
+    convo.record_stream_text("partial")
+    assert convo.rollback_turn() == (40, 1, True)
+    assert convo.messages == []
+    assert convo.usage_estimated is True
+
+
+def test_rollback_turn_requires_an_active_turn() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    with pytest.raises(RuntimeError, match="no active turn"):
+        convo.rollback_turn()
+
+
+def test_a_turn_runs_cleanly_after_a_rollback() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("first")
+    convo.start_iteration(prompt_estimate=40)
+    convo.record_stream_text("partial")
+    convo.rollback_turn()
+    _text_turn(convo, "second", "answer")
+    assert [message["content"] for message in convo.messages] == ["second", "answer"]
+
+
+def test_history_chars_reports_what_the_budget_is_measured_against() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    assert convo.history_chars == 0
+    _text_turn(convo, "question", "answer")
+    assert convo.history_chars >= len("question") + len("answer")

@@ -583,3 +583,58 @@ def test_cluster_facts_contract_available() -> None:
     # Guards the interaction import surface the harness tests rely on.
     facts = ClusterFacts(provider="azure", distribution="aks")
     assert facts.provider == "azure"
+
+
+# --- refusing a call the engine will not dispatch (Task 10) ------------------
+
+
+async def test_reject_answers_a_call_without_touching_a_port() -> None:
+    """The engine's own refusals reuse this harness's one error format."""
+    execution = _RecordingExecution()
+    bridge = _RecordingBridge()
+    harness = _harness(
+        _policy(["get_logs"], max_tool_calls=None), execution=execution, bridge=bridge
+    )
+
+    result = harness.reject("c1", "get_logs", "arguments must be a JSON object")
+
+    assert result == ToolExecution(
+        call_id="c1",
+        name="get_logs",
+        outcome=ToolOutcome(text="ERROR: arguments must be a JSON object", error=True),
+        evidence_ref=None,
+    )
+    assert execution.calls == []
+    assert bridge.actions == []
+
+
+async def test_reject_is_bounded() -> None:
+    harness = _harness(_policy(["get_logs"], max_tool_calls=None))
+
+    result = harness.reject("c1", "get_logs", "x" * 10_000)
+
+    assert len(result.outcome.text) < 10_000
+    assert result.outcome.error is True
+
+
+async def test_reject_mints_no_evidence() -> None:
+    evidence = EvidenceLedger()
+    harness = _harness(_policy(["get_logs"], max_tool_calls=None), evidence=evidence)
+
+    harness.reject("c1", "get_logs", "arguments must be a JSON object")
+
+    assert evidence.references() == ()
+    assert evidence.prompt_note() == ""
+
+
+async def test_reject_does_not_spend_the_iteration_budget() -> None:
+    """A call that never ran cannot consume the budget a real call needs."""
+    execution = _RecordingExecution()
+    harness = _harness(_policy(["get_logs"], max_tool_calls=1), execution=execution)
+    harness.begin_iteration()
+
+    harness.reject("c1", "get_logs", "arguments must be a JSON object")
+    result = await harness.execute("c2", "get_logs", {"pod": "api-1", "namespace": "default"})
+
+    assert execution.calls == [("get_logs", {"pod": "api-1", "namespace": "default"})]
+    assert result.outcome.error is False
