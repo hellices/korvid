@@ -261,6 +261,14 @@ def _create_run_dir(base: Path) -> tuple[str, Path]:
         return run_id, run_dir
 
 
+def _create_run_dir_or_report(base: Path) -> tuple[str, Path] | None:
+    try:
+        return _create_run_dir(base)
+    except OSError as exc:
+        print(f"error: could not create artifact directory {base}: {exc}", file=sys.stderr)
+        return None
+
+
 def _exit_code(exc: SystemExit) -> int:
     code = exc.code
     return code if isinstance(code, int) else 2
@@ -415,6 +423,24 @@ def _write_result_artifact(path: Path, content: str) -> bool:
     return True
 
 
+def _capture_campaign_serving(args: argparse.Namespace) -> dict[str, Any] | None:
+    if args.scripted:
+        return None
+    serving = asyncio.run(
+        capture_serving(
+            os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),
+            os.environ.get("KORVID_EVAL_MODEL", "").strip(),
+            fetch=httpx_fetch(
+                api_key=os.environ.get("KORVID_EVAL_API_KEY", "").strip(),
+                timeout_seconds=PROBE_TIMEOUT_SECONDS,
+            ),
+            warmup=False,
+        )
+    )
+    warn_if_unpinned(serving)
+    return serving
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the pack.
 
@@ -441,21 +467,11 @@ def main(argv: list[str] | None = None) -> int:
         path for path in (args.artifacts, args.json, args.out) if path is not None
     )
     revision = _korvid_revision(excluded_paths=excluded_paths)
-    run_id, run_dir = _create_run_dir(args.artifacts)
-    serving = None
-    if not args.scripted:
-        serving = asyncio.run(
-            capture_serving(
-                os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),
-                os.environ.get("KORVID_EVAL_MODEL", "").strip(),
-                fetch=httpx_fetch(
-                    api_key=os.environ.get("KORVID_EVAL_API_KEY", "").strip(),
-                    timeout_seconds=PROBE_TIMEOUT_SECONDS,
-                ),
-                warmup=False,
-            )
-        )
-        warn_if_unpinned(serving)
+    run_identity = _create_run_dir_or_report(args.artifacts)
+    if run_identity is None:
+        return 1
+    run_id, run_dir = run_identity
+    serving = _capture_campaign_serving(args)
     records = asyncio.run(
         _run(
             args,

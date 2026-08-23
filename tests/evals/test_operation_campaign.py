@@ -221,6 +221,29 @@ def test_campaign_reports_result_artifact_write_errors(
     assert "Traceback" not in captured.err
 
 
+def test_campaign_reports_artifact_directory_creation_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.write_text("not a directory", encoding="utf-8")
+
+    code = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--scripted",
+            "--artifacts",
+            str(artifacts),
+        ]
+    )
+
+    stderr = capsys.readouterr().err
+    assert code == 1
+    assert f"error: could not create artifact directory {artifacts}" in stderr
+    assert "Traceback" not in stderr
+
+
 def test_revision_is_captured_before_artifact_directory_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

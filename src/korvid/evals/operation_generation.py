@@ -49,6 +49,7 @@ _NAMESPACE_POOL = (
 _NAME_SUFFIXES = ("blue", "green", "teal", "amber", "slate", "ivory", "coral", "onyx")
 _MAX_DISTRACTORS = 2
 _MAX_RESOURCE_NAME_LENGTH = 253
+_MAX_DNS_LABEL_LENGTH = 63
 
 
 @dataclass(frozen=True)
@@ -255,10 +256,20 @@ def _generated_name(rng: random.Random, old: OperationTarget, used: set[str]) ->
     start = rng.randrange(len(_NAME_SUFFIXES))
     for offset in range(len(_NAME_SUFFIXES)):
         suffix = _NAME_SUFFIXES[(start + offset) % len(_NAME_SUFFIXES)]
-        candidate = f"{old.name}-{suffix}"
+        suffix_text = f"-{suffix}"
+        labels = old.name.split(".")
+        prefix_labels = [
+            label[:_MAX_DNS_LABEL_LENGTH].rstrip("-") or "object" for label in labels[:-1]
+        ]
+        final_label = labels[-1]
+        base = final_label[: _MAX_DNS_LABEL_LENGTH - len(suffix_text)].rstrip("-")
+        if not base:
+            base = "object"
+        final_candidate = f"{base}{suffix_text}"
+        candidate = ".".join((*prefix_labels, final_candidate))
         if len(candidate) <= _MAX_RESOURCE_NAME_LENGTH and candidate not in used:
             return candidate
-    base = old.name[: _MAX_RESOURCE_NAME_LENGTH - 9].rstrip(".-") or "object"
+    base = old.name.rpartition(".")[2][: _MAX_DNS_LABEL_LENGTH - 9].rstrip("-") or "object"
     while True:
         candidate = f"{base}-{rng.getrandbits(32):08x}"
         if candidate not in used:

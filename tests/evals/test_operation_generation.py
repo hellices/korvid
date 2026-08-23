@@ -20,7 +20,8 @@ from korvid.evals.scenario import ContainerLogs
 
 _TEMPLATES = {journey.id: journey for journey in load_operation_journeys(bundled_operations_dir())}
 _DNS1123_SUBDOMAIN = re.compile(
-    r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*"
+    r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*"
 )
 
 
@@ -137,6 +138,25 @@ def test_generated_target_name_respects_the_dns_subdomain_limit() -> None:
     generated = operation_generation._generated_name(random.Random(7), target, set())
 
     assert len(generated) <= 253
+
+
+def test_generated_target_name_respects_each_dns_label_limit() -> None:
+    target = replace(_TEMPLATES["scale-deployment-up"].target, name="a" * 60)
+
+    generated = operation_generation._generated_name(random.Random(7), target, set())
+
+    assert all(len(label) <= 63 for label in generated.split("."))
+
+
+def test_generated_target_name_caps_nonfinal_dns_labels() -> None:
+    target = replace(
+        _TEMPLATES["scale-deployment-up"].target,
+        name=f"{'a' * 64}.checkout",
+    )
+
+    generated = operation_generation._generated_name(random.Random(7), target, set())
+
+    assert all(len(label) <= 63 for label in generated.split("."))
 
 
 def test_generated_target_name_remains_a_dns_subdomain_after_truncation() -> None:
