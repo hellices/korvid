@@ -1647,3 +1647,114 @@ async def test_gate_returns_the_client_it_checked(tmp_path: Path) -> None:
     app._helm_ctl._helm = rebinding_helm  # simulates a :ctx rebind mid-gate
 
     assert app._helm_ctl.gate() is first, "returned a client the check never saw"
+
+
+# ---------------------------------------------------------------------------
+# Ownership: the helm entry points live on HelmController (Deep Task 10)
+# ---------------------------------------------------------------------------
+
+
+async def test_the_controller_refuses_a_rollback_raised_off_the_revision_view(
+    tmp_path: Path,
+) -> None:
+    """`check_action` only gates key dispatch (issue #114): a direct call
+    must not treat an unrelated view's focused row as a revision."""
+    app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause()  # the pods view: no helm rows at all
+        app._helm_ctl.rollback_selected()
+        await pilot.pause()
+        assert len(app.screen_stack) == 1
+        assert any(
+            "Helm rollback is only available on the helmrevisions view" in str(n.message)
+            for n in app._notifications
+        )
+
+
+async def test_the_controller_refuses_an_uninstall_raised_off_the_release_view(
+    tmp_path: Path,
+) -> None:
+    app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause()  # the pods view: no helm rows at all
+        app._helm_ctl.uninstall_selected()
+        await pilot.pause()
+        assert len(app.screen_stack) == 1
+        assert any(
+            "Helm uninstall is only available on the helmreleases view" in str(n.message)
+            for n in app._notifications
+        )
+
+
+async def test_the_controller_captures_the_rollback_target_at_the_keypress(
+    tmp_path: Path,
+) -> None:
+    from unittest import mock
+
+    app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    seen: list[tuple[Any, ...]] = []
+
+    async def spy(helm_arg: Any, row: Any, ns: Any, name: Any, namespace: Any, epoch: Any) -> None:
+        seen.append((row.release, row.revision, namespace))
+
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        with mock.patch.object(app._helm_ctl, "rollback", spy):
+            app._helm_ctl.rollback_selected()
+            await until(pilot, lambda: bool(seen), label="rollback worker ran")
+            assert seen == [("web", 2, "default")]
+
+
+async def test_the_controller_captures_the_uninstall_target_at_the_keypress(
+    tmp_path: Path,
+) -> None:
+    from unittest import mock
+
+    app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    seen: list[tuple[Any, ...]] = []
+
+    async def spy(helm_arg: Any, row: Any, ns: Any, name: Any, namespace: Any, epoch: Any) -> None:
+        seen.append((row.name, namespace))
+
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        with mock.patch.object(app._helm_ctl, "uninstall", spy):
+            app._helm_ctl.uninstall_selected()
+            await until(pilot, lambda: bool(seen), label="uninstall worker ran")
+            assert seen == [("web", "default")]
+
+
+async def test_the_controller_owns_the_revision_history_drill(tmp_path: Path) -> None:
+    """`h` on a release row drills into that release's revisions; raised on
+    any other view it is refused with the same guard as the write flows."""
+    app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause()  # the pods view: no helm rows at all
+        await app._helm_ctl.history()
+        await pilot.pause()
+        assert app.current_kind == "pods"
+        assert any(
+            "Helm history is only available on the helmreleases view" in str(n.message)
+            for n in app._notifications
+        )
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await app._helm_ctl.history()
+        await until(pilot, lambda: app.current_kind == "helmrevisions", label="revision drill")
+
+
+async def test_the_controller_refuses_install_and_upgrade_off_the_release_view(
+    tmp_path: Path,
+) -> None:
+    app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause()  # the pods view: no helm rows at all
+        app._helm_ctl.install()
+        app._helm_ctl.upgrade()
+        await pilot.pause()
+        assert len(app.screen_stack) == 1
+        messages = [str(n.message) for n in app._notifications]
+        assert any("Helm install is only available" in m for m in messages)
+        assert any("Helm upgrade is only available" in m for m in messages)

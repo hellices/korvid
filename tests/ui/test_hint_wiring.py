@@ -688,10 +688,10 @@ async def test_overlay_opens_when_event_fetch_stalls(monkeypatch: Any) -> None:
     """Review fix (PR #51 r6): a stalled events API must not hold the overlay
     hostage for the HTTP client's full timeout - bound the wait with a short
     UI timeout and open with the events marked unavailable."""
-    from korvid.ui import app as app_mod
+    from korvid.ui import resource_inspect_controller as inspect_mod
     from korvid.ui.widgets.hint_detail import HintDetailScreen
 
-    monkeypatch.setattr(app_mod, "_HINT_EVENTS_TIMEOUT", 0.05)
+    monkeypatch.setattr(inspect_mod, "_HINT_EVENTS_TIMEOUT", 0.05)
     stall = asyncio.Event()
 
     async def get_events(

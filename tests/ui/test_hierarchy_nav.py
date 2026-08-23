@@ -266,7 +266,7 @@ async def test_goto_from_tree_jumps_to_view_with_cursor() -> None:
         )
         await until(
             pilot,
-            lambda: app._cursor_row_key() == "default/web-nginx",
+            lambda: app._inspect_surface.cursor_row_key() == "default/web-nginx",
             label="target resource selected",
         )
 
@@ -395,11 +395,11 @@ async def test_hierarchy_return_is_scoped_to_the_initiating_pane() -> None:
         await pilot.press("escape")  # pane 1 shows the same kind - must not hijack
         await pilot.pause()
         assert not isinstance(app.screen, HierarchyScreen)
-        assert app._panes[1].kind == "deployments"  # pane 1 was not navigated away
+        assert app._workspace.panes[1].kind == "deployments"  # pane 1 was not navigated away
         await pilot.press("ctrl+w", "w")  # focus back to the initiating pane 0
         await pilot.press("escape")
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree reopened")
-        assert app._panes[0].kind == "helmreleases"
+        assert app._workspace.panes[0].kind == "helmreleases"
 
 
 async def test_a_jump_in_one_pane_does_not_erase_the_other_panes_return() -> None:
@@ -430,13 +430,15 @@ async def test_a_jump_in_one_pane_does_not_erase_the_other_panes_return() -> Non
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree 2 open")
         await pilot.press("down")
         await pilot.press("enter")  # pane 1 jumps too
-        await until(pilot, lambda: app._panes[1].kind == "deployments", label="pane 1 jumped")
+        await until(
+            pilot, lambda: app._workspace.panes[1].kind == "deployments", label="pane 1 jumped"
+        )
         await pilot.press("ctrl+w", "w")  # back to pane 0
         await pilot.press("escape")
         await until(
             pilot, lambda: isinstance(app.screen, HierarchyScreen), label="pane 0 tree reopened"
         )
-        assert app._panes[0].kind == "helmreleases"
+        assert app._workspace.panes[0].kind == "helmreleases"
 
 
 async def test_return_origin_is_captured_at_tree_open_not_at_dismissal() -> None:
@@ -451,7 +453,7 @@ async def test_return_origin_is_captured_at_tree_open_not_at_dismissal() -> None
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         # the agent switches the underlying pane while the tree is open
-        result = await app.agent_navigate("pods", None)
+        result = await app._agent_ui.agent_navigate("pods", None)
         assert result.startswith("switched")
         await pilot.press("down")
         await pilot.press("enter")  # goto Deployment/web-nginx
@@ -487,40 +489,42 @@ async def test_return_is_refused_when_a_ctx_switch_starts_during_the_navigate() 
         )
 
         # A switch begins the moment the reopen's navigate runs.
-        original = app._navigate
+        original = app._workspace_ctl.navigate
 
         async def navigate_then_switch(*args: object, **kwargs: object) -> None:
             await original(*args, **kwargs)  # type: ignore[arg-type]  # passthrough wrapper
-            app._ctx_switching = True
+            app._ctx._switching = True
 
-        app._navigate = navigate_then_switch  # type: ignore[method-assign]  # test seam
+        app._workspace_ctl.navigate = navigate_then_switch  # type: ignore[method-assign]  # test seam
         try:
             await pilot.press("escape")
             await until(
                 pilot,
-                lambda: app._ctx_switching and not isinstance(app.screen, HierarchyScreen),
+                lambda: app._ctx.switching() and not isinstance(app.screen, HierarchyScreen),
                 label="hierarchy return aborted by context switch",
             )
             assert not isinstance(app.screen, HierarchyScreen)
         finally:
-            app._navigate = original  # type: ignore[method-assign]  # restore
-            app._ctx_switching = False
+            app._workspace_ctl.navigate = original  # type: ignore[method-assign]  # restore
+            app._ctx._switching = False
 
 
 async def test_refresh_hierarchy_survives_an_empty_screen_stack() -> None:
     """A ResourcesUpdated dispatched during app teardown reaches
-    _refresh_hierarchy after the screen stack is emptied: reading
+    refresh_hierarchy after the screen stack is emptied: reading
     App.screen then raises ScreenStackError and fails the whole run
     (flaky-CI issue #147) - the refresh must treat 'no screen' as
     'no tree open'."""
     app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test():
-        # Simulate the teardown interleaving deterministically: the message
-        # handler runs while the screen stack is already empty.
+        # A tree must be considered open, or the refresh returns before it
+        # ever reads the screen; then simulate the teardown interleaving
+        # deterministically: the handler runs while the stack is empty.
+        app._workspace_ctl._hierarchy_ctx = ("HelmRelease web", [], "default", "default")
         with mock.patch.object(
             type(app), "screen", property(mock.Mock(side_effect=ScreenStackError))
         ):
-            app._refresh_hierarchy()  # must not raise
+            app._workspace_ctl.refresh_hierarchy()  # must not raise
         assert True  # reaching here is the assertion: no ScreenStackError
 
 
@@ -644,22 +648,24 @@ def test_component_resolution_matches_declared_group() -> None:
     )
     app, _ = make_app({}, aliases=aliases)
     ref_b = ComponentRef(kind="Widget", name="x", api_version="b.example.com/v1")
-    assert app._view_for_component(ref_b) == ("widgets.b.example.com", False)
+    assert app._workspace_ctl._view_for_component(ref_b) == ("widgets.b.example.com", False)
     ref_a = ComponentRef(kind="Widget", name="x", api_version="a.example.com/v1")
-    assert app._view_for_component(ref_a) == ("widgets.a.example.com", True)
+    assert app._workspace_ctl._view_for_component(ref_a) == ("widgets.a.example.com", True)
     # Core group ("v1") and undeclared apiVersion still resolve normally.
-    assert app._view_for_component(ComponentRef(kind="Pod", name="p", api_version="v1")) == (
+    assert app._workspace_ctl._view_for_component(
+        ComponentRef(kind="Pod", name="p", api_version="v1")
+    ) == (
         "pods",
         True,
     )
-    assert app._view_for_component(ComponentRef(kind="Deployment", name="d")) == (
+    assert app._workspace_ctl._view_for_component(ComponentRef(kind="Deployment", name="d")) == (
         "deployments",
         True,
     )
     # A declared group with no discovered match must not fall back to the
     # wrong group's view.
     ghost = ComponentRef(kind="Widget", name="x", api_version="c.example.com/v1")
-    assert app._view_for_component(ghost) is None
+    assert app._workspace_ctl._view_for_component(ghost) is None
 
 
 async def test_open_tree_refreshes_on_store_update() -> None:
@@ -855,7 +861,7 @@ async def test_jump_notifies_when_object_never_appears() -> None:
     silently - the user gets told instead of staring at a wrong cursor."""
     components = {"web": [ComponentRef(kind="Deployment", name="ghost")]}
     app, _ = make_app(_HELM_DATA, components=components)
-    app._jump_poll_attempts = 3
+    app._workspace_ctl._jump_poll_attempts = 3  # shrink the give-up window for the test
     notices: list[str] = []
     original = app.notify
 
@@ -918,7 +924,9 @@ async def test_jump_aborts_on_stale_context_epoch() -> None:
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="release listed")
-        await app._jump_to_object("deployments", "default", "web-nginx", epoch=app._ctx_epoch - 1)
+        await app._workspace_ctl.jump_to_object(
+            "deployments", "default", "web-nginx", epoch=app._ctx.epoch() - 1
+        )
         assert app.current_kind == "helmreleases"
 
 
@@ -1005,7 +1013,7 @@ async def test_owned_workloads_fallback_is_capped() -> None:
             lambda: len(app.store.get("deployments", "operators")) == len(owned),
             label="owned deployments watched",
         )
-        refs = app._refs_from_owned_workloads(csv_manifest, "operators")
+        refs = app._workspace_ctl._refs_from_owned_workloads(csv_manifest, "operators")
         assert len(refs) == MAX_COMPONENT_DOCS
 
 

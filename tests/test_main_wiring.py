@@ -1234,20 +1234,24 @@ async def test_mcp_controller_wires_follow_hooks() -> None:
     assert hooks.follow_enabled() is False  # app not attached yet
     hooks.note_activity("dropped")  # must not raise
 
-    class _App:
-        mcp_follow_enabled = True
+    class _Integrations:
+        follow_enabled = True
 
         def __init__(self) -> None:
             self.notes: list[str] = []
 
-        def note_mcp_activity(self, line: str) -> None:
+        def note_activity(self, line: str) -> None:
             self.notes.append(line)
+
+    class _App:
+        def __init__(self) -> None:
+            self.integrations = _Integrations()
 
     fake_app = _App()
     hooks.app = cast("Any", fake_app)  # duck-typed stand-in for KorvidApp
     assert hooks.follow_enabled() is True
     hooks.note_activity("seen")
-    assert fake_app.notes == ["seen"]
+    assert fake_app.integrations.notes == ["seen"]
 
 
 async def test_mcp_executor_receives_custom_column_names() -> None:
@@ -2027,6 +2031,12 @@ class _FakeAppCapturesKwargs:
 
     def __init__(self, **kwargs: Any) -> None:
         self.captured = kwargs
+        # `AppUIBridge(app)` reads exactly these two collaborators right
+        # after construction: the agent controller it delegates every UI
+        # tool to, and the dispatcher that marshals the call onto the app
+        # context. Sentinels are enough - the bridge only stores them.
+        self._agent_ui: Any = object()
+        self._bridge_dispatch: Any = object()
         _FakeAppCapturesKwargs.instances.append(self)
 
     def on_aliases_updated(self) -> None:

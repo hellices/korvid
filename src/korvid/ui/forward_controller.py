@@ -1,9 +1,10 @@
 """Port-forward session lifecycle, extracted from the app (issue #187).
 
-`ForwardController` owns the whole life of a forward: resolving the target
-workload, launching kubectl, tracking confirmations, reattaching after a
-pod restart, polling liveness, and the audit queue that records starts and
-stops without blocking the message pump.
+`ForwardController` owns the whole life of a forward: the shift+f action
+that opens the dialog, resolving the target workload, launching kubectl,
+tracking confirmations, reattaching after a pod restart, polling liveness,
+and the audit queue that records starts and stops without blocking the
+message pump.
 
 Unlike the helm and OLM controllers this one also owns *state*. Eleven
 fields moved with it - the broken set, the launching/reattaching/confirming
@@ -11,10 +12,11 @@ maps, the audit queue and its lock. They were only ever touched by these
 methods, so leaving them on the app would have meant injecting eleven more
 accessors to reach data nothing else reads.
 
-The write perimeter and the Textual surface arrive as the named
-interfaces `WriteGate` and `UiSurface`. `ViewState` is deliberately absent:
-a forward is pinned to the target it was started against, so nothing here
-asks what the user is looking at now.
+The write perimeter, the Textual surface and the selection arrive as the
+named interfaces `WriteGate`, `UiSurface` and `ViewState`. The view is read
+exactly once per journey - in `open_dialog`, to learn which row the user
+pressed the key on; everything after that is pinned to the target the
+forward was started against, never to what the user is looking at now.
 
 `run_worker` stays the app's, so shutdown cancels what this starts. A
 `:ctx` switch does not - it cancels only the `hint-events` group - so work
@@ -28,6 +30,7 @@ import asyncio
 import contextlib
 import functools
 import logging
+import shutil
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -45,9 +48,10 @@ from korvid.core.portforward import (
     controller_owner,
 )
 from korvid.k8s.errors import ApiStatusError
-from korvid.k8s.portforward import forward_target_gvr
+from korvid.k8s.portforward import FORWARDABLE_KINDS, forward_target_gvr
 from korvid.ui.ui_surface import UiSurface
-from korvid.ui.widgets.port_forward_screen import ForwardListScreen
+from korvid.ui.view_state import ViewState
+from korvid.ui.widgets.port_forward_screen import ForwardListScreen, PortForwardScreen
 from korvid.ui.write_gate import WriteGate
 
 logger = logging.getLogger(__name__)
@@ -65,12 +69,14 @@ class ForwardController:
         *,
         gate: WriteGate,
         ui: UiSurface,
+        view: ViewState,
         forwards: Callable[[], ForwardRegistry | None],
         audit: Callable[[], AuditLog | None],
         get_manifest: Callable[[], Callable[[str, str | None, str], Any] | None],
     ) -> None:
         self._gate = gate
         self._ui = ui
+        self._view = view
         self._forwards_registry = forwards
         self._audit_log = audit
         self._get_manifest_fn = get_manifest
@@ -152,6 +158,84 @@ class ForwardController:
     def reopen(self) -> None:
         """Accept forwards again after a `:ctx` switch retargets the registry."""
         self._forwards_closing = False
+
+    async def open_dialog(self) -> None:
+        """`shift+f` — resolve the selected target and open the forward dialog.
+
+        Everything the keypress has to decide lives here: the kind must be
+        forwardable, the session must not be mid-`:ctx` (the forward would
+        race the teardown/retarget and could spawn against whichever cluster
+        wins), a registry and a `kubectl` binary must exist, and a fetched
+        Service with no TCP port can never be forwarded at all.
+
+        The epoch is captured before the port prefill, which awaits, and
+        re-checked in the dialog's callback: an approval left open across a
+        switch would otherwise launch kubectl against the new cluster with
+        the old cluster's selection.
+        """
+        kind = self._view.current_kind()
+        if kind not in FORWARDABLE_KINDS:
+            self._ui.notify(
+                "Port-forward is only available for pods and services", severity="warning"
+            )
+            return
+        if not self._gate.reads_allowed():
+            return
+        epoch = self._gate.epoch()
+        if self._forwards_registry() is None:
+            self._ui.notify("Port-forward unavailable in this build", severity="warning")
+            return
+        if shutil.which("kubectl") is None:
+            self._ui.notify(
+                "kubectl not found on PATH — port-forward requires kubectl", severity="error"
+            )
+            return
+        namespace, name = self._view.selected_ns_name()
+        if namespace is None or name is None:
+            return
+        ports, manifest_ok = await self.prefill_ports(kind, namespace, name)
+        if kind == "services" and manifest_ok and not ports:
+            # A fetched Service with no TCP ports can never be forwarded —
+            # kubectl port-forward is TCP-only. (A failed fetch still opens
+            # the dialog: the port list is a convenience, not the source of
+            # truth, and kubectl gives the authoritative error.)
+            self._ui.notify(
+                f"{name} declares no TCP ports — kubectl port-forward is TCP-only",
+                severity="error",
+            )
+            return
+
+        def _on_result(result: tuple[int, int] | None) -> None:
+            if result is None:
+                return
+            if self._gate.switching() or epoch != self._gate.epoch():
+                # The dialog stayed open across a context switch (or the
+                # port prefill awaited through one): the selection belongs
+                # to the old cluster while kubectl and the reopened forward
+                # registry now target the new one.
+                self._ui.notify(
+                    f"port-forward to {name} cancelled - the kube context"
+                    " changed while the dialog was open",
+                    severity="warning",
+                )
+                return
+            self._ui.run_worker(
+                self.start(
+                    kind,
+                    namespace,
+                    name,
+                    local_port=result[0],
+                    remote_port=result[1],
+                    epoch=epoch,
+                )
+            )
+
+        await self._ui.push_screen(
+            PortForwardScreen(
+                f"{kind}/{namespace}/{name}", ports, restrict_remote=kind == "services"
+            ),
+            _on_result,
+        )
 
     async def prefill_ports(self, kind: str, namespace: str, name: str) -> tuple[list[int], bool]:
         """Declared TCP ports for the forward dialog, plus fetch success.

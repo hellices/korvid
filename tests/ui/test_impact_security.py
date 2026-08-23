@@ -251,13 +251,13 @@ async def test_the_impact_load_never_writes_reserves_or_audits(tmp_path: Path) -
     env = ImpactEnv(audit_path)
     reservations_during_load: list[int] = []
     env.lister.on_first_call = lambda: reservations_during_load.append(
-        env.app._active_cluster_writes
+        env.app._writes.active_writes()
     )
     async with env.app.run_test() as pilot:
         await open_delete_dialog(env, pilot, "deploy", expect="web")
         assert env.lister.calls != []
         assert reservations_during_load == [0]
-        assert env.app._active_cluster_writes == 0
+        assert env.app._writes.active_writes() == 0
         assert env.ops.calls == []
         assert not audit_path.exists()
 
@@ -290,7 +290,7 @@ async def test_audit_failure_still_blocks_the_operation_factory(tmp_path: Path) 
         )
         await until(
             pilot,
-            lambda: env.app._active_cluster_writes == 0,
+            lambda: env.app._writes.active_writes() == 0,
             label="write worker finished",
         )
         assert [
@@ -446,7 +446,7 @@ async def test_cancelling_the_delete_flow_during_the_impact_load_writes_nothing(
     env.lister.delay = 60.0
     reservations_during_load: list[int] = []
     env.lister.on_first_call = lambda: reservations_during_load.append(
-        env.app._active_cluster_writes
+        env.app._writes.active_writes()
     )
     async with env.app.run_test() as pilot:
         await to_view(pilot, "deploy", expect="web")
@@ -462,7 +462,7 @@ async def test_cancelling_the_delete_flow_during_the_impact_load_writes_nothing(
         assert not isinstance(env.app.screen, ConfirmScreen)
         assert len(env.app.screen_stack) == 1
         assert reservations_during_load == [0]
-        assert env.app._active_cluster_writes == 0
+        assert env.app._writes.active_writes() == 0
         assert env.ops.calls == []
         assert not audit_path.exists()
 
@@ -490,7 +490,7 @@ async def test_a_cancelled_snapshot_read_is_not_downgraded_to_the_unavailable_ad
         assert not isinstance(env.app.screen, ConfirmScreen)
         assert len(env.app.screen_stack) == 1
         assert not env.app.screen.query(".confirm-impact")
-        assert env.app._active_cluster_writes == 0
+        assert env.app._writes.active_writes() == 0
         assert env.ops.calls == []
         assert not audit_path.exists()
 
@@ -646,7 +646,7 @@ async def test_scale_down_audit_failure_blocks_operation_factory(
         )
         await until(
             pilot,
-            lambda: env.app._active_cluster_writes == 0,
+            lambda: env.app._writes.active_writes() == 0,
             label="scale-down write worker finished",
         )
         assert [
@@ -680,7 +680,7 @@ async def test_cancelling_scale_down_during_impact_load_writes_nothing(
     env.lister.delay = 60.0
     reservations_during_load: list[int] = []
     env.lister.on_first_call = lambda: reservations_during_load.append(
-        env.app._active_cluster_writes
+        env.app._writes.active_writes()
     )
     async with env.app.run_test() as pilot:
         worker = await _scale_worker(pilot, env.app)
@@ -695,7 +695,7 @@ async def test_cancelling_scale_down_during_impact_load_writes_nothing(
         assert not isinstance(env.app.screen, ConfirmScreen)
         assert len(env.app.screen_stack) == 1
         assert reservations_during_load == [0]
-        assert env.app._active_cluster_writes == 0
+        assert env.app._writes.active_writes() == 0
         assert env.ops.calls == []
         assert not audit_path.exists()
 
@@ -727,7 +727,7 @@ async def test_cancelled_scale_snapshot_is_not_an_unavailable_confirmation(
         assert not isinstance(env.app.screen, ConfirmScreen)
         assert len(env.app.screen_stack) == 1
         assert not env.app.screen.query(".confirm-impact")
-        assert env.app._active_cluster_writes == 0
+        assert env.app._writes.active_writes() == 0
         assert env.ops.calls == []
         assert not audit_path.exists()
 

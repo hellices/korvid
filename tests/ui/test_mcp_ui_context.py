@@ -259,7 +259,7 @@ async def test_cancelled_foreign_caller_reaps_the_dispatched_task() -> None:
         finally:
             cleaned.set()  # the inner task's finally must run on cancel
 
-    app.agent_open_describe = blocking_describe  # type: ignore[method-assign]  # test seam
+    app._agent_ui.agent_open_describe = blocking_describe  # type: ignore[method-assign]  # seam
     async with app.run_test() as pilot:
         await pilot.pause()
         bridge = AppUIBridge(app)
@@ -289,7 +289,7 @@ async def test_app_shutdown_reaps_in_flight_dispatches_and_refuses_new_work() ->
         finally:
             cleaned.set()
 
-    app.agent_open_describe = blocking_describe  # type: ignore[method-assign]  # test seam
+    app._agent_ui.agent_open_describe = blocking_describe  # type: ignore[method-assign]  # seam
     bridge = AppUIBridge(app)
     async with app.run_test() as pilot:
         await pilot.pause()

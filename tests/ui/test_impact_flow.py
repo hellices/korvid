@@ -775,7 +775,7 @@ async def test_incomplete_graph_still_renders_a_summary_with_the_coverage_warnin
 async def test_impact_timeout_renders_the_static_unavailable_advisory(tmp_path: Path) -> None:
     env = ImpactEnv(tmp_path / "audit.jsonl")
     env.lister.delay = 5.0
-    with mock.patch("korvid.ui.app._IMPACT_TIMEOUT", 0.01):
+    with mock.patch("korvid.ui.write_coordinator._IMPACT_TIMEOUT", 0.01):
         async with env.app.run_test() as pilot:
             await open_delete_dialog(env, pilot, "deploy", expect="web")
             text = impact_text(env.app)
@@ -810,7 +810,7 @@ async def test_a_renderer_failure_renders_the_static_unavailable_advisory(
     def boom(summary: Any) -> tuple[str, ...]:
         raise RuntimeError("renderer exploded on AKIAEXAMPLEPAYLOAD")
 
-    monkeypatch.setattr("korvid.ui.app.render_impact_lines", boom)
+    monkeypatch.setattr("korvid.ui.write_coordinator.render_impact_lines", boom)
     async with env.app.run_test() as pilot:
         await open_delete_dialog(env, pilot, "deploy", expect="web")
         text = impact_text(env.app)
@@ -829,8 +829,8 @@ async def test_a_summarizer_failure_keeps_the_dialog_and_logs_the_type_only(
     def boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("summarizer exploded on AKIAEXAMPLEPAYLOAD")
 
-    monkeypatch.setattr("korvid.ui.app.summarize_impact", boom)
-    with caplog.at_level(logging.DEBUG, logger="korvid.ui.app"):
+    monkeypatch.setattr("korvid.ui.write_coordinator.summarize_impact", boom)
+    with caplog.at_level(logging.DEBUG, logger="korvid.ui.write_coordinator"):
         async with env.app.run_test() as pilot:
             await open_delete_dialog(env, pilot, "deploy", expect="web")
             text = impact_text(env.app)
@@ -1023,7 +1023,7 @@ async def test_scale_down_dialog_survives_a_failing_dry_run_preview(
     doc's fail-open preview invariant carried over from #19/#294.
 
     Nothing must exist yet while the dialog is up: no write, no
-    reservation (`_active_cluster_writes`, which would block `:ctx`) and
+    reservation (`WriteCoordinator.active_writes()`, which would block `:ctx`) and
     no audit entry at all - not even the fail-closed intent line, because
     a failed *preview* is not a write and must not reserve one. A fresh
     keystroke approval afterwards must still execute and audit exactly as
@@ -1051,7 +1051,7 @@ async def test_scale_down_dialog_survives_a_failing_dry_run_preview(
         assert "known direct dependents (may be affected): 2 or more" in text
         assert "known transitive dependents (may be affected): 3 or more" in text
         assert env.ops.calls == []
-        assert env.app._active_cluster_writes == 0
+        assert env.app._writes.active_writes() == 0
         assert not audit_path.exists()
         await pilot.press("y")
         await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
@@ -1164,7 +1164,7 @@ async def test_scale_down_impact_timeout_still_states_the_static_limitations(
     """
     env = ImpactEnv(tmp_path / "audit.jsonl", rows=_scale_down_rows())
     env.lister.delay = 5.0
-    with mock.patch("korvid.ui.app._IMPACT_TIMEOUT", 0.01):
+    with mock.patch("korvid.ui.write_coordinator._IMPACT_TIMEOUT", 0.01):
         async with env.app.run_test() as pilot:
             await _scale_to_one(env, pilot, "deploy", expect="web")
             text = impact_text(env.app)
@@ -1286,7 +1286,7 @@ async def test_context_switch_during_the_impact_load_aborts_before_the_dialog(
     app = env.app
 
     def bump_epoch() -> None:
-        app._ctx_epoch += 1
+        app._ctx._epoch += 1
 
     env.lister.on_first_call = bump_epoch
     async with app.run_test() as pilot:
@@ -1561,7 +1561,9 @@ async def _prod_origin_beside_an_all_namespaces_pane(app: KorvidApp, pilot: Any)
     await _pane_to_view(pilot, "deploy all", "pane-1", expect="prod")
     assert str(app.query_one("#pane-1", ResourceTable).get_row_at(0)[1]) == "web"
     await pilot.press("ctrl+w", "w")
-    await until(pilot, lambda: app._focused_pane == 0, label="focus back on the prod pane")
+    await until(
+        pilot, lambda: app._workspace.focused_index == 0, label="focus back on the prod pane"
+    )
     assert app.current_scope == "prod"
 
 
@@ -1616,7 +1618,7 @@ async def test_focus_moving_to_another_pane_during_the_impact_load_aborts_the_de
     async with app.run_test() as pilot:
         await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
         origin = app._pane
-        env.lister.on_first_call = app._focus_other_pane
+        env.lister.on_first_call = app._workspace_ctl.focus_other_pane
         await app.action_delete_resource()
         assert app._pane is not origin
         assert len(app.screen_stack) == 1
@@ -1635,7 +1637,7 @@ async def test_focus_moving_to_another_pane_during_the_impact_load_aborts_the_re
     async with app.run_test() as pilot:
         await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
         origin = app._pane
-        env.lister.on_first_call = app._focus_other_pane
+        env.lister.on_first_call = app._workspace_ctl.focus_other_pane
         await app.action_rollout_restart()
         assert app._pane is not origin
         assert len(app.screen_stack) == 1
@@ -1659,7 +1661,7 @@ async def test_the_snapshot_scope_follows_the_pane_the_write_was_raised_from(
     app = env.app
     async with app.run_test() as pilot:
         await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
-        env.ops.on_first_preview = app._focus_other_pane
+        env.ops.on_first_preview = app._workspace_ctl.focus_other_pane
         await app.action_delete_resource()
         assert env.lister.calls != []
         assert _namespaced_list_scopes(env) == {"prod"}
@@ -1711,7 +1713,7 @@ async def test_scale_down_focus_move_to_same_object_aborts_before_confirmation(
     async with app.run_test() as pilot:
         await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
         origin = app._pane
-        env.lister.on_first_call = app._focus_other_pane
+        env.lister.on_first_call = app._workspace_ctl.focus_other_pane
         await pilot.press("S")
         await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
         await pilot.press("1")
@@ -1776,7 +1778,7 @@ async def test_scale_down_focus_move_while_the_prompt_is_open_aborts_before_any_
         origin = app._pane
         await pilot.press("S")
         await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
-        app._focus_other_pane()
+        app._workspace_ctl.focus_other_pane()
         await until(pilot, lambda: app._pane is not origin, label="focus on the other pane")
         assert isinstance(app.screen, ReplicasPrompt)
         await pilot.press("1")
@@ -1808,7 +1810,7 @@ def _uid_replacement_drift(app: KorvidApp) -> Callable[[], None]:
 
 def _focus_drift(app: KorvidApp) -> Callable[[], None]:
     """Focus lands in the second pane, whose cursor is on the same object."""
-    return app._focus_other_pane
+    return app._workspace_ctl.focus_other_pane
 
 
 def _scope_drift(app: KorvidApp) -> Callable[[], None]:
@@ -1896,7 +1898,7 @@ async def test_scale_down_focus_move_during_the_dry_run_never_loads_relationship
     async with app.run_test() as pilot:
         await _prod_origin_beside_an_all_namespaces_pane(app, pilot)
         origin = app._pane
-        env.ops.on_first_preview = app._focus_other_pane
+        env.ops.on_first_preview = app._workspace_ctl.focus_other_pane
         await pilot.press("S")
         await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt")
         await pilot.press("1")
@@ -1920,7 +1922,7 @@ async def test_scale_down_context_switch_during_the_dry_run_never_loads_relation
     app = env.app
 
     def bump_epoch() -> None:
-        app._ctx_epoch += 1
+        app._ctx._epoch += 1
 
     env.ops.on_first_preview = bump_epoch
     async with app.run_test() as pilot:
@@ -2128,6 +2130,6 @@ async def test_scale_drift_while_the_confirmation_is_open_never_writes(
         )
         assert len(app.screen_stack) == 1
         assert not isinstance(app.screen, ConfirmScreen)
-        assert app._active_cluster_writes == 0
+        assert app._writes.active_writes() == 0
         assert env.ops.calls == []
         assert not audit_path.exists()

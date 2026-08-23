@@ -254,7 +254,7 @@ async def test_failed_preview_still_opens_dialog(tmp_path: Path) -> None:
 async def test_slow_preview_times_out_and_opens_dialog(tmp_path: Path) -> None:
     ops = PreviewOps(lines=["~ spec.replicas: 3 -> 5"], delay=5.0)
     app = make_app(ops, tmp_path / "audit.jsonl")
-    with mock.patch("korvid.ui.app._PREVIEW_TIMEOUT", 0.05):
+    with mock.patch("korvid.ui.write_coordinator._PREVIEW_TIMEOUT", 0.05):
         async with app.run_test() as pilot:
             await _to_deployments(app, pilot)
             await pilot.press("ctrl+d")
@@ -296,7 +296,9 @@ async def test_agent_write_dialog_shows_preview(tmp_path: Path) -> None:
         await _to_deployments(app, pilot)
         app.query_one(AgentPanel).display = True
         task = asyncio.ensure_future(
-            app.agent_request_write("scale", "deployments", "web", namespace="default", replicas=4)
+            app._agent_ui.agent_request_write(
+                "scale", "deployments", "web", namespace="default", replicas=4
+            )
         )
         await until(
             pilot,

@@ -68,9 +68,9 @@ from korvid.tools.proposals import ProposalStore
 from korvid.tools.registry import mcp_tool_schemas
 from korvid.ui.app import (
     AppUIBridge,
-    ContextSwitchResult,
     KorvidApp,
 )
+from korvid.ui.context_switch_coordinator import ContextSwitchResult
 from korvid.ui.hints import EventsFetcher
 from korvid.ui.widgets.resource_table import sanitize_views
 
@@ -292,11 +292,11 @@ class _MCPAppHooks:
         self.app: KorvidApp | None = None
 
     def follow_enabled(self) -> bool:
-        return self.app is not None and self.app.mcp_follow_enabled
+        return self.app is not None and self.app.integrations.follow_enabled
 
     def note_activity(self, line: str) -> None:
         if self.app is not None:
-            self.app.note_mcp_activity(line)
+            self.app.integrations.note_activity(line)
 
 
 def _build_mcp_controller(

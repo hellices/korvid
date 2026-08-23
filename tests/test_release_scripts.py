@@ -1574,7 +1574,9 @@ def test_release_runbook_install_section_uses_tool_managed_environments() -> Non
 
 def test_runtime_install_hint_consumers_use_the_shared_helper() -> None:
     root = Path(__file__).parents[1] / "src" / "korvid"
-    for relative in ("__main__.py", "ui/app.py", "providers/entra.py"):
+    # `ui/integration_controller.py` is where the `:mcp` absence is reported
+    # since the integration ownership moved off the app (Deep Task 9).
+    for relative in ("__main__.py", "ui/integration_controller.py", "providers/entra.py"):
         source = (root / relative).read_text(encoding="utf-8")
         assert "from korvid.agent.install_hint import isolated_install_hint" in source
         assert "isolated_install_hint(" in source
