@@ -1024,7 +1024,10 @@ def test_mcp_media_reserves_its_own_intrinsic_ratio_not_the_generic_16_9() -> No
 
     The two MCP elements therefore carry a class, and a class-qualified rule
     restates their real ratio with higher specificity than the generic
-    element rules.
+    element rules. That reservation is only truthful because the clip is
+    encoded with square pixels — `tests/test_docs_visual_assets.py` reads the
+    shipped MP4's own geometry boxes and fails if its display box ever stops
+    matching the 1280x710 this rule reserves.
     """
     css = _strip_css_comments(_css())
     switcher = _scene_switcher()

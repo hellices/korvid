@@ -640,7 +640,7 @@ ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/relationship-demo.mp4 \
 
 ffmpeg -y -i docs/assets/mcp-follow-demo.gif -an -movflags +faststart \
   -pix_fmt yuv420p -crf 20 \
-  -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2,trim=start_frame=36:end_frame=84,setpts=PTS-STARTPTS,drawbox=x=1000:y=22:w=280:h=320:color=0x111111:t=fill,drawbox=x=1000:y=578:w=280:h=132:color=0x111111:t=fill' \
+  -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2,trim=start_frame=36:end_frame=84,setpts=PTS-STARTPTS,setsar=1,drawbox=x=1000:y=22:w=280:h=320:color=0x111111:t=fill,drawbox=x=1000:y=578:w=280:h=132:color=0x111111:t=fill' \
   docs/assets/scenes/mcp-follow-demo.mp4
 ffmpeg -y -i docs/assets/scenes/mcp-follow-demo.mp4 -vf "select='eq(n\,9)'" \
   -frames:v 1 docs/assets/scenes/mcp-poster.png
@@ -655,6 +655,19 @@ Open every PNG and scrub every MP4. If a selected timestamp does not show the
 named state, change only that `-ss` value in both this plan's execution notes
 and `docs/demo/visual-storytelling.md`, regenerate, and rerun the asset test.
 Do not relabel a mismatched frame.
+
+Then confirm the MCP clip displays at exactly the box it stores — the GIF's
+63:64 pixels are what `setsar=1` drops, and a browser lays a `<video>` out
+from the display box, not the stored one:
+
+```bash
+ffprobe -v error -select_streams v:0 -show_entries \
+  stream=width,height,sample_aspect_ratio,display_aspect_ratio \
+  -of default=noprint_wrappers=1 docs/assets/scenes/mcp-follow-demo.mp4
+```
+
+Expected: `1280`, `710`, `1:1`, `128:71`. Anything else means the reserved
+`1280 / 710` box pillarboxes the clip; fix the chain, never the box.
 
 - [ ] **Step 6: Document provenance and regeneration**
 
@@ -725,13 +738,15 @@ pane belongs to a third-party MCP client, whose startup banner and tool
 inventory above the exchange, and working directory, branch, token spend and
 model name below it, are unrelated to korvid and must not ship. The site uses
 a deterministic reframe of that reviewed recording — frames 36-83, with those
-two bands of the client pane cleared to its own background — plus a poster
-taken from the sanitised clip:
+two bands of the client pane cleared to its own background, and `setsar=1` so
+the 1280×711/63:64 source becomes a square-pixel 1280×710 clip instead of one
+that stores 1280×710 and displays 1258×710 — plus a poster taken from the
+sanitised clip:
 
 ```sh
 ffmpeg -y -i docs/assets/mcp-follow-demo.gif -an -movflags +faststart \
   -pix_fmt yuv420p -crf 20 \
-  -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2,trim=start_frame=36:end_frame=84,setpts=PTS-STARTPTS,drawbox=x=1000:y=22:w=280:h=320:color=0x111111:t=fill,drawbox=x=1000:y=578:w=280:h=132:color=0x111111:t=fill' \
+  -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2,trim=start_frame=36:end_frame=84,setpts=PTS-STARTPTS,setsar=1,drawbox=x=1000:y=22:w=280:h=320:color=0x111111:t=fill,drawbox=x=1000:y=578:w=280:h=132:color=0x111111:t=fill' \
   docs/assets/scenes/mcp-follow-demo.mp4
 ffmpeg -y -i docs/assets/scenes/mcp-follow-demo.mp4 -vf "select='eq(n\,9)'" \
   -frames:v 1 docs/assets/scenes/mcp-poster.png
@@ -1635,7 +1650,16 @@ Add:
    letterboxes inside a box that is not its own and the poster tile's
    `object-fit: cover` crops the external client's prompt. These selectors
    qualify the same elements with the class the MCP media carries, so they win
-   on specificity rather than on source order, and restate the real ratio. */
+   on specificity rather than on source order, and restate the real ratio.
+
+   Reserving the stored pixel box is only truthful because the clip is
+   normalised to square pixels: the source GIF is 1280×711 with a 63:64
+   sample aspect ratio, and making the height even for `yuv420p` would keep
+   that display aspect by rewriting the sample aspect ratio to 2485:2528 —
+   1280×710 stored, 1258×710 laid out, pillarboxed inside this very rule. The
+   capture recipe therefore ends its geometry pass with `setsar=1`, and
+   `tests/test_docs_visual_assets.py` reads the shipped MP4's own boxes and
+   fails if the stored, displayed and declared geometry ever disagree. */
 .md-typeset .scene-panel video.mcp-media,
 .md-typeset .scene-panel noscript img.mcp-media,
 .md-typeset .evidence-card img.mcp-media {

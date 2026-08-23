@@ -584,7 +584,16 @@
    letterboxes inside a box that is not its own and the poster tile's
    `object-fit: cover` crops the external client's prompt. These selectors
    qualify the same elements with the class the MCP media carries, so they win
-   on specificity rather than on source order, and restate the real ratio. */
+   on specificity rather than on source order, and restate the real ratio.
+
+   Reserving the stored pixel box is only truthful because the clip is
+   normalised to square pixels: the source GIF is 1280×711 with a 63:64
+   sample aspect ratio, and making the height even for `yuv420p` would keep
+   that display aspect by rewriting the sample aspect ratio to 2485:2528 —
+   1280×710 stored, 1258×710 laid out, pillarboxed inside this very rule. The
+   capture recipe therefore ends its geometry pass with `setsar=1`, and
+   `tests/test_docs_visual_assets.py` reads the shipped MP4's own boxes and
+   fails if the stored, displayed and declared geometry ever disagree. */
 .md-typeset .scene-panel video.mcp-media,
 .md-typeset .scene-panel noscript img.mcp-media,
 .md-typeset .evidence-card img.mcp-media {

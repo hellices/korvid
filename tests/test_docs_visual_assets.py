@@ -24,6 +24,7 @@ SCENES = ROOT / "docs" / "assets" / "scenes"
 DEMO_DIR = ROOT / "docs" / "demo"
 INSTRUCTIONS = DEMO_DIR / "visual-storytelling.md"
 LANDING = DOCS / "index.md"
+EXTRA_CSS = DOCS / "stylesheets" / "extra.css"
 AGENT_TAPE = DEMO_DIR / "agent.tape"
 AGENT_PAGE = DOCS / "agent.md"
 DEMO_HARNESS = DEMO_DIR / "demo.py"
@@ -60,6 +61,34 @@ MP4_ASSETS = {
     "mcp-follow-demo.mp4",
     "relationship-demo.mp4",
 }
+#: The pixel box each clip must both store and display. A browser lays a
+#: `<video>` out at its *display* size — stored size scaled by the sample
+#: aspect ratio — while the landing CSS reserves a box from the stored size,
+#: so a non-square SAR silently makes the two disagree and pillarboxes the
+#: media inside its own reservation.
+MP4_GEOMETRY = {
+    "agent-demo.mp4": (1280, 720),
+    "mcp-follow-demo.mp4": (1280, 710),
+    "relationship-demo.mp4": (1280, 720),
+}
+#: The MCP filter chain this repository published before square pixels were
+#: forced. `docs/assets/mcp-follow-demo.gif` is 1280x711 with SAR 63:64, and
+#: `scale`'s even-height correction (711 -> 710) preserves the display aspect
+#: by rewriting the SAR to 2485:2528 instead of dropping it — so the encode
+#: stored 1280x710 but displayed 1258x710. The contract below must reject it.
+MCP_UNNORMALIZED_CHAIN = (
+    "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+    "trim=start_frame=36:end_frame=84,setpts=PTS-STARTPTS,"
+    "drawbox=x=1000:y=22:w=280:h=320:color=0x111111:t=fill,"
+    "drawbox=x=1000:y=578:w=280:h=132:color=0x111111:t=fill"
+)
+#: One `ffmpeg` invocation that reads the reviewed GIF and writes the
+#: sanitised clip, without swallowing the commands published beside it.
+MCP_MP4_COMMAND = re.compile(
+    r"ffmpeg(?:(?!ffmpeg).)*?docs/assets/mcp-follow-demo\.gif"
+    r"(?:(?!ffmpeg).)*?docs/assets/scenes/mcp-follow-demo\.mp4",
+    re.S,
+)
 
 #: The MCP capture is a two-pane recording: korvid on the left of the divider
 #: at x=999, the external MCP client on the right.
@@ -79,6 +108,23 @@ def _png_size(path: Path) -> tuple[int, int]:
     payload = path.read_bytes()
     assert payload[:8] == b"\x89PNG\r\n\x1a\n"
     return struct.unpack(">II", payload[16:24])
+
+
+def _png_pixel_aspect(path: Path) -> tuple[int, int]:
+    """The pixel aspect ratio a PNG declares, defaulting to square.
+
+    A `pHYs` chunk with unit specifier 0 declares an aspect ratio rather than
+    a physical density (RFC 2083 section 4.2.4.2), and either form scales the
+    rendered image the same way. ffmpeg copies the decoded frame's sample
+    aspect ratio into it, so a poster cut from a non-square-pixel clip
+    inherits the same disagreement with its own `width`/`height`. An absent
+    chunk means square pixels.
+    """
+    for kind, body in _png_chunks(path.read_bytes()):
+        if kind == b"pHYs":
+            horizontal, vertical, _ = struct.unpack(">IIB", body)
+            return horizontal, vertical
+    return 1, 1
 
 
 def _png_chunks(payload: bytes) -> Iterator[tuple[bytes, bytes]]:
@@ -161,6 +207,106 @@ def _decode_png_bytes(payload: bytes, source: str) -> tuple[int, int, list[bytea
 def _decode_png_rgb(path: Path) -> tuple[int, int, list[bytearray]]:
     """Decode a PNG capture written by the pipeline. See `_decode_png_bytes`."""
     return _decode_png_bytes(path.read_bytes(), str(path))
+
+
+def _mp4_boxes(payload: bytes, start: int, end: int) -> Iterator[tuple[bytes, int, int]]:
+    """Yield `(type, body_start, box_end)` for every ISO-BMFF box in a span.
+
+    Args:
+        payload: The whole MP4 stream.
+        start: First byte of the first box header in the span.
+        end: Byte the span stops before.
+
+    Yields:
+        The four-character box type, the offset its payload starts at, and
+        the offset the box ends at.
+    """
+    cursor = start
+    while cursor + 8 <= end:
+        (size,) = struct.unpack(">I", payload[cursor : cursor + 4])
+        kind = payload[cursor + 4 : cursor + 8]
+        body = cursor + 8
+        if size == 1:
+            (size,) = struct.unpack(">Q", payload[body : body + 8])
+            body += 8
+        elif size == 0:
+            size = end - cursor
+        assert size >= 8, f"malformed {kind!r} box of size {size}"
+        yield kind, body, cursor + size
+        cursor += size
+
+
+def _find_mp4_box(payload: bytes, path: Sequence[bytes]) -> tuple[int, int]:
+    """Resolve a container path such as `moov/trak/mdia` to `(body, end)`."""
+    start, end = 0, len(payload)
+    for name in path:
+        for kind, body, stop in _mp4_boxes(payload, start, end):
+            if kind == name:
+                start, end = body, stop
+                break
+        else:
+            raise AssertionError(f"no {name!r} box under {b'/'.join(path).decode()}")
+    return start, end
+
+
+def _mp4_geometry(path: Path) -> tuple[tuple[int, int], tuple[float, float], tuple[int, int]]:
+    """Read a video track's stored size, display size and pixel aspect ratio.
+
+    The repository ships no media dependency, so the three ISO-BMFF fields a
+    browser lays a `<video>` out from are read here directly: `tkhd`'s fixed
+    16.16 display box, the `avc1` sample entry's stored pixel box, and the
+    optional `pasp` box that scales one into the other. An absent `pasp`
+    means square pixels (ISO/IEC 14496-12), so it is reported as `(1, 1)`.
+
+    Args:
+        path: The MP4 to read.
+
+    Returns:
+        `(stored, displayed, pixel_aspect)`.
+    """
+    payload = path.read_bytes()
+    trak, trak_end = _find_mp4_box(payload, (b"moov", b"trak"))
+    tkhd, _ = _find_mp4_box(payload[trak:trak_end], (b"tkhd",))
+    header = payload[trak + tkhd :]
+    offset = 88 if header[0] == 1 else 76
+    raw_width, raw_height = struct.unpack(">II", header[offset : offset + 8])
+    displayed = (raw_width / 65536, raw_height / 65536)
+
+    stsd, stsd_end = _find_mp4_box(payload[trak:trak_end], (b"mdia", b"minf", b"stbl", b"stsd"))
+    _, entry, entry_end = next(_mp4_boxes(payload, trak + stsd + 8, trak + stsd_end))
+    stored = struct.unpack(">HH", payload[entry + 24 : entry + 28])
+
+    pixel_aspect = (1, 1)
+    for kind, body, _ in _mp4_boxes(payload, entry + 78, entry_end):
+        if kind == b"pasp":
+            pixel_aspect = struct.unpack(">II", payload[body : body + 8])
+    return stored, displayed, pixel_aspect
+
+
+def _mcp_filter_chains(source: str, label: str) -> list[str]:
+    """Every `-vf` chain the MCP sanitising command publishes in `source`."""
+    chains = []
+    for command in MCP_MP4_COMMAND.finditer(source):
+        chain = re.search(r"-vf '([^']*)'", command.group(0))
+        assert chain is not None, f"{label} publishes an MCP command with no -vf chain"
+        chains.append(" ".join(chain.group(1).split()))
+    assert chains, f"{label} must publish the MCP sanitising command"
+    return chains
+
+
+def _forces_square_pixels(chain: str) -> bool:
+    """Does an ffmpeg filter chain drop a non-square SAR after its geometry?
+
+    `setsar=1` only governs what follows it, so it has to come after the
+    `scale`/`trim` pass that rewrites the sample aspect ratio in the first
+    place. None of the MCP chain's filters take a comma-bearing argument, so
+    splitting on commas is the filtergraph's own step separator here.
+    """
+    steps = [step.strip() for step in chain.split(",")]
+    if "setsar=1" not in steps:
+        return False
+    geometry = [index for index, step in enumerate(steps) if step.startswith(("scale=", "trim="))]
+    return steps.index("setsar=1") > max(geometry, default=-1)
 
 
 def _band_deviation(rows: list[bytearray], top: int, bottom: int, channels: int) -> int:
@@ -510,9 +656,10 @@ def test_storytelling_pngs_meet_their_declared_size_and_byte_budget() -> None:
     """Binary/dimension/byte contract only — it says nothing about content.
 
     The declared `width`/`height` attributes on the site must match the real
-    intrinsic size or the reserved box is wrong, and the byte budget keeps
-    the page light. Whether a capture is legible or shows the right screen
-    is verified by looking at it, not here.
+    intrinsic size — and a frame only lays out at that size while its pixels
+    are square — or the reserved box is wrong, and the byte budget keeps the
+    page light. Whether a capture is legible or shows the right screen is
+    verified by looking at it, not here.
     """
     for name, (width, min_height, max_height) in PNG_ASSETS.items():
         path = SCENES / name
@@ -521,6 +668,12 @@ def test_storytelling_pngs_meet_their_declared_size_and_byte_budget() -> None:
         assert actual_width == width
         assert min_height <= actual_height <= max_height
         assert path.stat().st_size <= 900_000
+        assert _png_pixel_aspect(path) == (1, 1), (
+            f"{name} declares non-square pixels {_png_pixel_aspect(path)}, so the "
+            f"{actual_width}x{actual_height} box the site reserves is not the box a "
+            "browser draws; cut the frame from a square-pixel source instead of "
+            "widening the reservation"
+        )
 
 
 def test_storytelling_motion_assets_are_local_mp4_files_with_a_size_budget() -> None:
@@ -530,6 +683,37 @@ def test_storytelling_motion_assets_are_local_mp4_files_with_a_size_budget() -> 
         payload = path.read_bytes()
         assert payload[4:8] == b"ftyp"
         assert len(payload) <= 3 * 1024 * 1024
+
+
+def test_storytelling_motion_assets_store_square_pixels() -> None:
+    """A published clip must display at exactly the box it stores.
+
+    `docs/assets/mcp-follow-demo.gif` is 1280x711 with a 63:64 sample aspect
+    ratio. Making the height even for `yuv420p` scales it to 710 and, unless
+    the chain says otherwise, `scale` preserves the *display* aspect by
+    rewriting the SAR to 2485:2528 — an encode that stores 1280x710 but that
+    every browser lays out at 1258x710. The landing page reserves a box from
+    the stored geometry, so the clip would then pillarbox inside its own
+    reservation. Forcing square pixels is what makes the reservation true.
+    """
+    for name, expected in MP4_GEOMETRY.items():
+        stored, displayed, pixel_aspect = _mp4_geometry(SCENES / name)
+        assert stored == expected, f"{name} stores {stored}, not the reviewed {expected}"
+        assert pixel_aspect[0] == pixel_aspect[1], (
+            f"{name} carries a non-square pixel aspect ratio {pixel_aspect[0]}:"
+            f"{pixel_aspect[1]}; add `setsar=1` to its filter chain and re-encode "
+            "rather than letting the CSS box disagree with the layout"
+        )
+        assert displayed == (float(stored[0]), float(stored[1])), (
+            f"{name} displays at {displayed} but stores {stored}; the reserved "
+            "box would pillarbox or crop it"
+        )
+
+    clip, _, _ = _mp4_geometry(SCENES / "mcp-follow-demo.mp4")
+    assert clip == _png_size(SCENES / "mcp-poster.png"), (
+        "the MCP poster stands in for the clip until it plays, so both must lay "
+        f"out in one box; clip is {clip}, poster is {_png_size(SCENES / 'mcp-poster.png')}"
+    )
 
 
 def test_storytelling_capture_instructions_name_every_generated_asset() -> None:
@@ -639,11 +823,70 @@ def test_mcp_capture_instructions_document_the_sanitising_pass() -> None:
 
 def test_mcp_follow_demo_mp4_sha256_matches_the_reviewed_sanitized_bytes() -> None:
     digest = hashlib.sha256((SCENES / "mcp-follow-demo.mp4").read_bytes()).hexdigest()
-    assert digest == "48a11a419d66b1732526387783abe25335484435e0fe51b9f83188de0d60a0f8", (
+    assert digest == "f4fe95f9109655124d0a16a6d6132e7396aeb14b2b22b89788c629378c59f2d5", (
         "docs/assets/scenes/mcp-follow-demo.mp4 is a privacy-sensitive re-encode; "
         "review any byte change explicitly alongside the redaction recipe in "
         "docs/demo/visual-storytelling.md before updating this SHA-256 pin"
     )
+
+
+def test_mcp_capture_recipe_forces_square_pixels_everywhere_it_is_published() -> None:
+    """Every replayable copy of the recipe must normalise the GIF's SAR.
+
+    The clip's bytes are pinned above, but a pin only proves the checked-in
+    file was reviewed — it cannot stop the next regeneration from restoring a
+    1258x710 display box. The command that produces those bytes is published
+    twice (the provenance page and the executable plan a contributor
+    replays), so `setsar=1` has to be in both, after the `scale`/`trim` pass
+    that rewrites the sample aspect ratio.
+    """
+    assert not _forces_square_pixels(MCP_UNNORMALIZED_CHAIN), (
+        "this contract must reject the chain that shipped the non-square encode, "
+        "or it would pass without normalising anything"
+    )
+    assert not _forces_square_pixels(f"setsar=1,{MCP_UNNORMALIZED_CHAIN}"), (
+        "a `setsar=1` placed before the geometry pass normalises nothing"
+    )
+
+    sources = {
+        "docs/demo/visual-storytelling.md": INSTRUCTIONS,
+        "docs/superpowers/plans/2026-08-22-visual-storytelling.md": VISUAL_STORYTELLING_PLAN,
+    }
+    for label, path in sources.items():
+        for chain in _mcp_filter_chains(path.read_text(encoding="utf-8"), label):
+            assert _forces_square_pixels(chain), (
+                "the published MCP command leaves the GIF's 63:64 pixels in the "
+                f"encode; it needs `setsar=1` after its geometry pass. {label} "
+                f"has {chain!r}"
+            )
+
+
+def test_mcp_landing_ratio_override_matches_the_clips_display_geometry() -> None:
+    """`aspect-ratio: 1280 / 710` is only truthful for a square-pixel clip.
+
+    The landing CSS reserves the MCP box from the stored pixel geometry the
+    markup declares. That reservation is a claim about layout, and layout
+    uses the *display* box — so the override is correct exactly while the
+    clip's sample aspect ratio is 1:1. The reason is kept next to the rule so
+    a later reader does not have to re-derive it from an ffprobe dump.
+    """
+    stored, displayed, pixel_aspect = _mp4_geometry(SCENES / "mcp-follow-demo.mp4")
+    css = EXTRA_CSS.read_text(encoding="utf-8")
+    rule = ".md-typeset .scene-panel video.mcp-media"
+    assert rule in css, "the MCP ratio override must still exist"
+
+    assert pixel_aspect == (1, 1)
+    assert displayed == (float(stored[0]), float(stored[1]))
+    assert f"aspect-ratio: {stored[0]} / {stored[1]}" in css[css.index(rule) :], (
+        f"the override must reserve the clip's real display box {displayed}"
+    )
+
+    reason = css[css.rindex("/*", 0, css.index(rule)) : css.index(rule)].lower()
+    for fragment in ("square", "setsar=1", "sample aspect"):
+        assert fragment in reason, (
+            "the rule's comment must say the reservation holds because the clip is "
+            f"normalised to square pixels; {fragment!r} is missing from {reason!r}"
+        )
 
 
 def test_agent_tape_types_the_real_prompt_and_presses_enter() -> None:

@@ -143,14 +143,28 @@ The poster is frame 9 of that clip: the external client's full prompt and its
 first two tool calls beside korvid's own `agent logs → shop/payment-worker-…`
 follow toast and its `⇄MCP on :7878 ·follow` status line.
 
+The chain also ends its geometry pass with `setsar=1`. The GIF is 1280×711
+with a 63:64 sample aspect ratio; rounding the height down to 710 for
+`yuv420p` otherwise preserves the *display* aspect by rewriting the sample
+aspect ratio to 2485:2528, which stores 1280×710 but lays out 1258×710 — so
+the landing page's `1280 / 710` reservation would pillarbox the clip inside
+its own box. Forcing square pixels changes no sample, only the metadata a
+browser lays out from, and it is what makes the reserved box true:
+
 ```sh
 ffmpeg -y -i docs/assets/mcp-follow-demo.gif -an -movflags +faststart \
   -pix_fmt yuv420p -crf 20 \
-  -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2,trim=start_frame=36:end_frame=84,setpts=PTS-STARTPTS,drawbox=x=1000:y=22:w=280:h=320:color=0x111111:t=fill,drawbox=x=1000:y=578:w=280:h=132:color=0x111111:t=fill' \
+  -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2,trim=start_frame=36:end_frame=84,setpts=PTS-STARTPTS,setsar=1,drawbox=x=1000:y=22:w=280:h=320:color=0x111111:t=fill,drawbox=x=1000:y=578:w=280:h=132:color=0x111111:t=fill' \
   docs/assets/scenes/mcp-follow-demo.mp4
 ffmpeg -y -i docs/assets/scenes/mcp-follow-demo.mp4 -vf "select='eq(n\,9)'" \
   -frames:v 1 docs/assets/scenes/mcp-poster.png
 ```
 
+The shipped clip answers `ffprobe -show_entries
+stream=width,height,sample_aspect_ratio,display_aspect_ratio` with
+`1280`, `710`, `1:1` and `128:71`.
+
 `tests/test_docs_visual_assets.py` decodes the poster and fails if either
-cleared band regains legible content — or if the retained band loses it.
+cleared band regains legible content — or if the retained band loses it. It
+also reads the MP4's own `tkhd`/`avc1`/`pasp` boxes and fails if the stored,
+displayed and declared geometry ever disagree again.
