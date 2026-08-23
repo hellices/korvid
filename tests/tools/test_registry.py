@@ -108,27 +108,27 @@ def test_every_tool_declares_an_outbound_result_format() -> None:
 # --- derived surfaces ---------------------------------------------------
 
 
-def test_full_agent_surface_matches_pre_registry_order() -> None:
+def test_high_agent_surface_matches_pre_registry_order() -> None:
     from korvid.tools.executor import READ_TOOLS, RESIZE_TOOLS, UI_TOOLS, WRITE_TOOLS
 
     schemas = agent_tool_schemas("high_agent", readonly=False, resize_supported=True)
     assert schemas == READ_TOOLS + UI_TOOLS + WRITE_TOOLS + RESIZE_TOOLS
 
 
-def test_full_agent_surface_readonly_omits_writes() -> None:
+def test_high_agent_surface_readonly_omits_writes() -> None:
     from korvid.tools.executor import READ_TOOLS, UI_TOOLS
 
     schemas = agent_tool_schemas("high_agent", readonly=True, resize_supported=True)
     assert schemas == READ_TOOLS + UI_TOOLS
 
 
-def test_full_agent_surface_gates_resize_on_capability() -> None:
+def test_high_agent_surface_gates_resize_on_capability() -> None:
     schemas = agent_tool_schemas("high_agent", readonly=False, resize_supported=False)
     assert "resize_pod" not in _names(schemas)
     assert "delete_resource" in _names(schemas)
 
 
-def test_small_agent_surface_offers_two_ui_tools() -> None:
+def test_low_agent_surface_offers_two_ui_tools() -> None:
     from korvid.tools.executor import READ_TOOLS
 
     schemas = agent_tool_schemas("low_agent", readonly=True, resize_supported=False)
@@ -278,14 +278,14 @@ _UI_ORDER = ["navigate", "set_filter", "open_logs", "open_describe", "drill_down
 _WRITE_ORDER = ["delete_resource", "scale_resource", "rollout_restart"]
 
 
-def test_full_agent_surface_matches_golden_order() -> None:
+def test_high_agent_surface_matches_golden_order() -> None:
     """Byte-identical-order criterion pinned against literals, not against
     lists derived from the same registry (which would move together)."""
     schemas = agent_tool_schemas("high_agent", readonly=False, resize_supported=True)
     assert _names(schemas) == _READ_ORDER + _UI_ORDER + _WRITE_ORDER + ["resize_pod"]
 
 
-def test_small_agent_surface_matches_golden_order() -> None:
+def test_low_agent_surface_matches_golden_order() -> None:
     schemas = agent_tool_schemas("low_agent", readonly=True, resize_supported=False)
     assert _names(schemas) == [*_READ_ORDER, "open_logs", "open_describe"]
 
