@@ -270,6 +270,11 @@ class DefaultAgentSession(AgentSession):
         #: Set whenever the live turn's driver joins the close, so a close
         #: already waiting on that driver stops waiting for it.
         self._driver_joined_close = asyncio.Event()
+        #: The exact task a close is currently waiting for. A driver gives
+        #: the turn back (`_driver` becomes None) *before* its own `finally`
+        #: asks for the close, so this is the only identity by which that
+        #: driver can still be recognized as the one being waited for.
+        self._awaited_driver: asyncio.Task[object] | None = None
         self._turn_active = False
         self._turn_started = False
         self._awaiting_finalization = False
@@ -573,7 +578,7 @@ class DefaultAgentSession(AgentSession):
             self._closing = asyncio.ensure_future(self._close())
         closing = self._closing
         caller = asyncio.current_task()
-        driving = caller is not None and caller is self._driver
+        driving = caller is not None and self._is_driver(caller)
         if caller is not None:
             self._close_waiters.add(caller)
             if driving:
@@ -583,6 +588,19 @@ class DefaultAgentSession(AgentSession):
         finally:
             if caller is not None:
                 self._close_waiters.discard(caller)
+
+    def _is_driver(self, caller: asyncio.Task[object]) -> bool:
+        """Is this caller the turn driver, live or being waited for?
+
+        A driver stopped by a close unwinds its turn before its own
+        `finally` closes the session, and unwinding releases the turn —
+        so by the time it asks, it is no longer `_driver`. The close that
+        stopped it is still waiting for exactly that task, and says so in
+        `_awaited_driver`; either identity means the caller is the driver
+        joining its own close, which is what makes the close stop waiting
+        for it instead of deadlocking against it.
+        """
+        return caller is self._driver or caller is self._awaited_driver
 
     async def _wait_out(
         self, closing: asyncio.Task[None], driver: asyncio.Task[object] | None
@@ -635,15 +653,20 @@ class DefaultAgentSession(AgentSession):
         be recognized some other way: by the driver being parked in
         `aclose`, either already or by joining while this wait is in
         progress. Waiting for a driver that is waiting for this close is
-        the one way this can hang, and both of those are that case.
+        the one way this can hang, and both of those are that case — the
+        second only because the identity of the task being waited for is
+        published here, for a driver that has already released the turn
+        by the time its `finally` asks for the close.
         """
         driver = self._driver
         if driver is None or driver in self._close_waiters:
             return
         joined = asyncio.ensure_future(self._driver_joined_close.wait())
+        self._awaited_driver = driver
         try:
             await asyncio.wait({driver, joined}, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            self._awaited_driver = None
             joined.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await joined
