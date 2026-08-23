@@ -122,6 +122,7 @@ class FakeNavigation:
         # name -> (row_key, uid)
         self._rows: dict[tuple[str, str | None], tuple[str, str | None]] = {}
         self._select_result = True
+        self.selected_row_key: str | None = None
 
     async def navigate_command(self, view: str | None, namespace: str | None) -> None:
         self.calls.append(("navigate", (view, namespace)))
@@ -147,6 +148,8 @@ class FakeNavigation:
 
     def select_row(self, row_key: str) -> bool:
         self.calls.append(("select_row", row_key))
+        if self._select_result:
+            self.selected_row_key = row_key
         return self._select_result
 
     def focus_pane(self, index: int) -> None:
@@ -478,6 +481,7 @@ async def test_apply_select_resource_ok() -> None:
 
     assert result.ok is True
     assert ("select_row", "default/api-1") in nav.calls
+    assert nav.selected_row_key == "default/api-1"
 
 
 @pytest.mark.asyncio
@@ -492,6 +496,25 @@ async def test_apply_select_resource_no_uid_check() -> None:
 
     assert result.ok is True
     assert ("select_row", "default/api-1") in nav.calls
+    assert nav.selected_row_key == "default/api-1"
+
+
+@pytest.mark.asyncio
+async def test_apply_select_resource_hidden_by_filter() -> None:
+    """SelectResource should fail when the row is absent from the rendered table."""
+    ws = WorkspaceState("pods", "default")
+    nav = FakeNavigation(workspace=ws)
+    nav._rows[("api-1", "default")] = ("default/api-1", "uid-api-1")
+    nav._select_result = False
+
+    bridge, _, _, _ = _make_bridge(workspace=ws, nav=nav)
+    result = await bridge.apply(
+        SelectResource(kind="Pod", name="api-1", namespace="default", uid="uid-api-1")
+    )
+
+    assert result.ok is False
+    assert result.message == "ERROR: resource is hidden by the active filter"
+    assert nav.selected_row_key is None
 
 
 @pytest.mark.asyncio

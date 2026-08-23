@@ -2210,7 +2210,7 @@ class AppAgentScreens(AgentScreens):
         """
         try:
             table = self._app.query_one(f"#{table_id}", ResourceTable)
-        except Exception:
+        except NoMatches:
             return None
         if table.row_count == 0:
             return None

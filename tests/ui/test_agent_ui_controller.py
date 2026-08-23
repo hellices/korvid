@@ -33,6 +33,7 @@ from korvid.agent.events import (
     ToolCallFinished,
     ToolCallStarted,
 )
+from korvid.agent.interaction import ResourceIdentity
 from korvid.agent.setup import AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -200,7 +201,7 @@ class FakeScreens(AgentScreens):
     ) -> None:
         self.panes.append((title, manifest, footer_note))
 
-    def selected_identity(self, table_id: str, kind: str) -> None:
+    def selected_identity(self, table_id: str, kind: str) -> ResourceIdentity | None:
         return None
 
 
@@ -841,12 +842,10 @@ async def test_a_context_switch_note_is_delivered_once(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-class RecordingBridge(AgentToolUIBridge):
+class RecordingBridge:
     """A UIBridge that records the mirrored calls instead of driving the UI."""
 
     def __init__(self) -> None:
-        # Skip AgentToolUIBridge.__init__: all used methods are overridden
-        # below, so neither _agent nor _dispatch is accessed at runtime.
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
 
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str:

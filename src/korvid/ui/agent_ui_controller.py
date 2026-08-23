@@ -602,12 +602,13 @@ class AgentUiController:
         callers that need it should construct `AgentWorkspaceBridge` directly
         through the composition root.
         """
-        if self._workspace_bridge is None:
+        bridge = self._workspace_bridge
+        if bridge is None:
             from korvid.ui.agent_workspace_bridge import (
                 AgentWorkspaceBridge,  # type: ignore[import]  # circular avoided via lazy import
             )
 
-            self._workspace_bridge = AgentWorkspaceBridge(
+            bridge = AgentWorkspaceBridge(
                 config=self._config,
                 context=self._context,
                 workspace=self._workspace,
@@ -615,7 +616,8 @@ class AgentUiController:
                 navigation=self._navigation,
                 controller=self,
             )
-        return self._workspace_bridge  # type: ignore[return-value]
+            self._workspace_bridge = bridge
+        return bridge
 
     def blocked_in_protected(self) -> bool:
         """`agent.disable_in_protected` (issue #83): agent turns are refused

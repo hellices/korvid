@@ -186,5 +186,6 @@ class AgentWorkspaceBridge(AgentUiBridge):
         row_key, current_uid = row
         if action.uid is not None and current_uid != action.uid:
             raise ValueError("stale resource identity")
-        self._navigation.select_row(row_key)
+        if not self._navigation.select_row(row_key):
+            raise ValueError("resource is hidden by the active filter")
         return f"selected {action.kind}/{action.name}"
