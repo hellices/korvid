@@ -250,6 +250,8 @@ def _checked_state(
             raise ValueError(f"journal state must not carry secret payloads: {path!r}")
         if value is not None and not isinstance(value, _SCALARS):
             raise ValueError(f"journal state values must be scalars: {path!r}")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"journal state values must be finite: {path!r}")
         checked[str(path)] = value
     return MappingProxyType(checked)
 

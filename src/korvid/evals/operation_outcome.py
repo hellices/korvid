@@ -644,13 +644,16 @@ def _reported_operation_details(
             if reported_action is not None:
                 action = reported_action
             claimed_target = match.group("target")
-            target = None if claimed_target in _GENERIC_REPORT_TARGETS else claimed_target
+            if claimed_target not in _GENERIC_REPORT_TARGETS:
+                target = claimed_target
             groups = match.groupdict()
-            namespace = (
+            claimed_namespace = (
                 groups.get("namespace_after")
                 or groups.get("namespace_before")
                 or groups.get("namespace")
             )
+            if claimed_namespace is not None:
+                namespace = claimed_namespace
     return action, target, namespace
 
 
