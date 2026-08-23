@@ -60,6 +60,8 @@ from korvid.tools.executor import RecordedExecution
 LOOPBACK_HOST = "127.0.0.1"
 LOOPBACK_PORT = 11434
 LOCAL_BASE_URL = f"http://{LOOPBACK_HOST}:{LOOPBACK_PORT}"
+LOCAL_PATH = "/api/chat"
+LOCAL_ENDPOINT = f"{LOOPBACK_HOST}:{LOOPBACK_PORT}{LOCAL_PATH}"
 LOCAL_MODEL = "qwen3:8b"
 
 _LOG_TAIL = "2026-07-27T07:59:00Z level=error msg='out of memory' exit=137 OOMKilled"
@@ -115,7 +117,13 @@ def _answer_body() -> str:
 
 
 class _LocalOnlyTransport(httpx.MockTransport):
-    """A transport that answers only the configured loopback endpoint."""
+    """A transport that answers only the configured loopback endpoint.
+
+    The endpoint check lives in the handler itself, not only in the
+    assertions afterwards: a request to anything else must fail *at the
+    boundary*, before it can consume a scripted body and let the rest of
+    the turn complete as if nothing had left the machine.
+    """
 
     def __init__(self, bodies: list[str]) -> None:
         self.requests: list[httpx.Request] = []
@@ -123,6 +131,9 @@ class _LocalOnlyTransport(httpx.MockTransport):
 
         def handler(request: httpx.Request) -> httpx.Response:
             self.requests.append(request)
+            endpoint = f"{request.url.host}:{request.url.port}{request.url.path}"
+            if endpoint != LOCAL_ENDPOINT:
+                raise AssertionError(f"off-endpoint request to {request.url}")
             if not self.bodies:
                 raise AssertionError(f"unscripted request to {request.url}")
             return httpx.Response(
@@ -188,17 +199,6 @@ def no_external_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "create_connection", refuse_connect)
 
 
-def _resolved_policy() -> Any:
-    return ModelRouter(MODEL_CATALOG).resolve(
-        descriptor=OllamaProvider(LOCAL_BASE_URL, LOCAL_MODEL).descriptor,
-        provider_capabilities=OllamaProvider(LOCAL_BASE_URL, LOCAL_MODEL).capabilities,
-        explicit_tier=None,
-        environment=PolicyEnvironment(
-            readonly=True, resize_supported=False, observability_backends=frozenset()
-        ),
-    )
-
-
 class _OfflineSession:
     """The production graph, wired around one loopback provider."""
 
@@ -260,12 +260,69 @@ async def offline_turn(no_external_lookup: None) -> Any:
     return offline, events
 
 
-def test_the_catalogued_local_model_routes_low_without_asking_anyone() -> None:
-    policy = _resolved_policy()
+async def test_the_catalogued_local_model_routes_low_without_asking_anyone(
+    offline_turn: Any,
+) -> None:
+    """The routed policy of the one provider the turn ran on — and closed."""
+    offline, _events = offline_turn
+    policy = offline.policy
     assert policy.tier is ModelTier.LOW
     assert policy.route_source is CapabilitySource.CATALOG
     assert policy.catalog_version == MODEL_CATALOG_VERSION
     assert policy.prompt_pack_id == "low-korvid-operator"
+
+
+def test_the_offline_fixture_refuses_name_lookup_and_socket_creation(
+    no_external_lookup: None,
+) -> None:
+    """The poison is the gate; a silently working escape hatch is the risk."""
+    with pytest.raises(AssertionError, match="name lookup"):
+        socket.getaddrinfo("example.invalid", 443)
+    with pytest.raises(AssertionError, match="name lookup"):
+        socket.gethostbyname("example.invalid")
+    with pytest.raises(AssertionError, match="socket connection"):
+        socket.create_connection(("example.invalid", 443))
+
+
+def test_the_transport_refuses_an_off_host_request_before_answering_it() -> None:
+    """An off-endpoint request must fail at the boundary, not be served.
+
+    Consuming a scripted body first would let a turn that reached the
+    outside world complete exactly like an air-gapped one, and only the
+    after-the-fact assertions would notice.
+    """
+    transport = _LocalOnlyTransport([_answer_body()])
+
+    with pytest.raises(AssertionError, match="off-endpoint request"):
+        transport.handle_request(httpx.Request("POST", "http://example.invalid/api/chat"))
+
+    assert len(transport.bodies) == 1
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"http://{LOOPBACK_HOST}:11435/api/chat",
+        f"http://{LOOPBACK_HOST}:{LOOPBACK_PORT}/api/generate",
+        f"http://10.0.0.1:{LOOPBACK_PORT}/api/chat",
+    ],
+)
+def test_the_transport_pins_the_exact_configured_host_port_and_path(url: str) -> None:
+    transport = _LocalOnlyTransport([_answer_body()])
+
+    with pytest.raises(AssertionError, match="off-endpoint request"):
+        transport.handle_request(httpx.Request("POST", url))
+
+    assert transport.bodies == [_answer_body()]
+
+
+def test_the_transport_serves_the_configured_loopback_endpoint() -> None:
+    transport = _LocalOnlyTransport([_answer_body()])
+
+    response = transport.handle_request(httpx.Request("POST", f"{LOCAL_BASE_URL}{LOCAL_PATH}"))
+
+    assert response.status_code == 200
+    assert transport.bodies == []
 
 
 async def test_every_request_goes_to_the_configured_loopback_endpoint(
@@ -276,7 +333,7 @@ async def test_every_request_goes_to_the_configured_loopback_endpoint(
     for request in offline.transport.requests:
         assert request.url.host == LOOPBACK_HOST, request.url
         assert request.url.port == LOOPBACK_PORT, request.url
-        assert request.url.path == "/api/chat", request.url
+        assert request.url.path == LOCAL_PATH, request.url
         assert request.method == "POST"
 
 
@@ -284,7 +341,7 @@ async def test_only_the_local_chat_endpoint_is_ever_contacted(offline_turn: Any)
     """No catalog service, no prompt service, no telemetry sink."""
     offline, _events = offline_turn
     hosts = {f"{r.url.host}:{r.url.port}{r.url.path}" for r in offline.transport.requests}
-    assert hosts == {f"{LOOPBACK_HOST}:{LOOPBACK_PORT}/api/chat"}
+    assert hosts == {LOCAL_ENDPOINT}
 
 
 async def test_the_turn_completes_within_the_low_tier_budgets(offline_turn: Any) -> None:

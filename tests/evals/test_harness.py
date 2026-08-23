@@ -326,3 +326,78 @@ def test_the_default_harness_ships_the_default_pack() -> None:
     assert harness.overlay_ids == ()
     assert harness.policy.prompt_pack_id == "low-korvid-operator"
     assert "Operate in small, bounded steps" in harness.static_prompt()
+
+
+# --- one ground policy for the whole campaign -------------------------------
+#
+# The overlay a grind adds is part of the policy the session composes
+# against, so the campaign grounds it once and hands the *same* object to
+# the session and to every metadata block. Grounding twice must therefore
+# be a no-op rather than a second `eval-overlay` in the published list.
+
+
+def test_grounding_a_policy_names_the_eval_overlay() -> None:
+    from korvid.evals.harness import EVAL_OVERLAY_ID, ground_eval_policy
+
+    policy = resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]))
+    ground = ground_eval_policy(policy, PromptGrind(overlay="Name the namespace."))
+
+    assert policy.prompt_overlay_ids == ()
+    assert ground.prompt_overlay_ids == (EVAL_OVERLAY_ID,)
+
+
+def test_grounding_an_already_ground_policy_changes_nothing() -> None:
+    from korvid.evals.harness import EVAL_OVERLAY_ID, ground_eval_policy
+
+    grind = PromptGrind(overlay="Name the namespace.")
+    once = ground_eval_policy(resolve_eval_policy(ScriptedProvider([[{"type": "done"}]])), grind)
+    twice = ground_eval_policy(once, grind)
+
+    assert twice.prompt_overlay_ids == (EVAL_OVERLAY_ID,)
+    assert twice == once
+
+
+def test_a_grind_without_an_overlay_adds_no_overlay_id() -> None:
+    from korvid.evals.harness import ground_eval_policy
+
+    ground = ground_eval_policy(
+        resolve_eval_policy(ScriptedProvider([[{"type": "done"}]])),
+        PromptGrind(tier_pack="Answer in one sentence."),
+    )
+
+    assert ground.prompt_overlay_ids == ()
+
+
+def test_the_session_composes_against_the_campaign_policy_it_was_given() -> None:
+    """The harness must not re-ground what the CLI already ground."""
+    from korvid.evals.harness import EVAL_OVERLAY_ID, ground_eval_policy
+
+    grind = PromptGrind(overlay="Name the namespace in every answer.")
+    campaign = ground_eval_policy(
+        resolve_eval_policy(ScriptedProvider([[{"type": "done"}]])), grind
+    )
+
+    harness = _harness(policy=campaign, grind=grind)
+
+    assert harness.policy.prompt_overlay_ids == (EVAL_OVERLAY_ID,)
+    assert harness.overlay_ids == (EVAL_OVERLAY_ID,)
+    assert "Name the namespace in every answer." in harness.static_prompt()
+
+
+def test_the_baseline_policy_drops_the_eval_overlay_again() -> None:
+    """The fingerprint's shipped-prompt baseline needs the ungrounded policy."""
+    from korvid.evals.harness import baseline_eval_policy, ground_eval_policy
+
+    policy = resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]))
+    grind = PromptGrind(overlay="Name the namespace.")
+
+    assert baseline_eval_policy(ground_eval_policy(policy, grind)) == policy
+    assert baseline_eval_policy(policy) == policy
+
+
+def test_an_empty_tier_string_means_automatic_routing() -> None:
+    """`model_tier or None`, exactly as the composition root normalizes it."""
+    policy = resolve_eval_policy(_CatalogProvider([[{"type": "done"}]]), model_tier="")
+
+    assert policy.route_source is CapabilitySource.CATALOG
+    assert policy.tier is ModelTier.LOW

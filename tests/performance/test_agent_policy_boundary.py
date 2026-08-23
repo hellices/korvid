@@ -31,7 +31,15 @@ _RETIRED_SYMBOLS = (
 )
 
 _PERFORMANCE_DIR = Path(__file__).parent
-_EVALS_DIR = Path(__file__).parents[2] / "src" / "korvid" / "evals"
+_REPO_ROOT = Path(__file__).parents[2]
+_EVALS_DIR = _REPO_ROOT / "src" / "korvid" / "evals"
+
+#: Documentation that describes the *current* program. Historical plans and
+#: specs under `docs/dev/` and `docs/superpowers/` are records of how korvid
+#: got here and legitimately name what they retired.
+_CURRENT_DOCS = sorted(
+    [*(_REPO_ROOT / "docs" / "evals").glob("*.md"), _REPO_ROOT / "docs" / "agent.md"]
+)
 
 
 def _python_sources(directory: Path) -> list[Path]:
@@ -52,6 +60,27 @@ def test_no_eval_module_names_a_retired_agent_symbol(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     found = [symbol for symbol in _RETIRED_SYMBOLS if symbol in text]
     assert found == [], f"{path.name} still names {found}"
+
+
+@pytest.mark.parametrize("path", _CURRENT_DOCS, ids=lambda p: p.name)
+def test_no_current_doc_names_a_retired_agent_symbol(path: Path) -> None:
+    """Docs describing today's program must name today's classes.
+
+    The eval methodology told readers that one `AgentRuntime` persists for
+    a journey, which is the class this migration retired — a reader who
+    went looking for it would find the module being deleted rather than
+    `DefaultAgentSession`, which is what actually persists.
+    """
+    text = path.read_text(encoding="utf-8")
+    found = [symbol for symbol in _RETIRED_SYMBOLS if symbol in text]
+    assert found == [], f"{path.name} still names {found}"
+
+
+def test_the_docs_guard_actually_covers_the_eval_methodology() -> None:
+    """A guard over an empty file list would pass forever."""
+    names = {path.name for path in _CURRENT_DOCS}
+    assert "methodology.md" in names
+    assert "agent.md" in names
 
 
 @pytest.mark.parametrize("path", _python_sources(_PERFORMANCE_DIR), ids=lambda p: p.name)

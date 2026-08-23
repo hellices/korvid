@@ -172,3 +172,43 @@ async def test_namespace_bound_reads_reject_cross_namespace_and_cluster_scope() 
     node_meta = ResourceMeta("Node", "nodes", "", "v1", False)
     with pytest.raises(ValueError, match="cluster-scoped"):
         await reads.list_objects(node_meta, None)
+
+
+# --- the live run's own context ---------------------------------------------
+#
+# A live journey runs against a real cluster, and the workspace the model is
+# shown must say which one. The authored fixture context is a fake, so
+# retargeting replaces it with the context the run actually connected to.
+
+
+def _triage() -> Any:
+    return next(
+        item for item in load_journeys(bundled_journeys_dir()) if item.id == "triage-and-correct"
+    )
+
+
+def test_retargeting_reports_the_context_the_live_run_connected_to() -> None:
+    journey = _triage()
+    assert journey.interaction.kube_context == "eval-fixture"
+
+    retargeted = retarget_journey_namespace(
+        journey,
+        "korvid-agent-eval-run-123",
+        context="aks-korvid-contract-test",
+    )
+
+    assert retargeted.interaction.kube_context == "aks-korvid-contract-test"
+    restated = [turn.interaction for turn in retargeted.turns if turn.interaction is not None]
+    assert restated
+    for interaction in restated:
+        assert interaction.kube_context == "aks-korvid-contract-test"
+
+
+def test_a_default_context_is_reported_as_none_not_as_a_fixture_name() -> None:
+    """`--context ''` means the kubeconfig's current context, not `eval-fixture`."""
+    retargeted = retarget_journey_namespace(_triage(), "korvid-agent-eval-run-123", context="")
+
+    assert retargeted.interaction.kube_context is None
+    for turn in retargeted.turns:
+        if turn.interaction is not None:
+            assert turn.interaction.kube_context is None

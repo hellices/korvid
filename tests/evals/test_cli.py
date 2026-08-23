@@ -19,6 +19,7 @@ from korvid.evals.__main__ import (
     _parse_args,
     _positive_int,
     _prompt_grind,
+    _resolve_policy,
     capture_serving,
     exit_code,
     probe_serving,
@@ -511,3 +512,62 @@ def test_warn_unpinned_is_silent_for_a_publishable_run(
 ) -> None:
     warn_if_unpinned({"unavailable": []})
     assert capsys.readouterr().err == ""
+
+
+# --- one policy per campaign, one overlay list ------------------------------
+#
+# `meta.policy.overlays` and `meta.prompts.overlays` are read side by side.
+# They describe the same composed system message, so they must be the same
+# list — and the eval overlay must appear once, not once per grounding.
+
+
+def _ground(grind: PromptGrind) -> Any:
+    from korvid.evals.harness import ground_eval_policy
+
+    return ground_eval_policy(_policy(), grind)
+
+
+def test_a_ground_campaign_publishes_one_agreeing_overlay_list() -> None:
+    grind = PromptGrind(overlay="Always name the namespace.")
+    payload = run_payload([_report()], policy=_ground(grind), grind=grind)
+
+    overlays = payload["meta"]["policy"]["overlays"]
+    assert overlays == ["eval-overlay"]
+    assert payload["meta"]["prompts"]["overlays"] == overlays
+
+
+def test_a_ground_campaign_never_publishes_a_duplicate_overlay_id() -> None:
+    grind = PromptGrind(overlay="Always name the namespace.")
+    payload = run_payload([_report()], policy=_ground(grind), grind=grind)
+
+    overlays = payload["meta"]["prompts"]["overlays"]
+    assert len(overlays) == len(set(overlays))
+
+
+def test_a_ground_campaign_is_still_marked_as_an_override() -> None:
+    """The baseline digest is the shipped prompt, not the ground one."""
+    grind = PromptGrind(overlay="Always name the namespace.")
+    payload = run_payload([_report()], policy=_ground(grind), grind=grind)
+
+    assert payload["meta"]["prompts"]["source"] == "override"
+    assert len(payload["meta"]["prompts"]["sha256"]) == 64
+
+
+def test_an_ungrounded_campaign_still_agrees_with_itself() -> None:
+    payload = run_payload([_report()], policy=_policy())
+
+    assert payload["meta"]["policy"]["overlays"] == payload["meta"]["prompts"]["overlays"] == []
+
+
+def test_the_campaign_policy_is_resolved_and_ground_once(tmp_path: Path) -> None:
+    """The CLI hands one object to the session, the report and the metadata."""
+    overlay = tmp_path / "overlay.md"
+    overlay.write_text("Always name the namespace.", encoding="utf-8")
+    args = _parse_args(["--prompt-overlay-file", str(overlay)])
+    grind = _prompt_grind(args)
+
+    policy = _resolve_policy(lambda: ScriptedProvider([[{"type": "done"}]]), args, grind)
+
+    assert policy.prompt_overlay_ids == ("eval-overlay",)
+    payload = run_payload([_report()], policy=policy, grind=grind)
+    assert payload["meta"]["policy"]["overlays"] == ["eval-overlay"]
