@@ -806,10 +806,12 @@ def test_build_helm_returns_none_without_binary(monkeypatch: pytest.MonkeyPatch)
     assert _build_helm(KorvidConfig()) is None
 
 
-async def test_agent_wiring_applies_the_small_profile(monkeypatch: object) -> None:
-    """`agent.profile: small` shrinks the tool surface, budgets, and prompt
+async def test_agent_wiring_applies_the_low_tier(monkeypatch: object) -> None:
+    """`agent.model_tier: low` shrinks the tool surface, budgets, and prompt
     at the composition root (issue #71); rebuilds after the :ai wizard honor
-    the wizard's profile choice."""
+    the wizard's tier choice. The old-runtime `small`/`full` profile split
+    still exists internally (Task 12/14 will replace it); a private adapter
+    in `__main__` maps low/high onto it until then."""
     import pytest
 
     mp = monkeypatch
@@ -828,7 +830,7 @@ async def test_agent_wiring_applies_the_small_profile(monkeypatch: object) -> No
         agent_base_url="http://localhost:9999/v1",
         agent_model="m",
         agent_api_key_env="KORVID_TEST_KEY",
-        agent_profile="small",
+        agent_model_tier="low",
     )
     kube_stub = cast("Any", object())
     runtime, _, rebuild, _, _, _, _ = _build_agent_wiring(
@@ -848,7 +850,7 @@ async def test_agent_wiring_applies_the_small_profile(monkeypatch: object) -> No
     assert runtime._max_result_chars is not None
     assert "one tool at a time" in runtime._messages[0]["content"]
 
-    # The wizard's rebuild carries its own profile choice.
+    # The wizard's rebuild carries its own tier choice.
     assert rebuild is not None
     full_runtime = rebuild(
         AgentSettings(
@@ -857,7 +859,7 @@ async def test_agent_wiring_applies_the_small_profile(monkeypatch: object) -> No
             base_url="http://localhost:9999/v1",
             model="m",
             api_key_env="KORVID_TEST_KEY",
-            profile="full",
+            model_tier="high",
         )
     )
     assert full_runtime is not None
@@ -866,11 +868,11 @@ async def test_agent_wiring_applies_the_small_profile(monkeypatch: object) -> No
     assert full_runtime._max_iterations != SMALL_MAX_ITERATIONS
 
 
-async def test_ctx_retarget_keeps_the_small_profile_surface(monkeypatch: object) -> None:
-    """A `:ctx` switch recomposes the tool set from the *active* profile
-    (issues #36 + #71): retargeting a small-profile runtime picks up the new
-    cluster's capabilities (resize) without resurrecting the full surface or
-    resetting the small system prompt."""
+async def test_ctx_retarget_keeps_the_low_tier_surface(monkeypatch: object) -> None:
+    """A `:ctx` switch recomposes the tool set from the *active* internal
+    profile (issues #36 + #71): retargeting a low-tier runtime picks up the
+    new cluster's capabilities (resize) without resurrecting the full
+    surface or resetting the small system prompt."""
     import pytest
 
     mp = monkeypatch
@@ -887,7 +889,7 @@ async def test_ctx_retarget_keeps_the_small_profile_surface(monkeypatch: object)
         agent_base_url="http://localhost:9999/v1",
         agent_model="m",
         agent_api_key_env="KORVID_TEST_KEY",
-        agent_profile="small",
+        agent_model_tier="low",
     )
     kube_stub = cast("Any", object())
     runtime, _, _, retarget, _, _, _ = _build_agent_wiring(
@@ -976,6 +978,44 @@ def test_startup_namespace_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(main_mod, "resolve_context_namespace", lambda name: None)
     assert _load_startup_config(False).namespace == "default"
+
+
+def test_load_startup_config_wraps_config_migration_error_as_system_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A removed `agent.profile`/`agent.prompts` key must fail startup with
+    one clear, actionable line — not an unfiltered traceback."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import ConfigMigrationError
+
+    def _raise() -> Any:
+        raise ConfigMigrationError(
+            "agent.profile was removed; use agent.model_tier instead (absent/low/high)."
+        )
+
+    monkeypatch.setattr(main_mod, "load_config", _raise)
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod._load_startup_config(False)
+    message = str(exc_info.value)
+    assert "\n" not in message  # one-line, actionable
+    assert "agent.profile" in message
+    assert "agent.model_tier" in message
+
+
+def test_load_startup_config_wraps_migration_error_even_when_agent_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The removed-key check is unconditional: startup must not silently
+    ignore a leftover `agent.profile` just because `agent.enabled: false`."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import load_config as real_load_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agent:\n  enabled: false\n  profile: full\n")
+    monkeypatch.setattr(main_mod, "load_config", lambda: real_load_config(config_path))
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod._load_startup_config(False)
+    assert "agent.profile" in str(exc_info.value)
 
 
 def test_cli_namespace_flag_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1909,116 +1949,6 @@ def test_github_copilot_variant_loads_oauth_token(monkeypatch: object) -> None:
     # No token stored → provider is None.
     assert runtime is None
     assert provider_box[0] is None
-
-
-def test_configured_prompt_overrides_reach_the_runtime(monkeypatch: object) -> None:
-    """`agent.prompts` must actually change the prompt the model receives."""
-    import pytest
-
-    mp = monkeypatch
-    assert isinstance(mp, pytest.MonkeyPatch)
-    mp.setenv("KORVID_TEST_KEY", "k")
-
-    from korvid.__main__ import _build_agent_wiring
-    from korvid.core.config import KorvidConfig
-
-    config = KorvidConfig(
-        agent_enabled=True,
-        agent_provider="openai",
-        agent_auth_method="api_key",
-        agent_base_url="http://localhost:9999/v1",
-        agent_model="m",
-        agent_api_key_env="KORVID_TEST_KEY",
-        agent_prompt_system="You are terse.",
-        agent_prompt_append="Never name nodes.",
-        agent_prompt_tool_descriptions={"get_logs": "Mine."},
-    )
-    kube_stub = cast("Any", object())
-    runtime, _, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {})
-    assert runtime is not None
-    prompt = cast("Any", runtime)._system_prompt_override
-    assert prompt.startswith("You are terse. Never name nodes.")
-    described = {t["function"]["name"]: t["function"]["description"] for t in runtime._tools}
-    assert described["get_logs"] == "Mine."
-
-
-def test_unusable_prompt_override_is_reported_not_fatal(monkeypatch: object) -> None:
-    """A typo'd tool name warns instead of silently doing nothing."""
-    import pytest
-
-    mp = monkeypatch
-    assert isinstance(mp, pytest.MonkeyPatch)
-    mp.setenv("KORVID_TEST_KEY", "k")
-
-    from korvid.__main__ import _build_agent_wiring
-    from korvid.core.config import KorvidConfig
-
-    config = KorvidConfig(
-        agent_enabled=True,
-        agent_provider="openai",
-        agent_auth_method="api_key",
-        agent_base_url="http://localhost:9999/v1",
-        agent_model="m",
-        agent_api_key_env="KORVID_TEST_KEY",
-        agent_prompt_tool_descriptions={"get_logz": "Mine."},
-    )
-    kube_stub = cast("Any", object())
-    warnings: list[str] = []
-    runtime, _, _, _, _, _, _ = _build_agent_wiring(
-        config, kube_stub, {}, startup_warnings=warnings
-    )
-    assert runtime is not None
-    assert any("get_logz" in w for w in warnings), warnings
-
-
-async def test_prompt_overrides_survive_a_wizard_rebuild_and_a_context_switch(
-    monkeypatch: object,
-) -> None:
-    """A `:ai` model change or `:ctx` switch must not silently drop the
-    configured prompt back to the shipped default."""
-    import pytest
-
-    mp = monkeypatch
-    assert isinstance(mp, pytest.MonkeyPatch)
-    mp.setenv("KORVID_TEST_KEY", "k")
-
-    from korvid.__main__ import _build_agent_wiring
-    from korvid.agent.setup import AgentSettings
-    from korvid.core.config import KorvidConfig
-
-    config = KorvidConfig(
-        agent_enabled=True,
-        agent_provider="openai",
-        agent_auth_method="api_key",
-        agent_base_url="http://localhost:9999/v1",
-        agent_model="m",
-        agent_api_key_env="KORVID_TEST_KEY",
-        agent_prompt_system="You are terse.",
-        agent_prompt_tool_descriptions={"get_logs": "Mine."},
-    )
-    kube_stub = cast("Any", object())
-    runtime, _, rebuild, retarget, _, _, _ = _build_agent_wiring(config, kube_stub, {})
-    assert runtime is not None
-    assert rebuild is not None
-
-    rebuilt = rebuild(
-        AgentSettings(
-            provider="openai",
-            auth_method="api_key",
-            base_url="http://localhost:9999/v1",
-            model="m",
-            api_key_env="KORVID_TEST_KEY",
-        )
-    )
-    assert rebuilt is not None
-    assert rebuilt._messages[0]["content"].startswith("You are terse.")
-    described = {t["function"]["name"]: t["function"]["description"] for t in rebuilt._tools}
-    assert described["get_logs"] == "Mine."
-
-    retarget(rebuilt, True, "This cluster runs on AWS (EKS managed).")
-    assert rebuilt._messages[0]["content"].startswith("You are terse.")
-    after = {t["function"]["name"]: t["function"]["description"] for t in rebuilt._tools}
-    assert after["get_logs"] == "Mine."
 
 
 class _FakeAppCapturesKwargs:

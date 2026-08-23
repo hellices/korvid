@@ -1,8 +1,8 @@
 """Direct tests for `AgentUiController` — the built-in agent's UI ownership
 (issue #187 / Deep Task 6).
 
-The controller owns the agent's session state (runtime, settings, profile,
-model, disconnect marker, follow flag), the turn task lifecycle including
+The controller owns the agent's session state (runtime, settings, model
+tier, model, disconnect marker, follow flag), the turn task lifecycle including
 interrupt-and-submit, the screen context the model is told about, and every
 `UIBridge` read the agent (or an MCP follow mirror) drives. It reaches
 Textual only through `UiSurface` and the named ports below, so all of that is
@@ -103,7 +103,7 @@ class FakePanel(AgentPanelPort):
         self.events: list[AgentEvent] = []
         self.turns: list[tuple[str, bool]] = []
         self.echoed: list[str] = []
-        self.headers: list[tuple[str, str | None]] = []
+        self.headers: list[str] = []
         self.stop_key = ""
         self.input_enabled = True
         self.focused = 0
@@ -133,9 +133,8 @@ class FakePanel(AgentPanelPort):
         output_tokens: int,
         *,
         estimated: bool,
-        profile: str | None,
     ) -> None:
-        self.headers.append((model, profile))
+        self.headers.append(model)
 
     def show_setup_hint(self) -> None:
         self.calls.append("setup_hint")
@@ -541,7 +540,7 @@ async def test_toggling_a_configured_panel_sets_the_header_and_focuses_the_input
 ) -> None:
     env = Env(tmp_path=tmp_path, runtime=ScriptedRuntime())
     env.controller.toggle_panel()
-    assert env.panel.headers == [("m-1", "full")]
+    assert env.panel.headers == ["m-1"]
     assert env.panel.focused == 1
     env.controller.toggle_panel()
     assert env.panel.visible is False
@@ -572,23 +571,25 @@ async def test_model_command_rejects_trailing_arguments(env: Env) -> None:
     assert "Usage: :model [name]" in env.ui.messages()
 
 
-async def test_applying_settings_swaps_the_runtime_and_the_profile(tmp_path: Path) -> None:
+async def test_applying_settings_swaps_the_runtime_and_the_configured_tier(
+    tmp_path: Path,
+) -> None:
     fresh = ScriptedRuntime()
     env = Env(tmp_path=tmp_path, rebuild=lambda settings: fresh)
     settings = AgentSettings(
-        provider="ollama", auth_method="none", base_url=None, model="m-2", profile="small"
+        provider="ollama", auth_method="none", base_url=None, model="m-2", model_tier="low"
     )
     assert env.controller.apply_settings(settings) is True
     assert env.controller.runtime is cast(Any, fresh)
     assert env.controller.model_name == "m-2"
-    assert env.controller.profile == "small"
+    assert env.controller.configured_model_tier == "low"
 
 
 async def test_a_failed_rebuild_keeps_the_previous_runtime(tmp_path: Path) -> None:
     previous = ScriptedRuntime()
     env = Env(tmp_path=tmp_path, runtime=previous, rebuild=lambda settings: None)
     settings = AgentSettings(
-        provider="ollama", auth_method="none", base_url=None, model="m-2", profile="full"
+        provider="ollama", auth_method="none", base_url=None, model="m-2", model_tier="high"
     )
     assert env.controller.apply_settings(settings) is False
     assert env.controller.runtime is cast(Any, previous)
