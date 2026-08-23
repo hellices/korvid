@@ -356,6 +356,24 @@ def _target(raw: Any, label: str) -> OperationTarget:
     )
 
 
+def _assertion_expected(raw: dict[str, Any], operator: object, label: str) -> Any:
+    has_expected = "expected" in raw
+    if operator in _VALUE_OPERATORS and not has_expected:
+        raise ValueError(f"{label}: operator {operator!r} needs an 'expected' value")
+    if operator not in _VALUE_OPERATORS and has_expected:
+        raise ValueError(f"{label}: operator {operator!r} takes no 'expected' value")
+    expected = raw.get("expected")
+    if has_expected and expected is not None and not isinstance(expected, (str, int, float, bool)):
+        raise ValueError(f"{label}.expected must be a finite JSON scalar")
+    if isinstance(expected, float) and not math.isfinite(expected):
+        raise ValueError(f"{label}.expected must be a finite JSON scalar")
+    if operator == "greater_than" and (
+        isinstance(expected, bool) or not isinstance(expected, (int, float))
+    ):
+        raise ValueError(f"{label}: greater_than expected must be a finite number")
+    return expected
+
+
 def _assertion(raw: Any, default_target: OperationTarget, label: str) -> StateAssertion:
     if not isinstance(raw, dict):
         raise ValueError(f"{label} must be a mapping")
@@ -367,16 +385,7 @@ def _assertion(raw: Any, default_target: OperationTarget, label: str) -> StateAs
     if not isinstance(path, str):
         raise ValueError(f"{label}.path must be a typed state path string")
     split_path(path)
-    has_expected = "expected" in raw
-    if operator in _VALUE_OPERATORS and not has_expected:
-        raise ValueError(f"{label}: operator {operator!r} needs an 'expected' value")
-    if operator not in _VALUE_OPERATORS and has_expected:
-        raise ValueError(f"{label}: operator {operator!r} takes no 'expected' value")
-    expected = raw.get("expected")
-    if has_expected and expected is not None and not isinstance(expected, (str, int, float, bool)):
-        raise ValueError(f"{label}.expected must be a finite JSON scalar")
-    if isinstance(expected, float) and not math.isfinite(expected):
-        raise ValueError(f"{label}.expected must be a finite JSON scalar")
+    expected = _assertion_expected(raw, operator, label)
     if raw.get("provisional", True) is not True:
         raise ValueError(
             f"{label}: Slice A fake-state assertions stay provisional; promotion to "

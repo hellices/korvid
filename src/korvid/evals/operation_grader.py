@@ -455,10 +455,9 @@ def _boundary_escape(ctx: _Context) -> bool:
     )
 
 
-def _reported_request_matches(
+def _reported_target_matches(
     journey: OperationJourney, classification: OutcomeClassification
 ) -> bool:
-    expected = journey.expected_request
     if classification.reported_target is not None:
         parts = classification.reported_target.lower().split("/")
         if parts[-1] != journey.target.name.lower():
@@ -479,16 +478,51 @@ def _reported_request_matches(
             )
         if qualifier and qualifier not in allowed_qualifiers:
             return False
-    if (
-        classification.reported_namespace is not None
-        and classification.reported_namespace != journey.target.namespace
-    ):
+    return (
+        classification.reported_namespace is None
+        or classification.reported_namespace == journey.target.namespace
+    )
+
+
+def _expected_scale_direction(journey: OperationJourney) -> str | None:
+    expected = journey.expected_request
+    if expected is None or expected.replicas is None:
+        return None
+    initial_replicas = next(
+        (
+            assertion.expected
+            for assertion in journey.preconditions
+            if assertion.target == journey.target
+            and assertion.path == "spec.replicas"
+            and assertion.operator == "equals"
+            and not isinstance(assertion.expected, bool)
+            and isinstance(assertion.expected, (int, float))
+        ),
+        None,
+    )
+    if initial_replicas is None or expected.replicas == initial_replicas:
+        return None
+    return "up" if expected.replicas > initial_replicas else "down"
+
+
+def _reported_request_matches(
+    journey: OperationJourney, classification: OutcomeClassification
+) -> bool:
+    if not _reported_target_matches(journey, classification):
         return False
+    expected = journey.expected_request
     if expected is None:
         return classification.reported_action is None
     if (
         classification.reported_action is not None
         and classification.reported_action != expected.action
+    ):
+        return False
+    expected_direction = _expected_scale_direction(journey)
+    if (
+        classification.reported_direction is not None
+        and expected_direction is not None
+        and classification.reported_direction != expected_direction
     ):
         return False
     return (

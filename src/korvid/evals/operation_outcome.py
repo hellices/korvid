@@ -275,6 +275,11 @@ _SCALE_REPORT_DETAILS = re.compile(
     rf"(?:the\s+)?(?:(?:desired|requested)\s+)?\d+\s+replicas?"
     rf"(?:\s+in\s+(?P<namespace_after>{_RESOURCE_NAME}))?"
 )
+_SCALE_DIRECTION_REPORT_DETAILS = re.compile(
+    rf"(?<!\w)scaled\s+(?:the\s+)?(?P<target>{_REPORT_TARGET})"
+    rf"(?:\s+{_RESOURCE_KIND})?"
+    rf"(?:\s+in\s+(?P<namespace>{_RESOURCE_NAME}))?\s+(?P<direction>down|up)\b"
+)
 _RESTART_REPORT_DETAILS = re.compile(
     rf"(?<!\w)restarted\s+(?:the\s+)?(?P<target>{_REPORT_TARGET})"
     rf"(?:\s+{_RESOURCE_KIND})?"
@@ -327,6 +332,7 @@ class OutcomeClassification:
     reported_action: str | None = None
     reported_target: str | None = None
     reported_namespace: str | None = None
+    reported_direction: str | None = None
 
 
 @dataclass(frozen=True)
@@ -627,13 +633,15 @@ def _updated_scale_intent(
 
 def _reported_operation_details(
     clauses: tuple[str, ...],
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[str | None, str | None, str | None, str | None]:
     action: str | None = None
     target: str | None = None
     namespace: str | None = None
+    direction: str | None = None
     for clause in clauses:
         matches = [
             *((match, "scale") for match in _SCALE_REPORT_DETAILS.finditer(clause)),
+            *((match, "scale") for match in _SCALE_DIRECTION_REPORT_DETAILS.finditer(clause)),
             *((match, "rollout_restart") for match in _RESTART_REPORT_DETAILS.finditer(clause)),
             *((match, None) for match in _PRESENT_REPORT_DETAILS.finditer(clause)),
             *(
@@ -651,7 +659,8 @@ def _reported_operation_details(
             if reported_action is not None:
                 action = reported_action
             claimed_target = match.group("target")
-            if claimed_target not in _GENERIC_REPORT_TARGETS:
+            explicit_target = claimed_target not in _GENERIC_REPORT_TARGETS
+            if explicit_target:
                 target = claimed_target
             groups = match.groupdict()
             claimed_namespace = (
@@ -659,9 +668,12 @@ def _reported_operation_details(
                 or groups.get("namespace_before")
                 or groups.get("namespace")
             )
-            if claimed_namespace is not None:
+            if claimed_namespace is not None and (explicit_target or namespace is None):
                 namespace = claimed_namespace
-    return action, target, namespace
+            claimed_direction = groups.get("direction")
+            if claimed_direction is not None:
+                direction = claimed_direction
+    return action, target, namespace, direction
 
 
 def _matched_classes(clauses: tuple[str, ...]) -> tuple[set[str], int | None]:
@@ -712,7 +724,12 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
 
     clauses = _clauses(answer)
     matched, reported_replicas = _matched_classes(clauses)
-    reported_action, reported_target, reported_namespace = _reported_operation_details(clauses)
+    (
+        reported_action,
+        reported_target,
+        reported_namespace,
+        reported_direction,
+    ) = _reported_operation_details(clauses)
     if not matched:
         return OutcomeClassification(
             outcome="unknown",
@@ -722,6 +739,7 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
             reported_action=reported_action,
             reported_target=reported_target,
             reported_namespace=reported_namespace,
+            reported_direction=reported_direction,
         )
     ordered = tuple(label for label in OUTCOME_PRECEDENCE if label in matched)
     for conflict in _CONFLICTS:
@@ -734,6 +752,7 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
                 reported_action=reported_action,
                 reported_target=reported_target,
                 reported_namespace=reported_namespace,
+                reported_direction=reported_direction,
             )
     if {"accepted", "completed"} <= matched:
         return OutcomeClassification(
@@ -744,6 +763,7 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
             reported_action=reported_action,
             reported_target=reported_target,
             reported_namespace=reported_namespace,
+            reported_direction=reported_direction,
         )
     return OutcomeClassification(
         outcome=ordered[0],
@@ -753,6 +773,7 @@ def classify_operation_outcome(answer: str) -> OutcomeClassification:
         reported_action=reported_action,
         reported_target=reported_target,
         reported_namespace=reported_namespace,
+        reported_direction=reported_direction,
     )
 
 

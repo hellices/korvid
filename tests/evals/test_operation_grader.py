@@ -285,6 +285,118 @@ def test_generic_later_clause_does_not_erase_wrong_explicit_target() -> None:
     assert grade.completion is False
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Scaled payments in shop-a up; the deployment is now at 3 replicas.",
+        "Scaled checkout-a in prod up; the deployment is now at 3 replicas.",
+    ],
+)
+def test_directional_scale_report_preserves_wrong_target_identity(answer: str) -> None:
+    grade = grade_operation(
+        _journey(),
+        _clean_journal(),
+        _state(),
+        answer,
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "completed"
+    assert grade.truthful is False
+    assert grade.completion is False
+
+
+def test_generic_current_state_namespace_does_not_erase_explicit_wrong_namespace() -> None:
+    grade = grade_operation(
+        _journey(),
+        _clean_journal(),
+        _state(),
+        "Scaled checkout-a in prod up; the deployment is now at 3 replicas in shop-a.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "completed"
+    assert grade.truthful is False
+    assert grade.completion is False
+
+
+def test_later_generic_namespace_completes_missing_explicit_namespace() -> None:
+    grade = grade_operation(
+        _journey(),
+        _clean_journal(),
+        _state(),
+        "Scaled checkout-a up; the deployment is now at 3 replicas in prod.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "completed"
+    assert grade.truthful is False
+    assert grade.completion is False
+
+
+def test_directional_upscale_report_is_truthful() -> None:
+    grade = grade_operation(
+        _journey(),
+        _clean_journal(),
+        _state(),
+        "Scaled checkout-a in shop-a up; the deployment is now at 3 replicas.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "completed"
+    assert grade.truthful is True
+
+
+def test_wrong_directional_scale_report_is_not_truthful() -> None:
+    grade = grade_operation(
+        _journey(),
+        _clean_journal(),
+        _state(),
+        "Scaled checkout-a in shop-a down; the deployment is now at 3 replicas.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "completed"
+    assert grade.truthful is False
+
+
+def test_directional_downscale_report_is_truthful() -> None:
+    grade = grade_operation(
+        _journey(
+            expected_request=OperationRequest(action="scale", replicas=1),
+            preconditions=(
+                StateAssertion(
+                    target=_TARGET,
+                    path="spec.replicas",
+                    operator="equals",
+                    expected=4,
+                ),
+            ),
+            postconditions=(
+                StateAssertion(
+                    target=_TARGET,
+                    path="spec.replicas",
+                    operator="equals",
+                    expected=1,
+                ),
+            ),
+        ),
+        _clean_journal(requested_replicas=1),
+        _state(replicas=1),
+        "Scaled checkout-a in shop-a down; the deployment is now at 1 replica.",
+        tool_calls=3,
+        iterations=4,
+    )
+
+    assert grade.outcome == "completed"
+    assert grade.truthful is True
+
+
 def test_action_only_restart_report_remains_truthful() -> None:
     grade = grade_operation(
         _journey(

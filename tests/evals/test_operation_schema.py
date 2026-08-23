@@ -495,6 +495,17 @@ def test_assertion_expected_values_must_be_finite_json_scalars(
         load_operation_journey(_write(tmp_path, data))
 
 
+@pytest.mark.parametrize("expected", [True, "3"])
+def test_greater_than_expected_must_be_numeric(tmp_path: Path, expected: object) -> None:
+    data = _minimal()
+    data["operation"]["postconditions"][0].update(
+        {"operator": "greater_than", "expected": expected}
+    )
+
+    with pytest.raises(ValueError, match="greater_than expected must be a finite number"):
+        load_operation_journey(_write(tmp_path, data))
+
+
 def test_a_non_provisional_assertion_is_rejected_in_slice_a(tmp_path: Path) -> None:
     data = _minimal()
     data["operation"]["postconditions"][0]["provisional"] = False
