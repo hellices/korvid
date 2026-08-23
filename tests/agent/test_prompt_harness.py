@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import fields
 from typing import Any
 
 import pytest
@@ -110,7 +111,6 @@ def inputs(
     interaction_: InteractionContext | None = None,
     cluster: ClusterFacts | None = None,
     user_rules: tuple[str, ...] = (),
-    evidence_note: str = "",
     handoff_note: str | None = None,
 ) -> PromptInputs:
     return PromptInputs(
@@ -118,7 +118,6 @@ def inputs(
         interaction=interaction_ if interaction_ is not None else interaction(),
         cluster=cluster if cluster is not None else _UNKNOWN_CLUSTER,
         user_rules=user_rules,
-        evidence_note=evidence_note,
         handoff_note=handoff_note,
     )
 
@@ -185,7 +184,6 @@ def test_every_layer_marker_appears_exactly_once_and_in_order() -> None:
             policy_=turn_policy,
             cluster=ClusterFacts(provider="azure", distribution="aks"),
             user_rules=("USER_RULE_MARKER",),
-            evidence_note="EVIDENCE_NOTE_MARKER",
             handoff_note="HANDOFF_NOTE_MARKER",
         ),
     )
@@ -199,8 +197,7 @@ def test_every_layer_marker_appears_exactly_once_and_in_order() -> None:
         "EXACT_MODEL_OVERLAY_MARKER",  # 5: exact-model overlay
         "USER_RULE_MARKER",  # 6: additive user rules
         "resize_pod",  # 7: armed write/UI capability clauses
-        "EVIDENCE_NOTE_MARKER",  # 8: bounded evidence/cluster/handoff context
-        "HANDOFF_NOTE_MARKER",
+        "HANDOFF_NOTE_MARKER",  # 8: bounded cluster/handoff context
     ]
     for marker in markers:
         assert system.count(marker) == 1, f"{marker!r} did not appear exactly once"
@@ -351,20 +348,30 @@ def test_no_armed_ui_tools_means_no_drive_clause() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Evidence / handoff / cluster notes
+# Handoff / cluster notes (the evidence table is the engine's, per round)
 # ---------------------------------------------------------------------------
 
 
-def test_evidence_note_is_included_verbatim_in_the_system_message() -> None:
-    harness = PromptHarness()
+def test_the_composed_prompt_carries_no_turn_evidence_table() -> None:
+    """The engine injects the table per round; a static copy would duplicate it.
+
+    `ComposedPrompt.system_message` is composed once and sent on every
+    round of the turn, so a table composed into it would still name the
+    reads of the round it was composed for — while the engine appends the
+    ledger's current contents to the same message. Two tables, one stale:
+    the field this harness could carry one in is gone.
+    """
     ledger = EvidenceLedger()
     ledger.record("diagnose_pod", {"name": "api-1", "namespace": "shop"}, "phase: Running")
-    item = ledger.resolve("E1")
-    assert item is not None
 
-    prompt = harness.compose("diagnose it", inputs(evidence_note=ledger.prompt_note()))
+    prompt = PromptHarness().compose("diagnose it", inputs())
 
-    assert "[E1] diagnose_pod" in prompt.system_message
+    assert ledger.prompt_note() not in prompt.system_message
+    assert "[E1]" not in prompt.system_message
+
+
+def test_prompt_inputs_cannot_carry_an_evidence_note() -> None:
+    assert "evidence_note" not in {field.name for field in fields(PromptInputs)}
 
 
 def test_handoff_note_is_included_in_the_system_message() -> None:
@@ -377,10 +384,10 @@ def test_handoff_note_is_included_in_the_system_message() -> None:
     assert "The Kubernetes context just changed to prod." in prompt.system_message
 
 
-def test_absent_evidence_and_handoff_notes_add_no_overhead() -> None:
+def test_an_absent_handoff_note_adds_no_overhead() -> None:
     harness = PromptHarness()
 
-    with_notes = harness.compose("diagnose it", inputs(evidence_note="", handoff_note=None))
+    with_notes = harness.compose("diagnose it", inputs(handoff_note=None))
     without_cluster_note = harness.compose(
         "diagnose it",
         inputs(cluster=ClusterFacts(provider="unknown", distribution=None)),

@@ -33,9 +33,9 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.interaction import Navigate
+from korvid.agent.interaction import Navigate, UiAction, UiActionResult
 from korvid.agent.native_engine import NativeAgentEngine
-from korvid.agent.request_gateway import RequestGateway
+from korvid.agent.request_gateway import PreparedGatewayRequest, RequestGateway
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.tools.executor import ToolResultBlocked
 
@@ -316,6 +316,63 @@ async def test_the_evidence_table_only_names_reads_that_happened() -> None:
     assert harness.tools.evidence.references() == ("E1",)
 
 
+# -- failures nothing expected -----------------------------------------------
+
+
+class ExplodingGateway(RequestGateway):
+    """A real gateway whose first preparation fails in a way nothing expects."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.armed = True
+
+    def prepare(self, *args: Any, **kwargs: Any) -> PreparedGatewayRequest:
+        if self.armed:
+            self.armed = False
+            raise RuntimeError("gateway exploded")
+        return super().prepare(*args, **kwargs)
+
+
+class ExplodingBridge(RecordingBridge):
+    """A UI bridge that fails the way a torn-down screen would."""
+
+    async def apply(self, action: UiAction) -> UiActionResult:
+        raise RuntimeError("bridge exploded")
+
+
+async def test_an_unexpected_gateway_failure_leaves_the_turn_recoverable() -> None:
+    harness = build_harness([text_turn(), text_turn("recovered")], gateway_class=ExplodingGateway)
+
+    with pytest.raises(RuntimeError, match="gateway exploded"):
+        await harness.run("first")
+    events = await harness.run("second")
+
+    assert isinstance(events[-1], TurnComplete)
+    assert [message["content"] for message in harness.conversation.messages] == [
+        "second",
+        "recovered",
+    ]
+
+
+async def test_an_unexpected_bridge_failure_leaves_the_turn_recoverable() -> None:
+    bridge = ExplodingBridge()
+    harness = build_harness(
+        [
+            [tool_call("c1", "navigate", '{"view":"pods","namespace":"prod"}'), DONE],
+            text_turn("recovered"),
+        ],
+        policy=make_policy(tool_names=("navigate",)),
+        bridge=bridge,
+    )
+
+    with pytest.raises(RuntimeError, match="bridge exploded"):
+        await harness.run("first")
+
+    assert not harness.conversation.has_unmatched_tool_calls
+    assert harness.conversation.messages == []
+    assert isinstance((await harness.run("second"))[-1], TurnComplete)
+
+
 # -- cancellation ------------------------------------------------------------
 
 
@@ -330,6 +387,20 @@ async def _cancel_at_stall(harness: Harness) -> None:
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
+
+
+async def test_a_cancelled_turn_is_left_active_for_the_session_to_finalize() -> None:
+    """Cancellation is not an unexpected error: nothing unwinds it here."""
+    stall = asyncio.Event()
+    harness = build_harness([[text_delta("thinking about"), stall]])
+
+    await _cancel_at_stall(harness)
+
+    interrupted = harness.conversation.finalize_interrupt()
+    assert interrupted.input_tokens > 0
+    note = str(harness.conversation.messages[-1]["content"])
+    assert note.startswith("thinking about")
+    assert note.endswith(INTERRUPT_MARKER)
 
 
 async def test_a_tool_only_stream_that_is_cancelled_is_still_charged() -> None:

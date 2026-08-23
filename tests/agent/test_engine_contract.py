@@ -40,6 +40,7 @@ from korvid.tools.executor import ToolOutcome
 from .engine_fakes import (
     DONE,
     SYSTEM_PROMPT,
+    USER_TEXT,
     Harness,
     RecordingExecution,
     ScriptedProvider,
@@ -59,6 +60,19 @@ from .engine_fakes import (
 EngineFactory = Callable[..., Harness]
 
 LOGS_ARGS = '{"pod":"api-0","namespace":"prod"}'
+EVENTS_ARGS = '{"kind":"pods","name":"api-0"}'
+#: An exception message shaped like a provider that echoed the request it
+#: refused — the credential is the part that must never reach the panel.
+SECRET_RESPONSE = '401 {"error":"invalid api key sk-live-DEADBEEF0000"}'
+
+
+def _stored_call_ids(harness: Harness) -> list[str]:
+    """Every tool call id retained history holds, in order."""
+    return [
+        str(call["id"])
+        for message in harness.conversation.messages
+        for call in (message.get("tool_calls") or [])
+    ]
 
 
 @pytest.fixture
@@ -260,6 +274,55 @@ async def test_a_duplicate_call_id_is_discarded_before_dispatch(
     assert [event.summary for event in discarded] == ["discarded: duplicate tool call id"]
 
 
+async def test_a_call_id_repeated_in_a_later_iteration_is_discarded(
+    engine_factory: EngineFactory,
+) -> None:
+    """An id is spent for as long as history holds the call that used it."""
+    execution = RecordingExecution()
+    harness = engine_factory(
+        [
+            [tool_call("c1", "get_logs", LOGS_ARGS), DONE],
+            [tool_call("c1", "get_logs", LOGS_ARGS), DONE],
+            text_turn("recovered"),
+        ],
+        execution=execution,
+    )
+
+    events = await harness.run()
+
+    assert execution.names == ["get_logs"]
+    started = [event for event in events if isinstance(event, ToolCallStarted)]
+    assert [event.call_id for event in started] == ["c1", "c1"]
+    discarded = [event for event in events if isinstance(event, ToolCallFinished) and not event.ok]
+    assert [event.summary for event in discarded] == ["discarded: duplicate tool call id"]
+    assert not harness.conversation.has_unmatched_tool_calls
+    assert _stored_call_ids(harness) == ["c1"]
+
+
+async def test_a_call_id_reused_in_a_later_turn_is_discarded(
+    engine_factory: EngineFactory,
+) -> None:
+    """Retained history still holds the first call: the repeat cannot pair."""
+    execution = RecordingExecution()
+    harness = engine_factory(
+        [
+            tool_turn(call_id="c1"),
+            text_turn(),
+            [tool_call("c1", "get_logs", LOGS_ARGS), DONE],
+        ],
+        execution=execution,
+    )
+
+    await harness.run("first")
+    events = await harness.run("second")
+
+    assert execution.names == ["get_logs"]
+    discarded = [event for event in events if isinstance(event, ToolCallFinished) and not event.ok]
+    assert [event.summary for event in discarded] == ["discarded: duplicate tool call id"]
+    assert not harness.conversation.has_unmatched_tool_calls
+    assert _stored_call_ids(harness) == ["c1"]
+
+
 @pytest.mark.parametrize(
     ("call_id", "name"),
     [("", "get_logs"), ("c1", ""), ("   ", "get_logs")],
@@ -317,6 +380,92 @@ async def test_excess_calls_are_discarded_and_the_notice_rides_the_last_kept_res
     assert last.summary == "discarded: too many tool calls in one response"
 
 
+# -- how many calls one response may make ------------------------------------
+
+
+async def test_a_policy_that_forbids_parallel_calls_keeps_only_the_first(
+    engine_factory: EngineFactory,
+) -> None:
+    """Sequential-only is a routing fact, not a cap the absence of one waives."""
+    execution = RecordingExecution()
+    harness = engine_factory(
+        [
+            [
+                tool_call("c1", "get_logs", LOGS_ARGS),
+                tool_call("c2", "get_events", EVENTS_ARGS),
+                DONE,
+            ],
+            text_turn(),
+        ],
+        policy=make_policy(
+            tool_names=("get_logs", "get_events"),
+            max_tool_calls=None,
+            allow_parallel_tool_calls=False,
+        ),
+        execution=execution,
+    )
+
+    events = await harness.run()
+
+    assert execution.names == ["get_logs"]
+    second = harness.provider.calls[1]
+    assert [call["id"] for call in assistant_tool_calls(second)] == ["c1"]
+    assert "get_events" not in json.dumps(second)
+    last = [event for event in events if isinstance(event, ToolCallFinished)][-1]
+    assert last.call_id == "c2"
+    assert last.ok is False
+    assert last.summary == "discarded: too many tool calls in one response"
+
+
+async def test_forbidding_parallel_calls_beats_a_generous_cap(
+    engine_factory: EngineFactory,
+) -> None:
+    execution = RecordingExecution()
+    harness = engine_factory(
+        [
+            [
+                tool_call("c1", "get_logs", LOGS_ARGS),
+                tool_call("c2", "get_logs", LOGS_ARGS),
+                tool_call("c3", "get_logs", LOGS_ARGS),
+                DONE,
+            ],
+            text_turn(),
+        ],
+        policy=make_policy(max_tool_calls=3, allow_parallel_tool_calls=False),
+        execution=execution,
+    )
+
+    await harness.run()
+
+    assert execution.names == ["get_logs"]
+    assert [call["id"] for call in assistant_tool_calls(harness.provider.calls[1])] == ["c1"]
+
+
+async def test_a_parallel_policy_is_still_bounded_by_its_explicit_cap(
+    engine_factory: EngineFactory,
+) -> None:
+    """Provider-confirmed parallelism permits several calls, not unlimited ones."""
+    execution = RecordingExecution()
+    harness = engine_factory(
+        [
+            [
+                tool_call("c1", "get_logs", LOGS_ARGS),
+                tool_call("c2", "get_logs", LOGS_ARGS),
+                tool_call("c3", "get_logs", LOGS_ARGS),
+                DONE,
+            ],
+            text_turn(),
+        ],
+        policy=make_policy(max_tool_calls=2, allow_parallel_tool_calls=True),
+        execution=execution,
+    )
+
+    await harness.run()
+
+    assert execution.names == ["get_logs", "get_logs"]
+    assert [call["id"] for call in assistant_tool_calls(harness.provider.calls[1])] == ["c1", "c2"]
+
+
 # -- iteration and citation --------------------------------------------------
 
 
@@ -346,6 +495,20 @@ async def test_every_round_restates_the_evidence_the_ledger_really_minted(
     first, second = harness.provider.calls
     assert "[E1]" not in system_message(first)
     assert "[E1]" in system_message(second)
+
+
+async def test_the_round_evidence_table_is_offered_exactly_once(
+    engine_factory: EngineFactory,
+) -> None:
+    """The engine is the only source of the table: the prompt carries none."""
+    harness = engine_factory([tool_turn(), text_turn()])
+
+    await harness.run()
+
+    second = system_message(harness.provider.calls[1])
+    assert second.count("[E1] get_logs") == 1
+    assert second.count("Evidence you may cite") == 1
+    assert second.startswith(SYSTEM_PROMPT)
 
 
 async def test_a_new_turn_never_offers_the_previous_turns_references(
@@ -434,10 +597,30 @@ async def test_a_failure_before_handoff_reports_the_error_and_charges_nothing(
 
     error = events[-1]
     assert isinstance(error, AgentError)
-    assert "no route to host" in error.message
+    # The failure is named by type; what the provider *said* is withheld.
+    assert "RuntimeError" in error.message
+    assert "no route to host" not in error.message
     assert harness.conversation.total_tokens == (0, 0)
     assert harness.conversation.usage_estimated is False
     assert harness.gateway.latest_outbound_payload is None
+
+
+@pytest.mark.parametrize("acknowledge", [False, True], ids=["before-handoff", "after-handoff"])
+async def test_a_provider_failure_never_repeats_what_the_provider_said(
+    engine_factory: EngineFactory, acknowledge: bool
+) -> None:
+    """An error body can quote the request, or a credential echoed back."""
+    provider = ScriptedProvider([[RuntimeError(SECRET_RESPONSE)]], acknowledge=acknowledge)
+    harness = engine_factory(provider=provider)
+
+    events = await harness.run()
+
+    error = events[-1]
+    assert isinstance(error, AgentError)
+    assert "sk-live-DEADBEEF0000" not in error.message
+    assert "invalid api key" not in error.message
+    assert "401" not in error.message
+    assert "RuntimeError" in error.message
 
 
 async def test_a_failure_after_handoff_charges_the_prompt_it_really_sent(
@@ -503,6 +686,41 @@ async def test_a_provider_failure_message_is_bounded(engine_factory: EngineFacto
     error = events[-1]
     assert isinstance(error, AgentError)
     assert len(error.message) <= 600
+
+
+# -- failures nothing expected -----------------------------------------------
+
+
+async def test_an_unexpected_collaborator_failure_leaves_no_active_turn(
+    engine_factory: EngineFactory,
+) -> None:
+    """It reaches the session, but never with half a turn left behind."""
+    execution = RecordingExecution({"get_logs": RuntimeError("executor exploded")})
+    harness = engine_factory([tool_turn(), text_turn("recovered")], execution=execution)
+
+    with pytest.raises(RuntimeError, match="executor exploded"):
+        await harness.run()
+
+    assert not harness.conversation.has_unmatched_tool_calls
+    assert harness.conversation.messages == []
+
+
+async def test_a_turn_after_an_unexpected_failure_still_runs(
+    engine_factory: EngineFactory,
+) -> None:
+    execution = RecordingExecution({"get_logs": RuntimeError("executor exploded")})
+    harness = engine_factory([tool_turn(), text_turn("recovered")], execution=execution)
+
+    with pytest.raises(RuntimeError, match="executor exploded"):
+        await harness.run("first")
+    events = await harness.run("second")
+
+    assert events[0] == TextDelta(text="recovered")
+    assert isinstance(events[-1], TurnComplete)
+    assert [message["content"] for message in harness.conversation.messages] == [
+        "second",
+        "recovered",
+    ]
 
 
 # -- interruption and close --------------------------------------------------
@@ -579,6 +797,80 @@ async def test_a_second_turn_cannot_start_while_one_is_live(
     assert first == TextDelta(text="the pod is healthy")
     events = await harness.run("second")
     assert isinstance(events[-1], TurnComplete)
+
+
+async def test_an_iterator_that_is_never_driven_does_not_latch_the_engine(
+    engine_factory: EngineFactory,
+) -> None:
+    """A turn that never started must not brick the engine for the next one."""
+    harness = engine_factory([text_turn()])
+
+    abandoned = harness.engine.run(harness.request("never driven"))
+    events = await harness.run("driven")
+
+    assert abandoned is not None
+    assert isinstance(events[-1], TurnComplete)
+    assert len(harness.provider.calls) == 1
+
+
+async def test_two_started_iterators_cannot_run_at_once(
+    engine_factory: EngineFactory,
+) -> None:
+    """Rejection moves to the second start, and rejects it just as hard."""
+    harness = engine_factory([text_turn(), text_turn("second answer")])
+
+    first = harness.engine.run(harness.request("first"))
+    second = harness.engine.run(harness.request("second"))
+    assert await anext(first) == TextDelta(text="the pod is healthy")
+    with pytest.raises(RuntimeError, match="already running"):
+        await anext(second)
+    async for _event in first:
+        pass
+
+    assert len(harness.provider.calls) == 1
+
+
+async def test_closing_the_engine_stops_a_live_turn(
+    engine_factory: EngineFactory,
+) -> None:
+    """A closed engine adds no event and no history, even mid-stream."""
+    stall = asyncio.Event()
+    provider = ScriptedProvider([[text_delta("thinking about"), stall]])
+    harness = engine_factory(provider=provider)
+    events: list[Any] = []
+
+    async def drive() -> None:
+        async for event in harness.engine.run(harness.request()):
+            events.append(event)
+
+    task = asyncio.create_task(drive())
+    await asyncio.wait_for(provider.stalled.wait(), timeout=5)
+    await harness.engine.aclose()
+    seen, history = list(events), list(harness.conversation.messages)
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+
+    assert events == seen
+    assert harness.conversation.messages == history
+    assert provider.closed == 1
+    # The turn is still the session's to repair — closing is not finalizing.
+    assert isinstance(harness.conversation.finalize_interrupt(), TurnInterrupted)
+
+
+async def test_closing_the_engine_from_inside_the_loop_ends_it(
+    engine_factory: EngineFactory,
+) -> None:
+    harness = engine_factory([[text_delta("one"), text_delta("two"), DONE], text_turn()])
+
+    events = []
+    async for event in harness.engine.run(harness.request()):
+        events.append(event)
+        await harness.engine.aclose()
+
+    assert events == [TextDelta(text="one")]
+    assert harness.provider.closed == 1
+    assert [message["content"] for message in harness.conversation.messages] == [USER_TEXT]
+    assert isinstance(harness.conversation.finalize_interrupt(), TurnInterrupted)
 
 
 async def test_aclose_releases_the_engine_and_rejects_a_later_turn(

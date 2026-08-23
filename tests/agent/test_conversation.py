@@ -645,3 +645,79 @@ def test_history_chars_reports_what_the_budget_is_measured_against() -> None:
     assert convo.history_chars == 0
     _text_turn(convo, "question", "answer")
     assert convo.history_chars >= len("question") + len("answer")
+
+
+# --------------------------------------------------------------------------
+# Call-id identity across iterations and turns
+# --------------------------------------------------------------------------
+
+
+def test_retained_tool_call_ids_names_every_call_history_still_holds() -> None:
+    """The caller cannot re-issue an id retained history already spent."""
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    _tool_turn(convo, "first", call_id="c1")
+    convo.start_turn("second")
+    convo.start_iteration()
+    convo.append_assistant("", [{"id": "c2", "name": "get_logs", "arguments": "{}"}])
+
+    assert convo.retained_tool_call_ids == frozenset({"c1", "c2"})
+
+
+def test_retained_tool_call_ids_is_a_copy_owned_snapshot() -> None:
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    _tool_turn(convo, "first", call_id="c1")
+
+    snapshot = convo.retained_tool_call_ids
+    _tool_turn(convo, "second", call_id="c2")
+
+    assert isinstance(snapshot, frozenset)
+    assert snapshot == frozenset({"c1"})
+    assert convo.retained_tool_call_ids == frozenset({"c1", "c2"})
+
+
+def test_retained_tool_call_ids_forgets_a_dropped_turn() -> None:
+    """An id only stays spent while the message carrying it is retained."""
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    _tool_turn(convo, "first", call_id="c1")
+    convo.start_turn("second")
+
+    assert convo.drop_oldest_turn() > 0
+    assert convo.retained_tool_call_ids == frozenset()
+
+
+def test_a_repeated_call_id_cannot_cancel_an_unanswered_one() -> None:
+    """Two calls sharing an id need two results; sets would hide the second."""
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("logs?")
+    convo.start_iteration()
+    convo.append_assistant(
+        "",
+        [
+            {"id": "c1", "name": "get_logs", "arguments": "{}"},
+            {"id": "c1", "name": "get_logs", "arguments": "{}"},
+        ],
+    )
+    convo.append_tool_result("c1", "ok")
+
+    assert convo.has_unmatched_tool_calls is True
+    with pytest.raises(RuntimeError, match="unmatched"):
+        convo.complete_turn()
+
+
+def test_two_calls_sharing_an_id_take_two_results() -> None:
+    """Pairing is per call, not per distinct id: two calls, two results."""
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("logs?")
+    convo.start_iteration()
+    convo.append_assistant(
+        "",
+        [
+            {"id": "c1", "name": "get_logs", "arguments": "{}"},
+            {"id": "c1", "name": "get_logs", "arguments": "{}"},
+        ],
+    )
+    convo.append_tool_result("c1", "first")
+    convo.append_tool_result("c1", "second")
+
+    assert convo.has_unmatched_tool_calls is False
+    assert convo.complete_turn() == (0, 0, False)
