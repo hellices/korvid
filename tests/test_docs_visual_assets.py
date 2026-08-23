@@ -1030,10 +1030,9 @@ def test_agent_tape_closes_the_focused_panel_before_quitting() -> None:
         for line in AGENT_TAPE.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
-    quit_index = commands.index('Type "q"')
-    assert commands[quit_index - 1] == "Ctrl+A", (
+    assert commands[-3:] == ["Ctrl+A", "Sleep 1s", 'Type "q"'], (
         "the Agent input still owns printable keys after the turn; close the "
-        "panel with its priority binding before typing q"
+        "panel and wait for focus handoff before typing q"
     )
 
 

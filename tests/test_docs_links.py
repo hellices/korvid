@@ -20,6 +20,7 @@ MKDOCS = ROOT / "mkdocs.yml"
 _INDEX_STEMS = frozenset({"index", "README"})
 
 _FENCE = re.compile(r"^(?P<fence>`{3,}|~{3,}).*?^(?P=fence)", re.DOTALL | re.MULTILINE)
+_INLINE_CODE = re.compile(r"(?P<ticks>`+)[^\n]*?(?P=ticks)")
 _MEDIA_ATTRIBUTE = re.compile(r"""(?<![-\w])(?:src|poster|data-poster)=(?:"([^"]+)"|'([^']+)')""")
 #: A raw-HTML link that points into the shared asset tree (e.g. the mosaic's
 #: full-resolution capture links) resolves exactly like `src` does.
@@ -175,6 +176,7 @@ def _local_media_urls(source: Path) -> Iterator[str]:
     otherwise 404 only after a visitor picks that scene or clicks through.
     """
     text = _FENCE.sub("", source.read_text(encoding="utf-8"))
+    text = _INLINE_CODE.sub("", text)
     matches = (*_MEDIA_ATTRIBUTE.finditer(text), *_ASSET_HREF.finditer(text))
     for match in matches:
         raw = match.group(1) or match.group(2)
@@ -199,6 +201,17 @@ def test_local_media_urls_accepts_single_quoted_raw_html(tmp_path: Path) -> None
         "../assets/deferred.png",
         "assets/full.png",
     ]
+
+
+def test_local_media_urls_ignores_inline_code_examples(tmp_path: Path) -> None:
+    """Inline markup examples are prose, not browser requests."""
+    source = tmp_path / "page.md"
+    source.write_text(
+        "Use `<video src='assets/example.mp4'>` for a demo.\n"
+        "<img src='assets/real.png' alt='real asset'>",
+        encoding="utf-8",
+    )
+    assert list(_local_media_urls(source)) == ["assets/real.png"]
 
 
 def test_raw_html_hero_primary_cta_resolves_to_a_docs_source() -> None:
@@ -237,7 +250,7 @@ def test_raw_html_media_resolves_from_every_published_page_url() -> None:
         "and each `../assets/…` escapes the site root into a 404 that this walk "
         "would no longer model; fix the page URLs before turning it off"
     )
-    checked = 0
+    checked: set[tuple[str, str]] = set()
     for source in _public_markdown_sources():
         page_url = _built_directory_url(source)
         for url in _local_media_urls(source):
@@ -250,8 +263,27 @@ def test_raw_html_media_resolves_from_every_published_page_url() -> None:
                 f"{source.relative_to(ROOT)} is served from /{page_url} where {url!r} "
                 f"resolves to /{resolved} — no such asset (expected {asset})"
             )
-            checked += 1
-    assert checked >= 13, f"the media walk must cover the storytelling assets, saw {checked}"
+            checked.add((source.relative_to(ROOT).as_posix(), url))
+
+    expected_storytelling = {
+        "agent-demo.mp4",
+        "agent-poster.png",
+        "cockpit-poster.png",
+        "diagnosis.png",
+        "mcp-follow-demo.mp4",
+        "mcp-poster.png",
+        "merged-logs.png",
+        "relationship-graph.png",
+    }
+    storytelling = {
+        posixpath.basename(urlsplit(url).path)
+        for _source, url in checked
+        if "assets/scenes/" in url
+    }
+    assert expected_storytelling <= storytelling, (
+        "the media walk missed published storytelling assets: "
+        f"{expected_storytelling - storytelling}"
+    )
 
 
 def test_exclude_docs_honours_single_page_entries_not_just_directories() -> None:
