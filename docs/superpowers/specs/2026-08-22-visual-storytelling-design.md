@@ -288,7 +288,11 @@ The implementation remains inside the documentation surface:
 - `docs/stylesheets/extra.css` owns layout, diagrams, annotations, and
   responsive/reduced-motion behavior.
 - `docs/assets/javascripts/visual-storytelling.js` owns only scene selection,
-  media pause/play behavior, and keyboard state for the tablist.
+  media pause/play behavior, and keyboard state for the tablist. It enhances
+  each switcher independently: every tab's panel is resolved before any state
+  is written, the enhancement hook is set only once the initial selection has
+  succeeded, and a switcher that cannot be enhanced is restored to its
+  no-JavaScript rendering and reported rather than left half-switched.
 - `docs/assets/` owns optimized local posters, recordings, and screenshots.
 - the selected concept pages own their detailed visual and explanatory text.
 - `mkdocs.yml` loads the local script and does not add external runtime assets.

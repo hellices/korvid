@@ -29,7 +29,11 @@ from __future__ import annotations
 
 import html
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parent.parent
 DOCS = ROOT / "docs"
@@ -40,6 +44,7 @@ COPYRIGHT_PARTIAL = OVERRIDES / "partials" / "copyright.html"
 MARK = DOCS / "assets" / "korvid-mark.svg"
 DEMO_README = DOCS / "demo" / "README.md"
 STORYTELLING_JS = DOCS / "assets" / "javascripts" / "visual-storytelling.js"
+SWITCHER_HARNESS = ROOT / "tests" / "js" / "scene_switcher_harness.mjs"
 VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
 
 MATERIAL_ATTRIBUTION = "https://squidfunk.github.io/mkdocs-material/"
@@ -869,6 +874,138 @@ def test_controller_pauses_off_screen_switcher_media_via_intersection_observer()
     assert ".play(" not in script, (
         "the controller must never resume playback itself; user control is authoritative"
     )
+
+
+def _strip_js_comments(source: str) -> str:
+    """Drop `/* … */` and `// …` comments so prose cannot satisfy a code contract."""
+    without_blocks = re.sub(r"/\*.*?\*/", " ", source, flags=re.DOTALL)
+    return re.sub(r"(?m)^\s*//.*$", " ", without_blocks)
+
+
+def test_controller_never_builds_a_selector_out_of_an_authored_id() -> None:
+    """`aria-controls` is author data, so it must never become a selector.
+
+    `switcher.querySelector("#" + id)` reads an id through the CSS parser: a
+    value with a space becomes a descendant selector that can match a
+    different element, a value with a dot becomes an id-plus-class selector,
+    and a value starting with a digit throws a `SyntaxError` that takes the
+    whole enhancement down instead of reporting one missing panel.
+    `getElementById` takes the id verbatim, and a containment check keeps
+    one switcher from adopting another's panel.
+    """
+    script = _strip_js_comments(STORYTELLING_JS.read_text(encoding="utf-8"))
+    assert "document.getElementById(" in script, (
+        "panels must be resolved by id, not by an interpolated CSS selector"
+    )
+    assert "switcher.contains(" in script, (
+        "a resolved panel must still be inside the switcher that claims it"
+    )
+    assert not re.search(r"querySelector(?:All)?\(\s*[`\"']#", script), (
+        "no selector may be built from an id at all"
+    )
+    assert not re.search(r"querySelector(?:All)?\([^)]*\$\{", script), (
+        "no selector may interpolate author data"
+    )
+
+
+def test_controller_validates_every_panel_before_touching_any_state() -> None:
+    """A switcher that cannot be driven must never be half-rewritten.
+
+    The panel lookup ran inside the selection loop, so a switcher whose last
+    tab pointed at a missing panel had already had `data-enhanced` set, two
+    panels hidden and the tab strip revealed before the lookup threw — and
+    the throw escaped the top-level loop, so every later switcher on the
+    page stayed unenhanced too. Resolution now happens up front, and the
+    enhancement hook is only set once the initial selection has succeeded.
+    """
+    script = _strip_js_comments(STORYTELLING_JS.read_text(encoding="utf-8"))
+    enhance = script[script.index("const enhance") :]
+    resolution = enhance.index("new Map(tabs.map(")
+    first_select = enhance.index("select(", resolution)
+    enhanced = enhance.index('switcher.dataset.enhanced = "true"')
+    assert resolution < first_select < enhanced, (
+        "panels must all resolve, then the initial selection must succeed, and "
+        "only then may the switcher advertise itself as enhanced"
+    )
+
+    for mutation in ("panel.hidden = ", 'tab.setAttribute("aria-selected"', "tab.tabIndex = "):
+        assert mutation in enhance, f"the enhancement still writes {mutation!r}"
+        assert enhance.index(mutation) > resolution, (
+            f"no switcher state may be written before every panel resolves: {mutation!r}"
+        )
+
+
+def test_controller_rolls_one_broken_switcher_back_and_keeps_going() -> None:
+    """One bad switcher costs itself, not the rest of the page."""
+    script = STORYTELLING_JS.read_text(encoding="utf-8")
+    assert re.search(r"try \{\s*enhance\(switcher, tabs\);\s*\} catch", script), (
+        "each switcher must be initialized independently inside its own try/catch"
+    )
+    rollback = script[script.index("const restoreFallback") : script.index("const enhance")]
+    assert 'switcher.removeAttribute("data-enhanced")' in rollback, (
+        "a rolled-back switcher must drop the hook that reveals its inert tab strip"
+    )
+    assert ".scene-panel" in rollback, (
+        "the rollback must reach every scene panel, not only the selected one"
+    )
+    assert "panel.hidden = false" in rollback, (
+        "every scene panel must be shown again, exactly as with no JavaScript"
+    )
+    assert 'tab.setAttribute("aria-selected", selected)' in rollback, (
+        "the authored tab state must be restored, not left mid-selection"
+    )
+    assert "console.error(" in script, "the failure must be reported, never swallowed"
+
+    design = (
+        DOCS / "superpowers" / "specs" / "2026-08-22-visual-storytelling-design.md"
+    ).read_text(encoding="utf-8")
+    boundary = " ".join(design.lower().split())
+    assert "restored to its no-javascript rendering" in boundary, (
+        "the design document owns this boundary, so it must state that a switcher "
+        "which cannot be enhanced falls back instead of shipping a broken one"
+    )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> None:
+    """Run the shipped controller, unmodified, against a stub DOM.
+
+    Reading the source proves the shape of the fix; only executing it proves
+    the behaviour — that a broken switcher ends up in exactly the
+    no-JavaScript state, that the next switcher still initializes, that
+    posters are promoted on selection, that tab and off-screen pauses still
+    happen, and that nothing ever calls `play()`.
+    `tests/js/scene_switcher_harness.mjs` implements only the DOM surface the
+    controller touches, so this needs no JavaScript dependency.
+    """
+    result = subprocess.run(
+        ["node", str(SWITCHER_HARNESS)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "not ok" not in result.stdout, result.stdout
+    for scenario in (
+        "healthy switchers enhance",
+        "left in the no-JavaScript state",
+        "outside its own switcher is rejected",
+        "without IntersectionObserver",
+    ):
+        assert scenario in result.stdout, f"the DOM harness must cover {scenario!r}"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_shipped_controller_is_syntactically_valid_javascript() -> None:
+    """A syntax error in the only shipped script is otherwise found by a visitor."""
+    result = subprocess.run(
+        ["node", "--check", str(STORYTELLING_JS)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_scene_videos_never_autoplay_and_below_fold_media_preloads_nothing() -> None:
