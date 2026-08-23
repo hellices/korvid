@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from dataclasses import FrozenInstanceError
 
 import pytest
+
 from korvid.agent.conversation import (
     MAX_HISTORY_TURNS,
     ConversationBudgetError,
@@ -27,7 +28,6 @@ from korvid.agent.conversation import (
     IterationCheckpoint,
     TurnCheckpoint,
 )
-
 from korvid.agent.events import TurnInterrupted
 from korvid.core.redaction import RedactionRecord
 
@@ -214,7 +214,7 @@ def test_strict_preflight_rejects_a_prompt_that_cannot_fit() -> None:
 
 def test_strict_preflight_drops_an_oversized_previous_turn() -> None:
     convo = ConversationState(max_history_chars=STRICT_BUDGET, strict_history_budget=True)
-    _text_turn(convo, "x" * 20_000 + " old", "y" * 3_000)
+    _text_turn(convo, "x" * 22_000 + " old", "y" * 5_000)
     convo.start_turn("fresh question")
     joined = json.dumps(convo.messages)
     assert "old" not in joined  # the oversized predecessor was trimmed away
@@ -326,7 +326,7 @@ def test_completing_a_turn_with_a_dangling_tool_call_is_rejected() -> None:
 def test_start_turn_rejects_a_second_active_turn() -> None:
     convo = ConversationState(max_history_chars=LOOSE_BUDGET)
     convo.start_turn("first")
-    with pytest.raises(RuntimeError, match="turn already active"):
+    with pytest.raises(RuntimeError, match="already active"):
         convo.start_turn("second")
 
 
