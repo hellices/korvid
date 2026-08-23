@@ -56,15 +56,18 @@ agent-requested — is recorded in the fail-closed
 
 <section class="docs-storyboard" aria-labelledby="agent-storyboard-title">
   <figure>
-    <img src="../assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic crash-looping payment worker with cited evidence">
-    <figcaption id="agent-storyboard-title">One prompt stays attached to the operational screen.</figcaption>
+    <img src="../assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer carrying an E1 citation marker">
+    <figcaption id="agent-storyboard-title">Illustrative capture: a deterministic scripted AgentPanel walkthrough. Capture note — the recording runs no provider and no real read tool, so it shows the panel rendering scripted events, not the turn flow listed with it.</figcaption>
   </figure>
-  <ol>
-    <li><strong>Context</strong><span>Current view, namespace, selection, and filter.</span></li>
-    <li><strong>Read</strong><span>Bounded tools gather manifests, events, logs, or diagnoses.</span></li>
-    <li><strong>Cite</strong><span>Evidence references remain selectable and validated.</span></li>
-    <li><strong>Drive</strong><span>Navigation can change; writes still stop at confirmation.</span></li>
-  </ol>
+  <div>
+    <p><strong>What a real turn does</strong></p>
+    <ol>
+      <li><strong>Context</strong><span>Current view, namespace, selection, and filter.</span></li>
+      <li><strong>Read</strong><span>Bounded tools gather manifests, events, logs, or diagnoses.</span></li>
+      <li><strong>Cite</strong><span>Evidence references remain selectable and validated.</span></li>
+      <li><strong>Drive</strong><span>Navigation can change; writes still stop at confirmation.</span></li>
+    </ol>
+  </div>
 </section>
 
 ## Stopping and correcting a turn

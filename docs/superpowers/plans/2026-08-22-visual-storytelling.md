@@ -16,6 +16,7 @@
 - Direct writes, agent requests, and opt-in MCP proposals all require a fresh in-TUI human keystroke and a successful fail-closed audit append before execution.
 - Embedded-agent provider payloads use the outbound masking boundary; MCP results retain their separate per-tool disclosure contracts.
 - Every new product image or recording must use synthetic data from a documented disposable or in-memory scenario.
+- The agent media comes from `ScriptedAgentRuntime`, which discards the prompt and screen context and emits fixed tool and citation events: every surface embedding it labels it a deterministic scripted AgentPanel walkthrough and never claims bounded reads, live tool execution, or validated citations from it.
 - The actual product occupies at least half of the desktop hero; every other landing section is led by real media, a semantic diagram, or an ordered flow.
 - Each scene, evidence tile, and destination card has no more than one sentence of body copy.
 - New below-fold media is lazy or `preload="none"`; only the active hero medium may load eagerly.
@@ -686,6 +687,15 @@ ffmpeg -y -ss 00:00:23 -i docs/assets/demo.mp4 -frames:v 1 \
 `docs/demo/agent.tape` drives the real AgentPanel against the deterministic
 `ScriptedAgentRuntime` in `docs/demo/demo.py`.
 
+What that runtime **proves**: the real `AgentPanel` accepts a typed prompt,
+submits it through the product's own `Input` path, and renders the turn.
+
+What it **does not prove**: anything about the provider, tool, or evidence
+pipeline — it discards the prompt and screen context, contacts no provider,
+executes no read tool, and emits hard-coded tool, text, citation, and token
+events, so its `[E1]` marker is not validated. Every page embedding this media
+calls it a scripted AgentPanel walkthrough.
+
 ```sh
 vhs docs/demo/agent.tape
 ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/agent-demo.mp4 \
@@ -886,12 +896,12 @@ with:
       <a href="tui/">Explore the TUI</a>
     </article>
     <article id="scene-agent" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-agent" tabindex="0">
-      <video src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="The embedded agent diagnoses the failing payment worker and cites its evidence">Your browser does not support this embedded-agent demo.</video>
-      <noscript><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic failing payment worker with cited evidence"></noscript>
-      <div><strong>Input</strong> Current selection + prompt</div>
-      <div><strong>Evidence</strong> Bounded fresh reads + citations</div>
-      <div><strong>Result</strong> Answer and UI drive</div>
-      <p>The agent investigates in context while writes remain proposals.</p>
+      <video src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="A deterministic scripted AgentPanel walkthrough: a prompt typed into korvid's real agent input, then scripted tool and citation events rendered in the panel">Your browser does not support this scripted AgentPanel walkthrough.</video>
+      <noscript><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer carrying an E1 citation marker"></noscript>
+      <div><strong>Input</strong> Prompt typed and submitted in the real AgentPanel input</div>
+      <div><strong>Evidence</strong> Scripted tool and citation events, not bounded reads</div>
+      <div><strong>Result</strong> Real AgentPanel rendering of the scripted answer</div>
+      <p>This capture does not execute korvid's provider or tool pipeline; the agent guide documents what a real turn does.</p>
       <a href="agent/">Explore the embedded agent</a>
     </article>
     <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
@@ -1505,8 +1515,8 @@ Delete the old “Find your flight path” list and add:
       <a href="tui/#ops-hints">Inspect diagnosis surfaces</a>
     </article>
     <article class="evidence-card">
-      <figure><a class="evidence-card__full" href="assets/scenes/agent-poster.png"><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic failing payment worker with cited evidence"></a><figcaption>Agent with citations</figcaption></figure>
-      <p>Ask from the current screen and keep checkable evidence in the answer.</p>
+      <figure><a class="evidence-card__full" href="assets/scenes/agent-poster.png"><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer carrying an E1 citation marker"></a><figcaption>Agent panel walkthrough</figcaption></figure>
+      <p>A scripted capture of the panel rendering a prompt, a tool event, and a cited answer — no live tool execution and no validated evidence.</p>
       <a href="agent/">Use the embedded agent</a>
     </article>
     <article class="evidence-card evidence-card--wide">
@@ -1772,15 +1782,18 @@ Insert after the opening agent write-safety paragraph and before
 ```html
 <section class="docs-storyboard" aria-labelledby="agent-storyboard-title">
   <figure>
-    <img src="../assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic crash-looping payment worker with cited evidence">
-    <figcaption id="agent-storyboard-title">One prompt stays attached to the operational screen.</figcaption>
+    <img src="../assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer carrying an E1 citation marker">
+    <figcaption id="agent-storyboard-title">Illustrative capture: a deterministic scripted AgentPanel walkthrough. Capture note — the recording runs no provider and no real read tool, so it shows the panel rendering scripted events, not the turn flow listed with it.</figcaption>
   </figure>
-  <ol>
-    <li><strong>Context</strong><span>Current view, namespace, selection, and filter.</span></li>
-    <li><strong>Read</strong><span>Bounded tools gather manifests, events, logs, or diagnoses.</span></li>
-    <li><strong>Cite</strong><span>Evidence references remain selectable and validated.</span></li>
-    <li><strong>Drive</strong><span>Navigation can change; writes still stop at confirmation.</span></li>
-  </ol>
+  <div>
+    <p><strong>What a real turn does</strong></p>
+    <ol>
+      <li><strong>Context</strong><span>Current view, namespace, selection, and filter.</span></li>
+      <li><strong>Read</strong><span>Bounded tools gather manifests, events, logs, or diagnoses.</span></li>
+      <li><strong>Cite</strong><span>Evidence references remain selectable and validated.</span></li>
+      <li><strong>Drive</strong><span>Navigation can change; writes still stop at confirmation.</span></li>
+    </ol>
+  </div>
 </section>
 ```
 

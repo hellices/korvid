@@ -57,6 +57,26 @@ utilization.
 presses Enter, submitting it through the genuine
 `Input`/`on_input_submitted` path to the deterministic `ScriptedAgentRuntime`.
 
+What `ScriptedAgentRuntime` **proves**: korvid's real `AgentPanel` accepts a
+typed prompt, submits it through the product's own `Input` path, and renders
+the resulting turn — the prompt echo, a tool line, streamed answer text, a
+citation marker, and the header's model and token counters — exactly as the
+widget does in production.
+
+What it **does not prove**: anything about korvid's provider, tool, or
+evidence pipeline. The runtime discards the prompt text and the screen context
+the panel hands it, contacts no provider, executes no read tool, and reads no
+cluster; it yields a fixed
+`ToolCallStarted`/`ToolCallFinished`/`TextDelta`/`TurnComplete` sequence whose
+arguments, summary, answer, token counts, and `[E1]` marker are hard-coded, so
+the citation is **not validated** against any evidence store. Every surface
+that embeds this media — the landing Agent scene, the landing evidence tile,
+and the `docs/agent.md` storyboard — must therefore call it a scripted
+AgentPanel walkthrough and must never present it as bounded-read, live
+tool-execution, or validated-citation evidence. The production behaviour those
+pages link to is documented in `docs/agent.md`, which this capture illustrates
+rather than demonstrates.
+
 ```sh
 vhs docs/demo/agent.tape
 ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/agent-demo.mp4 \

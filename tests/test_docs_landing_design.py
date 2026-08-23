@@ -43,6 +43,48 @@ VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-s
 
 MATERIAL_ATTRIBUTION = "https://squidfunk.github.io/mkdocs-material/"
 
+#: The Evidence label the Agent scene ships. `ScriptedAgentRuntime` in
+#: `docs/demo/demo.py` discards the prompt and the screen context it is
+#: handed, contacts no provider, runs no read tool, and yields a fixed
+#: tool/citation event sequence, so the capture shows scripted events — not
+#: the bounded fresh reads the product performs against a cluster.
+AGENT_SCENE_EVIDENCE = "Scripted tool and citation events, not bounded reads"
+
+#: Claims no surface built on `agent-poster.png`/`agent-demo.mp4` may make.
+SCRIPTED_AGENT_OVERCLAIMS = (
+    "bounded fresh reads",
+    "bounded reads",
+    "fresh reads",
+    "live tool",
+    "validated citation",
+    "validated evidence",
+    "checkable evidence",
+    "cited evidence",
+)
+
+#: Cues that turn a banned phrase into an allowed truthful denial, so a
+#: surface may state "not bounded reads" without tripping the ban.
+NEGATION_CUES = ("no ", "not ", "never ", "without ", "rather than ", "instead of ")
+
+
+def _unnegated(text: str, phrase: str) -> bool:
+    """Report whether `phrase` appears in `text` as a claim rather than a denial.
+
+    Args:
+        text: Markup or prose to scan; tags and whitespace are normalised away.
+        phrase: The lowercase claim to look for.
+
+    Returns:
+        True when at least one occurrence is not immediately preceded by a
+        negation cue.
+    """
+    flattened = " ".join(re.sub(r"<[^>]+>", " ", text).lower().split())
+    for match in re.finditer(re.escape(phrase), flattened):
+        preceding = flattened[max(0, match.start() - 40) : match.start()]
+        if not any(preceding.endswith(cue) for cue in NEGATION_CUES):
+            return True
+    return False
+
 
 def _index() -> str:
     return INDEX.read_text(encoding="utf-8")
@@ -706,14 +748,150 @@ def test_human_lane_and_direct_scene_name_the_fresh_tui_reads_the_demo_shows() -
     )
 
     agent = _section('<article id="scene-agent"', "</article>")
-    assert "Bounded fresh reads + citations" in agent, (
-        "the agent scene keeps its own distinct bounded-fresh-read language"
+    assert AGENT_SCENE_EVIDENCE in agent, (
+        "the agent scene keeps its own distinct label — and that label describes "
+        "the scripted capture it ships, not a bounded read it never performs"
     )
     mcp = _section('<article id="scene-mcp"', "</article>")
     assert "Tool-specific bounded fresh reads" in mcp, (
         "the MCP scene keeps its own distinct tool-specific bounded-fresh-read language"
     )
     assert "Bounded fresh reads over MCP" in contract
+
+
+def test_agent_scene_describes_the_scripted_walkthrough_it_actually_captured() -> None:
+    """The Agent scene ships a scripted panel walkthrough, not a real turn.
+
+    `docs/demo/demo.py`'s `ScriptedAgentRuntime` discards both the prompt text
+    and the screen context the panel hands it, contacts no provider, executes
+    no read tool, and yields a hard-coded
+    `ToolCallStarted`/`ToolCallFinished`/`TextDelta`/`TurnComplete` sequence
+    with a fixed `[E1]` marker. The recording therefore proves korvid's real
+    `AgentPanel` input, submission, and rendering path — and nothing about the
+    provider, tool, or evidence pipeline. Labelling it "Bounded fresh reads +
+    citations" with a "UI drive" result sold the capture as proof of exactly
+    the pipeline it replaces.
+
+    The scene stays linked to `agent/`, where the production behaviour is
+    documented in full; only the claims made *about this media* are narrowed.
+    """
+    scene = _section('<article id="scene-agent"', "</article>")
+
+    labels = dict(re.findall(r"<div><strong>(\w+)</strong>\s*([^<]+)</div>", scene))
+    assert set(labels) == {"Input", "Evidence", "Result"}, (
+        f"the Agent scene keeps its three visible labels; found {sorted(labels)}"
+    )
+    assert "AgentPanel" in labels["Input"], (
+        "the recording types into and submits through the real AgentPanel input, "
+        f"so the Input label may say so plainly; found {labels['Input']!r}"
+    )
+    assert labels["Evidence"].strip() == AGENT_SCENE_EVIDENCE, (
+        "the Evidence label must name the scripted tool/citation events the "
+        f"capture actually contains; found {labels['Evidence']!r}"
+    )
+    result = labels["Result"].lower()
+    assert "rendering" in result, (
+        f"the capture proves real panel rendering; found {labels['Result']!r}"
+    )
+    assert "ui drive" not in result, (
+        "the scripted runtime drives nothing; the capture never shows the agent "
+        f"navigating the TUI, found {labels['Result']!r}"
+    )
+
+    disclosure = re.search(r"<p>(.*?)</p>", scene, re.DOTALL)
+    assert disclosure is not None, "the Agent scene must keep one body sentence"
+    disclosure_text = " ".join(disclosure.group(1).lower().split())
+    assert "does not execute" in disclosure_text, (
+        "one concise sentence must disclose that the capture does not execute "
+        f"korvid's provider/tool pipeline; found {disclosure.group(1)!r}"
+    )
+    for pipeline_word in ("provider", "tool"):
+        assert pipeline_word in disclosure_text, (
+            f"the disclosure must name the {pipeline_word} pipeline the capture "
+            f"skips; found {disclosure.group(1)!r}"
+        )
+
+    described = [
+        re.search(r'aria-label="([^"]+)"', scene),
+        re.search(r"<video[^>]*>([^<]+)</video>", scene),
+        re.search(r"<noscript><img[^>]*alt=\"([^\"]+)\"", scene),
+    ]
+    assert all(part is not None for part in described), (
+        "the scene keeps an aria-label, an in-video fallback, and a noscript image"
+    )
+    for part in described:
+        assert part is not None  # narrowed above; keeps mypy and the reader honest
+        copy = part.group(1).lower()
+        assert "scripted" in copy, (
+            f"every description of this media must say it is scripted: {copy!r}"
+        )
+        assert "agentpanel" in copy or "agent panel" in copy or "agent input" in copy, (
+            f"and must name the real AgentPanel it does capture: {copy!r}"
+        )
+
+    for overclaim in SCRIPTED_AGENT_OVERCLAIMS:
+        assert not _unnegated(scene, overclaim), (
+            f"the Agent scene must not claim {overclaim!r} from a scripted capture"
+        )
+
+    assert 'href="agent/"' in scene, (
+        "narrowing the capture's claims must not cost the link to the real "
+        "embedded-agent documentation"
+    )
+
+
+def test_agent_evidence_tile_claims_only_the_scripted_panel_rendering() -> None:
+    """The mosaic tile named a product capability, not the frame it shows.
+
+    "Agent with citations" plus "keep checkable evidence in the answer" reads
+    as validated citation evidence. The frame is one scripted panel render:
+    the typed prompt, a scripted `diagnose_pod` tool line, and a scripted
+    answer carrying an `[E1]` marker that no evidence store ever validated.
+    """
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    card = next(
+        card
+        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
+        if "agent-poster.png" in card
+    )
+
+    caption = re.search(r"<figcaption>([^<]+)</figcaption>", card)
+    assert caption is not None, "the agent tile keeps a caption"
+    caption_text = caption.group(1).lower()
+    assert "agent with citations" not in caption_text, (
+        "the tile must not be named for a citation contract the capture never "
+        f"exercised; found {caption.group(1)!r}"
+    )
+    for token in ("agent", "walkthrough"):
+        assert token in caption_text, (
+            f"the caption must name the agent panel walkthrough it shows: {caption.group(1)!r}"
+        )
+
+    alt = re.search(r'<img[^>]*alt="([^"]+)"', card)
+    assert alt is not None
+    alt_text = alt.group(1).lower()
+    for signal in ("scripted", "prompt", "tool", "cit"):
+        assert signal in alt_text, (
+            f"the alt must describe the prompt, tool event, and cited answer this "
+            f"scripted frame renders; {signal!r} missing from {alt.group(1)!r}"
+        )
+
+    body = re.search(r"<p>(.*?)</p>", card, re.DOTALL)
+    assert body is not None
+    body_text = " ".join(body.group(1).lower().split())
+    assert "scripted" in body_text, (
+        f"the tile's copy must say the capture is scripted; found {body.group(1)!r}"
+    )
+    for denial in ("live tool execution", "validated evidence"):
+        assert denial in body_text, (
+            f"the tile must explicitly deny {denial!r} rather than leave a visitor "
+            f"to assume it; found {body.group(1)!r}"
+        )
+
+    for overclaim in SCRIPTED_AGENT_OVERCLAIMS:
+        assert not _unnegated(card, overclaim), (
+            f"the agent evidence tile must not claim {overclaim!r}"
+        )
 
 
 def test_guarded_write_path_orders_confirmation_audit_and_execution() -> None:
@@ -959,7 +1137,7 @@ def test_visual_storytelling_plan_contract_snippets_match_the_shipped_evidence_l
     assert f"<div><strong>Evidence</strong> {mixed}</div>" in scene_markup, (
         "the plan's Direct scene snippet must carry the shipped mixed evidence label"
     )
-    assert "<div><strong>Evidence</strong> Bounded fresh reads + citations</div>" in scene_markup
+    assert f"<div><strong>Evidence</strong> {AGENT_SCENE_EVIDENCE}</div>" in scene_markup
     assert "<div><strong>Evidence</strong> Tool-specific bounded fresh reads</div>" in scene_markup
 
     contract_markup = _fenced_block_after(
@@ -994,6 +1172,110 @@ def test_visual_storytelling_plan_contract_snippets_match_the_shipped_evidence_l
     assert "watch-backed tui snapshot" not in plan.lower(), (
         "no plan snippet or constraint may still reduce the TUI's evidence to a "
         "watch-backed snapshot"
+    )
+
+
+def test_visual_storytelling_plan_agent_snippets_match_the_shipped_scripted_copy() -> None:
+    """The plan is executable, so a replay must not restore the overclaim.
+
+    `docs/superpowers/plans/2026-08-22-visual-storytelling.md` embeds the
+    Agent scene, the agent evidence tile, the `docs/agent.md` storyboard and
+    the provenance page verbatim. Whatever the shipped pages say about the
+    scripted capture, those snippets have to say too, or the next contributor
+    following the recipe reintroduces "Bounded fresh reads + citations" and
+    "Agent with citations" for media that executes neither.
+    """
+    plan = _plan()
+
+    scene_markup = _fenced_block_after(
+        plan,
+        "- [ ] **Step 3: Replace the numbered cards with complete scene markup**",
+        "html",
+    )
+    shipped_scene = _section('<article id="scene-agent"', "</article>")
+    assert _compact(shipped_scene) in _compact(scene_markup), (
+        "the plan's Agent scene snippet must be the shipped Agent scene, "
+        "scripted-capture labels and disclosure sentence included"
+    )
+
+    mosaic_markup = _fenced_block_after(
+        plan,
+        "Delete the old “Find your flight path” list and add:",
+        "html",
+    )
+    shipped_mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    shipped_tile = next(
+        card
+        for card in re.findall(
+            r'<article class="evidence-card[^"]*".*?</article>', shipped_mosaic, re.S
+        )
+        if "agent-poster.png" in card
+    )
+    assert _compact(shipped_tile) in _compact(mosaic_markup), (
+        "the plan's agent evidence tile must carry the shipped caption, alt and copy"
+    )
+
+    storyboard_markup = _fenced_block_after(
+        plan,
+        "- [ ] **Step 5: Add the embedded-agent storyboard**",
+        "html",
+    )
+    agent_page = (DOCS / "agent.md").read_text(encoding="utf-8")
+    shipped_storyboard = agent_page[
+        agent_page.index('<section class="docs-storyboard"') : agent_page.index("</section>")
+        + len("</section>")
+    ]
+    assert _compact(shipped_storyboard) == _compact(storyboard_markup), (
+        "the plan's storyboard snippet must be the shipped storyboard, including "
+        "its scripted-capture caption and its separated production turn flow"
+    )
+
+    provenance = _fenced_block_after(plan, "## Embedded agent", "sh")
+    assert "vhs docs/demo/agent.tape" in provenance
+    plan_agent_prose = plan[plan.index("## Embedded agent") : plan.index("## Relationship graph")]
+    lowered_prose = " ".join(plan_agent_prose.lower().split())
+    assert "does not prove" in lowered_prose, (
+        "the plan's provenance snippet must carry the same proves/does-not-prove "
+        "boundary the shipped provenance page states"
+    )
+
+    for overclaim in ("Bounded fresh reads + citations", "Agent with citations"):
+        assert overclaim not in plan, (
+            f"no plan snippet may still ship {overclaim!r} for the scripted capture"
+        )
+
+
+def test_visual_storytelling_design_separates_agent_capability_from_the_capture() -> None:
+    """The design doc must keep the product claim and the proof claim apart.
+
+    Its scene description ("the agent performs bounded reads, cites evidence,
+    and drives the TUI") and its mosaic criterion ("embedded-agent answers
+    with validated citations") are true of the product and false of the media
+    this branch ships. The document keeps the capability statement, and adds
+    the rule the landing contract now enforces: the scripted capture is not
+    evidence of the pipeline it scripts.
+    """
+    design = (
+        DOCS / "superpowers" / "specs" / "2026-08-22-visual-storytelling-design.md"
+    ).read_text(encoding="utf-8")
+    lowered = " ".join(design.lower().split())
+
+    assert "scripted" in lowered, (
+        "the design must acknowledge that the agent media comes from a scripted runtime"
+    )
+    for rule in (
+        "deterministic scripted agentpanel walkthrough",
+        "not evidence of bounded fresh reads, live tool execution, or validated citations",
+    ):
+        assert rule in lowered, f"the design must state the capture rule: {rule!r}"
+
+    assert "embedded-agent answers with validated citations" not in lowered, (
+        "no mosaic criterion may require validated-citation evidence from a "
+        "capture whose citations are hard-coded"
+    )
+    assert "the agent performs bounded reads" in lowered, (
+        "the production capability statement stays: only the claim made about "
+        "the capture is narrowed"
     )
 
 

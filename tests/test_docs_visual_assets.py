@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.util
+import re
 import struct
 import sys
 import zlib
@@ -22,6 +23,7 @@ SCENES = ROOT / "docs" / "assets" / "scenes"
 INSTRUCTIONS = ROOT / "docs" / "demo" / "visual-storytelling.md"
 LANDING = DOCS / "index.md"
 AGENT_TAPE = ROOT / "docs" / "demo" / "agent.tape"
+AGENT_PAGE = DOCS / "agent.md"
 DEMO_HARNESS = ROOT / "docs" / "demo" / "demo.py"
 
 #: The synthetic pod the relationship tape opens the graph on.
@@ -350,6 +352,107 @@ def test_demo_harness_never_synthesizes_the_agent_prompt_submission() -> None:
     source = DEMO_HARNESS.read_text(encoding="utf-8")
     assert "AgentPromptSubmitted" not in source
     assert "on_agent_prompt_submitted(" not in source
+
+
+def test_agent_capture_provenance_states_what_the_scripted_runtime_proves() -> None:
+    """`ScriptedAgentRuntime` proves korvid's panel, never its pipeline.
+
+    The tape drives the product's real `AgentPanel`: VHS types the prompt into
+    `#agent-input` and presses Enter, so the submission crosses the genuine
+    `Input`/`on_input_submitted` path and the panel renders the turn itself.
+    Everything behind that boundary is fabricated — the runtime discards the
+    prompt text and the screen context it is handed, contacts no provider,
+    executes no read tool, and yields hard-coded tool, text, citation, and
+    token events.
+
+    That distinction is what every embedding page has to inherit, so it is
+    written down where the media's provenance lives instead of being
+    rediscovered by the next reviewer.
+    """
+    harness = DEMO_HARNESS.read_text(encoding="utf-8")
+    assert "del user_text, screen_context" in harness, (
+        "this contract is written against a runtime that ignores its prompt and "
+        "screen context; if the harness stopped discarding them the provenance "
+        "wording has to be revisited rather than silently kept"
+    )
+
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    section = instructions.split("## Embedded agent", 1)[1].split("\n## ", 1)[0]
+    lowered = " ".join(section.lower().split())
+
+    assert "proves" in lowered, "the provenance section must state what the capture does prove"
+    assert "does not prove" in lowered, "and must state the other half of the boundary explicitly"
+    for proof in ("agentpanel", "input", "renders"):
+        assert proof in lowered, f"the section must name what the capture does prove: {proof!r}"
+    for limit in (
+        "discards",
+        "screen context",
+        "contacts no provider",
+        "executes no read tool",
+        "hard-coded",
+        "not validated",
+    ):
+        assert limit in lowered, f"the section must name what it does not prove: {limit!r}"
+    assert "scripted agentpanel walkthrough" in lowered, (
+        "the provenance page must give the embedding surfaces the label they use"
+    )
+
+
+def test_agent_page_capture_is_labelled_scripted_and_split_from_the_turn_flow() -> None:
+    """`docs/agent.md` must not present the scripted frame as a real turn.
+
+    The storyboard pairs one capture with korvid's production turn flow. That
+    flow (context, bounded reads, validated citations, UI drive) documents
+    what the shipped `AgentRuntime` does and stays exactly as strong; the
+    capture beside it executes none of it, so its alt and caption identify the
+    deterministic scripted walkthrough and the caption carries the note that
+    no provider and no real read tool run.
+    """
+    page = AGENT_PAGE.read_text(encoding="utf-8")
+    storyboard = page[
+        page.index('<section class="docs-storyboard"') : page.index("</section>")
+        + len("</section>")
+    ]
+    figure = storyboard[storyboard.index("<figure>") : storyboard.index("</figure>")]
+
+    alt = re.search(r'<img[^>]*alt="([^"]+)"', figure)
+    assert alt is not None, "the storyboard keeps a described capture"
+    alt_text = alt.group(1).lower()
+    assert "scripted" in alt_text, f"the alt must identify the scripted capture: {alt_text!r}"
+    assert "agentpanel" in alt_text or "agent panel" in alt_text, (
+        f"the alt must name the panel the capture really shows: {alt_text!r}"
+    )
+
+    caption = re.search(r"<figcaption[^>]*>(.*?)</figcaption>", figure, re.DOTALL)
+    assert caption is not None, "the storyboard keeps its figure caption"
+    caption_text = " ".join(re.sub(r"<[^>]+>", " ", caption.group(1)).lower().split())
+    assert "scripted" in caption_text, (
+        f"the caption must identify the scripted capture: {caption_text!r}"
+    )
+    assert "no provider" in caption_text, (
+        f"the capture note must say no provider runs: {caption_text!r}"
+    )
+    assert "no real read tool" in caption_text, (
+        f"the capture note must say no real read tool runs: {caption_text!r}"
+    )
+
+    ordered_list = storyboard[storyboard.index("<ol>") :]
+    assert storyboard.index("</figure>") < storyboard.index("<ol>"), (
+        "the production turn flow must sit outside the captured figure, not read "
+        "as a description of the frame"
+    )
+    assert "scripted" not in ordered_list.lower(), (
+        "the production turn flow describes the real AgentRuntime and must not be "
+        "weakened into a description of the capture"
+    )
+    for production_fact in (
+        "Bounded tools gather manifests, events, logs, or diagnoses.",
+        "Evidence references remain selectable and validated.",
+        "Navigation can change; writes still stop at confirmation.",
+    ):
+        assert production_fact in ordered_list, (
+            f"the documented production behaviour must survive verbatim: {production_fact!r}"
+        )
 
 
 def test_relationship_demo_serves_every_kind_the_real_loader_asks_for() -> None:

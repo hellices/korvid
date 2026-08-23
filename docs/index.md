@@ -49,12 +49,12 @@ hide:
       <a href="tui/">Explore the TUI</a>
     </article>
     <article id="scene-agent" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-agent" tabindex="0">
-      <video src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="The embedded agent diagnoses the failing payment worker and cites its evidence">Your browser does not support this embedded-agent demo.</video>
-      <noscript><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic failing payment worker with cited evidence"></noscript>
-      <div><strong>Input</strong> Current selection + prompt</div>
-      <div><strong>Evidence</strong> Bounded fresh reads + citations</div>
-      <div><strong>Result</strong> Answer and UI drive</div>
-      <p>The agent investigates in context while writes remain proposals.</p>
+      <video src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="A deterministic scripted AgentPanel walkthrough: a prompt typed into korvid's real agent input, then scripted tool and citation events rendered in the panel">Your browser does not support this scripted AgentPanel walkthrough.</video>
+      <noscript><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer carrying an E1 citation marker"></noscript>
+      <div><strong>Input</strong> Prompt typed and submitted in the real AgentPanel input</div>
+      <div><strong>Evidence</strong> Scripted tool and citation events, not bounded reads</div>
+      <div><strong>Result</strong> Real AgentPanel rendering of the scripted answer</div>
+      <p>This capture does not execute korvid's provider or tool pipeline; the agent guide documents what a real turn does.</p>
       <a href="agent/">Explore the embedded agent</a>
     </article>
     <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
@@ -139,8 +139,8 @@ hide:
       <a href="tui/#ops-hints">Inspect diagnosis surfaces</a>
     </article>
     <article class="evidence-card">
-      <figure><a class="evidence-card__full" href="assets/scenes/agent-poster.png"><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid embedded agent diagnosing a synthetic failing payment worker with cited evidence"></a><figcaption>Agent with citations</figcaption></figure>
-      <p>Ask from the current screen and keep checkable evidence in the answer.</p>
+      <figure><a class="evidence-card__full" href="assets/scenes/agent-poster.png"><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer carrying an E1 citation marker"></a><figcaption>Agent panel walkthrough</figcaption></figure>
+      <p>A scripted capture of the panel rendering a prompt, a tool event, and a cited answer — no live tool execution and no validated evidence.</p>
       <a href="agent/">Use the embedded agent</a>
     </article>
     <article class="evidence-card evidence-card--wide">
