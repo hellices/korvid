@@ -203,6 +203,7 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
         agent_base_url="http://localhost:9999/v1",
         agent_model="m",
         agent_api_key_env="KORVID_TEST_KEY",
+        agent_model_tier="high",
     )
     kube_stub = cast("Any", object())  # wiring never touches kube before a tool call
     runtime, _, _, _, _, _, proxy = _build_agent_wiring(config, kube_stub, {})

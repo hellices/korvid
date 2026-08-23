@@ -656,13 +656,13 @@ def _tier_to_legacy_profile(model_tier: str | None) -> str:
     """Temporary bridge (Task 5) from `agent.model_tier` to the old
     full/small profile split in `agent/profiles.py`.
 
-    `high` and unset/Automatic both mean "run at full capability" — today's
-    default, unchanged for anyone who never opts into a tier; only `low`
-    reduces the tool surface, budgets, and prompt for small local models.
-    Task 12/14 replace this with real tier-aware routing and this function
-    should be deleted then; it is deliberately private (not exported).
+    `high` is the only explicit "full" setting; `low` and unset/Automatic
+    both map to the conservative small profile while the old runtime still
+    exists. Task 12/14 replace this with real tier-aware routing and this
+    function should be deleted then; it is deliberately private (not
+    exported).
     """
-    return "small" if model_tier == "low" else "full"
+    return "full" if model_tier == "high" else "small"
 
 
 def _initial_profile(
