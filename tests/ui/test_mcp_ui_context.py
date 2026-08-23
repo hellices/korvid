@@ -106,12 +106,12 @@ async def test_downstream_log_tasks_carry_the_app_context() -> None:
 async def test_concurrent_bridge_calls_from_foreign_contexts_stay_serialized() -> None:
     """The composition root's proxy serializes UI calls; the context
     marshaling underneath must not break that ordering."""
-    from korvid.__main__ import _UIBridgeProxy
+    from korvid.__main__ import _AgentToolUIBridgeProxy
 
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        proxy = _UIBridgeProxy()
+        proxy = _AgentToolUIBridgeProxy()
         proxy.target = AppUIBridge(app)
         first = _in_empty_context(proxy.agent_navigate("deployments"))
         second = _in_empty_context(proxy.agent_navigate("pods"))
@@ -129,7 +129,7 @@ async def test_real_mcp_http_open_describe_and_follow_mirror() -> None:
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
-    from korvid.__main__ import _UIBridgeProxy
+    from korvid.__main__ import _AgentToolUIBridgeProxy
     from korvid.k8s.discovery import PODS_META
     from korvid.mcp.server import KorvidMCPServer
     from korvid.tools.executor import READ_TOOLS, UI_TOOLS, ToolExecutor
@@ -137,7 +137,7 @@ async def test_real_mcp_http_open_describe_and_follow_mirror() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        proxy = _UIBridgeProxy()
+        proxy = _AgentToolUIBridgeProxy()
         proxy.target = AppUIBridge(app)
 
         class ManifestKube:

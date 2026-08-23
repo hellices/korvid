@@ -33,6 +33,7 @@ from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
 
+from .agent_session_fakes import FakeSession
 from .waits import until
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
@@ -307,31 +308,23 @@ async def test_bare_ctx_opens_picker_with_current_marked() -> None:
         assert "ctx-b" in prompts
 
 
-async def test_agent_screen_context_carries_switch_note() -> None:
+async def test_a_context_switch_moves_the_workspace_snapshot_not_the_prompt() -> None:
+    """A switch is a *fact*, not prose: the agent learns about it from the
+    next typed workspace snapshot (new context, new epoch), and the prompt
+    the user typed reaches the session untouched."""
     env = _CtxEnv()
     app = env.app
-
-    seen_context: list[str] = []
-
-    class _FakeRuntime:
-        total_tokens = (0, 0)
-        usage_estimated = False
-
-        async def run_turn(self, text: str, screen_context: str) -> AsyncIterator[Any]:
-            seen_context.append(screen_context)
-            return
-            yield  # pragma: no cover - makes this an async generator
-
-    app._agent_ui._runtime = _FakeRuntime()  # type: ignore[assignment]  # fake
+    session = FakeSession()
+    app._agent_ui._session = session
     async with app.run_test() as pilot:
+        before = app.agent_ui.workspace_bridge.snapshot()
         app.post_message(SwitchContextCommand("ctx-b"))
         await until(pilot, lambda: app.config.kube_context == "ctx-b", label="switched")
         await app._agent_ui.run_turn("hello")
-        assert "context=ctx-b" in seen_context[0]
-        assert "switched" in seen_context[0]
-        # The note is one-shot: the next turn goes back to plain context.
-        await app._agent_ui.run_turn("again")
-        assert "switched" not in seen_context[1]
+        after = app.agent_ui.workspace_bridge.snapshot()
+        assert after.kube_context == "ctx-b"
+        assert after.context_epoch > before.context_epoch
+        assert session.prompts == ["hello"]
 
 
 async def test_switch_failure_after_probe_restores_old_context() -> None:

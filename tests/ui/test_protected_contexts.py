@@ -26,6 +26,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
 
+from .agent_session_fakes import FakeSession
 from .waits import until
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
@@ -177,23 +178,16 @@ async def test_write_confirm_plain_y_when_unprotected(tmp_path: Path) -> None:
         await until(pilot, lambda: bool(recorder.calls), label="delete executed")
 
 
-class _RecordingRuntime:
-    """Duck-typed agent runtime that records the prompts it receives."""
+class _RecordingSession(FakeSession):
+    """An `AgentSession` that records the prompts it receives."""
 
-    total_tokens = (0, 0)
-    usage_estimated = False
-
-    def __init__(self) -> None:
-        self.turns: list[str] = []
-
-    async def run_turn(self, text: str, screen_context: str) -> AsyncIterator[Any]:
-        self.turns.append(text)
-        return
-        yield  # pragma: no cover - makes this an async generator
+    @property
+    def turns(self) -> list[str]:
+        return self.prompts
 
 
 async def test_agent_prompt_refused_when_disabled_in_protected(tmp_path: Path) -> None:
-    """The blocked prompt must never reach the runtime."""
+    """The blocked prompt must never reach the session."""
     from korvid.ui.messages import AgentPromptSubmitted
 
     app = make_app(
@@ -201,8 +195,8 @@ async def test_agent_prompt_refused_when_disabled_in_protected(tmp_path: Path) -
         protected_context="prod-eu",
         agent_disable_in_protected=True,
     )
-    runtime = _RecordingRuntime()
-    app._agent_ui._runtime = runtime  # type: ignore[assignment]  # duck-typed fake
+    session = _RecordingSession()
+    app._agent_ui._session = session
     async with app.run_test() as pilot:
         await _pod_row_ready(app, pilot)
         app.post_message(AgentPromptSubmitted("delete everything"))
@@ -211,7 +205,7 @@ async def test_agent_prompt_refused_when_disabled_in_protected(tmp_path: Path) -
             lambda: any("disabled in protected context" in n.message for n in app._notifications),
             label="agent refusal notification",
         )
-        assert runtime.turns == []
+        assert session.turns == []
 
 
 async def test_agent_prompt_allowed_in_protected_without_flag(tmp_path: Path) -> None:
@@ -220,12 +214,12 @@ async def test_agent_prompt_allowed_in_protected_without_flag(tmp_path: Path) ->
     from korvid.ui.messages import AgentPromptSubmitted
 
     app = make_app(tmp_path / "audit.log", protected_context="prod-eu")
-    runtime = _RecordingRuntime()
-    app._agent_ui._runtime = runtime  # type: ignore[assignment]  # duck-typed fake
+    session = _RecordingSession()
+    app._agent_ui._session = session
     async with app.run_test() as pilot:
         await _pod_row_ready(app, pilot)
         app.post_message(AgentPromptSubmitted("what is wrong?"))
-        await until(pilot, lambda: runtime.turns == ["what is wrong?"], label="turn ran")
+        await until(pilot, lambda: session.turns == ["what is wrong?"], label="turn ran")
         assert not any("disabled in protected context" in n.message for n in app._notifications)
 
 

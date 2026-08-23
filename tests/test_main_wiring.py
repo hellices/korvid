@@ -12,6 +12,7 @@ from typing import Any, ClassVar, cast
 import pytest
 
 import korvid
+import korvid.__main__
 from korvid.__main__ import _close_provider_in_background
 from korvid.agent.setup import AgentSettings
 from korvid.tools.executor import UIBridge
@@ -146,9 +147,9 @@ class _FakeApp(UIBridge):
 
 
 async def test_proxy_without_target_returns_error() -> None:
-    from korvid.__main__ import _UIBridgeProxy
+    from korvid.__main__ import _AgentToolUIBridgeProxy
 
-    proxy = _UIBridgeProxy()
+    proxy = _AgentToolUIBridgeProxy()
     assert (await proxy.agent_navigate("pods")).startswith("ERROR:")
     assert (await proxy.agent_set_filter("x")).startswith("ERROR:")
     assert (await proxy.agent_open_logs("p", "ns")).startswith("ERROR:")
@@ -158,9 +159,9 @@ async def test_proxy_without_target_returns_error() -> None:
 
 
 async def test_proxy_forwards_to_target() -> None:
-    from korvid.__main__ import _UIBridgeProxy
+    from korvid.__main__ import _AgentToolUIBridgeProxy
 
-    proxy = _UIBridgeProxy()
+    proxy = _AgentToolUIBridgeProxy()
     app = _FakeApp()
     proxy.target = app
     assert await proxy.agent_navigate("pods", "prod") == "ok-nav"
@@ -185,8 +186,96 @@ async def test_proxy_forwards_to_target() -> None:
     ]
 
 
+# --- Task 12: the second port, the agent UI bridge ---
+
+
+async def test_the_agent_ui_proxy_refuses_before_the_app_exists() -> None:
+    """The session's workspace port is late-bound like the tool port, but
+    it must never *fabricate* an answer: a snapshot invented before the UI
+    exists would be a lie about the screen, and a fabricated action result
+    would tell the model something happened that did not."""
+    from korvid.__main__ import _AgentUiBridgeProxy
+    from korvid.agent.interaction import UiAction
+
+    proxy = _AgentUiBridgeProxy()
+    with pytest.raises(RuntimeError, match="agent UI not ready"):
+        proxy.snapshot()
+    with pytest.raises(RuntimeError, match="agent UI not ready"):
+        await proxy.apply(UiAction(kind="navigate", target="pods"))
+
+
+async def test_the_agent_ui_proxy_forwards_once_bound() -> None:
+    from korvid.__main__ import _AgentUiBridgeProxy
+    from korvid.agent.interaction import (
+        AgentUiBridge,
+        InteractionContext,
+        PaneContext,
+        UiAction,
+        UiActionResult,
+    )
+
+    snapshot = InteractionContext(
+        kube_context="kind-dev",
+        context_epoch=3,
+        focused_pane=PaneContext(kind="pods", scope="default"),
+        secondary_pane=None,
+        timeline_cursor=None,
+    )
+
+    class _Bridge(AgentUiBridge):
+        def __init__(self) -> None:
+            self.applied: list[UiAction] = []
+
+        def snapshot(self) -> InteractionContext:
+            return snapshot
+
+        async def apply(self, action: UiAction) -> UiActionResult:
+            self.applied.append(action)
+            return UiActionResult(ok=True, detail="done", context_epoch=3)
+
+    proxy = _AgentUiBridgeProxy()
+    bridge = _Bridge()
+    proxy.target = bridge
+    assert proxy.snapshot() is snapshot
+    result = await proxy.apply(UiAction(kind="navigate", target="pods"))
+    assert result.ok is True
+    assert [action.kind for action in bridge.applied] == ["navigate"]
+
+
+def test_the_wiring_exposes_both_ports_separately() -> None:
+    """Two ports, two lifetimes: the tools-layer `UIBridge` the executor and
+    MCP share, and the agent-layer `AgentUiBridge` the session reads. They
+    are deliberately not the same object."""
+    from korvid.__main__ import (
+        _AgentToolUIBridgeProxy,
+        _AgentUiBridgeProxy,
+        _build_agent_wiring,
+    )
+    from korvid.core.config import KorvidConfig
+
+    wiring = _build_agent_wiring(KorvidConfig(), cast("Any", object()), {})
+    assert isinstance(wiring.tool_bridge, _AgentToolUIBridgeProxy)
+    assert isinstance(wiring.ui_bridge, _AgentUiBridgeProxy)
+
+
+def test_the_composition_root_never_names_the_old_runtime() -> None:
+    """Production cutover (issue #316 task 12): `AgentRuntime`, its profile
+    builder and its prompt-override plumbing are eval/test-only now. A
+    reference here would mean two agent objects are still wired."""
+    source = Path(korvid.__main__.__file__).read_text()
+    for banned in (
+        "AgentRuntime",
+        "build_profile",
+        "AgentProfile",
+        "PromptOverrides",
+        "cluster_context_note",
+        "_tier_to_legacy_profile",
+    ):
+        assert banned not in source, banned
+
+
 def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
-    """The composition root arms the runtime with READ_TOOLS + UI_TOOLS."""
+    """The composition root arms the session with READ_TOOLS + UI_TOOLS."""
     import pytest
 
     mp = monkeypatch
@@ -206,21 +295,23 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
         agent_model_tier="high",
     )
     kube_stub = cast("Any", object())  # wiring never touches kube before a tool call
-    runtime, _, _, _, _, _, proxy = _build_agent_wiring(config, kube_stub, {})
-    assert runtime is not None
-    names = [t["function"]["name"] for t in runtime._tools]
+    wiring = _build_agent_wiring(config, kube_stub, {})
+    session = wiring.session
+    proxy = wiring.tool_bridge
+    assert session is not None
+    names = [t["function"]["name"] for t in session.policy.tools]
     assert "navigate" in names
     assert "list_resources" in names
     assert "delete_resource" in names  # writes armed by default (approval-gated)
-    executor = cast("Any", runtime._executor)
-    assert executor._ui is proxy
+    assert wiring.tool_bridge is proxy
 
     # readonly strips every write tool: the model is never told they exist.
-    ro_runtime, _, _, _, _, _, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         dataclasses.replace(config, readonly=True), kube_stub, {}
     )
-    assert ro_runtime is not None
-    ro_names = [t["function"]["name"] for t in ro_runtime._tools]
+    ro_session = wiring.session
+    assert ro_session is not None
+    ro_names = [t["function"]["name"] for t in ro_session.policy.tools]
     assert "delete_resource" not in ro_names
     assert "scale_resource" not in ro_names
     assert "rollout_restart" not in ro_names
@@ -248,21 +339,24 @@ def test_agent_wiring_gates_resize_tool_on_discovery(monkeypatch: object) -> Non
     )
     kube_stub = cast("Any", object())
 
-    runtime, _, _, _, _, _, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         config, kube_stub, {}, pod_resize_supported=True
     )
-    assert runtime is not None
-    assert "resize_pod" in [t["function"]["name"] for t in runtime._tools]
+    session = wiring.session
+    assert session is not None
+    assert "resize_pod" in [t["function"]["name"] for t in session.policy.tools]
 
-    gated, _, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
+    wiring = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
+    gated = wiring.session
     assert gated is not None
-    assert "resize_pod" not in [t["function"]["name"] for t in gated._tools]
+    assert "resize_pod" not in [t["function"]["name"] for t in gated.policy.tools]
 
-    ro, _, _, _, _, _, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         dataclasses.replace(config, readonly=True), kube_stub, {}, pod_resize_supported=True
     )
+    ro = wiring.session
     assert ro is not None
-    assert "resize_pod" not in [t["function"]["name"] for t in ro._tools]
+    assert "resize_pod" not in [t["function"]["name"] for t in ro.policy.tools]
 
 
 def test_mcp_controller_builds_fresh_servers() -> None:
@@ -409,10 +503,10 @@ async def test_ui_bridge_proxy_serializes_concurrent_callers() -> None:
     """The proxy is shared by the built-in agent and the MCP server's
     concurrent stateless requests; UI operations (log pane swaps, describe
     views) are not safe to interleave, so calls must never overlap."""
-    from korvid.__main__ import _UIBridgeProxy
+    from korvid.__main__ import _AgentToolUIBridgeProxy
 
     probe = _OverlapProbeBridge()
-    proxy = _UIBridgeProxy()
+    proxy = _AgentToolUIBridgeProxy()
     proxy.target = probe
     await asyncio.gather(
         proxy.agent_open_logs("a", "ns"),
@@ -529,8 +623,12 @@ async def test_get_manifest_routes_helm_revision_names_to_specific_revision() ->
         await get_manifest("helmreleases", None, "web")
 
 
-async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None:
-    """A detected-provider note reaches the runtime's system prompt (issue #30)."""
+async def test_cluster_facts_reach_the_session_as_facts_not_prose(
+    monkeypatch: object,
+) -> None:
+    """The detected cloud provider is a typed fact the session composes its
+    own prompt from (issue #30 + #316 task 12) — the composition root never
+    hands the agent a sentence to paste into a system message."""
     import pytest
 
     mp = monkeypatch
@@ -538,6 +636,8 @@ async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None
     mp.setenv("KORVID_TEST_KEY", "k")
 
     from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.interaction import ClusterFacts
+    from korvid.agent.setup import AgentSettings
     from korvid.core.config import KorvidConfig
 
     config = KorvidConfig(
@@ -549,17 +649,12 @@ async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None
         agent_api_key_env="KORVID_TEST_KEY",
     )
     kube_stub = cast("Any", object())
-    note = "This cluster runs on Azure (AKS managed)."
-    runtime, _, rebuild, retarget, _, _, _ = _build_agent_wiring(
-        config, kube_stub, {}, cluster_context=note
-    )
-    assert runtime is not None
-    assert rebuild is not None
-    assert note in runtime._messages[0]["content"]
+    azure = ClusterFacts(provider="azure", distribution="aks")
+    wiring = _build_agent_wiring(config, kube_stub, {}, cluster=azure)
+    assert wiring.session is not None
+    assert wiring.rebuild is not None
 
-    from korvid.agent.setup import AgentSettings
-
-    rebuilt = rebuild(
+    rebuilt = wiring.rebuild(
         AgentSettings(
             provider="openai",
             auth_method="api_key",
@@ -569,27 +664,20 @@ async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None
         )
     )
     assert rebuilt is not None
-    assert note in rebuilt._messages[0]["content"]
+    # A rebuild inherits the cluster the wiring last learned about; what
+    # that produces on the wire is pinned by the end-to-end test below.
+    assert rebuilt.policy.model == wiring.session.policy.model
 
-    # `:ctx` switch (issue #36): the live runtime is re-armed in place and
-    # any later wizard rebuild uses the new cluster's note and tool set.
-    new_note = "This cluster runs on AWS (EKS managed)."
-    retarget(rebuilt, True, new_note)
-    assert new_note in rebuilt._messages[0]["content"]
-    assert note not in rebuilt._messages[0]["content"]
-    assert "resize_pod" in [t["function"]["name"] for t in rebuilt._tools]
-    rebuilt_after = rebuild(
-        AgentSettings(
-            provider="openai",
-            auth_method="api_key",
-            base_url="http://localhost:9999/v1",
-            model="m",
-            api_key_env="KORVID_TEST_KEY",
-        )
-    )
-    assert rebuilt_after is not None
-    assert new_note in rebuilt_after._messages[0]["content"]
-    assert "resize_pod" in [t["function"]["name"] for t in rebuilt_after._tools]
+
+def test_the_wiring_takes_cluster_facts_not_a_note() -> None:
+    """`cluster_context` prose is gone: the parameter is typed."""
+    import inspect
+
+    from korvid.__main__ import _build_agent_wiring
+
+    parameters = inspect.signature(_build_agent_wiring).parameters
+    assert "cluster_context" not in parameters
+    assert "cluster" in parameters
 
 
 async def test_cloud_provider_probe_is_bounded(monkeypatch: object) -> None:
@@ -765,9 +853,9 @@ async def test_ctx_switch_quiesces_discovery_before_swapping_connection() -> Non
         startup_config,
         cast("Any", FakeKube()),
         aliases,
-        cast("Any", [SimpleNamespace(agent_runtime=None, config=startup_config)]),  # app_box
+        cast("Any", [SimpleNamespace(agent_session=None, config=startup_config)]),  # app_box
         discovery_box,
-        lambda runtime, resize, note: None,
+        lambda session, resize, cluster: None,
     )
     try:
         await switch("ctx-b")
@@ -807,12 +895,9 @@ def test_build_helm_returns_none_without_binary(monkeypatch: pytest.MonkeyPatch)
     assert _build_helm(KorvidConfig()) is None
 
 
-async def test_agent_wiring_applies_the_low_tier(monkeypatch: object) -> None:
-    """`agent.model_tier: low` shrinks the tool surface, budgets, and prompt
-    at the composition root (issue #71); rebuilds after the :ai wizard honor
-    the wizard's tier choice. The old-runtime `small`/`full` profile split
-    still exists internally (Task 12/14 will replace it); a private adapter
-    in `__main__` maps low/high onto it until then."""
+async def test_the_low_tier_is_resolved_from_config(monkeypatch: object) -> None:
+    """`agent.model_tier: low` is an explicit user choice: the router must
+    resolve it and say so, and the surface must shrink with it (issue #71)."""
     import pytest
 
     mp = monkeypatch
@@ -820,7 +905,7 @@ async def test_agent_wiring_applies_the_low_tier(monkeypatch: object) -> None:
     mp.setenv("KORVID_TEST_KEY", "k")
 
     from korvid.__main__ import _build_agent_wiring
-    from korvid.agent.profiles import SMALL_MAX_HISTORY_CHARS, SMALL_MAX_ITERATIONS
+    from korvid.agent.model_policy import CapabilitySource, ModelTier
     from korvid.agent.setup import AgentSettings
     from korvid.core.config import KorvidConfig
 
@@ -834,11 +919,13 @@ async def test_agent_wiring_applies_the_low_tier(monkeypatch: object) -> None:
         agent_model_tier="low",
     )
     kube_stub = cast("Any", object())
-    runtime, _, rebuild, _, _, _, _ = _build_agent_wiring(
-        config, kube_stub, {}, pod_resize_supported=True
-    )
-    assert runtime is not None
-    names = [t["function"]["name"] for t in runtime._tools]
+    wiring = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
+    session = wiring.session
+    rebuild = wiring.rebuild
+    assert session is not None
+    assert session.policy.tier is ModelTier.LOW
+    assert session.policy.route_source is CapabilitySource.USER
+    names = [t["function"]["name"] for t in session.policy.tools]
     assert "diagnose_pod" in names
     assert "open_logs" in names
     assert "delete_resource" in names  # writes stay available (approval-gated)
@@ -846,14 +933,12 @@ async def test_agent_wiring_applies_the_low_tier(monkeypatch: object) -> None:
     assert "navigate" not in names
     assert "set_filter" not in names
     assert "drill_down" not in names
-    assert runtime._max_iterations == SMALL_MAX_ITERATIONS
-    assert runtime._max_history_chars == SMALL_MAX_HISTORY_CHARS
-    assert runtime._max_result_chars is not None
-    assert "one tool at a time" in runtime._messages[0]["content"]
+    assert session.policy.max_tool_calls_per_iteration == 1
+    assert session.policy.allow_parallel_tool_calls is False
 
     # The wizard's rebuild carries its own tier choice.
     assert rebuild is not None
-    full_runtime = rebuild(
+    high = rebuild(
         AgentSettings(
             provider="openai-compat",
             auth_method="api_key",
@@ -863,25 +948,15 @@ async def test_agent_wiring_applies_the_low_tier(monkeypatch: object) -> None:
             model_tier="high",
         )
     )
-    assert full_runtime is not None
-    full_names = [t["function"]["name"] for t in full_runtime._tools]
-    assert "navigate" in full_names
-    assert full_runtime._max_iterations != SMALL_MAX_ITERATIONS
+    assert high is not None
+    assert high.policy.tier is ModelTier.HIGH
+    assert high.policy.route_source is CapabilitySource.USER
+    assert "navigate" in [t["function"]["name"] for t in high.policy.tools]
 
 
-def test_tier_to_legacy_profile_maps_automatic_and_explicit_tiers() -> None:
-    """Automatic routing stays conservative while explicit tiers keep intent."""
-    from korvid.__main__ import _tier_to_legacy_profile
-
-    assert _tier_to_legacy_profile(None) == "small"
-    assert _tier_to_legacy_profile("low") == "small"
-    assert _tier_to_legacy_profile("high") == "full"
-
-
-async def test_agent_wiring_defaults_to_the_low_tier_for_automatic(
-    monkeypatch: object,
-) -> None:
-    """Automatic tier selection should keep the legacy runtime on the small surface."""
+async def test_an_unset_tier_is_routed_not_forced(monkeypatch: object) -> None:
+    """With no `agent.model_tier` the router decides, and reports where the
+    decision came from — never `USER`, which would be a lie about intent."""
     import pytest
 
     mp = monkeypatch
@@ -889,7 +964,7 @@ async def test_agent_wiring_defaults_to_the_low_tier_for_automatic(
     mp.setenv("KORVID_TEST_KEY", "k")
 
     from korvid.__main__ import _build_agent_wiring
-    from korvid.agent.profiles import SMALL_MAX_HISTORY_CHARS, SMALL_MAX_ITERATIONS
+    from korvid.agent.model_policy import CapabilitySource
     from korvid.core.config import KorvidConfig
 
     config = KorvidConfig(
@@ -901,29 +976,24 @@ async def test_agent_wiring_defaults_to_the_low_tier_for_automatic(
         agent_api_key_env="KORVID_TEST_KEY",
     )
     kube_stub = cast("Any", object())
-    runtime, _, _, _, _, _, _ = _build_agent_wiring(
-        config, kube_stub, {}, pod_resize_supported=True
+    wiring = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
+    session = wiring.session
+    assert session is not None
+    assert session.policy.route_source is not CapabilitySource.USER
+    assert session.policy.route_source in (
+        CapabilitySource.CATALOG,
+        CapabilitySource.PROVIDER,
+        CapabilitySource.FALLBACK,
     )
-    assert runtime is not None
-    names = [t["function"]["name"] for t in runtime._tools]
-    assert "diagnose_pod" in names
-    assert "open_logs" in names
-    assert "delete_resource" in names
-    assert "resize_pod" in names
-    assert "navigate" not in names
-    assert "set_filter" not in names
-    assert "drill_down" not in names
-    assert runtime._max_iterations == SMALL_MAX_ITERATIONS
-    assert runtime._max_history_chars == SMALL_MAX_HISTORY_CHARS
-    assert runtime._max_result_chars is not None
-    assert "one tool at a time" in runtime._messages[0]["content"]
 
 
-async def test_ctx_retarget_keeps_the_low_tier_surface(monkeypatch: object) -> None:
-    """A `:ctx` switch recomposes the tool set from the *active* internal
-    profile (issues #36 + #71): retargeting a low-tier runtime picks up the
-    new cluster's capabilities (resize) without resurrecting the full
-    surface or resetting the small system prompt."""
+async def test_a_ctx_retarget_rearms_the_surface_and_keeps_the_tier(
+    monkeypatch: object,
+) -> None:
+    """A `:ctx` switch re-resolves the policy from the *current* provider
+    facts and the new cluster's environment (issues #36 + #71): the new
+    cluster's resize capability is picked up without changing the routed
+    tier or the model, which `retarget` refuses outright."""
     import pytest
 
     mp = monkeypatch
@@ -931,6 +1001,7 @@ async def test_ctx_retarget_keeps_the_low_tier_surface(monkeypatch: object) -> N
     mp.setenv("KORVID_TEST_KEY", "k")
 
     from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.interaction import ClusterFacts
     from korvid.core.config import KorvidConfig
 
     config = KorvidConfig(
@@ -943,19 +1014,115 @@ async def test_ctx_retarget_keeps_the_low_tier_surface(monkeypatch: object) -> N
         agent_model_tier="low",
     )
     kube_stub = cast("Any", object())
-    runtime, _, _, retarget, _, _, _ = _build_agent_wiring(
-        config, kube_stub, {}, pod_resize_supported=False
-    )
-    assert runtime is not None
-    assert "resize_pod" not in [t["function"]["name"] for t in runtime._tools]
+    wiring = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
+    session = wiring.session
+    retarget = wiring.retarget
+    assert session is not None
+    assert "resize_pod" not in [t["function"]["name"] for t in session.policy.tools]
+    before = session.policy
 
-    retarget(runtime, True, "The cluster runs on AWS EKS.")
-    names = [t["function"]["name"] for t in runtime._tools]
+    retarget(session, True, ClusterFacts(provider="aws", distribution="eks"))
+    names = [t["function"]["name"] for t in session.policy.tools]
     assert "resize_pod" in names  # new cluster's capability picked up
-    assert "navigate" not in names  # still the small surface
-    prompt = runtime._messages[0]["content"]
-    assert "one tool at a time" in prompt  # still the small system prompt
-    assert "AWS EKS" in prompt  # new cluster's environment note
+    assert "navigate" not in names  # still the low-tier surface
+    assert session.policy.tier is before.tier
+    assert session.policy.model == before.model
+
+
+async def test_a_ctx_retarget_re_arms_a_later_rebuild(monkeypatch: object) -> None:
+    """The switch also updates what a *future* wizard rebuild starts from:
+    a session built after the switch sees the new cluster's capabilities."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.interaction import ClusterFacts
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+        agent_model_tier="low",
+    )
+    kube_stub = cast("Any", object())
+    wiring = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
+    session = wiring.session
+    assert session is not None
+    wiring.retarget(session, True, ClusterFacts(provider="aws", distribution="eks"))
+
+    rebuilt = wiring.rebuild(
+        AgentSettings(
+            provider="openai",
+            auth_method="api_key",
+            base_url="http://localhost:9999/v1",
+            model="m",
+            api_key_env="KORVID_TEST_KEY",
+            model_tier="low",
+        )
+    )
+    assert rebuilt is not None
+    assert "resize_pod" in [t["function"]["name"] for t in rebuilt.policy.tools]
+
+
+async def test_a_switch_retargets_the_session_with_typed_cluster_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`:ctx` converts the probed `ProviderInfo` into `ClusterFacts` and
+    hands it to `retarget` — the session, not the composition root, decides
+    what that means for the prompt."""
+    import contextlib
+    from types import SimpleNamespace
+
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _make_switch_context
+    from korvid.agent.interaction import ClusterFacts
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.csp import ProviderInfo
+
+    class FakeKube:
+        async def switch_context(self, name: str | None) -> None:
+            return None
+
+        async def detect_cloud_provider(self) -> ProviderInfo:
+            return ProviderInfo("azure", "aks")
+
+        async def discover_resources(self) -> list[Any]:
+            return []
+
+    monkeypatch.setattr(main_mod, "resolve_context_namespace", lambda name: None)
+    calls: list[tuple[Any, bool, Any]] = []
+    startup = KorvidConfig(namespace="default", readonly=True)
+    session = object()
+    app_stub = SimpleNamespace(agent_session=session, config=startup)
+    discovery_box: list[asyncio.Task[None]] = []
+    switch = _make_switch_context(
+        startup,
+        cast("Any", FakeKube()),
+        {},
+        cast("Any", [app_stub]),
+        discovery_box,
+        lambda target, resize, cluster: calls.append((target, resize, cluster)),
+    )
+    try:
+        await switch("ctx-b")
+    finally:
+        for task in discovery_box:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    assert calls
+    target, _resize, cluster = calls[-1]
+    assert target is session
+    assert cluster == ClusterFacts(provider="azure", distribution="aks")
 
 
 async def test_ctx_switch_result_carries_the_context_namespace(
@@ -987,7 +1154,7 @@ async def test_ctx_switch_result_carries_the_context_namespace(
     monkeypatch.setattr(main_mod, "resolve_context_namespace", ctx_namespaces.get)
 
     startup = KorvidConfig(namespace="startup-ns", readonly=True)
-    app_stub = SimpleNamespace(agent_runtime=None, config=startup)
+    app_stub = SimpleNamespace(agent_session=None, config=startup)
     discovery_box: list[asyncio.Task[None]] = []
     switch = _make_switch_context(
         startup,
@@ -995,7 +1162,7 @@ async def test_ctx_switch_result_carries_the_context_namespace(
         {},
         cast("Any", [app_stub]),
         discovery_box,
-        lambda runtime, resize, note: None,
+        lambda session, resize, cluster: None,
     )
     try:
         result_b = await switch("ctx-b")
@@ -1199,16 +1366,21 @@ def test_missing_agent_extra_degrades_when_not_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without the [agent] extra and without agent.provider configured,
-    the wiring is runtime-less and the retarget hook is a safe no-op."""
+    the wiring is session-less and the retarget hook is a safe no-op."""
     from korvid.__main__ import _build_agent_wiring
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
     _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
-    runtime, configurator, rebuild, retarget, _, provider_box, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         KorvidConfig(), cast("KubeClient", object()), {}
     )
-    assert runtime is None
+    session = wiring.session
+    configurator = wiring.configurator
+    rebuild = wiring.rebuild
+    retarget = wiring.retarget
+    provider_box = wiring.provider_box
+    assert session is None
     assert configurator is None
     assert rebuild is None
     assert provider_box == [None]
@@ -1288,17 +1460,21 @@ def test_httpx_without_keyring_does_not_compose_the_agent(
 
     _uninstall_packages(monkeypatch, "keyring")  # observability keeps httpx importable
     for cached in list(sys.modules):
-        if cached in ("korvid.agent.runtime", "korvid.agent.profiles"):
+        if cached in ("korvid.agent.session", "korvid.agent.profiles"):
             monkeypatch.delitem(sys.modules, cached)
 
-    runtime, configurator, rebuild, _, _, provider_box, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         KorvidConfig(), cast("KubeClient", object()), {}
     )
-    assert runtime is None
+    session = wiring.session
+    configurator = wiring.configurator
+    rebuild = wiring.rebuild
+    provider_box = wiring.provider_box
+    assert session is None
     assert configurator is None
     assert rebuild is None
     assert provider_box == [None]
-    assert "korvid.agent.runtime" not in sys.modules
+    assert "korvid.agent.session" not in sys.modules
     assert "korvid.agent.profiles" not in sys.modules
 
 
@@ -1400,8 +1576,11 @@ async def test_disconnect_agent_releases_the_provider(monkeypatch: object) -> No
         agent_api_key_env="KORVID_TEST_KEY",
     )
     kube_stub = cast("Any", object())
-    runtime, _, _, _, disconnect, provider_box, _ = _build_agent_wiring(config, kube_stub, {})
-    assert runtime is not None
+    wiring = _build_agent_wiring(config, kube_stub, {})
+    session = wiring.session
+    disconnect = wiring.disconnect
+    provider_box = wiring.provider_box
+    assert session is not None
     provider = provider_box[0]
     assert provider is not None
     closed: list[bool] = []
@@ -1493,12 +1672,15 @@ async def test_plugin_rebuild_failure_keeps_the_previous_provider_open(
 
     monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
     _install_company_plugin_site(monkeypatch, tmp_path)
-    runtime, _, rebuild, _, _, provider_box, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         _company_plugin_config(),
         cast("Any", object()),
         {},
     )
-    assert runtime is not None
+    session = wiring.session
+    rebuild = wiring.rebuild
+    provider_box = wiring.provider_box
+    assert session is not None
     assert rebuild is not None
     old_provider = provider_box[0]
     assert old_provider is not None
@@ -1519,19 +1701,22 @@ async def test_plugin_rebuild_closes_the_replaced_provider_once(
 
     monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
     _install_company_plugin_site(monkeypatch, tmp_path)
-    runtime, _, rebuild, _, _, provider_box, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         _company_plugin_config(),
         cast("Any", object()),
         {},
     )
-    assert runtime is not None
+    session = wiring.session
+    rebuild = wiring.rebuild
+    provider_box = wiring.provider_box
+    assert session is not None
     assert rebuild is not None
     old_provider = provider_box[0]
     assert old_provider is not None
 
-    new_runtime = rebuild(_company_plugin_settings())
+    new_session = rebuild(_company_plugin_settings())
 
-    assert new_runtime is not None
+    assert new_session is not None
     assert provider_box[0] is not None
     assert provider_box[0] is not old_provider
     await _wait_for_close_count(old_provider, 1)
@@ -1546,12 +1731,15 @@ async def test_plugin_disconnect_then_shutdown_does_not_double_close(
 
     monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
     _install_company_plugin_site(monkeypatch, tmp_path)
-    runtime, _, _, _, disconnect, provider_box, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         _company_plugin_config(),
         cast("Any", object()),
         {},
     )
-    assert runtime is not None
+    session = wiring.session
+    disconnect = wiring.disconnect
+    provider_box = wiring.provider_box
+    assert session is not None
     provider = provider_box[0]
     assert provider is not None
 
@@ -1572,12 +1760,14 @@ async def test_plugin_shutdown_closes_the_current_provider_once(
 
     monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
     _install_company_plugin_site(monkeypatch, tmp_path)
-    runtime, _, _, _, _, provider_box, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         _company_plugin_config(),
         cast("Any", object()),
         {},
     )
-    assert runtime is not None
+    session = wiring.session
+    provider_box = wiring.provider_box
+    assert session is not None
     provider = provider_box[0]
     assert provider is not None
 
@@ -1663,13 +1853,17 @@ def test_agent_wiring_initial_plugin_error_becomes_warning(monkeypatch: object) 
     )
     warnings: list[str] = []
     kube_stub = cast("Any", object())
-    runtime, configurator, _rebuild, _, _, provider_box, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         config,
         kube_stub,
         {},
         startup_warnings=warnings,
     )
-    assert runtime is None  # provider disabled, not a crash
+    session = wiring.session
+    configurator = wiring.configurator
+    _rebuild = wiring.rebuild
+    provider_box = wiring.provider_box
+    assert session is None  # provider disabled, not a crash
     assert provider_box[0] is None
     assert configurator is not None  # wizard must remain usable
     assert len(warnings) == 1
@@ -1712,7 +1906,8 @@ async def test_agent_wiring_rebuild_passes_plugin_registry(monkeypatch: object) 
         agent_api_key_env="KORVID_TEST_KEY",
     )
     kube_stub = cast("Any", object())
-    _, _, rebuild, _, _, _, _ = _build_agent_wiring(config, kube_stub, {})
+    wiring = _build_agent_wiring(config, kube_stub, {})
+    rebuild = wiring.rebuild
     assert rebuild is not None
 
     # Initial create must have plugin_registry
@@ -1794,32 +1989,29 @@ def test_validate_ca_bundle_rejects_malformed(tmp_path: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Finding #8: Rebuild transactional — profile/runtime failures
+# Finding #8: Rebuild transactional — profile/session failures
 # ---------------------------------------------------------------------------
 
 
-async def test_rebuild_profile_failure_closes_new_provider_keeps_old(
+async def test_a_failed_tool_wiring_during_rebuild_keeps_the_old_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """If build_profile raises during rebuild, the new provider must be closed
-    and the old provider_box/runtime state must remain untouched."""
+    """Rebuild is a transaction: the whole new provider *and* session are
+    built before anything is swapped. If the tool wiring raises, only the
+    new provider is released and the live session keeps running."""
     from korvid.__main__ import _build_agent_wiring
 
     monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
     _install_company_plugin_site(monkeypatch, tmp_path)
-    runtime, _, rebuild, _, _, provider_box, _ = _build_agent_wiring(
-        _company_plugin_config(),
-        cast("Any", object()),
-        {},
-    )
-    assert runtime is not None
-    assert rebuild is not None
+    wiring = _build_agent_wiring(_company_plugin_config(), cast("Any", object()), {})
+    session = wiring.session
+    provider_box = wiring.provider_box
+    session_box = wiring.session_box
+    assert session is not None
     old_provider = provider_box[0]
     assert old_provider is not None
 
-    # Use a settings with a profile that causes ToolExecutor to fail
-    # Patch ToolExecutor so that it raises on the next construction
     from korvid.tools import executor as executor_mod
 
     def _boom_te_init(self: Any, *args: Any, **kwargs: Any) -> None:
@@ -1828,45 +2020,41 @@ async def test_rebuild_profile_failure_closes_new_provider_keeps_old(
     monkeypatch.setattr(executor_mod.ToolExecutor, "__init__", _boom_te_init)
 
     with pytest.raises(RuntimeError, match="tool executor construction failed"):
-        rebuild(_company_plugin_settings())
+        wiring.rebuild(_company_plugin_settings())
 
-    # Old provider must be alive and still in the box
     assert provider_box[0] is old_provider
+    assert session_box[0] is session
     assert cast("Any", old_provider)._provider.close_calls == 0
+    assert cast("Any", session).finalization_pending is False
 
 
-async def test_rebuild_runtime_failure_closes_new_provider_keeps_old(
+async def test_a_failed_session_build_during_rebuild_closes_only_the_new_provider(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """If AgentRuntime construction raises, the new provider must be closed
-    and old state must remain live."""
     from korvid.__main__ import _build_agent_wiring
 
     monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
     _install_company_plugin_site(monkeypatch, tmp_path)
-    runtime, _, rebuild, _, _, provider_box, _ = _build_agent_wiring(
-        _company_plugin_config(),
-        cast("Any", object()),
-        {},
-    )
-    assert runtime is not None
-    assert rebuild is not None
+    wiring = _build_agent_wiring(_company_plugin_config(), cast("Any", object()), {})
+    session = wiring.session
+    provider_box = wiring.provider_box
+    assert session is not None
     old_provider = provider_box[0]
     assert old_provider is not None
 
-    # Patch AgentRuntime to raise on next instantiation
-    from korvid.agent import runtime as runtime_mod
+    from korvid.agent import session as session_mod
 
     def _boom_init(self: Any, *args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("runtime construction failed")
+        raise RuntimeError("session construction failed")
 
-    monkeypatch.setattr(runtime_mod.AgentRuntime, "__init__", _boom_init)
+    monkeypatch.setattr(session_mod.DefaultAgentSession, "__init__", _boom_init)
 
-    with pytest.raises(RuntimeError, match="runtime construction failed"):
-        rebuild(_company_plugin_settings())
+    with pytest.raises(RuntimeError, match="session construction failed"):
+        wiring.rebuild(_company_plugin_settings())
 
     assert provider_box[0] is old_provider
+    assert wiring.session_box[0] is session
     assert cast("Any", old_provider)._provider.close_calls == 0
 
 
@@ -1891,14 +2079,16 @@ def test_options_error_gates_plugin_creation_at_startup(
         agent_options_error="agent.options must be a mapping with string keys",
     )
     warnings: list[str] = []
-    runtime, _, _, _, _, provider_box, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         config,
         cast("Any", object()),
         {},
         startup_warnings=warnings,
     )
-    # The agent must be disabled (None runtime) and the warning must be surfaced.
-    assert runtime is None
+    session = wiring.session
+    provider_box = wiring.provider_box
+    # The agent must be disabled (None session) and the warning must be surfaced.
+    assert session is None
     assert provider_box[0] is None
     assert any("agent.options" in w for w in warnings)
 
@@ -1921,13 +2111,14 @@ def test_options_error_does_not_gate_builtin_provider(
         agent_options={},
         agent_options_error="agent.options exceeded max depth",
     )
-    runtime, _, _, _, _, _, _ = _build_agent_wiring(
+    wiring = _build_agent_wiring(
         config,
         cast("Any", object()),
         {},
     )
+    session = wiring.session
     # Built-in provider starts fine despite options_error
-    assert runtime is not None
+    assert session is not None
 
 
 def test_options_error_fails_rebuild_for_plugin_provider(
@@ -1993,12 +2184,14 @@ def test_github_copilot_variant_loads_oauth_token(monkeypatch: object) -> None:
 
     mp.setattr(ts_mod.TokenStore, "load", _tracking_load)
 
-    runtime, _, _, _, _, provider_box, _ = _build_agent_wiring(config, kube_stub, {})
+    wiring = _build_agent_wiring(config, kube_stub, {})
+    session = wiring.session
+    provider_box = wiring.provider_box
     # The composition root must have asked for "github-oauth" because the
     # canonical name matched "github-copilot".
     assert "github-oauth" in loaded_keys
     # No token stored → provider is None.
-    assert runtime is None
+    assert session is None
     assert provider_box[0] is None
 
 
@@ -2130,3 +2323,312 @@ async def test_wire_and_run_passes_session_timeline_and_warning_watch(
             epoch=0, phase="started", from_context=None, to_context=f"ctx-{index}"
         )
     assert timeline.snapshot(epoch=None, source=None, resource=None).stats.entry_count == 7
+
+
+# ---------------------------------------------------------------------------
+# Task 12: session ownership, rebuild/disconnect transactions, end-to-end
+# ---------------------------------------------------------------------------
+
+
+class _RecordingProvider:
+    """A provider that streams one scripted turn and records its requests."""
+
+    order: ClassVar[list[str]] = []
+
+    def __init__(self, model: str = "m") -> None:
+        from korvid.agent.model_policy import ModelDescriptor
+
+        self._descriptor = ModelDescriptor("test", model)
+        self.requests: list[list[dict[str, Any]]] = []
+        self.surfaces: list[list[dict[str, Any]]] = []
+        self.closed = 0
+
+    @property
+    def descriptor(self) -> Any:
+        return self._descriptor
+
+    @property
+    def capabilities(self) -> Any:
+        from korvid.agent.model_policy import ModelCapabilities
+
+        return ModelCapabilities.unknown()
+
+    async def complete(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, stream: bool = True
+    ) -> Any:
+        import copy
+
+        self.requests.append(copy.deepcopy(messages))
+        self.surfaces.append(copy.deepcopy(tools))
+        for event in self.script:
+            yield event
+
+    script: ClassVar[list[dict[str, Any]]] = [
+        {"type": "text", "text": "ok"},
+        {"type": "done"},
+    ]
+
+    async def aclose(self) -> None:
+        self.closed += 1
+        _RecordingProvider.order.append("provider")
+
+
+def _stub_providers(monkeypatch: pytest.MonkeyPatch) -> list[_RecordingProvider]:
+    """Make every `create_provider` call hand back a recording provider."""
+    built: list[_RecordingProvider] = []
+
+    def _create(**kwargs: Any) -> Any:
+        if not kwargs.get("enabled", False):
+            return None
+        provider = _RecordingProvider(str(kwargs.get("model") or "m"))
+        built.append(provider)
+        return provider
+
+    monkeypatch.setattr("korvid.providers.registry.create_provider", _create)
+    return built
+
+
+def _agent_config(**overrides: Any) -> Any:
+    from korvid.core.config import KorvidConfig
+
+    base = {
+        "agent_enabled": True,
+        "agent_provider": "openai",
+        "agent_auth_method": "api_key",
+        "agent_base_url": "http://localhost:9999/v1",
+        "agent_model": "m",
+        "agent_api_key_env": "KORVID_TEST_KEY",
+    }
+    base.update(overrides)
+    return KorvidConfig(**base)
+
+
+def _settings(model: str = "m2") -> AgentSettings:
+    return AgentSettings(
+        provider="openai",
+        auth_method="api_key",
+        base_url="http://localhost:9999/v1",
+        model=model,
+        api_key_env="KORVID_TEST_KEY",
+    )
+
+
+class _CountingBridge:
+    """The agent-layer UI port a bound proxy forwards to."""
+
+    def __init__(self) -> None:
+        self.snapshots = 0
+        self.applied: list[Any] = []
+
+    def snapshot(self) -> Any:
+        from korvid.agent.interaction import InteractionContext, PaneContext
+
+        self.snapshots += 1
+        return InteractionContext(
+            kube_context="kind-dev",
+            context_epoch=1,
+            focused_pane=PaneContext(kind="pods", scope="default"),
+            secondary_pane=None,
+            timeline_cursor=None,
+        )
+
+    async def apply(self, action: Any) -> Any:
+        from korvid.agent.interaction import UiActionResult
+
+        self.applied.append(action)
+        return UiActionResult(ok=True, detail="done", context_epoch=1)
+
+
+async def test_a_turn_carries_the_cluster_facts_and_the_configured_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end through the production wiring: the cluster the composition
+    root probed and the operator's `agent.rules` both reach the wire, and
+    they get there as *composed prompt state*, never as a prose parameter."""
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.interaction import ClusterFacts
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    providers = _stub_providers(monkeypatch)
+    config = _agent_config(agent_rules=("never touch kube-system",))
+    wiring = _build_agent_wiring(
+        config,
+        cast("Any", object()),
+        {},
+        cluster=ClusterFacts(provider="azure", distribution="aks"),
+    )
+    assert wiring.session is not None
+    wiring.ui_bridge.target = cast("Any", _CountingBridge())
+
+    events = [event async for event in wiring.session.run_turn("what is wrong?")]
+    assert events
+    system = providers[0].requests[0][0]["content"]
+    assert "aks" in system.lower()
+    assert "never touch kube-system" in system
+    await wiring.session.aclose()
+
+
+async def test_the_session_reads_the_workspace_through_the_bound_ui_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from korvid.__main__ import _build_agent_wiring
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    _stub_providers(monkeypatch)
+    wiring = _build_agent_wiring(_agent_config(), cast("Any", object()), {})
+    assert wiring.session is not None
+    bridge = _CountingBridge()
+    wiring.ui_bridge.target = cast("Any", bridge)
+
+    [event async for event in wiring.session.run_turn("hi")]
+    assert bridge.snapshots >= 1
+    await wiring.session.aclose()
+
+
+async def test_a_turn_before_the_ui_is_bound_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No fabricated workspace: a turn started before the app exists must
+    surface the wiring bug, not invent a screen for the model."""
+    from korvid.__main__ import _build_agent_wiring
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    _stub_providers(monkeypatch)
+    wiring = _build_agent_wiring(_agent_config(), cast("Any", object()), {})
+    assert wiring.session is not None
+    with pytest.raises(RuntimeError, match="agent UI not ready"):
+        [event async for event in wiring.session.run_turn("hi")]
+    await wiring.session.aclose()
+
+
+async def test_rebuild_swaps_both_boxes_and_closes_the_session_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The old session is closed *before* the old provider: closing the
+    provider first would tear the transport out from under a turn the
+    session is still winding down."""
+    from korvid.__main__ import _build_agent_wiring
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    _RecordingProvider.order.clear()
+    _stub_providers(monkeypatch)
+    wiring = _build_agent_wiring(_agent_config(), cast("Any", object()), {})
+    old_session = wiring.session
+    old_provider = wiring.provider_box[0]
+    assert old_session is not None
+    assert old_provider is not None
+
+    closes: list[str] = []
+    original = type(old_session).aclose
+
+    async def _record_close(self: Any) -> None:
+        closes.append("session")
+        _RecordingProvider.order.append("session")
+        await original(self)
+
+    monkeypatch.setattr(type(old_session), "aclose", _record_close)
+
+    new_session = wiring.rebuild(_settings())
+    assert new_session is not None
+    assert new_session is not old_session
+    assert wiring.session_box[0] is new_session
+    assert wiring.provider_box[0] is not old_provider
+
+    for _ in range(20):
+        if _RecordingProvider.order[:2] == ["session", "provider"]:
+            break
+        await asyncio.sleep(0.01)
+    assert _RecordingProvider.order[:2] == ["session", "provider"]
+    assert closes == ["session"]
+    await new_session.aclose()
+
+
+async def test_disconnect_clears_both_boxes_and_closes_session_then_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from korvid.__main__ import _build_agent_wiring
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    _RecordingProvider.order.clear()
+    _stub_providers(monkeypatch)
+    wiring = _build_agent_wiring(_agent_config(), cast("Any", object()), {})
+    session = wiring.session
+    assert session is not None
+    original = type(session).aclose
+
+    async def _record_close(self: Any) -> None:
+        _RecordingProvider.order.append("session")
+        await original(self)
+
+    monkeypatch.setattr(type(session), "aclose", _record_close)
+
+    wiring.disconnect()
+    assert wiring.provider_box[0] is None
+    assert wiring.session_box[0] is None
+
+    for _ in range(20):
+        if _RecordingProvider.order[:2] == ["session", "provider"]:
+            break
+        await asyncio.sleep(0.01)
+    assert _RecordingProvider.order[:2] == ["session", "provider"]
+    wiring.disconnect()  # idempotent when already off
+    assert wiring.session_box[0] is None
+
+
+async def test_teardown_closes_the_session_before_the_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure between building the agent and mounting the app leaves the
+    session owned by `_RunState`; global teardown must release it in the
+    same order a normal shutdown would."""
+    import korvid.__main__ as main_mod
+
+    order: list[str] = []
+
+    class _Session:
+        async def aclose(self) -> None:
+            order.append("session")
+
+    class _Provider:
+        async def aclose(self) -> None:
+            order.append("provider")
+
+    class _Kube:
+        async def close(self) -> None:
+            order.append("kube")
+
+    state = main_mod._RunState()
+    state.provider_box[0] = cast("Any", _Provider())
+    state.session_box[0] = cast("Any", _Session())
+    await main_mod._teardown(state, cast("Any", _Kube()))
+    assert order == ["session", "provider", "kube"]
+
+
+async def test_teardown_after_a_normal_shutdown_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app closes the session on unmount and teardown may close it
+    again: `AgentSession.aclose` is idempotent, so this must be inert."""
+    import korvid.__main__ as main_mod
+
+    closes: list[str] = []
+
+    class _Session:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        async def aclose(self) -> None:
+            self.closed += 1
+            closes.append("session")
+
+    class _Kube:
+        async def close(self) -> None:
+            return None
+
+    session = _Session()
+    state = main_mod._RunState()
+    state.session_box[0] = cast("Any", session)
+    await main_mod._teardown(state, cast("Any", _Kube()))
+    await main_mod._teardown(state, cast("Any", _Kube()))
+    assert session.closed == 1  # the box is cleared after the first close
+    assert closes == ["session"]

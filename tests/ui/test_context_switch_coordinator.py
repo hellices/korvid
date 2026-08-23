@@ -31,6 +31,7 @@ from korvid.ui.context_switch_coordinator import (
     ContextSwitchCoordinator,
     ContextSwitchResult,
     SessionConfiguration,
+    SwitchAgent,
 )
 from korvid.ui.widgets.pick_screen import PickScreen
 
@@ -270,15 +271,10 @@ class FakeAgent:
     def __init__(self, log: Log, *, busy: bool = False) -> None:
         self._log = log
         self._busy = busy
-        self.notes: list[str] = []
 
     @property
     def busy(self) -> bool:
         return self._busy
-
-    def note_context_switch(self, note: str) -> None:
-        self.notes.append(note)
-        self._log("agent-note")
 
 
 class FakeMCP(MCPControllerBase):
@@ -464,7 +460,6 @@ _SUCCESSFUL_ORDER = [
     "forwards-reopen",
     "workspace-reset",
     "retarget-tools",
-    "agent-note",
     "timeline:completed@1",
     "timeline-feed-start",
     "mcp-start",
@@ -881,18 +876,15 @@ async def test_a_protected_target_is_adopted_and_announced(tmp_path: Path) -> No
     assert any("is protected" in message for message in env.ui.messages())
 
 
-async def test_the_agent_is_told_about_the_switch_once(tmp_path: Path) -> None:
+async def test_the_coordinator_never_narrates_the_switch_to_the_agent(
+    tmp_path: Path,
+) -> None:
+    """A switch is a typed fact the session is retargeted with, not prose
+    injected into the conversation: the coordinator only reads `busy`."""
     env = Env(tmp_path)
     await env.switch()
-    assert env.agent.notes == [
-        "kube context switched from ctx-a to ctx-b; all cluster state was reset"
-    ]
-
-
-async def test_restoring_the_same_context_does_not_note_a_switch(tmp_path: Path) -> None:
-    env = Env(tmp_path, switch_error=RuntimeError("target unreachable"))
-    await env.switch()
-    assert env.agent.notes == []
+    assert not hasattr(env.agent, "note_context_switch")
+    assert not hasattr(SwitchAgent, "note_context_switch")
 
 
 async def test_the_warning_feed_restarts_even_when_the_target_swap_failed(

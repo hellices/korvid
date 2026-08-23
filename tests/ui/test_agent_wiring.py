@@ -1,4 +1,4 @@
-"""Tests for Task 9: Ctrl-A agent panel wiring."""
+"""Tests for the Ctrl-A agent panel wiring over an `AgentSession`."""
 
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ from textual.widgets import Input, OptionList
 
 from korvid import __version__
 from korvid.agent.events import AgentEvent, TextDelta, TurnComplete
+from korvid.agent.model_policy import CapabilitySource, ModelTier
 from korvid.agent.outbound import OutboundSnapshot
+from korvid.agent.session import AgentSession
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
@@ -19,6 +21,7 @@ from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.messages import AgentPromptSubmitted
 from korvid.ui.widgets.agent_panel import AgentPanel
+from tests.ui.agent_session_fakes import FakeSession, fake_policy
 from tests.ui.waits import until
 
 
@@ -35,31 +38,22 @@ def _pod(name: str) -> PodSummary:
     )
 
 
-class StubRuntime:
-    """Scripted stand-in for AgentRuntime."""
+class StubSession(FakeSession):
+    """Scripted stand-in for the production `AgentSession`."""
 
     def __init__(
         self,
         events: list[AgentEvent],
         block: bool = False,
         snapshot: OutboundSnapshot | None = None,
+        **kwargs: Any,
     ) -> None:
-        self._events = events
-        self._block = block
-        self.calls: list[tuple[str, str]] = []
-        self.total_tokens = (0, 0)
-        self.usage_estimated = False
-        self.latest_outbound_payload = snapshot
-
-    async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
-        self.calls.append((user_text, screen_context))
-        for ev in self._events:
-            yield ev
-        if self._block:
-            await asyncio.Event().wait()
+        super().__init__(events, block=block, snapshot=snapshot, **kwargs)
 
 
-def make_app(runtime: Any = None, model: str | None = "test-model", **kwargs: Any) -> KorvidApp:
+def make_app(
+    session: AgentSession | None = None, model: str | None = "test-model", **kwargs: Any
+) -> KorvidApp:
     store = ResourceStore()
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
@@ -71,7 +65,7 @@ def make_app(runtime: Any = None, model: str | None = "test-model", **kwargs: An
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),
-        agent_runtime=runtime,
+        agent_session=session,
         agent_model_name=model,
         **kwargs,
     )
@@ -114,7 +108,7 @@ def _agent_setup_screen_initialized(app: KorvidApp) -> bool:
 
 
 async def test_ctrl_a_toggles_panel_display() -> None:
-    app = make_app(StubRuntime([]))
+    app = make_app(StubSession([]))
     async with app.run_test() as pilot:
         panel = app.query_one(AgentPanel)
         assert panel.display is False
@@ -124,29 +118,29 @@ async def test_ctrl_a_toggles_panel_display() -> None:
         assert panel.display is False
 
 
-async def test_no_runtime_shows_setup_hint() -> None:
-    app = make_app(runtime=None, model=None)
+async def test_no_session_shows_setup_hint() -> None:
+    app = make_app(session=None, model=None)
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")
         assert "Run :ai" in _panel_text(app)
         assert app.query_one(AgentPanel).query_one("#agent-input", Input).disabled is True
 
 
-async def test_prompt_drives_runtime_and_renders_reply() -> None:
-    runtime = StubRuntime(
+async def test_prompt_drives_the_session_and_renders_the_reply() -> None:
+    session = StubSession(
         [
             TextDelta(text="All pods healthy.\n"),
             TurnComplete(input_tokens=10, output_tokens=4, estimated=False),
         ]
     )
-    app = make_app(runtime)
+    app = make_app(session)
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")
         inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
         inp.value = "how are my pods?"
         await pilot.press("enter")
-        await until(pilot, lambda: runtime.calls, label="agent turn started")
-        assert runtime.calls[0][0] == "how are my pods?"
+        await until(pilot, lambda: session.prompts, label="agent turn started")
+        assert session.prompts[0] == "how are my pods?"
         await until(
             pilot,
             lambda: "All pods healthy." in _panel_text(app),
@@ -156,78 +150,34 @@ async def test_prompt_drives_runtime_and_renders_reply() -> None:
         assert inp.disabled is False
 
 
-async def test_screen_context_includes_current_view() -> None:
-    runtime = StubRuntime([TurnComplete(input_tokens=0, output_tokens=0, estimated=True)])
-    app = make_app(runtime)
-    async with app.run_test() as pilot:
-        await pilot.press("ctrl+a")
-        inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
-        inp.value = "q"
-        await pilot.press("enter")
-        await until(pilot, lambda: runtime.calls, label="agent turn started")
-        ctx = runtime.calls[0][1]
-        assert "view=pods" in ctx
-        assert "scope=default" in ctx
-
-
-async def test_screen_context_splits_selected_namespace_from_name() -> None:
-    """Row keys are 'namespace/name' composites; fed verbatim as
-    `selected=` they teach the model to paste the whole string as a pod
-    name (observed: get_resource name='default/otel-…' -> 404). The
-    context must hand the model the two fields it actually needs."""
-    runtime = StubRuntime([TurnComplete(input_tokens=0, output_tokens=0, estimated=True)])
-    app = make_app(runtime)
-    async with app.run_test() as pilot:
-        # Wait for the watch to land the row: on an empty table the context
-        # reads `selected=-` and this test would pass without exercising
-        # the split (review on #172).
-        await until(
-            pilot,
-            lambda: (
-                "selected=web-1" in app._agent_ui.screen_context()
-                or "selected=default/web-1" in app._agent_ui.screen_context()
-            ),
-            label="pod row selected",
-        )
-        await pilot.press("ctrl+a")
-        inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
-        inp.value = "q"
-        await pilot.press("enter")
-        await until(pilot, lambda: runtime.calls, label="agent turn started")
-        ctx = runtime.calls[0][1]
-        assert "selected=web-1" in ctx
-        assert "selected_ns=default" in ctx
-        assert "selected=default/web-1" not in ctx
-
-
 async def test_second_submit_interrupts_and_replaces_running_turn() -> None:
     """Since issue #170 a submission while a turn runs is
     interrupt-and-submit: the old turn is cancelled and the new prompt
     starts a fresh turn."""
-    runtime = StubRuntime([TextDelta(text="thinking")], block=True)
-    app = make_app(runtime)
+    session = StubSession([TextDelta(text="thinking")], block=True)
+    app = make_app(session)
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")
         panel = app.query_one(AgentPanel)
         inp = panel.query_one("#agent-input", Input)
         inp.value = "first"
         await pilot.press("enter")
-        await until(pilot, lambda: bool(runtime.calls), label="first agent turn running")
+        await until(pilot, lambda: bool(session.prompts), label="first agent turn running")
         panel.post_message(AgentPromptSubmitted("second"))
         await until(
             pilot,
-            lambda: [c[0] for c in runtime.calls] == ["first", "second"],
+            lambda: session.prompts == ["first", "second"],
             label="replacement turn started",
         )
-        assert [c[0] for c in runtime.calls] == ["first", "second"]
+        assert session.prompts == ["first", "second"]
 
 
-async def test_status_bar_reflects_runtime_not_config_flag() -> None:
+async def test_status_bar_reflects_the_session_not_the_config_flag() -> None:
     """create_provider can return None while agent_enabled stays true —
-    the status label must track the actual runtime."""
+    the status label must track the actual session."""
     from korvid.ui.widgets.status_bar import StatusBar
 
-    app = make_app(runtime=None)
+    app = make_app(session=None)
     app.config = KorvidConfig(namespace="default", agent_enabled=True)
     async with app.run_test() as pilot:
         await until(
@@ -238,10 +188,10 @@ async def test_status_bar_reflects_runtime_not_config_flag() -> None:
         assert "AI off" in str(app.query_one(StatusBar).render())
 
 
-async def test_status_bar_on_when_runtime_present() -> None:
+async def test_status_bar_on_when_a_session_is_present() -> None:
     from korvid.ui.widgets.status_bar import StatusBar
 
-    app = make_app(StubRuntime([]))
+    app = make_app(StubSession([]))
     async with app.run_test() as pilot:
         await until(
             pilot,
@@ -251,8 +201,52 @@ async def test_status_bar_on_when_runtime_present() -> None:
         assert "AI on" in str(app.query_one(StatusBar).render())
 
 
+def _header_text(app: KorvidApp) -> str:
+    from textual.widgets import Static
+
+    return str(app.query_one(AgentPanel).query_one("#agent-header", Static).renderable)
+
+
+async def test_header_shows_the_resolved_tier_and_its_provenance() -> None:
+    """The header names the tier the *session* resolved, with where it
+    came from — never the requested override the wizard/config carry."""
+    session = StubSession(
+        [], policy=fake_policy(tier=ModelTier.HIGH, route_source=CapabilitySource.USER)
+    )
+    app = make_app(session)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")
+        await until(pilot, lambda: "high (user)" in _header_text(app), label="tier in header")
+        assert "high (user)" in _header_text(app)
+
+
+async def test_header_tier_survives_a_completed_turn() -> None:
+    """`TurnComplete` re-renders the header from cached state; the tier
+    marker must be replayed with the token counts, not dropped."""
+    session = StubSession(
+        [TurnComplete(input_tokens=7, output_tokens=2, estimated=False)],
+        policy=fake_policy(tier=ModelTier.LOW, route_source=CapabilitySource.CATALOG),
+    )
+    app = make_app(session)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")
+        inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
+        inp.value = "q"
+        await pilot.press("enter")
+        await until(pilot, lambda: "↑7" in _header_text(app), label="tokens rendered")
+        assert "low (catalog)" in _header_text(app)
+
+
+async def test_header_has_no_tier_marker_without_a_session() -> None:
+    app = make_app(session=None, model="test-model")
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")
+        await until(pilot, lambda: "test-model" in _header_text(app), label="header rendered")
+        assert "(" not in _header_text(app)
+
+
 async def test_setup_hint_not_duplicated_on_retoggle() -> None:
-    app = make_app(runtime=None, model=None)
+    app = make_app(session=None, model=None)
     async with app.run_test() as pilot:
         for _ in range(3):
             await pilot.press("ctrl+a")  # open
@@ -280,7 +274,7 @@ async def test_ai_command_pushes_setup_screen() -> None:
         async def save(self, settings: Any) -> None:
             pass
 
-    app = make_app(runtime=None, model=None, agent_configurator=NoopConfigurator())
+    app = make_app(session=None, model=None, agent_configurator=NoopConfigurator())
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("ai"))
         await until(
@@ -294,7 +288,7 @@ async def test_ai_command_pushes_setup_screen() -> None:
 async def test_ai_command_without_configurator_notifies() -> None:
     from korvid.ui.messages import UnknownCommand
 
-    app = make_app(runtime=None, model=None)
+    app = make_app(session=None, model=None)
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("ai"))
         await until(
@@ -318,11 +312,11 @@ async def test_ai_command_without_configurator_notifies() -> None:
         assert not isinstance(app.screen, AgentSetupScreen)
 
 
-async def test_ai_payload_without_runtime_notifies_agent_is_off() -> None:
+async def test_ai_payload_without_a_session_notifies_agent_is_off() -> None:
     from korvid.ui.messages import UnknownCommand
     from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 
-    app = make_app(runtime=None, model=None)
+    app = make_app(session=None, model=None)
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("ai payload"))
         await until(
@@ -337,7 +331,7 @@ async def test_ai_payload_without_snapshot_notifies_nothing_was_sent() -> None:
     from korvid.ui.messages import UnknownCommand
     from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 
-    app = make_app(StubRuntime([]))
+    app = make_app(StubSession([]))
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("ai payload"))
         await until(
@@ -352,11 +346,11 @@ async def test_ai_payload_refuses_transient_snapshot_during_busy_turn() -> None:
     from korvid.ui.messages import UnknownCommand
     from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 
-    runtime = StubRuntime([], block=True, snapshot=_snapshot())
-    app = make_app(runtime)
+    session = StubSession([], block=True, snapshot=_snapshot())
+    app = make_app(session)
     async with app.run_test() as pilot:
         app.on_agent_prompt_submitted(AgentPromptSubmitted("inspect pods"))
-        await until(pilot, lambda: runtime.calls, label="agent turn running")
+        await until(pilot, lambda: session.prompts, label="agent turn running")
         app.on_unknown_command(UnknownCommand("ai payload"))
         await until(
             pilot,
@@ -370,7 +364,7 @@ async def test_ai_payload_opens_inspector_for_idle_snapshot() -> None:
     from korvid.ui.messages import UnknownCommand
     from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 
-    app = make_app(StubRuntime([], snapshot=_snapshot()))
+    app = make_app(StubSession([], snapshot=_snapshot()))
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("ai payload"))
         await until(
@@ -385,26 +379,26 @@ async def test_apply_agent_settings_enables_agent() -> None:
     from korvid.agent.setup import AgentSettings
     from korvid.ui.widgets.status_bar import StatusBar
 
-    runtime = cast("Any", StubRuntime([]))
+    session = StubSession([])
     settings = AgentSettings(
         provider="ollama",
         auth_method="none",
         base_url="http://localhost:11434/v1",
         model="llama3",
     )
-    app = make_app(runtime=None, model=None, rebuild_agent=lambda s: runtime)
+    app = make_app(session=None, model=None, rebuild_agent=lambda s: session)
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")  # open panel: setup hint, input disabled
         app._agent_ui.apply_settings(settings)
         await until(
             pilot,
             lambda: (
-                app._agent_ui._runtime is runtime
+                app._agent_ui.session is session
                 and "AI on" in str(app.query_one(StatusBar).render())
             ),
-            label="agent runtime rebuilt and status bar updated",
+            label="agent session rebuilt and status bar updated",
         )
-        assert app._agent_ui._runtime is runtime
+        assert app._agent_ui.session is session
         assert app._agent_ui._model_name == "llama3"
         assert "AI on" in str(app.query_one(StatusBar).render())
         assert app.query_one(AgentPanel).query_one("#agent-input", Input).disabled is False
@@ -433,13 +427,13 @@ async def test_model_command_swaps_model_and_saves() -> None:
             saved.append(settings)
 
     rebuilt: list[AgentSettings] = []
-    runtime = cast("Any", StubRuntime([]))
+    session = StubSession([])
 
     def rebuild(settings: AgentSettings) -> Any:
         rebuilt.append(settings)
-        return runtime
+        return session
 
-    app = make_app(runtime=None, model=None, agent_configurator=Cfg(), rebuild_agent=rebuild)
+    app = make_app(session=None, model=None, agent_configurator=Cfg(), rebuild_agent=rebuild)
     settings = AgentSettings(
         provider="ollama",
         auth_method="none",
@@ -465,7 +459,7 @@ async def test_model_command_swaps_model_and_saves() -> None:
 async def test_model_command_without_config_does_not_crash() -> None:
     from korvid.ui.messages import UnknownCommand
 
-    app = make_app(runtime=None, model=None)
+    app = make_app(session=None, model=None)
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
         app.on_unknown_command(UnknownCommand("model"))
@@ -478,7 +472,7 @@ async def test_model_command_without_config_does_not_crash() -> None:
 
 
 async def test_model_command_does_not_persist_when_apply_fails() -> None:
-    """If the runtime swap is refused (rebuild returns None), the new model
+    """If the session swap is refused (rebuild returns None), the new model
     must NOT be written to config.yaml — otherwise the failed change silently
     takes effect after restart."""
     from korvid.agent.setup import AgentConfigurator, AgentSettings
@@ -502,15 +496,15 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
         async def save(self, settings: AgentSettings) -> None:
             saved.append(settings)
 
-    runtime = cast("Any", StubRuntime([]))
+    session = StubSession([])
     rebuilds: list[AgentSettings] = []
 
     def rebuild(settings: AgentSettings) -> Any:
         rebuilds.append(settings)
         # First call (initial apply) succeeds; the :model rebuild fails.
-        return runtime if len(rebuilds) == 1 else None
+        return session if len(rebuilds) == 1 else None
 
-    app = make_app(runtime=None, model=None, agent_configurator=Cfg(), rebuild_agent=rebuild)
+    app = make_app(session=None, model=None, agent_configurator=Cfg(), rebuild_agent=rebuild)
     settings = AgentSettings(
         provider="ollama",
         auth_method="none",
@@ -525,7 +519,7 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
             lambda: len(rebuilds) >= 2,
             label="rebuild attempted",
         )
-        assert app._agent_ui._model_name == "llama3"  # old runtime kept
+        assert app._agent_ui._model_name == "llama3"  # old session kept
         assert not saved  # and nothing was persisted
 
 
@@ -551,9 +545,9 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
         async def save(self, settings: AgentSettings) -> None:
             raise RuntimeError("disk full")
 
-    runtime = cast("Any", StubRuntime([]))
+    session = StubSession([])
     app = make_app(
-        runtime=None, model=None, agent_configurator=Cfg(), rebuild_agent=lambda s: runtime
+        session=None, model=None, agent_configurator=Cfg(), rebuild_agent=lambda s: session
     )
     settings = AgentSettings(
         provider="ollama",
@@ -593,7 +587,7 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
 
 
 async def test_model_command_works_after_configured_startup() -> None:
-    """A runtime built from config.yaml at startup must seed _agent_settings
+    """A session built from config.yaml at startup must seed _agent_settings
     so :model works without running the :ai wizard first."""
     from korvid.agent.setup import AgentConfigurator, AgentSettings
     from korvid.ui.messages import UnknownCommand
@@ -616,7 +610,7 @@ async def test_model_command_works_after_configured_startup() -> None:
         async def save(self, settings: AgentSettings) -> None:
             saved.append(settings)
 
-    runtime = cast("Any", StubRuntime([]))
+    session = StubSession([])
     store = ResourceStore()
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
@@ -636,10 +630,10 @@ async def test_model_command_works_after_configured_startup() -> None:
         ),
         store=store,
         watch_manager=WatchManager(store, source),
-        agent_runtime=runtime,
+        agent_session=session,
         agent_model_name="llama3",
         agent_configurator=Cfg(),
-        rebuild_agent=lambda s: runtime,
+        rebuild_agent=lambda s: session,
     )
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
@@ -664,7 +658,7 @@ async def test_apply_agent_settings_notifies_on_rebuild_failure() -> None:
         model="m",
         api_key_env="MISSING_ENV",
     )
-    app = make_app(runtime=None, model=None, rebuild_agent=lambda s: None)
+    app = make_app(session=None, model=None, rebuild_agent=lambda s: None)
     async with app.run_test() as pilot:
         app._agent_ui.apply_settings(settings)
         await until(
@@ -686,7 +680,7 @@ async def test_apply_agent_settings_without_rebuild_agent_shows_literal_hint() -
         model="m",
         api_key_env="MISSING_ENV",
     )
-    app = make_app(runtime=None, model=None)
+    app = make_app(session=None, model=None)
     async with app.run_test() as pilot:
         app._agent_ui.apply_settings(settings)
         await until(
@@ -722,7 +716,7 @@ async def test_apply_agent_settings_notifies_on_plugin_error() -> None:
     def boom(s: Any) -> Any:
         raise ProviderPluginError("plugin auth mismatch")
 
-    app = make_app(runtime=None, model=None, rebuild_agent=boom)
+    app = make_app(session=None, model=None, rebuild_agent=boom)
     async with app.run_test() as pilot:
         app._agent_ui.apply_settings(settings)
         await until(
@@ -737,7 +731,7 @@ async def test_apply_agent_settings_notifies_on_plugin_error() -> None:
         assert any("rebuild failed" in m.lower() or "plugin" in m.lower() for m in msgs)
 
 
-async def test_apply_agent_settings_notifies_on_runtime_hint_rebuild_error() -> None:
+async def test_apply_agent_settings_notifies_on_install_hint_rebuild_error() -> None:
     from korvid.agent.install_hint import isolated_install_hint
     from korvid.agent.setup import AgentSettings
 
@@ -752,7 +746,7 @@ async def test_apply_agent_settings_notifies_on_runtime_hint_rebuild_error() -> 
     def boom(s: Any) -> Any:
         raise RuntimeError(isolated_install_hint(feature="agent"))
 
-    app = make_app(runtime=None, model=None, rebuild_agent=boom)
+    app = make_app(session=None, model=None, rebuild_agent=boom)
     async with app.run_test() as pilot:
         app._agent_ui.apply_settings(settings)
         await until(
@@ -796,11 +790,11 @@ async def test_options_preserved_across_model_change() -> None:
             saved.append(settings)
 
     rebuilt: list[AgentSettings] = []
-    runtime = cast("Any", StubRuntime([]))
+    session = StubSession([])
 
     def rebuild(settings: AgentSettings) -> Any:
         rebuilt.append(settings)
-        return runtime
+        return session
 
     store = ResourceStore()
 
@@ -821,7 +815,7 @@ async def test_options_preserved_across_model_change() -> None:
         ),
         store=store,
         watch_manager=WatchManager(store, source),
-        agent_runtime=runtime,
+        agent_session=session,
         agent_model_name="m",
         agent_configurator=Cfg(),
         rebuild_agent=rebuild,
@@ -841,7 +835,7 @@ async def test_options_preserved_across_model_change() -> None:
 async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
     from korvid.ui.messages import UnknownCommand
 
-    old_runtime = cast("Any", StubRuntime([]))
+    old_session = StubSession([])
 
     class Cfg2:
         async def begin_device_login(self) -> Any:
@@ -877,7 +871,7 @@ async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
         ),
         store=store,
         watch_manager=WatchManager(store, source),
-        agent_runtime=old_runtime,
+        agent_session=old_session,
         agent_model_name="llama3",
         agent_configurator=cast("Any", Cfg2()),
         rebuild_agent=lambda s: None,  # rebuild always fails
@@ -889,8 +883,8 @@ async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
             lambda: any("rebuild failed" in str(n.message).lower() for n in app._notifications),
             label="rebuild failure notification",
         )
-        # Transactional swap: the working runtime and settings must survive.
-        assert app._agent_ui._runtime is old_runtime
+        # Transactional swap: the working session and settings must survive.
+        assert app._agent_ui.session is old_session
         assert app._agent_ui._model_name == "llama3"
         assert app._agent_ui._settings is not None
         assert app._agent_ui._settings.model == "llama3"
@@ -903,14 +897,14 @@ async def test_model_switch_blocked_while_turn_running() -> None:
     from korvid.agent.setup import AgentSettings
 
     rebuilt: list[AgentSettings] = []
-    new_runtime = cast("Any", StubRuntime([]))
+    new_runtime = StubSession([])
 
     def rebuild(s: AgentSettings) -> Any:
         rebuilt.append(s)
         return new_runtime
 
-    old_runtime = cast("Any", StubRuntime([]))
-    app = make_app(runtime=old_runtime, model="llama3", rebuild_agent=rebuild)
+    old_session = StubSession([])
+    app = make_app(session=old_session, model="llama3", rebuild_agent=rebuild)
     settings = AgentSettings(
         provider="ollama", auth_method="none", base_url="http://x/v1", model="new-model"
     )
@@ -924,7 +918,7 @@ async def test_model_switch_blocked_while_turn_running() -> None:
                 label="busy model-switch refusal shown",
             )
             assert not rebuilt  # swap must be blocked mid-turn
-            assert app._agent_ui._runtime is old_runtime
+            assert app._agent_ui.session is old_session
             msgs = [n.message for n in app._notifications]
             assert any("busy" in m.lower() for m in msgs)
         finally:
@@ -934,8 +928,8 @@ async def test_model_switch_blocked_while_turn_running() -> None:
 async def test_input_reenabled_even_when_panel_closed() -> None:
     from korvid.agent.setup import AgentSettings
 
-    new_runtime = cast("Any", StubRuntime([]))
-    app = make_app(runtime=None, model=None, rebuild_agent=lambda s: new_runtime)
+    new_runtime = StubSession([])
+    app = make_app(session=None, model=None, rebuild_agent=lambda s: new_runtime)
     settings = AgentSettings(
         provider="ollama", auth_method="none", base_url="http://x/v1", model="m"
     )
@@ -945,8 +939,8 @@ async def test_input_reenabled_even_when_panel_closed() -> None:
         app._agent_ui.apply_settings(settings)
         await until(
             pilot,
-            lambda: app._agent_ui._runtime is new_runtime,
-            label="agent runtime rebuilt while panel closed",
+            lambda: app._agent_ui.session is new_runtime,
+            label="agent session rebuilt while panel closed",
         )
         await pilot.press("ctrl+a")  # reopen: input must be usable again
         assert app.query_one(AgentPanel).query_one("#agent-input", Input).disabled is False
@@ -954,11 +948,11 @@ async def test_input_reenabled_even_when_panel_closed() -> None:
 
 async def test_model_query_requires_live_runtime() -> None:
     """`:model` must not report a model as active when the provider failed to
-    build at startup (runtime None) even though config carried a model name."""
+    build at startup (session None) even though config carried a model name."""
     from korvid.ui.messages import UnknownCommand
 
-    # Startup with a config model name but no runtime (e.g. missing API key).
-    app = make_app(runtime=None, model="gpt-4o")
+    # Startup with a config model name but no session (e.g. missing API key).
+    app = make_app(session=None, model="gpt-4o")
     notices: list[str] = []
     app.notify = lambda msg, **kw: notices.append(str(msg))  # type: ignore[method-assign]
     async with app.run_test():
@@ -1000,7 +994,7 @@ async def test_mcp_command_toggles_server_and_status_bar() -> None:
     from korvid.ui.widgets.status_bar import StatusBar
 
     mcp = FakeMCP()
-    app = make_app(StubRuntime([]), mcp=mcp)
+    app = make_app(StubSession([]), mcp=mcp)
     async with app.run_test() as pilot:
         assert "MCP off" in str(app.query_one(StatusBar).render())
         app.on_unknown_command(UnknownCommand("mcp on"))
@@ -1023,7 +1017,7 @@ async def test_mcp_command_bare_and_bad_args_do_not_touch_server() -> None:
     from korvid.ui.messages import UnknownCommand
 
     mcp = FakeMCP()
-    app = make_app(StubRuntime([]), mcp=mcp)
+    app = make_app(StubSession([]), mcp=mcp)
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("mcp"))
         app.on_unknown_command(UnknownCommand("mcp bogus"))
@@ -1038,7 +1032,7 @@ async def test_mcp_command_bare_and_bad_args_do_not_touch_server() -> None:
 async def test_mcp_command_without_controller_does_not_crash() -> None:
     from korvid.ui.messages import UnknownCommand
 
-    app = make_app(StubRuntime([]))
+    app = make_app(StubSession([]))
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("mcp on"))
         await until(

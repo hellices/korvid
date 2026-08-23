@@ -1,7 +1,7 @@
 """Direct tests for `AgentUiController` — the built-in agent's UI ownership
 (issue #187 / Deep Task 6).
 
-The controller owns the agent's session state (runtime, settings, model
+The controller owns the agent's session state (session, settings, model
 tier, model, disconnect marker, follow flag), the turn task lifecycle including
 interrupt-and-submit, the screen context the model is told about, and every
 `UIBridge` read the agent (or an MCP follow mirror) drives. It reaches
@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from textual.screen import Screen
@@ -32,8 +32,12 @@ from korvid.agent.events import (
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
+    TurnInterrupted,
 )
+from korvid.agent.evidence import EvidenceLedger
 from korvid.agent.interaction import ResourceIdentity
+from korvid.agent.model_policy import CapabilitySource, ModelTier
+from korvid.agent.session import AgentSession
 from korvid.agent.setup import AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -53,6 +57,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.workspace_state import WorkspaceState
 from korvid.ui.write_coordinator import WriteCoordinator
 
+from .agent_session_fakes import FakeSession, fake_policy
 from .test_write_coordinator import BrokenAudit, FakeContext, FakeTimeline, FakeUi, FakeView
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
@@ -104,6 +109,7 @@ class FakePanel(AgentPanelPort):
         self.turns: list[tuple[str, bool]] = []
         self.echoed: list[str] = []
         self.headers: list[str] = []
+        self.tiers: list[str | None] = []
         self.stop_key = ""
         self.input_enabled = True
         self.focused = 0
@@ -133,8 +139,10 @@ class FakePanel(AgentPanelPort):
         output_tokens: int,
         *,
         estimated: bool,
+        tier: str | None = None,
     ) -> None:
         self.headers.append(model)
+        self.tiers.append(tier)
 
     def show_setup_hint(self) -> None:
         self.calls.append("setup_hint")
@@ -343,39 +351,17 @@ class RecordingOps(WriteOps):
         return ["- pods/web-1"]
 
 
-class ScriptedRuntime:
-    """Duck-typed `AgentRuntime` replaying a fixed event script."""
+class ScriptedSession(FakeSession):
+    """An `AgentSession` replaying a fixed event script."""
 
     def __init__(
         self,
         events: list[AgentEvent] | None = None,
         *,
         gate: asyncio.Event | None = None,
+        **kwargs: Any,
     ) -> None:
-        self.events = events or []
-        self.gate = gate
-        self.contexts: list[str] = []
-        self.prompts: list[str] = []
-        self.finalized = 0
-        self.closed = 0
-        self.total_tokens = (1, 2)
-        self.usage_estimated = False
-        self.latest_outbound_payload: object | None = None
-
-    async def run_turn(self, text: str, screen_context: str) -> Any:
-        self.prompts.append(text)
-        self.contexts.append(screen_context)
-        try:
-            for event in self.events:
-                yield event
-            if self.gate is not None:
-                await self.gate.wait()
-        finally:
-            self.closed += 1
-
-    def finalize_interrupt(self) -> AgentEvent:
-        self.finalized += 1
-        return AgentError(message="interrupted")
+        super().__init__(events or [], gate=gate, tokens=(1, 2), **kwargs)
 
 
 class Env:
@@ -385,7 +371,7 @@ class Env:
         self,
         *,
         tmp_path: Path,
-        runtime: Any = None,
+        session: AgentSession | None = None,
         available: bool = True,
         audit: str = "working",
         manifests: dict[tuple[str, str | None, str], dict[str, Any]] | None = None,
@@ -459,7 +445,7 @@ class Env:
             pod_resize_supported=lambda: True,
             provider_hint=lambda: None,
             follow_bridge=lambda: follow_bridge,
-            runtime=runtime,
+            session=session,
             model_name="m-1",
             configurator=configurator,
             rebuild=rebuild,
@@ -500,11 +486,11 @@ def env(tmp_path: Path) -> Env:
 
 
 # ---------------------------------------------------------------------------
-# Runtime absent / disconnected / setup transitions
+# Session absent / disconnected / setup transitions
 # ---------------------------------------------------------------------------
 
 
-async def test_toggling_the_panel_without_a_runtime_shows_the_setup_hint(env: Env) -> None:
+async def test_toggling_the_panel_without_a_session_shows_the_setup_hint(env: Env) -> None:
     env.controller.toggle_panel()
     assert env.panel.visible is True
     assert env.panel.calls[-1] == "setup_hint"
@@ -513,10 +499,10 @@ async def test_toggling_the_panel_without_a_runtime_shows_the_setup_hint(env: En
 async def test_toggling_the_panel_after_disconnect_shows_the_reconnect_hint(
     tmp_path: Path,
 ) -> None:
-    runtime = ScriptedRuntime()
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession()
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.handle_command(["off"])
-    assert env.controller.runtime is None
+    assert env.controller.session is None
     env.controller.toggle_panel()
     assert env.panel.calls[-1] == "reconnect_hint"
     assert "setup_hint" not in env.panel.calls
@@ -524,12 +510,12 @@ async def test_toggling_the_panel_after_disconnect_shows_the_reconnect_hint(
 
 async def test_ai_off_is_refused_while_a_turn_runs(tmp_path: Path) -> None:
     gate = asyncio.Event()
-    runtime = ScriptedRuntime(gate=gate)
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("why is web-1 sad?")
     await asyncio.sleep(0)
     env.controller.handle_command(["off"])
-    assert env.controller.runtime is cast(Any, runtime)
+    assert env.controller.session is session
     assert any("busy" in message for message in env.ui.messages())
     gate.set()
     await env.close()
@@ -538,7 +524,7 @@ async def test_ai_off_is_refused_while_a_turn_runs(tmp_path: Path) -> None:
 async def test_toggling_a_configured_panel_sets_the_header_and_focuses_the_input(
     tmp_path: Path,
 ) -> None:
-    env = Env(tmp_path=tmp_path, runtime=ScriptedRuntime())
+    env = Env(tmp_path=tmp_path, session=ScriptedSession())
     env.controller.toggle_panel()
     assert env.panel.headers == ["m-1"]
     assert env.panel.focused == 1
@@ -553,14 +539,14 @@ async def test_agent_setup_without_a_configurator_reports_the_install_hint(env: 
 
 
 async def test_agent_commands_reject_unknown_or_trailing_arguments(tmp_path: Path) -> None:
-    runtime = ScriptedRuntime()
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession()
+    env = Env(tmp_path=tmp_path, session=session)
     initial_follow = env.controller.follow_enabled
     env.controller.handle_command(["off", "extra"])
     env.controller.handle_command(["follow", "off", "extra"])
     env.controller.handle_command(["payload", "extra"])
     env.controller.handle_command(["sideways"])
-    assert env.controller.runtime is cast(Any, runtime)
+    assert env.controller.session is session
     assert env.controller.follow_enabled is initial_follow
     assert sum("Usage: :ai" in message for message in env.ui.messages()) == 4
 
@@ -571,28 +557,28 @@ async def test_model_command_rejects_trailing_arguments(env: Env) -> None:
     assert "Usage: :model [name]" in env.ui.messages()
 
 
-async def test_applying_settings_swaps_the_runtime_and_the_configured_tier(
+async def test_applying_settings_swaps_the_session_and_the_configured_tier(
     tmp_path: Path,
 ) -> None:
-    fresh = ScriptedRuntime()
+    fresh = ScriptedSession()
     env = Env(tmp_path=tmp_path, rebuild=lambda settings: fresh)
     settings = AgentSettings(
         provider="ollama", auth_method="none", base_url=None, model="m-2", model_tier="low"
     )
     assert env.controller.apply_settings(settings) is True
-    assert env.controller.runtime is cast(Any, fresh)
+    assert env.controller.session is fresh
     assert env.controller.model_name == "m-2"
     assert env.controller.configured_model_tier == "low"
 
 
-async def test_a_failed_rebuild_keeps_the_previous_runtime(tmp_path: Path) -> None:
-    previous = ScriptedRuntime()
-    env = Env(tmp_path=tmp_path, runtime=previous, rebuild=lambda settings: None)
+async def test_a_failed_rebuild_keeps_the_previous_session(tmp_path: Path) -> None:
+    previous = ScriptedSession()
+    env = Env(tmp_path=tmp_path, session=previous, rebuild=lambda settings: None)
     settings = AgentSettings(
         provider="ollama", auth_method="none", base_url=None, model="m-2", model_tier="high"
     )
     assert env.controller.apply_settings(settings) is False
-    assert env.controller.runtime is cast(Any, previous)
+    assert env.controller.session is previous
 
 
 # ---------------------------------------------------------------------------
@@ -601,28 +587,28 @@ async def test_a_failed_rebuild_keeps_the_previous_runtime(tmp_path: Path) -> No
 
 
 async def test_a_prompt_starts_a_turn_and_streams_events_into_the_panel(tmp_path: Path) -> None:
-    runtime = ScriptedRuntime([TextDelta(text="hello")])
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession([TextDelta(text="hello")])
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("hi")
     await env.controller.wait_for_turn()
-    assert runtime.prompts == ["hi"]
+    assert session.prompts == ["hi"]
     assert env.panel.turns == [("hi", True)]
     assert [type(event) for event in env.panel.events] == [TextDelta]
 
 
 async def test_a_prompt_is_refused_while_a_context_switch_runs(tmp_path: Path) -> None:
-    runtime = ScriptedRuntime()
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession()
+    env = Env(tmp_path=tmp_path, session=session)
     env.context.is_switching = True
     env.controller.submit_prompt("hi")
-    assert runtime.prompts == []
+    assert session.prompts == []
     assert any("context switch" in message for message in env.ui.messages())
 
 
 async def test_a_prompt_is_refused_in_a_protected_context(tmp_path: Path) -> None:
     env = Env(
         tmp_path=tmp_path,
-        runtime=ScriptedRuntime(),
+        session=ScriptedSession(),
         config=KorvidConfig(namespace="default", agent_disable_in_protected=True),
     )
     env.writes.set_protected_context("prod")
@@ -635,46 +621,46 @@ async def test_a_second_prompt_interrupts_the_running_turn_and_replaces_it(
     tmp_path: Path,
 ) -> None:
     gate = asyncio.Event()
-    runtime = ScriptedRuntime(gate=gate)
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("first")
     await asyncio.sleep(0)
     env.controller.submit_prompt("second")
     assert env.panel.echoed == ["second"]
     await env.controller.wait_for_turn()
     await settle()
-    assert runtime.prompts == ["first", "second"]
-    assert runtime.finalized == 1
+    assert session.prompts == ["first", "second"]
+    assert session.finalized == 1
     gate.set()
     await env.close()
 
 
 async def test_only_the_latest_correction_is_queued(tmp_path: Path) -> None:
     gate = asyncio.Event()
-    runtime = ScriptedRuntime(gate=gate)
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("first")
     await asyncio.sleep(0)
     env.controller.submit_prompt("second")
     env.controller.submit_prompt("third")
     await env.controller.wait_for_turn()
     await settle()
-    assert runtime.prompts == ["first", "third"]
+    assert session.prompts == ["first", "third"]
     gate.set()
     await env.close()
 
 
 async def test_an_explicit_stop_discards_the_queued_replacement(tmp_path: Path) -> None:
     gate = asyncio.Event()
-    runtime = ScriptedRuntime(gate=gate)
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("first")
     await asyncio.sleep(0)
     env.controller.submit_prompt("second")
     env.controller.interrupt()
     await env.controller.wait_for_turn()
     await settle()
-    assert runtime.prompts == ["first"]
+    assert session.prompts == ["first"]
     gate.set()
     await env.close()
 
@@ -683,40 +669,82 @@ async def test_an_interrupted_turn_closes_the_generator_before_finalizing(
     tmp_path: Path,
 ) -> None:
     gate = asyncio.Event()
-    runtime = ScriptedRuntime(gate=gate)
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("first")
     await asyncio.sleep(0)
     env.controller.interrupt()
     await env.controller.wait_for_turn()
-    assert runtime.closed == 1
-    assert runtime.finalized == 1
+    assert session.iterators_released == 1
+    assert session.finalized == 1
     gate.set()
     await env.close()
 
 
-async def test_a_turn_cancelled_before_it_ran_is_still_finalized(tmp_path: Path) -> None:
-    """The done callback must finalize a task whose coroutine never started —
-    its own CancelledError handler never ran."""
+async def test_a_turn_cancelled_before_it_ran_settles_without_finalizing(
+    tmp_path: Path,
+) -> None:
+    """The done callback must settle a task whose coroutine never started —
+    its own CancelledError handler never ran. The session has nothing to
+    repair (it was never asked to run), so `finalize_interrupt` — which
+    raises without a pending turn — must not be called; the panel still
+    leaves its running state."""
     gate = asyncio.Event()
-    runtime = ScriptedRuntime(gate=gate)
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("first")
     env.controller.interrupt()  # before the first step of the coroutine
     await env.controller.wait_for_turn()
     await settle()
-    assert runtime.finalized == 1
+    assert session.prompts == []
+    assert session.finalized == 0
+    assert any(isinstance(event, TurnInterrupted) for event in env.panel.events)
     gate.set()
     await env.close()
 
 
-async def test_a_runtime_error_is_reported_in_the_panel(tmp_path: Path) -> None:
-    class Boom(ScriptedRuntime):
-        async def run_turn(self, text: str, screen_context: str) -> Any:
-            raise RuntimeError("provider exploded")
-            yield  # pragma: no cover - generator marker
+async def test_a_stop_signals_the_session_before_cancelling_the_task(tmp_path: Path) -> None:
+    """`interrupt()` is cooperative: the session is told first, so it can
+    wind the turn down itself rather than only learning about the stop
+    through a `CancelledError` it cannot attribute."""
+    gate = asyncio.Event()
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
+    env.controller.submit_prompt("first")
+    await asyncio.sleep(0)
+    env.controller.interrupt()
+    assert session.interrupts == 1
+    await env.controller.wait_for_turn()
+    gate.set()
+    await env.close()
 
-    env = Env(tmp_path=tmp_path, runtime=Boom())
+
+async def test_interrupt_and_submit_signals_the_session_before_cancelling(
+    tmp_path: Path,
+) -> None:
+    gate = asyncio.Event()
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
+    env.controller.submit_prompt("first")
+    await asyncio.sleep(0)
+    env.controller.submit_prompt("second")
+    assert session.interrupts == 1
+    await env.controller.wait_for_turn()
+    await settle()
+    gate.set()
+    await env.close()
+
+
+async def test_an_idle_stop_never_signals_the_session(tmp_path: Path) -> None:
+    session = ScriptedSession()
+    env = Env(tmp_path=tmp_path, session=session)
+    env.controller.interrupt()
+    assert session.interrupts == 0
+    await env.close()
+
+
+async def test_a_session_error_is_reported_in_the_panel(tmp_path: Path) -> None:
+    env = Env(tmp_path=tmp_path, session=ScriptedSession(turn_error=RuntimeError("boom")))
     env.controller.submit_prompt("hi")
     await env.controller.wait_for_turn()
     assert any(isinstance(event, AgentError) for event in env.panel.events)
@@ -727,10 +755,32 @@ async def test_a_runtime_error_is_reported_in_the_panel(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_shutdown_closes_the_session_exactly_once(tmp_path: Path) -> None:
+    """The controller owns the session's lifetime while the app runs: one
+    close, after the in-flight turn has been cancelled and drained."""
+    gate = asyncio.Event()
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
+    env.controller.submit_prompt("first")
+    await asyncio.sleep(0)
+    await env.controller.shutdown()
+    assert session.closed == 1
+    assert session.iterators_released == 1
+    await env.controller.shutdown()  # idempotent: teardown may repeat it
+    assert session.closed == 1
+    await env.dispatch.shutdown()
+
+
+async def test_shutdown_without_a_session_is_inert(env: Env) -> None:
+    await env.controller.shutdown()
+    assert env.controller.session is None
+    await env.dispatch.shutdown()
+
+
 async def test_shutdown_cancels_and_reaps_the_running_turn(tmp_path: Path) -> None:
     gate = asyncio.Event()
-    runtime = ScriptedRuntime(gate=gate)
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("first")
     await asyncio.sleep(0)
     task = env.controller.turn_task
@@ -742,21 +792,21 @@ async def test_shutdown_cancels_and_reaps_the_running_turn(tmp_path: Path) -> No
 
 async def test_shutdown_starts_no_queued_replacement(tmp_path: Path) -> None:
     gate = asyncio.Event()
-    runtime = ScriptedRuntime(gate=gate)
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("first")
     await asyncio.sleep(0)
     env.controller.submit_prompt("second")
     await env.controller.shutdown()
     await settle()
-    assert runtime.prompts == ["first"]
+    assert session.prompts == ["first"]
     await env.dispatch.shutdown()
 
 
 async def test_shutdown_does_not_touch_the_torn_down_transcript(tmp_path: Path) -> None:
     gate = asyncio.Event()
-    runtime = ScriptedRuntime(gate=gate)
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("first")
     await asyncio.sleep(0)
     before = len(env.panel.events)
@@ -773,15 +823,15 @@ async def test_begin_shutdown_stops_a_replacement_that_drains_before_shutdown(
     `begin_shutdown` marks the session down synchronously, so the drain
     starts no replacement (review of Deep Task 6)."""
     gate = asyncio.Event()
-    runtime = ScriptedRuntime(gate=gate)
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("first")
     await asyncio.sleep(0)
     task = env.controller.turn_task
     env.controller.submit_prompt("second")  # queues the replacement, cancels
     env.controller.begin_shutdown()
     await settle()  # the cancelled turn settles here, before shutdown() runs
-    assert runtime.prompts == ["first"]
+    assert session.prompts == ["first"]
     assert env.controller.turn_task is task
     await env.controller.shutdown()
     await env.dispatch.shutdown()
@@ -791,8 +841,8 @@ async def test_begin_shutdown_is_idempotent(tmp_path: Path) -> None:
     """Teardown marks the session down, and `shutdown()` marks it again
     defensively — a repeat must be inert, never reset the flag."""
     gate = asyncio.Event()
-    runtime = ScriptedRuntime(gate=gate)
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    session = ScriptedSession(gate=gate)
+    env = Env(tmp_path=tmp_path, session=session)
     env.controller.submit_prompt("first")
     await asyncio.sleep(0)
     env.controller.begin_shutdown()
@@ -804,38 +854,21 @@ async def test_begin_shutdown_is_idempotent(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Screen context
+# Session hand-off: no prose, typed retarget only
 # ---------------------------------------------------------------------------
 
 
-async def test_screen_context_reports_the_focused_pane(env: Env) -> None:
-    env.workspace.filter_pattern = "web"
-    context = env.controller.screen_context()
-    assert "view=pods" in context
-    assert "scope=default" in context
-    assert "selected=web-1" in context
-    assert "selected_ns=default" in context
-    assert "filter=web" in context
-
-
-async def test_screen_context_summarizes_the_other_pane_when_split(env: Env) -> None:
-    env.workspace.split()
-    env.workspace.focused.kind = "deployments"
-    context = env.controller.screen_context()
-    assert "other_pane=" in context
-
-
-async def test_a_context_switch_note_is_delivered_once(tmp_path: Path) -> None:
-    runtime = ScriptedRuntime()
-    env = Env(tmp_path=tmp_path, runtime=runtime)
-    env.controller.note_context_switch("kube context switched from a to b")
-    env.controller.submit_prompt("one")
+async def test_the_controller_hands_the_session_only_the_user_text(tmp_path: Path) -> None:
+    """The workspace snapshot reaches the session through the typed
+    `AgentUiBridge`, never as prose appended to the prompt: the controller
+    has no screen-context string to build and no note to inject."""
+    session = ScriptedSession()
+    env = Env(tmp_path=tmp_path, session=session)
+    env.controller.submit_prompt("what is wrong with web-1?")
     await env.controller.wait_for_turn()
-    env.controller.submit_prompt("two")
-    await env.controller.wait_for_turn()
-    assert len(runtime.contexts) == 2
-    assert "NOTE: kube context switched" in runtime.contexts[0]
-    assert "NOTE:" not in runtime.contexts[1]
+    assert session.prompts == ["what is wrong with web-1?"]
+    assert not hasattr(env.controller, "screen_context")
+    assert not hasattr(env.controller, "note_context_switch")
 
 
 # ---------------------------------------------------------------------------
@@ -862,7 +895,7 @@ async def test_a_successful_read_is_mirrored_through_the_configured_bridge(
     tmp_path: Path,
 ) -> None:
     bridge = RecordingBridge()
-    runtime = ScriptedRuntime(
+    session = ScriptedSession(
         [
             ToolCallStarted(
                 call_id="c1",
@@ -872,7 +905,7 @@ async def test_a_successful_read_is_mirrored_through_the_configured_bridge(
             ToolCallFinished(call_id="c1", name="get_resource", ok=True, summary=""),
         ]
     )
-    env = Env(tmp_path=tmp_path, runtime=runtime, follow_bridge=bridge)
+    env = Env(tmp_path=tmp_path, session=session, follow_bridge=bridge)
     env.controller.submit_prompt("what is wrong with web-1?")
     await env.controller.wait_for_turn()
     assert bridge.calls == [("describe", ("pods", "web-1", "default"))]
@@ -880,13 +913,13 @@ async def test_a_successful_read_is_mirrored_through_the_configured_bridge(
 
 async def test_a_failed_read_is_not_mirrored(tmp_path: Path) -> None:
     bridge = RecordingBridge()
-    runtime = ScriptedRuntime(
+    session = ScriptedSession(
         [
             ToolCallStarted(call_id="c1", name="get_resource", arguments='{"kind": "pods"}'),
             ToolCallFinished(call_id="c1", name="get_resource", ok=False, summary=""),
         ]
     )
-    env = Env(tmp_path=tmp_path, runtime=runtime, follow_bridge=bridge)
+    env = Env(tmp_path=tmp_path, session=session, follow_bridge=bridge)
     env.controller.submit_prompt("what is wrong?")
     await env.controller.wait_for_turn()
     assert bridge.calls == []
@@ -894,7 +927,7 @@ async def test_a_failed_read_is_not_mirrored(tmp_path: Path) -> None:
 
 async def test_follow_off_disables_mirroring(tmp_path: Path) -> None:
     bridge = RecordingBridge()
-    runtime = ScriptedRuntime(
+    session = ScriptedSession(
         [
             ToolCallStarted(
                 call_id="c1",
@@ -904,7 +937,7 @@ async def test_follow_off_disables_mirroring(tmp_path: Path) -> None:
             ToolCallFinished(call_id="c1", name="get_resource", ok=True, summary=""),
         ]
     )
-    env = Env(tmp_path=tmp_path, runtime=runtime, follow_bridge=bridge)
+    env = Env(tmp_path=tmp_path, session=session, follow_bridge=bridge)
     env.controller.handle_command(["follow", "off"])
     assert env.controller.follow_enabled is False
     env.controller.submit_prompt("what is wrong?")
@@ -914,13 +947,13 @@ async def test_follow_off_disables_mirroring(tmp_path: Path) -> None:
 
 async def test_malformed_tool_arguments_do_not_break_the_turn(tmp_path: Path) -> None:
     bridge = RecordingBridge()
-    runtime = ScriptedRuntime(
+    session = ScriptedSession(
         [
             ToolCallStarted(call_id="c1", name="get_resource", arguments="{broken"),
             ToolCallFinished(call_id="c1", name="get_resource", ok=True, summary=""),
         ]
     )
-    env = Env(tmp_path=tmp_path, runtime=runtime, follow_bridge=bridge)
+    env = Env(tmp_path=tmp_path, session=session, follow_bridge=bridge)
     env.controller.submit_prompt("show web-1")
     await env.controller.wait_for_turn()
     assert bridge.calls == []
@@ -1066,21 +1099,80 @@ async def test_a_secret_describe_is_masked_before_it_reaches_the_screen(tmp_path
 # ---------------------------------------------------------------------------
 
 
-async def test_open_evidence_without_a_runtime_is_an_error(env: Env) -> None:
+async def test_open_evidence_without_a_session_is_an_error(env: Env) -> None:
     out = await env.controller.open_evidence("E1")
     assert out.startswith("ERROR: the agent is not configured")
 
 
 async def test_open_evidence_rejects_a_reference_korvid_never_minted(tmp_path: Path) -> None:
-    class Ledger:
-        def resolve(self, ref: str) -> None:
-            return None
-
-    runtime = ScriptedRuntime()
-    runtime.evidence = Ledger()  # type: ignore[attr-defined]  # duck-typed ledger
-    env = Env(tmp_path=tmp_path, runtime=runtime)
+    env = Env(tmp_path=tmp_path, session=ScriptedSession())
     out = await env.controller.open_evidence("E9")
     assert out == "ERROR: E9 is not evidence from this turn"
+
+
+async def test_open_evidence_resolves_through_the_session_ledger(tmp_path: Path) -> None:
+    """The UI reads evidence only through the session's ledger — the
+    session owns it, the controller never keeps its own copy."""
+    ledger = EvidenceLedger()
+    ledger.start_turn()
+    ref = ledger.record(
+        "get_logs", {"pod": "web-1", "namespace": "default"}, "boom\n", container="main"
+    )
+    assert ref is not None
+    env = Env(tmp_path=tmp_path, session=ScriptedSession(evidence=ledger))
+    env.panel.mounted = True
+    env.panel.visible = True
+    out = await env.controller.open_evidence(ref)
+    assert not out.startswith("ERROR:")
+    assert env.screens.panes
+
+
+# ---------------------------------------------------------------------------
+# Header: the resolved tier, not the requested one
+# ---------------------------------------------------------------------------
+
+
+async def test_the_header_carries_the_resolved_tier_and_its_provenance(
+    tmp_path: Path,
+) -> None:
+    session = ScriptedSession(
+        policy=fake_policy(tier=ModelTier.HIGH, route_source=CapabilitySource.USER)
+    )
+    env = Env(tmp_path=tmp_path, session=session)
+    env.controller.toggle_panel()
+    assert env.panel.tiers[-1] == "high (user)"
+
+
+async def test_the_header_reports_a_fallback_route_honestly(tmp_path: Path) -> None:
+    session = ScriptedSession(
+        policy=fake_policy(tier=ModelTier.LOW, route_source=CapabilitySource.FALLBACK)
+    )
+    env = Env(tmp_path=tmp_path, session=session)
+    env.controller.toggle_panel()
+    assert env.panel.tiers[-1] == "low (fallback)"
+
+
+async def test_the_header_has_no_tier_without_a_session(env: Env) -> None:
+    env.controller.toggle_panel()
+    assert env.panel.tiers[-1] is None
+
+
+async def test_a_rebuild_refreshes_the_header_tier(tmp_path: Path) -> None:
+    """`:model`/setup swap the session; the header must show the tier the
+    *new* session resolved, not the one the old one had."""
+    fresh = ScriptedSession(
+        policy=fake_policy(tier=ModelTier.HIGH, route_source=CapabilitySource.CATALOG)
+    )
+    env = Env(
+        tmp_path=tmp_path,
+        session=ScriptedSession(policy=fake_policy(tier=ModelTier.LOW)),
+        rebuild=lambda settings: fresh,
+    )
+    settings = AgentSettings(
+        provider="ollama", auth_method="none", base_url=None, model="m-2", model_tier="high"
+    )
+    assert env.controller.apply_settings(settings) is True
+    assert env.panel.tiers[-1] == "high (catalog)"
 
 
 # ---------------------------------------------------------------------------
@@ -1221,7 +1313,7 @@ def test_the_controller_module_imports_nothing_from_the_app_module() -> None:
     """The module must never import `korvid.ui.app` or name `KorvidApp` in code.
 
     An import/name check, and no more than that: some ports the app binds at
-    runtime *are* app-backed adapters (`AppAgentPanel`, `AppAgentScreens`,
+    session *are* app-backed adapters (`AppAgentPanel`, `AppAgentScreens`,
     `AppUiSurface`, …). What this pins is that the controller depends on
     the port interfaces, never on the app module or an app type it names
     itself — prose in docstrings is free to explain where it came from.

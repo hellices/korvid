@@ -11,6 +11,7 @@ from korvid.agent.events import (
     ToolCallFinished,
     ToolCallStarted,
     TurnComplete,
+    TurnInterrupted,
 )
 from korvid.ui.messages import AgentPromptSubmitted
 from korvid.ui.widgets.agent_panel import AgentPanel, ChatEntry
@@ -431,37 +432,61 @@ async def test_turn_complete_updates_header_cumulatively() -> None:
         assert "75" in text
 
 
-async def test_header_never_shows_a_capability_tier_marker() -> None:
-    """The old `[full]`/`[small]` capability-profile marker is gone entirely:
-    the live panel will show a *resolved session tier* once Task 12 wires a
-    session, not the requested override — until then it must show nothing
-    of the kind (never `full`/`small`, and no low/high stand-in either)."""
+async def test_header_shows_the_resolved_tier_and_its_provenance() -> None:
+    """The old `[full]`/`[small]` capability-profile marker is gone: what the
+    panel shows now is the tier the *session* resolved plus where the
+    decision came from, so a silent fallback is visible as a fallback."""
+    app = PanelApp()
+    async with app.run_test():
+        panel = app.query_one(AgentPanel)
+        panel.set_header("qwen3:8b", 100, 20, estimated=False, tier="low (catalog)")
+        header = str(app.query_one("#agent-header", Static).render())
+        assert "low (catalog)" in header
+        assert "[" not in header  # never the old bracketed profile marker
+        assert "qwen3:8b" in header
+
+        panel.set_header("gpt-4o", 100, 20, estimated=False, tier="high (user)")
+        header = str(app.query_one("#agent-header", Static).render())
+        assert "high (user)" in header
+        assert "low" not in header
+
+
+async def test_header_without_a_tier_shows_no_marker() -> None:
+    """No session, no tier: the header must not invent one."""
     app = PanelApp()
     async with app.run_test():
         panel = app.query_one(AgentPanel)
         panel.set_header("qwen3:8b", 100, 20, estimated=False)
         header = str(app.query_one("#agent-header", Static).render())
-        assert "[" not in header
+        assert "(" not in header
         assert "qwen3:8b" in header
 
-        panel.set_header("gpt-4o", 100, 20, estimated=False)
-        header = str(app.query_one("#agent-header", Static).render())
-        assert "[" not in header
-        assert "gpt-4o" in header
 
-
-async def test_header_stays_free_of_a_tier_marker_after_turn_complete() -> None:
-    """TurnComplete re-renders the header from panel state; it must not
-    reintroduce a bracketed marker after the first turn."""
+async def test_header_replays_the_tier_after_turn_complete() -> None:
+    """TurnComplete re-renders the header from cached panel state; the tier
+    must ride along with the token counts, not be dropped on the first turn."""
     app = PanelApp()
     async with app.run_test() as pilot:
         panel = app.query_one(AgentPanel)
-        panel.set_header("qwen3:8b", 0, 0, estimated=False)
+        panel.set_header("qwen3:8b", 0, 0, estimated=False, tier="low (fallback)")
         panel.begin_turn("q")
         panel.apply_event(TurnComplete(input_tokens=7, output_tokens=3, estimated=False))
         await pilot.pause()
         header = str(app.query_one("#agent-header", Static).render())
+        assert "low (fallback)" in header
         assert "[" not in header
+
+
+async def test_header_replays_the_tier_after_an_interrupt() -> None:
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.set_header("qwen3:8b", 0, 0, estimated=False, tier="high (provider)")
+        panel.begin_turn("q")
+        panel.apply_event(TurnInterrupted(input_tokens=2, output_tokens=1, estimated=True))
+        await pilot.pause()
+        header = str(app.query_one("#agent-header", Static).render())
+        assert "high (provider)" in header
 
 
 async def test_unsupported_citations_are_marked_after_the_answer() -> None:

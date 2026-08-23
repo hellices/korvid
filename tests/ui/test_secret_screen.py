@@ -338,19 +338,11 @@ async def test_agent_describe_path_masks_secret_values(tmp_path: Path) -> None:
         assert "plain-note" not in body
 
 
-async def test_screen_context_never_contains_secret_values(tmp_path: Path) -> None:
-    """The screen context string sent to the LLM contains no secret values,
-    even while the Secret viewer is open with values revealed."""
+async def test_the_workspace_snapshot_never_contains_secret_values(tmp_path: Path) -> None:
+    """The typed workspace snapshot the agent reads carries no secret
+    values, even while the Secret viewer is open with values revealed."""
     audit_path = tmp_path / "audit.jsonl"
     app = make_secret_app(audit=AuditLog(audit_path))
-
-    captured: list[str] = []
-
-    class FakeRuntime:
-        async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[Any]:
-            captured.append(screen_context)
-            return
-            yield  # pragma: no cover - makes this an async generator
 
     async with app.run_test() as pilot:
         screen = await _open_secret_screen(pilot, app)
@@ -359,13 +351,10 @@ async def test_screen_context_never_contains_secret_values(tmp_path: Path) -> No
             await pilot.press("down")
         await pilot.press("x")
         await until(pilot, lambda: "hunter2" in _screen_text(screen), label="revealed")
-        app._agent_ui._runtime = FakeRuntime()  # type: ignore[assignment]  # duck-typed fake
-        await app._agent_ui.run_turn("what do you see?")
-        assert captured, "run_turn was not invoked"
-        context = captured[0]
-        assert "hunter2" not in context
-        assert _b64("hunter2") not in context
-        assert "plain-note" not in context
+        rendered = repr(app.agent_ui.workspace_bridge.snapshot())
+        assert "hunter2" not in rendered
+        assert _b64("hunter2") not in rendered
+        assert "plain-note" not in rendered
 
 
 async def test_reveal_audit_records_actor(tmp_path: Path) -> None:

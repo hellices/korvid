@@ -63,13 +63,13 @@ def _run_subprocess_probe(probe: str) -> None:
         "korvid.__main__",
         "korvid.ui.app",
         "korvid.tools.executor",
-        "korvid.agent.runtime",
+        "korvid.agent.session",
         "korvid.agent.outbound",
     ],
 )
 def test_base_import_does_not_require_optional_extras(module: str) -> None:
-    """The composition root, UI, tool layer, agent runtime, and outbound policy
-    are all importable without the [mcp]/[agent] extras installed."""
+    """The composition root, UI, tool layer, agent session, and outbound
+    policy are all importable without the [mcp]/[agent] extras installed."""
     _assert_import_is_extra_free(module)
 
 
@@ -122,13 +122,13 @@ def test_agentless_wiring_does_not_scan_provider_plugins() -> None:
         "importlib.util.find_spec = fake_find_spec\n"
         "from korvid.__main__ import _build_agent_wiring\n"
         "from korvid.core.config import KorvidConfig\n"
-        "runtime, configurator, rebuild, retarget, _disconnect, provider_box, _proxy = "
-        "_build_agent_wiring(KorvidConfig(), object(), {})\n"
-        "assert runtime is None\n"
-        "assert configurator is None\n"
-        "assert rebuild is None\n"
-        "assert provider_box == [None]\n"
-        "retarget(None, True, 'ctx')\n"
+        "wiring = _build_agent_wiring(KorvidConfig(), object(), {})\n"
+        "assert wiring.session is None\n"
+        "assert wiring.configurator is None\n"
+        "assert wiring.rebuild is None\n"
+        "assert wiring.provider_box == [None]\n"
+        "assert wiring.session_box == [None]\n"
+        "wiring.retarget(None, True, None)\n"
         "assert 'company_provider' not in sys.modules\n"
         "assert 'unselected_provider' not in sys.modules\n"
     )
@@ -143,7 +143,13 @@ def test_base_import_does_not_load_the_agent_loop(module: str) -> None:
     probe = (
         "import sys\n"
         f"import {module}  # noqa: F401\n"
-        "watched = ('korvid.agent.runtime', 'korvid.agent.provider', 'korvid.agent.profiles')\n"
+        "watched = (\n"
+        "    'korvid.agent.runtime',\n"
+        "    'korvid.agent.provider',\n"
+        "    'korvid.agent.profiles',\n"
+        "    'korvid.agent.native_engine',\n"
+        "    'korvid.agent.request_gateway',\n"
+        ")\n"
         "leaked = [m for m in watched if m in sys.modules]\n"
         "if leaked:\n"
         "    raise SystemExit(f'embedded-agent loop leaked into base import: {leaked}')\n"

@@ -6,18 +6,17 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from korvid.agent.model_policy import ModelDescriptor
-from korvid.agent.runtime import AgentRuntime
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
-from korvid.tools.executor import RecordedExecution, UIBridge
+from korvid.tools.executor import UIBridge
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.log_pane import LogPane
+from tests.ui.agent_session_fakes import FakeSession
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
@@ -653,33 +652,16 @@ async def test_agent_open_logs_reports_panel_truncation() -> None:
         assert f"first {MAX_PANELS} of {total}" in out
 
 
-def _with_runtime(app: KorvidApp) -> AgentRuntime:
-    """Attach a minimal runtime so the app has an evidence ledger.
+def _with_session(app: KorvidApp) -> FakeSession:
+    """Attach a minimal session so the app has an evidence ledger.
 
-    The citation entry point reads the ledger off the live runtime; this
+    The citation entry point reads the ledger off the live session; this
     harness does not otherwise need an agent.
     """
-    runtime = AgentRuntime(_SilentProvider(), _NoToolExecutor())
-    app._agent_ui._runtime = runtime
-    return runtime
-
-
-class _SilentProvider:
-    @property
-    def descriptor(self) -> ModelDescriptor:
-        return ModelDescriptor("test", "silent")
-
-    async def complete(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, stream: bool = True
-    ) -> AsyncIterator[dict[str, Any]]:  # pragma: no cover - never driven here
-        yield {"type": "done"}
-
-
-class _NoToolExecutor(RecordedExecution):
-    async def execute(
-        self, name: str, arguments: dict[str, Any]
-    ) -> str:  # pragma: no cover - never driven here
-        return ""
+    session = FakeSession()
+    session.evidence.start_turn()
+    app._agent_ui._session = session
+    return session
 
 
 async def test_opening_a_citation_shows_the_evidence_it_points_at() -> None:
@@ -691,8 +673,8 @@ async def test_opening_a_citation_shows_the_evidence_it_points_at() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        runtime = _with_runtime(app)
-        ref = runtime.evidence.record(
+        session = _with_session(app)
+        ref = session.evidence.record(
             "get_resource", {"kind": "pods", "name": "web-1", "namespace": "default"}, "ok"
         )
         assert ref is not None
@@ -709,7 +691,7 @@ async def test_opening_an_unknown_citation_reports_it() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        _with_runtime(app)
+        _with_session(app)
 
         out = await app._agent_ui.open_evidence("E9")
 
@@ -722,8 +704,8 @@ async def test_a_citation_with_nowhere_to_go_says_so() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        runtime = _with_runtime(app)
-        ref = runtime.evidence.record("helm_list_releases", {"namespace": "default"}, "ok")
+        session = _with_session(app)
+        ref = session.evidence.record("helm_list_releases", {"namespace": "default"}, "ok")
         assert ref is not None
 
         out = await app._agent_ui.open_evidence(ref)
@@ -736,8 +718,8 @@ async def test_a_log_citation_opens_the_container_the_read_used() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        runtime = _with_runtime(app)
-        ref = runtime.evidence.record(
+        session = _with_session(app)
+        ref = session.evidence.record(
             "get_logs", {"pod": "web-1", "namespace": "default"}, "log line"
         )
         assert ref is not None
@@ -761,8 +743,8 @@ async def test_a_cluster_wide_list_citation_opens_all_namespaces() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        runtime = _with_runtime(app)
-        ref = runtime.evidence.record("list_resources", {"kind": "pods"}, "web-1")
+        session = _with_session(app)
+        ref = session.evidence.record("list_resources", {"kind": "pods"}, "web-1")
         assert ref is not None
 
         out = await app._agent_ui.open_evidence(ref)
@@ -782,8 +764,8 @@ async def test_an_event_citation_on_a_non_pod_says_what_is_shown() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        runtime = _with_runtime(app)
-        ref = runtime.evidence.record(
+        session = _with_session(app)
+        ref = session.evidence.record(
             "get_events",
             {"kind": "deployments", "name": "web", "namespace": "default"},
             "BackOff",
@@ -801,8 +783,8 @@ async def test_an_event_citation_on_a_pod_shows_them_without_a_caveat() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        runtime = _with_runtime(app)
-        ref = runtime.evidence.record(
+        session = _with_session(app)
+        ref = session.evidence.record(
             "get_events", {"kind": "pods", "name": "web-1", "namespace": "default"}, "BackOff"
         )
         assert ref is not None
@@ -824,9 +806,9 @@ async def test_a_log_citation_resolves_a_pod_outside_the_current_view() -> None:
     app = make_app(manifest_containers=["app", "sidecar"])
     async with app.run_test() as pilot:
         await pilot.pause()
-        runtime = _with_runtime(app)
+        session = _with_session(app)
         # A namespace the pods pane is not scoped to.
-        ref = runtime.evidence.record(
+        ref = session.evidence.record(
             "get_logs", {"pod": "web-1", "namespace": "other-ns"}, "log line"
         )
         assert ref is not None
@@ -850,8 +832,8 @@ async def test_opening_a_citation_for_a_replaced_object_says_so() -> None:
     app = make_app(manifest_uid="uid-new")
     async with app.run_test() as pilot:
         await pilot.pause()
-        runtime = _with_runtime(app)
-        ref = runtime.evidence.record(
+        session = _with_session(app)
+        ref = session.evidence.record(
             "get_events",
             {"kind": "pods", "name": "web-1", "namespace": "default"},
             "BackOff",
@@ -870,8 +852,8 @@ async def test_opening_a_citation_for_the_same_object_is_not_flagged() -> None:
     app = make_app(manifest_uid="uid-same")
     async with app.run_test() as pilot:
         await pilot.pause()
-        runtime = _with_runtime(app)
-        ref = runtime.evidence.record(
+        session = _with_session(app)
+        ref = session.evidence.record(
             "get_events",
             {"kind": "pods", "name": "web-1", "namespace": "default"},
             "BackOff",
@@ -898,8 +880,8 @@ async def test_a_replacement_between_the_check_and_the_open_is_still_reported() 
     app = make_app(manifest_uid=lambda: next(uids, "uid-new"))
     async with app.run_test() as pilot:
         await pilot.pause()
-        runtime = _with_runtime(app)
-        ref = runtime.evidence.record(
+        session = _with_session(app)
+        ref = session.evidence.record(
             "get_resource",
             {"kind": "pods", "name": "web-1", "namespace": "default"},
             "ok",
