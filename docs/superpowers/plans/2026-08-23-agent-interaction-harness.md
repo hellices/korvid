@@ -810,10 +810,19 @@ git commit -m "feat: replace agent profiles with model tier routing" \
 - Consumes: Tasks 1 and 3 types plus retained `EvidenceLedger`.
 - Produces:
   - `PromptInputs(policy, interaction, cluster: ClusterFacts, user_rules,
-    evidence_note, handoff_note)`
+    handoff_note)`
   - `ComposedPrompt(system_message, user_message)`
   - `PromptHarness.compose(user_text, inputs)`
   - `EvidenceLedger.prompt_note()`
+- `PromptInputs` carries **no** evidence field. A `ComposedPrompt` is composed
+  once per turn and its system message is sent on every round, while the
+  ledger grows with each read, so a table composed here would be stale by the
+  next round and would sit beside the current one. The spec's dynamic evidence
+  requirement is met by the engine instead: `NativeAgentEngine` (Task 10) is
+  the **sole** dynamic per-round injector, appending `prompt_note()` from the
+  live ledger to the static system message on every request and never
+  retaining it. `PromptHarness` owns `prompt_note()`'s *format*; the engine
+  owns when it is offered.
 - Prompt order is safety, common role, tier pack, provider overlay, exact-model
   overlay, additive user rules, armed capability clauses, bounded dynamic
   context.
@@ -836,7 +845,8 @@ def test_user_rules_cannot_replace_safety_contract() -> None:
 ```
 
 Test low/high pack selection, sparse exact overlays, unknown overlay failure,
-tool/UI clauses, evidence note inclusion, and provider/model exact matching.
+tool/UI clauses, `EvidenceLedger.prompt_note()` formatting, the absence of any
+evidence field on `PromptInputs`, and provider/model exact matching.
 
 - [ ] **Step 2: Write bounded context-injection tests**
 
@@ -865,8 +875,10 @@ registry. User rules are appended and bounded; they never replace the safety
 or role layers.
 
 The user message contains the user's text plus one encoded
-`InteractionContext`. The system message contains the evidence/handoff notes
-and capability clauses. No UI module creates delimiters or model prose.
+`InteractionContext`. The system message contains the handoff note and the
+capability clauses — and no evidence table: the turn's table is appended per
+round by the engine, from the live ledger. No UI module creates delimiters or
+model prose.
 Bound resource, namespace, context, provider, and distribution fields to 512
 characters and filters to 2,048 characters before JSON encoding. Reject a
 static prompt larger than 25% of `policy.max_history_chars`.
@@ -1385,7 +1397,9 @@ Expected: collection fails on `korvid.agent.session`.
 2. snapshots the bridge;
 3. detects epoch/context handoff and resets evidence;
 4. composes the turn through `PromptHarness`;
-5. calls only `AgentEngine.run()`;
+5. calls only `AgentEngine.run()`, and **owns the iterator it starts**: a
+   started turn is exhausted or `aclose()`d (or the engine is closed), because
+   that iterator holds the engine's single-flight claim until it finishes;
 6. exposes engine events unchanged;
 7. leaves the bridge workspace authoritative after completion or interruption.
 

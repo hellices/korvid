@@ -28,7 +28,11 @@ Everything the model asks for is filtered before it can reach a port or
 durable history: a call with no id or no name, a repeated id, unusable
 arguments, and calls beyond the policy's per-iteration cap are answered or
 reported but never dispatched, and only the kept prefix is stored — so the
-provider protocol's one-result-per-call rule holds by construction.
+provider protocol's one-result-per-call rule holds by construction. The
+same rule survives a port that fails: a collaborator raising something
+nothing expected is contained as *that call's* error result, named by
+exception type only, so the turn keeps a valid history and can still
+finish. Cancellation is never contained — it is the hard interrupt.
 """
 
 from __future__ import annotations
@@ -135,7 +139,12 @@ class NativeAgentEngine(AgentEngine):
         The rejection is checked here so a caller learns immediately, and
         again when iteration really starts: an iterator that is created
         and then abandoned never claimed anything, so it cannot leave the
-        engine latched against the next turn.
+        engine latched against the next turn. For the same reason the
+        interrupt flag is *not* cleared here but in `_run`, when the turn
+        actually claims the engine — clearing it here would make an
+        `interrupt()` that lands in the window before the first
+        `__anext__` apply to a turn that had not started, silently ending
+        it before its first round.
 
         Raises:
             RuntimeError: The engine is closed, or a turn is already
@@ -143,7 +152,6 @@ class NativeAgentEngine(AgentEngine):
                 time, and a second turn would clobber it.
         """
         self._reject_if_unavailable()
-        self._interrupted = False
         return self._run(request)
 
     def interrupt(self) -> None:
@@ -196,13 +204,18 @@ class NativeAgentEngine(AgentEngine):
         """Claim the engine for this turn and release it on every exit.
 
         The claim is taken here rather than in `run` so it belongs to a
-        turn that actually started. `_closed` is re-read after every
-        event: a close that lands while this generator is suspended must
-        end the turn at that exact point, before another event or another
-        history append.
+        turn that actually started, and the interrupt flag is cleared with
+        it, in the same synchronous step: an interrupt only ever applies
+        to a turn that is running, so one raised while the engine was idle
+        — including in the window between `run` and the first
+        `__anext__` — is discarded here rather than inherited. `_closed`
+        is re-read after every event: a close that lands while this
+        generator is suspended must end the turn at that exact point,
+        before another event or another history append.
         """
         self._reject_if_unavailable()
         self._running = True
+        self._interrupted = False
         self._driver = asyncio.current_task()
         try:
             turn = self._turn(request)
@@ -243,13 +256,16 @@ class NativeAgentEngine(AgentEngine):
             yield AgentError(message=_bounded(f"{exc.headline}: {exc}"))
             yield TurnComplete(input_tokens=turn_in, output_tokens=turn_out, estimated=estimated)
         except Exception as exc:
-            # Nothing expected this: a collaborator raised something this
-            # loop has no answer for. The failure is the session's to
-            # render, but the *state* is this engine's to leave usable —
-            # an active turn, or an assistant call no result can ever
-            # pair with, would make every later turn fail to start. Only
-            # `Exception`: a cancellation is the hard interrupt, and the
-            # turn must stay active for the session to finalize.
+            # Nothing expected this: a collaborator outside the tool
+            # boundary — the gateway, the conversation itself — raised
+            # something this loop has no answer for. (A failing tool port
+            # never reaches here: `_dispatch` contains it as that call's
+            # own result.) The failure is the session's to render, but the
+            # *state* is this engine's to leave usable — an active turn,
+            # or an assistant call no result can ever pair with, would
+            # make every later turn fail to start. Only `Exception`: a
+            # cancellation is the hard interrupt, and the turn must stay
+            # active for the session to finalize.
             logger.warning("turn rolled back after an unexpected %s", type(exc).__name__)
             with contextlib.suppress(Exception):
                 self._conversation.rollback_turn()
@@ -441,6 +457,8 @@ class NativeAgentEngine(AgentEngine):
                     call_id=call.call_id, name=call.name, ok=False, summary="blocked"
                 )
                 raise
+            except Exception as exc:  # executor, bridge or harness bug
+                execution = self._contain(call, exc)
             text = execution.outcome.text
             if round_.excess and index == last:
                 text += _excess_notice(round_.excess)
@@ -469,6 +487,32 @@ class NativeAgentEngine(AgentEngine):
         if arguments is None:
             return self._tools.reject(call.call_id, call.name, _BAD_ARGUMENTS)
         return await self._tools.execute(call.call_id, call.name, arguments)
+
+    def _contain(self, call: _Call, exc: Exception) -> ToolExecution:
+        """Turn a collaborator's unexpected failure into this call's result.
+
+        The ports behind the harness — the recorded executor, the UI
+        bridge — can raise anything: a torn-down screen, a client bug, a
+        decoder that met a body it did not expect. That is *one call's*
+        failure, not the turn's: the model is told this call failed, the
+        stored call gets the one result the protocol requires it to have,
+        and the turn goes on to its next round. Letting it escape instead
+        would abandon a turn the model could still finish, and would leave
+        the panel with a half-open tool row.
+
+        Only `Exception`. A `CancelledError` is the hard interrupt and
+        must keep unwinding to the session, which repairs the conversation
+        with `ConversationState.finalize_interrupt`.
+
+        The reason is built the way a provider failure is — the class name
+        and nothing else. A tool failure routinely quotes what the call
+        touched: a cluster endpoint, a rejected credential, or the very
+        resource body the masking pipeline exists to redact, and this text
+        is bound for the *model*, so echoing it would send unmasked
+        cluster content across the boundary that is supposed to check it.
+        """
+        logger.warning("tool call failed: %s", type(exc).__name__)
+        return self._tools.reject(call.call_id, call.name, _tool_failure_message(exc))
 
     # -- turn outcomes -----------------------------------------------------
 
@@ -620,6 +664,22 @@ def _failure_message(exc: Exception) -> str:
     return (
         f"the provider request failed ({_safe_type_name(exc)}) — its own message is "
         "withheld because provider errors can quote the request or a credential"
+    )
+
+
+def _tool_failure_message(exc: Exception) -> str:
+    """Name a failed tool call by its type, never by what it said.
+
+    Same rule as `_failure_message`, for the other direction: this text is
+    stored as a tool result and sent to the model, and a port's exception
+    can quote the resource it read, the endpoint it called or the token it
+    was refused with — none of which passed the result-sanitizing pass
+    this refusal replaces.
+    """
+    return (
+        f"the tool call failed ({_safe_type_name(exc)}) — its own message is withheld "
+        "because a tool failure can quote cluster data or a credential; "
+        "try a different call or tell the user what could not be read"
     )
 
 
