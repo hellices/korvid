@@ -80,6 +80,25 @@ _NEGATION_PATTERN = re.compile(
 #: and decoded before the rest of the tags are dropped.
 _ATTR_VALUE = re.compile(r'\b(?:alt|aria-label)\s*=\s*"([^"]*)"', re.IGNORECASE)
 
+#: Explicit subjects that mark a comma-joined coordinate clause as making its
+#: *own* claim rather than continuing an enumeration ("X, Y, and Z"). Only
+#: these nouns/pronouns count, so "not evidence of X, Y, and validated
+#: citations" still reads as one negated list — "validated citations" is not
+#: one of these subjects.
+_COORDINATE_SUBJECTS = ("it", "this", "that", "the capture", "the scene", "the video", "the media")
+
+#: A clause boundary is a sentence terminator, a semicolon, or a comma-joined
+#: `and`/`but` that introduces one of `_COORDINATE_SUBJECTS`. The last form
+#: lets ", and it proves ..." start a fresh clause — so an unrelated "no"
+#: earlier in the sentence cannot suppress it — while ", and validated
+#: citations" (no explicit subject) stays part of the same enumeration.
+_CLAUSE_BOUNDARY = re.compile(
+    r"[.!?;]"
+    r"|,\s*(?:and|but)\s+(?:"
+    + "|".join(re.escape(subject) for subject in _COORDINATE_SUBJECTS)
+    + r")\b"
+)
+
 
 def _flatten(text: str) -> str:
     """Normalise markup into lowercase prose for phrase scanning.
@@ -102,15 +121,17 @@ def _flatten(text: str) -> str:
 def _clause_is_negated(flattened: str, index: int) -> bool:
     """Whether a negation cue governs the clause ending at `index`.
 
-    The clause is everything since the nearest preceding sentence terminator
-    (`.`, `!`, `?`), so a denial earlier in an unrelated sentence cannot
-    suppress a later, separate positive claim, while a negation anywhere
-    earlier in the *same* clause — including across a comma/`or` enumeration
-    — still covers a phrase buried inside it.
+    The clause is everything since the nearest preceding clause boundary — a
+    sentence terminator (`.`, `!`, `?`), a semicolon, or a comma-joined
+    `and`/`but` that introduces an explicit new subject (see
+    `_COORDINATE_SUBJECTS`) — so a denial earlier in an unrelated sentence or
+    coordinate clause cannot suppress a later, separate positive claim, while
+    a negation anywhere earlier in the *same* clause — including across a
+    comma/`or` enumeration — still covers a phrase buried inside it.
     """
     clause_start = 0
-    for terminator in re.finditer(r"[.!?]", flattened[:index]):
-        clause_start = terminator.end()
+    for boundary in _CLAUSE_BOUNDARY.finditer(flattened[:index]):
+        clause_start = boundary.end()
     return bool(_NEGATION_PATTERN.search(flattened[clause_start:index]))
 
 
@@ -178,6 +199,59 @@ def test_unnegated_does_not_let_an_earlier_sentence_suppress_a_later_claim() -> 
         "the second sentence's positive claim is a separate clause from the "
         "first sentence's denial and must still be flagged"
     )
+
+
+def test_unnegated_isolates_a_new_clause_introduced_by_a_coordinate_conjunction() -> None:
+    """A comma-joined coordinate clause with its own explicit subject is separate.
+
+    "There is no limit ..., and it proves ..." is two coordinate clauses, not
+    one long enumeration: the second clause introduces its own subject ("it")
+    and makes an unrelated, genuine positive claim. An unrelated "no" earlier
+    in the sentence must not launder it.
+    """
+    text = (
+        "<p>There is no limit on concurrency, and it proves bounded fresh "
+        "reads for every session.</p>"
+    )
+    assert _unnegated(text, "bounded fresh reads"), (
+        "the coordinate clause after ', and it' introduces a new subject and "
+        "must not inherit the earlier, unrelated negation"
+    )
+
+
+def test_unnegated_isolates_a_new_clause_after_but_or_a_semicolon() -> None:
+    """`, but <subject>` and a bare semicolon both start a new clause too."""
+    comma_but = (
+        "<p>There is no support for retries, but this proves bounded fresh "
+        "reads for every call.</p>"
+    )
+    semicolon = (
+        "<p>There is no support for retries; this proves bounded fresh reads for every call.</p>"
+    )
+    for text in (comma_but, semicolon):
+        assert _unnegated(text, "bounded fresh reads"), (
+            "a clause introduced by ', but this' or a semicolon must not "
+            "inherit an earlier, unrelated negation"
+        )
+
+
+def test_unnegated_keeps_a_truthful_oxford_comma_list_denial_intact() -> None:
+    """The final ", and <item>" of a negated Oxford-comma list is not a new clause.
+
+    Only a coordinate conjunction followed by an explicit subject (`it`,
+    `this`, `the capture`, ...) starts a new clause; "and validated
+    citations" is just the last item of one negated list and must stay
+    covered by the leading "not evidence of".
+    """
+    text = (
+        "<p>This capture is not evidence of bounded fresh reads, live tool "
+        "execution, and validated citations.</p>"
+    )
+    for phrase in ("bounded fresh reads", "live tool", "validated citation"):
+        assert not _unnegated(text, phrase), (
+            f"{phrase!r} sits inside one negated oxford-comma list; the "
+            "'and' before its final item must not split it into a new clause"
+        )
 
 
 def test_unnegated_scans_alt_and_aria_label_attribute_values() -> None:
