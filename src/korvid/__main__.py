@@ -28,7 +28,6 @@ from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
-    ConfigMigrationError,
     KorvidConfig,
     ObservabilityBackend,
     context_is_protected,
@@ -653,35 +652,14 @@ def _create_initial_provider(
 
 
 def _prompt_overrides(config: KorvidConfig) -> PromptOverrides:
-    """Prompt slot overrides for the still-live legacy runtime.
-
-    `agent.prompts` was removed (Task 5 brief) and `agent.rules` is not
-    wired into the old `build_profile`/`AgentRuntime` plumbing yet — the
-    old runtime ignores additive rules until the PromptHarness/Session
-    tasks land (Task 12+). This always returns the no-op default; delete
-    it once the old runtime is replaced.
-    """
+    """Configured prompt slots (`agent.prompts`) as the agent layer wants them."""
     from korvid.agent.profiles import PromptOverrides
 
-    return PromptOverrides()
-
-
-def _legacy_profile_name(model_tier: str | None) -> str:
-    """Temporary mapping from the new tier override to the old profile name.
-
-    The public `agent.model_tier` override (Task 5, design doc §6) only
-    ever means `None` (automatic), `"low"`, or `"high"` — there is no
-    `full`/`small` concept left in config, settings, or the UI. The old
-    `AgentRuntime`/`build_profile` plumbing, however, is still full/small
-    shaped until Task 12/14 replaces it with `ModelRouter`/`PromptHarness`/
-    `Session`. This composition-root-only mapping bridges the two: an
-    explicit `high` gets the legacy `full` profile's larger tool surface
-    and budgets; `low` or automatic (`None`) gets the legacy `small`
-    profile. It must stay private here — never exposed as a compatibility
-    alias in config/settings/UI — and must be deleted together with the
-    old wiring in Task 12/14.
-    """
-    return "full" if model_tier == "high" else "small"
+    return PromptOverrides(
+        system=config.agent_prompt_system,
+        append=config.agent_prompt_append,
+        tool_descriptions=config.agent_prompt_tool_descriptions,
+    )
 
 
 def _initial_profile(
@@ -703,7 +681,7 @@ def _initial_profile(
     from korvid.agent.profiles import build_profile, validate_prompt_overrides
 
     profile = build_profile(
-        _legacy_profile_name(config.agent_model_tier),
+        config.agent_profile or "full",
         readonly=config.readonly,
         resize_supported=pod_resize_supported,
         observability_backends=observability_backends,
@@ -833,7 +811,7 @@ def _build_agent_wiring(
             base_url=settings.base_url,
             model=settings.model,
             api_key_env=settings.api_key_env,
-            model_tier=settings.model_tier,
+            profile=settings.profile,
         )
 
     configurator = ProviderConfigurator(
@@ -871,7 +849,7 @@ def _build_agent_wiring(
         # raises, close the new provider exactly once and leave old state live.
         try:
             new_profile = build_profile(
-                _legacy_profile_name(settings.model_tier),
+                settings.profile,
                 readonly=config.readonly,
                 resize_supported=resize_box[0],
                 observability_backends=obs.backends,
@@ -980,13 +958,7 @@ def _validate_ca_bundle(path: str | None) -> None:
 def _load_startup_config(
     readonly: bool, mcp: bool = False, namespace: str | None = None
 ) -> KorvidConfig:
-    try:
-        config = load_config()
-    except ConfigMigrationError as exc:
-        # A removed/invalid `agent.*` key is a hard startup failure with an
-        # actionable message — silently ignoring it would leave the agent
-        # misconfigured without the user noticing (Task 5 brief).
-        raise SystemExit(f"korvid: {exc}") from exc
+    config = load_config()
     _validate_ca_bundle(config.network_ca_bundle)
     if readonly:
         config = dataclasses.replace(config, readonly=True)

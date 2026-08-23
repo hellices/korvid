@@ -25,40 +25,6 @@ import yaml
 from korvid.k8s.columns import SOURCES, CustomColumn, parse_jsonpath
 from korvid.k8s.helm import SYNTHETIC_VIEW_KINDS
 
-
-class ConfigMigrationError(Exception):
-    """Raised when config.yaml uses a key removed by a breaking migration.
-
-    Distinct from the advisory `warnings` mechanism: a migration error means
-    the config cannot be interpreted safely at all (its meaning changed),
-    so `_load_startup_config` turns this into a one-line `SystemExit`
-    instead of guessing and possibly running with the wrong capability
-    surface or a dropped prompt override.
-    """
-
-
-#: `agent.profile` (issue #71) was replaced by `agent.model_tier` (design
-#: doc §6): an explicit `low`/`high` override of the automatic capability
-#: router, not a `full`/`small` prompt-and-tool-surface switch.
-_AGENT_PROFILE_REMOVED = (
-    "agent.profile was removed — use agent.model_tier (low, high, or omit "
-    "the key for automatic routing) instead."
-)
-#: `agent.prompts` (replace-style system prompt/tool-description overrides)
-#: was replaced by `agent.rules` (additive house rules layered onto the
-#: shipped prompt pack) plus `agent.model_tier` for capability routing.
-_AGENT_PROMPTS_REMOVED = (
-    "agent.prompts was removed — use agent.rules (a list of additive house"
-    " rules) and agent.model_tier for capability routing instead."
-)
-#: `agent.model_tier` accepts only these two explicit values; anything else
-#: (including old profile names like `full`/`small` or `auto`) is rejected
-#: rather than silently falling back, so a stale/typo'd config cannot run
-#: with capabilities the user never chose.
-_VALID_MODEL_TIERS = ("low", "high")
-_MAX_AGENT_RULES = 16
-_MAX_AGENT_RULE_CHARS = 1000
-
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "korvid" / "config.yaml"
 _MAX_AGENT_OPTIONS_DEPTH = 4
 _MAX_AGENT_OPTIONS_KEYS = 64
@@ -200,19 +166,19 @@ class KorvidConfig:
     agent_auth_method: str | None = None
     agent_options: dict[str, object] = field(default_factory=dict)
     agent_options_error: str | None = None
-    #: `agent.model_tier` (design doc §6): an explicit override of the
-    #: automatic model-capability router. `None` means automatic — the
-    #: router decides from provider-reported/catalog facts, falling back to
-    #: `low`. Replaces the old `agent.profile` full/small switch (issue
-    #: #71); unlike that switch, an unset value is never turned into a
-    #: suggestion by the `:ai` wizard (no Ollama heuristic).
-    agent_model_tier: str | None = None
-    #: `agent.rules` (design doc §6): additive house rules layered onto the
-    #: shipped tier prompt pack — never a replacement for it. Bounded to
-    #: keep the resulting prompt small: at most 16 entries, each at most
-    #: 1000 characters. Replaces the old replace-style `agent.prompts`
-    #: overrides.
-    agent_rules: tuple[str, ...] = ()
+    #: Model-capability profile (issue #71): `agent.profile` — `full` keeps
+    #: the frontier surface; `small` reduces tools, budgets and prompt for
+    #: 3B-14B local models. None means unset: the runtime treats it as
+    #: `full`, but the `:ai` wizard may still suggest `small` for Ollama
+    #: (an explicit `full` is never overridden by that suggestion).
+    agent_profile: str | None = None
+    #: Agent prompt overrides (`agent.prompts`): the role statement, extra
+    #: house rules, and per-tool description rewording. None/empty means the
+    #: prompts korvid ships. Only these slots are configurable — the
+    #: write/no-write and UI clauses stay conditional on what is armed.
+    agent_prompt_system: str | None = None
+    agent_prompt_append: str | None = None
+    agent_prompt_tool_descriptions: dict[str, str] = field(default_factory=dict)
     #: Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml.
     agent_ollama_num_ctx: int = 16384
     agent_ollama_temperature: float = 0.0
@@ -297,14 +263,6 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     # User-edited configs can hold scalars where mappings are expected;
     # treat anything that is not a mapping as absent instead of crashing.
     agent_raw: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
-    # Breaking migrations (Task 5): both keys changed meaning rather than
-    # merely being renamed, so silently reinterpreting them would run with
-    # capabilities/prompts the user never chose. Checked before anything
-    # else in `agent_raw` is read.
-    if "profile" in agent_raw:
-        raise ConfigMigrationError(_AGENT_PROFILE_REMOVED)
-    if "prompts" in agent_raw:
-        raise ConfigMigrationError(_AGENT_PROMPTS_REMOVED)
     provider_raw: str | None = agent_raw.get("provider")
     # Canonicalize early: github_copilot, GitHub.Copilot etc. all become
     # github-copilot so auth-method defaults and the composition root's
@@ -364,9 +322,10 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         debug_images = {}
     views, view_warnings = _parse_views(raw.get("views"))
     warnings = list(view_warnings)
-    model_tier = _parse_model_tier(agent_raw)
-    agent_rules, rules_warnings = _parse_agent_rules(agent_raw.get("rules"))
-    warnings.extend(rules_warnings)
+    prompt_system, prompt_append, prompt_tool_descriptions, prompt_warnings = _parse_prompts(
+        agent_raw.get("prompts")
+    )
+    warnings.extend(prompt_warnings)
     if agent_options_error is not None:
         warnings.append(agent_options_error)
     if "namespaces" in raw:
@@ -402,8 +361,15 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_auth_method=auth_method,
         agent_options=agent_options,
         agent_options_error=agent_options_error,
-        agent_model_tier=model_tier,
-        agent_rules=agent_rules,
+        agent_profile=(
+            # Key presence checked here: `profile: null` is a present-but-
+            # invalid value (falls back to `full` like any other), not the
+            # unset state that lets the :ai wizard suggest `small`.
+            _parse_profile(agent_raw["profile"]) if "profile" in agent_raw else None
+        ),
+        agent_prompt_system=prompt_system,
+        agent_prompt_append=prompt_append,
+        agent_prompt_tool_descriptions=prompt_tool_descriptions,
         agent_ollama_num_ctx=_parse_num_ctx(ollama_raw.get("num_ctx")),
         agent_ollama_temperature=_parse_temperature(ollama_raw.get("temperature")),
         agent_ollama_seed=_parse_seed(ollama_raw.get("seed")),
@@ -727,7 +693,7 @@ def save_agent_config(
     base_url: str | None,
     model: str,
     api_key_env: str | None,
-    model_tier: str | None = None,
+    profile: str = "full",
 ) -> None:
     """Persist managed agent fields, preserving unrelated keys (read-modify-write)."""
     raw: dict[str, Any] = {}
@@ -737,14 +703,11 @@ def save_agent_config(
     agent: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
     agent["provider"] = provider
     agent["model"] = model
-    # `model_tier` is managed alongside the model choice: an explicit
-    # override (`low`/`high`) is a deliberate choice and must be written so
-    # it survives a restart; automatic routing (None) removes any stale
-    # override rather than persisting a stale explicit choice.
-    if model_tier is not None:
-        agent["model_tier"] = model_tier
-    else:
-        agent.pop("model_tier", None)
+    # The capability profile is managed alongside the model choice and is
+    # always written explicitly: after the wizard runs, the profile is a
+    # deliberate choice (preserved or suggested), and an explicit `full`
+    # must survive so reopening `:ai` never re-suggests `small` over it.
+    agent["profile"] = profile
     # Merge into any existing auth mapping: only `method` is managed here,
     # unrelated nested keys must survive the read-modify-write.
     existing_auth = agent.get("auth")
@@ -837,58 +800,18 @@ def _parse_buffer_lines(value: Any) -> int:
     return lines if lines > 0 else 5000
 
 
-def _parse_model_tier(agent_raw: dict[str, Any]) -> str | None:
-    """Parse `agent.model_tier`: absent means automatic (None); the only
-    other accepted values are `low` and `high`.
+def _parse_profile(value: Any) -> str:
+    """Coerce a present `agent.profile` value to a known profile name.
 
-    Unlike the old `agent.profile`, an invalid value (a stale `full`/`small`
-    profile name, `auto`, a typo, `null`) is never silently coerced to a
-    default — the router precedence already treats an absent key as
-    automatic, so a present-but-wrong value is actionable enough to fail
-    startup rather than guess which tier the user meant.
+    An unknown or null value falls back to `full` (never crashing startup)
+    so a typo keeps today's runtime behavior AND stays stable through the
+    wizard instead of silently becoming `small`. The caller maps an absent
+    key to None — the "unset" state the `:ai` wizard is allowed to fill
+    with its Ollama suggestion.
     """
-    if "model_tier" not in agent_raw:
-        return None
-    value = agent_raw["model_tier"]
-    if isinstance(value, str) and value.strip().lower() in _VALID_MODEL_TIERS:
+    if isinstance(value, str) and value.strip().lower() in ("full", "small"):
         return value.strip().lower()
-    raise ConfigMigrationError(
-        f"agent.model_tier: {value!r} is not valid — use low, high, or omit "
-        "the key for automatic routing"
-    )
-
-
-def _parse_agent_rules(value: Any) -> tuple[tuple[str, ...], list[str]]:
-    """Parse `agent.rules`: a bounded list of additive house rules.
-
-    Non-string/blank entries are dropped with a warning (never crash
-    startup); entries over 1000 characters are dropped the same way; more
-    than 16 valid entries keeps only the first 16. Returns (rules, warnings).
-    """
-    if value is None:
-        return (), []
-    if not isinstance(value, list):
-        return (), ["agent.rules: must be a list of strings; ignored"]
-    warnings: list[str] = []
-    rules: list[str] = []
-    for item in value:
-        if not isinstance(item, str) or not item.strip():
-            warnings.append("agent.rules: entries must be non-empty strings; dropping one")
-            continue
-        text = item.strip()
-        if len(text) > _MAX_AGENT_RULE_CHARS:
-            warnings.append(
-                f"agent.rules: an entry exceeds {_MAX_AGENT_RULE_CHARS} characters; dropping it"
-            )
-            continue
-        rules.append(text)
-    if len(rules) > _MAX_AGENT_RULES:
-        warnings.append(
-            f"agent.rules: more than {_MAX_AGENT_RULES} entries provided;"
-            f" keeping the first {_MAX_AGENT_RULES}"
-        )
-        rules = rules[:_MAX_AGENT_RULES]
-    return tuple(rules), warnings
+    return "full"
 
 
 def _parse_num_ctx(value: Any) -> int:
@@ -960,6 +883,95 @@ class _AgentOptionsError(ValueError):
 
 
 _UNSUPPORTED_AGENT_OPTION = object()
+
+
+def _prompt_slot(raw: dict[str, Any], key: str, warnings: list[str]) -> str | None:
+    """Read one prompt slot from `key` or `key_file`.
+
+    Returns None and warns for every problem — an unusable override falls
+    back to the prompt korvid ships rather than stopping startup, matching
+    how the rest of this module reports configuration mistakes.
+    """
+    file_key = f"{key}_file"
+    has_inline, has_file = key in raw, file_key in raw
+    if has_inline and has_file:
+        # Preferring one silently would let a file a reader cannot see
+        # override the text sitting right there in the config.
+        warnings.append(
+            f"agent.prompts: {key} and {file_key} are both set; "
+            f"remove one — the shipped prompt is used until then"
+        )
+        return None
+    if not has_inline and not has_file:
+        return None
+    if has_file:
+        return _prompt_from_file(raw[file_key], file_key, warnings)
+    return _prompt_text(raw[key], f"agent.prompts.{key}", warnings)
+
+
+def _prompt_from_file(value: Any, file_key: str, warnings: list[str]) -> str | None:
+    label = f"agent.prompts.{file_key}"
+    if not isinstance(value, str) or not value.strip():
+        warnings.append(f"{label}: must be a non-empty path; the shipped prompt is used")
+        return None
+    path = Path(value).expanduser()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        warnings.append(f"{label}: cannot read {path}: {exc.strerror}; the shipped prompt is used")
+        return None
+    except UnicodeError as exc:
+        # read_text raises UnicodeDecodeError, which is not an OSError; an
+        # unreadable encoding must fall back like any other bad value
+        # rather than stopping startup.
+        warnings.append(f"{label}: {path} is not valid UTF-8 ({exc}); the shipped prompt is used")
+        return None
+    return _prompt_text(text, label, warnings)
+
+
+def _prompt_text(value: Any, label: str, warnings: list[str]) -> str | None:
+    if not isinstance(value, str):
+        warnings.append(f"{label}: must be a string; the shipped prompt is used")
+        return None
+    text = value.strip()
+    if not text:
+        warnings.append(f"{label}: is empty; the shipped prompt is used")
+        return None
+    return text
+
+
+def _prompt_tool_descriptions(value: Any, warnings: list[str]) -> dict[str, str]:
+    """Per-tool description overrides, dropping entries that cannot be used.
+
+    Tool *names* are not validated here: `core` may not import the tool
+    registry. `agent.profiles.validate_prompt_overrides` catches typos once
+    the armed tool set is known.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        warnings.append("agent.prompts.tool_descriptions: must be a mapping; ignored")
+        return {}
+    descriptions: dict[str, str] = {}
+    for name, description in value.items():
+        if not isinstance(name, str) or not isinstance(description, str) or not description.strip():
+            warnings.append(
+                f"agent.prompts.tool_descriptions: {name!r} must map to a non-empty string; ignored"
+            )
+            continue
+        descriptions[name] = description.strip()
+    return descriptions
+
+
+def _parse_prompts(value: Any) -> tuple[str | None, str | None, dict[str, str], list[str]]:
+    """Parse `agent.prompts` into (system, append, tool_descriptions, warnings)."""
+    if not isinstance(value, dict):
+        return None, None, {}, []
+    warnings: list[str] = []
+    system = _prompt_slot(value, "system", warnings)
+    append = _prompt_slot(value, "append", warnings)
+    descriptions = _prompt_tool_descriptions(value.get("tool_descriptions"), warnings)
+    return system, append, descriptions, warnings
 
 
 def _parse_agent_options(value: Any) -> tuple[dict[str, object], str | None]:

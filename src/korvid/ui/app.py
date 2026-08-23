@@ -812,7 +812,7 @@ class KorvidApp(App[None]):
             refresh_status=lambda: self._refresh_status(),
         )
         #: The built-in agent's session and UI ownership (issue #187 / Deep
-        #: Task 6): the runtime/settings/model-tier/follow state, the turn task
+        #: Task 6): the runtime/settings/profile/follow state, the turn task
         #: with its interrupt-and-submit lifecycle, the screen context the
         #: model is told about, and every `UIBridge` read plus the direct,
         #: approval-gated agent write. It composes the same
@@ -2108,10 +2108,10 @@ class AppAgentPanel(AgentPanelPort):
         output_tokens: int,
         *,
         estimated: bool,
-        model_tier: str | None,
+        profile: str,
     ) -> None:
         self._app._agent_panel.set_header(
-            model, input_tokens, output_tokens, estimated=estimated, model_tier=model_tier
+            model, input_tokens, output_tokens, estimated=estimated, profile=profile
         )
 
     def show_setup_hint(self) -> None:
