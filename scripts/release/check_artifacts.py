@@ -6,12 +6,20 @@ from __future__ import annotations
 import argparse
 import email
 import re
+import stat
 import sys
 import tarfile
 import tomllib
 import zipfile
+from dataclasses import dataclass
 from email.message import Message
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+
+@dataclass(frozen=True)
+class _ArchiveMember:
+    name: str
+    is_regular_file: bool
 
 
 def _wheel_metadata(path: Path) -> Message:
@@ -153,6 +161,60 @@ def _expected_extra_dependencies(project: dict[str, object]) -> dict[str, set[st
     return {extra: expand(extra) for extra in raw_extras}
 
 
+def _archive_members(path: Path) -> tuple[_ArchiveMember, ...]:
+    if path.suffix == ".whl":
+        with zipfile.ZipFile(path) as wheel:
+            members: list[_ArchiveMember] = []
+            for info in wheel.infolist():
+                file_type = stat.S_IFMT(info.external_attr >> 16)
+                members.append(
+                    _ArchiveMember(
+                        name=info.orig_filename,
+                        is_regular_file=not info.is_dir() and file_type in {0, stat.S_IFREG},
+                    )
+                )
+            return tuple(members)
+    with tarfile.open(path) as sdist:
+        return tuple(
+            _ArchiveMember(name=member.name, is_regular_file=member.isfile())
+            for member in sdist.getmembers()
+        )
+
+
+def _has_contiguous_parts(name: str, expected: tuple[str, ...]) -> bool:
+    parts = PurePosixPath(name.replace("\\", "/")).parts
+    width = len(expected)
+    return any(parts[index : index + width] == expected for index in range(len(parts) - width + 1))
+
+
+def _validate_contents(
+    artifact: Path,
+    members: tuple[_ArchiveMember, ...],
+    *,
+    required_members: tuple[tuple[str, ...], ...],
+) -> None:
+    forbidden_patterns = [("korvid", "evals"), ("tests", "evals")]
+    offender = next(
+        (
+            member.name
+            for member in members
+            for forbidden in forbidden_patterns
+            if _has_contiguous_parts(member.name, forbidden)
+        ),
+        None,
+    )
+    if offender is not None:
+        raise ValueError(
+            f"{artifact.name}: contains development-only evaluation harness: {offender}"
+        )
+    member_parts = {
+        PurePosixPath(member.name).parts for member in members if member.is_regular_file
+    }
+    if not any(required in member_parts for required in required_members):
+        required = " or ".join("/".join(path) for path in required_members)
+        raise ValueError(f"{artifact.name}: missing required production member: {required}")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dist", required=True)
@@ -170,6 +232,17 @@ def main(argv: list[str]) -> int:
     if not expected_dependencies:
         raise ValueError("pyproject.toml declares no optional extras to validate")
 
+    _validate_contents(
+        wheels[0],
+        _archive_members(wheels[0]),
+        required_members=(("korvid", "__init__.py"),),
+    )
+    sdist_root = sdists[0].name.removesuffix(".tar.gz")
+    _validate_contents(
+        sdists[0],
+        _archive_members(sdists[0]),
+        required_members=(("pyproject.toml",), (sdist_root, "pyproject.toml")),
+    )
     _validate_metadata(
         wheels[0],
         _wheel_metadata(wheels[0]),

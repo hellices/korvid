@@ -212,7 +212,7 @@ def _manifests(raw: Any, key: str) -> tuple[dict[str, Any], ...]:
 
 
 def bundled_scenarios_dir() -> Path:
-    """Directory containing the scenario pack that ships with korvid."""
+    """Directory containing the scenario pack in the source checkout."""
     return Path(__file__).parent / "scenarios"
 
 

@@ -2110,7 +2110,9 @@ async def test_wire_and_run_wires_relationship_lister_from_kube(
         await state.discovery_box[0]
 
     assert len(_FakeAppCapturesKwargs.instances) == 1
-    wired = _FakeAppCapturesKwargs.instances[0].captured["list_relationship_objects"]
+    captured = _FakeAppCapturesKwargs.instances[0].captured
+    assert "approval_timeout_seconds" not in captured
+    wired = captured["list_relationship_objects"]
     result = await wired("meta", "ns")
     assert result == []
     assert kube.relationship_list_calls == [("meta", "ns")]

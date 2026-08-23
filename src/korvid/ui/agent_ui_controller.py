@@ -423,6 +423,7 @@ class AgentUiController:
         audit: Callable[[], AuditLog | None],
         pod_resize_supported: Callable[[], bool],
         provider_hint: Callable[[], str | None],
+        approval_timeout_seconds: float | None = None,
         #: Repaint the status bar's AI on/off/blocked label after a session
         #: state change; the bar itself belongs to the app's widget tree.
         refresh_status: Callable[[], None] = lambda: None,
@@ -459,6 +460,9 @@ class AgentUiController:
         self._audit = audit
         self._pod_resize_supported = pod_resize_supported
         self._provider_hint = provider_hint
+        self._approval_timeout = (
+            APPROVAL_TIMEOUT if approval_timeout_seconds is None else approval_timeout_seconds
+        )
         self._refresh_status = refresh_status
         self._follow_bridge = follow_bridge
         self._tasks = tasks if tasks is not None else AppLoopTurnTasks()
@@ -1875,7 +1879,7 @@ class AgentUiController:
         agent is never told the user declined when nobody answered) and an
         agent turn can never hang forever."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + APPROVAL_TIMEOUT
+        deadline = loop.time() + self._approval_timeout
         if not await self._wait_until_surfaceable(deadline):
             return "expired"
         fut: asyncio.Future[bool] = loop.create_future()

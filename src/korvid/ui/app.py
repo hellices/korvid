@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import functools
+import math
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -385,8 +386,13 @@ class KorvidApp(App[None]):
         ) = None,
         session_timeline: SessionTimeline | None = None,
         watch_warning_events: (Callable[[str | None], AsyncIterator[dict[str, Any]]] | None) = None,
+        approval_timeout_seconds: float | None = None,
     ) -> None:
         super().__init__()
+        if approval_timeout_seconds is not None and (
+            not math.isfinite(approval_timeout_seconds) or approval_timeout_seconds <= 0
+        ):
+            raise ValueError("approval_timeout_seconds must be finite and positive")
         #: The session's one typed view surface (issue #187): every
         #: controller reads the focused pane through it, and the selection
         #: reads (`selected_ns_name`, `selected_uid`) live on it rather than
@@ -778,6 +784,7 @@ class KorvidApp(App[None]):
             builder=lambda: self._agent_ui,
             config=lambda: self.config,
             audit=lambda: self._audit,
+            approval_timeout_seconds=approval_timeout_seconds,
             # Late-binding, like the other controllers' app callables: tests
             # patch `_refresh_status` after the app is constructed.
             refresh_status=lambda: self._refresh_status(),
@@ -834,6 +841,7 @@ class KorvidApp(App[None]):
             audit=lambda: self._audit,
             pod_resize_supported=lambda: self._pod_resize_supported,
             provider_hint=lambda: self._provider_hint,
+            approval_timeout_seconds=approval_timeout_seconds,
             # Late-binding, like the other controllers' app callables: tests
             # patch `_refresh_status` after the app is constructed.
             refresh_status=lambda: self._refresh_status(),

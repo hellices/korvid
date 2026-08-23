@@ -199,6 +199,7 @@ class ProposalController(AgentProposals):
         builder: Callable[[], WriteOpBuilder],
         config: Callable[[], KorvidConfig],
         audit: Callable[[], AuditLog | None],
+        approval_timeout_seconds: float | None = None,
         #: Repaint the status bar's pending-proposal label; the bar itself
         #: belongs to the app's widget tree.
         refresh_status: Callable[[], None] = lambda: None,
@@ -214,6 +215,9 @@ class ProposalController(AgentProposals):
         self._builder = builder
         self._config = config
         self._audit = audit
+        self._approval_timeout = (
+            APPROVAL_TIMEOUT if approval_timeout_seconds is None else approval_timeout_seconds
+        )
         self._refresh_status = refresh_status
 
     # ------------------------------------------------------------------
@@ -593,7 +597,7 @@ class ProposalController(AgentProposals):
         )
         await self._ui.push_screen(screen, _done)
         try:
-            confirmed = await asyncio.wait_for(fut, timeout=APPROVAL_TIMEOUT)
+            confirmed = await asyncio.wait_for(fut, timeout=self._approval_timeout)
         except TimeoutError:
             self._screens.dismiss_if_current(screen)
             return "dismissed"

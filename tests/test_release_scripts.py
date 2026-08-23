@@ -5,10 +5,12 @@ of the release workflow, unit-tested so the YAML stays thin."""
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -497,10 +499,15 @@ def test_smoke_install_required_korvid_modules_follow_the_selected_variant() -> 
 
 def test_smoke_install_forbids_optional_feature_packages_outside_their_variant() -> None:
     """MCP 2 uses httpx2, so a plain MCP install must not leak agent/obs httpx."""
-    assert smoke_install.forbidden_modules("base") == {"httpx", "keyring", "mcp"}
-    assert smoke_install.forbidden_modules("agent") == {"mcp"}
-    assert smoke_install.forbidden_modules("mcp") == {"httpx", "keyring"}
-    assert smoke_install.forbidden_modules("all") == set()
+    assert smoke_install.forbidden_modules("base") == {
+        "httpx",
+        "keyring",
+        "korvid.evals",
+        "mcp",
+    }
+    assert smoke_install.forbidden_modules("agent") == {"korvid.evals", "mcp"}
+    assert smoke_install.forbidden_modules("mcp") == {"httpx", "keyring", "korvid.evals"}
+    assert smoke_install.forbidden_modules("all") == {"korvid.evals"}
 
 
 def test_smoke_install_variant_matrix_excludes_entra() -> None:
@@ -854,21 +861,228 @@ def _metadata_text(
     )
 
 
-def _fake_dist(tmp_path: Path, metadata_text: str) -> Path:
+def _fake_dist(
+    tmp_path: Path,
+    metadata_text: str,
+    *,
+    wheel_members: tuple[str | zipfile.ZipInfo, ...] = (),
+    sdist_members: tuple[str | tarfile.TarInfo, ...] = (),
+    include_wheel_package: bool = True,
+    include_sdist_project: bool = True,
+) -> Path:
     dist = tmp_path / "dist"
     dist.mkdir()
     with zipfile.ZipFile(dist / "korvid-1.2.3-py3-none-any.whl", "w") as wheel:
+        if include_wheel_package:
+            wheel.writestr("korvid/__init__.py", "")
         wheel.writestr("korvid-1.2.3.dist-info/METADATA", metadata_text)
+        for member in wheel_members:
+            wheel.writestr(member, "")
     pkg_info = tmp_path / "PKG-INFO"
     pkg_info.write_text(metadata_text)
     with tarfile.open(dist / "korvid-1.2.3.tar.gz", "w:gz") as sdist:
         sdist.add(pkg_info, arcname="korvid-1.2.3/PKG-INFO")
+        required = ("korvid-1.2.3/pyproject.toml",) if include_sdist_project else ()
+        for member in (*required, *sdist_members):
+            info = member if isinstance(member, tarfile.TarInfo) else tarfile.TarInfo(member)
+            payload = b"" if info.name != "korvid-1.2.3/pyproject.toml" else b"[build-system]\n"
+            if info.isfile():
+                info.size = len(payload)
+                sdist.addfile(info, io.BytesIO(payload))
+            else:
+                sdist.addfile(info)
     return dist
+
+
+@pytest.mark.parametrize(
+    ("wheel_members", "sdist_members", "include_wheel_package", "include_sdist_project"),
+    [
+        pytest.param(
+            ("vendor/korvid/__init__.py",),
+            (),
+            False,
+            True,
+            id="wheel-nested-decoy",
+        ),
+        pytest.param(
+            (),
+            ("korvid-1.2.3/docs/pyproject.toml",),
+            True,
+            False,
+            id="sdist-nested-decoy",
+        ),
+    ],
+)
+def test_artifacts_reject_nested_decoys_for_required_root_members(
+    tmp_path: Path,
+    wheel_members: tuple[str, ...],
+    sdist_members: tuple[str, ...],
+    include_wheel_package: bool,
+    include_sdist_project: bool,
+) -> None:
+    dist = _fake_dist(
+        tmp_path,
+        _metadata_text(),
+        wheel_members=wheel_members,
+        sdist_members=sdist_members,
+        include_wheel_package=include_wheel_package,
+        include_sdist_project=include_sdist_project,
+    )
+    with pytest.raises(ValueError, match="missing required production member"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+@pytest.mark.parametrize(
+    ("wheel_members", "sdist_members", "include_wheel_package", "include_sdist_project"),
+    [
+        pytest.param(
+            (r"korvid\__init__.py",),
+            (),
+            False,
+            True,
+            id="wheel",
+        ),
+        pytest.param(
+            (),
+            (r"korvid-1.2.3\pyproject.toml",),
+            True,
+            False,
+            id="sdist",
+        ),
+    ],
+)
+def test_artifacts_reject_backslash_separated_required_root_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wheel_members: tuple[str, ...],
+    sdist_members: tuple[str, ...],
+    include_wheel_package: bool,
+    include_sdist_project: bool,
+) -> None:
+    monkeypatch.setattr(os, "sep", "/")
+    dist = _fake_dist(
+        tmp_path,
+        _metadata_text(),
+        wheel_members=wheel_members,
+        sdist_members=sdist_members,
+        include_wheel_package=include_wheel_package,
+        include_sdist_project=include_sdist_project,
+    )
+    monkeypatch.setattr(os, "sep", "\\")
+
+    with pytest.raises(ValueError, match="missing required production member"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_wheel_member_scan_preserves_the_raw_archive_name_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wheel_path = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    raw_name = r"korvid\__init__.py"
+    monkeypatch.setattr(os, "sep", "/")
+    with zipfile.ZipFile(wheel_path, "w") as wheel:
+        wheel.writestr(raw_name, "")
+    monkeypatch.setattr(os, "sep", "\\")
+
+    members = check_artifacts._archive_members(wheel_path)
+
+    assert [member.name for member in members] == [raw_name]
+
+
+@pytest.mark.parametrize("member_type", ["directory", "symlink"])
+def test_wheel_required_member_must_be_a_regular_file(tmp_path: Path, member_type: str) -> None:
+    if member_type == "directory":
+        member = zipfile.ZipInfo("korvid/__init__.py/")
+    else:
+        member = zipfile.ZipInfo("korvid/__init__.py")
+        member.create_system = 3
+        member.external_attr = (stat.S_IFLNK | 0o777) << 16
+    dist = _fake_dist(
+        tmp_path,
+        _metadata_text(),
+        wheel_members=(member,),
+        include_wheel_package=False,
+    )
+
+    with pytest.raises(ValueError, match="missing required production member"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+@pytest.mark.parametrize("member_type", [tarfile.DIRTYPE, tarfile.SYMTYPE])
+def test_sdist_required_member_must_be_a_regular_file(tmp_path: Path, member_type: bytes) -> None:
+    member = tarfile.TarInfo("korvid-1.2.3/pyproject.toml")
+    member.type = member_type
+    if member.issym():
+        member.linkname = "korvid-1.2.3/PKG-INFO"
+    dist = _fake_dist(
+        tmp_path,
+        _metadata_text(),
+        sdist_members=(member,),
+        include_sdist_project=False,
+    )
+
+    with pytest.raises(ValueError, match="missing required production member"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
 def test_wheel_and_sdist_metadata_match_version_and_extras(tmp_path: Path) -> None:
     dist = _fake_dist(tmp_path, _metadata_text())
     assert check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("wheel_members", "sdist_members", "artifact_name"),
+    [
+        pytest.param(
+            ("korvid/evals/runner.py",),
+            (),
+            "korvid-1.2.3-py3-none-any.whl",
+            id="wheel",
+        ),
+        pytest.param(
+            (),
+            ("korvid-1.2.3/src/korvid/evals/runner.py",),
+            "korvid-1.2.3.tar.gz",
+            id="sdist",
+        ),
+        pytest.param(
+            (),
+            ("korvid-1.2.3/tests/evals/test_operation.py",),
+            "korvid-1.2.3.tar.gz",
+            id="sdist-tests-evals",
+        ),
+        pytest.param(
+            (r"korvid\evals\runner.py",),
+            (),
+            "korvid-1.2.3-py3-none-any.whl",
+            id="wheel-backslash",
+        ),
+        pytest.param(
+            (),
+            (r"korvid-1.2.3\src\korvid\evals\runner.py",),
+            "korvid-1.2.3.tar.gz",
+            id="sdist-backslash",
+        ),
+    ],
+)
+def test_artifacts_reject_the_evaluation_harness(
+    tmp_path: Path,
+    wheel_members: tuple[str, ...],
+    sdist_members: tuple[str, ...],
+    artifact_name: str,
+) -> None:
+    dist = _fake_dist(
+        tmp_path,
+        _metadata_text(),
+        wheel_members=wheel_members,
+        sdist_members=sdist_members,
+    )
+    with pytest.raises(
+        ValueError,
+        match=rf"{re.escape(artifact_name)}: contains development-only evaluation harness",
+    ):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
 def test_artifact_metadata_missing_an_extra_fails(tmp_path: Path) -> None:
