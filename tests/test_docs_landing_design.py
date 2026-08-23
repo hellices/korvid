@@ -944,26 +944,24 @@ def test_only_the_visible_scene_ships_an_eagerly_fetched_poster() -> None:
     assert 'data-poster="assets/scenes/mcp-poster.png"' in switcher
 
 
-def test_deferred_scene_posters_keep_a_local_no_javascript_image() -> None:
+def test_deferred_scene_posters_keep_a_local_lazy_fallback_image() -> None:
     """A visitor without JavaScript must still see each scene's real frame.
 
-    `<noscript>` content is parsed as text — never as DOM — while scripting
-    is enabled, so this fallback costs the enhanced rendering nothing and
-    cannot double-fetch a poster the controller will promote. With scripting
-    off all three panels render at once, so both fallbacks sit below the
-    fold and must defer their own bytes exactly like the mosaic captures do.
+    The fallback must be real DOM so it also covers a controller-load failure,
+    not only a browser with JavaScript disabled. Both images sit below the fold
+    and must defer their bytes exactly like the mosaic captures do.
     """
     switcher = _scene_switcher()
-    fallbacks = re.findall(r"<noscript>(.*?)</noscript>", switcher, re.DOTALL)
-    assert len(fallbacks) == 2, "exactly the two deferred scenes need a no-JavaScript poster image"
+    fallbacks = re.findall(r'<img class="scene-panel__fallback[^"]*"[^>]+>', switcher)
+    assert len(fallbacks) == 2, "exactly the two deferred scenes need a fallback poster image"
     assets = []
     for fallback in fallbacks:
-        match = re.fullmatch(r'\s*<img src="([^"]+)"[^>]*alt="[^"]+"[^>]*>\s*', fallback)
+        match = re.search(r'src="([^"]+)"[^>]*alt="[^"]+"', fallback)
         assert match is not None, f"the fallback must be one described local image: {fallback!r}"
         source = match.group(1)
         assert source.startswith("assets/"), "no-JS fallbacks must stay local, never remote"
         assert 'loading="lazy"' in fallback, (
-            "a no-JavaScript fallback poster renders below the fold, so it must "
+            "a fallback poster renders below the fold, so it must "
             f"defer its own bytes like every other below-fold capture: {fallback!r}"
         )
         assets.append(source)
@@ -973,9 +971,24 @@ def test_deferred_scene_posters_keep_a_local_no_javascript_image() -> None:
     ]
 
 
+def test_deferred_scenes_keep_media_when_the_controller_never_runs() -> None:
+    """Always-parsed fallbacks must cover no-JS and controller-load failure."""
+    switcher = _scene_switcher()
+    assert "<noscript>" not in switcher
+    fallbacks = re.findall(r'<img class="scene-panel__fallback[^"]*"[^>]+>', switcher)
+    assert len(fallbacks) == 2
+    assert all('loading="lazy"' in fallback for fallback in fallbacks)
+
+    css = _css()
+    hidden_video = ".md-typeset .scene-panel video[data-poster] {"
+    restored_video = ".md-typeset .scene-panel video:not([data-poster]) + .scene-panel__fallback {"
+    assert "display: none" in _rule(css, hidden_video)
+    assert "display: none" in _rule(css, restored_video)
+
+
 def test_no_javascript_fallback_replaces_deferred_videos_with_posters() -> None:
     """No-JS rendering must show one media surface per deferred scene."""
-    selector = ".md-typeset .scene-switcher:not([data-enhanced]) .scene-panel video[data-poster] {"
+    selector = ".md-typeset .scene-panel video[data-poster] {"
     for label, source in (("stylesheet", _css()), ("plan", _plan())):
         assert selector in source, f"{label} must target deferred unenhanced videos"
         assert "display: none" in _rule(source, selector)
@@ -1253,7 +1266,7 @@ def test_no_landing_media_declares_a_box_its_asset_cannot_fill() -> None:
             assert "mcp-media" not in image, f"a 16:9 capture needs no override: {image}"
             continue
         assert (width, height) == (1280, 710), f"unexpected capture geometry: {image}"
-        assert 'class="mcp-media"' in image, (
+        assert re.search(r'class="[^"]*\bmcp-media\b[^"]*"', image), (
             f"a capture that is not 16:9 must reserve its own ratio: {image}"
         )
         assert f"aspect-ratio: {width} / {height}" in _rule(css, "video.mcp-media"), (
@@ -1448,10 +1461,10 @@ def test_agent_scene_describes_the_scripted_walkthrough_it_actually_captured() -
     described = [
         re.search(r'aria-label="([^"]+)"', scene),
         re.search(r"<video[^>]*>([^<]+)</video>", scene),
-        re.search(r"<noscript><img[^>]*alt=\"([^\"]+)\"", scene),
+        re.search(r'<img class="scene-panel__fallback[^"]*"[^>]*alt="([^"]+)"', scene),
     ]
     assert all(part is not None for part in described), (
-        "the scene keeps an aria-label, an in-video fallback, and a noscript image"
+        "the scene keeps an aria-label, an in-video fallback, and a fallback image"
     )
     for part in described:
         assert part is not None  # narrowed above; keeps mypy and the reader honest
@@ -1822,17 +1835,17 @@ def test_visual_storytelling_plan_scene_switcher_markup_matches_the_shipped_sour
 
     for poster in ("agent-poster.png", "mcp-poster.png"):
         shipped = re.search(
-            rf"<noscript><img[^>]*{re.escape(poster)}[^>]*></noscript>",
+            rf'<img class="scene-panel__fallback[^"]*"[^>]*{re.escape(poster)}[^>]*>',
             shipped_switcher,
         )
         assert shipped is not None
         planned = re.search(
-            rf"<noscript><img[^>]*{re.escape(poster)}[^>]*></noscript>",
+            rf'<img class="scene-panel__fallback[^"]*"[^>]*{re.escape(poster)}[^>]*>',
             plan_markup,
         )
-        assert planned is not None, f"the plan must keep the {poster} noscript poster snippet"
+        assert planned is not None, f"the plan must keep the {poster} fallback poster snippet"
         assert 'loading="lazy"' in planned.group(0), (
-            f"the plan's deferred {poster} noscript poster must stay lazy so the "
+            f"the plan's deferred {poster} fallback poster must stay lazy so the "
             "fallback matches the shipped source"
         )
         assert _compact(planned.group(0)) == _compact(shipped.group(0))
