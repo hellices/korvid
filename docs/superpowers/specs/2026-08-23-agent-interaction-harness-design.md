@@ -544,24 +544,30 @@ For air-gapped use:
 
 ## Framework Decision
 
-Pydantic AI is the first v2 engine candidate because the product has one
-streaming tool agent and can benefit from typed dependencies and generic
-model/tool-loop ownership.
+Agent v2 uses a clean native engine against `AgentEngine` and
+`RequestGateway`. Pydantic AI was evaluated and rejected for this replacement:
 
-A thin vertical slice must prove:
+- its public `Model` and `WrapperModel` hooks receive typed `ModelMessage` and
+  `ToolDefinition` values before provider-specific serialization; there is no
+  stable hook over the exact wire-shaped payload after serialization and before
+  transmission;
+- preserving `OutboundPolicy` and the exact `OutboundSnapshot` would therefore
+  require reimplementing provider serialization and streaming inside a custom
+  Pydantic AI model, bypassing the framework model implementation;
+- its interruption repair occurs inside its run lifecycle or on the next run,
+  while korvid must repair history immediately after external task
+  cancellation and before accepting another turn;
+- its agent loop does not expose korvid's per-iteration excess-tool-call
+  filtering contract; and
+- `pydantic-ai-slim` would add Pydantic, AnyIO, Griffe, and related machinery to
+  the optional agent extra without replacing korvid-owned request, history,
+  tool, evidence, or cancellation logic.
 
-- one text turn and one read-tool turn through `RequestGateway`;
-- typed event translation;
-- exact outbound snapshot parity;
-- cancellation without unmatched tool messages;
-- optional-import isolation;
-- local Ollama-compatible operation without cloud services;
-- no access to raw UI, Kubernetes, credentials, or write adapters.
-
-If the framework fails those constraints or retains most loop mechanics in
-korvid adapters, implement a small native v2 engine against the same contracts.
-That engine is a clean implementation of the harness, not a rename or gradual
-decomposition of `AgentRuntime`.
+The native engine retains OpenAI-shaped messages behind the existing provider
+ABC, so `RequestGateway` can sanitize and record the exact values passed to
+`LLMProvider.complete()`. It implements only the model/tool loop, streaming
+translation, history budgets, usage accounting, and interruption mechanics
+required by the harness. There is no new framework dependency.
 
 LangGraph remains out of scope until the product needs durable cross-process
 resume, explicit branching workflows, joined parallel branches, or multiple
@@ -728,10 +734,11 @@ temporary adapters, opt-in flags, or migration-only backend selection remain.
    - Move all model-facing context and prompt construction into the harness.
    - Convert existing low-model prompt work into versioned eval cases.
 
-3. **Engine vertical slice**
-   - Compare Pydantic AI and a native v2 slice through the same gateway and
+3. **Native engine foundation**
+   - Record the Pydantic AI rejection and native-engine decision in the agent
+     decision log.
+   - Implement the clean native engine through the gateway and backend
      contracts.
-   - Decide and document the engine before full implementation.
 
 4. **Agent v2 session**
    - Implement the selected engine, tool harness, evidence, cancellation,
