@@ -30,6 +30,12 @@ AGENT_TAPE = DEMO_DIR / "agent.tape"
 AGENT_PAGE = DOCS / "agent.md"
 DEMO_HARNESS = DEMO_DIR / "demo.py"
 VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
+_MARKDOWN_FENCE = re.compile(
+    r"^(?P<fence>`{3,}|~{3,}).*?^(?P=fence)",
+    re.DOTALL | re.MULTILINE,
+)
+_MARKDOWN_INLINE_CODE = re.compile(r"(?P<ticks>`+)[^\n]*?(?P=ticks)")
+_EXCLUDED_DOC_PREFIXES = ("overrides/", "dev/plans/", "superpowers/")
 
 #: Every tape that starts the TUI through `uv run` before it records.
 TUI_TAPES = ("demo.tape", "agent.tape", "relationships.tape")
@@ -369,6 +375,11 @@ def _band_contrast_pixels(
             if max(abs(value - 0x11) for value in row[base : base + 3]) > minimum_deviation:
                 count += 1
     return count
+
+
+def _without_markdown_code(text: str) -> str:
+    """Remove fenced and inline code before scanning visitor-facing prose."""
+    return _MARKDOWN_INLINE_CODE.sub("", _MARKDOWN_FENCE.sub("", text))
 
 
 def _png_chunk(kind: bytes, body: bytes) -> bytes:
@@ -875,16 +886,25 @@ def test_mcp_capture_instructions_distinguish_public_landing_media_from_the_serv
     mcp = INSTRUCTIONS.read_text(encoding="utf-8").split("## MCP follow", 1)[1]
     normalized_mcp = " ".join(mcp.split())
     landing = LANDING.read_text(encoding="utf-8")
-    public_pages = [
-        path
-        for path in DOCS.rglob("*.md")
-        if "demo" not in path.parts and "superpowers" not in path.parts
-    ]
+    public_pages = []
+    for path in DOCS.rglob("*.md"):
+        relative = path.relative_to(DOCS).as_posix()
+        if not relative.startswith(_EXCLUDED_DOC_PREFIXES):
+            public_pages.append(path)
+    published_labels = {path.relative_to(ROOT).as_posix() for path in public_pages}
+    assert "docs/demo/visual-storytelling.md" in published_labels
     embeds = [
         str(path.relative_to(ROOT))
         for path in public_pages
-        if "mcp-follow-demo.gif" in path.read_text(encoding="utf-8")
+        if "mcp-follow-demo.gif" in _without_markdown_code(path.read_text(encoding="utf-8"))
     ]
+
+    probe = (
+        "`assets/mcp-follow-demo.gif`\n"
+        "```text\nassets/mcp-follow-demo.gif\n```\n"
+        "![visitor-facing raw capture](assets/mcp-follow-demo.gif)"
+    )
+    assert _without_markdown_code(probe).count("mcp-follow-demo.gif") == 1
 
     assert (
         "No official-site page embeds or uses the unredacted GIF as visitor-facing "
