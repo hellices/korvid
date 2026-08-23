@@ -128,6 +128,19 @@ def test_core_concept_pages_each_have_their_selected_visual_evidence() -> None:
             assert marker in source, f"{relative} must contain {marker!r}"
 
 
+def test_ops_safety_diagram_shows_only_universal_write_gates() -> None:
+    """Optional previews must not appear as a prerequisite for every write."""
+    source = (ROOT / "docs" / "ops.md").read_text(encoding="utf-8")
+    diagram = source.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert "Validate + preview" not in diagram
+    for driver in ("DIRECT", "AGENT", "MCP"):
+        assert re.search(rf'{driver}\["[^"]+"\]\s*-->\s*CONFIRM', diagram)
+    assert 'CONFIRM["Fresh user keystroke"]' in diagram
+    assert 'CONFIRM --> AUDIT["Audit append"]' in diagram
+    assert 'AUDIT -->|success| EXECUTE["Execute mutation"]' in diagram
+    assert 'AUDIT -->|failure| BLOCK["Action blocked"]' in diagram
+
+
 def test_tui_annotation_pins_match_the_poster_layout() -> None:
     """`tui.md`'s pins must land on what their captions claim.
 

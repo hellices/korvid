@@ -630,6 +630,10 @@ Sleep 2s
 Type "g"
 Sleep 5s
 Hide
+# RelationshipScreen consumes the first q; wait for the modal to dismiss
+# before sending the app-level quit key.
+Type "q"
+Sleep 1s
 Type "q"
 ```
 

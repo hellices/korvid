@@ -1037,6 +1037,19 @@ def test_agent_tape_closes_the_focused_panel_before_quitting() -> None:
     )
 
 
+def test_relationship_tape_closes_the_modal_before_quitting() -> None:
+    """The first `q` closes RelationshipScreen; a second must quit the app."""
+    commands = [
+        line.strip()
+        for line in (DEMO_DIR / "relationships.tape").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert commands[-3:] == ['Type "q"', "Sleep 1s", 'Type "q"'], (
+        "RelationshipScreen consumes the first q; wait for dismissal before "
+        "sending the app-level quit key"
+    )
+
+
 def test_demo_harness_never_synthesizes_the_agent_prompt_submission() -> None:
     """The documentation-only harness may auto-open/focus the AgentPanel, but
     it must drive the prompt through real keyboard input recorded by VHS —

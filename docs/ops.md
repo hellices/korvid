@@ -19,10 +19,9 @@ initiated (keybinding, helm/OLM wizard, or [agent](agent.md) request):
 
 ```mermaid
 flowchart LR
-    DIRECT["Direct action"] --> PREVIEW["Validate + preview"]
-    AGENT["Agent proposal"] --> PREVIEW
-    MCP["Opt-in MCP proposal"] --> PREVIEW
-    PREVIEW --> CONFIRM["Fresh user keystroke"]
+    DIRECT["Direct action"] --> CONFIRM["Fresh user keystroke"]
+    AGENT["Agent proposal"] --> CONFIRM
+    MCP["Opt-in MCP proposal"] --> CONFIRM
     CONFIRM --> AUDIT["Audit append"]
     AUDIT -->|success| EXECUTE["Execute mutation"]
     AUDIT -->|failure| BLOCK["Action blocked"]
