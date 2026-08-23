@@ -16,10 +16,8 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from korvid.agent.engine import AgentEngine, AgentTurnRequest
-from korvid.agent.native_engine import NativeAgentEngine
-
 from korvid.agent.conversation import ConversationState
+from korvid.agent.engine import AgentEngine, AgentTurnRequest
 from korvid.agent.events import AgentEvent
 from korvid.agent.evidence import EvidenceLedger
 from korvid.agent.interaction import (
@@ -37,6 +35,7 @@ from korvid.agent.model_policy import (
     ModelTier,
     ResolvedAgentPolicy,
 )
+from korvid.agent.native_engine import NativeAgentEngine
 from korvid.agent.outbound import OutboundPolicy, request_char_budget
 from korvid.agent.prompt_harness import ComposedPrompt
 from korvid.agent.provider import REQUEST_SENT, LLMProvider

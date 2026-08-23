@@ -167,6 +167,28 @@ class ToolHarness:
             return await self._run_ui(call_id, definition, arguments)
         return await self._run_recorded(call_id, definition, arguments)
 
+    def reject(self, call_id: str, name: str, reason: str) -> ToolExecution:
+        """Answer a call the engine refuses to dispatch, touching no port.
+
+        The engine filters calls the protocol cannot use — unusable
+        arguments above all — and the model still needs one result per
+        stored call to correct itself from. Routing those refusals through
+        here keeps a single result-error format and a single bound: a
+        rejection is *not* a dispatch, so it spends no per-iteration
+        budget, mints no evidence, and never reaches the executor or the
+        bridge.
+
+        Args:
+            call_id: The provider's id for the call being refused.
+            name: The tool name exactly as the model called it.
+            reason: Why the call cannot run, in the model's terms.
+
+        Returns:
+            A bounded error execution, shaped exactly like every other
+            deterministic refusal this harness produces.
+        """
+        return self._error(call_id, name, reason)
+
     def _over_budget(self) -> bool:
         return self._max_calls is not None and self._calls_this_iteration >= self._max_calls
 

@@ -152,6 +152,11 @@ class _LiveIteration:
     #: Set once the assistant message is appended: the streamed output is
     #: now durable history, so an interrupt must not also mark it partial.
     settled: bool = False
+    #: Characters of tool calls this iteration streamed. Kept apart from
+    #: `text`: they are generated output and must be charged, but they are
+    #: not the assistant's partial answer and must never be replayed as
+    #: one in the interrupted-turn note.
+    tool_call_chars: int = 0
 
 
 class ConversationState:
@@ -223,6 +228,11 @@ class ConversationState:
             if message.get("role") == "tool"
         }
         return bool(call_ids ^ result_ids)
+
+    @property
+    def history_chars(self) -> int:
+        """The size retained history is measured at against the budget."""
+        return self._history_chars()
 
     # -- turn lifecycle ----------------------------------------------------
 
@@ -392,6 +402,38 @@ class ConversationState:
         live.transmitted = True
         live.text += text
 
+    def mark_transmitted(self) -> None:
+        """Record that this iteration's request reached the provider.
+
+        Handoff proof, not stream content, is what makes a request cost:
+        the gateway calls this the moment the provider produced anything at
+        all, so a request that ran and then died is still charged its
+        prompt while one that never left is charged nothing.
+
+        Raises:
+            RuntimeError: No iteration is open.
+        """
+        self._require_iteration().transmitted = True
+
+    def record_stream_tool_call(self, name: str, arguments: str) -> None:
+        """Record a streamed tool call as generated output.
+
+        Counted apart from the assistant's text: a tool-only iteration
+        generated real output even though nothing readable streamed, and an
+        interruption must charge for it — but the call is not an answer, so
+        it must never leak into the partial note a cancelled turn stores.
+
+        Args:
+            name: The tool name the provider streamed.
+            arguments: The raw argument text the provider streamed.
+
+        Raises:
+            RuntimeError: No iteration is open.
+        """
+        live = self._require_iteration()
+        live.transmitted = True
+        live.tool_call_chars += len(name) + len(arguments)
+
     def commit_usage(self, input_tokens: int, output_tokens: int) -> None:
         """Record provider-reported usage for the open iteration.
 
@@ -466,6 +508,57 @@ class ConversationState:
         self._remember(message, records, error=error)
 
     # -- recovery and interruption ----------------------------------------
+
+    def abandon_iteration(self) -> None:
+        """Discard the open iteration, keeping the cost it really incurred.
+
+        For a request that failed mid-stream: everything the iteration
+        appended goes — an assistant message whose tool calls can never be
+        answered would invalidate every later request — while completed
+        iterations of the same turn stay. A transmitted request is charged
+        (reported usage exactly, otherwise the prompt estimate plus what
+        streamed); one that never reached the provider is charged nothing.
+
+        Raises:
+            RuntimeError: No iteration is open.
+        """
+        live = self._require_iteration()
+        self._truncate(live.base_index)
+        in_tok, out_tok, estimated = self._in_flight_usage(live)
+        self._turn_in += in_tok
+        self._turn_out += out_tok
+        self._turn_estimated = self._turn_estimated or estimated
+        live.settled = True
+        self._live = None
+
+    def rollback_turn(self) -> tuple[int, int, bool]:
+        """Drop the whole active turn, committing the cost it really paid.
+
+        For a turn that produced something the boundary will not send: the
+        history it built is removed down to (and including) the user
+        message that started it, so no unanswerable tool call and no
+        unsendable result can survive into the next request, while the
+        tokens already spent are committed to the totals rather than
+        silently forgiven.
+
+        Returns:
+            The rolled-back turn's (input, output, estimated) usage.
+
+        Raises:
+            RuntimeError: No turn is active.
+        """
+        if not self._turn_active:
+            raise RuntimeError("no active turn to roll back")
+        in_flight_in, in_flight_out, estimated = self._in_flight_usage(self._live)
+        turn_in = self._turn_in + in_flight_in
+        turn_out = self._turn_out + in_flight_out
+        estimated = self._turn_estimated or estimated
+        self._truncate(self._turn_base)
+        self._total_in += turn_in
+        self._total_out += turn_out
+        self._estimated = self._estimated or estimated
+        self._end_turn()
+        return (turn_in, turn_out, estimated)
 
     def drop_oldest_turn(self) -> int:
         """Drop the oldest retained turn; return how many messages went.
@@ -552,8 +645,9 @@ class ConversationState:
             return (live.in_tok, live.out_tok, self._turn_estimated)
         if live.transmitted:
             # The request was acknowledged, so its prompt was real cost;
-            # the streamed text is the only generated output we can see.
-            return (live.prompt_estimate, len(live.text) // 4, True)
+            # the streamed text and calls are the only generated output we
+            # can see.
+            return (live.prompt_estimate, (len(live.text) + live.tool_call_chars) // 4, True)
         return (0, 0, self._turn_estimated)
 
     def _settle_iteration(

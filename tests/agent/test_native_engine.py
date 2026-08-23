@@ -23,7 +23,6 @@ import json
 from typing import Any
 
 import pytest
-from korvid.agent.native_engine import NativeAgentEngine
 
 from korvid.agent.conversation import INTERRUPT_MARKER
 from korvid.agent.events import (
@@ -35,6 +34,7 @@ from korvid.agent.events import (
     TurnComplete,
 )
 from korvid.agent.interaction import Navigate
+from korvid.agent.native_engine import NativeAgentEngine
 from korvid.agent.request_gateway import RequestGateway
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.tools.executor import ToolResultBlocked
@@ -57,6 +57,9 @@ from .engine_fakes import (
 LOGS_ARGS = '{"pod":"api-0","namespace":"prod"}'
 DELETE_ARGS = '{"kind":"pod","name":"api-0","namespace":"prod"}'
 SECRET_LOG = "starting up with password: hunter2-in-the-logs"
+#: A document the structured pass cannot parse — and that quotes a secret,
+#: so a refusal that echoed its input would leak one.
+SECRET_BLOB = "an unstructured dump carrying hunter2-in-the-logs"
 
 
 class CountingGateway(RequestGateway):
@@ -174,7 +177,7 @@ async def test_a_result_the_boundary_cannot_sanitize_stops_the_turn() -> None:
 
 
 async def test_a_blocked_turn_never_shows_the_document_it_refused() -> None:
-    execution = RecordingExecution({"get_resource": SECRET_LOG})
+    execution = RecordingExecution({"get_resource": SECRET_BLOB})
     harness = build_harness(
         [[tool_call("c1", "get_resource", '{"kind":"secret","name":"api"}'), DONE], text_turn()],
         policy=make_policy(tool_names=("get_resource",)),

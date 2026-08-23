@@ -277,3 +277,70 @@ Patterns that have already cost this project time:
   stated positively, keep forbidden keywords specific enough that no correct
   sentence starts with them, and validate against several real phrasings
   before trusting the list.
+
+---
+
+## 7. The agent loop stays native; no agent framework is adopted
+
+**Decision.** korvid keeps its own agentic loop. `AgentEngine` /
+`NativeAgentEngine` (2026-07, #316) drive the provider round-trip directly on
+top of korvid's own `ConversationState`, `RequestGateway` and `ToolHarness`.
+Pydantic AI was the candidate evaluated — it is typed, streaming-first and
+would have been the least-bad fit — and it was rejected. **No agent-framework
+dependency was added.**
+
+**What was evaluated.** Pydantic AI's only supported interception seams for a
+host that wants to keep its own loop are the model layer:
+
+- [`pydantic_ai.models.Model`](https://ai.pydantic.dev/api/models/base/#pydantic_ai.models.Model)
+- [`Model.request_stream`](https://ai.pydantic.dev/api/models/base/#pydantic_ai.models.Model.request_stream)
+- [`pydantic_ai.models.wrapper.WrapperModel`](https://ai.pydantic.dev/api/models/wrapper/#pydantic_ai.models.wrapper.WrapperModel)
+
+**Why they do not fit.** Three blockers, each one load-bearing for a security
+or correctness invariant korvid already ships:
+
+1. **No hook at the byte korvid must police.** `request_stream` is handed
+   `messages: list[ModelMessage]` — framework objects, *before* the concrete
+   model serializes them into the provider's wire shape. korvid's
+   `OutboundPolicy` runs on the serialized request: it counts the exact
+   characters that will leave the process, enforces the redaction and
+   tool-schema rules on that payload, and raises `OutboundRequestTooLarge` /
+   `OutboundPolicyError` so the engine can drop the oldest completed turn and
+   retry. A `WrapperModel` can only inspect the pre-serialization objects; the
+   provider-specific mapping happens inside each concrete `Model` and is not
+   public API. Policing a copy that is not the thing transmitted is exactly
+   the failure mode the gateway exists to prevent.
+2. **External interruption cannot be repaired in the framework's history.**
+   korvid's hard interrupt is task cancellation from the UI, which can land
+   mid-stream with a tool call already announced and no result. `ConversationState`
+   then repairs the durable history — drop the unmatched call, append the
+   interrupt marker, keep the usage estimate — and the *same* conversation
+   continues. Pydantic AI owns message history inside its run graph and
+   rebuilds it from completed `ModelResponse` parts; a cancelled
+   `request_stream` leaves nothing the framework will accept as a repaired
+   turn, so korvid would keep the authoritative history anyway and hand the
+   framework a translation of it. Two histories, one of them the one actually
+   audited, is a worse position than none.
+3. **No per-iteration interception of excess tool calls.** korvid's policy is
+   one tool call at a time: keep the allowed prefix, emit
+   `ToolCallStarted`/`ToolCallFinished(ok=False)` for every discarded call so
+   the transcript stays honest, and append a fixed notice to the last kept
+   result. Pydantic AI executes the tool calls of a response inside its graph
+   node, concurrently by default, below the point a `WrapperModel` can see;
+   there is no supported seam to truncate the call list, report the discards
+   as UI events and edit the last kept tool result before the next request.
+   Working around it means re-implementing the tool node — which is the loop
+   the framework was supposed to provide.
+
+**Cost accepted.** korvid maintains its own loop: streaming parse, tool
+dispatch, budget retry, cancellation. That is roughly 500 lines
+(`native_engine.py`) over components korvid needs regardless, and it is fully
+covered by contract tests written against the ABC rather than the
+implementation.
+
+**What would change this.** A framework that exposes (a) a hook on the
+serialized provider request, (b) an injectable tool-dispatch step per
+iteration, and (c) a documented way to hand back an externally repaired
+history. If Pydantic AI grows all three, re-run this evaluation — the
+`AgentEngine` ABC exists so a second engine can be written without touching
+the session, the UI or the tools.
