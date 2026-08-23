@@ -159,7 +159,7 @@ def build_profile(
     slots = overrides or PromptOverrides()
     if name == "full":
         tools = agent_tool_schemas(
-            "full_agent",
+            "high_agent",
             readonly=readonly,
             resize_supported=resize_supported,
             observability_backends=observability_backends,
@@ -177,7 +177,7 @@ def build_profile(
         )
     if name == "small":
         tools = agent_tool_schemas(
-            "small_agent",
+            "low_agent",
             readonly=readonly,
             resize_supported=resize_supported,
             observability_backends=observability_backends,

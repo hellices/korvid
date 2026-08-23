@@ -1009,7 +1009,7 @@ def test_diagnose_service_is_a_shared_structured_read_tool() -> None:
     definition = TOOLS_BY_NAME["diagnose_service"]
     assert definition.effect == "cluster_read"
     assert definition.result_format == "structured_yaml"
-    assert definition.surfaces == frozenset({"full_agent", "small_agent", "mcp"})
+    assert definition.surfaces == frozenset({"high_agent", "low_agent", "mcp"})
 
 
 @pytest.mark.asyncio
@@ -1277,7 +1277,7 @@ def test_diagnose_pvc_is_shared_structured_read() -> None:
     definition = TOOLS_BY_NAME["diagnose_pvc"]
     assert definition.effect == "cluster_read"
     assert definition.result_format == "structured_yaml"
-    assert definition.surfaces == frozenset({"full_agent", "small_agent", "mcp"})
+    assert definition.surfaces == frozenset({"high_agent", "low_agent", "mcp"})
 
 
 @pytest.mark.asyncio

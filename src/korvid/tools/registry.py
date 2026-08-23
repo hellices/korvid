@@ -28,7 +28,7 @@ Effect = Literal["cluster_read", "external_read", "ui_only", "cluster_write", "w
 Approval = Literal["none", "user_confirmation"]
 Capability = Literal["none", "pod_resize", "metrics_backend", "logs_backend"]
 ResultFormat = Literal["structured_yaml", "untrusted_text"]
-Surface = Literal["full_agent", "small_agent", "mcp", "mcp_proposal"]
+Surface = Literal["high_agent", "low_agent", "mcp", "mcp_proposal"]
 
 _EFFECTS = ("cluster_read", "external_read", "ui_only", "cluster_write", "write_proposal")
 _APPROVALS = ("none", "user_confirmation")
@@ -43,7 +43,7 @@ _BACKEND_CAPABILITIES: dict[str, str] = {
     "logs_backend": "logs",
 }
 _RESULT_FORMATS = ("structured_yaml", "untrusted_text")
-_SURFACES = ("full_agent", "small_agent", "mcp", "mcp_proposal")
+_SURFACES = ("high_agent", "low_agent", "mcp", "mcp_proposal")
 
 #: The only bridge method allowed to receive a cluster write: the
 #: user-confirmation approval gate (design doc security invariant).
@@ -325,7 +325,7 @@ def agent_tool_schemas(
     """Derive one agent surface's schema list, in registry order.
 
     Args:
-        surface: `full_agent` or `small_agent`.
+        surface: `high_agent` or `low_agent`.
         readonly: when True, write tools are omitted entirely — the model
             is never even told they exist.
         resize_supported: whether discovery found pods/resize; the resize
@@ -338,7 +338,7 @@ def agent_tool_schemas(
     Raises:
         ValueError: for a surface other than the two agent surfaces.
     """
-    if surface not in ("full_agent", "small_agent"):
+    if surface not in ("high_agent", "low_agent"):
         raise ValueError(f"unknown surface {surface!r}")
     schemas: list[dict[str, Any]] = []
     for d in TOOL_DEFS:
@@ -390,12 +390,12 @@ def mcp_tool_schemas(
     ]
 
 
-_ALL_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent", "mcp"})
-_FULL_AND_MCP: frozenset[Surface] = frozenset({"full_agent", "mcp"})
+_ALL_SURFACES: frozenset[Surface] = frozenset({"high_agent", "low_agent", "mcp"})
+_FULL_AND_MCP: frozenset[Surface] = frozenset({"high_agent", "mcp"})
 #: Surfaces an embedded-agent profile can offer. Public because callers
 #: outside this module need to tell "not armed on this cluster" apart from
 #: "no agent profile can ever offer this" (e.g. the MCP-only proposal tools).
-AGENT_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent"})
+AGENT_SURFACES: frozenset[Surface] = frozenset({"high_agent", "low_agent"})
 _AGENT_SURFACES = AGENT_SURFACES
 
 

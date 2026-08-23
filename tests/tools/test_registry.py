@@ -111,19 +111,19 @@ def test_every_tool_declares_an_outbound_result_format() -> None:
 def test_full_agent_surface_matches_pre_registry_order() -> None:
     from korvid.tools.executor import READ_TOOLS, RESIZE_TOOLS, UI_TOOLS, WRITE_TOOLS
 
-    schemas = agent_tool_schemas("full_agent", readonly=False, resize_supported=True)
+    schemas = agent_tool_schemas("high_agent", readonly=False, resize_supported=True)
     assert schemas == READ_TOOLS + UI_TOOLS + WRITE_TOOLS + RESIZE_TOOLS
 
 
 def test_full_agent_surface_readonly_omits_writes() -> None:
     from korvid.tools.executor import READ_TOOLS, UI_TOOLS
 
-    schemas = agent_tool_schemas("full_agent", readonly=True, resize_supported=True)
+    schemas = agent_tool_schemas("high_agent", readonly=True, resize_supported=True)
     assert schemas == READ_TOOLS + UI_TOOLS
 
 
 def test_full_agent_surface_gates_resize_on_capability() -> None:
-    schemas = agent_tool_schemas("full_agent", readonly=False, resize_supported=False)
+    schemas = agent_tool_schemas("high_agent", readonly=False, resize_supported=False)
     assert "resize_pod" not in _names(schemas)
     assert "delete_resource" in _names(schemas)
 
@@ -131,7 +131,7 @@ def test_full_agent_surface_gates_resize_on_capability() -> None:
 def test_small_agent_surface_offers_two_ui_tools() -> None:
     from korvid.tools.executor import READ_TOOLS
 
-    schemas = agent_tool_schemas("small_agent", readonly=True, resize_supported=False)
+    schemas = agent_tool_schemas("low_agent", readonly=True, resize_supported=False)
     assert _names(schemas) == [*_names(READ_TOOLS), "open_logs", "open_describe"]
 
 
@@ -155,7 +155,7 @@ def _tool(name: str, **overrides: Any) -> ToolDef:
         "schema": {"type": "function", "function": {"name": name, "parameters": {}}},
         "effect": "cluster_read",
         "dispatch": "_handler",
-        "surfaces": frozenset({"full_agent"}),
+        "surfaces": frozenset({"high_agent"}),
         "result_format": "untrusted_text",
     }
     fields.update(overrides)
@@ -208,7 +208,7 @@ def test_validate_rejects_mcp_exposed_write() -> None:
         effect="cluster_write",
         approval="user_confirmation",
         write_action="delete",
-        surfaces=frozenset({"full_agent", "mcp"}),
+        surfaces=frozenset({"high_agent", "mcp"}),
     )
     with pytest.raises(ValueError, match="mcp"):
         validate_tool_defs([bad])
@@ -281,12 +281,12 @@ _WRITE_ORDER = ["delete_resource", "scale_resource", "rollout_restart"]
 def test_full_agent_surface_matches_golden_order() -> None:
     """Byte-identical-order criterion pinned against literals, not against
     lists derived from the same registry (which would move together)."""
-    schemas = agent_tool_schemas("full_agent", readonly=False, resize_supported=True)
+    schemas = agent_tool_schemas("high_agent", readonly=False, resize_supported=True)
     assert _names(schemas) == _READ_ORDER + _UI_ORDER + _WRITE_ORDER + ["resize_pod"]
 
 
 def test_small_agent_surface_matches_golden_order() -> None:
-    schemas = agent_tool_schemas("small_agent", readonly=True, resize_supported=False)
+    schemas = agent_tool_schemas("low_agent", readonly=True, resize_supported=False)
     assert _names(schemas) == [*_READ_ORDER, "open_logs", "open_describe"]
 
 
@@ -321,7 +321,7 @@ def test_agent_surface_schemas_are_isolated_from_the_registry() -> None:
     """Providers are plugins: a provider mutating a schema it was handed
     must not corrupt the registry (the single source of tool metadata)."""
     exported = _first_schema(
-        agent_tool_schemas("full_agent", readonly=False, resize_supported=True)
+        agent_tool_schemas("high_agent", readonly=False, resize_supported=True)
     )
     name = exported["function"]["name"]
     canonical = next(d.schema for d in TOOL_DEFS if d.name == name)
@@ -332,9 +332,9 @@ def test_agent_surface_schemas_are_isolated_from_the_registry() -> None:
 
 
 def test_agent_surface_schemas_are_fresh_per_call() -> None:
-    first = _first_schema(agent_tool_schemas("full_agent", readonly=False, resize_supported=True))
+    first = _first_schema(agent_tool_schemas("high_agent", readonly=False, resize_supported=True))
     first["function"]["description"] = "tampered"
-    second = _first_schema(agent_tool_schemas("full_agent", readonly=False, resize_supported=True))
+    second = _first_schema(agent_tool_schemas("high_agent", readonly=False, resize_supported=True))
     assert second["function"]["description"] != "tampered"
 
 
@@ -406,7 +406,7 @@ def test_mcp_surface_offers_proposal_tools_only_when_enabled() -> None:
 
 
 def test_agent_surfaces_never_offer_proposal_tools() -> None:
-    for surface in ("full_agent", "small_agent"):
+    for surface in ("high_agent", "low_agent"):
         names = _names(agent_tool_schemas(surface, readonly=False, resize_supported=True))
         assert "propose_write" not in names
 
@@ -418,7 +418,7 @@ def test_validate_rejects_cluster_write_on_the_proposal_surface() -> None:
         approval="user_confirmation",
         write_action="delete",
         dispatch="agent_request_write",
-        surfaces=frozenset({"full_agent", "mcp_proposal"}),
+        surfaces=frozenset({"high_agent", "mcp_proposal"}),
     )
     with pytest.raises(ValueError, match="mcp"):
         validate_tool_defs([bad])
