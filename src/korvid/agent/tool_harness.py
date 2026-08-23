@@ -186,6 +186,19 @@ class ToolHarness:
         self._context_epoch = context_epoch
         self._evidence.start_turn()
 
+    def clear_evidence(self) -> None:
+        """Drop what the current surface minted, without claiming an epoch.
+
+        The retarget counterpart of `reset_evidence`. A citation read
+        against the cluster we just left must stop resolving *immediately*
+        — including for a screen still rendering the answer that cited it
+        — but the epoch that evidence belongs to is a property of the live
+        workspace, which only a starting turn reads. So this clears and
+        says nothing about the epoch; the next turn's `reset_evidence`
+        supplies the real one.
+        """
+        self._evidence.start_turn()
+
     async def execute(self, call_id: str, name: str, arguments: dict[str, Any]) -> ToolExecution:
         """Route one tool call to its port and return the sanitized outcome.
 

@@ -26,6 +26,11 @@ the outbound policy so anything it adds is sanitized and captured in the
 snapshot, and the provider is handed a payload reconstructed from the
 canonical snapshot — so no later mutation of the returned object can
 change what actually crosses the boundary.
+
+The boundary is replaceable between turns. `prepare_policy` derives the
+ceiling and the result formats a resolved policy's *own* surface needs and
+`install_policy` puts them in force, so a session retargeted onto a wider
+surface is not left bounded by the narrower one it was built for.
 """
 
 from __future__ import annotations
@@ -36,14 +41,17 @@ from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequen
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from korvid.agent.model_policy import ResolvedAgentPolicy
 from korvid.agent.outbound import (
     OutboundPolicy,
     OutboundSnapshot,
     PreparedOutbound,
     provider_prepared_messages,
+    request_char_budget,
 )
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.core.redaction import RedactionRecord
+from korvid.tools.registry import resolve_result_formats
 
 
 class RequestProvenance(Protocol):
@@ -126,6 +134,61 @@ class RequestGateway:
         previous real handoff on display.
         """
         return self._latest_outbound_payload
+
+    def prepare_policy(self, policy: ResolvedAgentPolicy) -> OutboundPolicy:
+        """Build the outbound boundary a policy's own tool surface needs.
+
+        Preparation only: nothing here touches this gateway, so a surface
+        that cannot be armed is refused while the boundary in force stays
+        exactly as it was. `install_policy` is the half that moves.
+
+        The ceiling is *derived* from the policy rather than carried over,
+        because the two things it is a safety net for both change with the
+        surface: the history budget the policy retains, and the schemas
+        that ride on every request. A gateway left on the previous
+        ceiling after a retarget onto a wider surface would drop the
+        operator's history to fit a limit no longer meant for it. A
+        deployment-specific ceiling configured at construction is
+        therefore replaced, not preserved — the composition root rebuilds
+        the session when it wants a different one.
+
+        Args:
+            policy: The resolved policy whose `tools` become the surface.
+
+        Returns:
+            The policy to hand `install_policy`.
+
+        Raises:
+            ValueError: A schema is unusable, a tool is offered twice, or
+                a result format cannot be resolved for one of them.
+        """
+        tools: list[dict[str, Any]] = [_thaw(schema) for schema in policy.tools]
+        result_formats = resolve_result_formats(tools)
+        try:
+            tools_chars = len(json.dumps(tools))
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"tool schemas cannot be serialized: {error}") from error
+        return OutboundPolicy(
+            max_request_chars=request_char_budget(
+                max_history_chars=policy.max_history_chars, tools_chars=tools_chars
+            ),
+            result_formats=result_formats,
+        )
+
+    def install_policy(self, policy: OutboundPolicy) -> None:
+        """Make `policy` the boundary every later request crosses.
+
+        Assignment only, and deliberately unable to fail: everything that
+        can refuse a surface already ran in `prepare_policy`, so a caller
+        swapping several components at once can install this one knowing
+        it cannot be the step that leaves the swap half-applied. Only
+        called between turns — the in-flight request of a live turn was
+        prepared against the boundary it started under.
+
+        Args:
+            policy: The prepared boundary from `prepare_policy`.
+        """
+        self._policy = policy
 
     def prepare(
         self,

@@ -25,8 +25,9 @@ The decisions this boundary makes, and why:
 - **The session hands over typed state and writes no model-facing prose.**
   When the Kubernetes context changes, `PromptHarness` — not this module —
   writes the handoff note, from the previous and current snapshots. The
-  session's only job is to remember which snapshot the *last started*
-  turn used, which is what makes the note appear exactly once.
+  session's only job is to remember which snapshot the last *delivered*
+  turn used, which is what makes the note appear exactly once: a turn that
+  never reached the provider leaves the note pending for the next one.
 - **`run_turn` is synchronous and returns a session-owned iterator.** A
   session that is closed, already running a turn, or still owing a
   finalization says so immediately, at the call, rather than at the first
@@ -35,13 +36,15 @@ The decisions this boundary makes, and why:
   iterator that is created and never driven wedges nothing.
 - **The session owns the engine iterator it starts.** It exhausts it or
   closes it — the engine contract requires a consumer that does, and this
-  is that consumer.
-- **Interrupt and close leave a conversation a later turn can start
-  from.** An advisory stop or a cancellation leaves `ConversationState`
-  mid-turn; the session records that a finalization is owed, and
-  `finalize_interrupt` (synchronous, one-shot) closes it. `aclose`
-  does the same for what it stopped, so a caller has nothing left to
-  finalize after it returns.
+  is that consumer — and closing it releases the provider stream
+  underneath, which closing a generator does not do by itself.
+- **Interruption, retarget and close are each one atomic operation.** An
+  advisory stop or a cancellation leaves `ConversationState` mid-turn; the
+  session records that a finalization is owed, and `finalize_interrupt`
+  (synchronous, one-shot) closes it. `retarget` validates everything
+  before it moves anything, then swaps policy, tool surface and outbound
+  boundary together. `aclose` runs once no matter how many callers ask
+  for it, and no caller returns before that close has finished.
 
 What this session deliberately does *not* own is provider and model
 replacement. `retarget` swaps policy and cluster facts on the live
@@ -140,6 +143,11 @@ class AgentSession(ABC):
     def retarget(self, policy: ResolvedAgentPolicy, cluster: ClusterFacts) -> None:
         """Install a new policy and cluster snapshot between turns.
 
+        All of the session or none of it: the composed prompt, the armed
+        tool surface and the request boundary that surface is sent across
+        move together, so no later turn is run against a mixture of the
+        two environments.
+
         Args:
             policy: The newly resolved policy for this environment.
             cluster: The cluster facts that go with it.
@@ -149,17 +157,19 @@ class AgentSession(ABC):
                 interrupted turn is awaiting finalization.
             SessionRetargetError: The policy changes something only a
                 rebuilt session can change.
-            ValueError: The policy is not composable or not executable.
-                Nothing is changed in that case.
+            ValueError: The policy is not composable, not executable, or
+                not sendable. Nothing is changed in that case.
         """
 
     @abstractmethod
     async def aclose(self) -> None:
         """Close the session and everything it started.
 
-        Idempotent. After it returns, no further event and no further
-        history arrive from the turn it stopped, and the caller has
-        nothing left to finalize.
+        Idempotent, and one operation however many callers ask for it:
+        concurrent callers await the same close, and each returns only
+        once that close has finished. After it returns, no further event
+        and no further history arrive from the turn it stopped, and the
+        caller has nothing left to finalize.
         """
 
     @property
@@ -180,7 +190,21 @@ class AgentSession(ABC):
     @property
     @abstractmethod
     def evidence(self) -> EvidenceLedger:
-        """The current turn's evidence ledger."""
+        """The current turn's evidence ledger, for readers only.
+
+        The session and its tool harness are the ledger's only writers:
+        entries are minted by the reads a turn actually performed, and the
+        whole ledger is dropped when a turn starts or the session is
+        retargeted. A consumer — the citation UI of issue #316 task 12
+        included — reads it through `EvidenceLedger.references` and
+        `EvidenceLedger.resolve`, and treats a reference that no longer
+        resolves as the answer it is: the read behind it belongs to a
+        cluster or a turn this session has left.
+
+        The object is live, not a copy. Holding it across turns is holding
+        the session's ledger, so a reader that must outlive a turn keeps
+        what it resolved, not the ledger it resolved from.
+        """
 
     @property
     @abstractmethod
@@ -239,14 +263,22 @@ class DefaultAgentSession(AgentSession):
         self._cluster = cluster
 
         self._closed = False
+        self._closing: asyncio.Task[None] | None = None
+        #: Tasks parked inside `aclose`. A close must not wait for a turn
+        #: driver that is itself waiting for that close.
+        self._close_waiters: set[asyncio.Task[object]] = set()
+        #: Set whenever the live turn's driver joins the close, so a close
+        #: already waiting on that driver stops waiting for it.
+        self._driver_joined_close = asyncio.Event()
         self._turn_active = False
         self._turn_started = False
         self._awaiting_finalization = False
         self._turn_iterator: AsyncIterator[AgentEvent] | None = None
         self._driver: asyncio.Task[object] | None = None
-        #: The snapshot the last *started* turn composed from. Only a
-        #: started turn moves it, so an iterator that was created and
-        #: dropped cannot swallow a pending handoff note.
+        #: The snapshot the last *delivered* turn composed from. Only a
+        #: request proven to have reached the provider moves it, so a turn
+        #: that never crossed the boundary cannot swallow a pending
+        #: handoff note.
         self._last_started: InteractionContext | None = None
 
     # -- properties --------------------------------------------------------
@@ -268,7 +300,13 @@ class DefaultAgentSession(AgentSession):
 
     @property
     def evidence(self) -> EvidenceLedger:
-        """The current turn's evidence ledger."""
+        """The current turn's evidence ledger, for readers only.
+
+        The harness's live ledger, not a copy. See `AgentSession.evidence`
+        for the reader contract: `references` and `resolve`, and a
+        reference that stops resolving after a retarget is a reference to
+        a cluster this session has left.
+        """
         return self._tools.evidence
 
     @property
@@ -303,21 +341,34 @@ class DefaultAgentSession(AgentSession):
         self._turn_active = True
         self._turn_started = True
         self._driver = asyncio.current_task()
+        #: What the boundary had delivered before this turn existed. The
+        #: handoff is consumed against this, not against the attempt.
+        delivered = self._gateway.latest_outbound_payload
+        request: AgentTurnRequest | None = None
         try:
-            iterator = self._engine.run(self._request(user_text))
+            request = self._request(user_text)
+            iterator = self._engine.run(request)
             self._turn_iterator = iterator
             try:
                 async for event in iterator:
+                    self._commit_handoff(request, delivered)
                     yield event
             finally:
-                await _aclose(iterator)
+                await self._release_iterator(iterator)
         finally:
+            self._commit_handoff(request, delivered)
             self._release_turn()
 
     def _request(self, user_text: str) -> AgentTurnRequest:
-        """Snapshot the live workspace and compose this turn's request."""
+        """Snapshot the live workspace and compose this turn's request.
+
+        Reads state; changes none. Composing is one of several things that
+        can fail before a single character reaches the provider, and the
+        pending handoff note is owed to a turn the *model actually saw* —
+        so what was delivered is decided by `_commit_handoff`, after the
+        boundary has spoken.
+        """
         interaction = self._bridge.snapshot()
-        previous, self._last_started = self._last_started, interaction
         prompt = self._prompts.compose(
             user_text,
             PromptInputs(
@@ -325,10 +376,51 @@ class DefaultAgentSession(AgentSession):
                 interaction=interaction,
                 cluster=self._cluster,
                 user_rules=self._user_rules,
-                previous_interaction=previous,
+                previous_interaction=self._last_started,
             ),
         )
         return AgentTurnRequest(prompt=prompt, policy=self._policy, interaction=interaction)
+
+    def _commit_handoff(
+        self, request: AgentTurnRequest | None, delivered: OutboundSnapshot | None
+    ) -> None:
+        """Consume the one-shot context handoff, but only once it was delivered.
+
+        The gateway moves `latest_outbound_payload` to a new snapshot
+        exactly when a request is proven to have reached the provider, so
+        a payload that is no longer the one this turn started with *is*
+        the proof that the note crossed the boundary. Everything that can
+        stop a turn before that — a prompt that will not compose, a
+        history budget that refuses it, a refusal at the outbound
+        boundary, a provider that failed or was cancelled before handoff —
+        leaves the note pending for the next turn, because the model never
+        read it.
+
+        Synchronous and idempotent: it runs after every event and again
+        when the turn unwinds, including through cancellation, where there
+        is no opportunity to await anything.
+        """
+        if request is None:
+            return
+        if self._gateway.latest_outbound_payload is delivered:
+            return
+        self._last_started = request.interaction
+
+    async def _release_iterator(self, iterator: AsyncIterator[AgentEvent]) -> None:
+        """Release this turn's engine iterator and the stream underneath it.
+
+        Closing an async generator unwinds that generator only: the ones
+        it was itself iterating are left to the garbage collector, on no
+        schedule a caller can wait for. A partially consumed turn closed
+        by its caller must nonetheless leave no provider iterator open, so
+        the session closes the gateway's stream state too — a no-op on
+        every path where the stream already ended, and never a substitute
+        for `AgentEngine.aclose`, which is what stops a *running* turn.
+        """
+        try:
+            await _aclose(iterator)
+        finally:
+            await self._gateway.aclose()
 
     def _release_turn(self) -> None:
         """Give the session back, and record any finalization the turn owes."""
@@ -375,11 +467,24 @@ class DefaultAgentSession(AgentSession):
 
         Idle-only and atomic: everything that can refuse this runs before
         anything moves, so a refused retarget leaves the previous policy
-        composed, the previous surface armed, and the previous cluster
-        facts in force. Evidence is cleared immediately rather than at the
-        next turn — a citation minted against the cluster we just left
-        must not resolve for anyone, including a screen rendering the
-        answer that is still on it.
+        composed, the previous surface armed, the previous outbound
+        boundary in force, and the previous cluster facts standing. What
+        moves after that cannot fail.
+
+        The whole session is retargeted, not half of it. The tool surface
+        and the request boundary that surface is sent across are one
+        decision: a session re-armed with more tools but still bounded by
+        the ceiling derived for the old ones would answer by silently
+        dropping the operator's oldest turns to fit. So the gateway is
+        re-armed from the same policy, in the same operation.
+
+        Evidence is cleared immediately rather than at the next turn — a
+        citation minted against the cluster we just left must not resolve
+        for anyone, including a screen rendering the answer that is still
+        on it. It is cleared *without* re-reading the workspace: this is
+        not a turn, there may be no live screen to read (task 12 wires a
+        bridge proxy), and the epoch that evidence belongs to is supplied
+        by the next turn that really starts.
 
         History and the pending context handoff both survive: the
         conversation is the operator's, and the note about the switch is
@@ -395,17 +500,20 @@ class DefaultAgentSession(AgentSession):
             SessionRetargetError: The policy changes the model descriptor
                 or the history budget, which only a rebuilt session can
                 change.
-            ValueError: The policy does not compose or arms a tool the
-                registry does not define.
+            ValueError: The policy does not compose, arms a tool the
+                registry does not define, or offers a surface the outbound
+                boundary cannot be built for.
         """
         self._require_idle("retarget")
         self._require_rebuildable_only(policy)
         self._validate(policy)
+        outbound = self._gateway.prepare_policy(policy)
 
-        self._tools.reset_evidence(self._bridge.snapshot().context_epoch)
         self._tools.retarget(policy)
+        self._gateway.install_policy(outbound)
         self._policy = policy
         self._cluster = cluster
+        self._tools.clear_evidence()
 
     def _require_rebuildable_only(self, policy: ResolvedAgentPolicy) -> None:
         """Refuse the half of a policy the session's collaborators own.
@@ -445,6 +553,64 @@ class DefaultAgentSession(AgentSession):
     async def aclose(self) -> None:
         """Close the session and everything it started.
 
+        One close, however many callers. A screen tearing down while a
+        context switch is closing the same session must not be told the
+        session is closed while the engine, the driver and the
+        conversation are still settling, so the first caller starts the
+        close and every caller — first or not — returns only when that
+        one close has finished. The close runs as its own task and is
+        awaited through a shield, so a caller that is cancelled abandons
+        its wait and not the cleanup: the turn's driver, the provider
+        iterator and the mid-flight conversation are all mid-teardown by
+        then, and stopping there would leave a turn nobody can finalize.
+
+        Idempotent. After it returns, no further event and no further
+        history arrive from the turn it stopped, and the caller has
+        nothing left to finalize.
+        """
+        if self._closing is None:
+            self._closed = True
+            self._closing = asyncio.ensure_future(self._close())
+        closing = self._closing
+        caller = asyncio.current_task()
+        driving = caller is not None and caller is self._driver
+        if caller is not None:
+            self._close_waiters.add(caller)
+            if driving:
+                self._driver_joined_close.set()
+        try:
+            await self._wait_out(closing, caller if driving else None)
+        finally:
+            if caller is not None:
+                self._close_waiters.discard(caller)
+
+    async def _wait_out(
+        self, closing: asyncio.Task[None], driver: asyncio.Task[object] | None
+    ) -> None:
+        """Wait for the one close, absorbing the stop it performs on us.
+
+        The engine stops a turn parked in a provider await by cancelling
+        its driver, and it exempts the task that asked — which, now that
+        the close runs as a task of its own, is no longer the task the
+        engine sees. So the exemption is honored here instead: a driver
+        closing its own session is being stopped by its own request, and
+        answering that request with `CancelledError` would report the
+        close as abandoned when it is exactly what was asked for.
+
+        Absorbed once, and only when this close is the sole thing
+        cancelling the caller: `uncancel` reports what remains, so a
+        driver that someone *else* also cancelled still propagates.
+        """
+        try:
+            await asyncio.shield(closing)
+        except asyncio.CancelledError:
+            if driver is None or driver.uncancel() > 0:
+                raise
+            await asyncio.shield(closing)
+
+    async def _close(self) -> None:
+        """Do the closing, exactly once, whoever asked for it.
+
         Order matters. The engine is closed first: it is the only party
         that can stop a turn parked in a provider await, and it cancels
         the task driving that turn. Only once that driver has settled can
@@ -454,10 +620,6 @@ class DefaultAgentSession(AgentSession):
         conversation comes last, so what is retained is everything the
         turn had actually appended by the time it really stopped.
         """
-        if self._closed:
-            return
-        self._closed = True
-
         await self._engine.aclose()
         await self._await_driver()
         await self._close_iterator()
@@ -468,13 +630,23 @@ class DefaultAgentSession(AgentSession):
     async def _await_driver(self) -> None:
         """Let an externally driven turn finish unwinding before we touch it.
 
-        A session closed from inside its own turn's loop is not waited
-        for: that task is us, and the turn ends at its next resumption.
+        The close runs as a task of its own, so the driver is never this
+        task and a session closed from inside its own turn's loop has to
+        be recognized some other way: by the driver being parked in
+        `aclose`, either already or by joining while this wait is in
+        progress. Waiting for a driver that is waiting for this close is
+        the one way this can hang, and both of those are that case.
         """
         driver = self._driver
-        if driver is None or driver is asyncio.current_task():
+        if driver is None or driver in self._close_waiters:
             return
-        await asyncio.wait({driver})
+        joined = asyncio.ensure_future(self._driver_joined_close.wait())
+        try:
+            await asyncio.wait({driver, joined}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            joined.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await joined
 
     async def _close_iterator(self) -> None:
         """Close a turn nobody is driving (a caller that stopped at `anext`)."""

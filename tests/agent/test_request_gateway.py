@@ -531,7 +531,7 @@ def test_prepare_policy_installs_nothing_by_itself() -> None:
 
     gateway.prepare_policy(policy)
 
-    with pytest.raises(OutboundPolicyError, match="too large"):
+    with pytest.raises(OutboundPolicyError, match="exceeds 2000 character limit"):
         gateway.prepare(
             _big_payload_messages(), list(policy.tools), iteration=1, provenance=_Provenance()
         )
@@ -547,7 +547,7 @@ def test_prepare_policy_refuses_a_surface_whose_results_cannot_be_resolved() -> 
         gateway.prepare_policy(doubled)
 
     # Nothing moved: the boundary is still the tight one it was built with.
-    with pytest.raises(OutboundPolicyError, match="too large"):
+    with pytest.raises(OutboundPolicyError, match="exceeds 2000 character limit"):
         gateway.prepare(
             _big_payload_messages(), list(policy.tools), iteration=1, provenance=_Provenance()
         )
