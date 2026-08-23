@@ -319,7 +319,7 @@ def _is_target_document(
         and group == target.group
         and str(metadata.get("namespace") or "") == target.namespace
         and str(metadata.get("name") or "") == target.name
-        and (reported_uid is None or reported_uid == target.uid)
+        and reported_uid == target.uid
     )
 
 

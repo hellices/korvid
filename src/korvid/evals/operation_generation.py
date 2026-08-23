@@ -279,8 +279,10 @@ def generate_instance(
         raise ValueError(
             "generated instance id must be at most 63 characters; use a shorter template id or seed"
         )
-    rng = random.Random(seed)
     old = template.target
+    if old.name == old.namespace:
+        raise ValueError("target name and namespace must differ for generation")
+    rng = random.Random(seed)
     used_namespaces, used_names = _reserved_identities(template)
     namespace = _generated_namespace(rng, used_namespaces)
     name = _generated_name(rng, old, used_names)

@@ -35,6 +35,36 @@ def test_different_seeds_move_the_target_identity() -> None:
     )
 
 
+def test_generation_rejects_an_ambiguous_shared_name_and_namespace() -> None:
+    template = _TEMPLATES["scale-deployment-up"]
+    namespace = template.target.name
+    objects = deepcopy(template.cluster.objects)
+    for manifest in objects:
+        metadata = manifest.get("metadata") or {}
+        if (
+            metadata.get("namespace") == template.target.namespace
+            and metadata.get("name") == template.target.name
+        ):
+            metadata["namespace"] = namespace
+    ambiguous = replace(
+        template,
+        target=replace(template.target, namespace=namespace),
+        preconditions=tuple(
+            replace(assertion, target=replace(assertion.target, namespace=namespace))
+            for assertion in template.preconditions
+        ),
+        postconditions=tuple(
+            replace(assertion, target=replace(assertion.target, namespace=namespace))
+            for assertion in template.postconditions
+        ),
+        turns=tuple(text.replace(template.target.namespace, namespace) for text in template.turns),
+        cluster=replace(template.cluster, objects=tuple(objects)),
+    )
+
+    with pytest.raises(ValueError, match="target name and namespace must differ"):
+        generate_instance(ambiguous, 7)
+
+
 def test_exhausted_namespace_pool_uses_a_noncolliding_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

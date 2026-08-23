@@ -982,6 +982,14 @@ def test_document_uid_identifies_a_same_name_replacement_without_incarnation() -
     assert _is_target_document(document, journey.target, None) is True
 
 
+def test_a_document_without_uid_is_not_target_identity_evidence() -> None:
+    journey = _JOURNEYS["scale-deployment-up"]
+    document = deepcopy(journey.cluster.objects[0])
+    document["metadata"].pop("uid")
+
+    assert _is_target_document(document, journey.target, None) is False
+
+
 async def test_a_missing_expected_preview_is_declined_without_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
