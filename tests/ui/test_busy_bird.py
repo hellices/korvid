@@ -169,7 +169,9 @@ async def test_run_write_publishes_progress_while_the_op_runs(tmp_path: Path) ->
         await gate.wait()
 
     async with app.run_test() as pilot:
-        task = asyncio.create_task(app._run_write("delete", PODS_META, "default", "web-1", slow_op))
+        task = asyncio.create_task(
+            app._writes.run("delete", PODS_META, "default", "web-1", slow_op)
+        )
         await until(
             pilot,
             lambda: any("delete pods/web-1" in v for v in app._progress_labels.values()),

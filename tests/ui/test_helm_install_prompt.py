@@ -426,12 +426,14 @@ async def test_in_flight_stale_schema_cannot_resurface_during_the_debounce() -> 
     that window and re-display stale required values."""
     import asyncio
 
-    gate = asyncio.Event()
+    stale_gate = asyncio.Event()
+    fresh_gate = asyncio.Event()
     calls: list[str] = []
     completed: list[str] = []
 
     async def gated_schema(chart: str, version: str) -> "dict[str, object] | None":
         calls.append(version)
+        gate = stale_gate if version == "18.1.0" else fresh_gate
         await gate.wait()
         completed.append(version)
         return _SCHEMA
@@ -455,12 +457,13 @@ async def test_in_flight_stale_schema_cannot_resurface_during_the_debounce() -> 
             lambda: prompt._schema_debounce is not None,
             label="edit handled, debounce armed",
         )
-        gate.set()  # the stale fetch completes inside the debounce window
+        stale_gate.set()  # the stale fetch completes inside the debounce window
         # observable state, not wall-clock: the *stale* fetch has finished
         # (its worker resumed past the gate) and the section stayed hidden.
         await until(pilot, lambda: "18.1.0" in completed, label="stale fetch completed")
         assert not app.screen.query_one("#helm-required", Static).display
         # the debounced refetch eventually renders the new version's schema
+        fresh_gate.set()
         await until(pilot, lambda: "18.2.0" in completed, label="refetched")
         await until(
             pilot,

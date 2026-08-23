@@ -317,7 +317,7 @@ async def test_download_blocked_when_audit_append_fails(tmp_path: Path) -> None:
 
 
 async def test_second_transfer_refused_while_one_in_flight(tmp_path: Path) -> None:
-    # `_transfer_task` is a single slot, so a second worker must be refused
+    # `TransferController.task` is a single slot, so a second worker must be refused
     # for the whole lifecycle of the first (launch through outcome audit) —
     # otherwise escape could cancel the wrong stream.
     opener = FakeExecOpener([b"\x01" + b"partial"], stall=True)
@@ -338,7 +338,7 @@ async def test_second_transfer_refused_while_one_in_flight(tmp_path: Path) -> No
         app.action_transfer()
         # …and so does a worker launched directly into the pre-modal window.
         spec = TransferSpec("download", "/other.bin", str(tmp_path / "other.bin"))
-        await app._run_transfer("default", "api-1", "app", spec, None)
+        await app._transfer.run("default", "api-1", "app", spec, None)
         await until(
             pilot,
             lambda: sum("already in progress" in str(n.message) for n in app._notifications) == 2,

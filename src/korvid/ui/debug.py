@@ -1,34 +1,65 @@
-"""Debug-fallback execution lifecycle, extracted from the app (issue #97 U3c).
+"""Debug-fallback execution lifecycle, extracted from the app (issue #97 U3c;
+the image-pull retry offer followed in Deep Task 10).
 
 `DebugController` owns the post-approval half of the kubectl debug fallback:
 the readonly and fail-closed audit gates, re-verifying the approved pod
 incarnation, running kubectl debug with image-pull monitoring while the TUI
-is suspended, auditing the outcome, and handing a pull failure back for the
-retry offer. The probe, RBAC pre-check, image picker, approval dialogs, and
-`run_worker` ownership stay on the app — it hands this controller narrow
-callables instead of itself.
+is suspended, auditing the outcome, and — when the pull failed — the retry
+offer with its air-gap guard, its equivalent-reference guard and the
+approval dialog that reruns the debug on the fallback image. The probe, RBAC
+pre-check, image picker and the *initial* approval stay with `ShellController`.
 
-The `audit` dependency is a getter because wiring may replace it after
-construction; `suspend`/`refresh` are late-binding callables so tests that
-patch the app's methods keep working.
+Textual arrives as `UiSurface`, so the controller never touches the app: the
+retry dialog is pushed, and the accepted rerun scheduled, through that one
+boundary. `audit`, `settings` and `run_debug` are getters because wiring, a
+`:ctx` switch and the tests may all replace them after construction.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import subprocess
-from collections.abc import Awaitable, Callable
-from contextlib import AbstractContextManager
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from time import monotonic
 from typing import Any
 
 from korvid.core.audit import AuditLog
-from korvid.core.debugimage import ephemeral_container_names, find_pull_failure
+from korvid.core.debugimage import (
+    FALLBACK_IMAGE,
+    ephemeral_container_names,
+    find_pull_failure,
+    same_image_ref,
+)
 from korvid.ui.shell import build_debug_argv, build_pod_get_argv
+from korvid.ui.ui_surface import UiSurface
+from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.write_coordinator import write_locus
 
 logger = logging.getLogger(__name__)
+
+#: Rerunning `kubectl debug` on the fallback image after an approved retry.
+RunDebug = Callable[[str, str, str | None, str | None, str], Coroutine[Any, Any, None]]
+
+
+@dataclasses.dataclass(frozen=True)
+class DebugSettings:
+    """The configuration the debug flow reads, as an immutable snapshot.
+
+    Narrower than `KorvidConfig`, for the same reason `ShellSettings` is:
+    that object is only shallowly frozen, so passing it whole would hand
+    over mutable `keybindings`/`agent_options` dicts along with the three
+    values used here. `images` is a `Mapping` for the same reason.
+    """
+
+    kube_context: str | None
+    default_image: str | None
+    #: `images is None` means unconfigured; an explicit (possibly empty)
+    #: mapping means the operator curated the debug images, which is what
+    #: makes offering a public busybox fallback wrong.
+    images: Mapping[str, str] | None
 
 
 class DebugController:
@@ -43,23 +74,29 @@ class DebugController:
     def __init__(
         self,
         *,
-        notify: Callable[..., None],
+        ui: UiSurface,
         audit: Callable[[], AuditLog | None],
         readonly: Callable[[], bool],
-        kube_context: Callable[[], str | None],
+        settings: Callable[[], DebugSettings],
         pod_uid_unchanged: Callable[..., Awaitable[bool]],
-        suspend: Callable[[], AbstractContextManager[Any]],
-        refresh: Callable[[], object],
-        offer_pull_retry: Callable[[str, str, str | None, str | None, str, str], None],
+        get_epoch: Callable[[], int],
+        epoch_crossed: Callable[[int], bool],
+        #: `WriteCoordinator.confirm_screen`; typed by its return so the
+        #: retry callback is checked against the dialog's own result type.
+        confirm_screen: Callable[..., ConfirmScreen],
+        #: Late-binding: the rerun goes back through `ShellController`, which
+        #: is constructed around this controller and keeps the write decorator.
+        run_debug: Callable[[], RunDebug],
     ) -> None:
-        self._notify = notify
+        self._ui = ui
         self._audit = audit
         self._readonly = readonly
-        self._kube_context = kube_context
+        self._settings = settings
         self._pod_uid_unchanged = pod_uid_unchanged
-        self._suspend = suspend
-        self._refresh = refresh
-        self._offer_pull_retry = offer_pull_retry
+        self._get_epoch = get_epoch
+        self._epoch_crossed = epoch_crossed
+        self._confirm_screen = confirm_screen
+        self._run_debug = run_debug
 
     async def run(
         self,
@@ -82,11 +119,11 @@ class DebugController:
         before the mutation starts.
         """
         if self._readonly():
-            self._notify("Read-only mode: cluster writes are disabled", severity="warning")
+            self._ui.notify("Read-only mode: cluster writes are disabled", severity="warning")
             return
         audit = self._audit()
         if audit is None:
-            self._notify("Writes disabled: no audit log configured", severity="warning")
+            self._ui.notify("Writes disabled: no audit log configured", severity="warning")
             return
         if approved_uid is not None and not await self._pod_uid_unchanged(
             namespace, name, approved_uid, action="kubectl debug"
@@ -97,13 +134,13 @@ class DebugController:
             await asyncio.to_thread(self._audit_entry, audit, namespace, name, detail, "intent")
         except Exception:
             logger.exception("audit append failed; blocking kubectl debug")
-            self._notify("Write blocked: audit log unavailable", severity="error")
+            self._ui.notify("Write blocked: audit log unavailable", severity="error")
             return
         argv = build_debug_argv(
-            namespace, name, container, context=self._kube_context(), image=image
+            namespace, name, container, context=self._settings().kube_context, image=image
         )
         target = f"{name}/{container}" if container else name
-        with self._suspend():
+        with self._ui.suspend():
             exit_code, pull_failure = self.run_process(
                 argv,
                 f"korvid debug -> {target} (exit to return)",
@@ -112,14 +149,14 @@ class DebugController:
                 image,
                 approved_uid,
             )
-        self._refresh()
+        self._ui.refresh()
         if exit_code is None:
             # The baseline snapshot saw a different pod incarnation: the
             # attach never started.
             await self._audit_outcome(
                 audit, namespace, name, detail, "error: pod replaced before attach"
             )
-            self._notify(
+            self._ui.notify(
                 f"kubectl debug cancelled - pod {name} was replaced since the prompt was shown.",
                 severity="warning",
             )
@@ -130,14 +167,70 @@ class DebugController:
             outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
         await self._audit_outcome(audit, namespace, name, detail, outcome)
         if pull_failure is not None:
-            self._offer_pull_retry(namespace, name, container, approved_uid, image, pull_failure)
+            self.offer_pull_retry(namespace, name, container, approved_uid, image, pull_failure)
             return
         if exit_code != 0:
-            self._notify(
+            self._ui.notify(
                 f"kubectl debug exited with status {exit_code}"
                 " — check RBAC (pods/ephemeralcontainers) and cluster version",
                 severity="warning",
             )
+
+    def offer_pull_retry(
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        approved_uid: str | None,
+        image: str,
+        reason: str,
+    ) -> None:
+        """Offer an immediate retry with the fallback image after a pull failure.
+
+        Air-gapped guard: when `debug.images` is configured without a
+        `debug.default_image`, no public busybox is offered - notify only.
+        """
+        settings = self._settings()
+        if settings.images is not None and not settings.default_image:
+            fallback = None
+        else:
+            fallback = settings.default_image or FALLBACK_IMAGE
+        target = f"{name}/{container}" if container else name
+        # Equivalent references (untagged vs :latest) would retry the very
+        # image that just failed - and each retry permanently adds another
+        # ephemeral container entry to the pod spec.
+        if fallback is None or same_image_ref(fallback, image) or self._ui.screen_depth() > 1:
+            self._ui.notify(
+                f"kubectl debug: image pull failed for {image} ({reason})",
+                severity="error",
+            )
+            return
+        retry_image = fallback
+        epoch = self._get_epoch()
+
+        def _on_choice(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            if self._epoch_crossed(epoch):
+                self._ui.notify(
+                    "kubectl debug retry cancelled - the kube context changed",
+                    severity="warning",
+                )
+                return
+            self._ui.run_worker(
+                self._run_debug()(namespace, name, container, approved_uid, retry_image)
+            )
+
+        self._ui.push_screen(
+            self._confirm_screen(
+                f"Image pull failed for {image} ({reason})",
+                f"Retry kubectl debug on {target}{write_locus(namespace)} with"
+                f" {retry_image}? Note: the failed ephemeral container entry cannot be"
+                " removed from the pod spec; the retry attaches an additional"
+                " container.",
+            ),
+            _on_choice,
+        )
 
     def run_process(
         self,
@@ -218,7 +311,7 @@ class DebugController:
         Used while the TUI is suspended - the async client sits behind the
         paused event loop, so the manifest is fetched with a subprocess.
         """
-        argv = build_pod_get_argv(namespace, name, context=self._kube_context())
+        argv = build_pod_get_argv(namespace, name, context=self._settings().kube_context)
         try:
             result = subprocess.run(argv, capture_output=True, timeout=5)
             if result.returncode != 0:
@@ -252,7 +345,7 @@ class DebugController:
             await asyncio.to_thread(self._audit_entry, audit, namespace, name, detail, outcome)
         except Exception:
             logger.exception("audit append failed after kubectl debug")
-            self._notify("Audit write failed for the executed debug", severity="warning")
+            self._ui.notify("Audit write failed for the executed debug", severity="warning")
 
     @staticmethod
     def _audit_entry(audit: AuditLog, namespace: str, name: str, detail: str, outcome: str) -> None:
@@ -268,4 +361,4 @@ class DebugController:
         )
 
 
-__all__ = ["DebugController"]
+__all__ = ["DebugController", "DebugSettings"]

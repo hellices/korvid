@@ -287,11 +287,12 @@ def test_the_harness_exposes_no_dialog_hook_parameter() -> None:
 
 def test_the_only_private_app_attribute_use_is_the_documented_turn_settle() -> None:
     """The harness reads exactly one private attribute off a foreign object:
-    `app._agent_task`, inside `_turn_task_settled`. Everything else — table
-    lookup, panel state, turn boundaries — goes through public API. A
-    docstring that merely names `_focused_table()` is not an access, which
-    is why this is an AST check rather than a substring search."""
-    assert _foreign_private_attributes() == {"_agent_task"}
+    `app._agent_ui`, inside `_turn_task_settled`; the controller's
+    `turn_task` property is public. Everything else — table lookup, panel
+    state, turn boundaries — goes through public API. A docstring that merely
+    names `_focused_table()` is not an access, which is why this is an AST
+    check rather than a substring search."""
+    assert _foreign_private_attributes() == {"_agent_ui"}
 
 
 def test_the_harness_arms_the_shipped_small_surface_unchanged() -> None:

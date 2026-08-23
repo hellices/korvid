@@ -253,7 +253,7 @@ class BlockingRelationshipLister:
     async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         self.calls.append((meta.plural, namespace))
         if self.app is not None:
-            self.reservations_during_load.append(self.app._active_cluster_writes)
+            self.reservations_during_load.append(self.app._writes.active_writes())
         self.entered.set()
         await self.release.wait()
         if meta.plural == "pods":
@@ -359,7 +359,7 @@ async def test_resize_graph_unavailable_keeps_local_notes_and_writes_nothing(
 
     relationship_lister: Callable[[ResourceMeta, str | None], Awaitable[list[GenericSummary]]]
     if mode == "timeout":
-        monkeypatch.setattr("korvid.ui.app._IMPACT_TIMEOUT", 0.01)
+        monkeypatch.setattr("korvid.ui.write_coordinator._IMPACT_TIMEOUT", 0.01)
         blocker = BlockingRelationshipLister()
         relationship_lister = blocker
     else:
@@ -473,7 +473,7 @@ async def test_cancelled_resize_impact_load_writes_nothing(tmp_path: Path) -> No
             assert len(app.screen_stack) == 1
             assert lister.reservations_during_load
             assert all(value == 0 for value in lister.reservations_during_load)
-            assert app._active_cluster_writes == 0
+            assert app._writes.active_writes() == 0
             assert recorder.calls == []
             assert not audit_path.exists()
         finally:
@@ -498,7 +498,7 @@ async def test_resize_focus_change_during_impact_load_writes_nothing(tmp_path: P
         worker = await _start_resize_confirmation_worker(app, pilot)
         await until(pilot, lister.entered.is_set, label="resize impact listing")
         try:
-            app._focus_other_pane()
+            app._workspace_ctl.focus_other_pane()
             lister.release.set()
             await until(pilot, lambda: worker.is_finished, label="resize worker finished")
             await until(
@@ -511,7 +511,7 @@ async def test_resize_focus_change_during_impact_load_writes_nothing(tmp_path: P
             )
             assert app._pane is not origin
             assert not isinstance(app.screen, ConfirmScreen)
-            assert app._active_cluster_writes == 0
+            assert app._writes.active_writes() == 0
             assert recorder.calls == []
             assert not audit_path.exists()
         finally:
@@ -545,7 +545,7 @@ async def test_resize_origin_scope_change_during_impact_load_writes_nothing(
             )
             assert app._pane is origin
             assert not isinstance(app.screen, ConfirmScreen)
-            assert app._active_cluster_writes == 0
+            assert app._writes.active_writes() == 0
             assert recorder.calls == []
             assert not audit_path.exists()
         finally:
@@ -703,7 +703,7 @@ async def test_agent_resize_approved_by_user_key(tmp_path: Path) -> None:
         await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
         _expand_panel(app)
         task = asyncio.ensure_future(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "resize", "pods", "web-1", namespace="default", resources=resources
             )
         )
@@ -763,7 +763,7 @@ async def test_agent_resize_uses_explicit_namespace_for_impact(tmp_path: Path) -
         assert app.current_scope == "default"
         _expand_panel(app)
         task = asyncio.create_task(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "resize",
                 "pods",
                 "web-1",
@@ -807,7 +807,7 @@ async def test_agent_resize_keeps_local_notes_when_manifest_lookup_fails_open(
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.create_task(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "resize",
                 "pods",
                 "web-1",
@@ -833,7 +833,7 @@ async def test_agent_resize_keeps_local_notes_when_manifest_lookup_fails_open(
 async def test_agent_resize_expiry_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("korvid.ui.app._APPROVAL_TIMEOUT", 0.2)
+    monkeypatch.setattr("korvid.ui.agent_ui_controller.APPROVAL_TIMEOUT", 0.2)
     recorder = ResizeRecorder()
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(
@@ -844,7 +844,7 @@ async def test_agent_resize_expiry_writes_nothing(
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.create_task(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "resize",
                 "pods",
                 "web-1",
@@ -876,7 +876,7 @@ async def test_non_resize_agent_writes_do_not_gain_impact(tmp_path: Path) -> Non
     async with app.run_test() as pilot:
         _expand_panel(app)
         task = asyncio.create_task(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "delete",
                 "deployments",
                 "web",
@@ -903,7 +903,7 @@ async def test_cancelled_agent_resize_impact_load_writes_nothing(tmp_path: Path)
     resources = {"app": {"requests": {"cpu": "200m"}}}
     async with app.run_test() as pilot:
         task = asyncio.create_task(
-            app.agent_request_write(
+            app._agent_ui.agent_request_write(
                 "resize",
                 "pods",
                 "web-1",
@@ -929,7 +929,9 @@ async def test_agent_resize_requires_resources(tmp_path: Path) -> None:
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
-        result = await app.agent_request_write("resize", "pods", "web-1", namespace="default")
+        result = await app._agent_ui.agent_request_write(
+            "resize", "pods", "web-1", namespace="default"
+        )
         assert result.startswith("ERROR:")
         assert rec.calls == []
 
@@ -939,7 +941,7 @@ async def test_agent_resize_rejected_for_non_pod_kind(tmp_path: Path) -> None:
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
-        result = await app.agent_request_write(
+        result = await app._agent_ui.agent_request_write(
             "resize",
             "deployments",
             "web",
@@ -956,7 +958,7 @@ async def test_agent_resize_rejected_when_cluster_lacks_subresource(tmp_path: Pa
     app = make_app(rec, tmp_path / "audit.jsonl", resize_supported=False)
     async with app.run_test() as pilot:
         await until(pilot, lambda: _row_count(app) == 1, label="pod row rendered")
-        result = await app.agent_request_write(
+        result = await app._agent_ui.agent_request_write(
             "resize",
             "pods",
             "web-1",

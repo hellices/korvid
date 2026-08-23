@@ -7,8 +7,8 @@ unmodified fail-closed `AuditLog`, the injected `StatefulFakeWriteOps`,
 and a Textual pilot that presses the same confirmation keys a user would.
 
 There is no approval callback shortcut and no eval-only mutation API: the
-only path into fake cluster state is `KorvidApp.agent_request_write` ->
-production audit intent -> injected `WriteOps`, plus the fixture's own
+only path into fake cluster state is `AppUIBridge.agent_request_write` ->
+production controller -> audit intent -> injected `WriteOps`, plus the fixture's own
 declared `dialog_intervention`, which the shared approval driver applies
 through the public `FakeClusterState.replace_incarnation`. Campaign
 tooling lives here rather than in `src/` so it never ships in the wheel.
@@ -882,15 +882,15 @@ def _turn_task_settled(app: KorvidApp) -> Callable[[], bool]:
     """The one deliberate private touch in this module.
 
     `KorvidApp` publishes no turn-completion message, and every wait above
-    keys on observable journal/panel state. This last settle exists only so
-    the *next* scripted turn is a fresh submission: a prompt posted while
-    the finished turn's task is still unwinding is treated as
-    interrupt-and-submit and cancels it. Replace this with a public
-    completion event the moment the app grows one.
+    keys on observable journal/panel state. The agent controller exposes its
+    task for shutdown assertions; this last settle exists only so the *next*
+    scripted turn is a fresh submission. A prompt posted while the finished
+    turn's task is still unwinding is treated as interrupt-and-submit and
+    cancels it. Replace this with a public completion event when one exists.
     """
 
     def settled() -> bool:
-        task = app._agent_task
+        task = app._agent_ui.turn_task
         return task is None or task.done()
 
     return settled
@@ -953,6 +953,7 @@ async def _drive_turn(
 
 async def _run_turns(
     app: KorvidApp,
+    bridge: UIBridge,
     pilot: Any,
     journey: OperationJourney,
     journal: ActionJournal,
@@ -963,7 +964,7 @@ async def _run_turns(
     panel = app.query_one(AgentPanel)
     for index, text in enumerate(journey.turns):
         if index > 0 and journey.initial_selection == "neutral":
-            await app.agent_navigate(journey.target.plural, journey.target.namespace)
+            await bridge.agent_navigate(journey.target.plural, journey.target.namespace)
             await until(
                 pilot,
                 lambda: _select_target_row(app, journey, journal),
@@ -1224,20 +1225,28 @@ async def run_operation_journey(
         async with app.run_test() as pilot:
             app.query_one(AgentPanel).display = True
             if journey.initial_selection == "neutral":
-                await app.agent_navigate(journey.target.plural, ALL_NAMESPACES)
+                await ui_proxy.agent_navigate(journey.target.plural, ALL_NAMESPACES)
                 await until(
                     pilot,
                     lambda: _select_neutral_row(app, journey, journal),
                     label=f"{journey.id} neutral distractor row selected",
                 )
             else:
-                await app.agent_navigate(journey.target.plural, journey.target.namespace)
+                await ui_proxy.agent_navigate(journey.target.plural, journey.target.namespace)
                 await until(
                     pilot,
                     lambda: _select_target_row(app, journey, journal),
                     label="fixture target row selected",
                 )
-            await _run_turns(app, pilot, journey, journal, driver, turn_timeout=turn_timeout)
+            await _run_turns(
+                app,
+                ui_proxy,
+                pilot,
+                journey,
+                journal,
+                driver,
+                turn_timeout=turn_timeout,
+            )
     finally:
         aclose = getattr(raw_provider, "aclose", None)
         if callable(aclose):

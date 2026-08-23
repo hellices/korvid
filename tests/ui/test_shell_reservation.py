@@ -274,7 +274,7 @@ async def test_direct_await_holds_the_reservation_while_suspended() -> None:
     """The wrapper must survive its own `__await__` (#237 review).
 
     `await` keeps the iterator `__await__` returns, not the object it came
-    from, and a direct `await app._run_write(...)` never binds the wrapper
+    from, and a direct `await app._writes.run(...)` never binds the wrapper
     to a name. Returning the inner coroutine's iterator therefore left
     nothing referencing the wrapper: a collection while the write was
     suspended mid-flight would fire the finalizer and release the slot
@@ -298,7 +298,7 @@ async def test_direct_await_holds_the_reservation_while_suspended() -> None:
 
     async def consume() -> str:
         # The wrapper is a temporary: nothing names it, exactly like
-        # `await app._run_write(...)`.
+        # `await app._writes.run(...)`.
         return await build()  # type: ignore[no-any-return]  # test double
 
     task = asyncio.create_task(consume())

@@ -1,15 +1,19 @@
 """Helm write flows, extracted from the app (issue #187).
 
 `HelmController` owns the install / upgrade / rollback / uninstall
-workflows: the write gate, the chart-search and values-editing wizard, the
-bounded dry-run preview with its render-failure recovery, and the mapping
-from a user's choices to an audited mutation.
+workflows: the view guard that keeps a helm write on the helm view, the
+write-gate orchestration, the chart-search and values-editing wizard, the target capture
+each keypress makes, the bounded dry-run preview with its render-failure
+recovery, and the mapping from a user's choices to an audited mutation. The
+revision-history drill (`h`) lives here too and is performed by the
+navigation owner.
 
 What it deliberately does *not* own is the security perimeter. Approval
-still goes through the app's `push_write_confirmation`, context
-revalidation through `write_context_intact`, and the mutation itself
-through the app's `_run_write` worker — so the approval gate and the
-fail-closed audit rule keep exactly one implementation each.
+and context/identity revalidation go through `WriteGate`, whose
+`WriteCoordinator` implementation also owns reservation, mutation execution,
+and fail-closed audit ordering. The controller supplies Helm-specific previews,
+metadata, and operation factories to that boundary; none of those security
+steps route back through app methods.
 
 The controller receives named boundaries — `WriteGate`, `ViewState`,
 `UiSurface` — plus the few helm-specific getters, rather than the app. That
@@ -30,8 +34,10 @@ import logging
 import os
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Protocol
 
 from korvid.core.store import ALL_NAMESPACES
+from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.helm import (
     HELM_RELEASES_META,
     HELM_REVISIONS_META,
@@ -57,6 +63,10 @@ _HELM_PREVIEW_TIMEOUT = 20.0
 #: A rendered chart can run to thousands of lines; the approval dialog shows
 #: at most this many so the operation summary stays reviewable.
 _HELM_PREVIEW_MAX_LINES = 60
+
+#: Exclusive worker group every helm write (rollback, uninstall) runs in: a
+#: second keypress must replace the pending preview, never race it.
+HELM_WRITE_GROUP = "helm-write"
 
 
 def _chart_base(chart: str) -> str:
@@ -112,6 +122,17 @@ async def _temp_values_file(values_text: str | None) -> AsyncIterator[str | None
             os.unlink(tmp)
 
 
+class HelmNavigation(Protocol):
+    """The drill-down the revision history opens (structural).
+
+    Satisfied by `WorkspaceController.drill_into`: `h` on a release row is a
+    navigation, so the owner of navigation performs it and reports its own
+    refusal string back for the toast.
+    """
+
+    async def drill_into(self, namespace: str, name: str) -> str | None: ...
+
+
 class HelmController:
     """Owns the helm install / upgrade / rollback / uninstall workflows.
 
@@ -129,6 +150,8 @@ class HelmController:
         gate: WriteGate,
         view: ViewState,
         ui: UiSurface,
+        #: Late-binding: the navigation owner is constructed after this one.
+        navigation: Callable[[], HelmNavigation],
         edit_in_external_editor: Callable[..., Awaitable[str | None]],
         #: optional injected editor (tests); None falls back to the real one.
         edit_text: Callable[[], Callable[..., Awaitable[str | None]] | None],
@@ -137,8 +160,19 @@ class HelmController:
         self._gate = gate
         self._view = view
         self._ui = ui
+        self._navigation = navigation
         self._edit_in_external_editor = edit_in_external_editor
         self._edit_text = edit_text
+
+    def _view_guard(self, meta: ResourceMeta, what: str) -> bool:
+        """`check_action` gates only key dispatch (issue #114); a direct
+        action call must not trust the focused row of an unrelated view as a
+        Helm release/revision name and open a write flow with it."""
+        current = self._view.aliases().get(self._view.canonical_kind(self._view.current_kind()))
+        if current is not None and (current.group, current.plural) == (meta.group, meta.plural):
+            return True
+        self._ui.notify(f"{what} is only available on the {meta.plural} view", severity="warning")
+        return False
 
     def gate(self) -> HelmCLI | None:
         """Common gate for helm write flows: read-only mode and the
@@ -180,6 +214,8 @@ class HelmController:
         keyword (issue #106) instead of listing every repo upfront.
         Synchronous by design: no await may separate the keypress from the
         namespace/epoch capture and the modal push."""
+        if not self._view_guard(HELM_RELEASES_META, "Helm install"):
+            return
         helm = self.gate()
         if helm is None:
             return
@@ -197,6 +233,8 @@ class HelmController:
         row's facts; the picker pre-searches the release's chart name.
         Synchronous by design: no await may separate the keypress from the
         row/epoch capture and the modal push."""
+        if not self._view_guard(HELM_RELEASES_META, "Helm upgrade"):
+            return
         helm = self.gate()
         if helm is None:
             return
@@ -624,6 +662,75 @@ class HelmController:
         # ConfirmScreen states it explicitly; None stays reserved for
         # failures, which the caller marks "preview unavailable".
         return (lines if lines is not None else [], title)
+
+    async def history(self) -> None:
+        """`h` on the helm release browser: the flat revision drill-down.
+
+        Revision history moved off Enter when Enter became the hierarchy
+        tree (issue #120); rollback keeps working from the revisions view.
+        The drill itself belongs to the navigation owner, which reports its
+        own refusal string back for the toast.
+        """
+        if not self._view_guard(HELM_RELEASES_META, "Helm history"):
+            return
+        namespace, name = self._view.selected_ns_name()
+        if namespace is None or name is None:
+            return
+        error = await self._navigation().drill_into(namespace, name)
+        if error is not None:
+            self._ui.notify(error, severity="warning")
+
+    def rollback_selected(self) -> None:
+        """`r` on the helm revision drill-down: roll the release back to the
+        selected revision (issue #31). Target captured synchronously with
+        the keypress; only the slow preview + confirmation run in a worker
+        (the diff render can block for up to `_HELM_PREVIEW_TIMEOUT` and must
+        not freeze the message pump, or the status-bar progress could never
+        paint)."""
+        if not self._view_guard(HELM_REVISIONS_META, "Helm rollback"):
+            return
+        helm = self.gate()
+        if helm is None:
+            return
+        epoch = self._gate.epoch()
+        ns, name = self._view.selected_ns_name()
+        if name is None:
+            return
+        row = self.revision_row(ns, name)
+        if row is None:
+            self._ui.notify("no helm revision selected", severity="warning")
+            return
+        namespace = ns or row.namespace
+        self._ui.run_worker(
+            self.rollback(helm, row, ns, name, namespace, epoch),
+            exclusive=True,
+            group=HELM_WRITE_GROUP,
+        )
+
+    def uninstall_selected(self) -> None:
+        """Ctrl+D on the helm release browser: uninstall the selected release
+        (issue #117). Target captured synchronously with the keypress; the
+        slow dry-run preview + confirmation run in a worker, exactly like
+        rollback."""
+        if not self._view_guard(HELM_RELEASES_META, "Helm uninstall"):
+            return
+        helm = self.gate()
+        if helm is None:
+            return
+        epoch = self._gate.epoch()
+        ns, name = self._view.selected_ns_name()
+        if name is None:
+            return
+        row = self.release_row(ns, name)
+        if row is None:
+            self._ui.notify("no helm release selected", severity="warning")
+            return
+        namespace = ns or row.namespace
+        self._ui.run_worker(
+            self.uninstall(helm, row, ns, name, namespace, epoch),
+            exclusive=True,
+            group=HELM_WRITE_GROUP,
+        )
 
     async def rollback(
         self,

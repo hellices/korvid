@@ -364,7 +364,7 @@ async def test_log_pane_controls_survive_focus_on_another_view() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await _rows_listed(pilot, app)
-        await app._open_log_pane("default", [("api-1", "app")])
+        await app._logs.open_pane("default", [("api-1", "app")])
         log_pane = app.query_one(LogPane)
         await until(pilot, lambda: log_pane.display, label="log pane open")
         await until(
@@ -384,11 +384,11 @@ async def test_log_pane_controls_vanish_when_the_pane_closes() -> None:
     app = make_app()
     async with app.run_test() as pilot:
         await _rows_listed(pilot, app)
-        await app._open_log_pane("default", [("api-1", "app")])
+        await app._logs.open_pane("default", [("api-1", "app")])
         await until(
             pilot, lambda: "JSON/raw" in _footer_descriptions(app), label="pane keys in footer"
         )
-        await app._close_log_pane()
+        await app._logs.close()
         await until(
             pilot,
             lambda: "JSON/raw" not in _footer_descriptions(app),

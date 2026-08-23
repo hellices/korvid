@@ -179,6 +179,21 @@ def describe_body_text(manifest: dict[str, Any], events: list[dict[str, Any]]) -
     return _body_plain(_manifest_yaml(manifest), _render_events(events))
 
 
+def provider_footer_note(manifest: dict[str, Any], provider_hint: str | None) -> str | None:
+    """One-line describe footer for Service/Ingress on a detected provider.
+
+    A pointer, not a catalog (issue #30): the CSP annotation knowledge lives
+    in the agent, so the footer just says where to ask. Lives with the widget
+    that renders it because both describe entry points - the `d` keybinding
+    and the agent's `open_describe` - must show the identical note.
+    """
+    if provider_hint is None:
+        return None
+    if manifest.get("kind") not in ("Service", "Ingress"):
+        return None
+    return f"provider: {provider_hint} — ask the agent about load balancer annotations (ctrl+a)"
+
+
 class DescribeScreen(ModalScreen[None]):
     """Full-screen modal showing the raw manifest YAML and events for a resource."""
 

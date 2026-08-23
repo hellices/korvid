@@ -153,7 +153,7 @@ async def _wait_rows(app: KorvidApp, pilot: Any) -> None:
 async def test_forward_dialog_prefills_port_from_manifest() -> None:
     procs: list[_FakeProc] = []
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -175,7 +175,7 @@ async def test_forward_submit_starts_kubectl_and_audits(tmp_path: Path) -> None:
         get_manifest=_pod_manifest,
         audit=_audit_log(tmp_path),
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -192,7 +192,7 @@ async def test_forward_submit_starts_kubectl_and_audits(tmp_path: Path) -> None:
 async def test_forward_dialog_custom_local_port() -> None:
     procs: list[_FakeProc] = []
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -217,7 +217,7 @@ async def test_forward_works_for_services() -> None:
         extra_data={"services": [_svc("web")]},
         get_manifest=svc_manifest,
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await pilot.pause()
             await app.on_navigate_command(NavigateCommand("services", None))
@@ -258,7 +258,7 @@ async def test_forward_unavailable_without_registry() -> None:
 async def test_forward_dialog_escape_cancels() -> None:
     procs: list[_FakeProc] = []
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -271,7 +271,7 @@ async def test_forward_dialog_escape_cancels() -> None:
 async def test_forward_dialog_rejects_invalid_port() -> None:
     procs: list[_FakeProc] = []
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -580,7 +580,7 @@ async def test_pf_reattach_follows_the_owning_workload_when_pod_gone(tmp_path: P
         get_manifest=_manifest,
         audit=_audit_log(tmp_path),
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -678,7 +678,7 @@ async def test_failed_retarget_audits_the_workload_it_targeted(tmp_path: Path) -
         get_manifest=_manifest,
         audit=_audit_log(tmp_path),
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -832,7 +832,7 @@ async def test_poll_stays_quiet_while_a_confirmation_reports_the_failure(tmp_pat
         notices.append(message)
         return original(message, **kwargs)
 
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             app.notify = _capture  # type: ignore[method-assign]  # test spy
             await _wait_rows(app, pilot)
@@ -886,7 +886,7 @@ async def test_poll_stays_quiet_while_a_launch_is_still_in_flight(tmp_path: Path
         notices.append(message)
         return original(message, **kwargs)
 
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             app.notify = _capture  # type: ignore[method-assign]  # test spy
             await _wait_rows(app, pilot)
@@ -958,7 +958,7 @@ async def test_launch_on_another_port_does_not_defer_a_breakage_toast(tmp_path: 
         notices.append(message)
         return original(message, **kwargs)
 
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             app.notify = _capture  # type: ignore[method-assign]  # test spy
             await _wait_rows(app, pilot)
@@ -994,7 +994,7 @@ async def test_forward_audit_failure_does_not_crash_app(tmp_path: Path) -> None:
         get_manifest=_pod_manifest,
         audit=_FailingAudit(tmp_path / "audit.log", context="test-ctx"),
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -1048,7 +1048,7 @@ async def test_forward_dialog_opens_when_manifest_fetch_breaks(tmp_path: Path) -
         raise RuntimeError("connection reset")
 
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_boom)
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -1093,7 +1093,7 @@ async def test_service_forward_rejects_undeclared_remote_port() -> None:
         extra_data={"services": [_svc("web")]},
         get_manifest=svc_manifest,
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await pilot.pause()
             await app.on_navigate_command(NavigateCommand("services", None))
@@ -1114,7 +1114,7 @@ async def test_pod_forward_allows_undeclared_remote_port() -> None:
     """Pod declarations stay informational — any remote port is forwardable."""
     procs: list[_FakeProc] = []
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -1133,7 +1133,7 @@ async def test_dialog_warns_on_privileged_local_port() -> None:
     procs: list[_FakeProc] = []
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
     notices: list[str] = []
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -1168,7 +1168,7 @@ async def test_duplicate_local_port_start_shows_clear_error() -> None:
         notices.append(message)
         return original(message, **kwargs)
 
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             app.notify = _capture  # type: ignore[method-assign]  # test spy
             await _wait_rows(app, pilot)
@@ -1214,7 +1214,7 @@ async def test_forward_audit_entries_keep_event_order(tmp_path: Path) -> None:
 
     audit.append = _stalling_append  # type: ignore[method-assign]  # test shim
     app = make_app([_pod("api-1")], forwards=registry, get_manifest=_pod_manifest, audit=audit)
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -1359,7 +1359,7 @@ async def test_failed_start_reports_error_not_success(tmp_path: Path) -> None:
         notices.append(message)
         return original(message, **kwargs)
 
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             app.notify = _capture  # type: ignore[method-assign]  # test spy
             await _wait_rows(app, pilot)
@@ -1408,7 +1408,7 @@ async def test_stop_during_startup_keeps_audit_order(tmp_path: Path) -> None:
         get_manifest=_pod_manifest,
         audit=_audit_log(tmp_path),
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -1447,7 +1447,7 @@ async def test_teardown_during_startup_keeps_audit_order(tmp_path: Path) -> None
         get_manifest=_pod_manifest,
         audit=_audit_log(tmp_path),
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -1486,7 +1486,7 @@ async def test_quit_during_spawn_still_audits_the_start_first(tmp_path: Path) ->
         get_manifest=_pod_manifest,
         audit=_audit_log(tmp_path),
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             # Release the spawn only once teardown has begun — deterministic,
             # unlike a timer that could fire before shutdown on a slow runner.
@@ -1576,7 +1576,7 @@ async def test_teardown_during_reattach_window_keeps_audit_order(tmp_path: Path)
         get_manifest=_pod_manifest,
         audit=_audit_log(tmp_path),
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -1695,7 +1695,7 @@ async def test_udp_only_service_is_rejected_up_front() -> None:
         original_notify(message, **kwargs)
 
     app.notify = _spy  # type: ignore[method-assign]  # test spy
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await pilot.pause()
             await app.on_navigate_command(NavigateCommand("services", None))
@@ -1724,7 +1724,7 @@ async def test_service_forward_opens_when_the_manifest_cannot_be_fetched() -> No
         extra_data={"services": [_svc("dns")]},
         get_manifest=failing_manifest,
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await pilot.pause()
             await app.on_navigate_command(NavigateCommand("services", None))
@@ -1751,7 +1751,7 @@ async def test_stop_during_startup_survives_immediate_exit(tmp_path: Path) -> No
         get_manifest=_pod_manifest,
         audit=_audit_log(tmp_path),
     )
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
@@ -1792,7 +1792,7 @@ async def test_silent_start_times_out_as_failure(tmp_path: Path) -> None:
         return original(message, **kwargs)
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("korvid.ui.forward_controller._FORWARD_READY_SECONDS", 0.05),
     ):
         async with app.run_test() as pilot:
@@ -2010,10 +2010,10 @@ async def test_forward_refused_while_context_switching() -> None:
     race the teardown and could spawn against either cluster (issue #36)."""
     procs: list[_FakeProc] = []
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
-            app._ctx_switching = True
+            app._ctx._switching = True
             try:
                 await pilot.press("F")
                 await until(
@@ -2024,7 +2024,7 @@ async def test_forward_refused_while_context_switching() -> None:
                     label="forward refusal",
                 )
             finally:
-                app._ctx_switching = False
+                app._ctx._switching = False
             assert procs == []
 
 
@@ -2034,12 +2034,12 @@ async def test_forward_dialog_cancelled_when_context_switched_while_open() -> No
     reopened registry targets the new one (issue #36 review round 11)."""
     procs: list[_FakeProc] = []
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
-    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
             await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
-            app._ctx_epoch += 1  # a context switch completed under the dialog
+            app._ctx._epoch += 1  # a context switch completed under the dialog
             await pilot.press("enter")
             await until(
                 pilot,
@@ -2058,14 +2058,14 @@ async def test_forward_worker_cancelled_when_context_switched_mid_lookup() -> No
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
 
     async def switching_lookup(namespace: str, name: str) -> str | None:
-        app._ctx_epoch += 1  # a switch completed while the lookup was in flight
+        app._ctx._epoch += 1  # a switch completed while the lookup was in flight
         return None
 
     async with app.run_test() as pilot:
         await _wait_rows(app, pilot)
         app._forward._resolve_forward_workload = switching_lookup  # type: ignore[method-assign]
         await app._forward.start(
-            "pods", "default", "api-1", local_port=18080, remote_port=80, epoch=app._ctx_epoch
+            "pods", "default", "api-1", local_port=18080, remote_port=80, epoch=app._ctx.epoch()
         )
         await until(
             pilot,
@@ -2088,7 +2088,7 @@ async def test_forward_worker_refused_when_scheduled_with_stale_epoch() -> None:
     async with app.run_test() as pilot:
         await _wait_rows(app, pilot)
         await app._forward.start(
-            "pods", "default", "api-1", local_port=18081, remote_port=80, epoch=app._ctx_epoch - 1
+            "pods", "default", "api-1", local_port=18081, remote_port=80, epoch=app._ctx.epoch() - 1
         )
         await until(
             pilot,
