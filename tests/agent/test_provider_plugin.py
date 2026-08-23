@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator, Mapping
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from typing import Any
 
 import pytest
 
 from korvid.agent.credentials import CredentialSource
-from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
+from korvid.agent.model_policy import CapabilitySource, ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
@@ -16,6 +16,8 @@ from korvid.agent.provider_plugin import (
     ProviderPluginContractError,
     ProviderPluginMetadata,
     ValidatedPluginProvider,
+    _known_capability_fact_names,
+    _validate_plugin_capabilities,
 )
 
 
@@ -150,8 +152,6 @@ def test_validated_plugin_provider_rejects_oversized_model_id() -> None:
 
 
 def test_validated_plugin_provider_rejects_unknown_provenance_fact() -> None:
-    from korvid.agent.model_policy import CapabilitySource
-
     class _BadProvenanceProvider(_ScriptedProvider):
         @property
         def capabilities(self) -> ModelCapabilities:
@@ -159,6 +159,21 @@ def test_validated_plugin_provider_rejects_unknown_provenance_fact() -> None:
 
     with pytest.raises(ProviderPluginContractError, match="provenance"):
         ValidatedPluginProvider(_BadProvenanceProvider([{"type": "done"}]))
+
+
+def test_known_capability_fact_names_follow_model_capabilities_fields() -> None:
+    expected_fact_names = frozenset(
+        field.name for field in fields(ModelCapabilities) if field.name != "provenance"
+    )
+
+    assert _known_capability_fact_names() == expected_fact_names
+
+
+def test_validated_plugin_provider_accepts_all_known_provenance_facts() -> None:
+    for fact in _known_capability_fact_names():
+        caps = ModelCapabilities(provenance={fact: CapabilitySource.PROVIDER})
+        validated = _validate_plugin_capabilities(caps)
+        assert validated.provenance[fact] is CapabilitySource.PROVIDER
 
 
 def test_concrete_plugin_returns_provider_instance() -> None:

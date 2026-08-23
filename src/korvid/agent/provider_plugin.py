@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from types import MappingProxyType
 from typing import Any, Final
 
@@ -20,18 +20,15 @@ _MAX_TOOL_ARGUMENTS_BYTES: Final[int] = 65_536
 _MAX_USAGE_TOKENS: Final[int] = 1_000_000_000
 _MAX_MODEL_ID_LENGTH: Final[int] = 256
 
-#: Capability fact names `ModelCapabilities.provenance` may name — kept in
-#: sync with Task 3's `model_policy._CAPABILITY_FACTS` by hand since that
-#: name is private to its module.
-_KNOWN_CAPABILITY_FACTS: Final[frozenset[str]] = frozenset(
-    {
-        "context_window_tokens",
-        "supports_tools",
-        "supports_parallel_tools",
-        "supports_reasoning",
-        "recommended_tier",
-    }
-)
+
+def _known_capability_fact_names() -> frozenset[str]:
+    """Return the `ModelCapabilities` fact names allowed in provenance."""
+    return frozenset(
+        field.name for field in fields(ModelCapabilities) if field.name != "provenance"
+    )
+
+
+_KNOWN_CAPABILITY_FACTS: Final[frozenset[str]] = _known_capability_fact_names()
 
 
 @dataclass(frozen=True)
