@@ -163,6 +163,7 @@ extend-exclude = [
 [tool.typos.default.extend-words]
 aks = "aks"  # Azure Kubernetes Service — not a typo of "ask"
 paeth = "paeth"  # Alan W. Paeth, who defined PNG filter type 4 — not "path"
+trak = "trak"  # the ISO/IEC 14496-12 track box FourCC — renaming it breaks MP4 parsing
 
 [tool.deptry]
 known_first_party = ["korvid"]
