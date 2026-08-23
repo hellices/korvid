@@ -54,6 +54,11 @@ from korvid.tools.executor import UI_TOOL_NAMES, WRITE_TOOL_NAMES
 _DEFAULT_FIELD_BOUND: Final[int] = 512
 _FILTER_FIELD_BOUND: Final[int] = 2_048
 
+#: The handoff note quotes two context names inside one sentence, so both
+#: are bounded harder than a standalone field would be — a note is worth
+#: at most a couple of lines of the system prompt.
+_HANDOFF_CONTEXT_BOUND: Final[int] = 200
+
 #: The static layers (1-7) must fit comfortably inside the model's own
 #: history budget before a single turn runs: a policy whose packs, rules,
 #: and overlays alone would eat most of the conversation budget is a
@@ -120,9 +125,12 @@ class PromptInputs:
 
     `user_rules` is `config.agent_rules` (already parsed and bounded to at
     most 16 entries of at most 1000 characters each — this harness does
-    not re-validate that). `handoff_note` is a turn-scoped string the
-    caller (task 11's `AgentSession`) supplies, defaulting to a "nothing
-    to add" value so a first turn composes without one.
+    not re-validate that). `previous_interaction` is the snapshot the
+    *previous* turn started from, or None on the first turn: the session
+    (task 11) hands over typed state and this harness alone decides
+    whether a handoff note is warranted and what it says. A raw note
+    string would make the session author model-facing prose, which is
+    exactly the split this module exists to prevent.
 
     There is deliberately no evidence field. A `ComposedPrompt` is
     composed once and its system message is sent on *every* round of the
@@ -137,7 +145,7 @@ class PromptInputs:
     interaction: InteractionContext
     cluster: ClusterFacts
     user_rules: tuple[str, ...] = ()
-    handoff_note: str | None = None
+    previous_interaction: InteractionContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +224,32 @@ class PromptHarness:
             model_overlays if model_overlays is not None else MODEL_PROMPT_OVERLAYS
         )
 
+    def validate(self, policy: ResolvedAgentPolicy, user_rules: tuple[str, ...] = ()) -> None:
+        """Check that `policy` composes, without needing a live snapshot.
+
+        Layers 1-7 depend only on the policy and the operator rules, so
+        they can be checked before there is any workspace to snapshot —
+        which is what lets `AgentSession` (issue #316 task 11) refuse a
+        bad policy at construction time and refuse a bad *retarget*
+        before it swaps anything on a live session. The dynamic layers
+        (cluster note, handoff note, workspace context) are per-turn and
+        deliberately out of scope here.
+
+        Args:
+            policy: The resolved policy to check.
+            user_rules: `config.agent_rules` the same turn would compose.
+
+        Raises:
+            UnknownPromptPackError: `policy.prompt_pack_id` is not a
+                shipped pack.
+            UnknownPromptOverlayError: `policy.prompt_overlay_ids` names
+                an id absent from the shipped/injected registry.
+            StaticPromptTooLargeError: the static layers (1-7) exceed
+                `_MAX_STATIC_PROMPT_FRACTION` of
+                `policy.max_history_chars`.
+        """
+        self._static_prompt(policy, user_rules)
+
     def compose(self, user_text: str, inputs: PromptInputs) -> ComposedPrompt:
         """Compose one turn's system and user messages.
 
@@ -228,23 +262,13 @@ class PromptHarness:
                 `_MAX_STATIC_PROMPT_FRACTION` of
                 `inputs.policy.max_history_chars`.
         """
-        policy = inputs.policy
-        static_layers = [
-            SAFETY_CONTRACT,
-            COMMON_ROLE,
-            _tier_pack(policy.prompt_pack_id),
-            *self._overlay_layers(policy),
-            *_user_rule_layer(inputs.user_rules),
-            _capability_clauses(policy.tools),
-        ]
-        static_prompt = "\n\n".join(layer for layer in static_layers if layer)
-        _check_static_budget(static_prompt, policy.max_history_chars)
+        static_prompt = self._static_prompt(inputs.policy, inputs.user_rules)
 
         dynamic_layers = [
             note
             for note in (
                 cluster_context_note(inputs.cluster),
-                inputs.handoff_note,
+                _handoff_note(inputs.previous_interaction, inputs.interaction),
             )
             if note
         ]
@@ -254,6 +278,22 @@ class PromptHarness:
         user_message = f"{user_text}\n\n{_WORKSPACE_CONTEXT_LABEL}{encoded_context}"
 
         return ComposedPrompt(system_message=system_message, user_message=user_message)
+
+    def _static_prompt(self, policy: ResolvedAgentPolicy, user_rules: tuple[str, ...]) -> str:
+        """Build and budget-check layers 1-7. One builder, so `validate`
+        cannot accept what `compose` would refuse.
+        """
+        static_layers = [
+            SAFETY_CONTRACT,
+            COMMON_ROLE,
+            _tier_pack(policy.prompt_pack_id),
+            *self._overlay_layers(policy),
+            *_user_rule_layer(user_rules),
+            _capability_clauses(policy.tools),
+        ]
+        static_prompt = "\n\n".join(layer for layer in static_layers if layer)
+        _check_static_budget(static_prompt, policy.max_history_chars)
+        return static_prompt
 
     def _overlay_layers(self, policy: ResolvedAgentPolicy) -> list[str]:
         layers: list[str] = []
@@ -269,6 +309,48 @@ class PromptHarness:
                 )
             layers.append(overlay_text)
         return layers
+
+
+def _handoff_note(previous: InteractionContext | None, current: InteractionContext) -> str | None:
+    """Layer 9: tell the model the workspace moved under it.
+
+    Driven by `context_epoch`, not by the context *name*: the epoch is
+    the interaction layer's own "everything you knew is stale" counter
+    (task 1), so a reconnect to a same-named context still invalidates
+    prior reads and a pure pane move inside one context does not. The
+    caller (`AgentSession`) supplies typed snapshots and never a
+    sentence; every word the model sees about the switch is written
+    here, and both names are bounded and escaped like any other
+    untrusted field.
+
+    Args:
+        previous: Snapshot the previous turn started from, or None on a
+            first turn.
+        current: Snapshot this turn is starting from.
+
+    Returns:
+        A one-paragraph note naming both contexts and both epochs, or
+        `None` when nothing changed.
+    """
+    if previous is None or previous.context_epoch == current.context_epoch:
+        return None
+    return (
+        "The workspace changed since the previous turn: it was "
+        f"{_context_label(previous.kube_context)} at context epoch "
+        f"{previous.context_epoch} and the user has since switched to "
+        f"{_context_label(current.kube_context)} at context epoch "
+        f"{current.context_epoch}. Resource state, names, and identifiers "
+        "you learned before this switch may not exist here — re-read what "
+        "you need in the current context before acting on it, and never "
+        "carry a resource identity across the switch."
+    )
+
+
+def _context_label(kube_context: str | None) -> str:
+    bounded = _bounded(kube_context, _HANDOFF_CONTEXT_BOUND)
+    if not bounded:
+        return "an unnamed context"
+    return _encode(bounded)
 
 
 def _tier_pack(prompt_pack_id: str) -> str:

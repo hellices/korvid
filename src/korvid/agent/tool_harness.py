@@ -106,13 +106,61 @@ class ToolHarness:
         self._execution = execution
         self._bridge = bridge
         self._evidence = evidence
+        armed, max_calls, max_result_chars = _armed_surface(policy)
         #: Names come only from the policy's own schemas, so a tool the
         #: registry defines but this policy did not arm is unreachable.
-        self._armed: frozenset[str] = frozenset(tool_schema_names(list(policy.tools)))
-        self._max_calls = policy.max_tool_calls_per_iteration
-        self._max_result_chars = policy.max_result_chars
+        self._armed: frozenset[str] = armed
+        self._max_calls = max_calls
+        self._max_result_chars = max_result_chars
         self._context_epoch = 0
         self._calls_this_iteration = 0
+
+    @staticmethod
+    def validate_policy(policy: ResolvedAgentPolicy) -> None:
+        """Check that `policy`'s armed surface is executable, without a harness.
+
+        Every armed name must resolve to a registry definition under its
+        *exact* name: routing, result format, and evidence eligibility all
+        come from that definition, so an armed name the registry does not
+        define could only ever fail at call time, mid-turn, in front of the
+        user. `AgentSession` (issue #316 task 11) calls this before it
+        swaps a live session's policy so the refusal happens while the old
+        surface is still armed and intact.
+
+        Args:
+            policy: The resolved policy whose `tools` are the armed surface.
+
+        Raises:
+            ValueError: A schema is malformed, or an armed name has no
+                registry definition.
+        """
+        _armed_surface(policy)
+
+    def retarget(self, policy: ResolvedAgentPolicy) -> None:
+        """Install a new armed surface and its budgets on this same harness.
+
+        Identity is preserved deliberately: the engine holds this object
+        for its whole life, so re-pointing it here is what lets a context
+        switch change the armed tools without rebuilding the engine, and
+        guarantees the very next call the engine routes sees the new
+        surface. Validation happens entirely in locals, so a refusal
+        leaves the previous surface armed and callable.
+
+        The in-flight per-iteration call count is untouched: this is only
+        ever called between turns, and clearing it here would hand a
+        mid-iteration caller a fresh budget.
+
+        Args:
+            policy: The resolved policy to arm.
+
+        Raises:
+            ValueError: A schema is malformed, or an armed name has no
+                registry definition. Nothing is changed in that case.
+        """
+        armed, max_calls, max_result_chars = _armed_surface(policy)
+        self._armed = armed
+        self._max_calls = max_calls
+        self._max_result_chars = max_result_chars
 
     @property
     def evidence(self) -> EvidenceLedger:
@@ -262,6 +310,32 @@ class ToolHarness:
             outcome=ToolOutcome(text=cap_result(f"ERROR: {message}"), error=True),
             evidence_ref=None,
         )
+
+
+def _armed_surface(
+    policy: ResolvedAgentPolicy,
+) -> tuple[frozenset[str], int | None, int | None]:
+    """Derive the armed names and budgets a policy asks for, or refuse it.
+
+    Kept module-level and pure so construction, `validate_policy`, and
+    `retarget` cannot drift into three slightly different notions of what
+    an executable surface is.
+
+    Raises:
+        ValueError: A schema is malformed, or an armed name has no
+            registry definition under that exact name.
+    """
+    names = tool_schema_names(list(policy.tools))
+    unknown = [name for name in names if tool_def(name) is None]
+    if unknown:
+        raise ValueError(
+            "armed tools are not defined by the tool registry: " + ", ".join(sorted(unknown))
+        )
+    return (
+        frozenset(names),
+        policy.max_tool_calls_per_iteration,
+        policy.max_result_chars,
+    )
 
 
 def _ui_action(definition: ToolDef, arguments: dict[str, Any]) -> UiAction:

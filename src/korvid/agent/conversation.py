@@ -256,6 +256,19 @@ class ConversationState:
         """The size retained history is measured at against the budget."""
         return self._history_chars()
 
+    @property
+    def turn_active(self) -> bool:
+        """True while a started turn has neither completed nor rolled back.
+
+        A turn that a cancellation or an advisory stop abandoned stays
+        active until `finalize_interrupt` closes it, which is exactly what
+        `AgentSession` (issue #316 task 11) reads to decide whether the
+        turn it just stopped still owes a finalization — the alternative
+        is the session keeping a shadow copy of this flag and drifting
+        from it.
+        """
+        return self._turn_active
+
     # -- turn lifecycle ----------------------------------------------------
 
     def start_turn(self, content: str, records: Sequence[RedactionRecord] = ()) -> TurnCheckpoint:

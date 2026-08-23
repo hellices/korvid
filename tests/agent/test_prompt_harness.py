@@ -478,8 +478,12 @@ def test_a_handoff_from_an_unnamed_context_still_names_both_sides() -> None:
 def test_validate_accepts_a_shipped_policy_without_any_snapshot() -> None:
     """A session validates before it ever has a live workspace to snapshot."""
     harness = PromptHarness()
+    shipped = policy()
 
-    assert harness.validate(policy(), ("be careful",)) is None
+    harness.validate(shipped, ("be careful",))
+
+    composed = harness.compose("diagnose it", inputs(policy_=shipped, user_rules=("be careful",)))
+    assert "be careful" in composed.system_message
 
 
 def test_validate_rejects_an_unknown_prompt_pack() -> None:
@@ -528,8 +532,17 @@ def test_validate_counts_the_user_rules_against_the_static_budget() -> None:
 def test_cluster_facts_are_not_part_of_static_validation() -> None:
     """Only layers 1-7 are static; the cluster note is dynamic per turn."""
     harness = PromptHarness()
+    shipped = policy()
 
-    assert harness.validate(policy()) is None
+    harness.validate(shipped)
+
+    on_azure = harness.compose(
+        "diagnose it",
+        inputs(policy_=shipped, cluster=ClusterFacts(provider="azure", distribution="aks")),
+    )
+    unknown = harness.compose("diagnose it", inputs(policy_=shipped))
+    assert "AKS" in on_azure.system_message
+    assert "AKS" not in unknown.system_message
 
 
 def test_cluster_context_note_names_the_managed_distribution() -> None:

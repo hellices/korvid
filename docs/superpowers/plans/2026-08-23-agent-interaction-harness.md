@@ -810,10 +810,17 @@ git commit -m "feat: replace agent profiles with model tier routing" \
 - Consumes: Tasks 1 and 3 types plus retained `EvidenceLedger`.
 - Produces:
   - `PromptInputs(policy, interaction, cluster: ClusterFacts, user_rules,
-    handoff_note)`
+    previous_interaction: InteractionContext | None)`
   - `ComposedPrompt(system_message, user_message)`
   - `PromptHarness.compose(user_text, inputs)`
+  - `PromptHarness.validate(policy, user_rules)` — layers 1-7 only, so a
+    session can refuse an uncomposable policy before it has any workspace
+    to snapshot (Task 11).
   - `EvidenceLedger.prompt_note()`
+- `PromptInputs` carries the *previous* snapshot, not a caller-written handoff
+  string: the harness alone decides that the context epoch changed and owns
+  every word the model reads about the switch, so `AgentSession` never writes
+  model-facing prose.
 - `PromptInputs` carries **no** evidence field. A `ComposedPrompt` is composed
   once per turn and its system message is sent on every round, while the
   ledger grows with each read, so a table composed here would be stale by the

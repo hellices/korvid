@@ -653,7 +653,12 @@ def _unregistered_policy() -> ResolvedAgentPolicy:
 
 
 def test_validate_policy_accepts_a_registry_backed_surface() -> None:
-    assert ToolHarness.validate_policy(_policy(["get_logs", "navigate"], max_tool_calls=1)) is None
+    """What validation accepts, construction accepts — one derivation."""
+    armed = _policy(["get_logs", "navigate"], max_tool_calls=1)
+
+    ToolHarness.validate_policy(armed)
+
+    assert isinstance(_harness(armed), ToolHarness)
 
 
 def test_validate_policy_rejects_an_armed_name_the_registry_does_not_define() -> None:

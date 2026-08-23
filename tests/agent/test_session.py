@@ -36,7 +36,6 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 import pytest
-from korvid.agent.session import AgentSession, DefaultAgentSession, SessionRetargetError
 
 from korvid.agent.conversation import INTERRUPT_MARKER, ConversationState
 from korvid.agent.engine import AgentEngine, AgentTurnRequest
@@ -51,6 +50,7 @@ from korvid.agent.interaction import ClusterFacts, InteractionContext, PaneConte
 from korvid.agent.model_policy import ModelDescriptor, ModelTier, ResolvedAgentPolicy
 from korvid.agent.prompt_harness import PromptHarness, UnknownPromptPackError
 from korvid.agent.request_gateway import RequestGateway
+from korvid.agent.session import AgentSession, DefaultAgentSession, SessionRetargetError
 from korvid.agent.tool_harness import ToolHarness
 from korvid.tools.registry import TOOLS_BY_NAME
 
@@ -465,11 +465,11 @@ async def test_retarget_preserves_completed_history() -> None:
 async def test_retarget_does_not_mutate_the_previous_frozen_policy() -> None:
     harness = build_session([text_turn("first")])
     previous = harness.session.policy
-    snapshot = copy.deepcopy(previous)
+    snapshot = repr(previous)
 
     harness.session.retarget(session_policy(tool_names=("get_events",)), AZURE_CLUSTER)
 
-    assert previous == snapshot
+    assert repr(previous) == snapshot
     assert harness.session.policy is not previous
 
 
