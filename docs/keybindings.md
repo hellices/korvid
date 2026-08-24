@@ -1,87 +1,41 @@
 # Keybindings
 
-All keys, grouped by the context they act in. The top bar's key legend
-adapts to the current view: only the keys that act on the resource kind on
-screen are shown (helm's `i`/`u`/`r`, node ops' `c`/`u`/`D`, workload
-restart/scale, …), and off-view keys are inert. The bar starts collapsed —
-the corvid mark, the view name and the few most relevant keys — and `~`
-expands it to the full grouped legend (Nav · Sort · Actions · Logs · Panes ·
-Agent); the choice persists to `ui.topbar` in the config, and narrow
-terminals collapse automatically. The in-app help overlay (`?`) always
-documents every view and shows the effective keys, including any remaps.
+Korvid shows only the keys that act on the current view. Press `?` for the complete effective set, including remaps; press `~` to expand the top-bar legend.
 
-| Key | Context | Action |
-|-----|---------|--------|
-| `:` | global | Open command bar — accepts `pods`, `deploy all`, `helm`, `ns <name>`, `ctx <name>`, `ai`, `model`, `q` |
-| `?` | global | Help overlay — keybindings grouped by context plus `:` commands (Esc/q/`?` closes) |
-| `~` | global | Collapse/expand the top bar's grouped key legend (persists to `ui.topbar`) |
-| `/` | table | Open filter — name, `~fuzzy`, `/regex/`, `!exclude`, `-l k=v`, `-s` hide Completed (Enter keeps, Esc clears) |
-| `/` | log pane | Open inline log search |
-| `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods; helm release / Subscription / CSV → [hierarchy tree](helm-operators.md#hierarchy-tree) |
-| `Esc` | table | Pop one drill-down level |
-| `Ctrl-W` `v` / `w` / `q` | table | Split workspace into two panes / focus the other pane / close the focused pane |
-| `Shift-N/A/C/M` | table | Sort by name / age / CPU / MEM (repeat flips ▲/▼; sorts on data, not rendered strings) |
-| `o` | table | Sort picker: choose any sortable column of the current view (builtins + custom columns) from a list; re-picking the active column flips ▲/▼. Clicking a column header sorts by it too |
-| `0` | global | Toggle all-namespaces view |
-| `1`-`9` | global | Jump to a favorite namespace (`favorite_namespaces` config, in order) |
-| `d` | table | Describe selected resource (manifest + events) |
-| `g` | table | Operational relationship graph for the selected resource — direct dependencies/dependents with a coverage banner; `Enter` on a resolved row navigates there, `d` expands dependents, `c` shows coverage detail |
-| `T` | table | Session timeline: bounded read-only log of watch deltas, Warning events, context switches, and writes, current cluster context only by default; `e` toggles the epoch filter, `s` cycles the source filter, `r` toggles the resource filter to the row selected when it opened; `Enter` on a resource row navigates there |
-| `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |
-| `s` | nodes table | Node shell (`kubectl debug node/`; approval dialog — privileged pod with the host filesystem at `/host`, deleted on exit) |
-| `Shift-F` | pods / services table | Port-forward the selected target (local port prompt; prefilled from declared ports) |
-| `l` | pods table | Open / close log pane for selected pod |
-| `L` | pods table | Merge logs of all currently filtered pods (up to 8) |
-| `f` | log pane | Toggle JSON-formatted / raw display |
-| `w` | log pane | Toggle line wrap |
-| `t` | log pane | Toggle kubelet-timestamp prefix |
-| `Ctrl-S` | log pane | Save the current buffer to `$XDG_DATA_HOME/korvid/logs/` (default `~/.local/share/korvid/logs/`) |
-| `p` | log pane | Reload pane with previous (terminated) container logs |
-| `n` / `N` | log pane | Jump to next / previous search hit |
-| `Ctrl-D` | table | Delete selected resource (confirm dialog; cluster-scoped kinds require typing the name). On a Helm release: uninstall; on a Subscription (or a CSV whose Subscription is known): [operator uninstall](helm-operators.md#operator-uninstall) — a CSV with no known Subscription is a plain delete |
-| `r` | table | Rolling restart of selected deployment / statefulset / daemonset (confirm dialog) |
-| `S` | table | Scale selected deployment / replicaset / statefulset (replica prompt + confirm dialog) |
-| `R` | pods table | In-place resize of pod CPU/memory requests/limits (Kubernetes 1.35+; prompt + confirm dialog) |
-| `I` | operators tables | Install the selected catalog operator (wizard + confirm dialog) or approve a pending InstallPlan |
-| `c` / `u` | nodes table | Cordon / uncordon the selected node (confirm dialog with server dry-run preview) |
-| `Shift-D` | nodes table | Drain the selected node — PDB-aware impact preview (evictions, PDB-blocked pods, skipped DaemonSet/mirror pods, emptyDir warnings), typed-name confirm, live progress; press again to cancel mid-drain (node stays cordoned) |
-| `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
-| `i` | pods table | Open hint details overlay for a troubled pod (full container trouble + recent Warning events) |
-| `i` / `u` | helm table | Install a chart / upgrade the selected release (wizard + dry-run preview + confirm dialog; needs `helm` on `PATH`) |
-| `h` | helm table | Revision history of the selected release (the flat drill-down; Enter opens the hierarchy tree) |
-| `r` | helm revisions table | Roll back the release to the selected revision (confirm dialog; needs `helm` on `PATH`) |
-| `Ctrl-R` | chart picker | Manage chart repositories: list, add, refresh indexes |
-| `Ctrl-T` | pods table | Transfer a file to/from the selected container (exec tar stream; upload needs approval) |
-| `Ctrl-A` | global | Toggle AI agent panel |
-| `Ctrl-X` | global | Stop the running agent turn (the partial answer stays; typing a new prompt while the agent runs interrupts and replaces the turn) |
-| `q` | global | Quit |
-| `Esc` | log pane | Close pane (or dismiss search / filter bar) |
+<img class="docs-keymap" src="../assets/keybindings-context-map.svg" width="1200" height="520" alt="Context map connecting Korvid's global, table, log, and guarded-write keys">
 
-## Remapping keys
+## Move and inspect
 
-App-level actions can be remapped via the `keybindings:` section of
-`~/.config/korvid/config.yaml`, mapping an **action name** from the list
-below to a new key (Textual key syntax — `x`, `f1`, `ctrl+q`, `shift+g`).
-Keys handled outside bindings (`Enter` drill-down, `Esc` close/pop, and the
-dialogs' own keys) are not remappable:
+| Key | What it does |
+|---|---|
+| `:` | Open the command bar |
+| `?` | Show the effective keys for every view |
+| `~` | Expand or collapse the top-bar legend |
+| `/` | Filter a table or search the log pane |
+| `Enter` / `Esc` | Drill in / return one level |
+| `0` / `1`–`9` | Change namespace scope |
+| `d` | Describe the selected resource |
+| `g` | Open operational relationships |
+| `l` / `L` | Open selected or merged pod logs |
+| `Ctrl-W v/w/q` | Split, focus, or close a workspace pane |
+| `Ctrl-A` / `Ctrl-X` | Toggle the Agent / stop its current turn |
+| `q` | Quit |
+
+## Act in context
+
+| Context | Keys |
+|---|---|
+| Pods | `l` logs · `s` shell · `Shift-F` port-forward |
+| Workloads | `r` restart · `S` scale |
+| Nodes | `c` cordon · `u` uncordon · `Shift-D` drain |
+| Helm | `i` install · `u` upgrade · `r` rollback |
+
+## Remap an app action
 
 ```yaml
 keybindings:
-  delete_resource: ctrl+x   # free Ctrl-D for the terminal
+  delete_resource: ctrl+x
   sort_by_age: g
 ```
 
-Action names: `quit`, `help`, `open_command`, `open_filter`,
-`toggle_all_namespaces`, `describe`, `relationships`, `timeline`, `shell`, `logs`, `logs_multi`,
-`log_format`, `log_wrap`, `log_timestamps`, `log_save`, `log_previous`,
-`log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
-`sort_by_mem`, `sort_picker`, `toggle_topbar`, `toggle_agent`, `interrupt_agent`, `delete_resource`, `rollout_restart`,
-`resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
-`cordon_node`, `uncordon_node`, `drain_node`, `port_forward`, `transfer`,
-`helm_install`, `helm_upgrade`, `helm_rollback`, `helm_history`.
-
-Unknown actions, duplicate keys, and keys that shadow another action's
-default produce a startup warning and are skipped — never a crash. The
-approval dialogs' confirm keys are **not remappable** by design: writes are
-only ever confirmed by the fixed keystrokes. The help overlay (`?`) always
-shows the effective keys.
+Unknown, duplicate, or shadowing remaps warn and are skipped. Keys handled by drill-down, closing, and dialogs are not remappable. The approval dialogs' confirm keys are **not remappable**: every write still requires the fixed fresh keystroke.

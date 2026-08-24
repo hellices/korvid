@@ -52,7 +52,7 @@ the same confirmation dialog as the keybindings (marked with a ⚠ in the tool
 log), and only your keystroke in that dialog approves it; an unanswered
 dialog expires without executing anything.  Every executed write — yours or
 agent-requested — is recorded in the fail-closed
-[audit log](ops.md#the-safety-model).
+[audit log](ops.md#one-write-path-three-drivers).
 
 <section class="docs-storyboard" aria-labelledby="agent-storyboard-title">
   <figure>

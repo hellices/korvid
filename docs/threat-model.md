@@ -245,7 +245,7 @@ flowchart LR
   permissions, under a directory that is created if missing.
 - **Write approval gate** — every cluster mutation, however requested,
   waits for a user keystroke in a confirmation dialog (see
-  [`docs/ops.md#the-safety-model`](ops.md#the-safety-model)); the agent and
+  [`docs/ops.md#one-write-path-three-drivers`](ops.md#one-write-path-three-drivers)); the agent and
   MCP write-proposal flow can only *request* a write, never execute one.
 - **Fail-closed audit** — if the audit entry for an executed write cannot
   be written, the write itself is blocked.

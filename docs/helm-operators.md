@@ -2,7 +2,7 @@
 
 Package-manager views: the Helm release browser (with install / upgrade /
 rollback / uninstall) and the OLM operator catalog. All writes here run
-the same [safety pipeline](ops.md#the-safety-model) as every other
+the same [safety pipeline](ops.md#one-write-path-three-drivers) as every other
 mutation.
 
 ## Helm release browser

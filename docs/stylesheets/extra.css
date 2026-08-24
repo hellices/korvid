@@ -791,6 +791,37 @@
   }
 }
 
+/* Contextual keyboard map (keybindings.md) and the compact reference
+   grids (keybindings.md, ops.md) built on top of it. */
+.md-typeset .docs-keymap {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 1.5rem 0 2rem;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+  background: var(--korvid-charcoal-raised);
+}
+
+.md-typeset .docs-reference-grid {
+  display: grid;
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.md-typeset .docs-reference-grid > section {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+}
+
+@media (min-width: 720px) {
+  .md-typeset .docs-reference-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Footer — korvid identity instead of the bare theme default          */
 /* ------------------------------------------------------------------ */
