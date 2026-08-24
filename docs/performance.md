@@ -27,62 +27,6 @@ store and diff paths do not fall over at that size; they are **not** a claim
 that the live budgets below hold there, because they do not exercise the API
 server, the watch decoder, or a real terminal.
 
-## Environment and methodology
-
-- **Live cluster:** a dedicated AKS cluster, Kubernetes 1.35.6, 5 ×
-  `Standard_D4s_v5`, for both live runs below.
-- **Live client** for run `i186-20260806-195353`: macOS arm64, Python 3.12,
-  10 cores. That run is the 31-minute schedule — its baseline CPU profile
-  below covers 1,877 s of it — not the 30-second workload described next.
-- **Short workload**, used by the deterministic replay and by run
-  `i279-20260813-1620`: the committed profile
-  [`tests/performance/profiles/steady-24eps-1k.json`](https://github.com/hellices/korvid/blob/main/tests/performance/profiles/steady-24eps-1k.json)
-  — 1,000 Pods across 20 namespaces, 30 seconds of burst-free churn at 24
-  events/s.
-- **Replay and CPU-comparison runs:** an unpinned local developer machine, so
-  only same-session, interleaved arms are ever compared with each other.
-
-Reproduce any of it with the benchmark command described in
-[the qualification design](dev/specs/2026-08-06-large-cluster-performance-qualification-design.md).
-The deterministic replay runs as:
-
-```bash
-python -m tests.performance.cli replay \
-  --profile tests/performance/profiles/steady-24eps-1k.json \
-  --json <artifact-dir>/steady-24eps-1k.json \
-  --out <artifact-dir>/steady-24eps-1k.md
-```
-
-**The input metric is a state acknowledgement.** Every cursor-input figure in
-this document except the invalidated `Pilot.press` rows called out below is the
-interval from injecting one key event into the running app to the
-`ResourceTable` cursor row being observed on its new index.
-It is not a terminal paint: it excludes the emulator's own draw, and it
-excludes every driver idle heuristic. It is emitted as `latency.input` in the
-metrics JSON and as "Input latency p95 (key injection to cursor-row
-acknowledgement)" in the markdown report. The probe takes
-`--input-sample-pairs` `down`/`up` round trips (25 pairs — 50 samples — by
-default, each pair returning the cursor to its original row), so the reported
-percentile is a percentile rather than a point observation.
-
-**Profiled runs are not comparable to unprofiled ones.** `cProfile`
-instruments every Python call and materially changes compositor cost, which
-alone moves the measured cursor figure by an order of magnitude. Profiles are
-diagnostic artifacts only, never the acceptance environment for the 100 ms
-input budget, and before/after profiles must use identical instrumentation to
-be comparable.
-
-**The artifacts encode which latency was measured**, rather than leaving it to
-prose. Every report carries `latency.update_latency_kind`. A deterministic
-replay reports `event_to_render`, populates `latency.event_to_render`, leaves
-`latency.watch_to_diff_completion` null, and prints "Event to render p95" in
-the Markdown. A metadata-only live run reports `watch_to_diff_completion`,
-publishes its samples under `latency.watch_to_diff_completion`, leaves
-`latency.event_to_render` **null**, and prints "Watch receipt to diff
-completion p95" — the string "Event to render" never appears in such a report.
-`latency.event_to_render` becoming nullable is why the JSON `schema_version`
-is `2`.
-
 ## Live 1,000-pod results
 
 **Run `i186-20260806-195353`**, measured before and after the render-path work
@@ -214,6 +158,62 @@ updates requests at most one repaint, and none at all when no changed row
 intersects the painted viewport. Off-screen rows still update their data
 immediately — `get_row`, sorting, filtering and the final digest see the new
 value — and the row repaints as soon as it scrolls into view.
+
+## Environment and methodology
+
+- **Live cluster:** a dedicated AKS cluster, Kubernetes 1.35.6, 5 ×
+  `Standard_D4s_v5`, for both live runs above.
+- **Live client** for run `i186-20260806-195353`: macOS arm64, Python 3.12,
+  10 cores. That run is the 31-minute schedule — its baseline CPU profile
+  above covers 1,877 s of it — not the 30-second workload described next.
+- **Short workload**, used by the deterministic replay and by run
+  `i279-20260813-1620`: the committed profile
+  [`tests/performance/profiles/steady-24eps-1k.json`](https://github.com/hellices/korvid/blob/main/tests/performance/profiles/steady-24eps-1k.json)
+  — 1,000 Pods across 20 namespaces, 30 seconds of burst-free churn at 24
+  events/s.
+- **Replay and CPU-comparison runs:** an unpinned local developer machine, so
+  only same-session, interleaved arms are ever compared with each other.
+
+Reproduce any of it with the benchmark command described in
+[the qualification design](dev/specs/2026-08-06-large-cluster-performance-qualification-design.md).
+The deterministic replay runs as:
+
+```bash
+python -m tests.performance.cli replay \
+  --profile tests/performance/profiles/steady-24eps-1k.json \
+  --json <artifact-dir>/steady-24eps-1k.json \
+  --out <artifact-dir>/steady-24eps-1k.md
+```
+
+**The input metric is a state acknowledgement.** Every cursor-input figure in
+this document except the invalidated `Pilot.press` rows called out above is the
+interval from injecting one key event into the running app to the
+`ResourceTable` cursor row being observed on its new index.
+It is not a terminal paint: it excludes the emulator's own draw, and it
+excludes every driver idle heuristic. It is emitted as `latency.input` in the
+metrics JSON and as "Input latency p95 (key injection to cursor-row
+acknowledgement)" in the markdown report. The probe takes
+`--input-sample-pairs` `down`/`up` round trips (25 pairs — 50 samples — by
+default, each pair returning the cursor to its original row), so the reported
+percentile is a percentile rather than a point observation.
+
+**Profiled runs are not comparable to unprofiled ones.** `cProfile`
+instruments every Python call and materially changes compositor cost, which
+alone moves the measured cursor figure by an order of magnitude. Profiles are
+diagnostic artifacts only, never the acceptance environment for the 100 ms
+input budget, and before/after profiles must use identical instrumentation to
+be comparable.
+
+**The artifacts encode which latency was measured**, rather than leaving it to
+prose. Every report carries `latency.update_latency_kind`. A deterministic
+replay reports `event_to_render`, populates `latency.event_to_render`, leaves
+`latency.watch_to_diff_completion` null, and prints "Event to render p95" in
+the Markdown. A metadata-only live run reports `watch_to_diff_completion`,
+publishes its samples under `latency.watch_to_diff_completion`, leaves
+`latency.event_to_render` **null**, and prints "Watch receipt to diff
+completion p95" — the string "Event to render" never appears in such a report.
+`latency.event_to_render` becoming nullable is why the JSON `schema_version`
+is `2`.
 
 ## Update-path CPU and memory, before and after
 

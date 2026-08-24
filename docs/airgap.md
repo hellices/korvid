@@ -1,10 +1,13 @@
 # Air-gapped and restricted-network operation
 
-korvid needs no internet access: every runtime dependency can point at an
-internal endpoint. The decisions are *which* endpoint to internalize, and
-who owns the trust for it — korvid configures TLS only for the connections
-it makes itself, and there is **no way to disable TLS verification** through
-korvid configuration, by design.
+korvid's own runtime dependencies each point at an internal endpoint, so no
+internet access is required for core operation. The decisions are *which*
+endpoint to internalize, and who owns the trust for it — korvid configures
+TLS only for the connections it makes itself, and there is **no way to
+disable TLS verification** through korvid configuration, by design. Optional
+features that authenticate against an external identity provider (for
+example GitHub Copilot or Entra device login) still need their own external
+connectivity; they are called out below.
 
 ## The artifact and trust path
 
@@ -26,6 +29,9 @@ flowchart LR
     HOST --> CLUSTER
     CLUSTER --> REGISTRY
 ```
+
+**Every connection korvid or a feature it depends on can make, who owns the
+trust decision for it, and how to configure that trust:**
 
 | Connection | Owner | Configure with |
 | --- | --- | --- |
@@ -129,8 +135,8 @@ Kubernetes credentials are separate operator-supplied dependencies.
 - **Workload images**: standard registry mirroring; korvid never pulls
   images itself.
 
-Registry trust for the last three belongs to the nodes and the container
-runtime, not to korvid.
+Registry trust for OLM catalogs, debug/node-shell images, and workload
+images belongs to the nodes and the container runtime, not to korvid.
 
 ## Readiness checklist (detect, don't assume)
 
