@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -42,6 +43,11 @@ def test_keybindings_is_a_compact_contextual_reference() -> None:
     assert "Action names:" not in source
     assert "approval dialogs' confirm keys are **not remappable**" in source
     assert source.count("```yaml") == 1
+
+
+def test_keybindings_context_map_is_well_formed_svg() -> None:
+    root = ET.parse(DOCS / "assets" / "keybindings-context-map.svg").getroot()
+    assert root.tag.endswith("svg")
 
 
 def test_core_guides_do_not_retain_catalog_scale_outlines() -> None:

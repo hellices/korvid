@@ -3,11 +3,10 @@
   <desc id="keymap-desc">Global navigation leads to table inspection, logs, and guarded write actions. The help overlay always shows the effective keys.</desc>
   <!--
     Loaded through an <img> tag (see docs/keybindings.md), which renders this
-    as a standalone document: host-page CSS variables do not cascade in, so
-    every color below is a literal hex copy of the --korvid-charcoal*,
-    --korvid-amber*, and --korvid-ink* custom properties declared in
-    docs/stylesheets/extra.css, matching the pattern already used by
-    assets/korvid-mark.svg.
+    as a standalone document. Host-page CSS variables do not cascade in, so
+    every color below is a literal hex copy of the Korvid charcoal, amber,
+    and ink custom properties declared in docs/stylesheets/extra.css, matching
+    the pattern already used by assets/korvid-mark.svg.
   -->
   <style>
     :root {
