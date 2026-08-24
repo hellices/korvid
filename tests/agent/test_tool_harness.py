@@ -456,6 +456,47 @@ async def test_oversized_result_is_capped_before_history() -> None:
     assert len(result.outcome.text) < len(big)
 
 
+async def test_oversized_result_keeps_both_ends_of_the_report() -> None:
+    """Migrated from the retired profile-budget suite.
+
+    korvid's diagnostic reports put identity first and the evidence —
+    Warning events, log excerpts, exit reasons — last. A prefix-only cap
+    would keep the pod's name and throw away the reason it died, so the
+    model would answer from the least diagnostic half of its own read.
+    """
+    head = "IDENTITY: pod prod/api-0\n"
+    tail = "\nLOG EXCERPT: OOMKilled (exit 137)"
+    execution = _RecordingExecution(ToolOutcome(text=head + "x" * 5_000 + tail))
+    harness = _harness(
+        _policy(["diagnose_pod"], max_tool_calls=None, max_result_chars=1_000),
+        execution=execution,
+    )
+
+    result = await harness.execute("c1", "diagnose_pod", {"name": "api-0", "namespace": "prod"})
+
+    assert len(result.outcome.text) <= 1_000
+    assert "IDENTITY: pod prod/api-0" in result.outcome.text
+    assert "OOMKilled (exit 137)" in result.outcome.text
+
+
+async def test_a_ui_drive_action_is_never_citable_as_evidence() -> None:
+    """Migrated from the retired evidence-runtime suite.
+
+    A screen action reads nothing from the cluster. Minting a reference
+    for it would let the model cite "[E1]" for a claim whose only backing
+    is that a pane changed.
+    """
+    evidence = EvidenceLedger()
+    bridge = _RecordingBridge(message="switched to deployments")
+    harness = _harness(_policy(["navigate"], max_tool_calls=None), bridge=bridge, evidence=evidence)
+
+    result = await harness.execute("c1", "navigate", {"view": "deployments"})
+
+    assert bridge.actions == [Navigate(view="deployments", namespace=None)]
+    assert result.evidence_ref is None
+    assert evidence.references() == ()
+
+
 async def test_producer_redactions_are_preserved_and_merged() -> None:
     produced = (RedactionRecord(path="result.spec.password", reason="value-classified-secret"),)
     execution = _RecordingExecution(ToolOutcome(text="ok", redactions=produced))

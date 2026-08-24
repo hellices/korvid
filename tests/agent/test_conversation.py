@@ -456,6 +456,32 @@ def test_interrupt_after_a_tool_result_rolls_back_the_active_iteration() -> None
     assert convo.has_unmatched_tool_calls is False
 
 
+def test_every_retained_call_id_is_paired_after_a_multi_iteration_interrupt() -> None:
+    """Migrated from the retired interrupt suite.
+
+    The durable history is what the next request is built from, so an
+    assistant tool call retained without its result is a payload the
+    provider rejects — and the user only finds out on the turn *after*
+    the one they stopped.
+    """
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("why is it failing?")
+    for index in (1, 2):
+        convo.start_iteration()
+        convo.record_stream_text("")
+        convo.append_assistant("", [{"id": f"c{index}", "name": "get_logs", "arguments": "{}"}])
+        convo.append_tool_result(f"c{index}", f"result-{index}")
+    convo.start_iteration(prompt_estimate=40)
+    convo.record_stream_text("still working")
+
+    convo.finalize_interrupt()
+
+    result_ids = {m["tool_call_id"] for m in convo.messages if m["role"] == "tool"}
+    assert convo.retained_tool_call_ids == frozenset({"c1", "c2"})
+    assert convo.retained_tool_call_ids == result_ids
+    assert convo.has_unmatched_tool_calls is False
+
+
 def test_usage_reported_before_interruption_is_committed() -> None:
     convo = ConversationState(max_history_chars=LOOSE_BUDGET)
     convo.start_turn("q")

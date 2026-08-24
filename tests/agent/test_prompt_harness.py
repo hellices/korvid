@@ -350,6 +350,52 @@ def test_no_armed_ui_tools_means_no_drive_clause() -> None:
     assert "drive the TUI" not in prompt.system_message
 
 
+def test_the_write_clause_forbids_retrying_a_denied_or_expired_request() -> None:
+    """Migrated from the retired write-prompt suite.
+
+    A model that re-proposes a write the user just denied turns one
+    refused dialog into an approval-fatigue loop, which is how a denial
+    eventually becomes an accidental approval.
+    """
+    harness = PromptHarness()
+    turn_policy = policy(
+        tier=ModelTier.HIGH, max_history_chars=120_000, tools=_write_and_ui_tools()
+    )
+
+    prompt = harness.compose("scale it down", inputs(policy_=turn_policy))
+
+    assert "Never retry a denied or expired request" in prompt.system_message
+
+
+def test_the_drive_clause_names_only_the_ui_tools_actually_armed() -> None:
+    """A low-tier surface offers two screen actions, and says exactly two.
+
+    Naming a tool the policy never armed teaches a small model to emit a
+    call that can only come back as an error, spending an iteration of a
+    six-iteration budget on nothing.
+    """
+    harness = PromptHarness()
+    armed = tuple(
+        schema
+        for schema in agent_tool_schemas(
+            "low_agent",
+            readonly=True,
+            resize_supported=False,
+            observability_backends=frozenset(),
+        )
+    )
+    turn_policy = policy(tier=ModelTier.LOW, tools=armed)
+
+    message = harness.compose("what is wrong", inputs(policy_=turn_policy)).system_message
+    clause = message.split("drive the TUI itself using: ", 1)[1].split(".", 1)[0]
+
+    assert "open_logs" in clause
+    assert "open_describe" in clause
+    assert "navigate" not in clause
+    assert "set_filter" not in clause
+    assert "drill_down" not in clause
+
+
 # ---------------------------------------------------------------------------
 # Handoff / cluster notes (the evidence table is the engine's, per round)
 # ---------------------------------------------------------------------------
@@ -555,6 +601,50 @@ def test_cluster_context_note_names_the_managed_distribution() -> None:
 
 def test_cluster_context_note_is_none_for_an_unknown_provider() -> None:
     assert cluster_context_note(ClusterFacts(provider="unknown", distribution=None)) is None
+
+
+def test_cluster_context_note_names_a_bare_provider_without_a_distribution() -> None:
+    """Migrated from the retired `agent.context` suite.
+
+    Self-managed clusters on a cloud provider are the common case; a note
+    that only fired for AKS/EKS/GKE would drop provider knowledge exactly
+    where the operator has to supply the platform pieces themselves.
+    """
+    note = cluster_context_note(ClusterFacts(provider="aws", distribution=None))
+
+    assert note is not None
+    assert "AWS" in note
+    assert "managed" not in note
+
+
+def test_cluster_context_note_directs_the_model_to_provider_annotations() -> None:
+    """The note exists to steer annotation/storage-class answers."""
+    note = cluster_context_note(ClusterFacts(provider="gcp", distribution="gke"))
+
+    assert note is not None
+    assert "annotation" in note.lower()
+    assert "storage class" in note.lower()
+
+
+@pytest.mark.parametrize(
+    ("provider", "distribution"),
+    [("azure", "aks"), ("aws", "eks"), ("gcp", "gke")],
+)
+def test_cluster_context_note_ships_no_hardcoded_annotation_keys(
+    provider: str, distribution: str
+) -> None:
+    """korvid ships no annotation catalog, and must not pretend to.
+
+    A hardcoded key rots the day the provider renames it, and korvid has
+    no way to notice. The model supplies the provider-specific knowledge;
+    the note only says which provider it is answering for.
+    """
+    note = cluster_context_note(ClusterFacts(provider=provider, distribution=distribution))
+
+    assert note is not None
+    assert "service.beta.kubernetes.io" not in note
+    assert "cloud.google.com/" not in note
+    assert "kubernetes.io/ingress" not in note
 
 
 def test_cluster_context_note_is_composed_into_the_system_message() -> None:

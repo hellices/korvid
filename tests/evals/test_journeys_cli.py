@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any, ClassVar
@@ -16,6 +17,7 @@ from korvid.evals.journey_runner import (
     JourneyRun,
     JourneyTurnResult,
 )
+from korvid.evals.journey_runner import render_markdown as render_journey_markdown
 from korvid.evals.journeys_cli import _parse_args, _run, exit_code, journey_run_payload
 from korvid.evals.scripted import ScriptedProvider
 from tests.evals.fixtures import EVAL_INTERACTION, eval_interaction
@@ -473,3 +475,73 @@ cluster: {objects: [], events: [], logs: {}}
     assert retargeted
     assert retargeted[0].interaction.kube_context == "aks-korvid-contract-test"
     assert retargeted[0].interaction.focused_pane.scope == "korvid-agent-eval-run-9"
+
+
+# ---------------------------------------------------------------------------
+# A journey's verdict is derived from its turns, not asserted alongside them
+# ---------------------------------------------------------------------------
+
+
+def test_journey_run_success_is_derived_never_stored() -> None:
+    """A stored flag beside the turns is a second copy of one fact.
+
+    `JourneyTurnResult.success` is already derived from its outcome for
+    exactly this reason; a run that still *takes* `success` lets a caller
+    publish `success=True` above a failed turn, and the scoreboard would
+    repeat the claim without noticing.
+    """
+    names = {field.name for field in dataclasses.fields(JourneyRun)}
+
+    assert "success" not in names
+    assert "turns" in names
+
+
+def test_a_journey_run_cannot_claim_a_success_its_turns_contradict() -> None:
+    run = JourneyRun(
+        turns=(
+            _turn_result(),
+            _turn_result(outcome="failure", failure_class="misdiagnosis"),
+        ),
+        input_tokens=10,
+        output_tokens=5,
+        tokens_estimated=False,
+    )
+
+    assert run.success is False
+
+
+def test_a_journey_run_whose_every_turn_succeeded_is_a_success() -> None:
+    run = JourneyRun(
+        turns=(_turn_result(), _turn_result()),
+        input_tokens=10,
+        output_tokens=5,
+        tokens_estimated=False,
+    )
+
+    assert run.success is True
+
+
+def test_a_journey_run_with_no_turns_is_not_a_success() -> None:
+    """A conversation that never ran proved nothing.
+
+    `all(())` is `True`, so the naive derivation would publish an empty
+    run — a provider that died before the first turn — as a clean pass.
+    """
+    run = JourneyRun(turns=(), input_tokens=0, output_tokens=0, tokens_estimated=True)
+
+    assert run.success is False
+
+
+def test_the_journey_markdown_column_says_which_success_it_counts() -> None:
+    """`success` next to a scenario table means something else there.
+
+    The two tables are read side by side in the scoreboard: this column
+    counts whole conversations whose every turn succeeded, while the
+    scenario table's counts repetitions whose diagnosis was graded
+    correct. One shared word for two measurements misreads as one.
+    """
+    header = render_journey_markdown([_journey_report()]).splitlines()[0]
+    cells = [cell.strip() for cell in header.strip("|").split("|")]
+
+    assert "all-turn journeys" in cells
+    assert "success" not in cells

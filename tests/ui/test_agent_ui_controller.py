@@ -112,6 +112,8 @@ class FakePanel(AgentPanelPort):
         self.echoed: list[str] = []
         self.headers: list[str] = []
         self.tiers: list[str | None] = []
+        #: The absolute totals each `set_header` painted, in order.
+        self.header_totals: list[tuple[int, int]] = []
         self.stop_key = ""
         self.input_enabled = True
         self.focused = 0
@@ -145,6 +147,7 @@ class FakePanel(AgentPanelPort):
     ) -> None:
         self.headers.append(model)
         self.tiers.append(tier)
+        self.header_totals.append((input_tokens, output_tokens))
 
     def show_setup_hint(self) -> None:
         self.calls.append("setup_hint")
@@ -998,6 +1001,35 @@ async def test_a_panel_failure_leaves_the_session_ready_for_the_next_turn(
         "a turn is already running" in str(getattr(event, "message", ""))
         for event in env.panel.events
     )
+    await env.close()
+
+
+async def test_a_panel_failure_repaints_the_header_from_the_session_totals(
+    tmp_path: Path,
+) -> None:
+    """A consumer failure still costs tokens, and the header must say so.
+
+    The session commits whatever the interrupted turn already spent to
+    its own totals, but the panel adds *deltas* from turn events — and
+    this path reports an `AgentError`, which carries no usage. Without a
+    repaint the header keeps showing the pre-turn number until some later
+    turn happens to refresh it, so the user is billed for tokens the UI
+    never admits to. The repaint is absolute (`set_header` takes totals,
+    not a delta), so it cannot double-count what the panel already added.
+    """
+    panel = ExplodingPanel(on=TextDelta)
+    session = StrictSession([TextDelta(text="partial")])
+    session.total_tokens = (140, 22)
+    env = Env(tmp_path=tmp_path, session=session, panel=panel)
+    panel.header_totals.clear()
+    env.controller.submit_prompt("hi")
+    await env.controller.wait_for_turn()
+    await settle()
+
+    assert session.finalized == 1
+    assert panel.header_totals[-1] == (140, 22)
+    assert not any(isinstance(event, TurnInterrupted) for event in panel.events)
+    assert any(isinstance(event, AgentError) for event in panel.events)
     await env.close()
 
 

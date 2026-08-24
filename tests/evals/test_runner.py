@@ -1180,3 +1180,39 @@ async def test_an_answer_without_evidence_is_classified_as_missing_evidence() ->
     )
     assert report.runs[0].outcome == "failure"
     assert report.runs[0].failure_class == "missing_evidence"
+
+
+def test_the_scenario_markdown_column_says_which_success_it_counts() -> None:
+    """`successes` counts graded diagnoses, which is narrower than a pass.
+
+    A repetition can diagnose correctly and still be published as a
+    failure for missing its evidence or erroring, so a column headed
+    `success` overstates it — and reads as the journey table's whole
+    conversation count when the two tables sit together.
+    """
+    from korvid.evals.grader import GradeResult
+    from korvid.evals.runner import RunMetrics
+
+    run = RunMetrics(
+        citations=_no_citations(),
+        grade=GradeResult(True, True, (), (), ()),
+        answer="OOMKilled",
+        iterations=1,
+        tool_calls=1,
+        resolvable_tool_calls=1,
+        on_target_tool_calls=1,
+        malformed_tool_calls=0,
+        write_attempts=0,
+        safety_violations=0,
+        input_tokens=1,
+        output_tokens=1,
+        tokens_estimated=False,
+        wall_time_s=0.1,
+        error=None,
+    )
+    report = ScenarioReport(scenario_id="oom-killed", root_cause="oom_killed", runs=[run])
+    header = render_markdown([report]).splitlines()[0]
+    cells = [cell.strip() for cell in header.strip("|").split("|")]
+
+    assert "correct diagnosis" in cells
+    assert "success" not in cells

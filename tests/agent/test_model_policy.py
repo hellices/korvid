@@ -18,6 +18,7 @@ from korvid.agent.model_policy import (
     ModelRoutingError,
     ModelTier,
     PolicyEnvironment,
+    ResolvedAgentPolicy,
 )
 
 # ---------------------------------------------------------------------------
@@ -640,3 +641,45 @@ def test_model_catalog_module_not_in_model_policy_dependencies() -> None:
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Tier budget arithmetic (migrated from the retired profile suite)
+# ---------------------------------------------------------------------------
+
+
+def _resolved(tier: ModelTier) -> ResolvedAgentPolicy:
+    from korvid.agent.model_catalog import MODEL_CATALOG
+
+    return ModelRouter(MODEL_CATALOG).resolve(
+        descriptor=ModelDescriptor("ollama", "qwen3:8b"),
+        provider_capabilities=ModelCapabilities.unknown(),
+        explicit_tier=tier,
+        environment=environment(resize_supported=True),
+    )
+
+
+def test_a_low_tier_turn_fits_inside_its_own_history_budget() -> None:
+    """Every result of a full low-tier turn must fit the retained history.
+
+    History trimming never drops the sole most recent turn, so if one
+    turn's worth of capped results could exceed the budget, the budget
+    would silently stop being a bound — on exactly the small local models
+    that cannot absorb the overflow.
+    """
+    policy = _resolved(ModelTier.LOW)
+
+    assert policy.max_result_chars is not None
+    assert policy.max_iterations * policy.max_result_chars <= policy.max_history_chars
+
+
+def test_the_low_tier_answers_in_fewer_iterations_and_less_history_than_high() -> None:
+    """The tiers are a real capability split, not two names for one budget."""
+    low = _resolved(ModelTier.LOW)
+    high = _resolved(ModelTier.HIGH)
+
+    assert low.max_iterations < high.max_iterations
+    assert low.max_history_chars < high.max_history_chars
+    assert low.max_tool_calls_per_iteration == 1
+    assert high.max_result_chars is None
+    assert len(low.tools) < len(high.tools)
