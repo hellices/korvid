@@ -443,9 +443,9 @@ owns everything about the built-in agent that used to live on `KorvidApp`:
 
 | Owned | Notes |
 |---|---|
-| runtime, model, settings, capability profile, configurator/rebuild/disconnect seams, the `:ai off` disconnect marker, the follow flag | `:ai`, `:ai off`, `:ai follow`, `:ai payload` and `:model` are all handled here; the app routes the command word and nothing else |
+| the `AgentSession`, model name, settings, configurator/rebuild/disconnect seams, the `:ai off` disconnect marker, the follow flag | `:ai`, `:ai off`, `:ai follow`, `:ai payload` and `:model` are all handled here; the app routes the command word and nothing else. The tier and budgets are not the controller's to pick — `ModelRouter` resolves them into the session's `ResolvedAgentPolicy`, and the controller only paints the routed tier in the header |
 | the turn task | A bare app-loop task, created through the `TurnTasks` port: the interrupt key must cancel *this* turn, the queued interrupt-and-submit replacement starts from the cancelled task's done callback, and `shutdown()` cancels and reaps it |
-| the screen context the model is told about | Composed from `WorkspaceState` and the selected row, plus the one-shot `:ctx` note the switch coordinator hands over through `note_context_switch` |
+| the workspace snapshot the session is handed | An `InteractionContext` composed from `WorkspaceState` and the selected row, through `AgentWorkspaceBridge`. It carries a `context_epoch`, not a sentence: a `:ctx` switch bumps the epoch and the `PromptHarness` decides what — if anything — the model is told about it, so no model-facing prose is written here |
 | follow mirroring | Successful cluster reads are mirrored through the injected serialized bridge (the composition root's `_UIBridgeProxy`), falling back to the controller's own `AgentUIBridge` |
 | every `UIBridge` read | evidence open, navigate, filter, drill, logs, describe — each with the approval-dialog and describe-screen guards |
 | the direct agent write | `agent_request_write`, its target manifest/uid/ownership lookups, the dry-run preview, the resize impact lines, and the write-op construction the proposal path shares |

@@ -1,7 +1,7 @@
 """korvid's agent layer: one interaction harness, published as one surface.
 
-Every contract the composition root, the UI, and a provider plugin need is
-named in `__all__` below, grouped by the part of the harness that owns it:
+`__all__` below is what the composition root and the UI wire against,
+grouped by the part of the harness that owns it:
 
 | group | what it is |
 | --- | --- |
@@ -17,12 +17,25 @@ named in `__all__` below, grouped by the part of the harness that owns it:
 | events | what a turn yields to the UI |
 | setup | the configurator contract the setup screen drives |
 
+Two public contracts are deliberately **not** in that list, and a plugin
+author imports them from the submodule that owns them:
+
+- `korvid.agent.provider_plugin` — `ProviderPlugin`,
+  `ProviderPluginMetadata`, `ProviderPluginConfig`, and
+  `PROVIDER_PLUGIN_API_VERSION` (the API 2 descriptor/capability
+  contract `ValidatedPluginProvider` enforces);
+- `korvid.agent.credentials` — `CredentialSource`.
+
+They stay out of `__all__` because publishing them would make the plugin
+validator part of every start, which is the boundary
+`tests/test_optional_extras.py` pins; naming them here costs nothing
+because this is prose, not an import.
+
 Attributes resolve lazily (PEP 562). `korvid.__main__` imports
 `korvid.agent.interaction` before it knows whether the agent is enabled, and
 an eager package import would drag the engine, the gateway and the provider
-ABC into every MCP-only or read-only start — the boundary
-`tests/test_optional_extras.py` pins. Static analysis still sees the real
-types through the `TYPE_CHECKING` block below.
+ABC into every MCP-only or read-only start. Static analysis still sees the
+real types through the `TYPE_CHECKING` block below.
 """
 
 from __future__ import annotations

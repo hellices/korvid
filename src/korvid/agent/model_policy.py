@@ -19,6 +19,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
+from korvid.agent.prompt_packs import LOW_TOOL_DESCRIPTIONS
 from korvid.tools.registry import agent_tool_schemas
 
 #: Version of the shipped exact-match model catalog (`model_catalog.py`).
@@ -241,6 +242,35 @@ def _route_tier(
     return ModelTier.LOW, CapabilitySource.FALLBACK
 
 
+def apply_low_tool_descriptions(schemas: list[dict[str, Any]]) -> None:
+    """Swap in the shipped low-tier wording, in place, by exact tool name.
+
+    Called on the deep copies `agent_tool_schemas` already produced and
+    *before* they are deep-frozen, so the registry is never touched and no
+    consumer ever receives a mutable schema.
+
+    Only `function.description` is ever replaced. Names, parameters and
+    required fields are left exactly as the registry declared them, so a
+    rewording can shorten what the model reads but never widen what a tool
+    accepts or does. Matching is by exact name: a schema this map does not
+    name — an unmapped registry tool, or a tool a plugin contributed —
+    keeps the description it declared.
+
+    Args:
+        schemas: Mutable, caller-owned OpenAI function schemas.
+    """
+    for schema in schemas:
+        function = schema.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str):
+            continue
+        replacement = LOW_TOOL_DESCRIPTIONS.get(name)
+        if replacement is not None:
+            function["description"] = replacement
+
+
 class ModelRouter:
     """Resolve routing policies from capability evidence.
 
@@ -297,6 +327,12 @@ class ModelRouter:
             resize_supported=environment.resize_supported,
             observability_backends=environment.observability_backends,
         )
+        if tier is ModelTier.LOW:
+            # Model-facing wording only, and only for the low tier: the
+            # schema list rides on every request, and a small serving
+            # context pays for each character of it. Applied here, on the
+            # mutable copies, so what freezes below is already final.
+            apply_low_tool_descriptions(raw_schemas)
         tools: tuple[ToolSchema, ...] = tuple(_deep_freeze(schema) for schema in raw_schemas)
 
         # Parallel tool calls are gated on the provider's own confirmation,

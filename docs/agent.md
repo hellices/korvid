@@ -339,9 +339,9 @@ receives only the same sanitized canonical payload
 plugin code is free to mutate, retain, log, or independently transmit that
 data; korvid has no visibility or control past the handoff (see
 [`docs/threat-model.md`](threat-model.md)).  See
-[Provider plugins](provider-plugins.md) for the exact API-v1 contract,
-entry-point registration, event limits, option limits, and selected-only
-loading behavior.
+[Provider plugins](provider-plugins.md) for the exact provider-plugin API 2
+contract, entry-point registration, event limits, option limits, and
+selected-only loading behavior.
 
 For endpoints signed by a corporate/private CA (internal Ollama, vLLM, or
 an OpenAI-compatible gateway), set `network.ca_bundle` in `config.yaml` —
@@ -377,6 +377,7 @@ the per-result cap, and which prompt pack is composed.
 | tool calls per response | 1 (extras discarded) | provider-confirmed parallel, else 1 |
 | screen tools armed | `open_logs`, `open_describe` | all five |
 | prompt pack | `low-korvid-operator` | `high-korvid-operator` |
+| tool descriptions | shipped low wording, ≤ 250 chars each | the registry wording |
 
 The low tier exists because small local models (3B–14B) handle a frontier
 surface poorly: they are competitive on simple single-function calls, fall
@@ -393,6 +394,39 @@ short fixed-size notice rides on top of the capped result.
 Writes are unaffected by the tier: every write tool the environment arms
 still passes the approval gate at both tiers, and a read-only deployment is
 never offered one at all.
+
+### What the low tier says differently
+
+The low tier does not just get *fewer* tools — it gets shorter text, in two
+places, because the whole schema list and the whole system prompt are
+retransmitted on every request of every iteration.
+
+- **The `low-korvid-operator` pack** adds bounded-operation and diagnosis
+  rules on top of korvid's immutable safety contract: one tool call at a
+  time; never invent a resource name or namespace; a 404 means list again
+  rather than retry; diagnose from the reason string in states and events
+  rather than an exit code alone (exit 137 alone is not `OOMKilled` — a
+  failing liveness probe kills a container the same way); follow a result
+  that points at another object before answering; name exactly one root
+  cause and no fault you ruled out; quote the decisive reason string; and
+  do not call a resource healthy while its warning events say otherwise.
+  These are additive — no pack, overlay or house rule can widen what the
+  safety contract permits.
+- **`LOW_TOOL_DESCRIPTIONS`** (in `korvid/agent/prompt_packs.py`) replaces
+  the description of the tools whose registry wording is written for a
+  frontier context window — `diagnose_pod`, `diagnose_pvc`,
+  `diagnose_workload`, `helm_list_releases`, `list_operators`, `open_logs`
+  and `resize_pod`. The swap happens by **exact tool name** on a low route
+  only: the high tier keeps the registry wording, a tool the map does not
+  name keeps the description it declared, and nothing but the description
+  is ever touched — no parameter, no required field, no name. Every
+  description the low surface arms is nonempty and at most 250 characters.
+
+Both are shipped, package-local text with no model or provider heuristic
+behind them, and both are eval-backed: changing either moves the eval prompt
+digest and requires re-running the retained cases before any score taken
+under the old wording can be compared. See
+[the eval methodology](evals/methodology.md#what-the-low-tier-ships-and-what-changing-it-costs).
 
 ### How the tier is chosen
 

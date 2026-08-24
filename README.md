@@ -142,12 +142,13 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
   OLM operator catalog with approval-gated installs and uninstalls.
 - **[AI agent](https://hellices.github.io/korvid/agent/)** — screen-context awareness, UI-driving
   tools, `diagnose_pod`, cloud-provider awareness (AKS / EKS / GKE),
-  provider setup (`:ai` wizard), capability profiles for small local
-  models, and an eval harness that grades diagnosis quality.
-- **[Provider plugins](https://hellices.github.io/korvid/provider-plugins/)** — the API-v1 contract for
-  third-party LLM adapters, selected-only loading, exact event and option
-  limits, and guidance on when a plugin is warranted instead of an
-  OpenAI-compatible endpoint.
+  provider setup (`:ai` wizard), a low/high model tier that sizes the tool
+  surface, budgets and prompt pack for small local models, and an eval
+  harness that grades diagnosis quality.
+- **[Provider plugins](https://hellices.github.io/korvid/provider-plugins/)** — the provider-plugin
+  API 2 contract for third-party LLM adapters, selected-only loading, exact
+  event and option limits, and guidance on when a plugin is warranted
+  instead of an OpenAI-compatible endpoint.
 - **[Observability connectors](https://hellices.github.io/korvid/observability/)** — bounded read-only
   Prometheus and Loki investigation: a fixed signal catalogue rather than
   free-form queries, enforced window/size/timeout/concurrency limits,

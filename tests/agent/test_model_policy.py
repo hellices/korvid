@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import inspect
 from types import MappingProxyType
+from typing import Any
 
 import pytest
 
@@ -756,7 +757,7 @@ def test_a_low_route_keeps_the_registry_wording_for_every_unmapped_tool() -> Non
 
 def test_an_unknown_tool_schema_keeps_the_description_it_declared() -> None:
     """A plugin tool the map never heard of must survive the low pass intact."""
-    plugin = [
+    plugin: list[dict[str, Any]] = [
         {
             "type": "function",
             "function": {

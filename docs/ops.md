@@ -72,9 +72,16 @@ big a tool result may be. It has **no** effect on the safety perimeter:
 - read-only mode and protected contexts are enforced in code, above the
   model: in read-only mode no write schema is offered at all, so there is
   nothing for a prompt to talk the model into asking for;
-- `run_kubectl` still validates the (verb × resource × flags) triple, and
-  sensitive reads still pass the masking pipeline before any result reaches
-  the model or the provider.
+- there is no shell or free-form `kubectl` tool at any tier, so there is
+  no command line to smuggle a flag into: the agent's whole cluster
+  surface is the structured tool registry
+  (`src/korvid/tools/registry.py`), whose calls the `ToolExecutor`
+  dispatches after validating the arguments against each tool's declared
+  schema;
+- every tool result — cluster read, screen action, or failure — passes
+  the masking pipeline before it reaches the model or the provider, and
+  a result that cannot be safely redacted stops the turn instead of
+  being sent.
 
 House rules (`agent.rules`) are local configuration, no more privileged
 than `agent.provider`. They are composed after korvid's immutable safety

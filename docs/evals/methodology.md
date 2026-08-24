@@ -443,6 +443,58 @@ Rules that follow from this:
   — a tier change, a catalog change, or a tool-schema edit — and the
   comparison is void.
 
+### What the low tier ships, and what changing it costs
+
+The low tier carries two pieces of shipped wording that a campaign has to
+hold fixed, because both are inputs to every request the model answers.
+
+**The low operating pack** (`prompt_packs.LOW_KORVID_OPERATOR_PACK`,
+layer 3) carries the behavioural rules that were tuned against the retained
+scenario pack rather than written from taste. Each rule answers a failure
+class those cases reproduce:
+
+| rule | the case it answers |
+|---|---|
+| diagnose from the reason string, never from an exit code alone (137 is not OOMKilled by itself) | `liveness-probe-failing` and `oom-killed` — the same exit code, different reason |
+| never invent a name or namespace; a 404 means re-list, not retry | `image-pull-typo` |
+| follow the pointer one more hop before answering | `pvc-pending-no-storageclass`, `service-endpoints-not-ready` |
+| quote the decisive reason string word for word | `job-backoff-limit-exceeded` |
+| ready is not healthy while warnings show probe failures; old restarts are history | `healthy-deployment`, `healthy-restart-history`, `readiness-probe-failing` |
+| one bounded tool call at a time | the low tier's `max_tool_calls_per_iteration: 1` |
+
+**The low tool descriptions** (`prompt_packs.LOW_TOOL_DESCRIPTIONS`,
+versioned by `LOW_TOOL_DESCRIPTIONS_VERSION`) replace the registry wording
+for the tools whose shipped description is written for a frontier context
+window. `ModelRouter` applies them under these constraints:
+
+- **low routes only.** A high route sends the registry description
+  unchanged, so the low tier and the high tier are not measuring the same
+  schema text;
+- **by exact tool name.** A tool the map does not name — an unmapped
+  registry tool, or one a plugin contributed — keeps the description it
+  declared. There is no prefix, alias, provider or model heuristic;
+- **description only.** Names, parameters and required fields are never
+  touched, so a rewording cannot widen what a tool accepts;
+- **nonempty and at most 250 characters**, for every tool the low surface
+  arms, under every read-only/resize/backend combination. The whole schema
+  list is retransmitted on every request, and a 4k-token serving context
+  pays for each character;
+- applied to the deep copy the registry hands out, **before** the schemas
+  are deep-frozen, so no consumer receives a mutable schema and the
+  registry itself is never mutated.
+
+Both are package-local text: nothing here reads a model name, a provider
+id, or a network resource to decide what to send.
+
+Changing either is a measurement change, not a copy edit. The digest moves
+(it covers the composed system message *and* the schemas), so every
+published row taken under the old wording stops being comparable. A change
+lands only with the retained cases above re-run on the same serving
+provenance, reported as a baseline/variant pair — see *Prompt pack and
+grinding*. No score is restated here: this section states constraints and
+names cases, and the numbers live on the
+[scoreboard](scoreboard.md).
+
 ### Outcome and failure class
 
 Each run — and each journey turn — records one `outcome` (`success`,

@@ -84,11 +84,13 @@ environment arms still opens the same approval dialog, at every tier, and
 only a user keystroke executes it; a write still carries the preconditions
 (UID and resourceVersion) the read observed; audit logging is still
 fail-closed, so a write whose audit record cannot be written does not run;
-read-only mode still means no write schema is offered at all; `run_kubectl`
-still validates the (verb × resource × flags) triple; and sensitive reads
-still pass the masking pipeline before any result reaches the model or the
-provider. House rules are composed *after* the immutable safety contract and
-cannot widen it.
+read-only mode still means no write schema is offered at all; there is
+still no shell or free-form `kubectl` tool at either tier, so the agent's
+whole cluster surface remains the structured tool registry the
+`ToolExecutor` dispatches after validating arguments against each tool's
+declared schema; and every tool result still passes the masking pipeline
+before it reaches the model or the provider. House rules are composed
+*after* the immutable safety contract and cannot widen it.
 
 ## Other agent-visible changes
 
