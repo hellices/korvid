@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import gc
 import importlib.metadata
+import logging
 import sys
 import textwrap
+import warnings
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -77,6 +81,17 @@ def _discover_from_path(
             if ep.group == "korvid.provider":
                 results.append((ep, dist_name))
     return results
+
+
+async def _drain_close_tasks(turns: int = 50) -> None:
+    """Let the loop run the background close `create` scheduled, if any.
+
+    Loop turns, not wall-clock: the close task and its done callback both
+    need the loop to come back round, and a sleep with a duration would
+    make the assertion a race against a timer.
+    """
+    for _ in range(turns):
+        await asyncio.sleep(0)
 
 
 @pytest.fixture
@@ -760,6 +775,231 @@ class TestFactoryFailure:
         message = str(exc_info.value)
         assert "REGISTRY_SECRET_LEAK" not in message
         assert len(message) <= 200
+
+    async def test_a_wrapper_rejection_closes_the_provider_it_refused(
+        self, plugin_site: Any, registry: ProviderPluginRegistry, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A refused provider is still a built one, and it owns resources.
+
+        `plugin.create` has already run by the time the wrapper reads
+        `descriptor`: an HTTP client, a socket, a credential handle may
+        exist. Dropping the reference on the refusal path leaks whatever
+        the plugin opened for the rest of the process — the composition
+        root never sees the object, so nothing else can close it.
+
+        The close is scheduled on the running loop rather than awaited,
+        because `create` is called from synchronous wiring; the task is
+        held strongly until it completes, and its failure is consumed
+        with a fixed message.
+        """
+        closed: list[str] = []
+
+        class _ExplodingDescriptorProvider(LLMProvider):
+            @property
+            def descriptor(self) -> ModelDescriptor:
+                raise RuntimeError("REGISTRY_SECRET_LEAK_abc123")
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                return ModelCapabilities.unknown()
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                stream: bool = True,
+            ) -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "done"}
+
+            async def aclose(self) -> None:
+                closed.append("aclose")
+
+        provider = _ExplodingDescriptorProvider()
+
+        class _ExplodingPropertyPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="Exploding property",
+                    auth_methods=("none",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return provider
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_ExplodingPropertyPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="none",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="company-llm") as exc_info:
+                reg.create("company-llm", config, None)
+
+        await _drain_close_tasks()
+
+        assert closed == ["aclose"], "the refused provider was not closed exactly once"
+        message = str(exc_info.value)
+        assert "REGISTRY_SECRET_LEAK" not in message
+        assert len(message) <= 200
+        assert "REGISTRY_SECRET_LEAK" not in caplog.text
+
+    async def test_a_refused_provider_whose_close_fails_is_logged_by_type_only(
+        self, plugin_site: Any, registry: ProviderPluginRegistry, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The close is best effort, and its failure is plugin text too.
+
+        A background task whose exception nobody retrieves prints a
+        warning at collection; one whose exception is logged verbatim
+        prints whatever the plugin's `aclose` was carrying. Only the
+        exception's type name survives, and the refusal the caller sees
+        is unchanged.
+        """
+
+        class _UncloseableProvider(LLMProvider):
+            @property
+            def descriptor(self) -> ModelDescriptor:
+                raise RuntimeError("descriptor unavailable")
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                return ModelCapabilities.unknown()
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                stream: bool = True,
+            ) -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "done"}
+
+            async def aclose(self) -> None:
+                raise RuntimeError("CLOSE_SECRET_LEAK_xyz789")
+
+        class _UncloseablePlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="Uncloseable",
+                    auth_methods=("none",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return _UncloseableProvider()
+
+        with (
+            caplog.at_level(logging.DEBUG, logger="korvid.providers.plugin_registry"),
+            patch(
+                "korvid.providers.plugin_registry._load_entry_point",
+                return_value=_UncloseablePlugin,
+            ),
+        ):
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="none",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="company-llm"):
+                reg.create("company-llm", config, None)
+
+            await _drain_close_tasks()
+
+        assert "CLOSE_SECRET_LEAK" not in caplog.text
+        assert "RuntimeError" in caplog.text
+
+    def test_a_wrapper_rejection_without_a_running_loop_refuses_without_closing(
+        self, plugin_site: Any, registry: ProviderPluginRegistry
+    ) -> None:
+        """The startup caller is synchronous, and must not be blocked.
+
+        `_create_initial_provider` runs before the app's event loop
+        exists. There is nothing to schedule the close on, so the refusal
+        is reported immediately — and no coroutine is created that would
+        be garbage-collected as "never awaited", which under this suite's
+        `filterwarnings = ["error"]` is a failure somewhere else entirely.
+        """
+        closed: list[str] = []
+
+        class _ExplodingCapabilitiesProvider(LLMProvider):
+            @property
+            def descriptor(self) -> ModelDescriptor:
+                return ModelDescriptor("company-llm", "m")
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                raise RuntimeError("capabilities unavailable")
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                stream: bool = True,
+            ) -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "done"}
+
+            async def aclose(self) -> None:
+                closed.append("aclose")
+
+        class _NoLoopPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="No loop",
+                    auth_methods=("none",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return _ExplodingCapabilitiesProvider()
+
+        with (
+            warnings.catch_warnings(record=True) as caught,
+            patch(
+                "korvid.providers.plugin_registry._load_entry_point",
+                return_value=_NoLoopPlugin,
+            ),
+        ):
+            warnings.simplefilter("always")
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="none",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="company-llm"):
+                reg.create("company-llm", config, None)
+            gc.collect()
+
+        assert closed == []
+        assert [w for w in caught if "never awaited" in str(w.message)] == []
 
     def test_a_descriptor_that_claims_another_provider_becomes_a_plugin_error(
         self, plugin_site: Any, registry: ProviderPluginRegistry

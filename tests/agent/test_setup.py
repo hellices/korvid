@@ -12,6 +12,7 @@ assembled, not three layers later.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import ItemsView, Iterator, Mapping
 
 import pytest
 
@@ -70,15 +71,46 @@ def test_a_non_string_tier_is_refused_too() -> None:
         _settings(model_tier=1)
 
 
+class _ExplodingOptions(Mapping[str, object]):
+    """A mapping that refuses to be read.
+
+    `_freeze_options` deep-copies through `Mapping.items()`, so a mapping
+    that raises there is the only way to observe *which* of the two things
+    `__post_init__` does ran first. Passing a plain dict proves nothing:
+    the tier check would raise whether it came before the freeze or after.
+    """
+
+    def __getitem__(self, key: str) -> object:
+        raise AssertionError("options were read")
+
+    def __iter__(self) -> Iterator[str]:
+        raise AssertionError("options were iterated")
+
+    def __len__(self) -> int:
+        raise AssertionError("options were measured")
+
+    def items(self) -> ItemsView[str, object]:
+        raise AssertionError("options were frozen")
+
+
 def test_the_check_runs_before_the_options_are_frozen() -> None:
     """`__post_init__` freezes `options` into read-only mappings.
 
     Doing that work for an object that is about to be refused is wasted,
     and (worse) leaves a half-initialised frozen dataclass reachable from
-    an exception handler's traceback frame.
+    an exception handler's traceback frame. The options here fail loudly
+    if they are touched at all, so the tier error is proof of order —
+    `AssertionError` is not a subclass of `ValueError`, and a freeze that
+    ran first would surface instead of the refusal.
     """
     with pytest.raises(ValueError, match="model_tier"):
-        _settings(model_tier="small", options={"nested": {"a": 1}})
+        _settings(model_tier="small", options=_ExplodingOptions())
+
+
+def test_the_exploding_options_really_do_explode() -> None:
+    """The teeth of the ordering test above: an accepted tier reaches them."""
+    with pytest.raises(AssertionError, match="options were frozen"):
+        _settings(model_tier="high", options=_ExplodingOptions())
 
 
 def test_replacing_a_valid_settings_object_is_revalidated() -> None:

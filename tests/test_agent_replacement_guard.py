@@ -528,6 +528,24 @@ def test_the_package_docstring_counts_the_submodules_not_the_contracts() -> None
     assert "two submodules" in doc
 
 
+def test_the_package_docstring_counts_the_contracts_it_lists() -> None:
+    """ "Some" leaves the same reader counting the bullets.
+
+    The count was wrong before ("two" over five names); replacing it with
+    a hedge fixes the falsehood without answering the question a plugin
+    author actually has — *is this list all of them?* The docstring names
+    both numbers, and this test fails the moment either one moves.
+    """
+    import korvid.agent as agent_package
+
+    doc = agent_package.__doc__ or ""
+    named = sum(len(names) for names in _SUBMODULE_ONLY_CONTRACTS.values())
+
+    assert named == 5
+    assert "Five public contracts" in doc
+    assert "Some public contracts" not in doc
+
+
 # ---------------------------------------------------------------------------
 # The typed UI action surface korvid actually ships
 # ---------------------------------------------------------------------------
@@ -601,3 +619,35 @@ def test_the_harness_design_pages_describe_the_shipped_action_surface(page: str)
             if name in line and "never shipped" not in line.lower()
         ]
         assert offenders == [], f"{page} still offers {name}: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# The retired vocabulary is gone from the comments too
+# ---------------------------------------------------------------------------
+
+#: Wording from the retired profile arms that survived the rename inside
+#: comments and docstrings. `docs/test_docs_agent_contracts.py` already
+#: refuses it in operator-facing prose; a comment is read by the next
+#: person changing that budget, and one that calls it a "profile budget"
+#: sends them looking for a knob korvid removed. The replacements are the
+#: shipped words: `tier result budget` and `low-tier budget`.
+_RETIRED_TIER_VOCABULARY = ("profile budget", "small-profile", "full-profile")
+
+
+@pytest.mark.parametrize("path", [*_SRC_FILES, *_TEST_FILES], ids=_relative)
+def test_no_module_describes_a_budget_in_retired_profile_words(path: Path) -> None:
+    found = _found(path.read_text(encoding="utf-8"), _RETIRED_TIER_VOCABULARY)
+    assert found == [], f"{_relative(path)} still calls a tier budget {found}"
+
+
+def test_the_shipped_budget_words_are_the_ones_in_use() -> None:
+    """The rename is only complete if the replacement wording exists.
+
+    A guard that only forbids can be satisfied by deleting the sentence,
+    which loses the explanation the comment carried.
+    """
+    evidence = (_SRC / "agent" / "evidence.py").read_text(encoding="utf-8")
+    outbound = (_SRC / "agent" / "outbound.py").read_text(encoding="utf-8")
+
+    assert "low-tier budget" in evidence
+    assert "tier budget" in outbound

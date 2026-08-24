@@ -10,7 +10,7 @@ transitions.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -294,3 +294,50 @@ def test_bridge_never_reaches_a_real_screen() -> None:
         text = handle.read()
     assert "korvid.ui" not in text
     assert "textual" not in text
+
+
+# ---------------------------------------------------------------------------
+# The recorder is total over the union it is given
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [
+        (Navigate(view="pods", namespace="jobs"), "navigate"),
+        (SetFilter(filter_pattern="api"), "set_filter"),
+        (OpenLogs(pod="worker-1", namespace="jobs"), "open_logs"),
+        (OpenDescribe(kind="pods", name="worker-1", namespace="jobs"), "open_describe"),
+        (DrillDown(name="worker-1"), "drill_down"),
+    ],
+)
+def test_every_shipped_action_is_recorded_under_its_own_tool_name(
+    action: Any, expected: str
+) -> None:
+    """Each of the five arms is named explicitly, `drill_down` included."""
+    from korvid.evals.interaction import _action_call
+
+    name, arguments = _action_call(action)
+
+    assert name == expected
+    assert isinstance(arguments, dict)
+
+
+def test_an_action_outside_the_union_is_refused_not_recorded_as_a_drill() -> None:
+    """A sixth action must not be scored as a drill-down.
+
+    The recorder ended in an unguarded `return "drill_down", ...`, so an
+    action added to `UiAction` without a branch here was silently written
+    into the journey transcript as a drill into `action.name` — a graded
+    artifact describing a call the model never made. Refusing is the only
+    answer the harness can give that a reader can trust; the union's own
+    completeness guard (`tests/test_agent_replacement_guard.py`) is what
+    keeps korvid's own actions from reaching this branch.
+    """
+    from korvid.evals.interaction import _action_call
+
+    class _UnshippedAction:
+        name = "worker-1"
+
+    with pytest.raises(TypeError, match="unsupported UI action"):
+        _action_call(cast("Any", _UnshippedAction()))

@@ -74,7 +74,7 @@ def test_evidence_carries_what_makes_it_checkable() -> None:
 
 def test_the_excerpt_is_bounded() -> None:
     """Evidence rides in the prompt; an unbounded excerpt would blow the
-    small-profile budget the issue requires to stay intact."""
+    low-tier budget the issue requires to stay intact."""
     ledger = EvidenceLedger(excerpt_limit=40)
 
     ref = ledger.record("get_logs", {"name": "api-1"}, "x" * 500)

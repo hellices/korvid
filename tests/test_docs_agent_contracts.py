@@ -373,3 +373,64 @@ def test_the_ui_controller_reference_describes_the_state_it_really_owns() -> Non
 
     assert "settings / profile" not in controllers
     assert "model tier" in controllers
+
+
+# ---------------------------------------------------------------------------
+# 6. What the model reads, and what the operator reads about it
+# ---------------------------------------------------------------------------
+
+
+def test_the_release_notes_record_the_truncation_marker_the_model_reads() -> None:
+    """A marker change is model-visible, so it is a release note.
+
+    `_MIDDLE_TRUNCATION_MARKER` is inserted into a tool result the model
+    consumes: its wording is part of the prompt every over-long read
+    produces, and an eval campaign comparing runs across this change is
+    comparing two slightly different inputs. The note is what tells a
+    reader (and a future campaign) which side of it a number came from.
+    """
+    from korvid.tools.executor import _MIDDLE_TRUNCATION_MARKER
+
+    notes = _text("docs/release-notes/unreleased.md")
+    marker = _MIDDLE_TRUNCATION_MARKER.strip()
+
+    assert marker in notes, f"the unreleased notes do not record {marker!r}"
+    assert "tier result budget" in marker
+
+
+def _prose_lines(text: str) -> list[tuple[int, str]]:
+    """Every line outside a fenced block and outside a markdown table."""
+    lines: list[tuple[int, str]] = []
+    fenced = False
+    for number, line in enumerate(text.splitlines(), start=1):
+        if line.startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced or line.lstrip().startswith("|"):
+            continue
+        lines.append((number, line))
+    return lines
+
+
+def test_the_overview_prose_stays_hand_wrapped() -> None:
+    """The landing page is edited by hand and read as a diff.
+
+    Every paragraph on it is wrapped at roughly 80 columns; a line that
+    escapes the wrap is the signature of an in-place word swap, and it
+    turns the next edit to that paragraph into a whole-paragraph diff
+    nobody can review line by line.
+    """
+    overview = _text("docs/overview.md")
+    long_lines = [(number, len(line)) for number, line in _prose_lines(overview) if len(line) > 100]
+
+    assert long_lines == [], f"docs/overview.md has unwrapped prose lines: {long_lines}"
+
+
+def test_the_wrap_scan_reads_the_paragraphs_and_skips_the_diagram() -> None:
+    """The teeth of the scan above: it must not be an empty selection."""
+    overview = _text("docs/overview.md")
+    numbered = _prose_lines(overview)
+
+    assert len(numbered) > 100
+    assert not any("flowchart LR" in line for _, line in numbered)
+    assert any("korvid" in line for _, line in numbered)

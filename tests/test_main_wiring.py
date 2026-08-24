@@ -1281,6 +1281,96 @@ async def test_the_degraded_start_neither_raises_nor_composes_a_session(
     assert warnings != []
 
 
+def test_an_over_budget_prompt_names_the_knob_the_operator_controls() -> None:
+    """The rules are the operator's, so the hint points at the rules.
+
+    `StaticPromptTooLargeError` is the one composition failure a
+    configuration change fixes: shorten `agent.rules`, or route somewhere
+    with a larger budget. The rule text itself is never echoed — it is
+    operator-authored and can carry anything.
+    """
+    from korvid.__main__ import _warn_agent_disabled
+    from korvid.agent.prompt_harness import StaticPromptTooLargeError
+
+    warnings: list[str] = []
+    _warn_agent_disabled(
+        StaticPromptTooLargeError("static system prompt is 9001 characters, over 25%"),
+        warnings,
+    )
+
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert "agent.rules" in warning
+    assert ":ai" in warning
+
+
+@pytest.mark.parametrize(
+    "error_name",
+    ["UnknownPromptPackError", "UnknownPromptOverlayError", "PromptCompositionError"],
+)
+def test_a_missing_prompt_pack_is_not_blamed_on_the_operators_rules(error_name: str) -> None:
+    """A pack or overlay korvid ships is korvid's, not the operator's.
+
+    `UnknownPromptPackError`/`UnknownPromptOverlayError` mean the routed
+    policy named a prompt layer the *installed* korvid does not carry — a
+    broken or partial install, or a bug. Telling that operator to shorten
+    `agent.rules` sends them to edit configuration that is already
+    correct, and they can shorten it to nothing without the start
+    recovering. The hint has to name the install and where to report it.
+    """
+    from korvid.__main__ import _warn_agent_disabled
+    from korvid.agent import prompt_harness
+
+    error_type = getattr(prompt_harness, error_name)
+    warnings: list[str] = []
+    _warn_agent_disabled(error_type("prompt pack 'k' is not a shipped pack"), warnings)
+
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning.startswith("agent disabled:")
+    assert "agent.rules" not in warning
+    assert "reinstall" in warning
+    assert "report" in warning
+
+
+def test_the_two_prompt_hints_are_fixed_text_that_quotes_no_payload() -> None:
+    """Neither hint is assembled from anything a failure was carrying.
+
+    A startup warning is rendered in the TUI and written to the log, so
+    the hint half of it must be a constant. Only the exception's own
+    (korvid-authored, bounded) message varies, and the warning is exactly
+    that message followed by the constant.
+    """
+    from korvid.__main__ import _PROMPT_DEGRADE_HINT, _PROMPT_PACKAGING_HINT, _warn_agent_disabled
+    from korvid.agent.prompt_harness import StaticPromptTooLargeError, UnknownPromptPackError
+
+    over_budget: list[str] = []
+    _warn_agent_disabled(StaticPromptTooLargeError("static system prompt too large"), over_budget)
+    missing_pack: list[str] = []
+    _warn_agent_disabled(UnknownPromptPackError("prompt pack 'k' is not shipped"), missing_pack)
+
+    assert over_budget == [
+        f"agent disabled: static system prompt too large — {_PROMPT_DEGRADE_HINT}"
+    ]
+    assert missing_pack == [
+        f"agent disabled: prompt pack 'k' is not shipped — {_PROMPT_PACKAGING_HINT}"
+    ]
+    assert _PROMPT_DEGRADE_HINT != _PROMPT_PACKAGING_HINT
+
+
+def test_a_model_that_cannot_call_tools_still_gets_no_prompt_advice() -> None:
+    """The other degrade arm is unchanged: neither prompt hint applies."""
+    from korvid.__main__ import _PROMPT_DEGRADE_HINT, _PROMPT_PACKAGING_HINT, _warn_agent_disabled
+    from korvid.agent.model_policy import ModelRoutingError
+
+    warnings: list[str] = []
+    _warn_agent_disabled(ModelRoutingError("model reports no tool support"), warnings)
+
+    assert len(warnings) == 1
+    assert _PROMPT_DEGRADE_HINT not in warnings[0]
+    assert _PROMPT_PACKAGING_HINT not in warnings[0]
+
+
 async def test_a_rebuild_that_cannot_compose_stays_transactional(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
