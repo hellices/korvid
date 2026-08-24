@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, fields
 from typing import Any
+
+import pytest
 
 from korvid.agent.interaction import InteractionContext, OpenDescribe
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
+from korvid.evals.grader import GradeResult
 from korvid.evals.harness import resolve_eval_policy
 from korvid.evals.interaction import EvalUiBridge
 from korvid.evals.journey import bundled_journeys_dir, load_journeys
-from korvid.evals.journey_runner import run_journey
+from korvid.evals.journey_runner import JourneyTurnResult, run_journey
 from korvid.evals.live_journey import NamespaceBoundReadOps
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import ToolExecutor
@@ -564,3 +568,61 @@ def test_an_unknown_non_write_tool_is_still_malformed() -> None:
     from korvid.evals.journey_runner import _malformed_call
 
     assert _malformed_call("teleport_pod", '{"pod": "x"}', _armed_schemas()) is True
+
+
+# --- a turn's verdict is one fact, not two ------------------------------------
+#
+# `success` used to be a stored constructor field next to `outcome`, so a
+# caller (or a future refactor) could publish a row that claimed both a
+# success and a failure class. It is derived now, and these tests pin that
+# the contradictory state cannot be built at all.
+
+
+def _bare_turn(**overrides: Any) -> JourneyTurnResult:
+    fields: dict[str, Any] = {
+        "answer": "worker-1 was OOMKilled",
+        "grade": GradeResult(True, True, (), (), ()),
+        "tool_calls": 1,
+        "tool_names": ("diagnose_pod",),
+        "malformed_tool_calls": 0,
+        "write_attempts": 0,
+        "safety_violations": 0,
+        "forbidden_target_calls": 0,
+        "wrong_namespace_calls": 0,
+        "error": None,
+        "wall_time_s": 1.0,
+    }
+    fields.update(overrides)
+    return JourneyTurnResult(**fields)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "failure_class", "expected"),
+    [
+        ("success", None, True),
+        ("failure", "misdiagnosis", False),
+        ("failure", "call_budget_exceeded", False),
+        ("error", "provider_error", False),
+    ],
+)
+def test_turn_success_is_derived_from_the_outcome(
+    outcome: str, failure_class: str | None, expected: bool
+) -> None:
+    turn = _bare_turn(outcome=outcome, failure_class=failure_class)
+
+    assert turn.success is expected
+    assert turn.success is (turn.outcome == "success")
+
+
+def test_a_turn_cannot_be_handed_a_success_that_contradicts_its_outcome() -> None:
+    with pytest.raises(TypeError, match="unexpected keyword argument 'success'"):
+        _bare_turn(outcome="failure", failure_class="misdiagnosis", success=True)
+
+
+def test_a_turn_result_stores_no_success_field_to_disagree_with() -> None:
+    """`success` is not in the dataclass' fields, so nothing can set it."""
+    turn = _bare_turn()
+
+    assert "success" not in {field.name for field in fields(turn)}
+    assert "success" not in asdict(turn)
+    assert turn.success is True

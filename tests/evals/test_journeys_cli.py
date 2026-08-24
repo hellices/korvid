@@ -148,7 +148,6 @@ def test_journey_exit_code_prints_turn_errors(
     turn = JourneyTurnResult(
         answer="",
         grade=grade,
-        success=False,
         tool_calls=0,
         tool_names=(),
         malformed_tool_calls=0,
@@ -158,6 +157,8 @@ def test_journey_exit_code_prints_turn_errors(
         wrong_namespace_calls=0,
         error="ReadTimeout",
         wall_time_s=60.0,
+        outcome="error",
+        failure_class="provider_error",
     )
     report = JourneyReport(
         journey_id="triage",
@@ -234,7 +235,6 @@ def _turn_result(**overrides: Any) -> JourneyTurnResult:
     fields: dict[str, Any] = {
         "answer": "payments needs registry credentials",
         "grade": GradeResult(True, True, (), (), ()),
-        "success": True,
         "tool_calls": 1,
         "tool_names": ("diagnose_pod",),
         "malformed_tool_calls": 0,
@@ -278,6 +278,74 @@ def test_journey_payload_publishes_the_starting_interaction() -> None:
 
     assert row["interaction"] == interaction_payload(EVAL_INTERACTION)
     json.dumps(payload)
+
+
+def test_journey_payload_counts_successful_journeys_not_ambiguous_successes() -> None:
+    """A journey row and a scenario row are read side by side.
+
+    The scenario artifact's `successes` counts repetitions whose *diagnosis*
+    was graded correct; a journey has no single diagnosis, so the same key
+    here would silently mean something else. The journey artifact names what
+    it counts instead: whole conversations whose every turn outcome was
+    `success`.
+    """
+    payload = journey_run_payload([_journey_report()], policy=_policy())
+    row = payload["journeys"][0]
+
+    assert row["successful_journeys"] == 1
+    assert "successes" not in row
+    json.dumps(payload)
+
+
+def test_a_journey_report_has_no_ambiguous_successes_attribute() -> None:
+    report = _journey_report()
+
+    assert report.successful_journeys == 1
+    assert not hasattr(report, "successes")
+
+
+def test_a_conversation_with_one_failed_turn_is_not_a_successful_journey() -> None:
+    report = _journey_report(
+        runs=(
+            JourneyRun(
+                success=False,
+                turns=(
+                    _turn_result(),
+                    _turn_result(outcome="failure", failure_class="misdiagnosis"),
+                ),
+                input_tokens=10,
+                output_tokens=5,
+                tokens_estimated=False,
+            ),
+        )
+    )
+    row = journey_run_payload([report], policy=_policy())["journeys"][0]
+
+    assert row["successful_journeys"] == 0
+    assert [turn["success"] for turn in row["runs"][0]["turns"]] == [True, False]
+
+
+def test_every_published_turn_success_agrees_with_its_outcome() -> None:
+    """The published flag is derived, so a row cannot claim both at once."""
+    report = _journey_report(
+        runs=(
+            JourneyRun(
+                success=False,
+                turns=(
+                    _turn_result(),
+                    _turn_result(outcome="failure", failure_class="missing_evidence"),
+                    _turn_result(outcome="error", failure_class="provider_error"),
+                ),
+                input_tokens=10,
+                output_tokens=5,
+                tokens_estimated=False,
+            ),
+        )
+    )
+    turns = journey_run_payload([report], policy=_policy())["journeys"][0]["runs"][0]["turns"]
+
+    for turn in turns:
+        assert turn["success"] is (turn["outcome"] == "success")
 
 
 def test_journey_payload_publishes_every_turn_snapshot_and_verdict() -> None:

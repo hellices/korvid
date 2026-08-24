@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from korvid.agent.conversation import ConversationState
+from korvid.agent.events import ToolCallFinished
 from korvid.agent.interaction import ClusterFacts
 from korvid.agent.model_catalog import MODEL_CATALOG, MODEL_CATALOG_VERSION
 from korvid.agent.model_policy import (
@@ -194,7 +195,10 @@ async def test_a_write_request_never_reaches_the_executor() -> None:
         executor=executor,
     )
     events = [event async for event in harness.session.run_turn("scale api to 5")]
-    finished = [event for event in events if type(event).__name__ == "ToolCallFinished"]
+    # Narrowed with `isinstance`, not a class-name string: the filter has to
+    # tell the type checker which member of the `AgentEvent` union survived
+    # it, or `.ok`/`.summary` below are unchecked attribute reads.
+    finished = [event for event in events if isinstance(event, ToolCallFinished)]
     assert len(finished) == 1
     assert not finished[0].ok
     assert "not armed" in finished[0].summary

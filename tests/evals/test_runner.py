@@ -124,7 +124,7 @@ def _good_script() -> list[list[dict[str, Any]]]:
     ]
 
 
-def _executor_factory(scenario: Scenario) -> Any:
+def _executor_factory(scenario: Scenario) -> RecordedExecution:
     from korvid.tools.executor import ToolExecutor
 
     return ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
@@ -1111,12 +1111,17 @@ async def test_a_write_request_is_never_armed_and_never_executed() -> None:
     executed: list[str] = []
 
     class _WatchingExecutor(RecordedExecution):
-        def __init__(self, inner: Any) -> None:
+        def __init__(self, inner: RecordedExecution) -> None:
             self._inner = inner
+
+        @property
+        def inner(self) -> RecordedExecution:
+            """The wrapped executor, typed so its results stay `str`."""
+            return self._inner
 
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             executed.append(name)
-            return await self._inner.execute(name, arguments)
+            return await self.inner.execute(name, arguments)
 
     script = [
         [
