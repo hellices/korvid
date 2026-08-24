@@ -132,3 +132,8 @@ are composed *after* the immutable safety contract and cannot widen it.
   two different measurements are no longer both called "success". A run's
   per-turn `success` is derived from its outcome and can no longer
   contradict it.
+- **Truncation marker.** A tool result too large for the tier's budget is
+  still shortened from the middle, and the marker the model reads there now
+  names the budget it hit: `… [middle truncated — tier result budget]`. It
+  is a small change to what the model sees, so a campaign comparing scores
+  across this release is comparing two slightly different prompts.

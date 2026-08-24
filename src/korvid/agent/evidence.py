@@ -42,7 +42,7 @@ TARGET_ARGUMENTS: dict[str, str] = {
 }
 
 #: Excerpts ride in the prompt on every later step of the turn, so they
-#: are capped: the issue requires the small-profile budget to survive the
+#: are capped: the issue requires the low-tier budget to survive the
 #: addition of citation metadata.
 _DEFAULT_EXCERPT_LIMIT = 240
 

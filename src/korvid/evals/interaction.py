@@ -334,4 +334,12 @@ def _action_call(action: UiAction) -> tuple[str, dict[str, Any]]:
             "name": action.name,
             "namespace": action.namespace,
         }
-    return "drill_down", {"name": action.name}
+    if isinstance(action, DrillDown):
+        return "drill_down", {"name": action.name}
+    # Every member of the closed union is named above. Falling through to
+    # `drill_down` recorded an unhandled action as a drill into whatever
+    # its `name` attribute held — a graded transcript describing a call
+    # the model never made. The union's completeness is guarded in
+    # `tests/test_agent_replacement_guard.py`; this is what happens if
+    # something reaches here anyway.
+    raise TypeError(f"unsupported UI action {type(action).__name__}")

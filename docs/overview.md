@@ -133,8 +133,9 @@ is a guess with better grammar.
 
 **What it needs:** a provider. GitHub Copilot, Azure OpenAI, Anthropic, OpenAI,
 a local Ollama, or any OpenAI-compatible endpoint. A low model tier
-(`agent.model_tier: low`) targets 3B–14B models that run on your own hardware — for air-gapped clusters, or for
-people who would rather their production incidents not leave the building.
+(`agent.model_tier: low`) targets 3B–14B models that run on your own
+hardware — for air-gapped clusters, or for people who would rather their
+production incidents not leave the building.
 
 ---
 

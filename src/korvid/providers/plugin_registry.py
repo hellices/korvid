@@ -9,6 +9,7 @@ keeps startup fast and avoids side-effects from unused packages.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import logging
 import re
@@ -62,6 +63,53 @@ RESERVED_PROVIDER_NAMES: frozenset[str] = OPENAI_COMPAT_ALIASES | {
 
 class ProviderPluginError(Exception):
     """Raised when provider plugin discovery, loading, or validation fails."""
+
+
+#: Strong references to the closes `create` schedules for providers the
+#: wrapper refused. asyncio holds only weak references to tasks, so a
+#: fire-and-forget close can be collected before it runs; entries are
+#: discarded by the task's own done callback.
+_REJECTED_CLOSE_TASKS: set[asyncio.Task[None]] = set()
+
+
+async def _close_quietly(provider: LLMProvider) -> None:
+    """Close a provider korvid refused, logging only what it may log.
+
+    A plugin's `aclose` is plugin code and can fail carrying anything, so
+    the exception type name is all that is recorded — the same rule the
+    refusal message itself follows. `BaseException` (cancellation at
+    shutdown) is left to propagate to the task.
+    """
+    try:
+        await provider.aclose()
+    except Exception as exc:
+        logger.warning(
+            "provider plugin close failed after validation refused it: %s", type(exc).__name__
+        )
+
+
+def _close_refused_provider(provider: LLMProvider) -> None:
+    """Best-effort release of a provider that failed wrapper validation.
+
+    `plugin.create` has already run: the object may own an HTTP client, a
+    socket or a credential handle, and korvid is about to drop the only
+    reference to it. `create` is synchronous and called from synchronous
+    wiring, so the close is scheduled on the running loop rather than
+    awaited.
+
+    With no running loop — the startup path, before the app exists —
+    there is nothing to schedule on and nothing that may block, so the
+    refusal is reported without touching `aclose` at all. Calling it
+    would build a coroutine nobody can run, which surfaces later as an
+    unrelated "never awaited" warning.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(_close_quietly(provider))
+    _REJECTED_CLOSE_TASKS.add(task)
+    task.add_done_callback(_REJECTED_CLOSE_TASKS.discard)
 
 
 def normalize_provider_name(name: str) -> str:
@@ -379,9 +427,14 @@ class ProviderPluginRegistry:
         # a contract error through instead would end a start with a
         # traceback. The wrapper's messages are already fixed and bounded,
         # so translating adds the provider name and nothing else.
+        #
+        # The refused provider is closed on the way out: it was really
+        # built, korvid is dropping the last reference to it, and nothing
+        # downstream will ever see it to release what it opened.
         try:
             return ValidatedPluginProvider(provider, provider_id=normalized)
         except ProviderPluginContractError as exc:
+            _close_refused_provider(provider)
             raise _bounded_error(
                 f"provider plugin {safe_name!r} failed validation: {exc}"
             ) from None

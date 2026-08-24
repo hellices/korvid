@@ -777,12 +777,31 @@ def _resolve_agent_policy(
     )
 
 
-#: What an operator can do about a prompt that will not compose. The rules
+#: What an operator can do about rules that will not fit. The rules
 #: themselves are never quoted back: they are operator text, and a startup
 #: warning is rendered in the TUI and written to the log.
 _PROMPT_DEGRADE_HINT: Final[str] = (
     "shorten agent.rules or route to a larger-context model with `:ai`"
 )
+
+#: What an operator can do about a prompt layer this korvid does not carry.
+#: `UnknownPromptPackError`/`UnknownPromptOverlayError` mean the routed
+#: policy named a pack or overlay the *installed* package is missing —
+#: configuration cannot fix that, and telling someone to shorten rules
+#: that are already correct sends them to edit the wrong thing.
+_PROMPT_PACKAGING_HINT: Final[str] = (
+    "korvid's own prompt layers are missing or incomplete — reinstall korvid, "
+    "and report it at https://github.com/hellices/korvid/issues if it persists"
+)
+
+
+def _prompt_degrade_hint(error: Exception) -> str:
+    """Pick the hint that names something the reader can actually change."""
+    from korvid.agent.prompt_harness import StaticPromptTooLargeError
+
+    if isinstance(error, StaticPromptTooLargeError):
+        return _PROMPT_DEGRADE_HINT
+    return _PROMPT_PACKAGING_HINT
 
 
 def _warn_agent_disabled(error: Exception, startup_warnings: list[str] | None) -> None:
@@ -792,13 +811,23 @@ def _warn_agent_disabled(error: Exception, startup_warnings: list[str] | None) -
     perimeter and the MCP server are unaffected, and the wizard's
     configurator and rebuild stay wired so the operator can fix the
     configuration from inside the running app.
+
+    Both hints are fixed text. Only the exception's own message — which
+    the prompt harness authors and bounds — varies, so nothing an
+    operator wrote and nothing a failure was carrying is echoed back.
     """
     from korvid.agent.prompt_harness import PromptCompositionError
 
     detail = str(error)
     if isinstance(error, PromptCompositionError):
-        detail = f"{detail} — {_PROMPT_DEGRADE_HINT}"
-        logger.warning("agent session not built; the system prompt does not fit the routed model")
+        hint = _prompt_degrade_hint(error)
+        detail = f"{detail} — {hint}"
+        if hint == _PROMPT_DEGRADE_HINT:
+            logger.warning(
+                "agent session not built; the system prompt does not fit the routed model"
+            )
+        else:
+            logger.warning("agent session not built; a shipped prompt layer is missing")
     else:
         logger.warning("agent session not built; the configured model reports no tool support")
     if startup_warnings is not None:

@@ -17,7 +17,7 @@ grouped by the part of the harness that owns it:
 | events | what a turn yields to the UI |
 | setup | the configurator contract the setup screen drives |
 
-Some public contracts are deliberately **not** in that list: they live in
+Five public contracts are deliberately **not** in that list: they live in
 two submodules a plugin author imports them from directly.
 
 - `korvid.agent.provider_plugin` — `ProviderPlugin`,
