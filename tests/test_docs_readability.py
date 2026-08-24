@@ -96,6 +96,28 @@ def test_safety_and_evidence_invariants_remain_explicit() -> None:
     assert "mask" in observability
 
 
+def test_task3_review_safety_caveats_are_preserved() -> None:
+    """Focused assertions for Task 3 review findings."""
+    rel = " ".join(_source("resource-relationships.md").split()).lower()
+    # (1a) PDBs do not gate controller scale-down deletes
+    assert "pdb" in rel or "poddisruptionbudget" in rel
+    # (1b) HPA reconciliation can overwrite replicas
+    assert "hpa" in rel or "horizontalpodautoscaler" in rel
+    # (1c) StatefulSet PVC retention policy is not evaluated
+    assert "pvc retention" in rel or "volumeclaimtemplates" in rel or "pvc" in rel
+    # (2) max_target_lists default 32 in the compact limits table
+    assert "max_target_lists" in rel
+    assert "32" in rel
+
+    helm = " ".join(_source("helm-operators.md").split()).lower()
+    # (3) --hide-secret masking guarantee in dry-run
+    assert "--hide-secret" in helm or "hide-secret" in helm
+
+    obs = " ".join(_source("observability.md").split()).lower()
+    # (4) token header-value validation/refusal for control/non-ASCII characters
+    assert "control" in obs or "non-ascii" in obs
+
+
 def test_redesign_does_not_add_a_script_bundle() -> None:
     source = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
     block = source.split("extra_javascript:", 1)[1].split("\nextra_", 1)[0]

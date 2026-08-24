@@ -127,8 +127,10 @@ A token is **named** in config, never stored there — exactly one of
 regular file; a FIFO or device is refused since opening one can block
 forever). Setting both, or an inline `token:`/`password:`/`api_key:`,
 disables the backend rather than guessing. The token is read at call time,
-used in one `Authorization` header, and dropped — never in a tool result,
-error, audit record, or log line; a rotated token takes effect without
+validated — any control characters or non-ASCII bytes cause the backend to be
+disabled with a configuration error rather than sending an invalid header
+value — used in one `Authorization` header, and dropped — never in a tool
+result, error, audit record, or log line; a rotated token takes effect without
 restarting korvid. If a `url` carries userinfo, only the host is ever
 reported.
 

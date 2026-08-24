@@ -33,7 +33,9 @@ previews the removal with `helm uninstall --dry-run` and, because it
 destroys every resource the release owns, requires **typing the release
 name** in the confirmation dialog before it runs; release history is removed
 with the release. Values entered through `$EDITOR` pass through a private
-temp file deleted as soon as helm returns.
+temp file deleted as soon as helm returns. The `--dry-run` preview is always
+passed `--hide-secret` so Secret values are masked in the preview output —
+the raw manifest is never surfaced in a tool result, log line, or audit record.
 
 ## Operator uninstall
 

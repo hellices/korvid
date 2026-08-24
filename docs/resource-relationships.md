@@ -144,6 +144,19 @@ bound (`N or more`) once coverage, a UID mismatch, or a traversal cap makes
 the true total unknowable. The section is advisory: it never claims a write
 will fail or succeed, only what the snapshot found.
 
+Three caveats apply to the scale-down preview in particular:
+
+- **PDB (PodDisruptionBudget)** rules are *not* evaluated — the graph
+  records the `poddisruptionbudget` relation, but whether the budget would
+  gate the actual eviction is determined by the API server at runtime, not
+  here.
+- **HPA (HorizontalPodAutoscaler)** reconciliation is *not* evaluated — a
+  scale-down you preview may be overwritten by the HPA's next control loop
+  if a conflicting target replica count is in effect.
+- **StatefulSet PVC retention policy** (`persistentVolumeClaimRetentionPolicy`)
+  is *not* evaluated — PVC fate on scale-down depends on that policy and the
+  storage class, neither of which the blast-radius walk examines.
+
 ## Deliberate limits
 
 korvid never renders an unrestricted, cluster-wide relationship graph: a
@@ -155,6 +168,7 @@ namespaces if you pressed `0` first), and the numeric caps below.
 | `max_resources` | 10,000 | Resources fed into the graph across every listed source |
 | `max_edges` | 50,000 | Joined edges kept in the graph |
 | `max_depth` / `max_nodes` | 5 / 500 | Hops and resources visited by the `d` expansion |
+| `max_target_lists` | 32 | Concurrent relation-target LISTs per snapshot |
 | `max_concurrency` | 4 | Concurrent LISTs the snapshot loader runs at once |
 
 Every cap is deterministic (ordered, never API-response-order dependent) and

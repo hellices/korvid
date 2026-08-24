@@ -4561,7 +4561,7 @@ Reading it:
     (candidate relationships were dropped, so some edges between resources
     that *are* present were never kept). Both are coarser, earlier limits
     than the 50-dependent traversal cap above (see
-    [Limits](resource-relationships.md#limits) for the exact numbers).
+    [Limits](resource-relationships.md#deliberate-limits) for the exact numbers).
 
 The snapshot is the same bounded, read-only LIST fan-out the relationship
 view (`g`) performs — scoped to the current namespace for a namespaced
