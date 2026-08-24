@@ -25,11 +25,14 @@ from korvid.agent.interaction import (
     PaneContext,
     ResourceIdentity,
 )
+from korvid.agent.model_catalog import MODEL_CATALOG
 from korvid.agent.model_policy import (
     CapabilitySource,
     ModelCapabilities,
     ModelDescriptor,
+    ModelRouter,
     ModelTier,
+    PolicyEnvironment,
     ResolvedAgentPolicy,
 )
 from korvid.agent.outbound import OutboundPolicy
@@ -702,6 +705,44 @@ def test_a_static_prompt_within_budget_is_accepted() -> None:
     prompt = harness.compose("diagnose it", inputs(policy_=policy(max_history_chars=24_000)))
 
     assert isinstance(prompt, ComposedPrompt)
+
+
+def test_the_fully_armed_low_tier_static_prompt_matches_the_migration_note_figures() -> None:
+    """Pins the numbers `docs/release-notes/unreleased.md` states for anyone
+    migrating a large `agent.prompts.append`/`agent.rules` block.
+
+    Resolved through the real `ModelRouter`, with every low-tier capability
+    armed (writes: `resize_pod`; both screen tools) — the largest the
+    static prompt (layers 1-7) gets before a single `agent.rules` or
+    overlay character is added, and therefore the *smallest* headroom a
+    migrating deployment has inside the 25%-of-history static-prompt
+    share. `_UNKNOWN_CLUSTER` and no previous turn keep the dynamic
+    layers (cluster note, handoff note) out of the composed message, so
+    `len(prompt.system_message)` is exactly the static prompt's length.
+
+    If this number drifts (a pack, the capability clauses, or a low tool
+    description changes), the release note's ~3,864 / 6,000 / ~2,136
+    figures have to move with it.
+    """
+    resolved = ModelRouter(MODEL_CATALOG).resolve(
+        descriptor=ModelDescriptor(provider="ollama", model="qwen3:8b"),
+        provider_capabilities=ModelCapabilities.unknown(),
+        explicit_tier="low",
+        environment=PolicyEnvironment(
+            readonly=False, resize_supported=True, observability_backends=frozenset()
+        ),
+    )
+    harness = PromptHarness()
+
+    prompt = harness.compose("diagnose it", inputs(policy_=resolved, interaction_=interaction()))
+
+    static_prompt_chars = len(prompt.system_message)
+    budget = int(resolved.max_history_chars * 0.25)
+
+    assert resolved.max_history_chars == 24_000
+    assert budget == 6_000
+    assert static_prompt_chars == 3_864
+    assert budget - static_prompt_chars == 2_136
 
 
 # ---------------------------------------------------------------------------

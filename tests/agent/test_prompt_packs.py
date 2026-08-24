@@ -13,11 +13,18 @@ elsewhere:
 
 These tests pin the *semantics*, not a sentence: each asserts the composed
 low-tier system message really instructs the behaviour, and that the low tool
-wording stays inside the bound a small serving context can afford.
+wording stays inside the bound a small serving context can afford. One test
+additionally pins a SHA-256 digest over the whole `LOW_TOOL_DESCRIPTIONS`
+mapping alongside its version constant: unlike the semantic tests above, a
+digest change means *some* wording moved, even a single character no
+semantic assertion happens to cover, so a rewording cannot land without
+deliberately updating the version an eval artifact records it under.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 
 import pytest
@@ -201,3 +208,40 @@ def test_every_low_description_is_shorter_than_the_registry_wording() -> None:
         if len(text) >= len(registry.get(name, ""))
     ]
     assert longer == []
+
+
+#: SHA-256 over the sorted `{name: description}` mapping, computed the same
+#: way `korvid.evals.__main__._prompt_digest` hashes any other JSON-shaped
+#: artifact (`json.dumps(..., sort_keys=True, ensure_ascii=False)`, encoded
+#: utf-8) so this pin uses the repo's one existing digest convention rather
+#: than inventing a second one.
+#:
+#: `LOW_TOOL_DESCRIPTIONS_VERSION` is a human-readable handle for "the low
+#: tool wording changed"; this digest is the machine-checkable one. Neither
+#: alone is enough: a version bump with no digest change would mean nothing
+#: actually moved, and a digest change with no version bump would leave an
+#: eval artifact recorded under the old version unable to tell it apart from
+#: one recorded after a silent rewording. Bump both together when the
+#: wording changes on purpose.
+_LOW_TOOL_DESCRIPTIONS_DIGEST = "7b99bda640a3235f28c394ee343b0600140a9f53b9d4f5bd22d4481c868f8446"
+
+
+def _low_tool_descriptions_digest() -> str:
+    payload = json.dumps(
+        dict(sorted(LOW_TOOL_DESCRIPTIONS.items())), sort_keys=True, ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def test_the_low_description_digest_is_pinned_to_its_shipped_version() -> None:
+    """A text-only edit to `LOW_TOOL_DESCRIPTIONS` must not land unnoticed.
+
+    Every request retransmits this text, and it is eval-backed (changing it
+    moves the eval prompt digest and requires re-running the retained
+    cases). Pinning both the content digest and the version here means a
+    change to either without the other fails this test, so "I only tweaked
+    a sentence" cannot skip the version bump the eval methodology depends
+    on to tell old and new artifacts apart.
+    """
+    assert _low_tool_descriptions_digest() == _LOW_TOOL_DESCRIPTIONS_DIGEST
+    assert LOW_TOOL_DESCRIPTIONS_VERSION == 1

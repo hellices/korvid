@@ -1,14 +1,21 @@
 """Current documentation may only claim what the agent layer really does.
 
 `tests/test_agent_replacement_guard.py` proves the retired *names* are gone.
-This module proves the surviving *claims* are true, for the three that a
+This module proves the surviving *claims* are true, for the four that a
 reader acts on:
 
 - the security perimeter an operator relies on — a doc naming a tool korvid
-  does not ship (`run_kubectl`) describes a validation step nothing performs;
+  does not ship (`run_kubectl`) describes a validation step nothing performs,
+  and so does a doc claiming `ToolExecutor` validates every call against a
+  JSON schema: the real controls are the policy arming only exact registry
+  names, the registry validating dispatch targets against import-time
+  metadata, and the executor rejecting an unknown tool and performing its
+  own explicit, typed argument validation;
 - the provider-plugin API version a third party writes against;
 - the low-tier prompt-pack and tool-description constraints an eval campaign
-  has to hold fixed to keep its numbers comparable.
+  has to hold fixed to keep its numbers comparable — including that the low
+  tier's wording is *not* identical to what the high tier and the MCP server
+  still read from the registry.
 
 Historical records (`docs/dev/specs/`, `docs/dev/plans/`, `docs/superpowers/`)
 are out of scope by the same rule the replacement guard uses: they record what
@@ -94,17 +101,91 @@ def test_no_current_page_claims_a_shell_tool_validation(path: Path) -> None:
 
 @pytest.mark.parametrize("page", ["docs/ops.md", "docs/release-notes/unreleased.md"])
 def test_the_perimeter_pages_state_the_boundary_that_really_runs(page: str) -> None:
-    """What replaces the fabricated claim has to be the real perimeter."""
+    """What replaces the fabricated claim has to be the real perimeter.
+
+    `ToolExecutor` never runs JSON-schema validation — a tool's declared
+    schema is model-facing wording, not the runtime check. The real
+    controls: the resolved policy arms only the registry's own exact tool
+    names; the registry validates every dispatch target against
+    import-time metadata; and the executor rejects a name outside that
+    registry as an unknown tool and performs its own explicit, typed
+    argument validation before a write reaches the cluster.
+    """
     text = _text(page)
     assert "structured" in text
     assert "ToolExecutor" in text
     assert "no shell" in text
-    # The four controls that do exist, on both pages.
+    # The controls that actually run, stated precisely, on both pages.
     assert "approval dialog" in text
     assert "keystroke" in text
     assert "resourceVersion" in text
     assert "fail-closed" in text
     assert "masking" in text
+    assert "exact" in text
+    assert "registry" in text
+    assert "import-time" in text
+    assert "unknown tool" in text
+    assert "typed argument validation" in text
+
+
+_SCHEMA_VALIDATION_OVERCLAIM = re.compile(
+    r"validat\w*\s+(?:the\s+)?arguments?\s+against\s+"
+    r"(?:each\s+tool.s|its|the)\s+declared\s+schema",
+    re.IGNORECASE,
+)
+
+
+@pytest.mark.parametrize("path", _MARKDOWN_FILES, ids=_relative)
+def test_no_current_page_claims_the_executor_validates_against_a_declared_schema(
+    path: Path,
+) -> None:
+    """`ToolExecutor` does not run JSON-schema validation.
+
+    It rejects a name outside the registry as an unknown tool and performs
+    its own explicit, typed argument checks (`isinstance` on `kind`,
+    `name`, `namespace`, `replicas`, `resources`); the declared OpenAI-style
+    schema is model-facing wording the registry hands the provider, never
+    the runtime control. Whitespace is normalized before matching so the
+    claim cannot hide by wrapping across a line break.
+    """
+    normalized = " ".join(path.read_text(encoding="utf-8").split())
+    assert not _SCHEMA_VALIDATION_OVERCLAIM.search(normalized), _relative(path)
+
+
+_IDENTICAL_TOOL_WORDING_OVERCLAIM = re.compile(
+    r"(?:describes?|describing)\s+(?:a|every)\s+tool\s+identically", re.IGNORECASE
+)
+
+
+@pytest.mark.parametrize("path", _MARKDOWN_FILES, ids=_relative)
+def test_no_current_page_claims_every_surface_describes_tools_identically(
+    path: Path,
+) -> None:
+    """The low tier ships its own shipped, versioned tool wording.
+
+    `LOW_TOOL_DESCRIPTIONS` replaces the registry's wording, by exact tool
+    name, on the low route only. The high tier and the MCP server still
+    describe every tool with the registry's own text, so "every surface
+    describes a tool identically" was never true once the low map shipped.
+    """
+    normalized = " ".join(path.read_text(encoding="utf-8").split())
+    assert not _IDENTICAL_TOOL_WORDING_OVERCLAIM.search(normalized), _relative(path)
+
+
+@pytest.mark.parametrize("page", ["docs/agent.md", "docs/release-notes/unreleased.md"])
+def test_the_tool_description_removal_note_names_which_arm_uses_which_wording(
+    page: str,
+) -> None:
+    """The migration note for `agent.prompts.tool_descriptions` has to say
+    what actually replaced it: per-deployment overrides are gone, the low
+    tier ships its own versioned wording, and the high tier plus the MCP
+    server still read the registry's.
+    """
+    text = _text(page)
+    assert "removed" in text
+    assert "low" in text.casefold()
+    assert "registry" in text
+    assert "MCP" in text
 
 
 # ---------------------------------------------------------------------------
