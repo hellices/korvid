@@ -149,11 +149,7 @@ def test_redesign_does_not_add_a_script_bundle() -> None:
         for line in block.splitlines()
         if line.startswith("  - ")
     ]
-    assert scripts == [
-        "assets/javascripts/vendor/resize-observer-polyfill-1.5.1.js",
-        "assets/javascripts/vendor/mermaid-11.17.0.min.js",
-        "assets/javascripts/visual-storytelling.js",
-    ]
+    assert scripts == ["assets/javascripts/visual-storytelling.js"]
 ```
 
 - [ ] **Step 2: Run the new tests to verify they fail**

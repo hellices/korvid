@@ -85,12 +85,6 @@ def test_redesign_does_not_add_a_script_bundle() -> None:
     source = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
     block = source.split("extra_javascript:", 1)[1].split("\nextra_", 1)[0]
     scripts = [
-        line.removeprefix("  - ").strip()
-        for line in block.splitlines()
-        if line.startswith("  - ")
+        line.removeprefix("  - ").strip() for line in block.splitlines() if line.startswith("  - ")
     ]
-    assert scripts == [
-        "assets/javascripts/vendor/resize-observer-polyfill-1.5.1.js",
-        "assets/javascripts/vendor/mermaid-11.17.0.min.js",
-        "assets/javascripts/visual-storytelling.js",
-    ]
+    assert scripts == ["assets/javascripts/visual-storytelling.js"]
