@@ -709,7 +709,7 @@ def test_a_static_prompt_within_budget_is_accepted() -> None:
 
 def test_the_fully_armed_low_tier_static_prompt_matches_the_migration_note_figures() -> None:
     """Pins the numbers `docs/release-notes/unreleased.md` states for anyone
-    migrating a large `agent.prompts.append`/`agent.rules` block.
+    migrating a large retired `append`-style rule block into `agent.rules`.
 
     Resolved through the real `ModelRouter`, with every low-tier capability
     armed (writes: `resize_pod`; both screen tools) — the largest the

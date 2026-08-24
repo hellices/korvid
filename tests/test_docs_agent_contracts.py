@@ -176,10 +176,10 @@ def test_no_current_page_claims_every_surface_describes_tools_identically(
 def test_the_tool_description_removal_note_names_which_arm_uses_which_wording(
     page: str,
 ) -> None:
-    """The migration note for `agent.prompts.tool_descriptions` has to say
-    what actually replaced it: per-deployment overrides are gone, the low
-    tier ships its own versioned wording, and the high tier plus the MCP
-    server still read the registry's.
+    """The migration note for the retired tool-description override has to
+    say what actually replaced it: per-deployment overrides are gone, the
+    low tier ships its own versioned wording, and the high tier plus the
+    MCP server still read the registry's.
     """
     text = _text(page)
     assert "removed" in text
