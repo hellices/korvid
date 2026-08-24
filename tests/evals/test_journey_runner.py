@@ -504,7 +504,11 @@ async def test_a_turn_without_its_evidence_is_classified_missing_evidence() -> N
 async def test_a_turn_over_its_call_budget_is_classified_as_such() -> None:
     """A journey-only failure signal still gets a published name."""
     journey = _journey("healthy-stop")
-    events_call = {"kind": "pods", "name": "catalog-1", "namespace": "catalog"}
+    events_call: dict[str, object] = {
+        "kind": "pods",
+        "name": "catalog-1",
+        "namespace": "catalog",
+    }
     script: list[list[dict[str, Any]]] = [
         [
             _call("list_resources", {"kind": "pods", "namespace": "catalog"}, "c1"),

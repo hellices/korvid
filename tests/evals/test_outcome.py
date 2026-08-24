@@ -80,6 +80,10 @@ def test_additional_classes_never_outrank_a_shared_one() -> None:
 
 
 def test_both_runners_share_one_classification_helper() -> None:
-    """Extracted, not duplicated — the same object in both modules."""
-    assert runner.classify_outcome is classify_outcome
-    assert journey_runner.classify_outcome is outcome.classify_outcome
+    """Extracted, not duplicated — the same object in both modules.
+
+    Read out of the module globals rather than as an attribute: an
+    imported name is not a re-export, and strict typing says so.
+    """
+    assert vars(runner)["classify_outcome"] is classify_outcome
+    assert vars(journey_runner)["classify_outcome"] is outcome.classify_outcome
