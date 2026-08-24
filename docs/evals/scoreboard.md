@@ -1,7 +1,8 @@
 # Local Model Agent Scoreboard
 
 > **Every row on this page predates the model-tier harness (issue #316).**
-> They were produced by the retired capability-profile runner and are kept
+> They were produced by the capability-profile runner that issue #316
+> deleted, and are kept
 > as historical rows: no score here has been restated, recomputed, or
 > relabelled under a tier. Read `small` as "the budget the `low` tier now
 > carries" and see

@@ -1338,7 +1338,7 @@ def write_config(tmp_path: Path, text: str) -> Path:
     return path
 
 
-def test_removed_agent_profile_is_actionable(tmp_path: Path) -> None:
+def test_the_removed_profile_key_is_actionable(tmp_path: Path) -> None:
     """`agent.profile` was replaced by `agent.model_tier`: reloading an old
     config must fail with a one-line, actionable message rather than
     silently reinterpreting or ignoring the key."""
@@ -1351,7 +1351,7 @@ def test_removed_agent_profile_is_actionable(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_removed_agent_profile_is_actionable_even_when_agent_disabled(
+def test_the_removed_profile_key_is_actionable_even_when_agent_disabled(
     tmp_path: Path,
 ) -> None:
     """The migration error must fire regardless of whether the agent block

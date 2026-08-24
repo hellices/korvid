@@ -43,11 +43,23 @@ def _context() -> InteractionContext:
     )
 
 
+def _assign(target: object, field: str, value: object) -> None:
+    """Attempt a field write the type checker rejects statically.
+
+    Every contract below is a frozen dataclass, so mypy reports a direct
+    assignment as writing a read-only property — while the point of these
+    tests is that the *runtime* refuses it too. Routing through `setattr`
+    keeps the runtime behaviour identical and leaves the static half of
+    the guarantee to the frozen declaration itself.
+    """
+    setattr(target, field, value)
+
+
 def test_resource_identity_is_frozen() -> None:
     identity = ResourceIdentity("Pod", "default", "api-1", "uid-1")
 
     with pytest.raises(FrozenInstanceError, match="cannot assign"):
-        identity.name = "api-2"
+        _assign(identity, "name", "api-2")
 
 
 def test_resource_identity_contract_allows_optional_namespace_and_uid() -> None:
@@ -77,21 +89,21 @@ def test_pane_context_is_frozen() -> None:
     )
 
     with pytest.raises(FrozenInstanceError, match="cannot assign"):
-        pane.scope = "prod"
+        _assign(pane, "scope", "prod")
 
 
 def test_cluster_facts_is_frozen() -> None:
     facts = ClusterFacts(provider="azure", distribution="aks")
 
     with pytest.raises(FrozenInstanceError, match="cannot assign"):
-        facts.provider = "aws"
+        _assign(facts, "provider", "aws")
 
 
 def test_interaction_context_is_frozen() -> None:
     context = _context()
 
     with pytest.raises(FrozenInstanceError, match="cannot assign"):
-        context.context_epoch = 4
+        _assign(context, "context_epoch", 4)
 
 
 def test_navigate_contract_uses_optional_namespace_default() -> None:
@@ -110,7 +122,7 @@ def test_ui_action_result_is_frozen() -> None:
     result = UiActionResult(ok=True, message="ok", context=_context())
 
     with pytest.raises(FrozenInstanceError, match="cannot assign"):
-        result.message = "changed"
+        _assign(result, "message", "changed")
 
 
 def test_navigate_rejects_blank_view() -> None:

@@ -1,11 +1,11 @@
 """The in-tree agent loop, assembled from the harness components.
 
-`NativeAgentEngine` is `AgentRuntime`'s loop with every responsibility it
-had accreted moved out: durable history and usage accounting live in
-`ConversationState`, the provider boundary in `RequestGateway`, tool
-routing and evidence in `ToolHarness`, and prompt composition in the
-session's `PromptHarness`. What remains here is the sequencing those parts
-cannot do for each other — and only that.
+`NativeAgentEngine` is korvid's one agent loop. Every responsibility a
+loop tends to accrete lives outside it: durable history and usage
+accounting in `ConversationState`, the provider boundary in
+`RequestGateway`, tool routing and evidence in `ToolHarness`, and prompt
+composition in the session's `PromptHarness`. What remains here is the
+sequencing those parts cannot do for each other — and only that.
 
 The order of operations in one provider round is itself a contract:
 

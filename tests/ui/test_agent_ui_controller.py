@@ -55,6 +55,7 @@ from korvid.ui.agent_ui_controller import (
     AgentUiController,
 )
 from korvid.ui.bridge_dispatch import AppContextDispatch
+from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.workspace_state import WorkspaceState
 from korvid.ui.write_coordinator import WriteCoordinator
@@ -741,8 +742,12 @@ async def test_the_setup_wizard_opens_on_the_configured_snapshot(tmp_path: Path)
     )
     env.controller.handle_command([])
     screen, _callback = env.ui.screens[-1]
-    assert screen._current_settings is not None
-    assert screen._current_settings.model == "llama3"
+    # The screen stack is typed as plain `Screen`s; the prefill under test
+    # is the setup screen's own state, so the type is narrowed first.
+    assert isinstance(screen, AgentSetupScreen)
+    current = screen._current_settings
+    assert current is not None
+    assert current.model == "llama3"
 
 
 # ---------------------------------------------------------------------------

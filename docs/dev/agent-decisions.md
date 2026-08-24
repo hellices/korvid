@@ -96,11 +96,21 @@ elaborating a wrong conclusion with confidence.
 
 ---
 
-## 2. Prompts: one per tier, overridable locally, and the lowest-leverage lever
+## 2. Prompts: one pack per tier, additive local rules, lowest-leverage lever
 
-**Decision.** korvid ships one prompt per capability tier (`full`, `small`) and
-does **not** fork per model. `agent.prompts` lets a deployment override the role
-statement, append house rules, and reword tool descriptions locally.
+**Decision.** korvid ships one prompt pack per capability tier (`low`, `high`)
+and does **not** fork per model. A deployment adds house rules with
+`agent.rules`; the role statement and the tool wording are korvid's.
+
+**Superseded, and how.** This decision originally shipped `agent.prompts`,
+which let a deployment replace the role statement and reword individual tool
+descriptions. Issue #316 removed both. Replacing the role statement made a
+deployment's prompt un-measurable against the scoreboard (every published row
+assumes the shipped wording), and per-deployment tool wording made the same
+tool describe itself differently on the agent, MCP and eval surfaces. What
+survives is the part that carried the evidence: additive rules, layered after
+the immutable safety contract, plus eval-only pack/overlay grinding so a
+wording change ships once numbers support it.
 
 **The ordering matters more than the feature.** Published evidence puts the
 levers in this order, and the documentation must present them this way:
@@ -111,7 +121,7 @@ levers in this order, and the documentation must present them this way:
 2. **Tool descriptions.** Documentation quality dominates prompt preamble for
    tool-selection accuracy ([EasyTool](https://arxiv.org/abs/2401.06201),
    [Tool Documentation](https://arxiv.org/abs/2308.00675)).
-3. **Context budget.** `agent.profile: small` and `agent.ollama.num_ctx`.
+3. **Context budget.** `agent.model_tier: low` and `agent.ollama.num_ctx`.
 4. **Then** the role statement.
 
 This independently confirms korvid's own measurement, recorded in #176: *"deterministic
@@ -139,14 +149,15 @@ risk:
 kubectl-ai shows the hazard: under `--enable-tool-use-shim` the tool JSON lives
 *inside* the system prompt, so an override that drops `{{.ToolsAsJSON}}`
 silently disables tool calling. korvid is not exposed to that, and the same
-reasoning keeps the write/no-write and UI clauses out of the override —
-`compose_system_prompt` still chooses them from the tools actually armed.
+reasoning keeps the write/no-write and UI clauses out of every configurable
+layer — the prompt harness derives them from the tools the resolved policy
+actually armed.
 
 That preserves two properties: the model is never told about a capability it
 was not offered, and a read-only deployment keeps offering the equivalent
-`kubectl` command instead of a bare refusal. `test_override_cannot_advertise_unarmed_write_tools`
-and its neighbours pin this; the naive alternative (override replaces the
-composed result) fails three of them.
+`kubectl` command instead of a bare refusal.
+`tests/agent/test_prompt_harness.py` pins both, together with the rule that a
+house rule cannot widen what the safety contract granted.
 
 **No safety behaviour is reachable from configuration.** Approvals, audit, and
 read-only enforcement live in code. "Delete pods without asking" produces a
@@ -207,9 +218,9 @@ bundled scenario exercises either diagnostic tool.
 ## 4. Tool surface is a cost, and it has not been paid for
 
 **Open question, recorded so it is not forgotten.** `diagnose_service` and
-`diagnose_pvc` were added to all three surfaces including `small_agent`:
+`diagnose_pvc` were added to every agent surface, the low tier's included:
 
-| `small` profile | tools | schema |
+| low-tier surface | tools | schema |
 |---|---:|---:|
 | with both | 16 | 8,107 chars |
 | without | 14 | 7,046 chars |
@@ -218,7 +229,7 @@ bundled scenario exercises either diagnostic tool.
 `diagnose_*` tools occupy the top four places by description length. The schema
 is retransmitted on every request.
 
-The `small` profile exists to shrink the surface for 3B–14B models, citing BFCL:
+The low tier exists to shrink the surface for 3B–14B models, citing BFCL:
 they are competitive on single-function calls but fall behind sharply on
 **multi-function selection**. Adding two tools may be a net win — one bounded
 call replaces a multi-step sequence, which is what small models are bad at — or

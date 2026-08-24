@@ -12,7 +12,8 @@ publishable model comparisons use the same AKS serving protocol.
 ### 1. Task diagnostics
 
 The 23 YAML scenarios under `src/korvid/evals/scenarios/` test one user question
-against a deterministic fake cluster. The model and Korvid runtime are live;
+against a deterministic fake cluster. The model and korvid's production
+agent session are live;
 only Kubernetes responses are fixtures.
 
 Each run records:
@@ -195,9 +196,9 @@ uv run python -m korvid.evals.journeys_cli \
 
 - serving engine: Ollama 0.32.5, OpenAI-compatible endpoint;
 - model node: zone-2 `Standard_D32s_v5` Spot, 30 CPU / 112Gi limit;
-- capability arm: the `small` profile of the time — six iterations, one tool
-  call per iteration — which is the budget the `low` model tier now carries
-  (see *Migrating pre-tier campaigns* below);
+- capability arm: the retired `small` capability profile of the time — six
+  iterations, one tool call per iteration — which is the budget the `low`
+  model tier now carries (see *Migrating pre-tier campaigns* below);
 - result timeout: 300 seconds;
 - model quantization: Q4_K_M;
 - task source revision: `25649a3`;
@@ -212,9 +213,9 @@ uv run python -m korvid.evals.journeys_cli \
 - models: Qwen3 1.7B, Qwen3 8B, Qwen3-Coder 30B-A3B;
 - serving engine: Ollama 0.32.5, OpenAI-compatible endpoint;
 - model node: zone-2 `Standard_D32s_v5` Spot, 30 CPU / 112Gi limit;
-- capability arm: the `small` profile of the time — six iterations, one tool
-  call per iteration — which is the budget the `low` model tier now carries
-  (see *Migrating pre-tier campaigns* below);
+- capability arm: the retired `small` capability profile of the time — six
+  iterations, one tool call per iteration — which is the budget the `low`
+  model tier now carries (see *Migrating pre-tier campaigns* below);
 - task pack: 23 scenarios ×3 repetitions;
 - offline pack: 3 journeys ×3 repetitions;
 - live pack: 1 guarded real-cluster journey ×3 repetitions;
@@ -420,9 +421,11 @@ immutable safety contract, which is always the first text in the composed
 system message: grinding can change how the model operates, never what it
 is permitted to do. There is no flag that replaces the whole system prompt.
 
-The eval CLI does **not** read `~/.config/korvid/config.yaml`: a configured
-`agent.prompts` block affects the running TUI, never this JSON, so a sweep
-is reproducible from its command line alone.
+The eval CLI does **not** read `~/.config/korvid/config.yaml`: configured
+house rules (`agent.rules`) affect the running TUI, never this JSON, so a
+sweep is reproducible from its command line alone. The TUI has no
+equivalent of these flags — a pack or overlay ships only after the numbers
+here justify it.
 
 The digest covers what the model actually receives — the composed system
 message (safety contract, common role, tier pack, overlays, armed
@@ -469,7 +472,9 @@ identically in both artifacts:
 ### Migrating pre-tier campaigns
 
 Campaigns run before issue #316 recorded `meta.profile` (`full` or `small`)
-instead of `meta.policy`. They are still readable, with these equivalences:
+instead of `meta.policy`. The runner that produced them has been deleted, so
+those fields can no longer be regenerated — the artifacts are still
+readable, with these equivalences:
 
 | Pre-tier field | Today |
 |---|---|

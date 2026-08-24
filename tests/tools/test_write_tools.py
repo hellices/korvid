@@ -7,15 +7,9 @@ ConfirmScreen the *user* must approve with a real keystroke.
 
 from typing import Any
 
-from korvid.agent.model_policy import ModelDescriptor
-from korvid.agent.prompts import SYSTEM_PROMPT, WRITE_PROMPT
-from korvid.agent.runtime import AgentRuntime
 from korvid.tools.executor import (
-    READ_TOOLS,
-    UI_TOOLS,
     WRITE_TOOL_NAMES,
     WRITE_TOOLS,
-    RecordedExecution,
     ToolExecutor,
     UIBridge,
 )
@@ -157,46 +151,6 @@ async def test_executor_write_without_ui_is_error() -> None:
     assert result.startswith("ERROR:")
 
 
-class _NullProvider:
-    @property
-    def descriptor(self) -> ModelDescriptor:
-        return ModelDescriptor("test", "null")
-
-    def complete(self, messages: Any, tools: Any, *, stream: bool = True) -> Any:
-        raise NotImplementedError
-
-
-class _NullExecutor(RecordedExecution):
-    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-        return "ok"
-
-
-def _system_prompt(runtime: AgentRuntime) -> str:
-    return str(runtime._messages[0]["content"])  # asserting the composed prompt
-
-
-def test_prompt_mentions_approval_when_write_tools_armed() -> None:
-    runtime = AgentRuntime(
-        _NullProvider(), _NullExecutor(), tools=READ_TOOLS + UI_TOOLS + WRITE_TOOLS
-    )
-    prompt = _system_prompt(runtime)
-    assert WRITE_PROMPT in prompt
-    assert "approv" in prompt.lower()
-
-
-def test_prompt_offers_kubectl_when_write_tools_absent() -> None:
-    runtime = AgentRuntime(_NullProvider(), _NullExecutor(), tools=READ_TOOLS)
-    prompt = _system_prompt(runtime)
-    assert WRITE_PROMPT not in prompt
-    assert "kubectl" in prompt
-
-
-def test_base_system_prompt_has_no_write_claims() -> None:
-    """The base prompt must not hard-code 'no write tools' — that claim is
-    now conditional on whether WRITE_TOOLS were armed."""
-    assert "no write tools" not in SYSTEM_PROMPT.lower()
-
-
 def test_namespaced_write_schemas_require_namespace() -> None:
     """scale/rollout targets are all namespaced apps/* workloads: the schema
     must not advertise calls that are guaranteed to fail validation. Delete
@@ -221,32 +175,3 @@ async def test_executor_rejects_non_string_write_arguments() -> None:
         result = await executor.execute("delete_resource", args)
         assert result.startswith("ERROR:")
         assert bridge.writes == []  # never reached the approval path
-
-
-def test_write_prompt_forbids_retrying_expired_requests() -> None:
-    """An expired (unanswered) request must be as non-retryable as an
-    explicit denial - reissuing it would keep reopening approval dialogs
-    the user is not acting on."""
-    assert "Never retry a denied or expired request" in WRITE_PROMPT
-
-
-def test_write_prompt_enumerates_armed_write_tools() -> None:
-    """The system instruction must list exactly the write tools that were
-    armed: enumerating a fixed trio steers the model away from resize_pod
-    on clusters that support it."""
-    from korvid.tools.executor import RESIZE_TOOLS
-
-    runtime = AgentRuntime(
-        _NullProvider(),
-        _NullExecutor(),
-        tools=READ_TOOLS + WRITE_TOOLS + RESIZE_TOOLS,
-    )
-    assert "resize_pod" in _system_prompt(runtime)
-
-
-def test_write_prompt_omits_unarmed_resize_tool() -> None:
-    """Without RESIZE_TOOLS armed the prompt must not advertise resize_pod."""
-    runtime = AgentRuntime(_NullProvider(), _NullExecutor(), tools=READ_TOOLS + WRITE_TOOLS)
-    prompt = _system_prompt(runtime)
-    assert "resize_pod" not in prompt
-    assert "delete_resource" in prompt

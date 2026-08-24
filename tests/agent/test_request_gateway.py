@@ -12,7 +12,7 @@ and never exposes it to the engine.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import replace
 from types import MappingProxyType
 from typing import Any
@@ -54,7 +54,7 @@ class _StreamProvider(LLMProvider):
         events: Sequence[Any],
         *,
         model: str = "qwen3:8b",
-        prepare: Any = None,
+        prepare: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
     ) -> None:
         self._events = list(events)
         self._model = model
@@ -352,8 +352,11 @@ async def test_prepare_runs_message_hook_before_sanitize_masking_secret() -> Non
 
 
 async def test_prepare_thaws_frozen_tools_and_isolates_copies() -> None:
-    inner = {"type": "object", "properties": {}}
-    tool = {"type": "function", "function": {"name": "get_resource", "parameters": inner}}
+    inner: dict[str, Any] = {"type": "object", "properties": {}}
+    tool: dict[str, Any] = {
+        "type": "function",
+        "function": {"name": "get_resource", "parameters": inner},
+    }
     frozen_tool = MappingProxyType(
         {"type": "function", "function": MappingProxyType({"name": "describe"})}
     )
@@ -413,10 +416,14 @@ async def test_cancellation_after_request_sent_keeps_latest_and_closes_iterator(
     callback = _Counter()
 
     stream = gateway.stream(prepared, callback)
-    first = await stream.__anext__()
+    first = await anext(stream)
     assert first == {"type": "text_delta", "text": "first"}
     assert gateway.latest_outbound_payload is prepared.prepared.snapshot
 
+    # `stream` is declared as an `AsyncIterator`, which has no `aclose`;
+    # abandoning a half-consumed one is what this case must not do, so the
+    # generator is closed explicitly through the concrete protocol.
+    assert isinstance(stream, AsyncGenerator)
     await stream.aclose()
 
     assert provider.iterator_closed

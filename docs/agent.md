@@ -1,7 +1,27 @@
 # AI agent
 
-Requires the `[agent]` extra (see the README's
-[installation section](https://github.com/hellices/korvid/blob/main/README.md#installation)).
+## Installing the agent
+
+The agent is an **optional extra**. A base install has no provider HTTP
+client and no keychain integration, and korvid starts, watches and drives
+the cluster exactly as before — `Ctrl-A` simply shows a setup hint.
+
+```sh
+uv tool install "korvid[agent]"      # or: pipx install "korvid[agent]"
+uv tool install "korvid[all]"        # agent + MCP + observability
+```
+
+Nothing about the extra is loaded until the agent is actually composed: an
+MCP-only or read-only start never imports the engine, the request gateway,
+or a provider adapter. If `agent.enabled` is set but the extra is missing,
+startup fails with the exact install command rather than degrading to a
+silently disabled agent.
+
+For a cluster with no internet egress, run a local model and keep every
+request on the machine — see [offline setup](#offline-and-air-gapped-setup)
+below and the [air-gapped guide](airgap.md).
+
+
 Press `Ctrl-A` to open the agent panel — a chat sidebar that answers questions
 about the cluster you are looking at.  The agent sees your current screen
 context (view, namespace, selected resource, active filter) and inspects the
@@ -49,6 +69,35 @@ repaired so the model never sees a half-finished tool exchange.  Interrupts
 respect the write gate: a pending approval dialog is dismissed without
 executing, while a write the user already approved always runs to completion
 and is audited.
+
+## Direct control and the conversation
+
+The agent and the keyboard drive **one** workspace. Nothing about a chat
+turn takes the TUI away from you:
+
+- Whatever you have selected when you submit a prompt is what the turn is
+  asked about — the view, namespace, active filter, focused pane and
+  selected resource travel with the question as structured context, not as
+  a screenshot or a prose summary.
+- When the agent navigates, filters, drills down, or opens the log/describe
+  pane, it moves the same panes your keys move. There is no separate agent
+  view to reconcile afterwards.
+- Pressing a normal key mid-turn keeps working. Direct control continues
+  from wherever the conversation left the screen, and the *next* turn starts
+  from where **you** left it — the handoff runs in both directions.
+- `Ctrl-X` stops the turn without disturbing the screen: the partial answer
+  stays in the transcript, and the panes keep whatever state they had.
+- Switching Kubernetes context with `:ctx` hands the cluster back to korvid
+  immediately. The conversation survives, but the evidence ledger is
+  cleared — a citation minted against the old cluster must not resolve to a
+  same-named object in the new one — and the session is re-routed for the
+  new cluster's capabilities.
+
+Each successful cluster read the agent performs mints a numbered evidence
+reference (`[E1]`, `[E2]`, …) that the answer cites. Opening a citation
+navigates to the exact object the read looked at, so a claim is checkable
+in the same session that made it. Screen actions and writes never mint
+evidence — only a read of cluster data does.
 
 ## Inspecting what the agent sends
 
@@ -235,6 +284,46 @@ the OS keyring (falling back to a `0600` file at
 `~/.config/korvid/credentials.json`).  Claude Code is a CLI product, not an
 API — use the Anthropic API entry above for Claude models.
 
+### Offline and air-gapped setup
+
+A local Ollama endpoint keeps every agent request on the machine — nothing
+leaves it, and no API key exists to leak:
+
+```sh
+# On a machine with egress, once:
+ollama pull qwen3:8b
+
+# On the air-gapped host:
+ollama serve                     # defaults to http://localhost:11434
+```
+
+```yaml
+agent:
+  enabled: true
+  provider: ollama
+  base_url: http://localhost:11434
+  model: qwen3:8b
+  auth: {method: none}
+  ollama:
+    # Ollama's own default context can be as low as 4k and truncates
+    # silently; the low tier's 24k-character history assumes ~16k tokens.
+    num_ctx: 16384
+    temperature: 0.0
+    keep_alive: 10m
+```
+
+Routing resolves such a model to the `low` tier automatically — from the
+shipped catalog for a known tag, otherwise from the conservative fallback —
+so no tier configuration is needed to run offline. korvid never contacts a
+model registry, a telemetry endpoint, or an update service; the only
+outbound request the agent makes is the one to the `base_url` you
+configured, and `:ai payload` shows exactly what it contained.
+
+For an endpoint behind a corporate/private CA, set `network.ca_bundle`;
+verification can never be disabled. See the
+[air-gapped guide](airgap.md) for image mirroring and the rest of the
+offline story.
+
 ### Provider plugins
 
 If your backend already speaks an OpenAI-compatible API, prefer
@@ -264,58 +353,74 @@ Without configuration, `Ctrl-A` shows a setup hint pointing at `:ai`.
 
 ### Turning the agent off and on
 
-`Ctrl-A` only toggles the panel's *visibility* — the runtime stays
+`Ctrl-A` only toggles the panel's *visibility* — the agent session stays
 connected.  To actually disconnect for the session, use `:ai off`: the
 provider connection is released, the status bar flips to `AI off`, and
 prompt submission is disabled while the transcript stays visible.  The
-configured provider, model, profile, and credentials are all kept (nothing
+configured provider, model, tier and credentials are all kept (nothing
 is rewritten in `config.yaml`), so a bare `:ai` reopens the wizard with the
 current settings and reconnects when applied.  `:ai off` is refused while a
 turn is running — stop the turn first (`Ctrl-X`) — and is a no-op when the
 agent is already off.
 
-## Capability profiles
+## Model tiers and routing
 
-Small local models (3B–14B) handle the agent's default surface — up to 15
-tools, 15 iterations, ~120k characters of retained history — poorly: they are
-competitive on simple single-function calls but fall behind sharply when
-choosing among many functions, and they degrade with context length far
-below their advertised windows. `agent.profile: small` gives them a surface
-they can actually handle:
+korvid resolves one **model tier** per session and everything the agent gets
+follows from it — the armed tool surface, the iteration and history budgets,
+the per-result cap, and which prompt pack is composed.
+
+| | low | high |
+| --- | --- | --- |
+| iterations per turn | 6 | 15 |
+| retained history | 24,000 chars (hard bound) | 120,000 chars |
+| per tool result | 3,000 chars | the executor's own 8,000-char cap |
+| tool calls per response | 1 (extras discarded) | provider-confirmed parallel, else 1 |
+| screen tools armed | `open_logs`, `open_describe` | all five |
+| prompt pack | `low-korvid-operator` | `high-korvid-operator` |
+
+The low tier exists because small local models (3B–14B) handle a frontier
+surface poorly: they are competitive on simple single-function calls, fall
+behind sharply when choosing among many functions, and degrade with context
+length far below their advertised windows. Its history budget is a *hard*
+bound — a turn whose retained text and tool-call arguments would push a
+follow-up request past it ends early instead of sending it, and a single
+prompt that cannot fit on its own is rejected without disturbing the next
+one. Oversized text results are compacted keeping head **and** tail so a
+report's trailing evidence sections survive; manifests are shrunk
+structurally and stay parseable; when extra parallel calls were discarded, a
+short fixed-size notice rides on top of the capped result.
+
+Writes are unaffected by the tier: every write tool the environment arms
+still passes the approval gate at both tiers, and a read-only deployment is
+never offered one at all.
+
+### How the tier is chosen
+
+Routing has one precedence order, highest first:
+
+1. **`agent.model_tier` in `config.yaml`** — an explicit operator override.
+2. **What the provider reports** about the configured model.
+3. **korvid's shipped model catalog**, for exact `(provider, model)` pairs.
+4. **Fallback: `low`** — the safe default when nothing else is known, because
+   over-serving a small model fails worse than under-serving a large one.
 
 ```yaml
 agent:
   provider: ollama
   base_url: http://localhost:11434
   model: qwen3:8b
-  profile: small   # default: full
+  # Omit for automatic routing; set only to override what routing decided.
+  model_tier: low   # low | high
 ```
 
-The `small` profile keeps every read and write tool (writes still pass the
-approval gate) but trims verbose tool descriptions, offers only the two
-evidence-showing UI tools (`open_logs`, `open_describe`) instead of all
-five, caps turns at 6 tool iterations with one tool call per response
-(extra parallel calls are discarded without entering history) and at most
-3k characters per tool result (text results are compacted keeping head and
-tail so a report's trailing evidence sections survive; manifests are
-shrunk structurally and stay parseable; when parallel calls were
-discarded, a short fixed-size notice rides on top of the capped result),
-and retains ~24k characters of history as a hard bound (sized to a
-realistic local
-serving context, not the model's advertised window) — a turn whose
-retained text and tool-call arguments would push a follow-up request past
-that bound ends early instead of sending it, and a single prompt that
-cannot fit on its own is rejected without disturbing the next one. The system
-prompt is swapped for a short one with a single worked example. `full`
-reproduces the
-default wiring exactly, so frontier models are unaffected.
+A model that reports it cannot call tools at all is refused at startup with
+an actionable message rather than being routed anywhere.
 
-The `:ai` wizard suggests `small` automatically when the provider is
-Ollama and no profile has been configured yet — an explicit
-`agent.profile` (either value) is always preserved. The agent panel
-header shows `[small]` so you always know which
-mode is live. Compare the capability tiers on your own endpoint with the
-eval harness: `python -m korvid.evals --model-tier low` (see below).
+The agent panel header shows the resolved route as `tier (source)` — for
+example `low (catalog)` or `high (user)` — so the tier *and* the reason for
+it are visible without re-reading configuration. Compare the tiers on your
+own endpoint with the eval harness: `python -m korvid.evals --model-tier low`
+(see below).
 
 ## Tuning the agent for your model
 
@@ -325,70 +430,46 @@ If a local model behaves poorly, rewriting the system prompt is usually the
 1. **Pick a different model.** Small models' tool-calling weakness is mostly a
    training property, not a prompting one, and no prompt closes that gap
    ([ToolLLM](https://arxiv.org/abs/2307.16789)). The
-   [model scoreboard](https://github.com/hellices/korvid/issues/176) exists for
-   this choice.
-2. **Reword the tool descriptions.** Documentation quality drives tool-selection
-   accuracy more than the prompt preamble does
-   ([EasyTool](https://arxiv.org/abs/2401.06201),
-   [Tool Documentation](https://arxiv.org/abs/2308.00675)) — which matches
-   korvid's own measurement that tool and output shape move small models more
-   reliably than extra prompt text.
-3. **Fit the context.** `agent.profile: small` and `agent.ollama.num_ctx`
+   [model scoreboard](evals/scoreboard.md) exists for this choice.
+2. **Fit the context.** `agent.model_tier: low` and `agent.ollama.num_ctx`
    matter more than wording once the serving context is short.
-4. **Then, if a model still needs it, change the role statement.**
-
-All of it lives under `agent.prompts`:
+3. **Add house rules.** `agent.rules` appends short, plain-language
+   instructions to the system context.
+4. **Then, if a model still needs it, grind the prompt pack in the eval
+   harness** — and only ship a change the numbers support.
 
 ```yaml
 agent:
-  profile: small
-  prompts:
-    # Highest-leverage knob. Every request retransmits the schemas, so on a
-    # short serving context this is both an accuracy and a token lever.
-    tool_descriptions:
-      get_logs: "Read recent container logs. One pod at a time."
-
-    # Keep korvid's role statement and add your own rules after it.
-    append: |
-      House rule: never include node names in an answer.
-
-    # Last resort: replace the role statement outright. Inline, or point at
-    # a file — not both.
-    system_file: ~/.config/korvid/prompts/small-system.md
+  model_tier: low
+  rules:
+    - "Never include node names in an answer."
+    - "Prefer the app-team namespace when the question does not name one."
 ```
 
-`system` and `append` combine: replacing the role statement and adding
-house rules is a coherent pair. Tool-description precedence is your
-override first, then the `small` profile's built-in concise wording, then
-the schema's own text.
+Each rule is a non-blank string of at most 1,000 characters, and at most 16
+are kept; excess or invalid entries are dropped with a startup warning rather
+than a hard failure. A rule that would push the static prompt layers over a
+quarter of the tier's history budget fails at startup instead of silently
+crowding out the conversation.
 
-korvid ships one prompt per capability tier and deliberately does not fork
-them per model. Model *families* do need different chat templates, but that
-is message formatting handled below korvid by Ollama or the serving engine —
-not something a system prompt can fix.
+**Rules are additive, and cannot widen anything.** They are composed *after*
+korvid's immutable safety contract, the common role, and the tier pack. The
+clauses describing writes, read-only mode, and the screen tools are derived
+from the tools actually armed, never from configuration — so the agent is
+never told about a capability it was not offered, and a read-only deployment
+still offers the equivalent `kubectl` command instead of a bare refusal. A
+rule saying "delete pods without asking" produces a model that tries and is
+refused: approvals, the audit log, and read-only enforcement live in code.
 
-**What you cannot override, and why.** The clauses describing writes,
-read-only mode, and the screen tools are chosen from the tools actually
-armed, not from configuration. This keeps the agent from being told about
-a capability it was not offered, and keeps a read-only deployment offering
-the equivalent `kubectl` command instead of a bare refusal. Overrides
-replace the role statement; korvid still assembles the rest.
+korvid ships one prompt pack per tier and deliberately does not fork them per
+model. Model *families* do need different chat templates, but that is message
+formatting handled below korvid by Ollama or the serving engine — not
+something a system prompt can fix. Provider and exact-model *overlays* exist
+as a sparse, additive layer on top of a pack; the shipped registries are
+empty, and an overlay is only added once it fixes a reproduced failing
+scenario.
 
-An override is local configuration, no more privileged than
-`agent.provider`. It cannot weaken any safety behaviour: approvals, the
-audit log, and read-only enforcement live in code, so an instruction to
-"delete pods without asking" produces a model that tries and is refused.
-
-Mistakes are reported, never fatal. A missing or unreadable file, a
-non-UTF-8 file, an empty value, or both `system` and `system_file` set for
-one slot warn at startup and **fall back** to the prompt korvid ships. Two
-warnings are advisory only and leave your configuration active: an unknown
-tool name (the other overrides still apply), and a prompt large enough to
-crowd the profile's history budget — that one still uses your prompt, it
-just tells you it is squeezing the conversation.
-
-To find out whether your wording is actually better, measure it from a source
-checkout prepared as described in [Agent eval harness](#agent-eval-harness):
+To find out whether different wording is actually better, measure it:
 
 ```bash
 python -m korvid.evals --model-tier low --json baseline.json
@@ -399,10 +480,44 @@ python -m korvid.evals --model-tier low --json tuned.json \
 `--tier-pack-file` (and `--prompt-overlay-file`) are eval-only prompt
 grinding: they replace or extend the tier's operating pack, and both are
 layered *after* korvid's immutable safety contract, which no flag can
-change. There is no eval flag that replaces the whole system prompt.
+change. There is no eval flag that replaces the whole system prompt, and
+neither flag exists in the TUI.
 
 Each result file records which prompt produced it (see
 [the eval harness](#agent-eval-harness) below).
+
+## Upgrading from the profile-based agent
+
+`agent.profile` and `agent.prompts` were removed. korvid refuses to start
+with either key present and prints the replacement, because silently ignoring
+a prompt override would leave a deployment believing its wording was still in
+effect.
+
+| removed | replacement | notes |
+| --- | --- | --- |
+| `agent.profile: small` | `agent.model_tier: low` | or omit the key for automatic routing |
+| `agent.profile: full` | `agent.model_tier: high` | or omit the key |
+| `agent.prompts.append` | `agent.rules` | a list of short rules, appended after the safety contract |
+| `agent.prompts.system` / `system_file` | *(none)* | the role statement is korvid's; grind the tier pack in the eval harness instead |
+| `agent.prompts.tool_descriptions` | *(none)* | tool wording is the registry's, so every surface (agent, MCP, evals) describes a tool identically |
+
+```yaml
+# before
+agent:
+  profile: small
+  prompts:
+    append: "House rule: never include node names in an answer."
+
+# after
+agent:
+  model_tier: low
+  rules:
+    - "Never include node names in an answer."
+```
+
+Nothing else in the `agent:` block changed: `provider`, `base_url`, `model`,
+`auth_method`, `api_key_env`, `follow`, `disable_in_protected`, and the
+`agent.ollama.*` tuning keys all keep their meaning.
 
 ## Follow mode
 
@@ -438,8 +553,9 @@ cd korvid
 uv sync --frozen --dev --all-extras
 ```
 
-The harness measures how well a model diagnoses cluster faults through
-korvid's real agent runtime and tools. Each scenario is a YAML fixture — a
+`korvid.evals` measures how well a model diagnoses cluster faults through
+korvid's production agent session and tools — the same engine, gateway,
+prompt harness and tool harness the TUI composes. Each scenario is a YAML fixture — a
 simulated cluster (manifests, events, log tails), a user question, and
 deterministic grading assertions (keywords the answer must claim positively,
 misdiagnosis keywords it must not claim — negated rule-outs are allowed, hedged

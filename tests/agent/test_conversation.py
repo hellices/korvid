@@ -6,7 +6,8 @@ evidence prompt text is ephemeral: it is supplied to `request_messages`
 and prepended per request, so it never enters retained history and a
 recomposition cannot mutate what was already stored.
 
-These tests pin the behavior that used to live inside `AgentRuntime`
+These tests pin the durable-history behavior that a monolithic agent
+loop would otherwise absorb
 (history trimming, strict/loose budgets, provenance projection,
 protocol pairing, phase validation, usage accounting, and one-shot
 interruption) as a standalone state machine, independent of the provider,

@@ -241,7 +241,7 @@ async def test_the_agent_ui_proxy_forwards_once_bound() -> None:
     assert proxy.snapshot() is snapshot
     result = await proxy.apply(Navigate(view="pods"))
     assert result.ok is True
-    assert [action.view for action in bridge.applied] == ["pods"]
+    assert [action.view for action in bridge.applied if isinstance(action, Navigate)] == ["pods"]
 
 
 def test_the_wiring_exposes_both_ports_separately() -> None:
@@ -260,32 +260,44 @@ def test_the_wiring_exposes_both_ports_separately() -> None:
     assert isinstance(wiring.ui_bridge, _AgentUiBridgeProxy)
 
 
-def test_the_composition_root_never_names_the_old_runtime() -> None:
-    """Production cutover (issue #316 task 12): `AgentRuntime`, its profile
-    builder and its prompt-override plumbing are eval/test-only now. A
-    reference here would mean two agent objects are still wired.
+def test_the_composition_root_composes_the_agent_from_harness_parts_only() -> None:
+    """One agent object, assembled here, from the published harness parts.
 
-    The scan covers the whole production TUI, not just the composition
-    root: the old runtime was reachable from `ui/` too, so a leftover
-    import, type hint or fallback in any screen, widget or controller
-    would re-introduce the second agent object this task removed —
-    somewhere `__main__.py` alone would never show it.
+    `tests/test_agent_replacement_guard.py` proves the retired names are
+    gone from the whole tree; this pins the positive half for the surface
+    that actually wires the agent — the composition root plus every screen,
+    widget and controller in `ui/`. A prompt string, a tier-to-surface
+    table or a second engine appearing in `ui/` would mean the UI had
+    started composing an agent of its own again.
     """
     banned = (
-        "AgentRuntime",
-        "build_profile",
-        "AgentProfile",
-        "PromptOverrides",
         "cluster_context_note",
-        "_tier_to_legacy_profile",
+        "prompt_pack",
+        "PROMPT_PACKS",
+        "NativeAgentEngine",
+        "ToolHarness",
+        "RequestGateway",
     )
     ui_package = Path(korvid.__file__).parent / "ui"
-    sources = [Path(korvid.__main__.__file__), *sorted(ui_package.rglob("*.py"))]
-    assert len(sources) > 1  # the ui package really was scanned
-    for path in sources:
+    ui_sources = sorted(ui_package.rglob("*.py"))
+    assert len(ui_sources) > 1  # the ui package really was scanned
+    for path in ui_sources:
         source = path.read_text(encoding="utf-8")
         for name in banned:
             assert name not in source, f"{path}: {name}"
+
+    root = Path(korvid.__main__.__file__).read_text(encoding="utf-8")
+    for part in (
+        "NativeAgentEngine",
+        "DefaultAgentSession",
+        "PromptHarness",
+        "RequestGateway",
+        "ToolHarness",
+        "ConversationState",
+        "EvidenceLedger",
+        "ModelRouter",
+    ):
+        assert part in root, f"__main__.py no longer wires {part}"
 
 
 def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
@@ -1067,7 +1079,9 @@ async def test_a_ctx_retarget_re_arms_a_later_rebuild(monkeypatch: object) -> No
     assert session is not None
     wiring.retarget(session, True, ClusterFacts(provider="aws", distribution="eks"))
 
-    rebuilt = wiring.rebuild(
+    rebuild = wiring.rebuild
+    assert rebuild is not None
+    rebuilt = rebuild(
         AgentSettings(
             provider="openai",
             auth_method="api_key",
@@ -1498,6 +1512,7 @@ def test_missing_agent_extra_degrades_when_not_enabled(
     """Without the [agent] extra and without agent.provider configured,
     the wiring is session-less and the retarget hook is a safe no-op."""
     from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.interaction import ClusterFacts
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
@@ -1512,7 +1527,7 @@ def test_missing_agent_extra_degrades_when_not_enabled(
     assert configurator is None
     assert rebuild is None
     assert provider_box == [None]
-    retarget(None, True, "ctx")  # must not raise
+    retarget(None, True, ClusterFacts(provider="aws", distribution=None))  # must not raise
 
 
 def test_missing_agent_extra_fails_actionably_when_enabled(
@@ -1588,7 +1603,7 @@ def test_httpx_without_keyring_does_not_compose_the_agent(
 
     _uninstall_packages(monkeypatch, "keyring")  # observability keeps httpx importable
     for cached in list(sys.modules):
-        if cached in ("korvid.agent.session", "korvid.agent.profiles"):
+        if cached in ("korvid.agent.session", "korvid.agent.native_engine"):
             monkeypatch.delitem(sys.modules, cached)
 
     wiring = _build_agent_wiring(KorvidConfig(), cast("KubeClient", object()), {})
@@ -1601,7 +1616,7 @@ def test_httpx_without_keyring_does_not_compose_the_agent(
     assert rebuild is None
     assert provider_box == [None]
     assert "korvid.agent.session" not in sys.modules
-    assert "korvid.agent.profiles" not in sys.modules
+    assert "korvid.agent.native_engine" not in sys.modules
 
 
 async def test_mcp_controller_wires_follow_hooks() -> None:
@@ -2145,8 +2160,10 @@ async def test_a_failed_tool_wiring_during_rebuild_keeps_the_old_session(
 
     monkeypatch.setattr(executor_mod.ToolExecutor, "__init__", _boom_te_init)
 
+    rebuild = wiring.rebuild
+    assert rebuild is not None
     with pytest.raises(RuntimeError, match="tool executor construction failed"):
-        wiring.rebuild(_company_plugin_settings())
+        rebuild(_company_plugin_settings())
 
     assert provider_box[0] is old_provider
     assert session_box[0] is session
@@ -2176,8 +2193,10 @@ async def test_a_failed_session_build_during_rebuild_closes_only_the_new_provide
 
     monkeypatch.setattr(session_mod.DefaultAgentSession, "__init__", _boom_init)
 
+    rebuild = wiring.rebuild
+    assert rebuild is not None
     with pytest.raises(RuntimeError, match="session construction failed"):
-        wiring.rebuild(_company_plugin_settings())
+        rebuild(_company_plugin_settings())
 
     assert provider_box[0] is old_provider
     assert wiring.session_box[0] is session
@@ -2553,7 +2572,7 @@ _CLOSE_TIMEOUT = 10.0
 def _agent_config(**overrides: Any) -> Any:
     from korvid.core.config import KorvidConfig
 
-    base = {
+    base: dict[str, Any] = {
         "agent_enabled": True,
         "agent_provider": "openai",
         "agent_auth_method": "api_key",
@@ -2693,7 +2712,9 @@ async def test_rebuild_swaps_both_boxes_and_closes_the_session_first(
 
     monkeypatch.setattr(type(old_session), "aclose", _record_close)
 
-    new_session = wiring.rebuild(_settings())
+    rebuild = wiring.rebuild
+    assert rebuild is not None
+    new_session = rebuild(_settings())
     assert new_session is not None
     assert new_session is not old_session
     assert wiring.session_box[0] is new_session

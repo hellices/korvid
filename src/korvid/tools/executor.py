@@ -217,8 +217,8 @@ def as_recorded(executor: object) -> RecordedExecution:
 
     The explicit on-ramp for something that is not a `RecordedExecution` —
     a test fake, a third-party integration — and it is the **caller's** to
-    invoke. `AgentRuntime` used to do it silently, which made a structural
-    shape the real constructor boundary; composing the adapter is a
+    invoke. Adapting silently inside an agent constructor would make a
+    structural shape the real boundary; composing the adapter is a
     decision, and it belongs where the executor is chosen (PR #197 review).
 
     Args:

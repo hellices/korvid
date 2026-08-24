@@ -319,6 +319,31 @@ def test_armed_write_tools_produce_a_write_clause_naming_them() -> None:
     assert "no write tools in this session" not in prompt.system_message
 
 
+def test_the_write_clause_omits_a_write_tool_the_cluster_cannot_honor() -> None:
+    """Migrated from the retired write-prompt suite.
+
+    `resize_pod` is armed only where discovery found in-place pod resize.
+    Advertising it anyway teaches the model to propose a write that can
+    only fail, and the user still sees the approval dialog for it.
+    """
+    harness = PromptHarness()
+    armed = tuple(
+        agent_tool_schemas(
+            "high_agent",
+            readonly=False,
+            resize_supported=False,
+            observability_backends=frozenset(),
+        )
+    )
+    turn_policy = policy(tier=ModelTier.HIGH, max_history_chars=120_000, tools=armed)
+
+    message = harness.compose("scale it down", inputs(policy_=turn_policy)).system_message
+    clause = message.split("request cluster writes with: ", 1)[1].split(".", 1)[0]
+
+    assert "delete_resource" in clause
+    assert "resize_pod" not in clause
+
+
 def test_no_armed_write_tools_produce_the_no_write_clause() -> None:
     harness = PromptHarness()
     turn_policy = policy(tools=())

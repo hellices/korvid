@@ -1,0 +1,112 @@
+# Unreleased
+
+These notes cover changes on `main` that have not been tagged yet. Released
+versions are listed under [Release notes](v0.3.0.md).
+
+## Breaking: the agent's configuration and plugin APIs
+
+The embedded agent was rebuilt as one interaction harness — a single
+`AgentSession` over one `AgentEngine`, with the provider boundary, tool
+dispatch, prompt composition, durable history and evidence ledger each owned
+by exactly one component. Two public surfaces changed with it.
+
+### `agent.profile` and `agent.prompts` were removed
+
+korvid **refuses to start** when either key is present and prints the
+replacement. Silently ignoring a prompt override would leave a deployment
+believing its wording was still in effect.
+
+| removed | replacement |
+| --- | --- |
+| `agent.profile: small` | `agent.model_tier: low` — or omit the key |
+| `agent.profile: full` | `agent.model_tier: high` — or omit the key |
+| `agent.prompts.append` | `agent.rules` (a list of short house rules) |
+| `agent.prompts.system` / `system_file` | *(none)* — grind the tier pack in the eval harness |
+| `agent.prompts.tool_descriptions` | *(none)* — tool wording is the registry's |
+
+```yaml
+# before
+agent:
+  profile: small
+  prompts:
+    append: "House rule: never include node names in an answer."
+
+# after
+agent:
+  model_tier: low
+  rules:
+    - "Never include node names in an answer."
+```
+
+Omitting `agent.model_tier` is now the recommended setting: routing resolves
+the tier from what the provider reports, then korvid's shipped model catalog,
+then a conservative `low` fallback. The agent panel header shows the resolved
+route as `tier (source)` — for example `low (catalog)` — so both the tier and
+the reason for it are visible without re-reading configuration.
+
+Every other `agent:` key keeps its meaning: `provider`, `base_url`, `model`,
+`auth`, `api_key_env`, `follow`, `disable_in_protected`, and the
+`agent.ollama.*` tuning knobs.
+
+### Provider plugin API 1 → API 2
+
+`PROVIDER_PLUGIN_API_VERSION` is now `2`, and a plugin declaring a different
+version is rejected at load. `LLMProvider.name` was replaced by two
+properties:
+
+| API 1 | API 2 |
+| --- | --- |
+| `name -> str` | `descriptor -> ModelDescriptor` (provider id **and** model tag) |
+| *(nothing)* | `capabilities -> ModelCapabilities` |
+
+`capabilities` is how a plugin participates in tier routing. Reporting
+nothing is valid — return `ModelCapabilities.unknown()` and korvid falls back
+to its catalog and then to `low`. `descriptor.provider` must equal the
+plugin's registered entry-point name, and `supports_tools=False` is a hard
+stop rather than a routing hint. See
+[provider plugins](../provider-plugins.md) for the full surface and a
+worked adapter.
+
+## What tiers actually change
+
+| | low | high |
+| --- | --- | --- |
+| iterations per turn | 6 | 15 |
+| retained history | 24,000 chars (hard bound) | 120,000 chars |
+| per tool result | 3,000 chars | 8,000 chars |
+| tool calls per response | 1 | provider-confirmed parallel, else 1 |
+| screen tools armed | `open_logs`, `open_describe` | all five |
+
+## The safety perimeter is unchanged
+
+Nothing in this rebuild moved a security boundary. Every write tool the
+environment arms still opens the same approval dialog, at every tier, and
+only a user keystroke executes it; a write still carries the preconditions
+(UID and resourceVersion) the read observed; audit logging is still
+fail-closed, so a write whose audit record cannot be written does not run;
+read-only mode still means no write schema is offered at all; `run_kubectl`
+still validates the (verb × resource × flags) triple; and sensitive reads
+still pass the masking pipeline before any result reaches the model or the
+provider. House rules are composed *after* the immutable safety contract and
+cannot widen it.
+
+## Other agent-visible changes
+
+- **Evidence citations.** Each successful cluster read mints a numbered
+  reference the answer cites; opening a citation navigates to the exact
+  object the read looked at. Screen actions and writes never mint evidence.
+  Switching Kubernetes context clears the ledger.
+- **Direct control.** The agent drives the same panes your keys drive.
+  Pressing a normal key mid-turn keeps working, and the next turn starts
+  from wherever you left the screen.
+- **Optional install unchanged in shape, stricter in behaviour.** The agent
+  still ships in the `[agent]` extra; a base or MCP-only start now provably
+  loads no engine, gateway or provider module, and an enabled agent with the
+  extra missing fails with the exact install command instead of degrading
+  silently.
+- **Eval artifacts.** Journey artifacts publish `successful_journeys` (whole
+  conversations whose every turn succeeded) and the markdown tables label
+  their verdict columns `all-turn journeys` and `correct diagnosis`, so the
+  two different measurements are no longer both called "success". A run's
+  per-turn `success` is derived from its outcome and can no longer
+  contradict it.

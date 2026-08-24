@@ -1,15 +1,15 @@
-"""The performance harness never depends on the retired agent profiles.
+"""The performance harness gets its agent budgets from the production router.
 
-Issue #316 task 13 moved every eval and performance path onto the
-production agent composition (resolved `ResolvedAgentPolicy` + `ModelTier`
-+ the production builders). The performance harness measures the TUI's
-read path and legitimately needs no agent at all — but "needs none" has to
-be *pinned*, because the way this regresses is someone reaching for the v1
-`AgentProfile`/`AgentRuntime` constants for a budget number, which would
-re-attach the performance numbers to a program that is being deleted.
+Issue #316 task 13 moved every eval and performance path onto the production
+agent composition (a resolved `ResolvedAgentPolicy` + `ModelTier` from
+`ModelRouter`). The performance harness measures the TUI's read path and
+legitimately needs no agent at all — but it is also where someone reaching
+for "a budget number" would land, so this module says exactly where such a
+number must come from.
 
-If a future workload does need agent budgets, these tests say where they
-must come from: `ModelRouter` over `MODEL_CATALOG`, not profile constants.
+The negative half — that no module anywhere names a retired agent symbol or
+a capability-profile name — is `tests/test_agent_replacement_guard.py`, which
+scans the whole tree rather than this directory alone.
 """
 
 from __future__ import annotations
@@ -18,28 +18,7 @@ from pathlib import Path
 
 import pytest
 
-#: The v1 agent surface no migrated module may name again.
-_RETIRED_SYMBOLS = (
-    "AgentRuntime",
-    "AgentProfile",
-    "build_profile",
-    "PromptOverrides",
-    "korvid.agent.runtime",
-    "korvid.agent.profiles",
-    "korvid.agent.prompts",
-    "compose_system_prompt",
-)
-
 _PERFORMANCE_DIR = Path(__file__).parent
-_REPO_ROOT = Path(__file__).parents[2]
-_EVALS_DIR = _REPO_ROOT / "src" / "korvid" / "evals"
-
-#: Documentation that describes the *current* program. Historical plans and
-#: specs under `docs/dev/` and `docs/superpowers/` are records of how korvid
-#: got here and legitimately name what they retired.
-_CURRENT_DOCS = sorted(
-    [*(_REPO_ROOT / "docs" / "evals").glob("*.md"), _REPO_ROOT / "docs" / "agent.md"]
-)
 
 
 def _python_sources(directory: Path) -> list[Path]:
@@ -47,45 +26,8 @@ def _python_sources(directory: Path) -> list[Path]:
 
 
 @pytest.mark.parametrize("path", _python_sources(_PERFORMANCE_DIR), ids=lambda p: p.name)
-def test_no_performance_module_names_a_retired_agent_symbol(path: Path) -> None:
-    text = path.read_text(encoding="utf-8")
-    if path.name == Path(__file__).name:
-        pytest.skip("this module names the symbols in order to forbid them")
-    found = [symbol for symbol in _RETIRED_SYMBOLS if symbol in text]
-    assert found == [], f"{path.name} still names {found}"
-
-
-@pytest.mark.parametrize("path", _python_sources(_EVALS_DIR), ids=lambda p: p.name)
-def test_no_eval_module_names_a_retired_agent_symbol(path: Path) -> None:
-    text = path.read_text(encoding="utf-8")
-    found = [symbol for symbol in _RETIRED_SYMBOLS if symbol in text]
-    assert found == [], f"{path.name} still names {found}"
-
-
-@pytest.mark.parametrize("path", _CURRENT_DOCS, ids=lambda p: p.name)
-def test_no_current_doc_names_a_retired_agent_symbol(path: Path) -> None:
-    """Docs describing today's program must name today's classes.
-
-    The eval methodology told readers that one `AgentRuntime` persists for
-    a journey, which is the class this migration retired — a reader who
-    went looking for it would find the module being deleted rather than
-    `DefaultAgentSession`, which is what actually persists.
-    """
-    text = path.read_text(encoding="utf-8")
-    found = [symbol for symbol in _RETIRED_SYMBOLS if symbol in text]
-    assert found == [], f"{path.name} still names {found}"
-
-
-def test_the_docs_guard_actually_covers_the_eval_methodology() -> None:
-    """A guard over an empty file list would pass forever."""
-    names = {path.name for path in _CURRENT_DOCS}
-    assert "methodology.md" in names
-    assert "agent.md" in names
-
-
-@pytest.mark.parametrize("path", _python_sources(_PERFORMANCE_DIR), ids=lambda p: p.name)
 def test_no_performance_module_hardcodes_a_capability_profile_name(path: Path) -> None:
-    """`full`/`small` were the v1 capability profiles; tiers are `low`/`high`."""
+    """`full`/`small` were the retired capability profiles; tiers are `low`/`high`."""
     if path.name == Path(__file__).name:
         pytest.skip("this module names the strings in order to forbid them")
     text = path.read_text(encoding="utf-8")
@@ -96,8 +38,8 @@ def test_no_performance_module_hardcodes_a_capability_profile_name(path: Path) -
 def test_agent_budgets_come_from_the_production_router() -> None:
     """The one supported way to get an agent budget in a harness.
 
-    Named here so a future workload copies this instead of re-introducing
-    profile constants.
+    Named here so a future workload copies this instead of inventing its
+    own budget constants.
     """
     from korvid.agent.model_catalog import MODEL_CATALOG
     from korvid.agent.model_policy import (

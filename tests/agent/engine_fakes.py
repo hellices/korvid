@@ -46,7 +46,7 @@ from korvid.tools.registry import TOOLS_BY_NAME, resolve_result_formats
 
 #: The composed prompt strings a turn carries. The engine never composes
 #: them — Task 6's `PromptHarness` does — so the fakes hand it fixed text.
-SYSTEM_PROMPT = "korvid safety contract: cite your evidence."
+TURN_SYSTEM_MESSAGE = "korvid safety contract: cite your evidence."
 USER_TEXT = "why is the api pod failing?"
 
 DONE: dict[str, Any] = {"type": "done"}
@@ -293,7 +293,7 @@ class Harness:
         self,
         user_text: str = USER_TEXT,
         *,
-        system_message: str = SYSTEM_PROMPT,
+        system_message: str = TURN_SYSTEM_MESSAGE,
     ) -> AgentTurnRequest:
         """One turn request carrying an already composed prompt."""
         return AgentTurnRequest(
@@ -306,7 +306,7 @@ class Harness:
         self,
         user_text: str = USER_TEXT,
         *,
-        system_message: str = SYSTEM_PROMPT,
+        system_message: str = TURN_SYSTEM_MESSAGE,
     ) -> list[AgentEvent]:
         """Drive one whole turn and collect its events."""
         request = self.request(user_text, system_message=system_message)

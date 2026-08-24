@@ -177,20 +177,21 @@ class KorvidConfig:
     agent_options: dict[str, object] = field(default_factory=dict)
     agent_options_error: str | None = None
     #: Explicit model-capability tier override (`agent.model_tier`): `low` or
-    #: `high`, or `None` for automatic routing. Replaces the old
-    #: `agent.profile` (full/small) — see `ConfigMigrationError` for the
-    #: removed key. Consumption into the runtime's tool surface/budgets is
-    #: still the old-runtime full/small split in `agent/profiles.py`; a
-    #: private `__main__` adapter bridges the two until Task 12/14 replace
-    #: it with real tier-aware routing.
+    #: `high`, or `None` for automatic routing. Replaces the removed
+    #: `agent.profile` key — see `ConfigMigrationError`. It is consumed by
+    #: `korvid.agent.model_policy.ModelRouter`, which resolves it (together
+    #: with provider-reported and shipped-catalog capabilities) into the
+    #: `ResolvedAgentPolicy` that carries the session's tool surface,
+    #: budgets, and prompt pack.
     agent_model_tier: str | None = None
     #: Additive house rules (`agent.rules`): short, plain-language
     #: instructions appended to the agent's system context (replaces the
     #: removed `agent.prompts` system/append/tool_descriptions overrides).
     #: Each entry is a non-blank string of at most 1000 characters; at most
     #: 16 entries are kept (excess and invalid entries are dropped with a
-    #: warning, never a hard failure). Not yet consumed by the runtime
-    #: prompt — parsing/storage only, per Task 5's scope.
+    #: warning, never a hard failure). Composed as an additive layer by
+    #: `korvid.agent.prompt_harness.PromptHarness`, which never lets a rule
+    #: widen what the safety contract above it granted.
     agent_rules: tuple[str, ...] = ()
     #: Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml.
     agent_ollama_num_ctx: int = 16384

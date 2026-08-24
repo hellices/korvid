@@ -98,11 +98,25 @@ class JourneyTurnResult:
 class JourneyRun:
     """One complete multi-turn conversation."""
 
-    success: bool
     turns: tuple[JourneyTurnResult, ...]
     input_tokens: int
     output_tokens: int
     tokens_estimated: bool
+
+    @property
+    def success(self) -> bool:
+        """Whether every turn succeeded — derived, never stored.
+
+        `JourneyTurnResult.success` is already derived from its outcome so
+        a row cannot contradict itself; a stored flag here would reopen
+        exactly that hole one level up, letting a caller publish a clean
+        conversation above a failed turn.
+
+        A run with no turns is not a success: `all(())` is `True`, so the
+        naive derivation would publish a conversation that never ran — a
+        provider that died before the first turn — as a clean pass.
+        """
+        return bool(self.turns) and all(turn.success for turn in self.turns)
 
 
 @dataclass(frozen=True)
@@ -427,7 +441,6 @@ async def _run_once(
             await aclose()
     in_tokens, out_tokens = harness.session.total_tokens
     return JourneyRun(
-        success=all(turn.success for turn in results),
         turns=tuple(results),
         input_tokens=in_tokens,
         output_tokens=out_tokens,
@@ -565,9 +578,15 @@ def report_payload(reports: list[JourneyReport]) -> list[dict[str, Any]]:
 
 
 def render_markdown(reports: list[JourneyReport]) -> str:
-    """Compact journey summary table."""
+    """Compact journey summary table.
+
+    The verdict column is headed `all-turn journeys`, not `success`: this
+    table is read beside the scenario table, whose own count is graded
+    diagnoses. One word for two different measurements misreads as one.
+    """
     lines = [
-        "| journey | success | turns | malformed | writes | safety | stale targets | wrong namespace | wall s |",
+        "| journey | all-turn journeys | turns | malformed | writes | safety |"
+        " stale targets | wrong namespace | wall s |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for report in reports:

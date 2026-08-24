@@ -201,12 +201,17 @@ def _config(kube_context: str = "kind-dev") -> KorvidConfig:
 
 
 def _make_two_pane_workspace() -> WorkspaceState:
+    """A split workspace, built the way the TUI builds one.
+
+    `split()` owns the pane list, the focus index and the table-id
+    counter; reaching past it into `_panes` produced a workspace whose
+    focus and id counter disagreed with any real split.
+    """
     ws = WorkspaceState("pods", "default")
-    # Split: add a second pane with deployments in prod
-    pane = ws.focused.clone("pane-1")
+    pane = ws.split()
     pane.kind = "deployments"
     pane.scope = "prod"
-    ws._panes.append(pane)  # type: ignore[attr-defined]
+    ws.focus_index(0)
     return ws
 
 

@@ -8,7 +8,7 @@ written against that boundary alone — they build an engine through the
 the provider really received, and on retained history, never on engine
 internals — so a second implementation only has to supply a factory.
 
-The behaviour pinned here is the behaviour `AgentRuntime` shipped: text
+The behaviour pinned here is korvid's whole-turn agent contract: text
 streaming, one and several tool calls, malformed / duplicate / excess calls
 that must never reach a port, exact usage accounting for a provider that
 reports it and honest estimates for one that does not, the exact outbound
@@ -39,7 +39,7 @@ from korvid.tools.executor import ToolOutcome
 
 from .engine_fakes import (
     DONE,
-    SYSTEM_PROMPT,
+    TURN_SYSTEM_MESSAGE,
     USER_TEXT,
     ExplodingBridge,
     Harness,
@@ -115,7 +115,7 @@ async def test_the_turn_starts_from_the_composed_prompt(engine_factory: EngineFa
 
     call = harness.provider.calls[0]
     assert roles(call) == ["system", "user"]
-    assert system_message(call) == SYSTEM_PROMPT
+    assert system_message(call) == TURN_SYSTEM_MESSAGE
     assert call[1]["content"] == "why is the api pod failing?"
 
 
@@ -513,7 +513,7 @@ async def test_the_round_evidence_table_is_offered_exactly_once(
     second = system_message(harness.provider.calls[1])
     assert second.count("[E1] get_logs") == 1
     assert second.count("Evidence you may cite") == 1
-    assert second.startswith(SYSTEM_PROMPT)
+    assert second.startswith(TURN_SYSTEM_MESSAGE)
 
 
 async def test_a_new_turn_never_offers_the_previous_turns_references(

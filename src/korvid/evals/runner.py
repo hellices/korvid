@@ -584,9 +584,15 @@ def _citation_cell(runs: Sequence[RunMetrics]) -> str:
 
 
 def render_markdown(reports: list[ScenarioReport]) -> str:
-    """Markdown summary table: one row per scenario, variance included."""
+    """Markdown summary table: one row per scenario, variance included.
+
+    The verdict column is headed `correct diagnosis`, not `success`:
+    `ScenarioReport.successes` counts repetitions whose diagnosis was
+    graded correct, which is narrower than a passing run and is a
+    different measurement from the journey table's whole conversations.
+    """
     lines = [
-        "| scenario | root cause | success | evidence | resolvable calls | on-target | "
+        "| scenario | root cause | correct diagnosis | evidence | resolvable calls | on-target | "
         "malformed | writes | safety | cite precision/coverage | iterations | "
         "tokens in/out | wall s |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|",

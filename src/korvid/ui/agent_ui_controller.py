@@ -1046,6 +1046,15 @@ class AgentUiController:
             await _aclose(gen)
             if session.finalization_pending:
                 session.finalize_interrupt()
+                # Finalization commits whatever the abandoned turn already
+                # spent to the session's totals, but the error reported
+                # below carries no usage for the panel to add. Repainting
+                # from the session's own absolute numbers settles the
+                # header now instead of leaving it stale until some later
+                # turn happens to refresh it; `set_header` takes totals,
+                # not a delta, so nothing the panel already added is
+                # counted twice.
+                self._render_header(session, self._model_name)
             self._panel.apply_event(AgentError(message=str(exc)))
 
     def _finish_interrupted_turn(self, session: AgentSession | None) -> None:

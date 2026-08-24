@@ -112,8 +112,8 @@ _FORBIDDEN_SELECTORS = (
 _REMOVED_CONFIG_KEYS = ("agent.profile", "agent.prompts")
 
 #: Files allowed to name a removed config key: the startup migration error,
-#: the tests that pin it, this guard, and the operator-facing migration
-#: documentation.
+#: the tests that pin it, this guard, the operator-facing migration
+#: documentation, and the decision record that explains the supersession.
 _MIGRATION_SURFACES = frozenset(
     {
         "src/korvid/core/config.py",
@@ -121,6 +121,7 @@ _MIGRATION_SURFACES = frozenset(
         "tests/test_main_wiring.py",
         "tests/test_agent_replacement_guard.py",
         "docs/agent.md",
+        "docs/dev/agent-decisions.md",
         "docs/release-notes/unreleased.md",
     }
 )

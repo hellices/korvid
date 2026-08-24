@@ -167,7 +167,6 @@ def test_journey_exit_code_prints_turn_errors(
         root_cause="none",
         runs=(
             JourneyRun(
-                success=False,
                 turns=(turn,),
                 input_tokens=0,
                 output_tokens=0,
@@ -261,7 +260,6 @@ def _journey_report(**overrides: Any) -> JourneyReport:
         "root_cause": "image_pull_auth",
         "runs": (
             JourneyRun(
-                success=True,
                 turns=(_turn_result(),),
                 input_tokens=10,
                 output_tokens=5,
@@ -310,7 +308,6 @@ def test_a_conversation_with_one_failed_turn_is_not_a_successful_journey() -> No
     report = _journey_report(
         runs=(
             JourneyRun(
-                success=False,
                 turns=(
                     _turn_result(),
                     _turn_result(outcome="failure", failure_class="misdiagnosis"),
@@ -332,7 +329,6 @@ def test_every_published_turn_success_agrees_with_its_outcome() -> None:
     report = _journey_report(
         runs=(
             JourneyRun(
-                success=False,
                 turns=(
                     _turn_result(),
                     _turn_result(outcome="failure", failure_class="missing_evidence"),

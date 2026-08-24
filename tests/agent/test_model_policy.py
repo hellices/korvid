@@ -343,9 +343,9 @@ def test_tool_schema_nested_mutation_raises_type_error() -> None:
         explicit_tier=None,
         environment=environment(),
     )
-    schema = policy.tools[0]
+    function = policy.tools[0]["function"]
     with pytest.raises(TypeError):
-        schema["function"]["name"] = "mutated"  # type: ignore[index]
+        function["name"] = "mutated"
 
 
 def test_provenance_is_immutable() -> None:
@@ -654,7 +654,7 @@ def _resolved(tier: ModelTier) -> ResolvedAgentPolicy:
     return ModelRouter(MODEL_CATALOG).resolve(
         descriptor=ModelDescriptor("ollama", "qwen3:8b"),
         provider_capabilities=ModelCapabilities.unknown(),
-        explicit_tier=tier,
+        explicit_tier=tier.value,
         environment=environment(resize_supported=True),
     )
 

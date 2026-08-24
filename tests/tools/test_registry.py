@@ -377,7 +377,7 @@ def _mutable_ids(obj: Any) -> set[int]:
 
 
 def test_executor_surface_lists_are_isolated_from_the_registry() -> None:
-    """The module-level executor lists ride into AgentRuntime by default;
+    """The module-level executor lists ride into the armed tool surface;
     their dicts must be deep copies: no mutable descendant may be shared
     with TOOL_DEFS."""
     from korvid.tools.executor import READ_TOOLS, RESIZE_TOOLS, UI_TOOLS, WRITE_TOOLS

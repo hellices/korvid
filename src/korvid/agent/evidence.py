@@ -155,16 +155,13 @@ class EvidenceLedger:
     def prompt_note(self) -> str:
         """A bounded, korvid-authored reference table for the system prompt.
 
-        The prompt harness (issue #316 task 6) needs this ledger's own
-        fact - which references it minted, in read order - as its own
-        method, independent of `agent.runtime.evidence_note`: the harness
-        must not import the v1 runtime it is meant to outlive, so the two
-        are separate implementations of the same rule rather than one
-        shared helper. Each row names only the tool that produced the
-        reference, exactly as `runtime.evidence_note` does: `kind`,
-        `name`, and `namespace` are tool arguments the model supplied, and
-        this table lives in the one region of the prompt that is
-        korvid's own, so nothing the model wrote may appear in it.
+        The ledger owns this fact — which references it minted, in read
+        order — so the table is built here rather than by whichever
+        component happens to need it. Each row names only the tool that
+        produced the reference: `kind`, `name`, and `namespace` are tool
+        arguments the model supplied, and this table lives in the one
+        region of the prompt that is korvid's own, so nothing the model
+        wrote may appear in it.
 
         Returns:
             One short line per reference, in read order, or `""` when
