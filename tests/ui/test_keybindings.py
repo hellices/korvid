@@ -122,12 +122,27 @@ async def test_timeline_binding_can_be_remapped() -> None:
         )
 
 
-def test_keybindings_doc_documents_every_remappable_action() -> None:
-    # docs/keybindings.md's action-name list must not drift from the real
-    # BINDINGS (the list moved out of README.md in the docs restructure).
+def test_keybindings_doc_directs_to_help_overlay_not_static_inventory() -> None:
+    # The approved design contract: docs/keybindings.md must direct users to
+    # the dynamic `?` help overlay for the complete effective set (including
+    # remaps), rather than embedding a static exhaustive action-name inventory.
+    # A hidden collapsible block ("??? note") is still a hidden inventory and
+    # must not exist.
     doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
-    for action in KorvidApp._binding_actions():
-        assert f"`{action}`" in doc, f"docs/keybindings.md missing keybinding action {action!r}"
+
+    # The doc must actively point users to the in-app overlay.
+    assert "Press `?` for the complete effective set" in doc, (
+        "docs/keybindings.md must direct users to the `?` help overlay"
+    )
+
+    # The hidden inventory block must be absent — not hidden behind a
+    # collapsible block, not present in any form.
+    assert '??? note "Every remappable action name"' not in doc, (
+        "docs/keybindings.md must not contain a hidden inventory of action names"
+    )
+    assert "Every remappable action name" not in doc, (
+        "docs/keybindings.md must not contain an action-name inventory title"
+    )
 
 
 def test_documented_remap_example_survives_the_real_keybinding_planner() -> None:

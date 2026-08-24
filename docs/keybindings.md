@@ -39,15 +39,3 @@ keybindings:
 ```
 
 Unknown, duplicate, or shadowing remaps warn and are skipped. Keys handled by drill-down, closing, and dialogs are not remappable. The approval dialogs' confirm keys are **not remappable**: every write still requires the fixed fresh keystroke.
-
-??? note "Every remappable action name"
-
-    `quit`, `help`, `open_command`, `open_filter`, `toggle_all_namespaces`,
-    `describe`, `relationships`, `timeline`, `shell`, `logs`, `logs_multi`,
-    `log_format`, `log_wrap`, `log_timestamps`, `log_save`, `log_previous`,
-    `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
-    `sort_by_mem`, `sort_picker`, `toggle_topbar`, `toggle_agent`,
-    `interrupt_agent`, `delete_resource`, `rollout_restart`, `resize_pod`,
-    `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
-    `cordon_node`, `uncordon_node`, `drain_node`, `port_forward`, `transfer`,
-    `helm_install`, `helm_upgrade`, `helm_rollback`, `helm_history`.
