@@ -30,9 +30,12 @@ server, the watch decoder, or a real terminal.
 ## Environment and methodology
 
 - **Live cluster:** a dedicated AKS cluster, Kubernetes 1.35.6, 5 ×
-  `Standard_D4s_v5`.
-- **Live client:** macOS arm64, Python 3.12, 10 cores.
-- **Workload:** the committed profile
+  `Standard_D4s_v5`, for both live runs below.
+- **Live client** for run `i186-20260806-195353`: macOS arm64, Python 3.12,
+  10 cores. That run is the 31-minute schedule — its baseline CPU profile
+  below covers 1,877 s of it — not the 30-second workload described next.
+- **Short workload**, used by the deterministic replay and by run
+  `i279-20260813-1620`: the committed profile
   [`tests/performance/profiles/steady-24eps-1k.json`](https://github.com/hellices/korvid/blob/main/tests/performance/profiles/steady-24eps-1k.json)
   — 1,000 Pods across 20 namespaces, 30 seconds of burst-free churn at 24
   events/s.
@@ -50,9 +53,10 @@ python -m tests.performance.cli replay \
   --out <artifact-dir>/steady-24eps-1k.md
 ```
 
-**The input metric is a state acknowledgement.** Everything reported as
-cursor-input latency is the interval from injecting one key event into the
-running app to the `ResourceTable` cursor row being observed on its new index.
+**The input metric is a state acknowledgement.** Every cursor-input figure in
+this document except the invalidated `Pilot.press` rows called out below is the
+interval from injecting one key event into the running app to the
+`ResourceTable` cursor row being observed on its new index.
 It is not a terminal paint: it excludes the emulator's own draw, and it
 excludes every driver idle heuristic. It is emitted as `latency.input` in the
 metrics JSON and as "Input latency p95 (key injection to cursor-row
@@ -309,10 +313,12 @@ AGE is evaluated for every row on every table-update pass — it feeds the stamp
 that decides whether the row can be reused, so it runs *before* the memo can
 spare anything, and 99.7% of those rows are then reused unchanged. Row rebuilds
 track the events, so they are flat across all four arms. The quantity that
-triples is exactly the quantity the update-path change makes cheap: the cheaper
-a pass gets, the more of them the run completes before the schedule ends, so
-the same optimisation has about three times as many opportunities to pay. That
-explains the direction but only a minority of the size — tripling the
+triples is exactly the quantity the update-path change makes cheap. Table-update
+passes are not a fixed quantity of the workload: the cheaper a pass gets, the
+more of them the run completes before the schedule ends. **The render-path
+change roughly triples them**, so the same optimisation has about three times as
+many opportunities to pay. That explains the direction but only a minority of
+the size — tripling the
 0.16-second isolated saving predicts roughly 0.48 seconds, well below the
 1.89-second saving with the new render path. Nothing measured here separates
 the remainder, so the residual is left unexplained rather than narrated.
