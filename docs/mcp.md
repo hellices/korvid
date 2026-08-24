@@ -89,9 +89,9 @@ instances can be discovered side by side:
 | Cursor | `.cursor/mcp.json`: `{"mcpServers": {"korvid": {"type": "http", "url": "http://127.0.0.1:7878/mcp"}}}` |
 | Zed | `settings.json`: `{"context_servers": {"korvid": {"url": "http://127.0.0.1:7878/mcp"}}}` |
 
-Without configuration, korvid still runs the server if `mcp.enabled` — no
-client is required for it to be listening; point any MCP-capable host at the
-published endpoint above.
+Without configuration, korvid still runs the server once `mcp.enabled: true`
+is set — no client is required for it to be listening; point any MCP-capable
+host at the published endpoint above.
 
 ## Read once or follow activity
 

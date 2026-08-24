@@ -12,6 +12,20 @@ It is not a general product security overview — see
 [`docs/ops.md`](ops.md) for the cluster-write safety model and
 [`SECURITY.md`](https://github.com/hellices/korvid/blob/main/SECURITY.md) for how to report a vulnerability.
 
+```mermaid
+flowchart LR
+    K["Kubernetes/UI"] --> T["ToolExecutor/Runtime"]
+    T --> O["OutboundPolicy"]
+    O --> I["Inspector snapshot"]
+    O --> B["Built-in provider transport"]
+    O --> P["Trusted provider plugin"]
+    M["External MCP client"] -->|"no embedded-provider boundary"| T
+```
+
+`OutboundPolicy` is the one fail-closed choke point in front of an embedded
+provider. An external MCP client never crosses it, and therefore owns its own
+AI data boundary.
+
 ## Assets
 
 - **kubeconfig** and the credentials/contexts it grants access to.
@@ -29,15 +43,7 @@ It is not a general product security overview — see
 
 ## Trust boundaries
 
-```mermaid
-flowchart LR
-    K["Kubernetes/UI"] --> T["ToolExecutor/Runtime"]
-    T --> O["OutboundPolicy"]
-    O --> I["Inspector snapshot"]
-    O --> B["Built-in provider transport"]
-    O --> P["Trusted provider plugin"]
-    M["External MCP client"] -->|"no embedded-provider boundary"| T
-```
+What each boundary in the diagram above does, and does not, guarantee:
 
 - **Kubernetes API boundary** — everything korvid reads or writes crosses
   here first; RBAC on the active kubeconfig context is the only access
@@ -99,8 +105,8 @@ flowchart LR
   result, error, audit record or log line; a URL's userinfo is dropped
   before the host is ever reported. Every call carries an enforced
   timeout, time window, result-size, response-byte and concurrency bound,
-  and a truncated answer says so. TLS verification cannot be disabled —
-  see [`docs/observability.md`](observability.md). What comes *back* is
+  and a truncated answer says so (see
+  [`docs/observability.md`](observability.md)). What comes *back* is
   untrusted text like any pod log, and it is projected in `ToolExecutor`
   — before **either** consumer sees it — because MCP does not pass
   through `OutboundPolicy` at all. That pass masks credential-shaped text
@@ -316,7 +322,7 @@ These are explicit, current limitations — not aspirational future work:
   `0o600` argument. Owner-only access on Windows is not guaranteed by this
   code path alone.
 
-## What the inspector proves — and what it does not
+## What the inspector proves — and what it does not prove
 
 The `:ai payload` inspector (`PayloadInspectorScreen`) renders
 `OutboundSnapshot.export_json()`: the exact canonical `messages` and

@@ -5,9 +5,6 @@ cluster. Every number here comes from a recorded run whose manifest pins the
 cluster, the workload profile, and the korvid commit. Nothing here is
 extrapolated: a scale that is not listed has not been measured.
 
-Reproduce any of it with the benchmark command described in
-[the qualification design](dev/specs/2026-08-06-large-cluster-performance-qualification-design.md).
-
 ## Supported envelope
 
 | | Measured |
@@ -30,11 +27,62 @@ store and diff paths do not fall over at that size; they are **not** a claim
 that the live budgets below hold there, because they do not exercise the API
 server, the watch decoder, or a real terminal.
 
-## Live 1,000-pod result
+## Environment and methodology
 
-Run `i186-20260806-195353` against a dedicated AKS cluster (Kubernetes 1.35.6,
-5 × `Standard_D4s_v5`), driven from macOS arm64 / Python 3.12 / 10 cores.
-Measured before and after the render-path work described below.
+- **Live cluster:** a dedicated AKS cluster, Kubernetes 1.35.6, 5 ×
+  `Standard_D4s_v5`.
+- **Live client:** macOS arm64, Python 3.12, 10 cores.
+- **Workload:** the committed profile
+  [`tests/performance/profiles/steady-24eps-1k.json`](https://github.com/hellices/korvid/blob/main/tests/performance/profiles/steady-24eps-1k.json)
+  — 1,000 Pods across 20 namespaces, 30 seconds of burst-free churn at 24
+  events/s.
+- **Replay and CPU-comparison runs:** an unpinned local developer machine, so
+  only same-session, interleaved arms are ever compared with each other.
+
+Reproduce any of it with the benchmark command described in
+[the qualification design](dev/specs/2026-08-06-large-cluster-performance-qualification-design.md).
+The deterministic replay runs as:
+
+```bash
+python -m tests.performance.cli replay \
+  --profile tests/performance/profiles/steady-24eps-1k.json \
+  --json <artifact-dir>/steady-24eps-1k.json \
+  --out <artifact-dir>/steady-24eps-1k.md
+```
+
+**The input metric is a state acknowledgement.** Everything reported as
+cursor-input latency is the interval from injecting one key event into the
+running app to the `ResourceTable` cursor row being observed on its new index.
+It is not a terminal paint: it excludes the emulator's own draw, and it
+excludes every driver idle heuristic. It is emitted as `latency.input` in the
+metrics JSON and as "Input latency p95 (key injection to cursor-row
+acknowledgement)" in the markdown report. The probe takes
+`--input-sample-pairs` `down`/`up` round trips (25 pairs — 50 samples — by
+default, each pair returning the cursor to its original row), so the reported
+percentile is a percentile rather than a point observation.
+
+**Profiled runs are not comparable to unprofiled ones.** `cProfile`
+instruments every Python call and materially changes compositor cost, which
+alone moves the measured cursor figure by an order of magnitude. Profiles are
+diagnostic artifacts only, never the acceptance environment for the 100 ms
+input budget, and before/after profiles must use identical instrumentation to
+be comparable.
+
+**The artifacts encode which latency was measured**, rather than leaving it to
+prose. Every report carries `latency.update_latency_kind`. A deterministic
+replay reports `event_to_render`, populates `latency.event_to_render`, leaves
+`latency.watch_to_diff_completion` null, and prints "Event to render p95" in
+the Markdown. A metadata-only live run reports `watch_to_diff_completion`,
+publishes its samples under `latency.watch_to_diff_completion`, leaves
+`latency.event_to_render` **null**, and prints "Watch receipt to diff
+completion p95" — the string "Event to render" never appears in such a report.
+`latency.event_to_render` becoming nullable is why the JSON `schema_version`
+is `2`.
+
+## Live 1,000-pod results
+
+**Run `i186-20260806-195353`**, measured before and after the render-path work
+described below.
 
 | Metric | Budget | Baseline | Optimized | |
 |---|---:|---:|---:|---|
@@ -56,41 +104,26 @@ heuristic plus a ~2 s constant, not user-visible input latency. They are
 retained here only to invalidate them; do not compare them to any budget or to
 any corrected figure.
 
-**The corrected metric** — everything reported as cursor-input latency from
-this point on — is the interval from injecting one key event into the running
-app to the `ResourceTable` cursor row being observed on its new index. It is a
-state acknowledgement, not a terminal paint: it excludes the emulator's own
-draw, and it excludes every driver idle heuristic. It is emitted as
-`latency.input` in the metrics JSON and as "Input latency p95 (key injection to
-cursor-row acknowledgement)" in the markdown report. The probe takes
-`--input-sample-pairs` `down`/`up` round trips (25 pairs — 50 samples — by
-default, each pair returning the cursor to its original row), so the reported
-percentile is a percentile rather than a point observation.
+**Event-to-render is a no-op-diff interval here.** Live churn is metadata-only,
+so the recorded interval ends when the table diff completes without writing a
+cell. The 527 → 299 ms improvement is a real reduction in per-event diff cost,
+but the figure is not a to-screen measurement. The **miss** verdict still
+holds: a no-op diff is strictly less work than one that writes cells and
+repaints, so 299 ms is a lower bound on a rendered-cell workload at the same
+rate, and a lower bound already over the 250 ms budget refutes it.
 
 Supporting numbers: event-to-render p50 266 → 156 ms, p99 659 → 356 ms, max
 1,628 → 714 ms; max backlog depth 42 → 39; achieved churn 23.18 → 23.996 ev/s
-against a 24.0 target.
+against a 24.0 target. Render passes went *up* 51% (3,640 → 5,493) while
+latency went *down* 43%: before the change each pass was expensive enough that
+the update coalescer was swallowing work to keep up; afterwards each pass is
+cheap enough to run more often, so events are applied sooner, the backlog stays
+shallower, and the event driver is no longer back-pressured by the renderer —
+which is why achieved churn only reaches its 24.0 ev/s target after the change.
 
-**The event-to-render row measures the same thing here as in the 30-second
-table below**, and for the same reason: live churn is metadata-only, so the
-recorded interval ends when the table diff completes without writing a cell.
-The 527 → 299 ms improvement is a real reduction in per-event diff cost, but
-the figure is not a to-screen measurement. The **miss** verdict still holds:
-a no-op diff is strictly less work than one that writes cells and repaints, so
-299 ms is a lower bound on a rendered-cell workload at the same rate, and a
-lower bound already over the 250 ms budget refutes it.
-
-Render passes went *up* 51% (3,640 → 5,493) while latency went *down* 43%.
-Before the change each pass was expensive enough that the update coalescer was
-swallowing work to keep up; afterwards each pass is cheap enough to run more
-often, so events are applied sooner and the backlog stays shallower. That
-is also why achieved churn only reaches its 24.0 ev/s target after the change —
-the event driver was previously being back-pressured by the renderer.
-
-### What made it faster
-
-A 31-minute CPU profile of the baseline run (1,877 s of samples, 2.5 B calls)
-showed the cost was per-row-per-frame work on 1,000 rows, in three places:
+**What made it faster.** A 31-minute CPU profile of the baseline run (1,877 s
+of samples, 2.5 B calls) showed the cost was per-row-per-frame work on 1,000
+rows, in three places:
 
 - the in-place table diff read every surviving row back out of the `DataTable`
   to decide whether it had changed — 7.35 M `get_row` calls and 102 M cell
@@ -103,41 +136,75 @@ All three are now memoised. The one thing deliberately *not* cached is the
 `Text` object returned for a phase cell: `DataTable` takes ownership of it and
 mutates it, so a shared instance would corrupt unrelated rows.
 
+**Run `i279-20260813-1620`** exercised the same checked-in `steady-24eps-1k`
+profile against the same cluster: 1,000 Running, Ready Pods across 20
+namespaces, 720 guarded metadata mutations in 30 seconds, and 50 cursor samples
+after churn dispatch began. This run predates the watch-receipt gate described
+below, so its cursor result is preliminary dispatch-gated evidence, not a live
+budget verdict.
+
+| Metric | Budget | Result | |
+|---|---:|---:|---|
+| Dropped updates | 0 | 0 | pass |
+| Final digest mismatch | 0 | 0 | pass |
+| LIST to 1,000-row table | ≤ 2 s | 144 ms | pass |
+| Process start to interactive | ≤ 10 s | 1.55 s | pass |
+| Peak RSS | ≤ 512 MiB | 236 MiB | pass |
+| Achieved churn | 24 ev/s | 24.06 ev/s (720/720) | pass |
+| Cursor-input p95 | ≤ 100 ms | 7 ms (n=50), dispatch-gated | preliminary |
+| Event-to-render p95 | ≤ 250 ms @ 20 ev/s | **n/a for this workload** | not measured |
+
+**Event-to-render was not measured by this run, and its 250 ms budget is
+neither passed nor missed by it.** The live churn driver is metadata-only by
+design: it patches one label, `korvid.dev/performance-tick`, and nothing else.
+No Pod column renders labels — they feed the client-side `-l` filter — so the
+in-place table diff finds no changed cell for such an event, writes nothing,
+and requests no repaint. The harness nevertheless calls `record_render()` when
+the resource-update handler returns, so the 32 ms figure this run recorded is
+the interval from **watch-event receipt to no-op table-diff completion**. That
+is a real number about the message path, but it is not a rendered-frame
+measurement and is not compared to the render budget here. (Almost every tick
+is a no-op: AGE is recomputed on each update, so a tick that carries a Pod
+across a minute, hour or day boundary does write a cell. Those are a small,
+unpredictable minority, which is the other reason the figure is published under
+the weaker name.) A no-op diff is strictly less work than one that writes cells
+and requests a repaint, so 32 ms is a *lower bound* on what a rendered-cell
+workload would record at the same rate — a lower bound can refute a budget,
+never establish it. Measuring event-to-render live needs a churn workload that
+changes a rendered cell (phase, ready, restarts) and observes it on the table;
+that workload does not exist yet.
+
+**The current harness requires activity at the application**, not merely at
+the mutation driver: it opens its own watch and does not take the first cursor
+sample until an owned `MODIFIED` event arrives. Run `i279-20260813-1620`
+predates that gate and began sampling after mutation dispatch, which occurs
+before the `PATCH` is awaited. Its 7 ms result therefore cannot establish that
+the table was already receiving churn. A repeat under the current gate is
+required before the live cursor budget can be called passed.
+
+The driver completed all 720 requested mutations in 29.92 seconds
+(24.06 events/s), with no mutation throttles. A separate run with `cProfile`
+enabled measured 116 ms cursor-input p95 and 99.4% peak CPU; those figures are
+diagnostic overhead, not acceptance results (its 134 ms watch-receipt-to-diff-
+completion p95 carries the same metadata-only caveat as above).
+
 ## Corrected deterministic 1,000-pod replay
 
-The corrected probe has been exercised against a local, deterministic replay of
-the 1,000-pod / 24-events-per-second workload committed as
-[`tests/performance/profiles/steady-24eps-1k.json`](https://github.com/hellices/korvid/blob/main/tests/performance/profiles/steady-24eps-1k.json)
-(1,000 Pods across 20 namespaces, 30 seconds of burst-free churn at 24
-events/s). That replay exercises the real app, watch manager, store and table,
-but not the API server, the watch decoder, or a real terminal, so it can never
-replace the live table above.
+The deterministic replay exercises the real app, watch manager, store and
+table, but not the API server, the watch decoder, or a real terminal, so it can
+never replace the live tables above. It *does* rewrite rendered cells, so its
+event-to-render numbers remain event-to-rendered-cell measurements.
 
-Reproduce it with:
+What it establishes is qualitative and holds across runs: the digest matches,
+no update is dropped, and the corrected cursor probe reports a figure in the
+single-digit-millisecond range instead of the ~2.2 s `Pilot.press` artifact it
+replaced. **No point estimate from it is published here.** Successive local
+runs on an unpinned developer machine differ, and quoting one run's percentile
+as *the* number is how the withdrawn figures above came to be trusted in the
+first place.
 
-```bash
-python -m tests.performance.cli replay \
-  --profile tests/performance/profiles/steady-24eps-1k.json \
-  --json <artifact-dir>/steady-24eps-1k.json \
-  --out <artifact-dir>/steady-24eps-1k.md
-```
-
-What that replay establishes is qualitative and holds across runs: the digest
-matches, no update is dropped, and the corrected cursor probe now reports a
-figure in the single-digit-millisecond range instead of the ~2.2 s
-`Pilot.press` artifact it replaced. **No point estimate from it is published
-here.** Successive local runs on an unpinned developer machine differ, and
-quoting one run's percentile as *the* number is how the withdrawn figures above
-came to be trusted in the first place.
-
-Profiled runs are not comparable to unprofiled ones: `cProfile` instruments
-every Python call and materially changes compositor cost, which alone moves the
-measured cursor figure by an order of magnitude. Profiles are diagnostic
-artifacts only, never the acceptance environment for the 100 ms input budget,
-and before/after profiles must use identical instrumentation to be comparable.
-
-Two production changes drive the difference, both in the in-place table diff: an
-unchanged cursor is no longer re-seated after every watch tick (a
+Two production changes drive the difference, both in the in-place table diff:
+an unchanged cursor is no longer re-seated after every watch tick (a
 `move_cursor()` to the same coordinate is repaint work), and a batch of cell
 updates requests at most one repaint, and none at all when no changed row
 intersects the painted viewport. Off-screen rows still update their data
@@ -152,16 +219,15 @@ same fixed workload delivers the same events and reaches the same final state,
 so CPU time is what these numbers are taken from. What is fixed is the
 *external* schedule, not the internal work: table-update throughput rises when
 an update pass gets cheaper, so the arms do not perform equal amounts of
-application work. Both arms in this update-path comparison use the new render
-path; the AGE-evaluation counts in the 2×2 section below put the optimised arm
-at roughly 1.2× the table-update passes (3.91 M versus 3.19 M evaluations, or
-about 3,910 versus 3,190 passes over this 1,000-row view). That makes a CPU-time
-ratio a conservative reading of the change rather than a like-for-like one.
-Even then, running all the "before" samples and then all the "after" samples is
-not enough: a first attempt that way put a 13% swing on one arm and reversed
-the sign of the smaller result. The figures below alternate the two arms run by
-run, five rounds each. Workload: 1,000 Pods across 20 namespaces at 120 events/s
-for 20 s.
+application work. Both arms here use the new render path; the AGE-evaluation
+counts below put the optimised arm at roughly 1.2× the table-update passes
+(3.91 M versus 3.19 M evaluations, or about 3,910 versus 3,190 passes over this
+1,000-row view). That makes a CPU-time ratio a conservative reading of the
+change rather than a like-for-like one. Even then, running all the "before"
+samples and then all the "after" samples is not enough: a first attempt that way
+put a 13% swing on one arm and reversed the sign of the smaller result. The
+figures below alternate the two arms run by run, five rounds each. Workload:
+1,000 Pods across 20 namespaces at 120 events/s for 20 s.
 
 | Workload | Metric | Before | After | |
 |---|---|---:|---:|---|
@@ -177,35 +243,30 @@ timestamp-bearing workload the two arms' samples do not overlap at all
 overlap, so −7.4% is the weaker claim of the two. Absolute CPU time drifts
 between sessions on this machine — an earlier round measured the same change
 at −16.5% with both arms roughly 0.5–1.5 s faster — which is why only
-same-session, interleaved pairs are quoted.
+same-session, interleaved pairs are quoted. The figures were re-taken after
+review hardening added work to the per-cell path, and held: −12.3% median
+against −12.1% as published.
 
-The figures above were re-taken after review hardening added work to the
-per-cell path, and held: −12.3% median against −12.1% as published.
-
-### The two changes do not compose independently
-
-An earlier revision of this section claimed the render-path change and the
-update-path change multiply out. That was wrong twice over. The figure quoted
-as "both together" came from a run that reverted only the render-path file, so
-the update-path change was present in *both* arms and no arm ever had both
-changes off. And the two effects are not independent to begin with.
-
-Answering "do these interact" needs every cell of the 2×2 against the same
-machine state, which two separate two-arm runs do not provide — a first
-attempt at the split below produced two runs that disagreed about the shared
+**The two changes do not compose independently.** An earlier revision claimed
+the render-path change and the update-path change multiply out. That was wrong
+twice over: the figure quoted as "both together" came from a run that reverted
+only the render-path file, so the update-path change was present in *both* arms
+and no arm ever had both changes off — and the two effects are not independent
+to begin with. Answering "do these interact" needs every cell of the 2×2
+against the same machine state, which two separate two-arm runs do not provide:
+a first attempt at the split produced two runs that disagreed about the shared
 cell (14.64 s against 14.93 s) by more than the effect being claimed. All four
 arms are therefore run round-robin *within* each round, and the arms are
 differenced within a round before anything is summarised. That does not make
-load artifacts impossible: the four arms still run one after another, so a
-short spike can land on a single arm. What it bounds is the *time* between the
+load artifacts impossible — the four arms still run one after another, so a
+short spike can land on a single arm — but it bounds the *time* between the
 arms being compared, which is what slow drift needs to separate them. Anything
 faster than that survives, which is why the interaction is reported below as
-its nine per-round values, together with how often they agree on a sign,
-rather than as one number. Each arm starts by restoring every file the matrix
-touches to `HEAD`, then reverts its own set to the pre-merge commit
-`fb674c5` — without the restore, an arm inherits whatever the previous arm
-reverted, which is a sharper version of the same error this section is about.
-The empty set is the shipped tree.
+its nine per-round values, together with how often they agree on a sign, rather
+than as one number. Each arm starts by restoring every file the matrix touches
+to `HEAD`, then reverts its own set to the pre-merge commit `fb674c5` — without
+the restore, an arm inherits whatever the previous arm reverted. The empty set
+is the shipped tree.
 
 **Render path (`resource_table.py`) × update path (`store.py` + `models.py`)**,
 9 rounds, timestamp-bearing workload:
@@ -248,16 +309,13 @@ AGE is evaluated for every row on every table-update pass — it feeds the stamp
 that decides whether the row can be reused, so it runs *before* the memo can
 spare anything, and 99.7% of those rows are then reused unchanged. Row rebuilds
 track the events, so they are flat across all four arms. The quantity that
-triples is exactly the quantity the update-path change makes cheap.
-
-Table-update passes are not a fixed quantity of the workload: the cheaper a
-pass gets, the more of them the run completes before the schedule ends. The
-render-path change roughly triples them, so the same optimisation has about
-three times as many opportunities to pay. That explains the direction but only
-a minority of the size: tripling the 0.16-second isolated saving predicts
-roughly 0.48 seconds, well below the 1.89-second saving with the new render
-path. Nothing measured here separates the remainder, so the residual is left
-unexplained rather than narrated.
+triples is exactly the quantity the update-path change makes cheap: the cheaper
+a pass gets, the more of them the run completes before the schedule ends, so
+the same optimisation has about three times as many opportunities to pay. That
+explains the direction but only a minority of the size — tripling the
+0.16-second isolated saving predicts roughly 0.48 seconds, well below the
+1.89-second saving with the new render path. Nothing measured here separates
+the remainder, so the residual is left unexplained rather than narrated.
 
 Two consequences worth stating. The arms do not perform equal work: the
 fully-optimised arm completes roughly 3.5× the table-update passes of the
@@ -323,75 +381,6 @@ nothing — which is why the same change is worth 7.4% against that profile and
 timestamps also account for the workload's own cost: adding them raised
 baseline CPU from 13.93 s to 18.80 s. Benchmark numbers taken against the
 committed profile are therefore a floor for anything AGE-dependent.
-
-## Corrected live 1,000-pod smoke result
-
-Run `i279-20260813-1620` exercised the same checked-in
-`steady-24eps-1k` profile against the dedicated AKS cluster: 1,000 Running,
-Ready Pods across 20 namespaces, 720 guarded metadata mutations in 30 seconds,
-and 50 cursor samples after churn dispatch began. This run predates the
-watch-receipt gate described below, so its cursor result is preliminary
-dispatch-gated evidence, not a live budget verdict.
-
-| Metric | Budget | Result | |
-|---|---:|---:|---|
-| Dropped updates | 0 | 0 | pass |
-| Final digest mismatch | 0 | 0 | pass |
-| LIST to 1,000-row table | ≤ 2 s | 144 ms | pass |
-| Process start to interactive | ≤ 10 s | 1.55 s | pass |
-| Peak RSS | ≤ 512 MiB | 236 MiB | pass |
-| Achieved churn | 24 ev/s | 24.06 ev/s (720/720) | pass |
-| Cursor-input p95 | ≤ 100 ms | 7 ms (n=50), dispatch-gated | preliminary |
-| Event-to-render p95 | ≤ 250 ms @ 20 ev/s | **n/a for this workload** | not measured |
-
-**Event-to-render was not measured by this run, and its 250 ms budget is
-neither passed nor missed by it.** The live churn driver is metadata-only by
-design: it patches one label, `korvid.dev/performance-tick`, and nothing
-else. No Pod column renders labels — they feed the client-side `-l` filter —
-so the in-place table diff finds no changed cell for such an event, writes
-nothing, and requests no repaint. The harness nevertheless calls
-`record_render()` when the resource-update handler returns, so the 32 ms
-figure this run recorded is the interval from **watch-event receipt to
-no-op table-diff completion**. That is a real number about the message path,
-but it is not a rendered-frame measurement and is not compared to the render
-budget here. (Almost every tick is a no-op: AGE is recomputed on each update,
-so a tick that carries a Pod across a minute, hour or day boundary does write a
-cell. Those are a small, unpredictable minority, which is the other reason the
-figure is published under the weaker name.) A no-op diff is strictly less work
-than one that writes cells and
-requests a repaint, so 32 ms is a *lower bound* on what a rendered-cell
-workload would record at the same rate — a lower bound can refute a budget,
-never establish it. Measuring event-to-render live needs a churn workload that
-changes a rendered cell (phase, ready, restarts) and observes it on the table;
-that workload does not exist yet.
-
-The deterministic replay above *does* rewrite rendered cells, so its
-event-to-render numbers remain event-to-rendered-cell measurements.
-
-The artifacts encode this distinction rather than leaving it to prose. Every
-report carries `latency.update_latency_kind`. A deterministic replay reports
-`event_to_render`, populates `latency.event_to_render`, leaves
-`latency.watch_to_diff_completion` null, and prints "Event to render p95" in
-the Markdown. A metadata-only live run reports `watch_to_diff_completion`,
-publishes its samples under `latency.watch_to_diff_completion`, leaves
-`latency.event_to_render` **null**, and prints "Watch receipt to diff
-completion p95" — the string "Event to render" never appears in such a report.
-`latency.event_to_render` becoming nullable is why the JSON `schema_version`
-is `2`.
-
-The current harness requires activity at the *application*, not merely at the
-mutation driver: it opens its own watch and does not take the first cursor
-sample until an owned `MODIFIED` event arrives. Run `i279-20260813-1620`
-predates that gate and began sampling after mutation dispatch, which occurs
-before the `PATCH` is awaited. Its 7 ms result therefore cannot establish that
-the table was already receiving churn. A repeat under the current gate is
-required before the live cursor budget can be called passed.
-
-The driver completed all 720 requested mutations in 29.92 seconds
-(24.06 events/s), with no mutation throttles. A separate run with `cProfile`
-enabled measured 116 ms cursor-input p95 and 99.4% peak CPU; those figures are
-diagnostic overhead, not acceptance results (its 134 ms watch-receipt-to-diff-
-completion p95 carries the same metadata-only caveat as above).
 
 ## Known limits
 

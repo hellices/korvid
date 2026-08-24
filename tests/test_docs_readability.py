@@ -127,6 +127,26 @@ def test_task3_review_safety_caveats_are_preserved() -> None:
     assert "control" in obs or "non-ascii" in obs
 
 
+def test_administration_guides_keep_their_empirical_and_contract_detail() -> None:
+    """Administration pages may be shortened, but not stripped of evidence."""
+    performance = _source("performance.md")
+    for marker in ("1,000", "environment", "methodology", "Raw artifacts"):
+        assert marker.lower() in performance.lower()
+
+    threat = _source("threat-model.md")
+    for marker in ("Assets", "Trust boundaries", "Mitigations", "Residual risks", "does not prove"):
+        assert marker in threat
+
+    provider = _source("provider-plugins.md")
+    for heading in (
+        "## API-v1: exact public surface",
+        "## Event contract and exact limits",
+        "## Options contract, immutability, and secret policy",
+        "## Lifecycle and compatibility",
+    ):
+        assert heading in provider
+
+
 def test_redesign_does_not_add_a_script_bundle() -> None:
     source = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
     block = source.split("extra_javascript:", 1)[1].split("\nextra_", 1)[0]

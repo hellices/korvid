@@ -1,16 +1,8 @@
 # Provider plugins
 
 Third-party provider plugins are the escape hatch for LLM backends that do
-**not** fit korvid's built-in providers:
-
-- `github-copilot`
-- `ollama`
-- `openai-compat` and its built-in aliases: `openai`, `azure`, `vllm`,
-  `github`, `anthropic`, `claude`
-
-If your backend already speaks an OpenAI-compatible `/v1` API, prefer the
-built-in `openai-compat` path instead of a plugin. Reach for a plugin only
-when the wire protocol or auth flow truly differs.
+**not** fit korvid's built-in providers. Reach for one only when the wire
+protocol or the auth flow truly differs from anything korvid already speaks.
 
 > **Security warning:** provider plugins are trusted, in-process Python code
 > loaded into the korvid process. Selected-only loading avoids importing
@@ -27,13 +19,15 @@ when the wire protocol or auth flow truly differs.
 
 ## When you should not write a plugin
 
-Use a built-in config whenever possible:
+A built-in configuration covers most backends:
 
 - **OpenAI, Azure OpenAI, GitHub Models, Anthropic compatibility endpoint,
-  vLLM, local gateways, internal proxies:** use `provider: openai-compat` or
-  a built-in alias.
-- **Native Ollama `/api/chat`:** use `provider: ollama`.
-- **GitHub Copilot device login:** use `provider: github-copilot`.
+  vLLM, local gateways, internal proxies** — `provider: openai-compat`, or one
+  of its built-in aliases `openai`, `azure`, `vllm`, `github`, `anthropic`,
+  `claude`. Any backend that already speaks an OpenAI-compatible `/v1` API
+  belongs here rather than in a plugin.
+- **Native Ollama `/api/chat`** — `provider: ollama`.
+- **GitHub Copilot device login** — `provider: github-copilot`.
 
 A plugin is warranted only when you need a genuinely different protocol or auth
 scheme composition behind korvid's public `CredentialSource` boundary.
