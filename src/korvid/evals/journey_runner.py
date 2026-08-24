@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, ToolCallStarted
@@ -55,7 +55,6 @@ class JourneyTurnResult:
 
     answer: str
     grade: GradeResult
-    success: bool
     tool_calls: int
     tool_names: tuple[str, ...]
     malformed_tool_calls: int
@@ -74,12 +73,25 @@ class JourneyTurnResult:
     #: starts. It is how a published row shows that the model navigated.
     final_interaction: InteractionContext | None = None
     #: `success`, `failure` or `error` — one word per turn, ranked by the
-    #: same precedence the scenario runner publishes.
+    #: same precedence the scenario runner publishes. The turn's single
+    #: verdict: everything else about how it went is derived from it.
     outcome: str = "success"
     #: Why the turn was not a success, or `None`. The four shared classes
     #: plus the journey's own: `malformed_call`, `forbidden_target`,
     #: `wrong_namespace`, `call_budget_exceeded`.
     failure_class: str | None = None
+
+    @property
+    def success(self) -> bool:
+        """Whether the turn succeeded — derived, never stored.
+
+        A stored flag beside `outcome` is a second copy of one fact, and
+        two copies can disagree: a row could claim `success=True` next to
+        `outcome="failure"` and `failure_class="misdiagnosis"`, and
+        nothing would catch it. Deriving it means the contradictory row
+        cannot be constructed at all.
+        """
+        return self.outcome == SUCCESS
 
 
 @dataclass(frozen=True)
@@ -106,8 +118,15 @@ class JourneyReport:
     interaction: InteractionContext | None = None
 
     @property
-    def successes(self) -> int:
-        return sum(run.success for run in self.runs)
+    def successful_journeys(self) -> int:
+        """Repetitions in which *every* turn's outcome was `success`.
+
+        Named for what it counts. The scenario artifact's `successes`
+        counts repetitions whose diagnosis was graded correct; a
+        conversation has no single diagnosis, so reusing that key here
+        would publish two different measurements under one name.
+        """
+        return sum(1 for run in self.runs if run.success)
 
 
 @dataclass
@@ -334,7 +353,6 @@ def _turn_result(
     return JourneyTurnResult(
         answer=tally.answer,
         grade=result,
-        success=outcome == SUCCESS,
         tool_calls=len(tally.started_calls),
         tool_names=tuple(name for name, _args in tally.started_calls),
         malformed_tool_calls=tally.malformed,
@@ -474,18 +492,38 @@ async def run_journey(
     )
 
 
-def _turn_payload(turn: JourneyTurnResult) -> dict[str, Any]:
-    """One turn's published row, screens included."""
-    from dataclasses import asdict
+#: Published through `interaction_payload`, not `asdict`: the record shape
+#: has to match a scenario row's (`filter`, not `filter_pattern`).
+_SCREEN_FIELDS = ("interaction", "final_interaction")
 
-    payload = asdict(turn)
-    payload["interaction"] = (
-        None if turn.interaction is None else interaction_payload(turn.interaction)
-    )
-    payload["final_interaction"] = (
-        None if turn.final_interaction is None else interaction_payload(turn.final_interaction)
-    )
+
+def _turn_payload(turn: JourneyTurnResult) -> dict[str, Any]:
+    """One turn's published row, screens included.
+
+    The two screens are rendered by `interaction_payload` so a journey row
+    publishes the same record shape a scenario row does. They are skipped
+    on the way in rather than overwritten afterwards, so `asdict` never
+    deep-copies two contexts this function immediately discards.
+
+    `success` is published explicitly because it is a derived property, not
+    a field: `asdict` would drop it, and a reader comparing runs should not
+    have to re-derive a turn's verdict from the `outcome` string.
+    """
+    payload: dict[str, Any] = {
+        item.name: getattr(turn, item.name)
+        for item in fields(turn)
+        if item.name not in _SCREEN_FIELDS
+    }
+    payload["grade"] = asdict(turn.grade)
+    payload["success"] = turn.success
+    payload["interaction"] = _screen_payload(turn.interaction)
+    payload["final_interaction"] = _screen_payload(turn.final_interaction)
     return payload
+
+
+def _screen_payload(screen: InteractionContext | None) -> dict[str, Any] | None:
+    """A workspace snapshot in the shared record shape, or `None`."""
+    return None if screen is None else interaction_payload(screen)
 
 
 def report_payload(reports: list[JourneyReport]) -> list[dict[str, Any]]:
@@ -495,17 +533,22 @@ def report_payload(reports: list[JourneyReport]) -> list[dict[str, Any]]:
     shape a scenario row publishes, so one reader can compare the two
     artifacts without a second schema (a raw `asdict` would publish
     `filter_pattern` here and `filter` there).
+
+    The conversation count is published as `successful_journeys` rather
+    than `successes`. A scenario row's `successes` counts repetitions
+    whose diagnosis was graded correct; this counts repetitions in which
+    every turn's outcome was `success`. Two different measurements sharing
+    one key is how a scoreboard ends up comparing numbers that were never
+    comparable.
     """
     return [
         {
             "journey": report.journey_id,
             "root_cause": report.root_cause,
-            "successes": report.successes,
+            "successful_journeys": report.successful_journeys,
             # The screen the conversation opened on: a journey score is
             # not reproducible without it.
-            "interaction": (
-                None if report.interaction is None else interaction_payload(report.interaction)
-            ),
+            "interaction": _screen_payload(report.interaction),
             "runs": [
                 {
                     "success": run.success,
@@ -537,7 +580,7 @@ def render_markdown(reports: list[JourneyReport]) -> str:
         wrong_namespace = sum(turn.wrong_namespace_calls for run in runs for turn in run.turns)
         wall = sum(turn.wall_time_s for run in runs for turn in run.turns)
         lines.append(
-            f"| {report.journey_id} | {report.successes}/{len(runs)} | "
+            f"| {report.journey_id} | {report.successful_journeys}/{len(runs)} | "
             f"{turns} | {malformed} | {writes} | {safety} | {stale} | "
             f"{wrong_namespace} | {wall:.1f} |"
         )

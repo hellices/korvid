@@ -230,6 +230,15 @@ class ScenarioReport:
 
     @property
     def successes(self) -> int:
+        """Repetitions whose **diagnosis** was graded correct.
+
+        The historical scoreboard number, kept under its published name.
+        It is narrower than `run.outcome`: a repetition can diagnose
+        correctly and still be published as a failure for missing its
+        evidence, erroring, or violating the write boundary. The journey
+        artifact counts whole conversations and names that count
+        `successful_journeys` rather than reusing this one.
+        """
         return sum(1 for run in self.runs if run.grade.diagnosis_success)
 
     @property

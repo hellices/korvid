@@ -289,6 +289,9 @@ therefore writes a metadata envelope alongside the per-scenario results:
   "scenarios": [
     {
       "scenario": "oom-killed",
+      "root_cause": "oom_killed",
+      "successes": 1,
+      "evidence_hits": 1,
       "interaction": {
         "kube_context": "eval-fixture",
         "context_epoch": 1,
@@ -323,7 +326,7 @@ question does not:
     {
       "journey": "triage-and-correct",
       "root_cause": "image_pull_auth",
-      "successes": 1,
+      "successful_journeys": 1,
       "interaction": {"kube_context": "eval-fixture", "…": "…"},
       "runs": [
         {
@@ -333,6 +336,7 @@ question does not:
               "interaction": {"…": "the screen this turn was asked from"},
               "final_interaction": {"…": "the screen it left behind"},
               "outcome": "success",
+              "success": true,
               "failure_class": null,
               "…": "…"
             }
@@ -348,6 +352,24 @@ question does not:
 row publishes. Both ends are recorded because a journey turn may start on a
 screen nobody authored: the previous turn's model may have navigated there
 itself.
+
+### Counting successes
+
+The two artifacts count different things, so they do not share a key:
+
+| Artifact | Key | Counts |
+|---|---|---|
+| scenario | `successes` | repetitions whose **diagnosis** was graded correct (`grade.diagnosis_success`) |
+| journey | `successful_journeys` | repetitions in which **every turn's** `outcome` was `success` |
+
+A scenario's `successes` is the historical scoreboard number and is
+deliberately narrower than that run's `outcome`: a repetition can diagnose
+correctly and still publish `outcome: "failure"` because it missed its
+evidence, or `outcome: "error"` because the provider failed. A conversation
+has no single diagnosis to grade that way, so a journey counts whole runs
+and says so in the key. Each journey turn also publishes `success`, which
+is derived from that turn's `outcome` and never stored separately — a
+published turn cannot claim a success and a failure class at once.
 
 ### `model_tier`
 

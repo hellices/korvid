@@ -200,7 +200,19 @@ async def warm_up(base_url: str, model: str, *, fetch: Fetch) -> bool:
 
 
 def report_payload(reports: list[ScenarioReport]) -> list[dict[str, Any]]:
-    """JSON-serializable form of the reports, for machine consumption."""
+    """JSON-serializable form of the reports, for machine consumption.
+
+    `successes` counts repetitions whose **diagnosis** was graded correct
+    (`grade.diagnosis_success`), which is the historical scoreboard number
+    and is deliberately narrower than the run's `outcome`: a run can
+    diagnose correctly and still be published as a failure because it
+    missed its evidence, errored, or violated the write boundary.
+
+    The journey artifact does not reuse this key. A conversation has no
+    single diagnosis, so it publishes `successful_journeys` — repetitions
+    in which every turn's outcome was `success` — rather than two
+    different measurements under one name.
+    """
     return [
         {
             "scenario": report.scenario_id,
