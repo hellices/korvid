@@ -150,7 +150,7 @@ matching audit record.
 
 Server `dryRun=All` replay shown as a compact diff
 (`~ spec.replicas: 3 -> 5`). A known scale-*down* additionally loads an
-advisory graph-derived impact summary (see [tui.md](tui.md#preview-impact-before-a-write)).
+advisory graph-derived impact summary (see [Preview impact before a write](tui.md#preview-impact-before-a-write)).
 </section>
 
 <section markdown="1">

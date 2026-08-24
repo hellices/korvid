@@ -135,6 +135,15 @@ def test_keybindings_doc_directs_to_help_overlay_not_static_inventory() -> None:
         "docs/keybindings.md must direct users to the `?` help overlay"
     )
 
+    # Discovery contract: action names come from the app; an unrecognised name
+    # is skipped at startup with a warning that lists every valid action name.
+    assert "Action names come from the app itself" in doc, (
+        "docs/keybindings.md must explain that action names come from the app"
+    )
+    assert "skipped at startup with a warning that lists every valid action name" in doc, (
+        "docs/keybindings.md must explain that an unrecognised name is skipped with a warning"
+    )
+
     # The hidden inventory block must be absent — not hidden behind a
     # collapsible block, not present in any form.
     assert '??? note "Every remappable action name"' not in doc, (

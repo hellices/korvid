@@ -1,7 +1,7 @@
 # Browsing the cluster
 
 Everything about reading the cluster: tables, filters, custom columns, live
-metrics, ops hints, the split workspace, the log viewer, namespace scope,
+metrics, the split workspace, the log viewer, namespace scope,
 and context switching. Keys referenced here are listed in
 [keybindings.md](keybindings.md).
 
