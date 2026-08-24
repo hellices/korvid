@@ -34,15 +34,12 @@ from typing import Any, Final
 from korvid.agent.interaction import (
     AgentUiBridge,
     DrillDown,
-    FocusPane,
     InteractionContext,
     Navigate,
     OpenDescribe,
-    OpenEvidence,
     OpenLogs,
     PaneContext,
     ResourceIdentity,
-    SelectResource,
     SetFilter,
     UiAction,
     UiActionResult,
@@ -256,18 +253,6 @@ class EvalUiBridge(AgentUiBridge):
         if isinstance(action, SetFilter):
             pane = replace(self._focused, filter_pattern=action.filter_pattern)
             return True, f"filter set to {action.filter_pattern or '(cleared)'}", self._focus(pane)
-        if isinstance(action, SelectResource):
-            return self._select(
-                ResourceIdentity(
-                    kind=action.kind,
-                    namespace=action.namespace,
-                    name=action.name,
-                    uid=action.uid,
-                ),
-                f"selected {action.name}",
-            )
-        if isinstance(action, FocusPane):
-            return self._focus_pane(action)
         if isinstance(action, OpenLogs):
             return self._select(
                 ResourceIdentity(kind="Pod", namespace=action.namespace, name=action.pod, uid=None),
@@ -294,7 +279,11 @@ class EvalUiBridge(AgentUiBridge):
                 ),
                 f"drilled into {action.name}",
             )
-        return self._open_evidence(action)
+        # `UiAction` is a closed union of five members and every one is
+        # handled above; the fall-through keeps the function total for
+        # mypy without inventing a transition for an action korvid cannot
+        # produce.
+        raise ValueError(f"unhandled UI action {type(action).__name__}")
 
     @property
     def _focused(self) -> PaneContext:
@@ -304,13 +293,19 @@ class EvalUiBridge(AgentUiBridge):
         return replace(self._context, focused_pane=pane)
 
     def _navigate(self, action: Navigate) -> tuple[bool, str, InteractionContext]:
-        # A new view is a new list: the filter and the selection describe
-        # the pane the operator just left, and carrying them forward would
-        # tell the next turn a resource is on screen that is not.
+        # The filter survives, exactly as it does in the TUI: navigating
+        # changes the pane's kind and scope and never touches
+        # `pane.filter_pattern`, which is why `agent_navigate` reports the
+        # still-applied filter back to the model. Clearing it here would
+        # score the model against a screen production never shows.
+        #
+        # The selection does not survive: it names a row of the list the
+        # operator just left, and the new list has its own rows. Keeping
+        # it would tell the next turn a resource is on screen that is not.
         pane = PaneContext(
             kind=action.view,
             scope=action.namespace or ALL_NAMESPACES_SCOPE,
-            filter_pattern=None,
+            filter_pattern=self._focused.filter_pattern,
             selected=None,
         )
         return True, f"navigated to {action.view}", self._focus(pane)
@@ -320,21 +315,6 @@ class EvalUiBridge(AgentUiBridge):
     ) -> tuple[bool, str, InteractionContext]:
         return True, message, self._focus(replace(self._focused, selected=resource))
 
-    def _focus_pane(self, action: FocusPane) -> tuple[bool, str, InteractionContext]:
-        if action.index == 0:
-            return True, "focused the primary pane", self._context
-        secondary = self._context.secondary_pane
-        if secondary is None:
-            # Refused, not invented: a fixture with one pane must not have
-            # a second one appear because the model asked for it.
-            return False, "there is no secondary pane in this session", self._context
-        swapped = replace(self._context, focused_pane=secondary, secondary_pane=self._focused)
-        return True, "focused the secondary pane", swapped
-
-    def _open_evidence(self, action: OpenEvidence) -> tuple[bool, str, InteractionContext]:
-        moved = replace(self._context, timeline_cursor=action.ref)
-        return True, f"opened evidence {action.ref}", moved
-
 
 def _action_call(action: UiAction) -> tuple[str, dict[str, Any]]:
     """The `(tool name, arguments)` an applied action is recorded under."""
@@ -342,15 +322,6 @@ def _action_call(action: UiAction) -> tuple[str, dict[str, Any]]:
         return "navigate", {"view": action.view, "namespace": action.namespace}
     if isinstance(action, SetFilter):
         return "set_filter", {"pattern": action.filter_pattern}
-    if isinstance(action, SelectResource):
-        return "select_resource", {
-            "kind": action.kind,
-            "name": action.name,
-            "namespace": action.namespace,
-            "uid": action.uid,
-        }
-    if isinstance(action, FocusPane):
-        return "focus_pane", {"index": action.index}
     if isinstance(action, OpenLogs):
         return "open_logs", {
             "pod": action.pod,
@@ -363,6 +334,4 @@ def _action_call(action: UiAction) -> tuple[str, dict[str, Any]]:
             "name": action.name,
             "namespace": action.namespace,
         }
-    if isinstance(action, DrillDown):
-        return "drill_down", {"name": action.name}
-    return "open_evidence", {"ref": action.ref}
+    return "drill_down", {"name": action.name}

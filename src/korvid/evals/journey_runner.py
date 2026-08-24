@@ -121,7 +121,7 @@ class JourneyRun:
 
 @dataclass(frozen=True)
 class JourneyReport:
-    """Repeated runs of one journey under one model/profile."""
+    """Repeated runs of one journey under one model/tier."""
 
     journey_id: str
     root_cause: str

@@ -405,9 +405,9 @@ def mcp_tool_schemas(
 
 _ALL_SURFACES: frozenset[Surface] = frozenset({"high_agent", "low_agent", "mcp"})
 _HIGH_AND_MCP: frozenset[Surface] = frozenset({"high_agent", "mcp"})
-#: Surfaces an embedded-agent profile can offer. Public because callers
+#: Surfaces an embedded-agent policy can offer. Public because callers
 #: outside this module need to tell "not armed on this cluster" apart from
-#: "no agent profile can ever offer this" (e.g. the MCP-only proposal tools).
+#: "no agent tier can ever offer this" (e.g. the MCP-only proposal tools).
 AGENT_SURFACES: frozenset[Surface] = frozenset({"high_agent", "low_agent"})
 _AGENT_SURFACES = AGENT_SURFACES
 

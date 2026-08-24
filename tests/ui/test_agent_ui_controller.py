@@ -250,15 +250,6 @@ class FakeNavigation:
         self.drills.append((namespace, name))
         return self.drill_error
 
-    def focused_row_data(self, name: str, namespace: str | None) -> tuple[str, str | None] | None:
-        return None
-
-    def select_row(self, row_key: str) -> bool:
-        return True
-
-    def focus_pane(self, index: int) -> None:
-        pass
-
 
 class FakeLogs:
     """The log-pane surface an agent log open drives."""

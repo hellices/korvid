@@ -27,7 +27,7 @@ Built-in adapters therefore yield `{"type": REQUEST_SENT}` as soon as the
 transport has accepted the request (response headers received), before
 the status code is judged: an HTTP 500 answer still means the provider
 has the payload. The runtime consumes it as bookkeeping and never renders
-it. It is internal to the built-ins — the plugin contract (API v1) knows
+it. It is internal to the built-ins — the plugin contract (API 2) knows
 four event types and rejects anything else, so a plugin's request is
 recorded on its first completion event instead, which is equally proof
 that the request ran.

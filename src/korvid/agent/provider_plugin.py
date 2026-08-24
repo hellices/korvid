@@ -126,6 +126,28 @@ def _validate_plugin_capabilities(capabilities: object) -> ModelCapabilities:
     )
 
 
+def _read_plugin_fact(provider: LLMProvider, name: str) -> object:
+    """Read one plugin-reported property, translating anything it raises.
+
+    A `descriptor`/`capabilities` property is plugin code: it may probe an
+    endpoint or read a credential, and fail carrying whatever it was
+    holding. Re-raising that unchanged would end a start with a
+    third party's exception — including one spelling itself
+    `ProviderPluginContractError` with a payload of its own — so the type
+    name is all that survives.
+
+    `BaseException` is deliberately not caught: a cancellation or a
+    `KeyboardInterrupt` during startup is not a contract violation.
+    """
+    try:
+        return getattr(provider, name)
+    except Exception as exc:
+        exc_type = type(exc).__name__
+        raise ProviderPluginContractError(
+            f"provider plugin {name} read failed: {_bounded_exception(exc_type)}"
+        ) from None
+
+
 class ValidatedPluginProvider(LLMProvider):
     """LLMProvider wrapper that enforces the provider plugin event contract."""
 
@@ -134,8 +156,16 @@ class ValidatedPluginProvider(LLMProvider):
             raise ProviderPluginContractError("provider plugin must return an LLMProvider instance")
         self._provider = provider
         self._closed = False
-        self._descriptor = _validate_plugin_descriptor(provider.descriptor, provider_id)
-        self._capabilities = _validate_plugin_capabilities(provider.capabilities)
+        # Both reads run third-party code (a lazy probe, a credential
+        # read), so each is wrapped on its own: the message says which
+        # fact korvid could not obtain, and names only the exception type
+        # — never what the plugin's exception carried.
+        self._descriptor = _validate_plugin_descriptor(
+            _read_plugin_fact(provider, "descriptor"), provider_id
+        )
+        self._capabilities = _validate_plugin_capabilities(
+            _read_plugin_fact(provider, "capabilities")
+        )
 
     @property
     def descriptor(self) -> ModelDescriptor:

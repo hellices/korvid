@@ -298,7 +298,7 @@ So the boundaries that matter are named:
   context-pinned CLI wrappers). Implemented by `AppContextSurface` and
   `AppSessionConfiguration`; neither runs any part of the transaction.
 - **`AgentPanelPort`** (`ui/agent_ui_controller.py`) — the chat panel as the
-  agent session may drive it: visibility, the header the live runtime renders
+  agent session may drive it: visibility, the header the live session renders
   into, the two unconfigured-state hints, and the transcript operations a turn
   performs. Implemented by `AppAgentPanel`.
 - **`AgentScreens`** (`ui/agent_ui_controller.py`) — the screen the agent may
@@ -614,8 +614,8 @@ tests added before the move where the behaviour is not already pinned.
     delegates and re-exports the eligibility sets for `_ACTION_VIEWS` and the
     agent write ops.
 12. ~~The agent session and its UI bridge~~ — done (#187);
-    `AgentUiController` (`ui/agent_ui_controller.py`) owns the runtime /
-    settings / profile / follow state, the turn task with its
+    `AgentUiController` (`ui/agent_ui_controller.py`) owns the session /
+    settings / model tier / follow state, the turn task with its
     interrupt-and-submit lifecycle, the screen context, follow mirroring, all
     `UIBridge` reads, and the direct approval-gated agent write. `AppUIBridge`
     became an adapter over it plus `AppContextDispatch`

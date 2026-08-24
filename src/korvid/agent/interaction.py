@@ -74,31 +74,6 @@ class SetFilter:
 
 
 @dataclass(frozen=True, slots=True)
-class SelectResource:
-    """Select a specific resource in the focused pane."""
-
-    kind: str
-    name: str
-    namespace: str | None = None
-    uid: str | None = None
-
-    def __post_init__(self) -> None:
-        _require_nonblank(self.kind, "kind")
-        _require_nonblank(self.name, "name")
-
-
-@dataclass(frozen=True, slots=True)
-class FocusPane:
-    """Move focus to one of the two workspace panes."""
-
-    index: int
-
-    def __post_init__(self) -> None:
-        if self.index not in {0, 1}:
-            raise ValueError("index must be 0 or 1")
-
-
-@dataclass(frozen=True, slots=True)
 class OpenLogs:
     """Open logs for an exact pod target."""
 
@@ -134,26 +109,15 @@ class DrillDown:
         _require_nonblank(self.name, "name")
 
 
-@dataclass(frozen=True, slots=True)
-class OpenEvidence:
-    """Open evidence linked to an exact reference."""
-
-    ref: str
-
-    def __post_init__(self) -> None:
-        _require_nonblank(self.ref, "ref")
-
-
-UiAction: TypeAlias = (
-    Navigate
-    | SetFilter
-    | SelectResource
-    | FocusPane
-    | OpenLogs
-    | OpenDescribe
-    | DrillDown
-    | OpenEvidence
-)
+#: Every typed action an armed tool can produce, and nothing else.
+#:
+#: `ToolHarness._ui_action` is the only producer in production, keyed on a
+#: registry tool's validated dispatch target, so a member here without a
+#: tool behind it is an action the model can never call — one the eval
+#: bridge and the live bridge would both still implement and nobody would
+#: exercise. A new action starts with a registry schema and eval evidence,
+#: then joins this union.
+UiAction: TypeAlias = Navigate | SetFilter | OpenLogs | OpenDescribe | DrillDown
 
 
 @dataclass(frozen=True, slots=True)

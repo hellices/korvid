@@ -205,9 +205,12 @@ class ToolHarness:
         The per-iteration budget is checked before any port, so a low-tier
         iteration never dispatches more calls than the policy permits. An
         unarmed or unknown call returns a bounded deterministic error
-        without touching the executor or the bridge. Arguments are copied
-        before dispatch so neither the executor nor the evidence ledger can
-        be handed the caller's mutable dict.
+        without touching the executor or the bridge, and — like a
+        `reject` — spends none of that budget: the model still owes one
+        result per stored call, and a correction it cannot act on is no
+        correction. Arguments are copied before dispatch so neither the
+        executor nor the evidence ledger can be handed the caller's
+        mutable dict.
 
         Raises:
             OutboundPolicyError: the result could not be sanitized safely
@@ -218,12 +221,17 @@ class ToolHarness:
             return self._error(
                 call_id, name, "iteration tool-call budget exhausted; no further calls this step"
             )
-        self._calls_this_iteration += 1
         if name not in self._armed:
             return self._error(call_id, name, f"tool {name!r} is not armed for this policy")
         definition = tool_def(name)
         if definition is None:  # defensive: an armed built-in always resolves
             return self._error(call_id, name, f"unknown tool {name!r}")
+        # Counted here, after the name resolves: a refusal touches no port
+        # and does no work, so charging the iteration for it would let a
+        # model that guesses two wrong names spend a low-tier step and be
+        # refused for budget on the corrected call it was just told to
+        # make. Same rule as `reject`.
+        self._calls_this_iteration += 1
         if definition.effect == "ui_only":
             return await self._run_ui(call_id, definition, arguments)
         return await self._run_recorded(call_id, definition, arguments)

@@ -134,9 +134,11 @@ implementation and no v1 adapter, backend selector, or opt-in flag.
   - `ClusterFacts(provider, distribution)`
   - `InteractionContext(kube_context, context_epoch, focused_pane,
     secondary_pane, timeline_cursor)`
-  - `Navigate`, `SetFilter`, `SelectResource`, `FocusPane`, `OpenLogs`,
-    `OpenDescribe`, `DrillDown`, and `OpenEvidence`
-  - `UiAction` union
+  - `Navigate`, `SetFilter`, `OpenLogs`, `OpenDescribe`, and `DrillDown` —
+    the five typed actions korvid ships, one per armed `ui_only` registry
+    tool (`navigate`, `set_filter`, `open_logs`, `open_describe`,
+    `drill_down`)
+  - `UiAction` union — closed over exactly those five
   - `UiActionResult(ok, message, context)`
   - `AgentUiBridge.snapshot()` and `AgentUiBridge.apply()`
 - Consumes: no application services; this module stays pure Python.
@@ -222,16 +224,7 @@ class UiActionResult:
     context: InteractionContext
 
 
-UiAction = (
-    Navigate
-    | SetFilter
-    | SelectResource
-    | FocusPane
-    | OpenLogs
-    | OpenDescribe
-    | DrillDown
-    | OpenEvidence
-)
+UiAction = Navigate | SetFilter | OpenLogs | OpenDescribe | DrillDown
 
 
 class AgentUiBridge(ABC):
@@ -244,9 +237,17 @@ class AgentUiBridge(ABC):
         """Apply one typed action to that same workspace."""
 ```
 
-Validate `FocusPane.index` as `0` or `1`, reject blank required action fields
-with `ValueError`, and do not include Textual objects, selectors, or command
-strings in any type.
+Reject blank required action fields with `ValueError`, and do not include
+Textual objects, selectors, or command strings in any type.
+
+A member is only added to the union once a registry tool can produce it: the
+tool schema (`effect="ui_only"`, agent surfaces) and eval evidence that a model
+drives it correctly come first, then the dataclass, the
+`ToolHarness._ui_action` conversion, and the live and eval bridge branches.
+Three actions drafted the other way round — selecting a resource identity,
+focusing the other pane, and opening a ledger reference — never shipped a tool
+and were removed; opening a citation remains a user operation on
+`AgentUiController`.
 
 - [ ] **Step 4: Run targeted type, lint, and unit checks**
 
@@ -327,14 +328,14 @@ Cover every union member. At minimum assert:
 result = await bridge.apply(Navigate(view="deployments", namespace="prod"))
 
 assert result.ok is True
-assert navigation.calls == [("deployments", "prod")]
+assert controller.navigate_calls == [("deployments", "prod")]
 assert result.context.focused_pane.kind == "deployments"
 ```
 
-Also assert a stale `SelectResource(uid="old")` returns
-`UiActionResult(ok=False, message="ERROR: stale resource identity",
-context=bridge.snapshot())`, does not move the cursor, and reports the
-post-failure current context.
+Also assert a controller refusal (an unknown view, a describe screen the user
+is reading) comes back as `UiActionResult(ok=False, message="ERROR: ...",
+context=bridge.snapshot())`, changes nothing, and reports the post-failure
+current context.
 
 - [ ] **Step 3: Run tests and verify the bridge is absent**
 

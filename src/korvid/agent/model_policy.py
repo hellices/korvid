@@ -13,7 +13,7 @@ module never imports from `model_catalog`.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -279,7 +279,7 @@ class ModelRouter:
             pass the module-level ``MODEL_CATALOG``.
     """
 
-    def __init__(self, catalog_entries: list[ModelCatalogEntry]) -> None:
+    def __init__(self, catalog_entries: Sequence[ModelCatalogEntry]) -> None:
         self._catalog: dict[tuple[str, str], ModelCatalogEntry] = {
             (e.provider, e.model): e for e in catalog_entries
         }

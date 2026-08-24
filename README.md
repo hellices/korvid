@@ -31,8 +31,8 @@ events, a compound `diagnose_pod`) and **drives the UI itself**: "show me the
 crashing pod's logs" navigates, filters, and opens the actual log pane.
 Secret data is masked before it reaches the model. Works with GitHub
 Copilot, Azure OpenAI, Anthropic, OpenAI, local Ollama, or any
-OpenAI-compatible endpoint — including a `small` profile tuned for 3B–14B
-local models.
+OpenAI-compatible endpoint — including a low model tier
+(`agent.model_tier: low`) tuned for 3B–14B local models.
 
 **Writes are gated and audited — no exceptions.** Every mutation (yours or
 agent-requested) executes only after you confirm it in a dialog, and every
@@ -193,7 +193,7 @@ the Helm release browser.
 ## Status
 
 Work in progress — core TUI, log viewer, live metrics, MCP server, and
-agent runtime are functional. Read-heavy by design: cluster writes exist
+the agent harness are functional. Read-heavy by design: cluster writes exist
 (delete / scale / rollout restart / edit / resize / node ops / helm / OLM)
 but every one is approval-gated and audited.
 

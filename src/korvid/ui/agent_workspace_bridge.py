@@ -20,20 +20,17 @@ from typing import Protocol
 from korvid.agent.interaction import (
     AgentUiBridge,
     DrillDown,
-    FocusPane,
     InteractionContext,
     Navigate,
     OpenDescribe,
-    OpenEvidence,
     OpenLogs,
     PaneContext,
-    SelectResource,
     SetFilter,
     UiAction,
     UiActionResult,
 )
 from korvid.core.config import KorvidConfig
-from korvid.ui.agent_ui_controller import AgentScreens, WorkspaceOps
+from korvid.ui.agent_ui_controller import AgentScreens
 from korvid.ui.workspace_controller import ContextGuard
 from korvid.ui.workspace_state import WorkspaceState
 
@@ -59,15 +56,13 @@ class _ControllerOps(Protocol):
 
     async def agent_drill_down(self, name: str) -> str: ...
 
-    async def open_evidence(self, ref: str) -> str: ...
-
 
 class AgentWorkspaceBridge(AgentUiBridge):
     """Live implementation of `AgentUiBridge` over a running workspace.
 
     Reads state through `WorkspaceState`, `ContextGuard`, and `AgentScreens`,
-    then dispatches typed actions to the controller's existing guarded methods
-    and `WorkspaceOps` transitions — the same paths a user keystroke follows.
+    then dispatches each typed action to the controller's existing guarded
+    method — the same path a user keystroke follows.
 
     `AgentToolUIBridge` (the `UIBridge` write surface) is **not** composed
     here; they share no authority and must remain separate.
@@ -90,7 +85,6 @@ class AgentWorkspaceBridge(AgentUiBridge):
         context: ContextGuard,
         workspace: WorkspaceState,
         screens: AgentScreens,
-        navigation: WorkspaceOps,
         controller: _ControllerOps,
         timeline_cursor: Callable[[], str | None] = lambda: None,
     ) -> None:
@@ -98,7 +92,6 @@ class AgentWorkspaceBridge(AgentUiBridge):
         self._context = context
         self._workspace = workspace
         self._screens = screens
-        self._navigation = navigation
         self._controller = controller
         self._timeline_cursor = timeline_cursor
 
@@ -160,13 +153,6 @@ class AgentWorkspaceBridge(AgentUiBridge):
         if isinstance(action, SetFilter):
             return await self._controller.agent_set_filter(action.filter_pattern or "")
 
-        if isinstance(action, SelectResource):
-            return self._apply_select(action)
-
-        if isinstance(action, FocusPane):
-            self._navigation.focus_pane(action.index)
-            return f"focused pane {action.index}"
-
         if isinstance(action, OpenLogs):
             return await self._controller.agent_open_logs(
                 action.pod, action.namespace, action.container
@@ -180,22 +166,5 @@ class AgentWorkspaceBridge(AgentUiBridge):
         if isinstance(action, DrillDown):
             return await self._controller.agent_drill_down(action.name)
 
-        if isinstance(action, OpenEvidence):
-            return await self._controller.open_evidence(action.ref)
-
         # The UiAction TypeAlias is exhaustive; this branch guards new members.
         return f"ERROR: unhandled action type {type(action).__name__}"
-
-    def _apply_select(self, action: SelectResource) -> str:
-        """Validate and select *action*; raises ValueError on staleness."""
-        row = self._navigation.focused_row_data(action.name, action.namespace)
-        if row is None:
-            raise KeyError(
-                f"resource {action.name!r} not in current view (check kind, namespace, and filter)"
-            )
-        row_key, current_uid = row
-        if action.uid is not None and current_uid != action.uid:
-            raise ValueError("stale resource identity")
-        if not self._navigation.select_row(row_key):
-            raise ValueError("resource is hidden by the active filter")
-        return f"selected {action.kind}/{action.name}"

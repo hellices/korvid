@@ -3,9 +3,9 @@
 `AgentUiController` owns everything about the embedded agent that used to
 live directly on `KorvidApp`:
 
-- the session state — session, model, settings, capability profile, the
-  configurator/rebuild/disconnect seams, the `:ai off` disconnect marker and
-  the follow flag;
+- the session state — session, model, settings, the configured model tier
+  the wizard and `:model` rebuild from, the configurator/rebuild/disconnect
+  seams, the `:ai off` disconnect marker and the follow flag;
 - the turn lifecycle — the bare app-loop task, its cancellation, the
   interrupt-and-submit replacement queue, the finalization of an interrupted
   turn, and the shutdown drain;
@@ -272,19 +272,6 @@ class WorkspaceOps(Protocol):
 
     async def drill_into(self, namespace: str, name: str) -> str | None:
         """Drill into a row; None on success, else the reason."""
-
-    def focused_row_data(self, name: str, namespace: str | None) -> tuple[str, str | None] | None:
-        """Find (row_key, uid) for the named resource in the focused view.
-
-        Returns None when the resource is not in the current visible rows.
-        Used by `AgentWorkspaceBridge` to validate and move to a resource.
-        """
-
-    def select_row(self, row_key: str) -> bool:
-        """Move the focused table's cursor to *row_key*; False when absent."""
-
-    def focus_pane(self, index: int) -> None:
-        """Switch workspace focus to the pane at *index*."""
 
 
 class AgentLogOps(Protocol):
@@ -651,7 +638,6 @@ class AgentUiController:
                 context=self._context,
                 workspace=self._workspace,
                 screens=self._screens,
-                navigation=self._navigation,
                 controller=self,
             )
             self._workspace_bridge = bridge

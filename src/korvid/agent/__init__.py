@@ -17,8 +17,8 @@ grouped by the part of the harness that owns it:
 | events | what a turn yields to the UI |
 | setup | the configurator contract the setup screen drives |
 
-Two public contracts are deliberately **not** in that list, and a plugin
-author imports them from the submodule that owns them:
+Some public contracts are deliberately **not** in that list: they live in
+two submodules a plugin author imports them from directly.
 
 - `korvid.agent.provider_plugin` — `ProviderPlugin`,
   `ProviderPluginMetadata`, `ProviderPluginConfig`, and
@@ -87,9 +87,6 @@ if TYPE_CHECKING:
         DrillDown as DrillDown,
     )
     from .interaction import (
-        FocusPane as FocusPane,
-    )
-    from .interaction import (
         InteractionContext as InteractionContext,
     )
     from .interaction import (
@@ -99,9 +96,6 @@ if TYPE_CHECKING:
         OpenDescribe as OpenDescribe,
     )
     from .interaction import (
-        OpenEvidence as OpenEvidence,
-    )
-    from .interaction import (
         OpenLogs as OpenLogs,
     )
     from .interaction import (
@@ -109,9 +103,6 @@ if TYPE_CHECKING:
     )
     from .interaction import (
         ResourceIdentity as ResourceIdentity,
-    )
-    from .interaction import (
-        SelectResource as SelectResource,
     )
     from .interaction import (
         SetFilter as SetFilter,
@@ -237,7 +228,6 @@ _EXPORTS: Final[dict[str, str]] = {
     "DrillDown": "interaction",
     "Evidence": "evidence",
     "EvidenceLedger": "evidence",
-    "FocusPane": "interaction",
     "InteractionContext": "interaction",
     "LLMProvider": "provider",
     "ModelCapabilities": "model_policy",
@@ -249,7 +239,6 @@ _EXPORTS: Final[dict[str, str]] = {
     "NativeAgentEngine": "native_engine",
     "Navigate": "interaction",
     "OpenDescribe": "interaction",
-    "OpenEvidence": "interaction",
     "OpenLogs": "interaction",
     "OutboundPolicy": "outbound",
     "OutboundSnapshot": "outbound",
@@ -263,7 +252,6 @@ _EXPORTS: Final[dict[str, str]] = {
     "RequestGateway": "request_gateway",
     "ResolvedAgentPolicy": "model_policy",
     "ResourceIdentity": "interaction",
-    "SelectResource": "interaction",
     "SessionRetargetError": "session",
     "SetFilter": "interaction",
     "StaticPromptTooLargeError": "prompt_harness",

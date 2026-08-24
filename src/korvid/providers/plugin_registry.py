@@ -18,6 +18,7 @@ from korvid.agent.provider import LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
     ProviderPlugin,
+    ProviderPluginContractError,
     ProviderPluginMetadata,
     ValidatedPluginProvider,
 )
@@ -370,4 +371,17 @@ class ProviderPluginRegistry:
         # Wrap in ValidatedPluginProvider for event contract enforcement.
         # `normalized` is this plugin's registered id — the wrapper checks
         # the provider's own descriptor claims the same one.
-        return ValidatedPluginProvider(provider, provider_id=normalized)
+        #
+        # The wrapper reads the plugin's `descriptor`/`capabilities` while
+        # constructing and refuses with `ProviderPluginContractError`.
+        # Callers of this registry — the composition root above all — know
+        # only `ProviderPluginError`, and degrade the agent on it; letting
+        # a contract error through instead would end a start with a
+        # traceback. The wrapper's messages are already fixed and bounded,
+        # so translating adds the provider name and nothing else.
+        try:
+            return ValidatedPluginProvider(provider, provider_id=normalized)
+        except ProviderPluginContractError as exc:
+            raise _bounded_error(
+                f"provider plugin {safe_name!r} failed validation: {exc}"
+            ) from None

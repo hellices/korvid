@@ -277,14 +277,31 @@ class AgentUiBridge(ABC):
 ```
 
 `snapshot()` lets every turn begin from current human-visible state. `apply()`
-accepts only typed, validated UI actions such as:
+accepts only typed, validated UI actions. The shipped set is exactly the five
+an armed registry tool can produce:
 
-- focus a resource kind;
-- change scope;
-- select a resource identity;
-- set or clear a filter;
-- focus the other pane;
-- open evidence supported by the current ledger.
+- `Navigate` — change the resource kind and/or namespace scope (`navigate`);
+- `SetFilter` — set or clear the pane filter (`set_filter`);
+- `OpenLogs` — open the live log pane for an exact pod (`open_logs`);
+- `OpenDescribe` — open the describe screen for an exact resource
+  (`open_describe`);
+- `DrillDown` — follow the ownership chain from the focused row
+  (`drill_down`).
+
+The union is closed on purpose, and it is closed *at the registry*: a typed
+action with no armed tool behind it is one the model can never call, yet it
+still has to be implemented in the live bridge, the eval bridge, and the
+tool-call conversion. Three earlier drafts of this design (selecting a
+resource identity, focusing the other pane, opening a ledger reference) were
+specified here and never shipped a tool, so they were removed. A future action
+is added the other way round: first a registry tool schema (name, arguments,
+`effect="ui_only"`, agent surfaces), then eval evidence that a model uses it
+correctly, and only then the typed member, the conversion, and the two bridge
+branches.
+
+Opening a citation from the evidence ledger stayed a *user* operation
+(`AgentUiController.open_evidence`, driven from the transcript): the reader
+who opens a reference is the person, not the model.
 
 The bridge does not expose arbitrary widget lookup, CSS selectors, command
 strings, or the Textual `App`.

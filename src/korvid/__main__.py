@@ -19,7 +19,7 @@ import ssl
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from korvid import __version__
 from korvid.agent.install_hint import isolated_install_hint
@@ -777,6 +777,34 @@ def _resolve_agent_policy(
     )
 
 
+#: What an operator can do about a prompt that will not compose. The rules
+#: themselves are never quoted back: they are operator text, and a startup
+#: warning is rendered in the TUI and written to the log.
+_PROMPT_DEGRADE_HINT: Final[str] = (
+    "shorten agent.rules or route to a larger-context model with `:ai`"
+)
+
+
+def _warn_agent_disabled(error: Exception, startup_warnings: list[str] | None) -> None:
+    """Record one actionable warning for a session korvid refused to build.
+
+    The agent is the only thing that degrades: the TUI, the write
+    perimeter and the MCP server are unaffected, and the wizard's
+    configurator and rebuild stay wired so the operator can fix the
+    configuration from inside the running app.
+    """
+    from korvid.agent.prompt_harness import PromptCompositionError
+
+    detail = str(error)
+    if isinstance(error, PromptCompositionError):
+        detail = f"{detail} — {_PROMPT_DEGRADE_HINT}"
+        logger.warning("agent session not built; the system prompt does not fit the routed model")
+    else:
+        logger.warning("agent session not built; the configured model reports no tool support")
+    if startup_warnings is not None:
+        startup_warnings.append(f"agent disabled: {detail}")
+
+
 def _build_session(
     provider: LLMProvider,
     policy: Any,
@@ -960,16 +988,21 @@ def _build_agent_wiring(
     from korvid.agent.model_policy import ModelRoutingError
 
     if provider is not None:
+        # Imported here, not above: with the agent off there is no session
+        # to compose and no refusal to classify, and the prompt harness is
+        # part of the session graph a disabled start must not pull in
+        # (`tests/test_optional_extras.py`).
+        from korvid.agent.prompt_harness import PromptCompositionError
+
         try:
             session_box[0] = compose(provider, tier_box[0])[0]
-        except ModelRoutingError as error:
-            # A model that cannot call tools is a configuration problem,
-            # not a reason to refuse to start: korvid comes up with the
-            # agent off and a warning, and `:ai` can point it elsewhere.
-            # The provider stays in the box, so teardown still releases it.
-            if startup_warnings is not None:
-                startup_warnings.append(f"agent disabled: {error}")
-            logger.warning("agent session not built; the configured model reports no tool support")
+        except (ModelRoutingError, PromptCompositionError) as error:
+            # A model that cannot call tools, or a system prompt that does
+            # not fit it, is a configuration problem — not a reason to
+            # refuse to start: korvid comes up with the agent off and a
+            # warning, and `:ai` can point it elsewhere. The provider stays
+            # in the box, so teardown still releases it.
+            _warn_agent_disabled(error, startup_warnings)
 
     configurator = ProviderConfigurator(
         token_store,

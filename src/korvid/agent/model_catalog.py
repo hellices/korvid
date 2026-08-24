@@ -9,6 +9,10 @@ module can depend on it without creating a cycle.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Final
+
 from korvid.agent.model_policy import (
     MODEL_CATALOG_VERSION,
     ModelCapabilities,
@@ -23,7 +27,13 @@ __all__ = [
 ]
 
 #: Exact-match entries retained from eval artifacts.
-MODEL_CATALOG: list[ModelCatalogEntry] = [
+#:
+#: A tuple, not a list: this is shipped module state that the composition
+#: root, the evals and every `ModelRouter` read from the same object. One
+#: stray `append`/`clear` anywhere would silently re-tier every session
+#: built afterwards while the header still reported the routing as
+#: catalogue-derived.
+MODEL_CATALOG: Final[tuple[ModelCatalogEntry, ...]] = (
     ModelCatalogEntry(
         provider="ollama",
         model="qwen3:8b",
@@ -34,12 +44,12 @@ MODEL_CATALOG: list[ModelCatalogEntry] = [
         ),
         prompt_overlay_ids=(),
     ),
-]
+)
 
 #: Fast exact-match lookup; keyed by (provider, model).
-_CATALOG_INDEX: dict[tuple[str, str], ModelCatalogEntry] = {
-    (e.provider, e.model): e for e in MODEL_CATALOG
-}
+_CATALOG_INDEX: Final[Mapping[tuple[str, str], ModelCatalogEntry]] = MappingProxyType(
+    {(e.provider, e.model): e for e in MODEL_CATALOG}
+)
 
 
 def get_catalog_entry(provider: str, model: str) -> ModelCatalogEntry | None:
