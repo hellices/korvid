@@ -38,6 +38,11 @@ from korvid.tools.executor import (
     WRITE_TOOLS,
 )
 from korvid.tools.structured import dump_yaml
+from tests.tools.executor_fakes import (
+    LONG_NAME_ENV_SENTINEL,
+    NESTED_SECRET_SENTINEL,
+    oversized_crd_with_nested_credentials,
+)
 
 _DEEP_NESTING = 2_000
 
@@ -1743,3 +1748,100 @@ def test_a_document_that_says_one_thing_still_crosses() -> None:
     assert loaded["kind"] == "Secret"
     assert loaded["data"]["ca.crt"] == MASK_PLACEHOLDER
     assert loaded["spec"]["kind"] == "nested"
+
+
+# ---------------------------------------------------------------------------
+# Size elision is inventoried, at the path the payload really carries
+# ---------------------------------------------------------------------------
+
+
+def test_a_structurally_elided_document_is_inventoried_as_a_size_elision() -> None:
+    """Bounding a redacted document is a change the inventory must report.
+
+    `_sanitize_structured_result` redacts first and shrinks second, so what
+    leaves is parseable — but entries the shrink dropped are *gone*, not
+    masked, and a reader of the payload inspector cannot see the absence.
+    The record is the only evidence that the model was shown less than the
+    executor produced.
+    """
+    records: list[RedactionRecord] = []
+
+    sanitized = sanitize_tool_result(
+        "get_resource",
+        dump_yaml(oversized_crd_with_nested_credentials()),
+        max_chars=3_000,
+        records=records,
+    )
+
+    assert len(sanitized) <= 3_000
+    assert RedactionRecord(path="tool_result", reason="size-elision") in records
+    assert [r for r in records if r.reason == "size-elision"] == [
+        RedactionRecord(path="tool_result", reason="size-elision")
+    ]
+
+
+def test_a_document_that_fits_is_not_reported_as_elided() -> None:
+    """The premise of the test above: the reason is about size, not shape."""
+    records: list[RedactionRecord] = []
+
+    sanitize_tool_result(
+        "get_resource",
+        dump_yaml({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "web"}}),
+        max_chars=3_000,
+        records=records,
+    )
+
+    assert [r for r in records if r.reason == "size-elision"] == []
+
+
+def test_the_credentials_a_size_elision_removed_never_reach_the_payload() -> None:
+    """Elision must not be the pass that *creates* the leak.
+
+    Both sentinels are recognizable only through classifiers (`kind:
+    Secret`, a long credential-spelling env name) that the size reduction
+    itself removes. Redacting first is what keeps them out; the inventory
+    below is what proves the reduction really happened on this payload.
+    """
+    records: list[RedactionRecord] = []
+    sanitized = sanitize_tool_result(
+        "get_resource",
+        dump_yaml(oversized_crd_with_nested_credentials()),
+        max_chars=3_000,
+        records=records,
+    )
+
+    policy = OutboundPolicy(max_request_chars=200_000)
+    prepared = policy.prepare(
+        "qwen3:8b",
+        _tool_exchange(sanitized),
+        [],
+        iteration=1,
+        ingress={2: tuple(records)},
+    )
+
+    assert NESTED_SECRET_SENTINEL not in prepared.snapshot.payload_json
+    assert LONG_NAME_ENV_SENTINEL not in prepared.snapshot.payload_json
+    assert MASK_PLACEHOLDER in prepared.snapshot.payload_json
+
+
+def test_a_carried_size_elision_is_re_rooted_onto_the_payload_path() -> None:
+    """The record travels: an inventory is only useful at a findable path.
+
+    The producer records `tool_result`; the payload carries that content at
+    `messages[2].content`, and that is where the inspector must show it.
+    """
+    records = [RedactionRecord(path="tool_result", reason="size-elision")]
+
+    policy = OutboundPolicy(max_request_chars=200_000)
+    prepared = policy.prepare(
+        "qwen3:8b",
+        _tool_exchange("kind: Pod\nmetadata:\n  name: web\n"),
+        [],
+        iteration=1,
+        ingress={2: tuple(records)},
+    )
+
+    assert (
+        RedactionRecord(path="messages[2].content", reason="size-elision")
+        in prepared.snapshot.redactions
+    )

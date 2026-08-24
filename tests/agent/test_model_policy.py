@@ -19,7 +19,13 @@ from korvid.agent.model_policy import (
     ModelTier,
     PolicyEnvironment,
     ResolvedAgentPolicy,
+    apply_low_tool_descriptions,
 )
+from korvid.agent.prompt_packs import (
+    LOW_TOOL_DESCRIPTION_MAX_CHARS,
+    LOW_TOOL_DESCRIPTIONS,
+)
+from korvid.tools.registry import agent_tool_schemas
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -683,3 +689,141 @@ def test_the_low_tier_answers_in_fewer_iterations_and_less_history_than_high() -
     assert low.max_tool_calls_per_iteration == 1
     assert high.max_result_chars is None
     assert len(low.tools) < len(high.tools)
+
+
+# ---------------------------------------------------------------------------
+# Low-tier tool descriptions (migrated from the retired profile suite)
+# ---------------------------------------------------------------------------
+
+
+def _descriptions(policy: ResolvedAgentPolicy) -> dict[str, str]:
+    return {tool["function"]["name"]: tool["function"]["description"] for tool in policy.tools}
+
+
+def _registry_descriptions(surface: str) -> dict[str, str]:
+    return {
+        schema["function"]["name"]: schema["function"]["description"]
+        for schema in agent_tool_schemas(
+            surface,
+            readonly=False,
+            resize_supported=True,
+            observability_backends=frozenset({"metrics", "logs"}),
+        )
+    }
+
+
+def _armed(tier: ModelTier, **env: bool) -> ResolvedAgentPolicy:
+    return router().resolve(
+        descriptor=ModelDescriptor("test", "model"),
+        provider_capabilities=capabilities(),
+        explicit_tier=tier.value,
+        environment=environment(
+            readonly=env.get("readonly", False),
+            resize_supported=env.get("resize_supported", True),
+            observability_backends=frozenset({"metrics", "logs"}),
+        ),
+    )
+
+
+def test_a_low_route_swaps_in_the_shipped_low_tool_wording() -> None:
+    """Every request retransmits the schemas; the low tier pays per character."""
+    resolved = _descriptions(_armed(ModelTier.LOW))
+
+    for name, description in LOW_TOOL_DESCRIPTIONS.items():
+        assert resolved[name] == description
+
+
+def test_a_high_route_keeps_the_registry_tool_wording() -> None:
+    """The map is a low-tier artifact; the high tier is not retuned by it."""
+    resolved = _descriptions(_armed(ModelTier.HIGH))
+    registry = _registry_descriptions("high_agent")
+
+    assert resolved == registry
+    for name in LOW_TOOL_DESCRIPTIONS:
+        assert resolved[name] == registry[name]
+
+
+def test_a_low_route_keeps_the_registry_wording_for_every_unmapped_tool() -> None:
+    """Exact names only — an unmapped tool keeps the description it declared."""
+    resolved = _descriptions(_armed(ModelTier.LOW))
+    registry = _registry_descriptions("low_agent")
+
+    unmapped = set(registry) - set(LOW_TOOL_DESCRIPTIONS)
+    assert unmapped  # the surface really has tools the map does not name
+    for name in unmapped:
+        assert resolved[name] == registry[name]
+
+
+def test_an_unknown_tool_schema_keeps_the_description_it_declared() -> None:
+    """A plugin tool the map never heard of must survive the low pass intact."""
+    plugin = [
+        {
+            "type": "function",
+            "function": {
+                "name": "vendor_inspect",
+                "description": "Vendor-declared description.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "diagnose_pod_extended",
+                "description": "Not diagnose_pod; a prefix must not match.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+
+    apply_low_tool_descriptions(plugin)
+
+    assert plugin[0]["function"]["description"] == "Vendor-declared description."
+    assert plugin[1]["function"]["description"] == "Not diagnose_pod; a prefix must not match."
+
+
+@pytest.mark.parametrize("readonly", [False, True])
+@pytest.mark.parametrize("resize_supported", [False, True])
+def test_every_shipped_low_tool_description_is_nonempty_and_bounded(
+    readonly: bool, resize_supported: bool
+) -> None:
+    """A 4k-token serving context cannot afford an unbounded schema list."""
+    resolved = _descriptions(
+        _armed(ModelTier.LOW, readonly=readonly, resize_supported=resize_supported)
+    )
+
+    assert resolved
+    for name, description in resolved.items():
+        assert description.strip(), name
+        assert len(description) <= LOW_TOOL_DESCRIPTION_MAX_CHARS, (name, len(description))
+
+
+def test_the_low_route_leaves_the_registry_schemas_untouched() -> None:
+    """The rewrite works on the deep copy, never on the shared registry."""
+    before = _registry_descriptions("low_agent")
+
+    _armed(ModelTier.LOW)
+
+    assert _registry_descriptions("low_agent") == before
+    assert before["diagnose_pod"] != LOW_TOOL_DESCRIPTIONS["diagnose_pod"]
+
+
+def test_a_reworded_low_schema_is_still_deeply_frozen() -> None:
+    """Rewording happens before the freeze, so it cannot leave a live dict."""
+    policy = _armed(ModelTier.LOW)
+
+    reworded = next(
+        tool for tool in policy.tools if tool["function"]["name"] in LOW_TOOL_DESCRIPTIONS
+    )
+    assert isinstance(reworded, MappingProxyType)
+    assert isinstance(reworded["function"], MappingProxyType)
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        reworded["function"]["description"] = "mutated"  # type: ignore[index]  # frozen schema
+
+
+def test_two_low_routes_do_not_share_a_schema_object() -> None:
+    """A second resolve builds its own copies, reworded from the registry again."""
+    first = _armed(ModelTier.LOW)
+    second = _armed(ModelTier.LOW)
+
+    assert _descriptions(first) == _descriptions(second)
+    assert all(a is not b for a, b in zip(first.tools, second.tools, strict=True))

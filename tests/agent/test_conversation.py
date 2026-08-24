@@ -28,6 +28,7 @@ from korvid.agent.conversation import (
     ConversationBudgetError,
     ConversationState,
     IterationCheckpoint,
+    RequestView,
     TurnCheckpoint,
 )
 from korvid.agent.events import TurnInterrupted
@@ -54,6 +55,21 @@ def _text_turn(
     convo.record_stream_text(answer)
     if usage:
         convo.commit_usage(input_tokens, output_tokens)
+    convo.append_assistant(answer)
+    convo.complete_turn()
+
+
+def _text_turn_with_records(
+    convo: ConversationState,
+    content: str,
+    answer: str,
+    records: Sequence[RedactionRecord],
+) -> None:
+    """One text-only turn whose *user* message carried ingress redactions."""
+    convo.start_turn(content, records=records)
+    convo.start_iteration()
+    convo.record_stream_text(answer)
+    convo.commit_usage(1, 1)
     convo.append_assistant(answer)
     convo.complete_turn()
 
@@ -792,3 +808,184 @@ def test_a_rolled_back_turn_is_no_longer_active() -> None:
     convo.rollback_turn()
 
     assert convo.turn_active is False
+
+
+# --------------------------------------------------------------------------
+# Provenance identity: a record belongs to one message, not to its text
+# --------------------------------------------------------------------------
+
+
+def _ingress_paths(view: RequestView) -> dict[int, list[str]]:
+    return {index: [r.path for r in records] for index, records in view.ingress.items()}
+
+
+def test_identical_messages_each_keep_their_own_record() -> None:
+    """Content is not an identifier.
+
+    Two turns can sanitize to byte-identical text — the same screen, the
+    same stripped control character — and they are still two messages. A
+    store keyed on content would collapse them and report one redaction
+    where two happened.
+    """
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    record = RedactionRecord("screen_context", "control-character")
+    _text_turn_with_records(convo, "why?", "ok", [record])
+    _text_turn_with_records(convo, "why?", "ok", [record])
+
+    convo.start_turn("third")
+    view = convo.request_messages()
+
+    assert [m["content"] for m in view.messages[:4]] == ["why?", "ok", "why?", "ok"]
+    assert _ingress_paths(view)[0] == ["screen_context"]
+    assert _ingress_paths(view)[2] == ["screen_context"]
+
+
+def test_identical_messages_keep_separate_records_of_the_same_multiplicity() -> None:
+    """Two credentials each, twice: two records per message, not shared."""
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    pair = [
+        RedactionRecord("screen_context", "api-key"),
+        RedactionRecord("screen_context", "password"),
+    ]
+    _text_turn_with_records(convo, "a", "ok", pair)
+    _text_turn_with_records(convo, "a", "ok", pair)
+
+    convo.start_turn("third")
+    view = convo.request_messages()
+
+    assert len(view.ingress[0]) == 2
+    assert len(view.ingress[2]) == 2
+    assert view.ingress[0] == view.ingress[2]
+    assert view.ingress[0] is not view.ingress[2]
+
+
+def test_a_dropped_message_cannot_lend_its_records_to_a_new_one() -> None:
+    """A dropped turn's provenance goes with it, whatever lands at its index.
+
+    Provenance is keyed by message identity, so the store has to forget an
+    entry when its message leaves history — otherwise a later message that
+    happens to occupy the same index (or, for an id-only store, the same
+    address) would be reported carrying redactions nobody applied to it.
+    """
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    _tool_turn(
+        convo,
+        "first",
+        call_id="a1",
+        result="first result",
+        result_records=[RedactionRecord("first.pw", "secret")],
+        result_error=True,
+    )
+    convo.start_turn("second")
+    dropped = convo.drop_oldest_turn()
+    assert dropped > 0
+    convo.start_iteration()
+    convo.record_stream_text("")
+    convo.commit_usage(1, 1)
+    convo.append_assistant("", [{"id": "b1", "name": "get_logs", "arguments": "{}"}])
+    convo.append_tool_result("b1", "second result", (), error=False)
+
+    view = convo.request_messages()
+
+    assert [m["content"] for m in view.messages] == ["second", "", "second result"]
+    assert view.ingress == {}
+    assert view.tool_errors == frozenset()
+
+
+def test_a_dropped_turn_takes_only_its_own_records() -> None:
+    """The surviving turn keeps every record it really carried."""
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    _tool_turn(
+        convo,
+        "first",
+        call_id="a1",
+        result="first result",
+        result_records=[RedactionRecord("first.pw", "secret")],
+    )
+    _tool_turn(
+        convo,
+        "second",
+        call_id="b1",
+        result="second result",
+        result_records=[RedactionRecord("second.pw", "secret")],
+    )
+    convo.start_turn("third")
+    convo.drop_oldest_turn()
+
+    paths = [path for paths in _ingress_paths(convo.request_messages()).values() for path in paths]
+
+    assert paths == ["second.pw"]
+
+
+def test_rolling_back_a_turn_removes_the_provenance_it_created() -> None:
+    """A rolled-back turn is unsendable; its records must not outlive it."""
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("blocked", records=[RedactionRecord("screen_context", "masked")])
+    convo.start_iteration()
+    convo.record_stream_text("")
+    convo.commit_usage(3, 1)
+    convo.append_assistant("", [{"id": "c1", "name": "get_logs", "arguments": "{}"}])
+    convo.append_tool_result("c1", "leaky", [RedactionRecord("data.pw", "secret")], error=True)
+
+    convo.rollback_turn()
+
+    assert convo.messages == []
+    convo.start_turn("after")
+    view = convo.request_messages()
+    assert view.ingress == {}
+    assert view.tool_errors == frozenset()
+
+
+def test_rolling_back_a_turn_keeps_the_provenance_of_the_turns_before_it() -> None:
+    """Rollback is scoped to the turn, not a reset of the whole store."""
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    _tool_turn(
+        convo,
+        "kept",
+        call_id="a1",
+        result="kept result",
+        result_records=[RedactionRecord("kept.pw", "secret")],
+        result_error=True,
+    )
+    convo.start_turn("blocked", records=[RedactionRecord("screen_context", "masked")])
+    convo.start_iteration()
+    convo.record_stream_text("")
+    convo.commit_usage(1, 1)
+    convo.append_assistant("", [{"id": "b1", "name": "get_logs", "arguments": "{}"}])
+    convo.append_tool_result("b1", "leaky", [RedactionRecord("data.pw", "secret")], error=True)
+
+    convo.rollback_turn()
+    convo.start_turn("after")
+    view = convo.request_messages()
+
+    paths = [path for paths in _ingress_paths(view).values() for path in paths]
+    assert paths == ["kept.pw"]
+    assert view.tool_errors == frozenset({2})
+    assert view.messages[2]["content"] == "kept result"
+
+
+def test_every_projected_index_addresses_the_message_that_carried_it() -> None:
+    """The projection is positional, so a shift would silently misattribute.
+
+    Trimming, dropping and rolling back all move messages under the
+    provenance store; this drives all three and then checks the invariant
+    the outbound boundary actually relies on — the record at index *i*
+    describes `messages[i]`.
+    """
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    for index in range(4):
+        _tool_turn(
+            convo,
+            f"turn {index}",
+            call_id=f"c{index}",
+            result=f"result {index}",
+            result_records=[RedactionRecord(f"turn{index}.pw", "secret")],
+        )
+    convo.start_turn("live")
+    convo.drop_oldest_turn()
+    view = convo.request_messages(prefix=[{"role": "system", "content": "SYS"}])
+
+    for index, records in view.ingress.items():
+        message = view.messages[index]
+        assert message["role"] == "tool"
+        assert [r.path for r in records] == [f"turn{message['content'][-1]}.pw"]

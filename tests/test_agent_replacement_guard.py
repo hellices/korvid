@@ -28,6 +28,8 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
+import subprocess
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -434,3 +436,76 @@ def test_the_guard_scans_the_files_it_claims_to() -> None:
     assert {"docs/agent.md", "docs/evals/methodology.md", "docs/threat-model.md"} <= docs
     assert not any(path.startswith("docs/dev/specs/") for path in docs)
     assert not any(path.startswith("docs/superpowers/") for path in docs)
+
+
+# ---------------------------------------------------------------------------
+# The package docstring describes the surface it actually publishes
+# ---------------------------------------------------------------------------
+
+#: Contracts a third party implements that are deliberately *not* in
+#: `__all__`: importing them eagerly would drag the plugin validator (and
+#: its `ModelCapabilities` import graph) into every start, which is the
+#: boundary `tests/test_optional_extras.py` pins. They stay reachable at
+#: their own submodule, and the docstring has to say so rather than imply
+#: `korvid.agent` publishes every contract a plugin needs.
+_SUBMODULE_ONLY_CONTRACTS = {
+    "korvid.agent.provider_plugin": (
+        "ProviderPlugin",
+        "ProviderPluginConfig",
+        "ProviderPluginMetadata",
+        "PROVIDER_PLUGIN_API_VERSION",
+    ),
+    "korvid.agent.credentials": ("CredentialSource",),
+}
+
+
+def test_the_provider_plugin_contracts_are_not_published_by_the_package() -> None:
+    """The premise of the docstring fix: these really are submodule-only."""
+    import korvid.agent as agent_package
+
+    published = set(agent_package.__all__)
+    for names in _SUBMODULE_ONLY_CONTRACTS.values():
+        assert published.isdisjoint(names), sorted(published & set(names))
+
+
+@pytest.mark.parametrize("module", sorted(_SUBMODULE_ONLY_CONTRACTS))
+def test_each_submodule_only_contract_resolves_where_the_docstring_sends_readers(
+    module: str,
+) -> None:
+    imported = importlib.import_module(module)
+    for name in _SUBMODULE_ONLY_CONTRACTS[module]:
+        assert getattr(imported, name) is not None
+
+
+def test_the_package_docstring_names_the_submodules_that_own_them() -> None:
+    """A plugin author reading `korvid.agent` must be sent somewhere real.
+
+    The docstring used to read as though `__all__` were every contract the
+    layer offers, which sends a plugin author looking for `ProviderPlugin`
+    in a surface that does not carry it.
+    """
+    import korvid.agent as agent_package
+
+    doc = agent_package.__doc__ or ""
+    assert "provider_plugin" in doc
+    assert "credentials" in doc
+    for names in _SUBMODULE_ONLY_CONTRACTS.values():
+        for name in names:
+            assert name in doc or name.lower() in doc.lower()
+
+
+def test_naming_the_submodules_does_not_make_the_package_import_them() -> None:
+    """Accuracy in prose, not an eager import: the docstring costs nothing."""
+    probe = (
+        "import sys\n"
+        "import korvid.agent  # noqa: F401\n"
+        "leaked = [m for m in "
+        "('korvid.agent.provider_plugin', 'korvid.agent.credentials', "
+        "'korvid.agent.provider') if m in sys.modules]\n"
+        "if leaked:\n"
+        "    raise SystemExit(f'eager import: {leaked}')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr

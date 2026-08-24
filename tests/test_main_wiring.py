@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import dataclasses
 import re
@@ -298,6 +299,97 @@ def test_the_composition_root_composes_the_agent_from_harness_parts_only() -> No
         "ModelRouter",
     ):
         assert part in root, f"__main__.py no longer wires {part}"
+
+
+#: Model-facing prompt material the composition root must never touch. Wiring
+#: a `PromptHarness` is the whole job; reaching past it into the layer text,
+#: the pack registries, or the cluster-note formatter would make `__main__.py`
+#: a second author of what the model reads — which is exactly the split
+#: `prompt_harness.py` exists to hold (issue #316 task 6).
+_FORBIDDEN_PROMPT_COMPOSITION = (
+    "cluster_context_note",
+    "SAFETY_CONTRACT",
+    "COMMON_ROLE",
+    "PROMPT_PACKS",
+    "PROVIDER_PROMPT_OVERLAYS",
+    "MODEL_PROMPT_OVERLAYS",
+    "LOW_KORVID_OPERATOR_PACK",
+    "HIGH_KORVID_OPERATOR_PACK",
+    "LOW_TOOL_DESCRIPTIONS",
+    "ComposedPrompt",
+    "PromptInputs",
+    "prompt_pack_id",
+)
+
+
+def _referenced_names(tree: ast.AST) -> set[str]:
+    """Every bare name and attribute the module mentions anywhere."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.ImportFrom):
+            names.update(alias.name for alias in node.names)
+            names.update(alias.asname for alias in node.names if alias.asname)
+        elif isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+    return names
+
+
+def _main_tree() -> ast.Module:
+    return ast.parse(
+        Path(korvid.__main__.__file__).read_text(encoding="utf-8"),
+        filename="__main__.py",
+    )
+
+
+def test_the_composition_root_composes_no_model_facing_prompt_text() -> None:
+    """Structural, not textual: the AST must not *reference* the prompt layers.
+
+    A grep would trip over the legitimate `from korvid.agent.prompt_harness
+    import PromptHarness`; this looks at what the module actually names, so
+    constructing and injecting the harness stays allowed while reaching into
+    its layers does not.
+    """
+    referenced = _referenced_names(_main_tree())
+
+    found = sorted(name for name in _FORBIDDEN_PROMPT_COMPOSITION if name in referenced)
+    assert found == [], f"__main__.py composes model-facing prompt text: {found}"
+
+
+def test_the_composition_root_never_imports_the_prompt_pack_registry() -> None:
+    """Layer text reaches the model through the harness or not at all."""
+    banned_modules = ("korvid.agent.prompt_packs",)
+    for node in ast.walk(_main_tree()):
+        if isinstance(node, ast.ImportFrom):
+            assert node.module not in banned_modules, node.module
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name not in banned_modules, alias.name
+
+
+def test_the_composition_root_still_builds_and_injects_the_prompt_harness() -> None:
+    """The positive half: the guard must not pass by wiring nothing at all."""
+    tree = _main_tree()
+    constructed = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "PromptHarness"
+    ]
+    assert constructed, "__main__.py no longer constructs a PromptHarness"
+
+    injected = [
+        keyword
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "prompt_harness"
+    ]
+    assert injected, "__main__.py no longer injects the harness into the session"
 
 
 def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
