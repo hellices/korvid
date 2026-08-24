@@ -81,10 +81,19 @@ def test_safety_and_evidence_invariants_remain_explicit() -> None:
     assert "provider" in agent
     assert "payload" in agent
 
+    agent_raw = _source("agent.md")
+    assert "not live provider execution or grounded tool calls" in agent_raw
+    assert "fresh user keystroke" in agent_raw
+
     mcp = " ".join(_source("mcp.md").split()).lower()
     assert "tool-specific" in mcp
     assert "opt-in" in mcp
     assert "write proposal" in mcp
+
+    mcp_raw = _source("mcp.md")
+    assert "not necessarily the same snapshot" in mcp_raw
+    assert "activity note" in mcp_raw
+    assert "does not make the read followable" in mcp_raw
 
     relationships = " ".join(_source("resource-relationships.md").split()).lower()
     for term in ("direct", "bounded", "confidence", "unresolved", "incomplete"):

@@ -146,7 +146,7 @@ hide:
     <article class="evidence-card evidence-card--wide">
       <figure><a class="evidence-card__full" href="assets/scenes/mcp-poster.png"><img src="assets/scenes/mcp-poster.png" class="mcp-media" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></a><figcaption>MCP follow</figcaption></figure>
       <p>Let an external assistant read bounded tools while korvid can mirror where it went.</p>
-      <a href="mcp/#follow-mode">Connect over MCP</a>
+      <a href="mcp/#read-once-or-follow-activity">Connect over MCP</a>
     </article>
   </div>
 </section>

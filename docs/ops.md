@@ -36,7 +36,7 @@ payloads — they are raw cluster and operator data with no `OutboundPolicy`
 sanitization applied, and stay just as sensitive as the cluster access that
 produced them. Only the sanitized request the agent actually sends is
 redacted and inspectable via `:ai payload` (see
-[`docs/agent.md#inspecting-what-the-agent-sends`](agent.md#inspecting-what-the-agent-sends)
+[`docs/agent.md#what-leaves-the-machine`](agent.md#what-leaves-the-machine)
 and [`docs/threat-model.md`](threat-model.md)).
 
 ## What approval proves
