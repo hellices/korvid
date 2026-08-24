@@ -792,12 +792,15 @@
 }
 
 /* Contextual keyboard map (keybindings.md) and the compact reference
-   grids (keybindings.md, ops.md) built on top of it. */
+   grids (keybindings.md, ops.md) built on top of it. The map's viewBox is
+   narrow and stacked so its labels stay legible in a phone-width column;
+   capping the width keeps it from scaling into a wall on a wide screen. */
 .md-typeset .docs-keymap {
   display: block;
   width: 100%;
+  max-width: 400px;
   height: auto;
-  margin: 1.5rem 0 2rem;
+  margin: 1.5rem auto 2rem;
   border: 1px solid var(--korvid-charcoal-border);
   border-radius: var(--korvid-radius);
   background: var(--korvid-charcoal-raised);

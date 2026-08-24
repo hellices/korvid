@@ -131,12 +131,12 @@ hide:
     <article class="evidence-card">
       <figure><a class="evidence-card__full" href="assets/scenes/merged-logs.png"><img src="assets/scenes/merged-logs.png" width="1280" height="720" loading="lazy" alt="Korvid split workspace streaming one synthetic payment worker pod's logs beside the filtered table"></a><figcaption>Pod log stream</figcaption></figure>
       <p>Follow, filter, and reconnect a selected pod's logs beside the table you started from.</p>
-      <a href="tui/#log-viewer">Read the log workflow</a>
+      <a href="tui/#work-with-logs">Read the log workflow</a>
     </article>
     <article class="evidence-card">
       <figure><a class="evidence-card__full" href="assets/scenes/diagnosis.png"><img src="assets/scenes/diagnosis.png" width="1280" height="720" loading="lazy" alt="Korvid describe view showing a synthetic failing pod and warning events"></a><figcaption>Operational evidence</figcaption></figure>
       <p>Put manifests, warning events, and failure context beside the selected resource.</p>
-      <a href="tui/#ops-hints">Inspect diagnosis surfaces</a>
+      <a href="tui/#follow-one-signal">Inspect diagnosis surfaces</a>
     </article>
     <article class="evidence-card">
       <figure><a class="evidence-card__full" href="assets/scenes/agent-poster.png"><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer whose E1 marker the panel flags as an unsupported citation"></a><figcaption>Agent panel walkthrough</figcaption></figure>

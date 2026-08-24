@@ -17,9 +17,9 @@ explains what's missing instead of hiding the keys.
   <div>
     <p id="helm-storyboard-title"><strong>Release lifecycle</strong></p>
     <ol>
-      <li><strong>Install</strong><span>A search-first chart picker (`helm search repo`), a release/version/namespace wizard that surfaces a chart's required values and README, and a `--dry-run` preview before the approval dialog.</span></li>
-      <li><strong>Inspect</strong><span>`Enter` on a release, Subscription, or CSV opens a read-only hierarchy tree of everything that root installed, down to the live Pods it owns; `h` shows revision history, `d` describes.</span></li>
-      <li><strong>Upgrade</strong><span>The same wizard pinned to the release, reusing its current values by default; a real `helm-diff` plan replaces the plain dry-run preview when the plugin is installed.</span></li>
+      <li><strong>Install</strong><span>A search-first chart picker (<code>helm search repo</code>), a release/version/namespace wizard that surfaces a chart's required values and README, and a <code>--dry-run</code> preview before the approval dialog.</span></li>
+      <li><strong>Inspect</strong><span><kbd>Enter</kbd> on a release, Subscription, or CSV opens a read-only hierarchy tree of everything that root installed, down to the live Pods it owns; <kbd>h</kbd> shows revision history, <kbd>d</kbd> describes.</span></li>
+      <li><strong>Upgrade</strong><span>The same wizard pinned to the release, reusing its current values by default; a real <code>helm-diff</code> plan replaces the plain dry-run preview when the plugin is installed.</span></li>
       <li><strong>Rollback</strong><span>Roll back to a selected revision — a diff preview only when the plugin is installed, otherwise the confirmation states the target revision with no manifest diff.</span></li>
     </ol>
   </div>

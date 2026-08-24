@@ -4649,7 +4649,7 @@ including its UID, and never by name: a row whose summary carries no UID
 gets no impact section at all — the preview is omitted and no snapshot is
 loaded — rather than a summary silently attached to whichever object holds
 that name now. The summary is advisory — see [Write impact
-preview](tui.md#write-impact-preview) for how it appears and what it never
+preview](tui.md#preview-impact-before-a-write) for how it appears and what it never
 does.
 
 Only `Ctrl-D` and `r` show this section today. The remaining write types

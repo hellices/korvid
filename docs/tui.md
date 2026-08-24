@@ -89,12 +89,15 @@ views:
         label: team
 ```
 
-The pods table's `CPU`/`MEM` and `%CPU/R`/`%MEM/R` columns are always
-relative to the declared request, but their colour keys off the most
-severe **limit** the usage approaches across every applicable ceiling
-(container and, on K8s 1.34+, pod-aggregate) — never off the request
-alone. Without `metrics.k8s.io` installed the columns show `-` and korvid
-keeps polling, picking up a later install with no restart.
+The pods table's `%CPU/R` / `%MEM/R` columns are always relative to the
+declared request (`CPU` and `MEM` show absolute usage), but their colour
+keys off the most severe **limit** the usage approaches across every
+applicable ceiling (container and, on K8s 1.34+, pod-aggregate) — never off
+the request alone. Only when no limit bounds the usage does the colour fall
+back to the request ratio, capped at yellow: bursting above a request is
+expected, never critical. Without `metrics.k8s.io` installed the columns
+show `-` and korvid keeps polling, picking up a later install with no
+restart.
 
 ## Preview impact before a write
 

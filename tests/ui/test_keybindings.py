@@ -4,9 +4,13 @@ help overlay shows the effective keys."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
+from textual.binding import Binding
+
 from korvid.core.config import KorvidConfig
+from korvid.core.keybindings import plan_keybindings
 from korvid.core.session_timeline import SessionTimeline
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.help_screen import HelpScreen
@@ -124,6 +128,53 @@ def test_keybindings_doc_documents_every_remappable_action() -> None:
     doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
     for action in KorvidApp._binding_actions():
         assert f"`{action}`" in doc, f"docs/keybindings.md missing keybinding action {action!r}"
+
+
+def test_documented_remap_example_survives_the_real_keybinding_planner() -> None:
+    """The `keybindings:` snippet in docs/keybindings.md must be a remap the
+    shipped app actually accepts. `ctrl+x` (interrupt_agent) and `g`
+    (relationships) are defaults of other actions, so an example using them
+    is silently dropped with a startup warning."""
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
+    block = doc.split("```yaml", 1)[1].split("```", 1)[0]
+    documented = dict(re.findall(r"^\s{2}([a-z_]+):\s*(\S+)", block, flags=re.MULTILINE))
+    assert documented, "docs/keybindings.md must keep a worked remap example"
+
+    bindings = [raw if isinstance(raw, Binding) else Binding(*raw) for raw in KorvidApp.BINDINGS]
+    plan = plan_keybindings(
+        dict(documented),
+        KorvidApp._binding_actions(),
+        {binding.action for binding in bindings if binding.priority},
+        reserved_keys={binding.key: binding.action for binding in bindings if binding.id is None},
+    )
+    assert plan.warnings == ()
+    assert plan.overrides == documented
+
+
+async def test_documented_remap_example_rebinds_the_running_app() -> None:
+    """End-to-end proof for the same snippet: the freed defaults go inert
+    and the documented keys drive the documented actions."""
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
+    block = doc.split("```yaml", 1)[1].split("```", 1)[0]
+    documented = dict(re.findall(r"^\s{2}([a-z_]+):\s*(\S+)", block, flags=re.MULTILINE))
+    pods = [_pod("bb"), _pod("aa")]
+    app = make_app(pods, config=_config(documented))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        assert app._keybinding_overrides == documented
+        assert not any("keybindings:" in n.message for n in app._notifications)
+
+        def _sorted_by_age() -> bool:
+            return any(
+                "AGE" in str(c.label) and "▼" in str(c.label) for c in table.columns.values()
+            )
+
+        await pilot.press("A")  # freed default must be inert now
+        await pilot.pause()
+        assert not _sorted_by_age()
+        await pilot.press(documented["sort_by_age"])
+        await until(pilot, _sorted_by_age, label="documented key sorts by age")
 
 
 def test_favorite_namespace_keys_are_not_remappable() -> None:

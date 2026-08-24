@@ -1,12 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 520" role="img" aria-labelledby="keymap-title keymap-desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 820" role="img" aria-labelledby="keymap-title keymap-desc">
   <title id="keymap-title">Korvid keys change with operational context</title>
-  <desc id="keymap-desc">Global navigation leads to table inspection, logs, and guarded write actions. The help overlay always shows the effective keys.</desc>
+  <desc id="keymap-desc">Global navigation leads to table inspection, which branches to logs and to guarded write actions. The help overlay always shows the effective keys.</desc>
   <!--
     Loaded through an <img> tag (see docs/keybindings.md), which renders this
     as a standalone document. Host-page CSS variables do not cascade in, so
     every color below is a literal hex copy of the Korvid charcoal, amber,
     and ink custom properties declared in docs/stylesheets/extra.css, matching
     the pattern already used by assets/korvid-mark.svg.
+
+    The viewBox is deliberately narrow and stacked: an <img> scales to the
+    content column, so a wide viewBox shrinks every label by the same factor.
+    At 1200 units the 20px chip text rendered at roughly 5px in a phone-width
+    column; at 460 units the 26px chip text renders around 18px there.
   -->
   <style>
     :root {
@@ -14,19 +19,19 @@
     }
     .keymap-bg { fill: #1b1f26; }
     .keymap-box { fill: #12151a; stroke: #2a2f38; stroke-width: 2; }
-    .keymap-heading { fill: #f5a623; font-size: 28px; font-weight: 700; letter-spacing: 0.06em; }
+    .keymap-heading { fill: #f5a623; font-size: 30px; font-weight: 700; letter-spacing: 0.06em; }
     .keymap-chip { fill: #2a2f38; stroke: #3a4150; stroke-width: 1; }
     .keymap-chip-text {
       fill: #e7e9ee;
-      font-size: 20px;
+      font-size: 26px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       dominant-baseline: middle;
     }
-    .keymap-arrow { stroke: #aab0bd; stroke-width: 2.5; fill: none; }
-    .keymap-note { fill: #aab0bd; font-size: 18px; font-style: italic; }
+    .keymap-arrow { stroke: #aab0bd; stroke-width: 3; fill: none; }
+    .keymap-note { fill: #aab0bd; font-size: 24px; font-style: italic; }
   </style>
 
-  <rect class="keymap-bg" x="0" y="0" width="1200" height="520" rx="12" />
+  <rect class="keymap-bg" x="0" y="0" width="460" height="820" rx="12" />
 
   <defs>
     <marker id="keymap-arrowhead" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
@@ -34,64 +39,65 @@
     </marker>
   </defs>
 
-  <!-- Flow: GLOBAL navigation reaches TABLE inspection, which branches to LOGS and to a guarded WRITE. -->
-  <line class="keymap-arrow" x1="320" y1="140" x2="452" y2="140" marker-end="url(#keymap-arrowhead)" />
-  <line class="keymap-arrow" x1="740" y1="140" x2="872" y2="140" marker-end="url(#keymap-arrowhead)" />
-  <line class="keymap-arrow" x1="600" y1="220" x2="600" y2="292" marker-end="url(#keymap-arrowhead)" />
+  <!-- Flow: GLOBAL navigation reaches TABLE inspection, which branches down
+       to LOGS and around the right-hand side to the guarded WRITE keys. -->
+  <line class="keymap-arrow" x1="212" y1="172" x2="212" y2="208" marker-end="url(#keymap-arrowhead)" />
+  <line class="keymap-arrow" x1="212" y1="364" x2="212" y2="400" marker-end="url(#keymap-arrowhead)" />
+  <path class="keymap-arrow" d="M400,288 H432 V672 H408" marker-end="url(#keymap-arrowhead)" />
 
   <!-- GLOBAL context -->
   <g>
-    <rect class="keymap-box" x="40" y="60" width="280" height="160" rx="10" />
-    <text class="keymap-heading" x="64" y="100">GLOBAL</text>
-    <rect class="keymap-chip" x="64" y="128" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="86" y="149" text-anchor="middle">:</text>
-    <rect class="keymap-chip" x="118" y="128" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="140" y="149" text-anchor="middle">?</text>
-    <rect class="keymap-chip" x="172" y="128" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="194" y="149" text-anchor="middle">/</text>
-    <rect class="keymap-chip" x="226" y="128" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="248" y="149" text-anchor="middle">0</text>
+    <rect class="keymap-box" x="24" y="24" width="376" height="144" rx="10" />
+    <text class="keymap-heading" x="48" y="70">GLOBAL</text>
+    <rect class="keymap-chip" x="48" y="92" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="70" y="115" text-anchor="middle">:</text>
+    <rect class="keymap-chip" x="102" y="92" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="124" y="115" text-anchor="middle">?</text>
+    <rect class="keymap-chip" x="156" y="92" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="178" y="115" text-anchor="middle">/</text>
+    <rect class="keymap-chip" x="210" y="92" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="232" y="115" text-anchor="middle">0</text>
   </g>
 
   <!-- TABLE context -->
   <g>
-    <rect class="keymap-box" x="460" y="60" width="280" height="160" rx="10" />
-    <text class="keymap-heading" x="484" y="100">TABLE</text>
-    <rect class="keymap-chip" x="484" y="128" width="70" height="40" rx="6" />
-    <text class="keymap-chip-text" x="519" y="149" text-anchor="middle">Enter</text>
-    <rect class="keymap-chip" x="562" y="128" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="584" y="149" text-anchor="middle">d</text>
-    <rect class="keymap-chip" x="614" y="128" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="636" y="149" text-anchor="middle">g</text>
-    <rect class="keymap-chip" x="666" y="128" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="688" y="149" text-anchor="middle">l</text>
+    <rect class="keymap-box" x="24" y="216" width="376" height="144" rx="10" />
+    <text class="keymap-heading" x="48" y="262">TABLE</text>
+    <rect class="keymap-chip" x="48" y="284" width="92" height="44" rx="6" />
+    <text class="keymap-chip-text" x="94" y="307" text-anchor="middle">Enter</text>
+    <rect class="keymap-chip" x="150" y="284" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="172" y="307" text-anchor="middle">d</text>
+    <rect class="keymap-chip" x="204" y="284" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="226" y="307" text-anchor="middle">g</text>
+    <rect class="keymap-chip" x="258" y="284" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="280" y="307" text-anchor="middle">l</text>
   </g>
 
   <!-- LOGS context -->
   <g>
-    <rect class="keymap-box" x="880" y="60" width="280" height="160" rx="10" />
-    <text class="keymap-heading" x="904" y="100">LOGS</text>
-    <rect class="keymap-chip" x="904" y="128" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="926" y="149" text-anchor="middle">/</text>
-    <rect class="keymap-chip" x="958" y="128" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="980" y="149" text-anchor="middle">f</text>
-    <rect class="keymap-chip" x="1012" y="128" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="1034" y="149" text-anchor="middle">w</text>
-    <rect class="keymap-chip" x="1066" y="128" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="1088" y="149" text-anchor="middle">p</text>
+    <rect class="keymap-box" x="24" y="408" width="376" height="144" rx="10" />
+    <text class="keymap-heading" x="48" y="454">LOGS</text>
+    <rect class="keymap-chip" x="48" y="476" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="70" y="499" text-anchor="middle">/</text>
+    <rect class="keymap-chip" x="102" y="476" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="124" y="499" text-anchor="middle">f</text>
+    <rect class="keymap-chip" x="156" y="476" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="178" y="499" text-anchor="middle">w</text>
+    <rect class="keymap-chip" x="210" y="476" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="232" y="499" text-anchor="middle">p</text>
   </g>
 
   <!-- WRITE context (guarded) -->
   <g>
-    <rect class="keymap-box" x="460" y="300" width="280" height="160" rx="10" />
-    <text class="keymap-heading" x="484" y="340">WRITE</text>
-    <rect class="keymap-chip" x="484" y="368" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="506" y="389" text-anchor="middle">r</text>
-    <rect class="keymap-chip" x="538" y="368" width="44" height="40" rx="6" />
-    <text class="keymap-chip-text" x="560" y="389" text-anchor="middle">S</text>
-    <rect class="keymap-chip" x="592" y="368" width="96" height="40" rx="6" />
-    <text class="keymap-chip-text" x="640" y="389" text-anchor="middle">Ctrl-D</text>
+    <rect class="keymap-box" x="24" y="600" width="376" height="144" rx="10" />
+    <text class="keymap-heading" x="48" y="646">WRITE</text>
+    <rect class="keymap-chip" x="48" y="668" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="70" y="691" text-anchor="middle">r</text>
+    <rect class="keymap-chip" x="102" y="668" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="124" y="691" text-anchor="middle">S</text>
+    <rect class="keymap-chip" x="156" y="668" width="112" height="44" rx="6" />
+    <text class="keymap-chip-text" x="212" y="691" text-anchor="middle">Ctrl-D</text>
   </g>
 
-  <text class="keymap-note" x="600" y="500" text-anchor="middle">Fresh approval keystroke</text>
+  <text class="keymap-note" x="212" y="790" text-anchor="middle">Fresh approval keystroke</text>
 </svg>

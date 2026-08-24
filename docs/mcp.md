@@ -106,9 +106,10 @@ A successful **Kubernetes** read may emit an activity note: `list_resources`
 navigates to that view, `get_resource` / `get_events` open the describe
 pane, `get_logs` opens the log pane, and the `diagnose_*` tools open the
 relevant describe pane too. Prometheus and Loki reads have no korvid screen
-to mirror, so they never emit that note. An activity note does not make the read followable in the same sense,
-though: mirroring is fire-and-forget UI navigation, not a resumable feed,
-and observability reads simply have nothing on screen to navigate to.
+to mirror, so they always surface as an activity note instead of navigating
+anywhere. An activity note does not make the read followable in the same
+sense, though: mirroring is fire-and-forget UI navigation, not a resumable
+feed, and observability reads simply have nothing on screen to navigate to.
 
 Mirroring never waits on, or fails with, the MCP response; a failed read is
 never mirrored, and a mirror never opens over an approval dialog — approvals
