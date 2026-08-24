@@ -402,7 +402,7 @@ async def test_the_bridge_dispatches_only_the_shipped_typed_actions() -> None:
 
     ctrl = FakeController()
     bridge, _, _ = _make_bridge(controller=ctrl)
-    shipped = [
+    shipped: list[UiAction] = [
         Navigate(view="pods"),
         SetFilter(filter_pattern="api"),
         OpenLogs(pod="api-1", namespace="default"),

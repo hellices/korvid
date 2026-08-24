@@ -7,6 +7,7 @@ import asyncio
 import dataclasses
 import re
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
@@ -16,6 +17,8 @@ import pytest
 import korvid
 import korvid.__main__
 from korvid.__main__ import _close_provider_in_background
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
+from korvid.agent.provider import LLMProvider
 from korvid.agent.setup import AgentSettings
 from korvid.tools.executor import UIBridge
 from tests.fixtures.provider_plugin.site_helpers import (
@@ -39,8 +42,6 @@ class _OkProvider:
 
 
 async def test_close_task_reference_is_retained_until_done() -> None:
-    from korvid.agent.provider import LLMProvider
-
     provider = _OkProvider()
     tasks: set[asyncio.Task[None]] = set()
     _close_provider_in_background(cast("LLMProvider", provider), tasks)
@@ -52,8 +53,6 @@ async def test_close_task_reference_is_retained_until_done() -> None:
 
 
 async def test_close_errors_are_consumed() -> None:
-    from korvid.agent.provider import LLMProvider
-
     tasks: set[asyncio.Task[None]] = set()
     _close_provider_in_background(cast("LLMProvider", _BoomProvider()), tasks)
     for _ in range(3):
@@ -68,7 +67,6 @@ async def test_close_background_does_not_log_secret_payload(
 ) -> None:
     """Background provider close must log a fixed message, never the raw
     exception payload which may contain secrets from third-party plugins."""
-    from korvid.agent.provider import LLMProvider
 
     class _SecretBoomProvider:
         async def aclose(self) -> None:
@@ -2871,32 +2869,28 @@ async def test_wire_and_run_passes_session_timeline_and_warning_watch(
 # ---------------------------------------------------------------------------
 
 
-class _RecordingProvider:
+class _RecordingProvider(LLMProvider):
     """A provider that streams one scripted turn and records its requests."""
 
     order: ClassVar[list[str]] = []
 
     def __init__(self, model: str = "m") -> None:
-        from korvid.agent.model_policy import ModelDescriptor
-
         self._descriptor = ModelDescriptor("test", model)
         self.requests: list[list[dict[str, Any]]] = []
         self.surfaces: list[list[dict[str, Any]]] = []
         self.closed = 0
 
     @property
-    def descriptor(self) -> Any:
+    def descriptor(self) -> ModelDescriptor:
         return self._descriptor
 
     @property
-    def capabilities(self) -> Any:
-        from korvid.agent.model_policy import ModelCapabilities
-
+    def capabilities(self) -> ModelCapabilities:
         return ModelCapabilities.unknown()
 
     async def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, stream: bool = True
-    ) -> Any:
+    ) -> AsyncIterator[dict[str, Any]]:
         import copy
 
         self.requests.append(copy.deepcopy(messages))
