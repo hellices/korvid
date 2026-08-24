@@ -86,6 +86,15 @@ def test_safety_and_evidence_invariants_remain_explicit() -> None:
     assert "opt-in" in mcp
     assert "write proposal" in mcp
 
+    relationships = " ".join(_source("resource-relationships.md").split()).lower()
+    for term in ("direct", "bounded", "confidence", "unresolved", "incomplete"):
+        assert term in relationships
+
+    observability = " ".join(_source("observability.md").split()).lower()
+    assert "watch-backed" in observability
+    assert "independent read" in observability
+    assert "mask" in observability
+
 
 def test_redesign_does_not_add_a_script_bundle() -> None:
     source = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
