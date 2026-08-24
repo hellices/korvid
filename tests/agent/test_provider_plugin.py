@@ -131,6 +131,82 @@ def test_validated_plugin_provider_rejects_descriptor_provider_id_mismatch() -> 
         )
 
 
+def test_validated_plugin_provider_translates_a_raising_descriptor_property() -> None:
+    """A plugin's own exception from `descriptor` must not reach korvid raw.
+
+    The wrapper reads the property while constructing, so third-party code
+    runs before korvid has validated anything. A lazy credential read or
+    endpoint probe in there can fail carrying whatever it was holding — so
+    the failure becomes the same fixed, bounded contract error every other
+    plugin fault does, naming the exception type and nothing else.
+    """
+
+    class _ExplodingDescriptor(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            raise RuntimeError("PLUGIN_DESCRIPTOR_SECRET_abc123" * 20)
+
+    with pytest.raises(ProviderPluginContractError) as caught:
+        ValidatedPluginProvider(_ExplodingDescriptor([{"type": "done"}]))
+
+    message = str(caught.value)
+    assert "descriptor" in message
+    assert "RuntimeError" in message
+    assert "PLUGIN_DESCRIPTOR_SECRET" not in message
+    assert len(message) < 512
+
+
+def test_validated_plugin_provider_translates_a_raising_capabilities_property() -> None:
+    """The capability read is wrapped on its own, so the message says which
+    read failed without ever repeating what the plugin raised."""
+
+    class _ExplodingCapabilities(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            raise RuntimeError("PLUGIN_CAPABILITIES_SECRET_xyz789" * 20)
+
+    with pytest.raises(ProviderPluginContractError) as caught:
+        ValidatedPluginProvider(_ExplodingCapabilities([{"type": "done"}]))
+
+    message = str(caught.value)
+    assert "capabilities" in message
+    assert "RuntimeError" in message
+    assert "PLUGIN_CAPABILITIES_SECRET" not in message
+    assert len(message) < 512
+
+
+def test_a_raising_property_is_translated_even_when_it_raises_a_contract_error() -> None:
+    """A plugin may raise korvid's own error type with a payload of its own.
+
+    Re-raising it unchanged would publish that payload under a name the
+    rest of korvid treats as safe, so the wrapper translates by exception
+    type rather than by trusting the class.
+    """
+
+    class _ContractErrorDescriptor(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            raise ProviderPluginContractError("PLUGIN_TOKEN_LEAK_qqq" * 20)
+
+    with pytest.raises(ProviderPluginContractError) as caught:
+        ValidatedPluginProvider(_ContractErrorDescriptor([{"type": "done"}]))
+
+    assert "PLUGIN_TOKEN_LEAK" not in str(caught.value)
+
+
+def test_a_raising_property_does_not_hide_cancellation() -> None:
+    """`BaseException` is not a contract violation: a cancelled start must
+    still cancel, not be reported as a broken plugin."""
+
+    class _CancelledDescriptor(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            raise KeyboardInterrupt("start interrupted")
+
+    with pytest.raises(KeyboardInterrupt, match="start interrupted"):
+        ValidatedPluginProvider(_CancelledDescriptor([{"type": "done"}]))
+
+
 def test_validated_plugin_provider_rejects_empty_model_id() -> None:
     class _EmptyModelProvider(_ScriptedProvider):
         @property

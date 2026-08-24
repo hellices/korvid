@@ -324,7 +324,9 @@ async def test_a_compacted_report_keeps_its_evidence_and_its_bound() -> None:
 
     assert "WORKLOAD — Deployment default/api" in out
     assert "POD DIAGNOSIS — default/api-1" in out
-    assert "middle truncated" in out
+    # The marker is model-facing: it names the budget the model is
+    # actually under, which is its tier's, not a retired profile's.
+    assert "middle truncated — tier result budget" in out
     assert len(out) <= MAX_RESULT_CHARS
 
 

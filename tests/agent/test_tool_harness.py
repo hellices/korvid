@@ -11,7 +11,7 @@ the policy's per-iteration tool-call budget before touching any port.
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
@@ -38,7 +38,7 @@ from korvid.agent.model_policy import (
     ResolvedAgentPolicy,
 )
 from korvid.agent.outbound import OutboundPolicyError
-from korvid.agent.tool_harness import ToolExecution, ToolHarness
+from korvid.agent.tool_harness import ToolExecution, ToolHarness, _ui_action
 from korvid.core.redaction import RedactionRecord
 from korvid.tools.executor import (
     RecordedExecution,
@@ -46,7 +46,7 @@ from korvid.tools.executor import (
     ToolOutcome,
     UIBridge,
 )
-from korvid.tools.registry import TOOLS_BY_NAME
+from korvid.tools.registry import AGENT_SURFACES, TOOL_DEFS, TOOLS_BY_NAME, ToolDef
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -330,6 +330,114 @@ async def test_drill_down_maps_to_drill_down_action() -> None:
     harness = _harness(_policy(["drill_down"], max_tool_calls=None), bridge=bridge)
     await harness.execute("c1", "drill_down", {"name": "api"})
     assert bridge.actions == [DrillDown(name="api")]
+
+
+def _minimal_arguments(schema: dict[str, Any]) -> dict[str, Any]:
+    """The smallest argument set a tool's own JSON schema calls valid.
+
+    Only the declared `required` properties, each filled with a non-blank
+    value of its declared type. Anything richer would test this helper
+    instead of the conversion.
+    """
+    parameters = schema["function"].get("parameters", {})
+    properties = parameters.get("properties", {})
+    arguments: dict[str, Any] = {}
+    for name in parameters.get("required", []):
+        kind = properties.get(name, {}).get("type", "string")
+        if kind == "integer":
+            arguments[name] = 1
+        elif kind == "number":
+            arguments[name] = 1.0
+        elif kind == "boolean":
+            arguments[name] = True
+        elif kind == "array":
+            arguments[name] = ["x"]
+        elif kind == "object":
+            arguments[name] = {"k": "v"}
+        else:
+            arguments[name] = "x"
+    return arguments
+
+
+def _armed_ui_tools() -> list[ToolDef]:
+    """Every registry tool that drives the screen on an agent surface."""
+    return [
+        definition
+        for definition in TOOL_DEFS
+        if definition.effect == "ui_only" and definition.surfaces & AGENT_SURFACES
+    ]
+
+
+def test_the_registry_does_arm_ui_tools_to_convert() -> None:
+    """The completeness test below is worthless against an empty list."""
+    names = {definition.name for definition in _armed_ui_tools()}
+
+    assert names == {"navigate", "set_filter", "open_logs", "open_describe", "drill_down"}
+
+
+@pytest.mark.parametrize(
+    "definition", _armed_ui_tools(), ids=lambda definition: str(definition.name)
+)
+def test_every_armed_ui_tool_converts_to_a_typed_action(definition: ToolDef) -> None:
+    """A UI tool a policy can arm must have a `UiAction` behind it.
+
+    This is derived from the registry, not from a list kept next to it: a
+    future screen tool added with `effect="ui_only"` and an agent surface
+    is armed the moment a policy includes it, and without a conversion the
+    model's first call comes back "no UI action mapping" — a tool korvid
+    published and cannot run. The arguments come from each tool's own
+    schema, so the check follows a schema change too.
+    """
+    action = _ui_action(definition, _minimal_arguments(definition.schema))
+
+    assert isinstance(action, get_args(UiAction))
+
+
+def test_the_completeness_check_fails_for_a_tool_with_no_conversion() -> None:
+    """The teeth of the check above: a screen tool nothing converts.
+
+    Stands in for the next `ui_only` tool someone adds to the registry and
+    arms on an agent surface without teaching `_ui_action` about it — the
+    parametrised test would collect it, call this same function, and fail
+    here instead of shipping a tool whose every call answers "no UI action
+    mapping".
+    """
+    future_tool = ToolDef(
+        name="split_pane",
+        effect="ui_only",
+        dispatch="agent_split_pane",
+        surfaces=AGENT_SURFACES,
+        result_format="untrusted_text",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "split_pane",
+                "description": "Split the workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"index": {"type": "integer"}},
+                    "required": ["index"],
+                },
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="no UI action mapping"):
+        _ui_action(future_tool, _minimal_arguments(future_tool.schema))
+
+
+@pytest.mark.parametrize(
+    "definition", _armed_ui_tools(), ids=lambda definition: str(definition.name)
+)
+async def test_every_armed_ui_tool_reaches_the_bridge_end_to_end(definition: ToolDef) -> None:
+    """And the same call really does apply through the harness."""
+    bridge = _RecordingBridge()
+    harness = _harness(_policy([definition.name], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute("c1", definition.name, _minimal_arguments(definition.schema))
+
+    assert result.outcome.error is False
+    assert len(bridge.actions) == 1
 
 
 async def test_ui_invalid_arguments_return_one_bounded_error_without_bridge() -> None:
@@ -690,6 +798,64 @@ async def test_reject_mints_no_evidence() -> None:
 
     assert evidence.references() == ()
     assert evidence.prompt_note() == ""
+
+
+async def test_an_unarmed_call_does_not_spend_the_iteration_budget() -> None:
+    """A refusal is not a dispatch, however the model spelled the name.
+
+    An unarmed name never reaches a port — the harness answers it from a
+    fixed string. Charging the iteration budget for it lets a model that
+    guesses two wrong names spend a low-tier iteration without korvid
+    doing any work, and the correction it is being given becomes
+    unusable: the very next (correct) call is refused for budget.
+    """
+    execution = _RecordingExecution()
+    harness = _harness(
+        _policy(["get_logs"], max_tool_calls=1, tier=ModelTier.LOW), execution=execution
+    )
+    harness.begin_iteration()
+
+    unarmed = await harness.execute("c1", "delete_resource", {"kind": "pods", "name": "api-1"})
+    real = await harness.execute("c2", "get_logs", {"pod": "api-1", "namespace": "default"})
+
+    assert unarmed.outcome.error is True
+    assert "not armed" in unarmed.outcome.text
+    assert real.outcome.error is False
+    assert execution.calls == [("get_logs", {"pod": "api-1", "namespace": "default"})]
+
+
+async def test_an_unknown_tool_name_does_not_spend_the_iteration_budget() -> None:
+    """The same rule for a name no registry entry defines at all."""
+    execution = _RecordingExecution()
+    harness = _harness(
+        _policy(["get_logs"], max_tool_calls=1, tier=ModelTier.LOW), execution=execution
+    )
+    harness.begin_iteration()
+
+    unknown = await harness.execute("c1", "hallucinated_tool", {})
+    real = await harness.execute("c2", "get_logs", {"pod": "api-1", "namespace": "default"})
+
+    assert unknown.outcome.error is True
+    assert real.outcome.error is False
+    assert execution.calls == [("get_logs", {"pod": "api-1", "namespace": "default"})]
+
+
+async def test_the_budget_still_bounds_the_calls_that_do_dispatch() -> None:
+    """Not charging refusals must not stop charging real calls."""
+    execution = _RecordingExecution()
+    harness = _harness(
+        _policy(["get_logs"], max_tool_calls=1, tier=ModelTier.LOW), execution=execution
+    )
+    harness.begin_iteration()
+
+    await harness.execute("c1", "delete_resource", {"kind": "pods", "name": "api-1"})
+    first = await harness.execute("c2", "get_logs", {"pod": "api-1", "namespace": "default"})
+    second = await harness.execute("c3", "get_logs", {"pod": "api-2", "namespace": "default"})
+
+    assert first.outcome.error is False
+    assert second.outcome.error is True
+    assert "budget exhausted" in second.outcome.text
+    assert len(execution.calls) == 1
 
 
 async def test_reject_does_not_spend_the_iteration_budget() -> None:

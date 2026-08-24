@@ -320,15 +320,12 @@ _PUBLIC_SURFACE = {
     "AgentUiBridge",
     "ClusterFacts",
     "DrillDown",
-    "FocusPane",
     "InteractionContext",
     "Navigate",
     "OpenDescribe",
-    "OpenEvidence",
     "OpenLogs",
     "PaneContext",
     "ResourceIdentity",
-    "SelectResource",
     "SetFilter",
     "UiAction",
     "UiActionResult",
@@ -509,3 +506,98 @@ def test_naming_the_submodules_does_not_make_the_package_import_them() -> None:
         [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_the_package_docstring_counts_the_submodules_not_the_contracts() -> None:
+    """The docstring said "two contracts" over a list of five names.
+
+    A plugin author counting them finds `ProviderPlugin`,
+    `ProviderPluginMetadata`, `ProviderPluginConfig`,
+    `PROVIDER_PLUGIN_API_VERSION` and `CredentialSource` — five contracts
+    in two submodules. A prose count that disagrees with its own list
+    makes the reader wonder which three were left out.
+    """
+    import korvid.agent as agent_package
+
+    doc = agent_package.__doc__ or ""
+    named = sum(len(names) for names in _SUBMODULE_ONLY_CONTRACTS.values())
+
+    assert len(_SUBMODULE_ONLY_CONTRACTS) == 2
+    assert named == 5
+    assert "Two public contracts" not in doc
+    assert "two submodules" in doc
+
+
+# ---------------------------------------------------------------------------
+# The typed UI action surface korvid actually ships
+# ---------------------------------------------------------------------------
+
+#: The action classes an armed registry tool can produce, and therefore the
+#: whole `UiAction` union. Named here (not derived) so a member added
+#: without a tool behind it fails this file, which is where the rule lives.
+_SHIPPED_UI_ACTIONS = ("Navigate", "SetFilter", "OpenLogs", "OpenDescribe", "DrillDown")
+
+#: Action classes that shipped in the union with no tool able to produce
+#: them: three dataclasses, three eval-bridge branches and three live-bridge
+#: branches implementing an action the model could never call.
+_UNREACHABLE_UI_ACTIONS = ("SelectResource", "FocusPane", "OpenEvidence")
+
+#: The design and plan pages for the harness. Excluded from the historical
+#: allowance above precisely because they describe the surface as *shipped*:
+#: a reader takes the action list in them for what exists today.
+_HARNESS_DESIGN_PAGES = (
+    "docs/superpowers/specs/2026-08-23-agent-interaction-harness-design.md",
+    "docs/superpowers/plans/2026-08-23-agent-interaction-harness.md",
+)
+
+
+def test_the_union_is_exactly_the_actions_a_registry_tool_can_produce() -> None:
+    from korvid.agent import interaction
+
+    union = {member.__name__ for member in interaction.UiAction.__args__}
+
+    assert union == set(_SHIPPED_UI_ACTIONS)
+    for name in _UNREACHABLE_UI_ACTIONS:
+        assert not hasattr(interaction, name), f"{name} is back in the interaction module"
+
+
+@pytest.mark.parametrize("name", _UNREACHABLE_UI_ACTIONS)
+def test_no_unreachable_action_survives_anywhere_in_the_tree(name: str) -> None:
+    """Union, exports, both bridges, and the eval recorder — one sweep.
+
+    The three implementations of each removed action were spread across
+    `agent/interaction.py`, `agent/__init__.py`, `ui/agent_workspace_bridge.py`
+    and `evals/interaction.py`; a partial deletion leaves a branch that
+    cannot run but must still be maintained.
+    """
+    offenders = [
+        _relative(path)
+        for path in (*_SRC_FILES, *_TEST_FILES)
+        if name in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == [], f"{name} still appears in {offenders}"
+
+
+@pytest.mark.parametrize("page", _HARNESS_DESIGN_PAGES)
+def test_the_harness_design_pages_describe_the_shipped_action_surface(page: str) -> None:
+    """The pages a reader plans the next action from must name what ships.
+
+    They may keep describing the migration, but the list of typed actions
+    has to be the five korvid arms, plus the rule that made three of the
+    original eight unreachable: a new action starts with a registry schema
+    and eval evidence, not with a dataclass.
+    """
+    text = (_REPO_ROOT / page).read_text(encoding="utf-8")
+
+    for action in ("navigate", "filter", "logs", "describe", "drill"):
+        assert action in text.lower(), f"{page} does not name the shipped {action} action"
+    assert "registry" in text.lower()
+    assert "eval" in text.lower()
+    for name in _UNREACHABLE_UI_ACTIONS:
+        offenders = [
+            line
+            for line in text.splitlines()
+            if name in line and "never shipped" not in line.lower()
+        ]
+        assert offenders == [], f"{page} still offers {name}: {offenders}"

@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -101,3 +102,34 @@ def test_a_failing_or_malformed_hook_blocks_the_request() -> None:
     assert "sk-should-not-surface" not in str(raised.value)
     with pytest.raises(OutboundPolicyError, match="returned an invalid shape"):
         provider_prepared_messages(_Malformed(), [])
+
+
+def test_the_request_sent_note_points_a_plugin_author_at_the_shipped_api() -> None:
+    """`REQUEST_SENT` explains why plugins do not emit it, so it has to name
+    the contract they really write against.
+
+    A plugin author reading "the plugin contract (API v1) knows four event
+    types" goes looking for API 1 — a contract `ValidatedPluginProvider`
+    rejects at construction, because `PROVIDER_PLUGIN_API_VERSION` is 2.
+    """
+    import ast
+
+    import korvid.agent.provider as provider_module
+    from korvid.agent.provider_plugin import PROVIDER_PLUGIN_API_VERSION
+
+    source = Path(str(provider_module.__file__)).read_text(encoding="utf-8")
+    body = ast.parse(source).body
+    note = ""
+    for index, node in enumerate(body):
+        target = getattr(node, "target", None)
+        if isinstance(node, ast.AnnAssign) and getattr(target, "id", "") == "REQUEST_SENT":
+            following = body[index + 1]
+            assert isinstance(following, ast.Expr)
+            value = following.value
+            assert isinstance(value, ast.Constant)
+            note = str(value.value)
+
+    assert note, "REQUEST_SENT has lost its attribute docstring"
+    assert PROVIDER_PLUGIN_API_VERSION == 2
+    assert "API v1" not in note
+    assert f"API {PROVIDER_PLUGIN_API_VERSION}" in note

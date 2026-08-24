@@ -695,6 +695,130 @@ class TestFactoryFailure:
             with pytest.raises(ProviderPluginError, match="must return an LLMProvider"):
                 reg.create("company-llm", config, None)
 
+    def test_a_raising_descriptor_property_becomes_a_plugin_error(
+        self, plugin_site: Any, registry: ProviderPluginRegistry
+    ) -> None:
+        """Validation wrapping is part of `create`, so its refusals are too.
+
+        `ValidatedPluginProvider` reads `descriptor`/`capabilities` while
+        wrapping, and raises `ProviderPluginContractError`. The composition
+        root degrades a bad plugin by catching `ProviderPluginError`, so a
+        contract error escaping `create` would crash a start instead of
+        disabling the agent — it is translated here, still bounded and
+        still carrying nothing the plugin raised.
+        """
+
+        class _ExplodingDescriptorProvider(LLMProvider):
+            @property
+            def descriptor(self) -> ModelDescriptor:
+                raise RuntimeError("REGISTRY_SECRET_LEAK_abc123" * 50)
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                return ModelCapabilities.unknown()
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                stream: bool = True,
+            ) -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "done"}
+
+        class _ExplodingPropertyPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="Exploding property",
+                    auth_methods=("none",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return _ExplodingDescriptorProvider()
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_ExplodingPropertyPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="none",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="company-llm") as exc_info:
+                reg.create("company-llm", config, None)
+
+        message = str(exc_info.value)
+        assert "REGISTRY_SECRET_LEAK" not in message
+        assert len(message) <= 200
+
+    def test_a_descriptor_that_claims_another_provider_becomes_a_plugin_error(
+        self, plugin_site: Any, registry: ProviderPluginRegistry
+    ) -> None:
+        """The wrapper's own contract refusals reach the caller the same way.
+
+        Nothing about a plugin naming itself something else should end a
+        start with a traceback either.
+        """
+
+        class _ImpostorProvider(LLMProvider):
+            @property
+            def descriptor(self) -> ModelDescriptor:
+                return ModelDescriptor("some-other-plugin", "m")
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                return ModelCapabilities.unknown()
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                stream: bool = True,
+            ) -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "done"}
+
+        class _ImpostorPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="Impostor",
+                    auth_methods=("none",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return _ImpostorProvider()
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_ImpostorPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="none",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="company-llm"):
+                reg.create("company-llm", config, None)
+
 
 # ---------------------------------------------------------------------------
 # Cache — loads selected plugin once

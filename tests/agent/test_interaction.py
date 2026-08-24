@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from inspect import Signature, signature
-from typing import get_type_hints
+from typing import get_args, get_type_hints
 
 import pytest
 
@@ -13,15 +13,12 @@ from korvid.agent.interaction import (
     AgentUiBridge,
     ClusterFacts,
     DrillDown,
-    FocusPane,
     InteractionContext,
     Navigate,
     OpenDescribe,
-    OpenEvidence,
     OpenLogs,
     PaneContext,
     ResourceIdentity,
-    SelectResource,
     SetFilter,
     UiAction,
     UiActionResult,
@@ -130,27 +127,6 @@ def test_navigate_rejects_blank_view() -> None:
         Navigate(view=" ", namespace="default")
 
 
-def test_select_resource_contract_requires_kind_and_name() -> None:
-    params = signature(SelectResource).parameters
-
-    assert params["kind"].default is Signature.empty
-    assert params["name"].default is Signature.empty
-    assert params["namespace"].default is None
-    assert params["uid"].default is None
-
-    action = SelectResource(kind="Pod", name="api-1")
-
-    assert action.kind == "Pod"
-    assert action.name == "api-1"
-    assert action.namespace is None
-    assert action.uid is None
-
-
-def test_select_resource_rejects_blank_name() -> None:
-    with pytest.raises(ValueError, match="name"):
-        SelectResource(kind="Pod", namespace="default", name=" ", uid="uid-1")
-
-
 def test_set_filter_rejects_blank_pattern() -> None:
     with pytest.raises(ValueError, match="filter_pattern"):
         SetFilter(filter_pattern=" ")
@@ -159,11 +135,6 @@ def test_set_filter_rejects_blank_pattern() -> None:
 def test_set_filter_none_clears_the_filter_explicitly() -> None:
     assert SetFilter().filter_pattern is None
     assert SetFilter(None).filter_pattern is None
-
-
-def test_focus_pane_requires_left_or_right_pane() -> None:
-    with pytest.raises(ValueError, match="index"):
-        FocusPane(index=2)
 
 
 def test_open_logs_contract_requires_pod_and_namespace() -> None:
@@ -223,19 +194,24 @@ def test_drill_down_rejects_blank_name() -> None:
         DrillDown(name=" ")
 
 
-def test_open_evidence_contract_requires_ref() -> None:
-    params = signature(OpenEvidence).parameters
+def test_the_union_holds_exactly_the_actions_a_model_can_reach() -> None:
+    """The typed action surface is what an armed tool can produce, no more.
 
-    assert params["ref"].default is Signature.empty
-
-    action = OpenEvidence(ref="trace://event-123")
-
-    assert action.ref == "trace://event-123"
-
-
-def test_open_evidence_rejects_blank_ref() -> None:
-    with pytest.raises(ValueError, match="ref"):
-        OpenEvidence(ref=" ")
+    Every member has to be reachable from a registry tool the agent
+    surfaces arm — `ToolHarness._ui_action` is the only producer of
+    `UiAction` in production. A member with no tool behind it is a
+    contract the model can never use, an eval bridge branch nothing
+    scores, and a live bridge branch nothing exercises: three
+    implementations of an action korvid does not ship. Adding one starts
+    with a registry schema and eval evidence, not with a dataclass here.
+    """
+    assert set(get_args(UiAction)) == {
+        Navigate,
+        SetFilter,
+        OpenLogs,
+        OpenDescribe,
+        DrillDown,
+    }
 
 
 def test_interaction_module_exports_live_at_package_level() -> None:

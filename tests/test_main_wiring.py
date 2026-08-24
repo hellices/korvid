@@ -1187,6 +1187,160 @@ async def test_a_ctx_retarget_re_arms_a_later_rebuild(monkeypatch: object) -> No
     assert "resize_pod" in [t["function"]["name"] for t in rebuilt.policy.tools]
 
 
+#: Two rules at the parser's own per-rule ceiling. Composed into the
+#: static prompt they push a low-tier policy (24,000-character history,
+#: a 25% static share) past its budget — the exact shape of an operator
+#: who migrated a large retired prompt block into `agent.rules`.
+_OVERSIZED_RULES = ("R" * 1000, "S" * 1000)
+
+
+async def test_an_uncomposable_prompt_disables_only_the_agent_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rules block too large for the routed model must not fail the start.
+
+    `DefaultAgentSession` validates the static prompt at construction, so
+    an operator whose `agent.rules` no longer fit the automatically routed
+    low-tier budget would otherwise get a traceback out of the composition
+    root instead of a TUI — and, under the app's restart-on-failure
+    handling, a start that fails the same way every time. It is the same
+    class of configuration mistake as a model that cannot call tools, and
+    degrades the same way: korvid comes up, the agent is off, one warning
+    says why and what to change, and the `:ai` wizard is still there to
+    point the agent somewhere it fits.
+    """
+    from korvid.__main__ import _build_agent_wiring
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    _stub_providers(monkeypatch)
+    warnings: list[str] = []
+    wiring = _build_agent_wiring(
+        _agent_config(agent_rules=_OVERSIZED_RULES),
+        cast("Any", object()),
+        {},
+        startup_warnings=warnings,
+    )
+
+    assert wiring.session is None
+    assert wiring.session_box[0] is None
+    # The provider stays owned by the box the teardown guard reads: a
+    # degraded agent must not leak the credential client it built.
+    assert wiring.provider_box[0] is not None
+    # Recovery is still wired: the wizard can re-point the agent, and the
+    # rebuild it drives is the same transaction it always was.
+    assert wiring.configurator is not None
+    assert wiring.rebuild is not None
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning.startswith("agent disabled:")
+    assert "agent.rules" in warning
+    # Actionable, and never an echo of what the operator wrote: the rule
+    # text can carry anything, including secrets.
+    assert "R" * 1000 not in warning
+    assert "S" * 1000 not in warning
+
+
+async def test_the_degraded_start_neither_raises_nor_composes_a_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal is caught where the session is built, not swallowed later.
+
+    Pins the two halves a restart loop would need: nothing propagates out
+    of the wiring, and the failure really is the prompt harness refusing
+    this policy (so a future change that stops validating eagerly fails
+    here rather than silently shipping an agent with an over-budget
+    prompt).
+    """
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.prompt_harness import PromptHarness, StaticPromptTooLargeError
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    _stub_providers(monkeypatch)
+    refusals: list[tuple[str, ...]] = []
+    original = PromptHarness.validate
+
+    def _record(self: Any, policy: Any, user_rules: tuple[str, ...] = ()) -> None:
+        try:
+            original(self, policy, user_rules)
+        except StaticPromptTooLargeError:
+            refusals.append(user_rules)
+            raise
+
+    monkeypatch.setattr(PromptHarness, "validate", _record)
+
+    warnings: list[str] = []
+    wiring = _build_agent_wiring(
+        _agent_config(agent_rules=_OVERSIZED_RULES),
+        cast("Any", object()),
+        {},
+        startup_warnings=warnings,
+    )
+
+    assert refusals == [_OVERSIZED_RULES]
+    assert wiring.session is None
+    assert warnings != []
+
+
+async def test_a_rebuild_that_cannot_compose_stays_transactional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The startup degrade must not soften the `:ai` wizard's swap.
+
+    A start that routes high composes the same rules comfortably; asking
+    the wizard for the low tier makes them over-budget. That failure is
+    the wizard's to show — the live session and provider stay exactly as
+    they were, only the half-built replacement is released, and the error
+    reaches the caller instead of leaving the user with a silently
+    unchanged agent.
+    """
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.prompt_harness import StaticPromptTooLargeError
+
+    providers = _stub_providers(monkeypatch)
+    warnings: list[str] = []
+    wiring = _build_agent_wiring(
+        _agent_config(agent_model_tier="high", agent_rules=_OVERSIZED_RULES),
+        cast("Any", object()),
+        {},
+        startup_warnings=warnings,
+    )
+    session = wiring.session
+    assert session is not None
+    assert warnings == []
+    live_provider = wiring.provider_box[0]
+    rebuild = wiring.rebuild
+    assert rebuild is not None
+
+    with pytest.raises(StaticPromptTooLargeError, match="static system prompt"):
+        rebuild(
+            AgentSettings(
+                provider="openai",
+                auth_method="api_key",
+                base_url="http://localhost:9999/v1",
+                model="m",
+                api_key_env="KORVID_TEST_KEY",
+                model_tier="low",
+            )
+        )
+
+    assert wiring.provider_box[0] is live_provider
+    assert wiring.session_box[0] is session
+    # Only the replacement it built is released.
+    assert providers[-1] is not live_provider
+    await _wait_for_provider_close(providers[-1])
+    await session.aclose()
+
+
+async def _wait_for_provider_close(provider: Any) -> None:
+    """Wait for the background close of a discarded provider."""
+    for _ in range(50):
+        if provider.closed:
+            return
+        await asyncio.sleep(0.01)
+    assert provider.closed
+
+
 async def test_a_refused_retarget_fails_the_switch_instead_of_keeping_the_old_cluster(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1894,6 +2048,60 @@ async def _wait_for_close_count(provider: object, expected: int) -> None:
             return
         await asyncio.sleep(0.01)
     assert inner.close_calls == expected
+
+
+async def test_a_plugin_property_that_raises_degrades_the_start_to_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A third-party `descriptor`/`capabilities` read is plugin code too.
+
+    `ValidatedPluginProvider` reads both while wrapping the plugin's
+    provider, before korvid has any use for them. A plugin that raises
+    there — a lazy credential read, a probe — must degrade exactly like
+    every other plugin failure: a startup warning, provider None, a
+    usable TUI. Anything the exception carries stays out of the warning.
+    """
+    from korvid.__main__ import _build_agent_wiring
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
+    _install_company_plugin_site(monkeypatch, tmp_path)
+    config = dataclasses.replace(
+        _company_plugin_config(), agent_options={"raise_in_property": "descriptor"}
+    )
+    warnings: list[str] = []
+
+    wiring = _build_agent_wiring(config, cast("Any", object()), {}, startup_warnings=warnings)
+
+    assert wiring.session is None
+    assert wiring.provider_box[0] is None
+    assert wiring.configurator is not None
+    assert len(warnings) == 1
+    assert "Provider plugin failed" in warnings[0]
+    assert "PLUGIN_SECRET" not in warnings[0]
+
+
+async def test_a_plugin_capabilities_property_that_raises_degrades_the_same_way(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The capability read is wrapped separately from the descriptor read."""
+    from korvid.__main__ import _build_agent_wiring
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
+    _install_company_plugin_site(monkeypatch, tmp_path)
+    config = dataclasses.replace(
+        _company_plugin_config(), agent_options={"raise_in_property": "capabilities"}
+    )
+    warnings: list[str] = []
+
+    wiring = _build_agent_wiring(config, cast("Any", object()), {}, startup_warnings=warnings)
+
+    assert wiring.session is None
+    assert wiring.provider_box[0] is None
+    assert len(warnings) == 1
+    assert "Provider plugin failed" in warnings[0]
+    assert "PLUGIN_SECRET" not in warnings[0]
 
 
 async def test_plugin_rebuild_failure_keeps_the_previous_provider_open(

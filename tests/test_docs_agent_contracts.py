@@ -300,3 +300,76 @@ def test_the_low_pack_documentation_publishes_no_score() -> None:
     end = methodology.find("\n## ", start)
     section = methodology[start:] if end == -1 else methodology[start:end]
     assert not re.search(r"\d+(\.\d+)?\s?%", section), section
+
+
+# ---------------------------------------------------------------------------
+# 5. No retired arm name offered as a feature, in prose or in a docstring
+# ---------------------------------------------------------------------------
+
+#: The two arm names the retired profile key took. They were replaced by
+#: `agent.model_tier` (`low`/`high`/absent), so a page still offering one
+#: is describing a knob `KorvidConfig` rejects at startup.
+_RETIRED_ARM_PROSE = re.compile(r"`?(small|full)`?[- ]profile", re.IGNORECASE)
+
+#: A published release note records what *that* release shipped and is not
+#: rewritten; only `unreleased.md` describes the program being built.
+_CURRENT_PAGES = [
+    path
+    for path in _MARKDOWN_FILES
+    if not _relative(path).startswith("docs/release-notes/")
+    or _relative(path) == "docs/release-notes/unreleased.md"
+]
+
+
+@pytest.mark.parametrize("path", _CURRENT_PAGES, ids=_relative)
+def test_no_current_page_offers_a_small_or_full_profile(path: Path) -> None:
+    """The README's feature list is the first thing a new user reads.
+
+    "including a `small` profile tuned for 3B-14B local models" names an
+    arm korvid no longer has; the equivalent today is the low model tier,
+    which is also what an operator has to write in config.yaml.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    offenders = [
+        line
+        for index, line in enumerate(lines)
+        if _RETIRED_ARM_PROSE.search(line) and not _historically_marked(lines, index)
+    ]
+
+    assert offenders == [], f"{_relative(path)} still offers a retired arm: {offenders}"
+
+
+def test_the_release_note_scan_still_covers_the_pages_it_should() -> None:
+    """The exclusion above must not quietly empty the parametrisation."""
+    scanned = {_relative(path) for path in _CURRENT_PAGES}
+
+    assert "README.md" in scanned
+    assert "docs/overview.md" in scanned
+    assert "docs/release-notes/unreleased.md" in scanned
+    assert not any(
+        page.startswith("docs/release-notes/") and page != "docs/release-notes/unreleased.md"
+        for page in scanned
+    )
+
+
+def test_the_agent_ui_controller_docstring_names_what_it_owns_today() -> None:
+    """A module docstring is read like documentation, so it is held to it.
+
+    `AgentUiController` holds `_configured_tier` — the explicit
+    `agent.model_tier` the wizard seeds from — and has held no capability
+    profile since the tier replaced it.
+    """
+    import korvid.ui.agent_ui_controller as controller_module
+
+    doc = controller_module.__doc__ or ""
+
+    assert "capability profile" not in doc
+    assert "model tier" in doc
+
+
+def test_the_ui_controller_reference_describes_the_state_it_really_owns() -> None:
+    """The same claim in `docs/dev/ui-controllers.md`'s owner list."""
+    controllers = _text("docs/dev/ui-controllers.md")
+
+    assert "settings / profile" not in controllers
+    assert "model tier" in controllers

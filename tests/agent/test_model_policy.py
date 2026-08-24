@@ -394,6 +394,39 @@ def test_catalog_version() -> None:
     assert MODEL_CATALOG_VERSION == 1
 
 
+def test_the_shipped_catalog_cannot_be_edited_in_place() -> None:
+    """The catalog is a shipped fact, and every router reads the same object.
+
+    `MODEL_CATALOG` is module state imported by the composition root, the
+    evals and any caller resolving a policy. As a list, one
+    `append`/`clear` anywhere — a test that forgot to copy, a plugin
+    poking at the module — silently re-tiers every later session, and the
+    header would still report the routing as catalogue-derived. A tuple
+    makes that a `AttributeError` at the point of the mistake.
+    """
+    from korvid.agent.model_catalog import MODEL_CATALOG
+
+    assert isinstance(MODEL_CATALOG, tuple)
+    assert not hasattr(MODEL_CATALOG, "append")
+
+
+def test_the_router_still_takes_the_shipped_catalog_as_it_ships() -> None:
+    """Freezing the container must not force every caller to convert it."""
+    from korvid.agent.model_catalog import MODEL_CATALOG
+
+    policy = ModelRouter(MODEL_CATALOG).resolve(
+        descriptor=ModelDescriptor(provider="ollama", model="qwen3:8b"),
+        provider_capabilities=ModelCapabilities.unknown(),
+        explicit_tier=None,
+        environment=PolicyEnvironment(
+            readonly=False, resize_supported=False, observability_backends=frozenset()
+        ),
+    )
+
+    assert policy.tier is ModelTier.LOW
+    assert policy.catalog_version == MODEL_CATALOG_VERSION
+
+
 # ---------------------------------------------------------------------------
 # Model switch re-resolution
 # ---------------------------------------------------------------------------

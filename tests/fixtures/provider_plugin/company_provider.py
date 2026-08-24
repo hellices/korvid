@@ -26,18 +26,31 @@ def _thaw(value: object) -> object:
 
 
 class _CompanyLLMProvider(LLMProvider):
-    def __init__(self, turns: list[list[object]]) -> None:
+    def __init__(self, turns: list[list[object]], *, raise_in: str | None = None) -> None:
         self._turns = turns
+        self._raise_in = raise_in
         self.calls: list[list[dict[str, Any]]] = []
         self.tools_seen: list[list[dict[str, Any]]] = []
         self.close_calls = 0
 
+    def _maybe_explode(self, prop: str) -> None:
+        """Raise a secret-bearing error from a property, on demand.
+
+        Real plugins compute these lazily (an HTTP probe, a credential
+        read), so a property is a place a third party's exception — and
+        whatever it carries — can reach korvid.
+        """
+        if self._raise_in == prop:
+            raise RuntimeError(f"PLUGIN_SECRET_{prop.upper()}_abc123xyz" * 10)
+
     @property
     def descriptor(self) -> ModelDescriptor:
+        self._maybe_explode("descriptor")
         return ModelDescriptor("company-llm", "company-llm-v1")
 
     @property
     def capabilities(self) -> ModelCapabilities:
+        self._maybe_explode("capabilities")
         return ModelCapabilities.unknown()
 
     async def complete(
@@ -82,4 +95,7 @@ class CompanyProviderPlugin(ProviderPlugin):
         turns = raw_turns if isinstance(raw_turns, list) else None
         if turns is None:
             turns = [[{"type": "text_delta", "text": "hello"}, {"type": "done"}]]
-        return _CompanyLLMProvider(turns)
+        raise_in = config.options.get("raise_in_property")
+        return _CompanyLLMProvider(
+            turns, raise_in=str(raise_in) if isinstance(raise_in, str) else None
+        )
