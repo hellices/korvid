@@ -1038,6 +1038,43 @@ async def test_a_panel_failure_repaints_the_header_from_the_session_totals(
     await env.close()
 
 
+async def test_a_failing_header_repaint_still_reports_the_original_failure(
+    tmp_path: Path,
+) -> None:
+    """The repaint is cosmetic; the error report settles the panel.
+
+    A panel that is already failing is exactly where `set_header` can fail
+    too. If that second failure escaped, it would replace the one the user
+    needs to see *and* skip the `AgentError` — the only event that takes
+    the panel out of its running state — so the next prompt would be
+    refused for the rest of the session.
+    """
+
+    class _HeaderExplodingPanel(ExplodingPanel):
+        def set_header(
+            self,
+            model: str,
+            input_tokens: int,
+            output_tokens: int,
+            *,
+            estimated: bool,
+            tier: str | None = None,
+        ) -> None:
+            raise RuntimeError("header widget is gone")
+
+    panel = _HeaderExplodingPanel(on=TextDelta)
+    session = StrictSession([TextDelta(text="partial")])
+    env = Env(tmp_path=tmp_path, session=session, panel=panel)
+    env.controller.submit_prompt("hi")
+    await env.controller.wait_for_turn()
+    await settle()
+
+    assert session.finalized == 1
+    errors = [event for event in panel.events if isinstance(event, AgentError)]
+    assert [event.message for event in errors] == ["panel exploded"]
+    await env.close()
+
+
 async def test_a_panel_failure_after_the_turn_ended_needs_no_finalization(
     tmp_path: Path,
 ) -> None:

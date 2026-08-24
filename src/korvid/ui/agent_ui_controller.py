@@ -1054,7 +1054,14 @@ class AgentUiController:
                 # turn happens to refresh it; `set_header` takes totals,
                 # not a delta, so nothing the panel already added is
                 # counted twice.
-                self._render_header(session, self._model_name)
+                #
+                # Best-effort on purpose: a panel that just failed is
+                # exactly where a repaint can fail too, and that must not
+                # replace the failure the user needs to see — nor skip the
+                # `AgentError` below, which is the only event that takes
+                # the panel out of its running state.
+                with contextlib.suppress(Exception):
+                    self._render_header(session, self._model_name)
             self._panel.apply_event(AgentError(message=str(exc)))
 
     def _finish_interrupted_turn(self, session: AgentSession | None) -> None:
