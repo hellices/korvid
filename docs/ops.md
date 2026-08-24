@@ -75,9 +75,16 @@ big a tool result may be. It has **no** effect on the safety perimeter:
 - there is no shell or free-form `kubectl` tool at any tier, so there is
   no command line to smuggle a flag into: the agent's whole cluster
   surface is the structured tool registry
-  (`src/korvid/tools/registry.py`), whose calls the `ToolExecutor`
-  dispatches after validating the arguments against each tool's declared
-  schema;
+  (`src/korvid/tools/registry.py`). The resolved policy arms only the
+  registry's own exact tool names — never one it invents — and the
+  registry validates every dispatch target against its import-time
+  metadata (which class and method an effect may reach). The
+  `ToolExecutor` rejects any name outside that registry as an unknown tool
+  and performs its own explicit, typed argument validation before a write
+  reaches the cluster — a wrong-typed `kind`, `name`, `namespace`,
+  `replicas`, or `resources` value is refused, not coerced. The tool's
+  declared JSON schema is model-facing wording sent to the provider, not
+  the runtime check;
 - every tool result — cluster read, screen action, or failure — passes
   the masking pipeline before it reaches the model or the provider, and
   a result that cannot be safely redacted stops the turn instead of

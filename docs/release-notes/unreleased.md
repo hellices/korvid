@@ -22,7 +22,7 @@ believing its wording was still in effect.
 | `agent.profile: full` | `agent.model_tier: high` — or omit the key |
 | `agent.prompts.append` | `agent.rules` (a list of short house rules) |
 | `agent.prompts.system` / `system_file` | *(none)* — grind the tier pack in the eval harness |
-| `agent.prompts.tool_descriptions` | *(none)* — tool wording is the registry's |
+| `agent.prompts.tool_descriptions` | *(none)* — deployment overrides removed: the low tier ships its own shipped, versioned, bounded wording by exact tool name; the high tier and the MCP server still use the registry's wording |
 
 ```yaml
 # before
@@ -47,6 +47,22 @@ the reason for it are visible without re-reading configuration.
 Every other `agent:` key keeps its meaning: `provider`, `base_url`, `model`,
 `auth`, `api_key_env`, `follow`, `disable_in_protected`, and the
 `agent.ollama.*` tuning knobs.
+
+### Migration warning: a large `agent.rules` block can now fail to start
+
+The low tier's static prompt — the safety contract, the common role, the
+tier pack, and the armed-capability clauses, fully armed (writes and both
+screen tools) — is already **~3,864** characters of the **6,000-character**
+budget `PromptHarness` enforces for it (25% of the tier's 24,000-character
+history budget), leaving roughly **~2.1k characters** of headroom for
+`agent.rules` and any provider/exact-model overlay. This budget is new:
+the retired `agent.prompts.append` mechanism enforced no such share of the
+history budget, so a rule set (or `system`/`append` text migrated
+verbatim into `agent.rules`) that the old profile-based agent accepted
+without complaint can now be too large. Startup raises
+`StaticPromptTooLargeError` instead of silently crowding out the
+conversation — shorten the rule set (or move guidance the tool descriptions
+and safety contract already cover) if korvid refuses to start with it.
 
 ### Provider plugin API 1 → API 2
 
@@ -86,11 +102,15 @@ only a user keystroke executes it; a write still carries the preconditions
 fail-closed, so a write whose audit record cannot be written does not run;
 read-only mode still means no write schema is offered at all; there is
 still no shell or free-form `kubectl` tool at either tier, so the agent's
-whole cluster surface remains the structured tool registry the
-`ToolExecutor` dispatches after validating arguments against each tool's
-declared schema; and every tool result still passes the masking pipeline
-before it reaches the model or the provider. House rules are composed
-*after* the immutable safety contract and cannot widen it.
+whole cluster surface remains the structured tool registry — the resolved
+policy arms only the registry's own exact tool names, the registry
+validates every dispatch target against its import-time metadata, and the
+`ToolExecutor` rejects any name outside that registry as an unknown tool
+and performs its own explicit, typed argument validation before a write
+reaches the cluster (the tool's declared JSON schema is model-facing
+wording, not the runtime check); and every tool result still passes the
+masking pipeline before it reaches the model or the provider. House rules
+are composed *after* the immutable safety contract and cannot widen it.
 
 ## Other agent-visible changes
 

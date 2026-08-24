@@ -533,7 +533,7 @@ effect.
 | `agent.profile: full` | `agent.model_tier: high` | or omit the key |
 | `agent.prompts.append` | `agent.rules` | a list of short rules, appended after the safety contract |
 | `agent.prompts.system` / `system_file` | *(none)* | the role statement is korvid's; grind the tier pack in the eval harness instead |
-| `agent.prompts.tool_descriptions` | *(none)* | tool wording is the registry's, so every surface (agent, MCP, evals) describes a tool identically |
+| `agent.prompts.tool_descriptions` | *(none)* | deployment tool-wording overrides were removed: the low tier now ships its own shipped, versioned, bounded descriptions (`LOW_TOOL_DESCRIPTIONS`, applied by exact tool name only); the high tier and the MCP server still describe every tool with the registry's own wording; an eval run's prompt fingerprint hashes the schemas the resolved policy actually carries, so a wording change on either arm is detectable |
 
 ```yaml
 # before
