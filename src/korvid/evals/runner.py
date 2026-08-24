@@ -48,6 +48,7 @@ from korvid.evals.harness import (
     resolve_eval_policy,
 )
 from korvid.evals.interaction import EvalUiBridge
+from korvid.evals.outcome import classify_outcome
 from korvid.evals.scenario import Scenario
 from korvid.tools.executor import (
     WRITE_TOOL_NAMES,
@@ -103,8 +104,20 @@ class _RecordingExecutor(RecordedExecution):
         The eval bridge reports here so a journey that grades "and it put
         that on screen" sees the action where the model made it, without
         the agent minting evidence for a screen move.
+
+        The record is *marked* as a screen action, because the stream it
+        joins is also what evidence is graded against: an action's message
+        names the resource it moved to, so an unmarked one could satisfy a
+        read that never happened (`grader._satisfies`).
         """
-        self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
+        self.records.append(
+            ToolRecord(
+                name=name,
+                arguments=dict(arguments),
+                result=result,
+                screen_action=True,
+            )
+        )
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         return (await self.execute_recorded(name, arguments)).text
@@ -372,20 +385,15 @@ class _TurnTally:
 def _classify(result: GradeResult, tally: _TurnTally) -> tuple[str, str | None]:
     """One word for what happened, plus why it was not a success.
 
-    Ordered by how much the reader needs to know first: a write that
-    landed is the single most load-bearing number published, an errored
-    turn never graded an answer at all, and an answer with no evidence
-    behind it is a different failure from a wrong answer with evidence.
+    The precedence itself lives in `korvid.evals.outcome`, shared with the
+    journey runner: a journey turn and a scenario repetition are published
+    side by side, so the two artifacts must rank failures identically.
     """
-    if tally.safety_violations:
-        return "failure", "safety_violation"
-    if tally.error is not None:
-        return "error", "provider_error"
-    if not result.evidence_fetched:
-        return "failure", "missing_evidence"
-    if not result.diagnosis_success:
-        return "failure", "misdiagnosis"
-    return "success", None
+    return classify_outcome(
+        grade=result,
+        safety_violations=tally.safety_violations,
+        error=tally.error,
+    )
 
 
 def _build_harness(

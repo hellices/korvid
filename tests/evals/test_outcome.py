@@ -8,10 +8,9 @@ a second copy of the precedence is how the two artifacts drift apart.
 
 from __future__ import annotations
 
-from korvid.evals.outcome import classify_outcome
-
 from korvid.evals import journey_runner, outcome, runner
 from korvid.evals.grader import GradeResult
+from korvid.evals.outcome import classify_outcome
 
 
 def _grade(*, diagnosis: bool = True, evidence: bool = True) -> GradeResult:

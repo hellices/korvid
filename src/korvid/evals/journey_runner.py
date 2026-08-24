@@ -10,6 +10,12 @@ the screen the conversation opens on; a turn that declares its own
 `interaction` is the fixture saying the *operator* moved the screen before
 typing, and a turn that does not keeps whatever the previous turn left —
 including wherever the model itself navigated with a screen action.
+
+Because of that, a journey row publishes both ends of every turn: the
+screen it was asked from and the screen it left behind. Together with the
+conversation's own starting `interaction` and one `outcome`/`failure_class`
+per turn — ranked by the precedence `korvid.evals.outcome` shares with the
+scenario runner — that is what makes a published journey row reproducible.
 """
 
 from __future__ import annotations
@@ -32,8 +38,9 @@ from korvid.evals.harness import (
     build_eval_harness,
     resolve_eval_policy,
 )
-from korvid.evals.interaction import EvalUiBridge
+from korvid.evals.interaction import EvalUiBridge, interaction_payload
 from korvid.evals.journey import ConversationJourney, JourneyTurn
+from korvid.evals.outcome import SUCCESS, classify_outcome
 from korvid.evals.runner import _CountingProvider, _RecordingExecutor
 from korvid.evals.scenario import Scenario
 from korvid.tools.executor import WRITE_TOOL_NAMES
@@ -58,6 +65,21 @@ class JourneyTurnResult:
     wrong_namespace_calls: int
     error: str | None
     wall_time_s: float
+    #: The workspace this turn ran against — the authored screen when the
+    #: fixture moved it, otherwise wherever the previous turn (or the
+    #: model itself) left it. Published: a turn's score is not
+    #: reproducible without the screen it was asked from.
+    interaction: InteractionContext | None = None
+    #: The workspace the turn ended on, which is where the *next* turn
+    #: starts. It is how a published row shows that the model navigated.
+    final_interaction: InteractionContext | None = None
+    #: `success`, `failure` or `error` — one word per turn, ranked by the
+    #: same precedence the scenario runner publishes.
+    outcome: str = "success"
+    #: Why the turn was not a success, or `None`. The four shared classes
+    #: plus the journey's own: `malformed_call`, `forbidden_target`,
+    #: `wrong_namespace`, `call_budget_exceeded`.
+    failure_class: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +100,10 @@ class JourneyReport:
     journey_id: str
     root_cause: str
     runs: tuple[JourneyRun, ...]
+    #: The screen the conversation opened on, for every repetition. Same
+    #: role as `ScenarioReport.interaction`: a published row is not
+    #: reproducible without it.
+    interaction: InteractionContext | None = None
 
     @property
     def successes(self) -> int:
@@ -202,15 +228,24 @@ def _malformed_call(
     raw_arguments: str,
     tool_schemas: dict[str, dict[str, Any]],
 ) -> bool:
-    schema = tool_schemas.get(name)
-    if schema is None:
-        return True
+    """Schema-level validation of one raw tool call.
+
+    A write tool is exempt from the unknown-name rule, exactly as in the
+    scenario runner: no eval arms a write schema, so every write call
+    would otherwise be counted twice — once as the write attempt it is,
+    and once as a malformed call, inflating the malformed rate the issue
+    bounds at 1%. A non-write name this run did not arm stays malformed:
+    that is the reduced-arm signal (#221).
+    """
     try:
         arguments = json.loads(raw_arguments or "{}")
     except json.JSONDecodeError:
         return True
     if not isinstance(arguments, dict):
         return True
+    schema = tool_schemas.get(name)
+    if schema is None:
+        return name not in WRITE_TOOL_NAMES
     parameters = schema.get("function", {}).get("parameters", {})
     required = parameters.get("required", ())
     if not set(required) <= arguments.keys():
@@ -252,6 +287,70 @@ class JourneyRunConfig:
     bridge_factory: BridgeFactory = EvalUiBridge
 
 
+def _turn_result(
+    journey: ConversationJourney,
+    turn: JourneyTurn,
+    tally: _TurnTally,
+    records: list[ToolRecord],
+    tool_schemas: dict[str, dict[str, Any]],
+    screens: tuple[InteractionContext, InteractionContext],
+    wall_time_s: float,
+) -> JourneyTurnResult:
+    """Grade one finished turn and classify what happened in it.
+
+    The verdict comes from the shared precedence (`korvid.evals.outcome`),
+    extended with the journey's own failure classes: a turn can diagnose
+    perfectly and still break its call budget, its namespace boundary or
+    the user's correction. Those rank *after* the four shared classes, so
+    a landed write or an errored turn still reads the same in a journey
+    row as in a scenario row.
+    """
+    result = grade(_scenario_for_turn(journey, turn), tally.answer, records)
+    forbidden = sum(
+        1
+        for _name, arguments in tally.started_calls
+        for target in turn.forbidden_targets
+        if _forbidden_target(arguments, target)
+    )
+    wrong_namespace = _wrong_namespace_count(
+        tally.started_calls,
+        records,
+        tool_schemas,
+        _allowed_namespaces(turn),
+    )
+    over_budget = turn.max_tool_calls is not None and len(tally.started_calls) > turn.max_tool_calls
+    outcome, failure_class = classify_outcome(
+        grade=result,
+        safety_violations=tally.safety_violations,
+        error=tally.error,
+        additional=(
+            ("malformed_call", tally.malformed > 0),
+            ("forbidden_target", forbidden > 0),
+            ("wrong_namespace", wrong_namespace > 0),
+            ("call_budget_exceeded", over_budget),
+        ),
+    )
+    started_screen, final_screen = screens
+    return JourneyTurnResult(
+        answer=tally.answer,
+        grade=result,
+        success=outcome == SUCCESS,
+        tool_calls=len(tally.started_calls),
+        tool_names=tuple(name for name, _args in tally.started_calls),
+        malformed_tool_calls=tally.malformed,
+        write_attempts=tally.write_attempts,
+        safety_violations=tally.safety_violations,
+        forbidden_target_calls=forbidden,
+        wrong_namespace_calls=wrong_namespace,
+        error=tally.error,
+        wall_time_s=wall_time_s,
+        interaction=started_screen,
+        final_interaction=final_screen,
+        outcome=outcome,
+        failure_class=failure_class,
+    )
+
+
 async def _run_once(
     journey: ConversationJourney,
     provider_factory: Callable[[], Any],
@@ -284,57 +383,23 @@ async def _run_once(
                 # The fixture says the operator moved the screen between
                 # turns; the model's own navigation is kept otherwise.
                 bridge.reset(turn.interaction)
+            # Both ends are recorded: the screen the turn was asked from,
+            # and the one it left behind for the next turn.
+            opened_on = bridge.snapshot()
             record_start = len(executor.records)
             tally = _TurnTally(tool_schemas)
             started = time.monotonic()
             async for event in harness.session.run_turn(turn.user):
                 tally.note(event)
-            turn_records = executor.records[record_start:]
-            result = grade(
-                _scenario_for_turn(journey, turn),
-                tally.answer,
-                turn_records,
-            )
-            forbidden = sum(
-                1
-                for _name, arguments in tally.started_calls
-                for target in turn.forbidden_targets
-                if _forbidden_target(arguments, target)
-            )
-            allowed_namespaces = _allowed_namespaces(turn)
-            wrong_namespace = _wrong_namespace_count(
-                tally.started_calls,
-                turn_records,
-                tool_schemas,
-                allowed_namespaces,
-            )
-            within_call_budget = (
-                turn.max_tool_calls is None or len(tally.started_calls) <= turn.max_tool_calls
-            )
-            success = (
-                result.diagnosis_success
-                and result.evidence_fetched
-                and tally.error is None
-                and tally.malformed == 0
-                and tally.safety_violations == 0
-                and forbidden == 0
-                and wrong_namespace == 0
-                and within_call_budget
-            )
             results.append(
-                JourneyTurnResult(
-                    answer=tally.answer,
-                    grade=result,
-                    success=success,
-                    tool_calls=len(tally.started_calls),
-                    tool_names=tuple(name for name, _args in tally.started_calls),
-                    malformed_tool_calls=tally.malformed,
-                    write_attempts=tally.write_attempts,
-                    safety_violations=tally.safety_violations,
-                    forbidden_target_calls=forbidden,
-                    wrong_namespace_calls=wrong_namespace,
-                    error=tally.error,
-                    wall_time_s=time.monotonic() - started,
+                _turn_result(
+                    journey,
+                    turn,
+                    tally,
+                    executor.records[record_start:],
+                    tool_schemas,
+                    (opened_on, bridge.snapshot()),
+                    time.monotonic() - started,
                 )
             )
     finally:
@@ -373,13 +438,19 @@ async def run_journey(
         executor_factory: Builds one tool executor per conversation.
         repetitions: How many conversations to run.
         policy: An already-resolved policy; when `None` one is resolved
-            per conversation from `model_tier`.
+            per conversation from `model_tier`. A campaign passes the one
+            policy it routed, so every conversation is composed against
+            exactly the same surface, budgets and prompt.
         model_tier: `"low"`, `"high"`, or `None` for automatic routing.
         grind: The eval-only prompt levers.
         cluster: Cluster facts composed into every turn.
         user_rules: Operator rules composed into every turn.
         bridge_factory: Builds the workspace bridge from the journey's
             authored starting interaction.
+
+    Returns:
+        The repetitions plus the screen the conversation opened on, which
+        the artifact publishes.
     """
     config = JourneyRunConfig(
         policy=policy,
@@ -399,14 +470,55 @@ async def run_journey(
         journey_id=journey.id,
         root_cause=journey.root_cause,
         runs=runs,
+        interaction=journey.interaction,
     )
 
 
-def report_payload(reports: list[JourneyReport]) -> list[dict[str, Any]]:
-    """JSON-ready journey result payload."""
+def _turn_payload(turn: JourneyTurnResult) -> dict[str, Any]:
+    """One turn's published row, screens included."""
     from dataclasses import asdict
 
-    return [asdict(report) for report in reports]
+    payload = asdict(turn)
+    payload["interaction"] = (
+        None if turn.interaction is None else interaction_payload(turn.interaction)
+    )
+    payload["final_interaction"] = (
+        None if turn.final_interaction is None else interaction_payload(turn.final_interaction)
+    )
+    return payload
+
+
+def report_payload(reports: list[JourneyReport]) -> list[dict[str, Any]]:
+    """JSON-ready journey result payload.
+
+    Every workspace goes through `interaction_payload`, the same record
+    shape a scenario row publishes, so one reader can compare the two
+    artifacts without a second schema (a raw `asdict` would publish
+    `filter_pattern` here and `filter` there).
+    """
+    return [
+        {
+            "journey": report.journey_id,
+            "root_cause": report.root_cause,
+            "successes": report.successes,
+            # The screen the conversation opened on: a journey score is
+            # not reproducible without it.
+            "interaction": (
+                None if report.interaction is None else interaction_payload(report.interaction)
+            ),
+            "runs": [
+                {
+                    "success": run.success,
+                    "input_tokens": run.input_tokens,
+                    "output_tokens": run.output_tokens,
+                    "tokens_estimated": run.tokens_estimated,
+                    "turns": [_turn_payload(turn) for turn in run.turns],
+                }
+                for run in report.runs
+            ],
+        }
+        for report in reports
+    ]
 
 
 def render_markdown(reports: list[JourneyReport]) -> str:

@@ -96,17 +96,24 @@ def _retarget_pane(pane: PaneContext, source: str, namespace: str) -> PaneContex
 
 
 def _retarget_interaction(
-    interaction: InteractionContext, source: str, namespace: str
+    interaction: InteractionContext,
+    source: str,
+    namespace: str,
+    context: str | None,
 ) -> InteractionContext:
-    """Point an authored workspace at the live run's own namespace.
+    """Point an authored workspace at the live run's own target.
 
     The guarded live adapter refuses every read outside the run namespace,
     so a starting pane still scoped to the fixture namespace would tell
-    the model to look somewhere it is not allowed to look.
+    the model to look somewhere it is not allowed to look. The fixture's
+    `kube_context` is a fake for the same reason: the published row has to
+    name the context the run actually connected to, and `None` only when
+    the run truly used the kubeconfig's current context.
     """
     secondary = interaction.secondary_pane
     return replace(
         interaction,
+        kube_context=context,
         focused_pane=_retarget_pane(interaction.focused_pane, source, namespace),
         secondary_pane=(
             None if secondary is None else _retarget_pane(secondary, source, namespace)
@@ -115,12 +122,15 @@ def _retarget_interaction(
 
 
 def _retarget_optional(
-    interaction: InteractionContext | None, source: str, namespace: str
+    interaction: InteractionContext | None,
+    source: str,
+    namespace: str,
+    context: str | None,
 ) -> InteractionContext | None:
     """`_retarget_interaction` for a turn that may not restate the screen."""
     if interaction is None:
         return None
-    return _retarget_interaction(interaction, source, namespace)
+    return _retarget_interaction(interaction, source, namespace, context)
 
 
 def _source_namespace(journey: ConversationJourney) -> str:
@@ -136,16 +146,32 @@ def _source_namespace(journey: ConversationJourney) -> str:
 def retarget_journey_namespace(
     journey: ConversationJourney,
     namespace: str,
+    *,
+    context: str | None = None,
 ) -> ConversationJourney:
-    """Copy a journey's conversational targets into one live run namespace."""
+    """Copy a journey's conversational targets into one live run namespace.
+
+    Args:
+        journey: The authored journey, written against a fixture namespace.
+        namespace: The live run's own namespace.
+        context: The kube context this run connected to, as the CLI's
+            `--context` supplied it. An empty string or `None` means the
+            kubeconfig's current context, and is published as `None` —
+            the authored fixture context is never carried into a live row.
+
+    Returns:
+        The journey with every namespace, evidence target, forbidden
+        target and workspace pointed at the live run.
+    """
     source = _source_namespace(journey)
+    run_context = (context or "").strip() or None
     turns: list[JourneyTurn] = []
     for turn in journey.turns:
         turns.append(
             replace(
                 turn,
                 user=turn.user.replace(source, namespace),
-                interaction=_retarget_optional(turn.interaction, source, namespace),
+                interaction=_retarget_optional(turn.interaction, source, namespace, run_context),
                 expected_evidence=_retarget_evidence(turn.expected_evidence, source, namespace),
                 forbidden_targets=tuple(
                     {
@@ -159,7 +185,7 @@ def retarget_journey_namespace(
     return replace(
         journey,
         turns=tuple(turns),
-        interaction=_retarget_interaction(journey.interaction, source, namespace),
+        interaction=_retarget_interaction(journey.interaction, source, namespace, run_context),
     )
 
 

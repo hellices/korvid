@@ -27,7 +27,9 @@ the route-specific "kind" appears among the call's argument values;
 "kind" values, when both sides name one, are canonicalized through the
 resource alias table and must agree) counts, whichever tool fetched it.
 Fetching the *wrong* object whose output happens to contain the same
-substring is still not credited.
+substring is still not credited. A record the eval workspace bridge filed
+for a *screen action* fetched nothing at all, so it only ever satisfies
+evidence that names that action by tool.
 """
 
 from __future__ import annotations
@@ -70,11 +72,18 @@ _ALIASES = builtin_aliases()
 @dataclass(frozen=True)
 class ToolRecord:
     """One executed tool call: structured arguments plus its **full**
-    (uncapped-summary) result."""
+    (uncapped-summary) result.
+
+    `screen_action` marks a record the *eval UI bridge* filed rather than
+    the tool executor: the model moved the screen, and nothing was fetched
+    from the cluster. Such a record may only satisfy evidence that names
+    that action by tool (see `_satisfies`).
+    """
 
     name: str
     arguments: dict[str, Any]
     result: str
+    screen_action: bool = False
 
 
 @dataclass(frozen=True)
@@ -458,12 +467,22 @@ def _satisfies(evidence: Evidence, record: ToolRecord) -> bool:
     path: any successful call whose result contains the expected content
     and whose arguments name the same object counts, whichever read tool
     fetched it (`evidence.tool` documents one known-good route, verified
-    reachable by the fixture-integrity test)."""
+    reachable by the fixture-integrity test).
+
+    One exception, and it is a safety rule rather than a routing one: a
+    *screen action* fetched nothing. Its result is the workspace message
+    ("selected worker-1"), which names the resource it moved to and can
+    therefore collide with both the expected target and the expected
+    substring of a read that never ran. So an action only ever satisfies
+    evidence that names that action by tool — which is exactly what the
+    TUI-following journeys assert (`tool: open_describe`)."""
     if evidence.contains not in record.result:
         return False
     # A failed call is not evidence even when its error message echoes the
     # expected substring (e.g. the object name in a not-found message).
     if record.result.startswith("ERROR:"):
+        return False
+    if record.screen_action and evidence.tool != record.name:
         return False
     return matches_target(evidence, record)
 

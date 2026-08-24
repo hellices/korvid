@@ -80,24 +80,40 @@ def _fake_executor(fixture: Any) -> ToolExecutor:
     return ToolExecutor(FakeKubeClient(fixture), builtin_aliases())
 
 
-async def _run(args: argparse.Namespace) -> list[JourneyReport]:
+async def _run(
+    args: argparse.Namespace,
+    policy: ResolvedAgentPolicy | None = None,
+) -> list[JourneyReport]:
+    """Run every journey in the pack against one resolved policy.
+
+    Args:
+        args: The parsed CLI arguments.
+        policy: The campaign's policy, routed once by `main`. Every
+            conversation is composed against this exact object, so the
+            artifact's `meta` describes the run rather than whichever
+            conversation happened to be inspected. `None` (a direct
+            caller, or a test) falls back to per-conversation routing
+            from `--model-tier`.
+    """
     journeys = load_journeys(args.journeys)
     if not journeys:
         raise SystemExit(f"no journey YAML files found in {args.journeys}")
     provider_factory = provider_factory_from_env(os.environ)
     live_environment: Any | None = None
     if args.live:
-        from korvid.evals.live_journey import (
-            LiveJourneyEnvironment,
-            retarget_journey_namespace,
-        )
+        from korvid.evals import live_journey as live
 
-        live_environment = await LiveJourneyEnvironment.connect(
+        live_environment = await live.LiveJourneyEnvironment.connect(
             args.context,
             args.namespace,
         )
         try:
-            journeys = [retarget_journey_namespace(journey, args.namespace) for journey in journeys]
+            # The run's own context, not the fixture's: a live row must
+            # name the cluster the conversation actually ran against.
+            journeys = [
+                live.retarget_journey_namespace(journey, args.namespace, context=args.context)
+                for journey in journeys
+            ]
         except Exception:
             await live_environment.close()
             raise
@@ -114,6 +130,7 @@ async def _run(args: argparse.Namespace) -> list[JourneyReport]:
                     provider_factory=provider_factory,
                     executor_factory=executor_factory,
                     repetitions=args.reps,
+                    policy=policy,
                     model_tier=args.model_tier,
                 )
             )
@@ -184,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     warn_if_unpinned(serving)
     provider_factory = provider_factory_from_env(os.environ)
     policy = _resolve_policy(provider_factory, args.model_tier)
-    reports = asyncio.run(_run(args))
+    reports = asyncio.run(_run(args, policy))
     markdown = render_markdown(reports)
     print(markdown)
     if args.out:
@@ -198,7 +215,12 @@ def main(argv: list[str] | None = None) -> int:
 def _resolve_policy(
     provider_factory: Callable[[], Any], model_tier: str | None
 ) -> ResolvedAgentPolicy:
-    """Route once, so the artifact describes the campaign, not one run."""
+    """Route once, so the artifact describes the campaign, not one run.
+
+    The same object then flows through `_run` into every conversation and
+    into `journey_run_payload`, exactly as the scenario campaign does.
+    This CLI has no prompt-grinding flags, so there is nothing to ground.
+    """
     provider = provider_factory()
     try:
         return resolve_eval_policy(provider, model_tier=model_tier)

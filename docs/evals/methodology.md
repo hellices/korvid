@@ -26,9 +26,9 @@ Each run records:
 ### 2. Offline conversational journeys
 
 The YAML files under `src/korvid/evals/journeys/` share one fake cluster across
-multiple scripted user turns. One `AgentRuntime` persists for the complete
-conversation, so history, corrections, stale targets, and stopping behavior are
-real.
+multiple scripted user turns. One `DefaultAgentSession` — the same session class
+the TUI runs — persists for the complete conversation, so history, corrections,
+stale targets, and stopping behavior are real.
 
 Each turn grades:
 
@@ -88,6 +88,17 @@ longer credits a required claim to an answer that rules it out. The
 remaining shapes cannot be fixed centrally and are the reason each turn must
 carry a rejecting phrasing.
 
+#### A screen action is not evidence
+
+The eval workspace bridge files every applied screen action into the same
+ordered record stream as the reads, which is what lets a journey grade "and
+it put that on screen" (`tool: open_describe`). That stream is also what
+evidence is graded against, and an action's message names the resource it
+moved to — `selected worker-1` targets the same object as a `get_resource`
+read of `worker-1` and contains the same text. So a screen action only ever
+satisfies evidence that **names that action by tool**: moving the screen to
+a resource is never credited as having fetched it.
+
 ### 3. Stateful operation journeys
 
 The YAML files under `src/korvid/evals/operations/` grade a write
@@ -130,6 +141,9 @@ Safety controls:
 - fixtures carry `app.kubernetes.io/managed-by=korvid-agent-eval`;
 - the eval policy is resolved against a read-only environment, so no write
   schema is ever armed; fixture writes happen before the model starts;
+- retargeting points every journey — evidence, forbidden targets, and the
+  starting workspace — at the run namespace and at the run's own kube
+  context, so the published row names the cluster it ran against;
 - cleanup deletes only the run namespace;
 - the contract cluster returns to its stopped-at-rest state.
 
@@ -298,7 +312,42 @@ therefore writes a metadata envelope alongside the per-scenario results:
 ```
 
 Journey runs (`korvid.evals.journeys_cli --json`) carry the same envelope
-under a `journeys` key.
+under a `journeys` key, and one policy is routed for the whole campaign
+there too — every conversation is composed against that same object. A
+journey row adds the per-turn detail a conversation has and a single
+question does not:
+
+```json
+{
+  "journeys": [
+    {
+      "journey": "triage-and-correct",
+      "root_cause": "image_pull_auth",
+      "successes": 1,
+      "interaction": {"kube_context": "eval-fixture", "…": "…"},
+      "runs": [
+        {
+          "success": true,
+          "turns": [
+            {
+              "interaction": {"…": "the screen this turn was asked from"},
+              "final_interaction": {"…": "the screen it left behind"},
+              "outcome": "success",
+              "failure_class": null,
+              "…": "…"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`interaction` and `final_interaction` use the same record shape a scenario
+row publishes. Both ends are recorded because a journey turn may start on a
+screen nobody authored: the previous turn's model may have navigated there
+itself.
 
 ### `model_tier`
 
@@ -327,7 +376,15 @@ as typed state through the UI bridge, so a change in phrasing cannot
 silently change the screen the model was shown. Journey turns may restate
 it, which is the fixture saying the *operator* moved the screen between
 turns; a turn that does not restate it keeps whatever the previous turn
-left, including wherever the model navigated itself.
+left, including wherever the model navigated itself. Each journey turn
+publishes both ends of that — `interaction` and `final_interaction` — so a
+reader can see where a turn was asked from and where the model left the
+screen, without replaying the conversation.
+
+On a **live** run the authored `kube_context` is a fixture name, so
+retargeting replaces it with the context `--context` connected to. It is
+`null` only when the run truly used the kubeconfig's current context; a
+live row never publishes the fixture's own context name.
 
 ### Prompt pack and grinding
 
@@ -363,8 +420,11 @@ Rules that follow from this:
 
 ### Outcome and failure class
 
-Each run records one `outcome` (`success`, `failure`, `error`) and, when it
-was not a success, one `failure_class`, in this precedence:
+Each run — and each journey turn — records one `outcome` (`success`,
+`failure`, `error`) and, when it was not a success, one `failure_class`.
+Both artifacts rank the same four classes in the same order, from one
+shared helper (`korvid.evals.outcome`), so a journey row and a scenario row
+mean the same thing:
 
 | `failure_class` | Meaning |
 |---|---|
@@ -372,6 +432,17 @@ was not a success, one `failure_class`, in this precedence:
 | `provider_error` | the turn errored before it produced a graded answer |
 | `missing_evidence` | the answer was not backed by any expected evidence |
 | `misdiagnosis` | evidence was fetched, but the answer was wrong |
+
+A journey turn can also fail in ways a single question cannot, and those
+rank *after* the four above — a landed write or an errored turn still reads
+identically in both artifacts:
+
+| journey-only `failure_class` | Meaning |
+|---|---|
+| `malformed_call` | a call the armed schemas reject (a write attempt is *not* one: it is published as a write attempt) |
+| `forbidden_target` | the model went back to the resource the user just ruled out |
+| `wrong_namespace` | a call left the namespace the turn's evidence lives in |
+| `call_budget_exceeded` | more calls than the turn's `max_tool_calls` |
 
 ### Migrating pre-tier campaigns
 

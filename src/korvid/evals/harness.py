@@ -155,7 +155,9 @@ def resolve_eval_policy(
     policy = ModelRouter(MODEL_CATALOG).resolve(
         descriptor=provider.descriptor,
         provider_capabilities=provider.capabilities,
-        explicit_tier=model_tier,
+        # `or None`, exactly as the composition root normalizes it: an
+        # empty string is "no tier named", not a tier called "".
+        explicit_tier=model_tier or None,
         environment=environment,
     )
     if not omit_tools:
@@ -176,11 +178,52 @@ def armed_tool_names(policy: ResolvedAgentPolicy) -> tuple[str, ...]:
     return tuple(sorted(str(tool["function"]["name"]) for tool in policy.tools))
 
 
-def _ground_policy(policy: ResolvedAgentPolicy, grind: PromptGrind) -> ResolvedAgentPolicy:
-    """The policy a ground run composes against (overlay ids only)."""
+def _ground_overlay_ids(policy: ResolvedAgentPolicy) -> tuple[str, ...]:
+    """`policy`'s overlay ids with the eval overlay named exactly once."""
+    if EVAL_OVERLAY_ID in policy.prompt_overlay_ids:
+        return policy.prompt_overlay_ids
+    return (*policy.prompt_overlay_ids, EVAL_OVERLAY_ID)
+
+
+def ground_eval_policy(policy: ResolvedAgentPolicy, grind: PromptGrind) -> ResolvedAgentPolicy:
+    """The policy a ground run composes against (overlay ids only).
+
+    Idempotent on purpose. A campaign grounds once and hands the *same*
+    object to the session, to `meta.policy`, to `meta.prompts` and to the
+    report; the harness still grounds whatever it is given, so a policy
+    that arrives already ground must come back unchanged rather than
+    naming `eval-overlay` twice in a published list.
+
+    Args:
+        policy: The resolved policy, ground or not.
+        grind: The eval-only prompt levers. Only `overlay` adds an id;
+            replacing the tier pack changes the pack's *text*, not which
+            layers were composed.
+
+    Returns:
+        The policy every collaborator of a ground run must agree on.
+    """
     if grind.overlay is None:
         return policy
-    return replace(policy, prompt_overlay_ids=(*policy.prompt_overlay_ids, EVAL_OVERLAY_ID))
+    return replace(policy, prompt_overlay_ids=_ground_overlay_ids(policy))
+
+
+def baseline_eval_policy(policy: ResolvedAgentPolicy) -> ResolvedAgentPolicy:
+    """The same policy without the eval overlay — the shipped-prompt baseline.
+
+    `meta.prompts.source` compares a run's digest against korvid's own
+    wording, and that comparison has to compose the shipped prompt: an
+    already-ground policy still names `eval-overlay`, for which the
+    shipped registry has no text at all.
+    """
+    if EVAL_OVERLAY_ID not in policy.prompt_overlay_ids:
+        return policy
+    return replace(
+        policy,
+        prompt_overlay_ids=tuple(
+            overlay for overlay in policy.prompt_overlay_ids if overlay != EVAL_OVERLAY_ID
+        ),
+    )
 
 
 def build_prompt_harness(policy: ResolvedAgentPolicy, grind: PromptGrind) -> PromptHarness:
@@ -218,11 +261,12 @@ def static_prompt(policy: ResolvedAgentPolicy, grind: PromptGrind = NO_GRIND) ->
     """The system message layers 1-7 a resolved policy and grind produce.
 
     Args:
-        policy: The policy as `resolve_eval_policy` returned it — not one
-            a grind has already been applied to.
+        policy: The resolved policy. An already-ground one is accepted:
+            grounding is idempotent, so a campaign can fingerprint the
+            same object its session composes against.
         grind: The eval-only prompt levers.
     """
-    return _compose_static(_ground_policy(policy, grind), build_prompt_harness(policy, grind))
+    return _compose_static(ground_eval_policy(policy, grind), build_prompt_harness(policy, grind))
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +355,7 @@ def build_eval_harness(
     )
     # One policy from here on: the grind only ever *adds* an overlay id,
     # and every collaborator must agree on which surface is armed.
-    resolved = _ground_policy(base, grind)
+    resolved = ground_eval_policy(base, grind)
     recorded = as_recorded(execution)
     tools = ToolHarness(
         policy=resolved,
