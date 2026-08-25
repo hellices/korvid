@@ -145,6 +145,16 @@ The captured timeline runs the story once, at reading speed: the pod table,
 the failing pod's diagnosis in a describe pane, its log stream held long
 enough to read before the story moves on, then the Helm releases that own it.
 
+One piece of choreography, disclosed plainly: `diagnose_pod` opens a modal
+describe screen through korvid's own follow bridge, and the shipped
+user-priority guard then correctly refuses to mirror the next two calls
+while that screen is up — the user is reading it. `DemoKorvidApp`, a
+documentation-only harness used only for this recording, closes that modal
+after 2.2 seconds so the shipped guard can accept the later `get_logs` and
+Helm follow mirrors, standing in for the Esc a watching operator would press.
+No keystroke is sent to the TUI, and the shipped guard itself is not weakened
+by this documentation-only harness.
+
 The poster is cut from the log beat, where the external client's first three
 calls sit beside korvid's own log pane, its `agent logs →
 shop/payment-worker-…` follow toast and its `⇄MCP on :7878 ·follow` status

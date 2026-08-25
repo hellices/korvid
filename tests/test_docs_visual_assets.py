@@ -1196,6 +1196,43 @@ def test_mcp_capture_instructions_publish_the_whole_reproducible_recording() -> 
         )
 
 
+def test_mcp_capture_instructions_disclose_the_documentation_only_describe_dismissal() -> None:
+    """The one piece of choreography in the capture must be named, not hidden.
+
+    `diagnose_pod` opens a modal `DescribeScreen` through korvid's own follow
+    bridge, and the shipped user-priority guard then correctly refuses to
+    mirror the next two calls (`get_logs`, the Helm releases) while a
+    describe screen is up — the user is reading it. `DemoKorvidApp`, a
+    documentation-only harness, stands in for the Esc a watching operator
+    would press by closing that modal after `MCP_DESCRIBE_HOLD = 2.2` s so the
+    capture can continue. The provenance page must disclose this plainly: the
+    dismissal is documentation-only, it happens after 2.2 seconds, no
+    keystroke is sent to the TUI, and the shipped guard itself is not
+    weakened.
+    """
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    mcp = instructions[instructions.index("## MCP follow") :]
+    lowered = mcp.lower()
+    assert "documentation-only" in lowered, (
+        "the provenance page must call the describe-dismissal harness documentation-only"
+    )
+    assert "2.2" in mcp, "the provenance page must state the 2.2 second describe hold"
+    assert "demokorvidapp" in lowered, (
+        "the provenance page must name the harness that closes the modal"
+    )
+    assert "get_logs" in mcp, "the provenance page must name the mirror the dismissal unblocks"
+    assert "helm" in lowered, (
+        "the provenance page must name the second mirror the dismissal unblocks"
+    )
+    assert "no keystroke is sent" in lowered or "no tui keystroke is sent" in lowered, (
+        "the provenance page must state that no keystroke is sent to the TUI"
+    )
+    assert "guard" in lowered, "the provenance page must name the shipped guard"
+    assert "not weakened" in lowered or "is not weakened" in lowered, (
+        "the provenance page must state that the shipped guard is not weakened"
+    )
+
+
 def test_mcp_landing_ratio_override_matches_the_clips_display_geometry() -> None:
     """`aspect-ratio: 1280 / 710` is only truthful for a square-pixel clip.
 
