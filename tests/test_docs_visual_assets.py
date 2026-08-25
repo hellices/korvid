@@ -102,6 +102,62 @@ MCP_CLIENT_CALLS = ("list_resources", "diagnose_pod", "get_logs", "helm_list_rel
 #: together; a blanked or half-drawn pane would prove nothing.
 MCP_EVIDENCE_BAND = (0, 690)
 MCP_EVIDENCE_MIN_PIXELS = 5_000
+#: How long `docs/demo/mcp_client.py` holds on the `diagnose_pod` answer
+#: before it issues `get_logs`. `docs/demo/demo.py`'s `MCP_DESCRIBE_HOLD`
+#: (2.2 s) dismisses the follow-opened describe modal well inside this beat,
+#: so the shipped user-priority guard is never actually asked to refuse a
+#: mirror in the captured timeline.
+MCP_DIAGNOSE_HOLD = "3.2"
+#: Indicative refusal verbs — a claim that something *was* refused. The bare
+#: infinitive ("would refuse", "never asked to refuse") is deliberately absent:
+#: a counterfactual is exactly what this page is allowed to say.
+_INDICATIVE_REFUSAL = re.compile(
+    r"\b(refuses|refused|refusing|blocks|blocked|rejects|rejected|denies|denied"
+    r"|(?:does|did|do) (?:refuse|block|reject|deny))\b",
+    re.IGNORECASE,
+)
+#: The two moods that keep such a clause truthful about this recording: a
+#: conditional (the guard *would* refuse) or a denial (it never did).
+_UNASSERTED_MOOD = re.compile(r"\b(would|if|were|had|never|not|no|nothing)\b", re.IGNORECASE)
+
+
+def _prose_sentences(markdown: str) -> list[str]:
+    """Split markdown prose into sentences without cutting decimals or paths.
+
+    A naive split on `.` would cut `2.2`, `00:00:08.5` and `mcp_client.py`
+    into fragments and hide a claim across two of them, so the period must be
+    preceded by a non-digit and followed by whitespace to end a sentence.
+
+    Args:
+        markdown: Markdown text, fences and tables included.
+
+    Returns:
+        Whitespace-collapsed sentences in document order.
+    """
+    flat = " ".join(markdown.split())
+    return [part.strip() for part in re.split(r"(?<=[^0-9])\.(?=\s)", flat) if part.strip()]
+
+
+def _prose_clauses(markdown: str) -> list[str]:
+    """Split prose further, at every comma, semicolon, colon and em dash.
+
+    A whole-sentence scan lets an unrelated denial elsewhere in the sentence
+    excuse a claim — "the guard refuses the next two calls, but no keystroke
+    is sent" would pass on the strength of its second clause. Grading each
+    clause on its own removes that laundering.
+
+    Args:
+        markdown: Markdown text, fences and tables included.
+
+    Returns:
+        Whitespace-collapsed clauses in document order.
+    """
+    return [
+        clause.strip()
+        for sentence in _prose_sentences(markdown)
+        for clause in re.split(r"[,;:—]", sentence)
+        if clause.strip()
+    ]
 
 
 def _png_size(path: Path) -> tuple[int, int]:
@@ -1241,15 +1297,16 @@ def test_mcp_capture_instructions_disclose_the_documentation_only_describe_dismi
     """The one piece of choreography in the capture must be named, not hidden.
 
     `diagnose_pod` opens a modal `DescribeScreen` through korvid's own follow
-    bridge, and the shipped user-priority guard then correctly refuses to
-    mirror the next two calls (`get_logs`, the Helm releases) while a
-    describe screen is up — the user is reading it. `DemoKorvidApp`, a
-    documentation-only harness, stands in for the Esc a watching operator
-    would press by closing that modal after `MCP_DESCRIBE_HOLD = 2.2` s so the
-    capture can continue. The provenance page must disclose this plainly: the
-    dismissal is documentation-only, it happens after 2.2 seconds, no
-    keystroke is sent to the TUI, and the shipped guard itself is not
-    weakened.
+    bridge, and the shipped user-priority guard *would* refuse to mirror any
+    later call while that screen stayed up — the user is reading it.
+    `DemoKorvidApp`, a documentation-only harness, stands in for the Esc a
+    watching operator would press by closing that modal after
+    `MCP_DESCRIBE_HOLD = 2.2` s, which lands inside the client's 3.2 s
+    `diagnose_pod` beat and therefore before `get_logs` is ever issued: no
+    call in the recording is actually refused. The provenance page must
+    disclose this plainly: the dismissal is documentation-only, it happens
+    after 2.2 seconds, no keystroke is sent to the TUI, and the shipped guard
+    itself is not weakened.
     """
     instructions = INSTRUCTIONS.read_text(encoding="utf-8")
     mcp = instructions[instructions.index("## MCP follow") :]
@@ -1261,9 +1318,9 @@ def test_mcp_capture_instructions_disclose_the_documentation_only_describe_dismi
     assert "demokorvidapp" in lowered, (
         "the provenance page must name the harness that closes the modal"
     )
-    assert "get_logs" in mcp, "the provenance page must name the mirror the dismissal unblocks"
+    assert "get_logs" in mcp, "the provenance page must name the mirror the dismissal protects"
     assert "helm" in lowered, (
-        "the provenance page must name the second mirror the dismissal unblocks"
+        "the provenance page must name the second mirror the dismissal protects"
     )
     assert "no keystroke is sent" in lowered or "no tui keystroke is sent" in lowered, (
         "the provenance page must state that no keystroke is sent to the TUI"
@@ -1271,6 +1328,60 @@ def test_mcp_capture_instructions_disclose_the_documentation_only_describe_dismi
     assert "guard" in lowered, "the provenance page must name the shipped guard"
     assert "not weakened" in lowered or "is not weakened" in lowered, (
         "the provenance page must state that the shipped guard is not weakened"
+    )
+
+
+def test_mcp_provenance_states_the_guard_refusal_only_as_a_counterfactual() -> None:
+    """The recording contains no refusal, so the page may not claim one.
+
+    The page used to say the shipped user-priority guard "then correctly
+    refuses to mirror the next two calls" while the follow-opened describe
+    modal is up. Nothing in the captured timeline does that:
+    `MCP_DESCRIBE_HOLD` dismisses the modal 2.2 s into the client's 3.2 s
+    `diagnose_pod` beat, so the modal is already gone when `get_logs` is
+    issued and all four mirrors succeed. Reading that sentence, a visitor
+    would look for two refused mirrors in a clip that shows four accepted
+    ones.
+
+    The truthful shape is counterfactual: the guard *would* refuse a later
+    mirror if the modal stayed up, which is exactly why the
+    documentation-only harness closes it first. So every indicative refusal
+    claim in this section must be either conditional or denied *in its own
+    clause*, and the page must publish the beat the dismissal lands inside,
+    the ordering it buys, and the fact that no mirror is refused.
+    """
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    mcp = instructions[instructions.index("## MCP follow") :]
+    for clause in _prose_clauses(mcp):
+        if not _INDICATIVE_REFUSAL.search(clause):
+            continue
+        assert _UNASSERTED_MOOD.search(clause), (
+            "the captured timeline holds no refusal — the documentation-only harness "
+            f"dismisses the describe modal at 2.2 s, inside the client's "
+            f"{MCP_DIAGNOSE_HOLD} s `diagnose_pod` beat and before `get_logs` is issued — "
+            f"so a refusal may only be stated as a counterfactual: {clause!r}"
+        )
+
+    lowered = " ".join(mcp.lower().split())
+    assert "would refuse" in lowered, (
+        "the page must keep the shipped guard's rule visible, in the conditional: "
+        "it would refuse a later mirror if the modal stayed up"
+    )
+    assert MCP_DIAGNOSE_HOLD in mcp, (
+        f"the page must publish the {MCP_DIAGNOSE_HOLD} s `diagnose_pod` beat that the "
+        "2.2 s dismissal lands inside, or the ordering is unverifiable"
+    )
+    ordering = [
+        sentence
+        for sentence in _prose_sentences(mcp)
+        if "get_logs" in sentence and "before" in sentence.lower()
+    ]
+    assert ordering, (
+        "the page must state the ordering the dismissal buys: the modal closes "
+        "before `get_logs` is issued"
+    )
+    assert "succeed" in lowered, (
+        "the page must say what the capture actually shows — every mirror succeeding"
     )
 
 

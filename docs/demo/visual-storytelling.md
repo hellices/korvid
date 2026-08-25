@@ -178,14 +178,17 @@ the capture on purpose — a client that exited first would close its pane and
 reflow the TUI to full width inside the last captured frames.
 
 One piece of choreography, disclosed plainly: `diagnose_pod` opens a modal
-describe screen through korvid's own follow bridge, and the shipped
-user-priority guard then correctly refuses to mirror the next two calls
-while that screen is up — the user is reading it. `DemoKorvidApp`, a
-documentation-only harness used only for this recording, closes that modal
-after 2.2 seconds so the shipped guard can accept the later `get_logs` and
-Helm follow mirrors, standing in for the Esc a watching operator would press.
-No keystroke is sent to the TUI, and the shipped guard itself is not weakened
-by this documentation-only harness.
+describe screen through korvid's own follow bridge, and korvid's shipped
+user-priority guard would refuse to mirror any later call while that screen
+stayed up — the user is reading it. So `DemoKorvidApp`, a documentation-only
+harness used only for this recording, closes that modal after 2.2 seconds,
+standing in for the Esc a watching operator would press. That dismissal lands
+inside the client's 3.2 s `diagnose_pod` beat, so the screen is already gone
+before `get_logs` is issued: nothing in the captured timeline is ever
+refused, and all four mirrors — the pod table, the describe pane, the log
+pane and the Helm releases — succeed. No keystroke is sent to the TUI, and
+the shipped guard is not weakened, bypassed or reconfigured by this
+documentation-only harness; it is simply never asked to refuse.
 
 The poster is cut from the log beat, where the external client's first three
 calls sit beside korvid's own log pane, its `agent logs →

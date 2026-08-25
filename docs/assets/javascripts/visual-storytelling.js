@@ -69,7 +69,14 @@
     switcher.removeAttribute("data-enhanced");
     for (const panel of switcher.querySelectorAll(".scene-panel")) {
       panel.hidden = false;
+      /* Dropping `data-poster` is what reveals the `<video>` and hides the
+         `.scene-panel__fallback` image beside it, so the source has to be
+         promoted in the same pass: a revealed player still holding only
+         `data-src` would replace a real product frame with an empty one. */
       promotePoster(panel);
+      for (const video of panel.querySelectorAll("video")) {
+        promoteVideo(video);
+      }
     }
     for (const [tab, selected, tabIndex] of authoredTabState) {
       if (selected === null) tab.removeAttribute("aria-selected");

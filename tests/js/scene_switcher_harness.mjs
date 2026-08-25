@@ -4,7 +4,9 @@
 // documentation site ships, and its failure mode is what a source-reading
 // test cannot see: whether a switcher whose markup is broken leaves the page
 // half-enhanced (a visible tab strip that switches nothing, panels stuck
-// hidden) and whether a later, healthy switcher still initializes.
+// hidden, a revealed player with no source) and whether a later, healthy
+// switcher — and the standalone hero, which has no switcher to roll back —
+// still initializes.
 //
 // The repository ships no JavaScript dependencies and must not grow one for
 // a documentation script, so this file implements exactly the DOM surface
@@ -192,6 +194,27 @@ function buildSwitcher(prefix, { brokenTab = null, panelOutside = false } = {}) 
     element("div", { class: "scene-panels" }, ...(panelOutside ? panels.slice(0, 2) : panels)),
   );
   return { switcher, tabs, panels, videos, stray: panelOutside ? panels[2] : null };
+}
+
+/** Build the landing page's standalone hero exactly as `docs/index.md` ships
+ *  it: a `[data-autoplay-video]` video with an eager `src`/`poster`, nested in
+ *  the same figure/frame wrappers, and outside every scene switcher. The
+ *  controller's own hero block is what runs against it — nothing here
+ *  re-implements enter/restart or leave/pause. */
+function buildHero() {
+  const video = element("video", {
+    src: "assets/demo.mp4",
+    poster: "assets/scenes/cockpit-poster.png",
+    "data-autoplay-video": "",
+    controls: "",
+    preload: "metadata",
+  });
+  const figure = element(
+    "figure",
+    { class: "hero-demo" },
+    element("div", { class: "hero-demo__frame" }, video),
+  );
+  return { figure, video };
 }
 
 function buildDocument(switchers, strays = []) {
@@ -422,6 +445,24 @@ const scenarios = {
       broken.videos.every((video) => video.getAttribute("data-poster") === null),
       "rollback must finish promoting every deferred poster",
     );
+    /* Dropping `data-poster` is what the stylesheet watches: it reveals the
+       `<video>` and hides the adjacent `.scene-panel__fallback` image. A
+       rollback that promotes only the poster therefore swaps a real product
+       frame for a player with no source at all — worse than the no-JavaScript
+       rendering it claims to restore. */
+    assert.deepEqual(
+      broken.videos.map((video) => video.getAttribute("src")),
+      ["direct.mp4", "agent.mp4", "mcp.mp4"],
+      "rollback must give every revealed video a real source, not a dead player",
+    );
+    assert.ok(
+      broken.videos.every((video) => video.getAttribute("data-src") === null),
+      "rollback must stop deferring every scene source it just revealed",
+    );
+    assert.ok(
+      broken.videos.every((video) => video.played === 0),
+      "rollback restores media without starting any of it",
+    );
     assert.equal(errors.length, 1, "the failure must be reported, not swallowed");
     assert.match(errors[0], /scene switcher/i);
 
@@ -464,6 +505,53 @@ const scenarios = {
       [true, true, false],
       "tab switching must not depend on IntersectionObserver support",
     );
+  },
+
+  "a standalone hero plays only while on screen, restarts on return, and obeys reduced motion"() {
+    const hero = buildHero();
+    const document = buildDocument([], [hero.figure]);
+    const { errors, observers } = run(document);
+
+    assert.deepEqual(errors, [], "a hero outside every switcher must not report a failure");
+    assert.equal(observers.length, 1, "the hero is observed on its own, with no switcher present");
+    assert.equal(hero.video.played, 0, "a hero must not start before it is on screen");
+
+    observers[0].callback([{ isIntersecting: true }]);
+    assert.equal(hero.video.played, 1, "scrolling the hero into view starts it without a click");
+    assert.equal(hero.video.currentTime, 0, "the hero starts at zero, not wherever it was left");
+
+    hero.video.currentTime = 9;
+    observers[0].callback([{ isIntersecting: false }]);
+    assert.equal(hero.video.paused, 1, "scrolling the hero away pauses it instead of decoding on");
+    assert.equal(hero.video.played, 1, "leaving the viewport must never start playback");
+
+    observers[0].callback([{ isIntersecting: true }]);
+    assert.equal(hero.video.played, 2, "returning to the hero starts it again");
+    assert.equal(hero.video.currentTime, 0, "the return is a restart, not a resume mid-clip");
+
+    const quiet = buildHero();
+    const quietRun = run(buildDocument([], [quiet.figure]), { reducedMotion: true });
+    quietRun.observers[0].callback([{ isIntersecting: true }]);
+    assert.equal(
+      quiet.video.played,
+      0,
+      "a reduced-motion visitor must never see the hero start by itself",
+    );
+    assert.equal(
+      quiet.video.getAttribute("controls"),
+      "",
+      "the hero stays playable by hand under reduced motion",
+    );
+
+    const unobserved = buildHero();
+    const legacy = run(buildDocument([], [unobserved.figure]), { intersectionObserver: false });
+    assert.deepEqual(legacy.errors, []);
+    assert.equal(
+      unobserved.video.played,
+      1,
+      "without IntersectionObserver the hero plays immediately rather than never",
+    );
+    assert.equal(unobserved.video.currentTime, 0, "that immediate start is also from the beginning");
   },
 };
 

@@ -383,7 +383,9 @@
 
 /* Always parsed so controller load failures retain a product frame. The
    image stays lazy, and promotion removes `data-poster` so the real video
-   replaces it after successful enhancement or rollback. */
+   replaces it after successful enhancement or rollback. Both paths promote
+   `data-src` in the same pass, so the video this rule uncovers always has a
+   source to play. */
 .md-typeset .scene-panel__fallback {
   grid-column: 1 / -1;
   display: block;

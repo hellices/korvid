@@ -1148,6 +1148,11 @@ def test_controller_rolls_one_broken_switcher_back_and_keeps_going() -> None:
     assert 'tab.setAttribute("aria-selected", selected)' in rollback, (
         "the authored tab state must be restored, not left mid-selection"
     )
+    assert "promoteVideo(video)" in rollback, (
+        "promoting `data-poster` is what uncovers the `<video>` and hides the "
+        "`.scene-panel__fallback` image, so the rollback must promote `data-src` "
+        "in the same pass or it replaces a real product frame with a dead player"
+    )
     assert "console.error(" in script, "the failure must be reported, never swallowed"
 
     design = (
@@ -1166,13 +1171,18 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
 
     Reading the source proves the shape of the fix; only executing it proves
     the behaviour — that a broken switcher ends up in exactly the
-    no-JavaScript state, that the next switcher still initializes, that
-    posters are promoted on selection, that tab and off-screen pauses still
-    happen, that a visible switcher starts and restarts the selected scene,
-    that `prefers-reduced-motion` suppresses that autoplay, and that a
-    browser-blocked `play()` promise never rolls the switcher back.
-    `tests/js/scene_switcher_harness.mjs` implements only the DOM surface the
-    controller touches, so this needs no JavaScript dependency.
+    no-JavaScript state (every panel visible, every revealed video holding a
+    real source rather than a dead player), that the next switcher still
+    initializes, that posters are promoted on selection, that tab and
+    off-screen pauses still happen, that a visible switcher starts and
+    restarts the selected scene, that `prefers-reduced-motion` suppresses that
+    autoplay, and that a browser-blocked `play()` promise never rolls the
+    switcher back. The standalone `[data-autoplay-video]` hero has no tab strip
+    and therefore no rollback of its own, so it is covered separately: it must
+    start from zero on entry, pause on exit, restart on return, stay still
+    under reduced motion, and play immediately where `IntersectionObserver`
+    does not exist. `tests/js/scene_switcher_harness.mjs` implements only the
+    DOM surface the controller touches, so this needs no JavaScript dependency.
     """
     result = subprocess.run(
         ["node", str(SWITCHER_HARNESS)],
@@ -1192,6 +1202,7 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
         "left in the no-JavaScript state",
         "outside its own switcher is rejected",
         "without IntersectionObserver",
+        "a standalone hero plays only while on screen",
     ):
         assert scenario in result.stdout, f"the DOM harness must cover {scenario!r}"
 
