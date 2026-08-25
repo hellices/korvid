@@ -764,6 +764,46 @@ def test_agent_capture_copy_states_the_grounded_path_and_its_offline_limit() -> 
     )
 
 
+def test_agent_provenance_credits_the_successful_log_mirror_not_a_refusal() -> None:
+    """The `get_logs` follow mirror succeeds; nothing refuses it in this capture.
+
+    `agent_open_describe`'s guard (`AgentScreens.describe_screen_open`) only
+    trips for a pushed modal `DescribeScreen`. With `AgentPanel` expanded,
+    `diagnose_pod`'s mirror shares the non-modal `DescribePane` instead of
+    pushing one, so the app screen is never a `DescribeScreen` and
+    `agent_open_logs`'s identical guard never blocks the second mirror:
+    both the `diagnose_pod` describe and the `get_logs` mirror succeed, and
+    both fire their own success toast. The log pane really opens — it is
+    only invisible in the frame because the docked describe pane (60%
+    width) and the docked `AgentPanel` (40% width) already fill the screen
+    between them, leaving the undocked log pane no room. The old claim that
+    a "user-priority guard refuses" the `get_logs` mirror described the MCP
+    scene's modal-dismissal choreography, not this capture, and must not
+    appear here.
+    """
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    section = instructions.split("## Embedded agent", 1)[1].split("\n## ", 1)[0]
+    lowered = " ".join(section.lower().split())
+
+    assert "guard refuses" not in lowered, (
+        "the get_logs mirror is not refused by any guard in this capture — "
+        "describe_screen_open() never trips while the shared pane is open"
+    )
+    assert "user-priority guard" not in lowered, (
+        "the user-priority guard does not gate this capture's get_logs mirror; "
+        "it only trips for a pushed modal DescribeScreen, which this capture "
+        "never pushes"
+    )
+    assert "both" in lowered, "the page must state plainly that both follow mirrors succeed"
+    assert "succeed" in lowered, "the page must state plainly that both follow mirrors succeed"
+    assert "toast" in lowered, "the page must say both mirrors fire their own success toast"
+    assert "log pane" in lowered, "the page must say the log pane really opens"
+    assert " opens" in lowered, "the page must say the log pane really opens"
+    assert "not visible" in lowered or "invisible" in lowered, (
+        "the page must explain the log pane opens but is not visible in the frame"
+    )
+
+
 def _mp4_duration(path: Path) -> float:
     """Seconds of presentation time, read from the movie header.
 

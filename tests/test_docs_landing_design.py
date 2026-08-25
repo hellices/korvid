@@ -1546,8 +1546,9 @@ def test_agent_scene_states_the_grounded_deterministic_walkthrough() -> None:
 def test_agent_scene_credits_follow_rather_than_a_ui_drive_or_a_write() -> None:
     """The describe pane in the frame is a mirror, not the agent driving.
 
-    `AgentUiController._mirror_read` sends each successful read through the
-    same `UIBridge` mapping MCP follow uses, so the capture's screen change
+    `AgentUiController._maybe_follow_read` sends each successful read
+    through `korvid.tools.follow.mirror_read`, the same `UIBridge` mapping
+    MCP follow uses, so the capture's screen change
     is `agent.follow` reflecting a read. Describing it as UI drive would
     claim a tool call the recording never makes, and describing it as a
     change to the cluster would cross the write boundary entirely.

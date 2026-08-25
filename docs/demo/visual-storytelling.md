@@ -91,9 +91,15 @@ selection, and no surface may present the row as its evidence.
 The describe pane filling the left of the frame is `agent.follow`: the
 shipped `AgentUiController` mirrors each successful read through the same
 `UIBridge` mapping MCP follow uses, so the pane is a reflection of
-`diagnose_pod`, not a UI-drive tool call and not a write. The `get_logs`
-mirror surfaces as the `agent logs →` toast instead, because the shipped
-user-priority guard refuses to cover a describe screen the user is reading.
+`diagnose_pod`, not a UI-drive tool call and not a write. With the panel
+expanded, `agent_open_describe` shares that pane instead of pushing a modal
+`DescribeScreen`, so the guard that gates a second mirror — which only
+trips for a pushed modal — never blocks `get_logs`: both the `diagnose_pod`
+describe and the `get_logs` mirror succeed, and both fire their own success
+toast (`describe →` and `logs →`). The log pane really opens; it is simply
+not visible in this frame, because the docked describe pane (60% width)
+and the docked `AgentPanel` (40% width) already fill the screen between
+them, leaving the undocked log pane no room to render alongside.
 
 ```sh
 vhs docs/demo/agent.tape
