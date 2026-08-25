@@ -6,7 +6,7 @@ fail the moment `UIBridge` gains, loses, or changes a method — which is
 exactly when the proxy would otherwise start silently degrading a real
 tool call to "UI not ready". They also pin that the harness imports no
 private production name, never wraps the audit log, reads exactly one
-private app attribute, and arms the shipped `small` surface unchanged.
+private app attribute, and arms the shipped `low`-tier surface unchanged.
 """
 
 from __future__ import annotations
@@ -19,8 +19,10 @@ from typing import Any
 
 import pytest
 
-from korvid.agent.profiles import build_profile
+from korvid.agent.model_policy import PolicyEnvironment
 from korvid.evals.__main__ import prompt_fingerprint
+from korvid.evals.harness import resolve_eval_policy
+from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import UIBridge
 
 from . import operation_app
@@ -295,37 +297,54 @@ def test_the_only_private_app_attribute_use_is_the_documented_turn_settle() -> N
     assert _foreign_private_attributes() == {"_agent_ui"}
 
 
-def test_the_harness_arms_the_shipped_small_surface_unchanged() -> None:
+def test_the_harness_arms_the_shipped_low_tier_surface_unchanged() -> None:
     """Prompt/tool/config parity with production wiring (design: "Parity
     tests pin the `UIBridge` method set and prompt/tool/config fingerprint
     against production wiring").
 
-    Slice A grades the shipped profile, never a harness variant: the same
-    composed prompt, the same tool schemas, and the same budgets the
-    composition root arms. Slice C's ablations build explicit variants and
-    fingerprint them separately.
+    Slice A grades the shipped low-tier policy, never a harness variant:
+    the same composed prompt, the same tool schemas, and the same budgets
+    the composition root arms. Slice C's ablations build explicit variants
+    and fingerprint them separately.
     """
-    profile = build_profile("small", readonly=False, resize_supported=False)
-    names = {str(tool.get("function", tool).get("name")) for tool in profile.tools}
+    policy = resolve_eval_policy(
+        ScriptedProvider([]),
+        model_tier="low",
+        environment=PolicyEnvironment(
+            readonly=False, resize_supported=False, observability_backends=frozenset()
+        ),
+    )
+    names = {str(tool.get("function", tool).get("name")) for tool in policy.tools}
     assert "scale_resource" in names
     assert "rollout_restart" in names
     # Armed but never legitimately used by a Slice A fixture: any
     # delete dialog is an `unrelated_write` hard failure.
     assert "delete_resource" in names
     assert "resize_pod" not in names  # resize_supported=False
-    assert (profile.max_iterations, profile.max_history_chars) == (6, 24_000)
-    assert (profile.max_result_chars, profile.max_tool_calls_per_iteration) == (3_000, 1)
-    assert profile.strict_history_budget is True
-    assert sorted(prompt_fingerprint(profile, tools=profile.tools)) == ["sha256", "source"]
-    # AST again: the harness must build the shipped profile with exactly
-    # these two flags, and a reflowed call is not a policy change.
-    profile_calls = _calls_named("build_profile")
-    assert len(profile_calls) == 1
-    assert {keyword.arg for keyword in profile_calls[0].keywords} == {
+    assert (policy.max_iterations, policy.max_history_chars) == (6, 24_000)
+    assert (policy.max_result_chars, policy.max_tool_calls_per_iteration) == (3_000, 1)
+    assert policy.strict_history_budget is True
+    assert sorted(prompt_fingerprint(policy)) == ["overlays", "pack", "sha256", "source"]
+    # AST again: the harness must build the writable eval environment with
+    # exactly these three flags, and a reflowed call is not a policy change.
+    environment_calls = _calls_named("PolicyEnvironment")
+    assert len(environment_calls) == 1
+    assert {keyword.arg for keyword in environment_calls[0].keywords} == {
         "readonly",
         "resize_supported",
+        "observability_backends",
     }
+    bool_keywords = [
+        keyword
+        for keyword in environment_calls[0].keywords
+        if keyword.arg != "observability_backends"
+    ]
     assert all(
         isinstance(keyword.value, ast.Constant) and keyword.value.value is False
-        for keyword in profile_calls[0].keywords
+        for keyword in bool_keywords
     )
+    backends_keyword = _keyword(environment_calls[0], "observability_backends")
+    assert isinstance(backends_keyword, ast.Call)
+    assert isinstance(backends_keyword.func, ast.Name)
+    assert backends_keyword.func.id == "frozenset"
+    assert backends_keyword.args == []

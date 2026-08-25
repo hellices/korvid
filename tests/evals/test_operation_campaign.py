@@ -105,10 +105,10 @@ def test_a_scripted_campaign_writes_a_provenance_stamped_artifact(tmp_path: Path
     payload = json.loads(payload_path.read_text())
     meta = payload["meta"]
     assert meta["schema_version"] == 2
-    assert meta["profile"] == "small"
+    assert meta["model_tier"] == "low"
     assert meta["mode"] == "scripted"
     assert meta["repetitions"] == 1
-    assert set(meta["prompts"]) == {"source", "sha256"}
+    assert set(meta["prompts"]) == {"pack", "overlays", "source", "sha256"}
     assert meta["korvid_revision"]
     run = payload["runs"][0]
     assert run["template_id"] == "scale-deployment-up"

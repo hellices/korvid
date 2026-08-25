@@ -19,9 +19,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from korvid.evals.harness import resolve_eval_policy
 
 from korvid.evals.__main__ import _parse_args, prompt_fingerprint
+from korvid.evals.harness import resolve_eval_policy
 from korvid.evals.scripted import ScriptedProvider
 
 

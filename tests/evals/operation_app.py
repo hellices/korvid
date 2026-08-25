@@ -2,9 +2,11 @@
 
 The only module in the operation harness that may import `korvid.ui` and
 `korvid.core`. It builds the **production** `KorvidApp` around the real
-`AgentRuntime`, the real `ToolExecutor`, the real `AppUIBridge`, the real
-unmodified fail-closed `AuditLog`, the injected `StatefulFakeWriteOps`,
-and a Textual pilot that presses the same confirmation keys a user would.
+`DefaultAgentSession` (composed by `korvid.evals.harness.build_eval_harness`,
+the exact graph `korvid.__main__` builds), the real `ToolExecutor`, the real
+`AppUIBridge`, the real unmodified fail-closed `AuditLog`, the injected
+`StatefulFakeWriteOps`, and a Textual pilot that presses the same
+confirmation keys a user would.
 
 There is no approval callback shortcut and no eval-only mutation API: the
 only path into fake cluster state is `AppUIBridge.agent_request_write` ->
@@ -41,20 +43,22 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from textual.widgets import Static
 from yaml import YAMLError, safe_load
 
 from korvid.agent.events import AgentError, AgentEvent, TextDelta, ToolCallFinished
+from korvid.agent.interaction import AgentUiBridge, InteractionContext, UiAction, UiActionResult
+from korvid.agent.model_policy import PolicyEnvironment
 from korvid.agent.outbound import sanitize_recorded_tool_result
-from korvid.agent.profiles import build_profile
-from korvid.agent.runtime import AgentRuntime
+from korvid.agent.session import AgentSession, DefaultAgentSession
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.evals.fake_kube import builtin_aliases
+from korvid.evals.harness import EVAL_CLUSTER, build_eval_harness, resolve_eval_policy
 from korvid.evals.operation import OperationJourney, OperationTarget, StateAssertion
 from korvid.evals.operation_grader import (
     OperationGrade,
@@ -110,6 +114,16 @@ MIN_APPROVAL_TIMEOUT = 1.0
 #: The one read that can earn state credit: it returns the target's own
 #: sanitized YAML document, so the result can be parsed and walked.
 _STATE_READ_TOOL = "get_resource"
+#: The eval environment every operation journey composes against. Unlike
+#: `korvid.evals.harness.EVAL_ENVIRONMENT`, writes are armed here: an
+#: operation journey *is* the write path under test, gated only by the
+#: real `KorvidApp` approval dialog and the real fail-closed `AuditLog` —
+#: never by a harness shortcut.
+_WRITE_ENVIRONMENT: Final[PolicyEnvironment] = PolicyEnvironment(
+    readonly=False,
+    resize_supported=False,
+    observability_backends=frozenset(),
+)
 
 
 class OperationUIBridgeProxy(UIBridge):
@@ -232,6 +246,37 @@ class OperationUIBridgeProxy(UIBridge):
             return self._NOT_READY
         async with self._lock:
             return await target.agent_cancel_write_proposal(proposal_id, session_id=session_id)
+
+
+class _AgentUiBridgeProxy(AgentUiBridge):
+    """Late-bound *agent-layer* workspace port, for the session's own snapshot/apply.
+
+    Mirrors `korvid.__main__._AgentUiBridgeProxy` (private, therefore not
+    imported here): `build_eval_harness` needs a bridge before `KorvidApp`
+    exists, so this proxy stands in and `run_operation_journey` points
+    `target` at the app's real `AgentWorkspaceBridge`
+    (`app.agent_ui.workspace_bridge`) immediately after construction.
+
+    Unlike `OperationUIBridgeProxy`, an unbound call here raises rather than
+    degrading: a session that composed a turn from a fabricated snapshot, or
+    reported a UI action as having happened before the app exists, would be
+    a worse failure than the wiring bug it would hide.
+    """
+
+    _NOT_READY = "operation harness agent UI not ready"
+
+    def __init__(self) -> None:
+        self.target: AgentUiBridge | None = None
+
+    def snapshot(self) -> InteractionContext:
+        if self.target is None:
+            raise RuntimeError(self._NOT_READY)
+        return self.target.snapshot()
+
+    async def apply(self, action: UiAction) -> UiActionResult:
+        if self.target is None:
+            raise RuntimeError(self._NOT_READY)
+        return await self.target.apply(action)
 
 
 def make_audit_intent_probe(audit_path: Path) -> AuditIntentProbe:
@@ -521,8 +566,8 @@ class _JournalingExecutor(RecordedExecution):
         )
 
 
-class _AnswerCapturingRuntime(AgentRuntime):
-    """The production runtime, recording each turn's final assistant text
+class _AnswerCapturingSession(DefaultAgentSession):
+    """The production session, recording each turn's final assistant text
     and journaling the turn boundary.
 
     The answer is the text streamed after the last tool call, the same
@@ -532,6 +577,11 @@ class _AnswerCapturingRuntime(AgentRuntime):
     finished turn whose answer is not captured yet. Interrupted or errored
     turns end the wait with an empty, ungradable answer instead of publishing
     a partial completion claim.
+
+    `run_turn` stays synchronous, like `DefaultAgentSession.run_turn`: it
+    delegates to the base implementation *before* wrapping, so a session
+    that is closed or mid-turn still raises at the call, and only the
+    journaling/capture below is deferred to the first `__anext__`.
     """
 
     def __init__(self, *args: Any, journal: ActionJournal, **kwargs: Any) -> None:
@@ -539,7 +589,12 @@ class _AnswerCapturingRuntime(AgentRuntime):
         self._journal = journal
         self.answers: list[str] = []
 
-    async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
+    def run_turn(self, user_text: str) -> AsyncIterator[AgentEvent]:
+        return self._capture(user_text, super().run_turn(user_text))
+
+    async def _capture(
+        self, user_text: str, events: AsyncIterator[AgentEvent]
+    ) -> AsyncIterator[AgentEvent]:
         self._journal.append(
             event="turn_started",
             actor="app_internal",
@@ -549,7 +604,7 @@ class _AnswerCapturingRuntime(AgentRuntime):
         completed = False
         failed = False
         try:
-            async for event in super().run_turn(user_text, screen_context):
+            async for event in events:
                 if isinstance(event, TextDelta):
                     buffer += event.text
                 elif isinstance(event, ToolCallFinished):
@@ -888,8 +943,9 @@ def _select_neutral_row(app: KorvidApp, journey: OperationJourney, journal: Acti
 
 
 def _turn_ended(journal: ActionJournal, completed: int) -> Callable[[], bool]:
-    """Observable turn end: the runtime wrapper journaled `turn_finished`
-    (after capturing the answer) more times than when this turn started."""
+    """Observable turn end: the answer-capturing session journaled
+    `turn_finished` (after capturing the answer) more times than when this
+    turn started."""
 
     def ended() -> bool:
         return journal.count("turn_finished") > completed
@@ -1127,7 +1183,7 @@ def _build_app(
     journey: OperationJourney,
     kube: StatefulFakeKubeClient,
     journal: ActionJournal,
-    runtime: AgentRuntime,
+    session: AgentSession,
     ui_proxy: OperationUIBridgeProxy,
     *,
     audit_path: Path,
@@ -1157,7 +1213,7 @@ def _build_app(
         # The shipped audit log, constructed and then left alone.
         audit=AuditLog(audit_path, context=journey.target.context),
         check_permission=_make_check_permission(journey, journal),
-        agent_runtime=runtime,
+        agent_session=session,
         agent_model_name="operation-eval",
         agent_follow_bridge=ui_proxy,
         approval_timeout_seconds=approval_timeout_seconds,
@@ -1169,7 +1225,7 @@ async def run_operation_journey(
     *,
     audit_path: Path,
     provider_factory: Callable[[], Any],
-    profile_name: str = "small",
+    model_tier: str | None = None,
     approval_timeout_seconds: float = 5.0,
     turn_timeout: float = 20.0,
 ) -> OperationRun:
@@ -1183,8 +1239,11 @@ async def run_operation_journey(
         audit_path: where the real `AuditLog` writes; read back for grading.
         provider_factory: builds the LLM provider — `ScriptedProvider` in
             deterministic mode, the configured provider in a campaign.
-        profile_name: the shipped agent profile to arm (`small` by default,
-            with `readonly=False` and `resize_supported=False`).
+        model_tier: `"low"`, `"high"`, or `None` for automatic routing (a
+            `ScriptedProvider`'s unknown capabilities always fall back to
+            `low`, the tier the retired `small` profile shipped). Writes are
+            always armed (`readonly=False`) and pod resize is always off
+            (`resize_supported=False`), regardless of tier.
         approval_timeout_seconds: injected into `KorvidApp`; the expiry
             fixture uses a short value so the run waits on the observable
             expired result instead of the production 120-second window.
@@ -1211,38 +1270,46 @@ async def run_operation_journey(
     kube = StatefulFakeKubeClient(journey.cluster)
     journal = ActionJournal()
     ui_proxy = OperationUIBridgeProxy()
-    profile = build_profile(profile_name, readonly=False, resize_supported=False)
+    agent_ui_proxy = _AgentUiBridgeProxy()
     raw_provider = provider_factory()
     provider = _CountingProvider(raw_provider)
+    policy = resolve_eval_policy(provider, model_tier=model_tier, environment=_WRITE_ENVIRONMENT)
     executor = _JournalingExecutor(
         ToolExecutor(kube, _ALIASES, ui=ui_proxy),
         journal,
         journey,
-        max_result_chars=profile.max_result_chars,
+        max_result_chars=policy.max_result_chars,
     )
-    runtime = _AnswerCapturingRuntime(
-        provider,
-        executor,
-        tools=profile.tools,
-        max_iterations=profile.max_iterations,
-        max_history_chars=profile.max_history_chars,
-        max_result_chars=profile.max_result_chars,
-        max_tool_calls_per_iteration=profile.max_tool_calls_per_iteration,
-        strict_history_budget=profile.strict_history_budget,
-        system_prompt=profile.system_prompt,
-        ui_prompt=profile.ui_prompt,
+    harness = build_eval_harness(
+        provider=provider,
+        execution=executor,
+        bridge=agent_ui_proxy,
+        policy=policy,
+        cluster=EVAL_CLUSTER,
+    )
+    session = _AnswerCapturingSession(
+        engine=harness.engine,
+        bridge=harness.bridge,
+        prompt_harness=harness.prompts,
+        conversation=harness.conversation,
+        gateway=harness.gateway,
+        tools=harness.tools,
+        policy=harness.policy,
+        cluster=harness.cluster,
+        user_rules=harness.user_rules,
         journal=journal,
     )
     app = _build_app(
         journey,
         kube,
         journal,
-        runtime,
+        session,
         ui_proxy,
         audit_path=audit_path,
         approval_timeout_seconds=approval_timeout_seconds,
     )
     ui_proxy.target = AppUIBridge(app)
+    agent_ui_proxy.target = app.agent_ui.workspace_bridge
     driver = _ApprovalDriver(
         app,
         journey,
@@ -1280,7 +1347,7 @@ async def run_operation_journey(
         aclose = getattr(raw_provider, "aclose", None)
         if callable(aclose):
             await aclose()
-    answer = runtime.answers[-1] if runtime.answers else ""
+    answer = session.answers[-1] if session.answers else ""
     journal.append(
         event="outcome_reported",
         actor="model_tool",

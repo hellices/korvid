@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from korvid.agent.profiles import PromptOverrides, build_profile
+from korvid.agent.model_policy import PolicyEnvironment
 from korvid.evals.__main__ import (
     PROBE_TIMEOUT_SECONDS,
     capture_serving,
@@ -37,6 +37,7 @@ from korvid.evals.__main__ import (
     provider_factory_from_env,
     warn_if_unpinned,
 )
+from korvid.evals.harness import resolve_eval_policy
 from korvid.evals.operation import (
     OPERATION_SCHEMA_VERSION,
     OperationJourney,
@@ -50,6 +51,14 @@ from korvid.evals.scripted import ScriptedProvider
 from .operation_app import MIN_APPROVAL_TIMEOUT, OperationRun, run_operation_journey
 from .operation_scripts import OPERATION_SCRIPTS
 
+#: The writable environment the shipped harness composes its policy
+#: against (`operation_app._WRITE_ENVIRONMENT`): every journey exercises
+#: real cluster writes, so `readonly` must be `False` here too, or the
+#: meta fingerprint below would describe a policy the run never used.
+_WRITE_ENVIRONMENT = PolicyEnvironment(
+    readonly=False, resize_supported=False, observability_backends=frozenset()
+)
+
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -59,7 +68,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--operations", type=Path, default=bundled_operations_dir())
     parser.add_argument("--only", action="append", default=[], help="journey id (repeatable)")
     parser.add_argument("--reps", type=int, default=3)
-    parser.add_argument("--profile", choices=("full", "small"), default="small")
+    parser.add_argument(
+        "--model-tier",
+        choices=("low", "high"),
+        default="low",
+        help="model-capability tier to route every run against (default: low)",
+    )
     parser.add_argument("--seeds", default="", help="comma-separated metamorphic seeds")
     parser.add_argument(
         "--scripted",
@@ -343,7 +357,7 @@ async def _run(
                     provider_factory=_provider_factory(
                         template_id, args.scripted, live_provider_factory
                     ),
-                    profile_name=args.profile,
+                    model_tier=args.model_tier,
                     approval_timeout_seconds=approval_timeout_for(instance, args.approval_timeout),
                 )
             except Exception as exc:
@@ -481,15 +495,15 @@ def main(argv: list[str] | None = None) -> int:
             live_provider_factory=live_provider_factory,
         )
     )
-    profile = build_profile(
-        args.profile, readonly=False, resize_supported=False, overrides=PromptOverrides()
+    policy = resolve_eval_policy(
+        ScriptedProvider([]), model_tier=args.model_tier, environment=_WRITE_ENVIRONMENT
     )
     payload = {
         "meta": {
             "schema_version": OPERATION_SCHEMA_VERSION,
             "korvid_revision": revision,
-            "profile": profile.name,
-            "prompts": prompt_fingerprint(profile, tools=profile.tools),
+            "model_tier": policy.tier.value,
+            "prompts": prompt_fingerprint(policy),
             "repetitions": args.reps,
             "mode": "scripted" if args.scripted else "live",
             "seeds": seeds,

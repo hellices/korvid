@@ -1,6 +1,7 @@
 """Deterministic operation journeys through the production approval path.
 
-Every journey runs the real `KorvidApp`, the real `AgentRuntime`, the real
+Every journey runs the real `KorvidApp`, the real `DefaultAgentSession`
+(composed by `korvid.evals.harness.build_eval_harness`), the real
 `ToolExecutor`, the real `AppUIBridge`, the real unmodified fail-closed
 `AuditLog`, and a Textual pilot that presses the same keys a user would.
 """
@@ -18,6 +19,7 @@ from typing import Any, cast
 
 import pytest
 
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import LLMProvider
 from korvid.evals.operation import PermissionDenial, bundled_operations_dir, load_operation_journeys
 from korvid.evals.operation_journal import ActionJournal, JournalTarget
@@ -57,6 +59,14 @@ class _PartialFailureProvider(LLMProvider):
     @property
     def name(self) -> str:
         return "partial-failure"
+
+    @property
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("partial-failure", "partial-failure")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,
@@ -122,6 +132,15 @@ class _PromptSpy(ScriptedProvider):
         self.calls.append([dict(message) for message in messages])
         async for event in super().complete(messages, tools, stream=stream):
             yield event
+
+
+def _focused_pane(prompt: str) -> dict[str, Any]:
+    """Parse the `focused_pane` object out of a prompt's workspace-context JSON."""
+    marker = "Workspace context (JSON): "
+    context = json.loads(prompt.split(marker, 1)[1])
+    focused_pane = context["focused_pane"]
+    assert isinstance(focused_pane, dict)
+    return focused_pane
 
 
 async def run_scripted_journey(
@@ -896,12 +915,11 @@ async def test_a_malformed_delete_call_still_reaches_the_real_executor(tmp_path:
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "arguments", "expected_detail"),
+    ("tool_name", "arguments"),
     [
         (
             'de"lete_resource',
             {"kind": "deployments", "name": '"api"', "namespace": '"shop-a"'},
-            "kind=redacted dropped=3",
         ),
         (
             'sc"ale_resource',
@@ -911,18 +929,20 @@ async def test_a_malformed_delete_call_still_reaches_the_real_executor(tmp_path:
                 "namespace": '"shop-a"',
                 "replicas": 3,
             },
-            "kind=redacted replicas=3 dropped=3",
         ),
         (
             "ghp_" + "a" * 36,
             {"kind": "deployments"},
-            "kind=redacted dropped=1",
         ),
     ],
 )
-async def test_a_malformed_tool_name_reaches_the_real_executor(
-    tool_name: str, arguments: dict[str, object], expected_detail: str, tmp_path: Path
+async def test_a_malformed_tool_name_is_rejected_before_touching_the_executor(
+    tool_name: str, arguments: dict[str, object], tmp_path: Path
 ) -> None:
+    """A malformed/garbled tool name is refused by the harness's armed-tool
+    gate before it ever reaches the executor or the bridge (design doc
+    §6.2): no port is touched, nothing is journaled or audited, and the
+    model sees a bounded, deterministic error naming its own call."""
     provider = _PromptSpy(
         [
             [
@@ -951,18 +971,10 @@ async def test_a_malformed_tool_name_reaches_the_real_executor(
     tool_results = [
         message["content"] for message in provider.calls[1] if message.get("role") == "tool"
     ]
-    assert tool_results == [f"ERROR: unknown tool: {tool_name!r}"]
-    tool_events = [entry for entry in run.journal if entry["event"] == "tool_call"]
-    assert [entry["action"] for entry in tool_events] == ["unknown_tool"]
-    assert [entry["detail"] for entry in tool_events] == [expected_detail]
-    assert all("tool=" not in entry["detail"] for entry in tool_events)
-    assert all(
-        '"api"' not in entry["detail"] and '"shop-a"' not in entry["detail"]
-        for entry in tool_events
-    )
+    assert tool_results == [f"ERROR: tool {tool_name!r} is not armed for this policy"]
+    assert [entry for entry in run.journal if entry["event"] == "tool_call"] == []
     payload = json.dumps(run.journal, sort_keys=True)
     assert tool_name not in payload
-    assert "unknown_tool" in payload
     assert [entry for entry in run.journal if entry["event"] == "mutation_started"] == []
     assert [entry for entry in run.journal if entry["event"] == "write_requested"] == []
     assert run.audit == ()
@@ -994,11 +1006,12 @@ async def test_an_ambiguous_journeys_first_turn_does_not_preselect_the_answer(
     first_prompt = "\n".join(
         str(message["content"]) for message in provider.calls[0] if message.get("role") == "user"
     )
-    assert "scope=*" in first_prompt
-    assert "selected=api" in first_prompt
-    assert "selected_ns=shop-a" in first_prompt
-    assert "selected=web" not in first_prompt
-    assert "selected_ns=shop-b" not in first_prompt
+    focused_pane = _focused_pane(first_prompt)
+    assert focused_pane["scope"] == "*"
+    assert focused_pane["selected"]["name"] == "api"
+    assert focused_pane["selected"]["namespace"] == "shop-a"
+    assert focused_pane["selected"]["name"] != "web"
+    assert focused_pane["selected"]["namespace"] != "shop-b"
 
 
 async def test_a_name_collision_cannot_flip_a_target_initial_selection(tmp_path: Path) -> None:
@@ -1018,9 +1031,10 @@ async def test_a_name_collision_cannot_flip_a_target_initial_selection(tmp_path:
     first_prompt = "\n".join(
         str(message["content"]) for message in provider.calls[0] if message.get("role") == "user"
     )
-    assert "scope=*" not in first_prompt
-    assert "selected=web" in first_prompt
-    assert "selected_ns=shop-b" in first_prompt
+    focused_pane = _focused_pane(first_prompt)
+    assert focused_pane["scope"] != "*"
+    assert focused_pane["selected"]["name"] == "web"
+    assert focused_pane["selected"]["namespace"] == "shop-b"
 
 
 async def test_an_rbac_refusal_never_reaches_a_dialog_or_the_audit_log(tmp_path: Path) -> None:
