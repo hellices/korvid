@@ -49,20 +49,20 @@ hide:
       <a href="tui/">Explore the TUI</a>
     </article>
     <article id="scene-agent" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-agent" tabindex="0">
-      <video data-src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="A deterministic scripted AgentPanel walkthrough: a prompt typed into korvid's real agent input, then scripted tool events and a scripted answer whose E1 marker the panel flags as an unsupported citation">Your browser does not support this scripted AgentPanel walkthrough.</video>
-      <img class="scene-panel__fallback" src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer whose E1 marker the panel flags as an unsupported citation">
-      <div><strong>Input</strong> Prompt typed and submitted in the real AgentPanel input</div>
-      <div><strong>Evidence</strong> Scripted tool events and an E1 marker the panel flags as unsupported, not bounded reads</div>
-      <div><strong>Result</strong> Real AgentPanel rendering of the scripted answer</div>
-      <p>This capture does not execute korvid's provider or tool pipeline; nothing is read, so the panel flags the scripted E1 marker as an unsupported citation. The agent guide documents what a real turn does.</p>
+      <video data-src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="A deterministic synthetic-cluster walkthrough: a prompt submitted in korvid's real AgentPanel, real diagnose_pod and get_logs reads that agent follow mirrors onto the screen, and a grounded answer citing E1 and E2">Your browser does not support this deterministic synthetic-cluster walkthrough.</video>
+      <img class="scene-panel__fallback" src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel ending a deterministic synthetic-cluster walkthrough: the submitted prompt, real diagnose_pod and get_logs tool events, a grounded answer citing E1 and E2, and the describe pane agent follow mirrored beside it">
+      <div><strong>Input</strong> Prompt submitted through the real AgentPanel</div>
+      <div><strong>Evidence</strong> Real read tools over a deterministic synthetic cluster</div>
+      <div><strong>Result</strong> Grounded answer rendered by the real Agent loop</div>
+      <p>A deterministic synthetic-cluster walkthrough, not a live-model quality claim. The describe pane beside the panel is agent follow mirroring a read.</p>
       <a href="agent/">Explore the embedded agent</a>
     </article>
     <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
-      <video data-src="assets/scenes/mcp-follow-demo.mp4" class="mcp-media" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
-      <img class="scene-panel__fallback mcp-media" src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation">
-      <div><strong>Input</strong> External assistant</div>
+      <video data-src="assets/scenes/mcp-follow-demo.mp4" class="mcp-media" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="A clean local MCP SDK client making real read-only MCP requests over Streamable HTTP while korvid follow mode mirrors each answer onto the screen">Your browser does not support this MCP follow demo.</video>
+      <img class="scene-panel__fallback mcp-media" src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="A clean local MCP SDK client reading a synthetic cluster over Streamable HTTP while korvid follow mode mirrors the same table, describe, and log views">
+      <div><strong>Input</strong> Real read-only MCP requests from a clean local SDK client</div>
       <div><strong>Evidence</strong> Tool-specific bounded fresh reads</div>
-      <div><strong>Result</strong> MCP response + optional follow</div>
+      <div><strong>Result</strong> Real follow navigation mirroring each answer</div>
       <p>MCP exposes bounded tools; write proposals are off by default.</p>
       <a href="mcp/">Explore MCP</a>
     </article>
@@ -139,12 +139,12 @@ hide:
       <a href="tui/#follow-one-signal">Inspect diagnosis surfaces</a>
     </article>
     <article class="evidence-card">
-      <figure><a class="evidence-card__full" href="assets/scenes/agent-poster.png"><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer whose E1 marker the panel flags as an unsupported citation"></a><figcaption>Agent panel walkthrough</figcaption></figure>
-      <p>A scripted capture: the panel renders a prompt, a tool event, and an answer whose E1 marker it flags as unsupported — no live tool execution, no validated evidence.</p>
+      <figure><a class="evidence-card__full" href="assets/scenes/agent-poster.png"><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel ending a deterministic synthetic-cluster walkthrough: the submitted prompt, real diagnose_pod and get_logs tool events, a grounded answer citing E1 and E2, and the describe pane agent follow mirrored beside it"></a><figcaption>Agent panel walkthrough</figcaption></figure>
+      <p>A deterministic synthetic-cluster walkthrough: real read tools, a real evidence ledger, a grounded answer — not a live-model quality claim.</p>
       <a href="agent/">Use the embedded agent</a>
     </article>
     <article class="evidence-card evidence-card--wide">
-      <figure><a class="evidence-card__full" href="assets/scenes/mcp-poster.png"><img src="assets/scenes/mcp-poster.png" class="mcp-media" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation"></a><figcaption>MCP follow</figcaption></figure>
+      <figure><a class="evidence-card__full" href="assets/scenes/mcp-poster.png"><img src="assets/scenes/mcp-poster.png" class="mcp-media" width="1280" height="710" loading="lazy" alt="A clean local MCP SDK client reading a synthetic cluster over Streamable HTTP while korvid follow mode mirrors the same table, describe, and log views"></a><figcaption>MCP follow</figcaption></figure>
       <p>Let an external assistant read bounded tools while korvid can mirror where it went.</p>
       <a href="mcp/#read-once-or-follow-activity">Connect over MCP</a>
     </article>

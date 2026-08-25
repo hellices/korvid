@@ -21,7 +21,13 @@ _INDEX_STEMS = frozenset({"index", "README"})
 
 _FENCE = re.compile(r"^(?P<fence>`{3,}|~{3,}).*?^(?P=fence)", re.DOTALL | re.MULTILINE)
 _INLINE_CODE = re.compile(r"(?P<ticks>`+)[^\n]*?(?P=ticks)")
-_MEDIA_ATTRIBUTE = re.compile(r"""(?<![-\w])(?:src|poster|data-poster)=(?:"([^"]+)"|'([^']+)')""")
+#: Every attribute that becomes a browser request for a local asset —
+#: including the two the scene controller promotes on selection. `data-src`
+#: is as load-bearing as `src`: the landing page's Agent and MCP clips ship
+#: their URL only there until their tab is picked.
+_MEDIA_ATTRIBUTE = re.compile(
+    r"""(?<![-\w])(?:src|poster|data-src|data-poster)=(?:"([^"]+)"|'([^']+)')"""
+)
 #: A raw-HTML link that points into the shared asset tree (e.g. the mosaic's
 #: full-resolution capture links) resolves exactly like `src` does.
 _ASSET_HREF = re.compile(r"""(?<![-\w])href=(?:"([^"]*assets/[^"]+)"|'([^']*assets/[^']+)')""")
@@ -185,10 +191,12 @@ def _resolve_media_path(page_url: str, url: str) -> str:
 def _local_media_urls(source: Path) -> Iterator[str]:
     """Local raw-HTML media URLs on a page, ignoring code samples.
 
-    Covers `src`, `poster`, the deferred `data-poster` the scene controller
-    promotes on selection, and any `href` into the asset tree — a typo in
-    the deferred attribute or in a full-resolution capture link would
-    otherwise 404 only after a visitor picks that scene or clicks through.
+    Covers `src`, `poster`, the deferred `data-src`/`data-poster` pair the
+    scene controller promotes on selection, and any `href` into the asset
+    tree — a typo in either deferred attribute or in a full-resolution
+    capture link would otherwise 404 only after a visitor picks that scene
+    or clicks through. No scene uses a `<source>` child: each deferred clip
+    carries its single URL on the `<video>` element itself.
     """
     text = _FENCE.sub("", source.read_text(encoding="utf-8"))
     text = _INLINE_CODE.sub("", text)
@@ -215,6 +223,31 @@ def test_local_media_urls_accepts_single_quoted_raw_html(tmp_path: Path) -> None
         "assets/poster.png",
         "../assets/deferred.png",
         "assets/full.png",
+    ]
+
+
+def test_local_media_urls_walks_the_deferred_data_src(tmp_path: Path) -> None:
+    """A deferred `data-src` is a real browser request, one selection later.
+
+    The landing scene controller defers the two below-the-fold clips by
+    holding their URL in `data-src` and promoting it to `src` when the scene
+    is selected. A scanner that only knew `src`/`poster`/`data-poster`
+    therefore walked past both MP4s: a typo in either would have 404'd only
+    after a visitor picked that tab, and the storytelling-asset roll-call at
+    the bottom of this module reported them as unpublished instead.
+
+    There are no `<source>` children to consider — each scene ships exactly
+    one deferred URL on the `<video>` element itself.
+    """
+    source = tmp_path / "page.md"
+    source.write_text(
+        '<video data-src="assets/scenes/agent-demo.mp4" '
+        "data-poster='assets/scenes/agent-poster.png'></video>",
+        encoding="utf-8",
+    )
+    assert list(_local_media_urls(source)) == [
+        "assets/scenes/agent-demo.mp4",
+        "assets/scenes/agent-poster.png",
     ]
 
 

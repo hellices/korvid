@@ -14,7 +14,7 @@ VISUAL_MARKERS = {
     "resource-relationships.md": ("relationship-graph.png", "Resolution", "Coverage"),
     "helm-operators.md": ('class="docs-storyboard"', "Install", "Rollback"),
     "observability.md": ("```mermaid", "Prometheus", "Loki"),
-    "agent.md": ("agent-poster.png", "deterministic AgentPanel walkthrough"),
+    "agent.md": ("agent-poster.png", "deterministic synthetic-cluster walkthrough"),
     "mcp.md": ("```mermaid", "External MCP client", "tool-specific"),
     "airgap.md": ("```mermaid", "Internal"),
     "performance.md": ("Supported envelope", "Known limits", "Raw artifacts"),
@@ -82,7 +82,7 @@ def test_safety_and_evidence_invariants_remain_explicit() -> None:
     assert "payload" in agent
 
     agent_raw = _source("agent.md")
-    assert "not live provider execution or grounded tool calls" in agent_raw
+    assert "not a live-model quality claim" in agent_raw
     assert "fresh user keystroke" in agent_raw
 
     mcp = " ".join(_source("mcp.md").split()).lower()

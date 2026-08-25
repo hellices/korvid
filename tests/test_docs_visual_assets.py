@@ -27,6 +27,7 @@ LANDING = DOCS / "index.md"
 EXTRA_CSS = DOCS / "stylesheets" / "extra.css"
 AGENT_TAPE = DEMO_DIR / "agent.tape"
 AGENT_PAGE = DOCS / "agent.md"
+MCP_PAGE = DOCS / "mcp.md"
 DEMO_HARNESS = DEMO_DIR / "demo.py"
 VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
 _MARKDOWN_FENCE = re.compile(
@@ -1357,15 +1358,17 @@ def test_agent_capture_provenance_states_what_the_grounded_turn_proves() -> None
     )
 
 
-def test_agent_page_capture_is_labelled_scripted_and_split_from_the_turn_flow() -> None:
-    """`docs/agent.md` must not present the scripted frame as a real turn.
+def test_agent_page_capture_states_the_grounded_walkthrough_beside_the_turn_flow() -> None:
+    """`docs/agent.md` must describe the frame it ships, and only that frame.
 
-    The storyboard pairs one capture with korvid's production turn flow. That
-    flow (context, bounded reads, validated citations, UI drive) documents
-    what the shipped `AgentRuntime` does and stays exactly as strong; the
-    capture beside it executes none of it, so its alt and caption identify the
-    deterministic scripted walkthrough and the caption carries the note that
-    no provider and no real read tool run.
+    The storyboard pairs one capture with korvid's production turn flow.
+    That flow (context, bounded reads, validated citations, UI drive)
+    documents what the shipped `AgentRuntime` does and stays exactly as
+    strong. The capture beside it now runs that same runtime, executor and
+    evidence ledger over a synthetic fixture behind a deterministic offline
+    provider — so its alt and caption identify a deterministic
+    synthetic-cluster walkthrough, refuse the live-model claim, and must no
+    longer say that no provider or no read tool runs.
     """
     page = AGENT_PAGE.read_text(encoding="utf-8")
     storyboard = page[
@@ -1377,23 +1380,27 @@ def test_agent_page_capture_is_labelled_scripted_and_split_from_the_turn_flow() 
     alt = re.search(r'<img[^>]*alt="([^"]+)"', figure)
     assert alt is not None, "the storyboard keeps a described capture"
     alt_text = alt.group(1).lower()
-    assert "scripted" in alt_text, f"the alt must identify the scripted capture: {alt_text!r}"
+    assert "deterministic synthetic-cluster walkthrough" in alt_text, (
+        f"the alt must carry the shared label for this media: {alt_text!r}"
+    )
     assert "agentpanel" in alt_text or "agent panel" in alt_text, (
         f"the alt must name the panel the capture really shows: {alt_text!r}"
     )
+    assert "scripted" not in alt_text, f"the capture is no longer scripted: {alt_text!r}"
 
     caption = re.search(r"<figcaption[^>]*>(.*?)</figcaption>", figure, re.DOTALL)
     assert caption is not None, "the storyboard keeps its figure caption"
     caption_text = " ".join(re.sub(r"<[^>]+>", " ", caption.group(1)).lower().split())
-    assert "scripted" in caption_text, (
-        f"the caption must identify the scripted capture: {caption_text!r}"
+    assert "deterministic synthetic-cluster walkthrough" in caption_text, (
+        f"the caption must identify the capture: {caption_text!r}"
     )
-    assert "no provider" in caption_text, (
-        f"the capture note must say no provider runs: {caption_text!r}"
+    assert "not a live-model quality claim" in caption_text, (
+        f"the capture note must refuse the live-model claim: {caption_text!r}"
     )
-    assert "no real read tool" in caption_text, (
-        f"the capture note must say no real read tool runs: {caption_text!r}"
-    )
+    for stale in ("scripted", "no provider", "no real read tool", "unsupported citation"):
+        assert stale not in caption_text, (
+            f"the capture note must not keep the replaced story: {stale!r} in {caption_text!r}"
+        )
 
     ordered_list = storyboard[storyboard.index("<ol>") :]
     assert storyboard.index("</figure>") < storyboard.index("<ol>"), (
@@ -1412,6 +1419,105 @@ def test_agent_page_capture_is_labelled_scripted_and_split_from_the_turn_flow() 
         assert production_fact in ordered_list, (
             f"the documented production behaviour must survive verbatim: {production_fact!r}"
         )
+
+
+def test_agent_page_recording_note_names_the_real_pipeline_and_the_follow_mirror() -> None:
+    """The guide's recording note is the longest-lived description of the clip.
+
+    It must name the four shipped components the capture runs, say that the
+    screen change beside the panel is `agent.follow` mirroring a read rather
+    than a UI-drive tool call or a write, and keep the offline/no-quality
+    limit. The old note claimed the opposite of all of that.
+    """
+    page = AGENT_PAGE.read_text(encoding="utf-8")
+    note = page.split("## What the recording demonstrates", 1)[1]
+    lowered = " ".join(note.lower().split())
+
+    for component in ("agentpanel", "agentruntime", "toolexecutor", "evidenceledger"):
+        assert component in lowered.replace("`", ""), (
+            f"the note must name the shipped component the capture runs: {component!r}"
+        )
+    for read in ("diagnose_pod", "get_logs"):
+        assert read in lowered, f"the note must name the read the turn dispatches: {read!r}"
+    assert "agent.follow" in lowered, (
+        "the note must credit follow for the describe pane beside the panel"
+    )
+    assert "mirror" in lowered, "and must call it a mirror of the read"
+    assert "not a ui drive" in lowered or "not a ui-drive" in lowered, (
+        "the note must deny the UI-drive reading of that mirror"
+    )
+    assert "not a write" in lowered, "and must deny the write reading of it too"
+    for limit in ("deterministic", "offline", "synthetic", "live model", "quality"):
+        assert limit in lowered, f"the note must keep the capture's limit: {limit!r}"
+    assert "no unsupported-citation warning" in lowered, (
+        "the note must explain the absence of the warning the replaced capture "
+        "carried, rather than leave a reader to wonder"
+    )
+    assert "scripted" not in lowered, "the replaced panel-only story must be gone"
+
+
+def test_mcp_guide_capture_note_stays_compact_and_truthful() -> None:
+    """`docs/mcp.md` gets a capture note, not a recording manual.
+
+    The guide documents the product; the clip's full provenance lives on the
+    provenance page. So the note has to be short, name the real SDK client,
+    the loopback Streamable HTTP endpoint, the read-only boundary and follow,
+    and link onwards rather than restate the tape.
+    """
+    page = MCP_PAGE.read_text(encoding="utf-8")
+    matches = re.findall(r"(?m)^The landing clip[^\n]*(?:\n(?!\n)[^\n]*)*", page)
+    assert len(matches) == 1, f"docs/mcp.md must carry exactly one capture note; found {matches}"
+    note = matches[0]
+    lowered = " ".join(note.lower().split())
+
+    assert len(note.split()) <= 60, (
+        f"the capture note must stay compact; found {len(note.split())} words"
+    )
+    for fact in ("mcp sdk", "streamable http", "read-only", "follow", "synthetic"):
+        assert fact in lowered, f"the capture note must state {fact!r}; found {lowered!r}"
+    assert "demo/visual-storytelling.md" in note, (
+        "the note must link to the full provenance instead of restating it"
+    )
+
+
+def test_mcp_capture_instructions_publish_the_visible_two_pane_composition() -> None:
+    """The provenance must describe the frame a visitor actually sees.
+
+    The clip is two tmux panes at a fixed split, a fixed tool order and
+    fixed holds, and a right pane that never clears — so the log excerpt
+    `get_logs` returned is still on screen under the Helm beat and the
+    closing summary. Those are the facts a reader needs to check the frame
+    against the recipe, and they are also what stops the page drifting back
+    to a derivation of somebody else's capture.
+    """
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    mcp = instructions[instructions.index("## MCP follow") :]
+    lowered = " ".join(mcp.lower().split())
+
+    assert "tmux" in lowered, "the provenance must name the compositor"
+    assert "-p 45" in mcp, "and publish the exact pane split the tape asks tmux for"
+    assert "139" in mcp, "and the exact terminal width the panes are laid out over"
+    assert "42" in mcp, "and the exact terminal height"
+
+    assert "streamable http" in lowered, "the transport must be named"
+    assert "127.0.0.1:7878/mcp" in mcp, "and the exact loopback endpoint the client speaks to"
+    assert "mcp sdk" in lowered, "and the official SDK the client is built on"
+
+    for call, hold in (
+        ("list_resources", "2.2"),
+        ("diagnose_pod", "3.2"),
+        ("get_logs", "3.6"),
+        ("helm_list_releases", "2.4"),
+    ):
+        assert call in mcp, f"the provenance must publish the call {call!r}"
+        assert hold in mcp, f"and the hold {hold!r}s that call is read at"
+
+    assert "the logs remain visible" in lowered, (
+        "the provenance must state that the client pane never clears, so the log "
+        "excerpt is still readable beside the closing beats"
+    )
+    assert "read-only" in lowered, "the read-only boundary stays stated"
+    assert "no keystroke is sent" in lowered, "and so does the follow boundary"
 
 
 def test_relationship_demo_serves_every_kind_the_real_loader_asks_for() -> None:

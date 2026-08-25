@@ -49,25 +49,36 @@ VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-s
 
 MATERIAL_ATTRIBUTION = "https://squidfunk.github.io/mkdocs-material/"
 
-#: The Evidence label the Agent scene ships. `ScriptedAgentRuntime` in
-#: `docs/demo/demo.py` discards the prompt and the screen context it is
-#: handed, contacts no provider, runs no read tool, and yields a fixed
-#: tool/citation event sequence, so the capture shows scripted events — not
-#: the bounded fresh reads the product performs against a cluster.
-AGENT_SCENE_EVIDENCE = (
-    "Scripted tool events and an E1 marker the panel flags as unsupported, not bounded reads"
-)
+#: The Evidence label the Agent scene ships. `build_demo_agent_runtime` in
+#: `docs/demo/agent_story.py` wires korvid's own `AgentRuntime` to the real
+#: `ToolExecutor` over the synthetic `DemoReadOps` fixture, so the capture's
+#: reads are the product's real read tools — the deterministic part is the
+#: cluster they read and the offline provider that chose them.
+AGENT_SCENE_EVIDENCE = "Real read tools over a deterministic synthetic cluster"
 
 #: Claims no surface built on `agent-poster.png`/`agent-demo.mp4` may make.
-SCRIPTED_AGENT_OVERCLAIMS = (
-    "bounded fresh reads",
-    "bounded reads",
-    "fresh reads",
-    "live tool",
-    "validated citation",
-    "validated evidence",
-    "checkable evidence",
-    "cited evidence",
+#: The recording runs the real runtime, executor and evidence ledger, so the
+#: read path is no longer the overclaim; the model and the cluster are.
+#: `DemoAgentProvider` opens no socket and always chooses the same two tool
+#: calls, and every byte those tools read is a fixture — so nothing here may
+#: be sold as a live model, a live cluster, or an answer-quality result.
+AGENT_CAPTURE_OVERCLAIMS = (
+    "live model",
+    "live provider",
+    "live cluster",
+    "real cluster",
+    "production cluster",
+    "model quality",
+    "answer quality",
+)
+
+#: Phrases every capture-specific Agent surface must state, so a visitor is
+#: told both halves of the boundary: the pipeline is real, the model and the
+#: cluster are not. Compared against `_flatten`, which folds hyphens.
+AGENT_CAPTURE_DISCLOSURES = (
+    "deterministic synthetic cluster walkthrough",
+    "real read tools",
+    "not a live model",
 )
 
 #: Cues that turn a banned phrase into an allowed truthful denial, so a
@@ -118,11 +129,15 @@ def _flatten(text: str) -> str:
         text and every decoded `alt`/`aria-label` attribute value, each
         appended as its own sentence so a clause boundary always separates
         one attribute's claim from the next and from the surrounding copy.
+        Hyphens and en-dashes inside a claim are folded to spaces, because
+        hyphenation is a writer's choice and must never decide whether a
+        claim is scanned: "a live-model quality claim" is the same statement
+        as "a live model quality claim".
     """
     attribute_values = [html.unescape(match.group(1)) for match in _ATTR_VALUE.finditer(text)]
     body = re.sub(r"<[^>]+>", " ", text)
     combined = ". ".join([body, *attribute_values])
-    return " ".join(combined.lower().split())
+    return " ".join(re.sub(r"[-\u2010-\u2013]", " ", combined.lower()).split())
 
 
 def _clause_is_negated(flattened: str, index: int) -> bool:
@@ -286,6 +301,16 @@ def test_unnegated_accepts_a_negated_alt_attribute() -> None:
         )
 
 
+def test_unnegated_folds_hyphenation_so_it_cannot_launder_a_claim() -> None:
+    """`live-model` and `live model` are the same claim to a reader."""
+    assert _unnegated("<p>This capture is a live-model quality claim.</p>", "live model"), (
+        "a hyphenated overclaim must still be flagged"
+    )
+    assert not _unnegated("<p>Not a live-model quality claim.</p>", "live model"), (
+        "and its truthful negation must still be accepted"
+    )
+
+
 def test_unnegated_accepts_the_shipped_agent_scene_and_tile_copy() -> None:
     """Regression pin: the real Agent scene and evidence tile stay clean."""
     scene = _section('<article id="scene-agent"', "</article>")
@@ -295,7 +320,7 @@ def test_unnegated_accepts_the_shipped_agent_scene_and_tile_copy() -> None:
         for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
         if "agent-poster.png" in card
     )
-    for overclaim in SCRIPTED_AGENT_OVERCLAIMS:
+    for overclaim in AGENT_CAPTURE_OVERCLAIMS:
         assert not _unnegated(scene, overclaim), (
             f"the shipped Agent scene must not claim {overclaim!r}"
         )
@@ -1425,8 +1450,9 @@ def test_human_lane_and_direct_scene_name_the_fresh_tui_reads_the_demo_shows() -
 
     agent = _section('<article id="scene-agent"', "</article>")
     assert AGENT_SCENE_EVIDENCE in agent, (
-        "the agent scene keeps its own distinct label — and that label describes "
-        "the scripted capture it ships, not a bounded read it never performs"
+        "the agent scene keeps its own distinct label — real read tools over a "
+        "deterministic synthetic cluster, not the watch-backed table the direct "
+        "lane reads"
     )
     mcp = _section('<article id="scene-mcp"', "</article>")
     assert "Tool-specific bounded fresh reads" in mcp, (
@@ -1435,56 +1461,61 @@ def test_human_lane_and_direct_scene_name_the_fresh_tui_reads_the_demo_shows() -
     assert "Bounded fresh reads over MCP" in contract
 
 
-def test_agent_scene_describes_the_scripted_walkthrough_it_actually_captured() -> None:
-    """The Agent scene ships a scripted panel walkthrough, not a real turn.
+def test_agent_scene_states_the_grounded_deterministic_walkthrough() -> None:
+    """The Agent scene ships a real turn over a deterministic synthetic cluster.
 
-    `docs/demo/demo.py`'s `ScriptedAgentRuntime` discards both the prompt text
-    and the screen context the panel hands it, contacts no provider, executes
-    no read tool, and yields a hard-coded
-    `ToolCallStarted`/`ToolCallFinished`/`TextDelta`/`TurnComplete` sequence
-    with a fixed `[E1]` marker. The recording therefore proves korvid's real
-    `AgentPanel` input, submission, and rendering path — and nothing about the
-    provider, tool, or evidence pipeline. Labelling it "Bounded fresh reads +
-    citations" with a "UI drive" result sold the capture as proof of exactly
-    the pipeline it replaces.
+    `docs/demo/demo.py` wires the `agent` scene to `build_demo_agent_runtime`,
+    which is korvid's own `AgentRuntime` over the real `ToolExecutor` and the
+    synthetic `DemoReadOps` fixture. The prompt really is submitted through
+    the real `AgentPanel`; `diagnose_pod` and `get_logs` really execute; the
+    real `EvidenceLedger` mints `[E1]`/`[E2]` and validates the answer's
+    markers against them, so the frame carries no unsupported-citation
+    warning. What the capture still cannot speak for is a live model, a live
+    cluster, or answer quality — `DemoAgentProvider` is offline and always
+    chooses the same two calls.
 
-    The scene stays linked to `agent/`, where the production behaviour is
-    documented in full; only the claims made *about this media* are narrowed.
+    So the scene must state both halves, and must never again describe
+    injected events, an empty ledger, or a flagged citation.
     """
     scene = _section('<article id="scene-agent"', "</article>")
+    lowered = " ".join(scene.lower().split())
+    flattened = _flatten(scene)
 
     labels = dict(re.findall(r"<div><strong>(\w+)</strong>\s*([^<]+)</div>", scene))
     assert set(labels) == {"Input", "Evidence", "Result"}, (
         f"the Agent scene keeps its three visible labels; found {sorted(labels)}"
     )
-    assert "AgentPanel" in labels["Input"], (
-        "the recording types into and submits through the real AgentPanel input, "
-        f"so the Input label may say so plainly; found {labels['Input']!r}"
+    assert labels["Input"].strip() == "Prompt submitted through the real AgentPanel", (
+        "the Input label must name the real panel the prompt goes through; "
+        f"found {labels['Input']!r}"
     )
     assert labels["Evidence"].strip() == AGENT_SCENE_EVIDENCE, (
-        "the Evidence label must name the scripted tool/citation events the "
-        f"capture actually contains; found {labels['Evidence']!r}"
+        "the Evidence label must name the real read tools and the deterministic "
+        f"synthetic cluster they read; found {labels['Evidence']!r}"
     )
     result = labels["Result"].lower()
-    assert "rendering" in result, (
-        f"the capture proves real panel rendering; found {labels['Result']!r}"
-    )
+    for token in ("grounded", "real agent loop"):
+        assert token in result, (
+            "the Result label must credit the real agent loop's grounded answer; "
+            f"{token!r} missing from {labels['Result']!r}"
+        )
     assert "ui drive" not in result, (
-        "the scripted runtime drives nothing; the capture never shows the agent "
-        f"navigating the TUI, found {labels['Result']!r}"
+        "the capture's screen changes are `agent.follow` mirroring the reads, not "
+        f"a UI-drive tool call; found {labels['Result']!r}"
     )
 
-    disclosure = re.search(r"<p>(.*?)</p>", scene, re.DOTALL)
-    assert disclosure is not None, "the Agent scene must keep one body sentence"
-    disclosure_text = " ".join(disclosure.group(1).lower().split())
-    assert "does not execute" in disclosure_text, (
-        "one concise sentence must disclose that the capture does not execute "
-        f"korvid's provider/tool pipeline; found {disclosure.group(1)!r}"
+    for phrase in AGENT_CAPTURE_DISCLOSURES:
+        assert phrase in flattened, f"the Agent scene must state {phrase!r}; found {flattened!r}"
+    assert "deterministic synthetic-cluster walkthrough" in lowered, (
+        "the scene must ship the exact hyphenated label every other surface uses"
     )
-    for pipeline_word in ("provider", "tool"):
-        assert pipeline_word in disclosure_text, (
-            f"the disclosure must name the {pipeline_word} pipeline the capture "
-            f"skips; found {disclosure.group(1)!r}"
+    assert "unsupported citation" not in lowered, (
+        "the shipped turn validates both markers, so no surface may still say "
+        "the panel flags an unsupported citation"
+    )
+    for stale in ("scripted", "injected", "nothing is read"):
+        assert stale not in lowered, (
+            f"the old panel-only story must not survive anywhere in the scene: {stale!r}"
         )
 
     described = [
@@ -1497,32 +1528,96 @@ def test_agent_scene_describes_the_scripted_walkthrough_it_actually_captured() -
     )
     for part in described:
         assert part is not None  # narrowed above; keeps mypy and the reader honest
-        copy = part.group(1).lower()
-        assert "scripted" in copy, (
-            f"every description of this media must say it is scripted: {copy!r}"
-        )
-        assert "agentpanel" in copy or "agent panel" in copy or "agent input" in copy, (
-            f"and must name the real AgentPanel it does capture: {copy!r}"
+        copy = " ".join(part.group(1).lower().replace("-", " ").split())
+        assert "deterministic synthetic cluster walkthrough" in copy, (
+            f"every description of this media must carry its one label: {copy!r}"
         )
 
-    for overclaim in SCRIPTED_AGENT_OVERCLAIMS:
+    for overclaim in AGENT_CAPTURE_OVERCLAIMS:
         assert not _unnegated(scene, overclaim), (
-            f"the Agent scene must not claim {overclaim!r} from a scripted capture"
+            f"the Agent scene must not claim {overclaim!r} from a deterministic capture"
         )
 
     assert 'href="agent/"' in scene, (
-        "narrowing the capture's claims must not cost the link to the real "
-        "embedded-agent documentation"
+        "the scene keeps the link to the real embedded-agent documentation"
     )
 
 
-def test_agent_evidence_tile_claims_only_the_scripted_panel_rendering() -> None:
-    """The mosaic tile named a product capability, not the frame it shows.
+def test_agent_scene_credits_follow_rather_than_a_ui_drive_or_a_write() -> None:
+    """The describe pane in the frame is a mirror, not the agent driving.
 
-    "Agent with citations" plus "keep checkable evidence in the answer" reads
-    as validated citation evidence. The frame is one scripted panel render:
-    the typed prompt, a scripted `diagnose_pod` tool line, and a scripted
-    answer carrying an `[E1]` marker that no evidence store ever validated.
+    `AgentUiController._mirror_read` sends each successful read through the
+    same `UIBridge` mapping MCP follow uses, so the capture's screen change
+    is `agent.follow` reflecting a read. Describing it as UI drive would
+    claim a tool call the recording never makes, and describing it as a
+    change to the cluster would cross the write boundary entirely.
+    """
+    scene = _section('<article id="scene-agent"', "</article>")
+    flattened = _flatten(scene)
+    assert "follow" in flattened, (
+        "the scene must name the follow mirror that opens the describe pane "
+        f"beside the panel; found {flattened!r}"
+    )
+    for write_claim in ("writes", "mutates", "applies", "restarts the"):
+        assert write_claim not in flattened, (
+            f"the capture performs no write, so it must not say {write_claim!r}"
+        )
+
+
+def test_mcp_scene_states_the_real_read_only_requests_and_follow() -> None:
+    """The MCP scene is a real SDK exchange, and must be described as one.
+
+    `docs/demo/mcp_client.py` is an MCP SDK `ClientSession` speaking
+    Streamable HTTP to the `KorvidMCPServer` the `mcp` demo scene binds on
+    loopback, and every view the left pane opens is korvid's own follow
+    bridge mirroring the answer just received. Nothing in the clip comes
+    from a third-party client any more, so no visitor-facing surface may
+    describe it as one.
+    """
+    scene = _section('<article id="scene-mcp"', "</article>")
+    mosaic = _section('<section class="evidence-mosaic"', "</section>")
+    tile = next(
+        card
+        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
+        if "mcp-poster.png" in card
+    )
+    published_mcp_description = _flatten(scene + tile)
+
+    assert "real read only mcp requests" in published_mcp_description, (
+        "the MCP scene must state the requests are real and read-only; "
+        f"found {published_mcp_description!r}"
+    )
+    for signal in ("follow", "sdk client", "streamable http"):
+        assert signal in published_mcp_description, (
+            f"the MCP copy must name {signal!r}; found {published_mcp_description!r}"
+        )
+    assert "third party" not in published_mcp_description, (
+        "the clip is recorded from this repository alone; no visitor-facing MCP "
+        "copy may still derive it from a third-party client"
+    )
+    assert "disposable local cluster" not in published_mcp_description, (
+        "the clip is recorded against the in-memory synthetic fixture the `mcp` "
+        "demo scene serves, not a disposable cluster"
+    )
+    assert 'href="mcp/"' in scene, "the scene keeps the link to the MCP guide"
+
+
+def test_mcp_landing_copy_keeps_the_production_write_and_follow_limits() -> None:
+    """Recording a truthful read demo must not soften the production limits."""
+    scene = _section('<article id="scene-mcp"', "</article>")
+    flattened = _flatten(scene)
+    assert "proposal" in flattened, "MCP writes stay opt-in proposals on the landing page"
+    assert "off by default" in flattened, "and the page must keep saying they are off"
+
+
+def test_agent_evidence_tile_claims_only_the_grounded_deterministic_capture() -> None:
+    """The mosaic tile must match the frame it renders, in both directions.
+
+    The tile used to deny live tool execution and validated evidence,
+    because the old capture had neither. The shipped frame has both, over a
+    synthetic fixture, so denying them now understates the product exactly
+    as badly as the old copy overstated it. What stays denied is the model
+    and the cluster.
     """
     mosaic = _section('<section class="evidence-mosaic"', "</section>")
     card = next(
@@ -1534,10 +1629,6 @@ def test_agent_evidence_tile_claims_only_the_scripted_panel_rendering() -> None:
     caption = re.search(r"<figcaption>([^<]+)</figcaption>", card)
     assert caption is not None, "the agent tile keeps a caption"
     caption_text = caption.group(1).lower()
-    assert "agent with citations" not in caption_text, (
-        "the tile must not be named for a citation contract the capture never "
-        f"exercised; found {caption.group(1)!r}"
-    )
     for token in ("agent", "walkthrough"):
         assert token in caption_text, (
             f"the caption must name the agent panel walkthrough it shows: {caption.group(1)!r}"
@@ -1545,44 +1636,39 @@ def test_agent_evidence_tile_claims_only_the_scripted_panel_rendering() -> None:
 
     alt = re.search(r'<img[^>]*alt="([^"]+)"', card)
     assert alt is not None
-    alt_text = alt.group(1).lower()
-    for signal in ("scripted", "prompt", "tool", "cit"):
+    alt_text = " ".join(alt.group(1).lower().replace("-", " ").split())
+    for signal in ("deterministic synthetic cluster walkthrough", "prompt", "diagnose_pod", "e1"):
         assert signal in alt_text, (
-            f"the alt must describe the prompt, tool event, and cited answer this "
-            f"scripted frame renders; {signal!r} missing from {alt.group(1)!r}"
+            "the alt must describe the grounded turn this frame ends on; "
+            f"{signal!r} missing from {alt.group(1)!r}"
         )
 
     body = re.search(r"<p>(.*?)</p>", card, re.DOTALL)
     assert body is not None
-    body_text = " ".join(body.group(1).lower().split())
-    assert "scripted" in body_text, (
-        f"the tile's copy must say the capture is scripted; found {body.group(1)!r}"
-    )
-    for denial in ("live tool execution", "validated evidence"):
-        assert denial in body_text, (
-            f"the tile must explicitly deny {denial!r} rather than leave a visitor "
-            f"to assume it; found {body.group(1)!r}"
+    body_text = _flatten(body.group(1))
+    for stale in ("scripted", "no live tool execution", "no validated evidence"):
+        assert stale not in body_text, (
+            "the shipped capture executes real read tools and validates its own "
+            f"citations, so the tile must not still deny {stale!r}: {body.group(1)!r}"
         )
+    assert "not a live model" in body_text, (
+        f"the tile must keep the one denial that is still true: {body.group(1)!r}"
+    )
 
-    for overclaim in SCRIPTED_AGENT_OVERCLAIMS:
+    for overclaim in AGENT_CAPTURE_OVERCLAIMS:
         assert not _unnegated(card, overclaim), (
             f"the agent evidence tile must not claim {overclaim!r}"
         )
 
 
-def test_agent_capture_surfaces_explain_the_flagged_scripted_citation() -> None:
-    """The frame shows korvid's unsupported-citation warning; the copy must own it.
+def test_agent_capture_surfaces_state_the_validated_citations_they_show() -> None:
+    """Every capture-specific surface tells the same, current story.
 
-    `ScriptedAgentRuntime` mints no evidence, so its `[E1]` is reported in
-    `TurnComplete.uncited` and the real panel renders its yellow
-    "unsupported citation" note beneath the scripted answer. Publishing that
-    frame while describing "a cited answer" would make korvid look broken in
-    its own screenshot, so every capture-specific surface — the landing
-    scene, the landing evidence tile and the `docs/agent.md` storyboard —
-    says the marker is unsupported and that the panel flags it.
-
-    The production turn flow beside the capture is untouched: real turns do
-    validate citations, and that claim stays exactly as strong.
+    The scene, the mosaic tile and the `docs/agent.md` storyboard all render
+    the same frame, so a stale disclosure on any one of them contradicts the
+    other two — and contradicts the frame itself, which shows `[E1]`/`[E2]`
+    with no warning beneath them. The production turn flow beside the
+    storyboard is untouched.
     """
     scene = _section('<article id="scene-agent"', "</article>")
     mosaic = _section('<section class="evidence-mosaic"', "</section>")
@@ -1600,49 +1686,53 @@ def test_agent_capture_surfaces_explain_the_flagged_scripted_citation() -> None:
 
     for name, surface in (("scene", scene), ("tile", tile), ("storyboard figure", figure)):
         flattened = _flatten(surface)
-        assert "unsupported" in flattened, (
-            f"the {name} must say the scripted marker is unsupported: {flattened!r}"
+        assert "deterministic synthetic cluster walkthrough" in flattened, (
+            f"the {name} must carry the shared label for this media: {flattened!r}"
         )
-        assert "e1" in flattened, f"the {name} must name the marker the panel flags"
-        assert not _unnegated(surface, "cited answer"), (
-            f"the {name} must not describe a flagged marker as a cited answer"
+        assert "unsupported" not in flattened, (
+            f"the {name} must not still report a citation warning the frame does "
+            f"not contain: {flattened!r}"
         )
-        for overclaim in SCRIPTED_AGENT_OVERCLAIMS:
+        assert "scripted" not in flattened, (
+            f"the {name} must not still call the capture scripted: {flattened!r}"
+        )
+        for overclaim in AGENT_CAPTURE_OVERCLAIMS:
             assert not _unnegated(surface, overclaim), (
-                f"the {name} must not claim {overclaim!r} from a scripted capture"
+                f"the {name} must not claim {overclaim!r} from a deterministic capture"
             )
 
     ordered_list = storyboard[storyboard.index("<ol>") :]
     assert "Evidence references remain selectable and validated." in ordered_list, (
-        "the production turn flow must keep its validated-citation claim: only "
-        "what the capture shows is narrowed"
+        "the production turn flow keeps its validated-citation claim"
     )
     assert "unsupported" not in ordered_list.lower(), (
-        "the capture's flagged marker must not be written into the description "
-        "of what a real turn does"
+        "and must not import a capture-specific warning into the description of "
+        "what a real turn does"
     )
 
     design = (
         DOCS / "superpowers" / "specs" / "2026-08-22-visual-storytelling-design.md"
     ).read_text(encoding="utf-8")
     lowered_design = " ".join(design.lower().split())
-    assert "uncited" in lowered_design, (
-        "the design must record which field the scripted harness reports, since "
-        "that is what makes the frame's warning correct rather than a defect"
+    assert "unsupported citation" not in lowered_design, (
+        "the design must not keep requiring the warning the shipped capture no longer produces"
     )
-    assert "unsupported citation" in lowered_design
+    assert "deterministic synthetic-cluster walkthrough" in lowered_design, (
+        "the design must record the label every shipping surface uses"
+    )
     assert "the agent performs bounded reads" in lowered_design, (
         "the production capability statement stays exactly as strong"
     )
 
 
 def test_agent_capture_never_presents_the_selected_row_as_grounding() -> None:
-    """The demo's highlighted row is not context the scripted answer used.
+    """The demo's highlighted row is not the evidence the answer rests on.
 
-    `ScriptedAgentRuntime` discards the screen context it is handed, so any
-    resemblance between the selected pod and the scripted answer is
-    coincidence. No capture-specific surface may present it as the grounding
-    for the answer.
+    The answer is grounded in the two tool reads the runtime dispatched —
+    `diagnose_pod` and `get_logs` — and the `[E1]`/`[E2]` references the
+    evidence ledger minted for them. Whatever row the demo table happens to
+    have selected is not that grounding, so no capture-specific surface may
+    offer it as evidence.
     """
     scene = _section('<article id="scene-agent"', "</article>")
     mosaic = _section('<section class="evidence-mosaic"', "</section>")
@@ -1663,7 +1753,7 @@ def test_agent_capture_never_presents_the_selected_row_as_grounding() -> None:
     lowered = " ".join(section.lower().split())
     assert "selected row" in lowered, (
         "the provenance page must state plainly that the capture's selected row "
-        "is not grounding for the scripted answer"
+        "is not the grounding for the answer"
     )
 
 
@@ -1955,15 +2045,15 @@ def test_visual_storytelling_plan_contract_snippets_match_the_shipped_evidence_l
     )
 
 
-def test_visual_storytelling_plan_agent_snippets_match_the_shipped_scripted_copy() -> None:
-    """The plan is executable, so a replay must not restore the overclaim.
+def test_visual_storytelling_plan_agent_snippets_match_the_shipped_copy() -> None:
+    """The plan is executable, so a replay must not restore stale copy.
 
     `docs/superpowers/plans/2026-08-22-visual-storytelling.md` embeds the
     Agent scene, the agent evidence tile, the `docs/agent.md` storyboard and
     the provenance page verbatim. Whatever the shipped pages say about the
-    scripted capture, those snippets have to say too, or the next contributor
-    following the recipe reintroduces "Bounded fresh reads + citations" and
-    "Agent with citations" for media that executes neither.
+    capture, those snippets have to say too, or the next contributor
+    following the recipe reintroduces a panel-only scripted walkthrough for
+    media that now runs korvid's real runtime, executor and evidence ledger.
     """
     plan = _plan()
 
@@ -1975,7 +2065,7 @@ def test_visual_storytelling_plan_agent_snippets_match_the_shipped_scripted_copy
     shipped_scene = _section('<article id="scene-agent"', "</article>")
     assert _compact(shipped_scene) in _compact(scene_markup), (
         "the plan's Agent scene snippet must be the shipped Agent scene, "
-        "scripted-capture labels and disclosure sentence included"
+        "grounded-capture labels and disclosure sentence included"
     )
 
     mosaic_markup = _fenced_block_after(
@@ -2007,7 +2097,7 @@ def test_visual_storytelling_plan_agent_snippets_match_the_shipped_scripted_copy
     ]
     assert _compact(shipped_storyboard) == _compact(storyboard_markup), (
         "the plan's storyboard snippet must be the shipped storyboard, including "
-        "its scripted-capture caption and its separated production turn flow"
+        "its capture note and its separated production turn flow"
     )
 
     provenance = _fenced_block_after(plan, "## Embedded agent", "sh")
@@ -2021,37 +2111,46 @@ def test_visual_storytelling_plan_agent_snippets_match_the_shipped_scripted_copy
 
     for overclaim in ("Bounded fresh reads + citations", "Agent with citations"):
         assert overclaim not in plan, (
-            f"no plan snippet may still ship {overclaim!r} for the scripted capture"
+            f"no plan snippet may still ship {overclaim!r} for this capture"
+        )
+    for stale in ("scripted tool events", "unsupported citation", "nothing is read"):
+        assert stale not in plan.lower(), (
+            f"no plan snippet may still describe the replaced panel-only capture: {stale!r}"
         )
 
 
 def test_visual_storytelling_design_separates_agent_capability_from_the_capture() -> None:
     """The design doc must keep the product claim and the proof claim apart.
 
-    Its scene description ("the agent performs bounded reads, cites evidence,
-    and drives the TUI") and its mosaic criterion ("embedded-agent answers
-    with validated citations") are true of the product and false of the media
-    this branch ships. The document keeps the capability statement, and adds
-    the rule the landing contract now enforces: the scripted capture is not
-    evidence of the pipeline it scripts.
+    Its production statement ("the agent performs bounded reads, cites
+    evidence, and drives the TUI") is true of the shipped runtime and stays
+    exactly as strong. The capture rule beside it has to describe the media
+    this branch actually ships: a deterministic synthetic-cluster
+    walkthrough that runs the real pipeline over a fixture, behind an
+    offline provider — not the panel-only scripted replay it replaced, and
+    not a live-model or answer-quality claim either.
     """
     design = (
         DOCS / "superpowers" / "specs" / "2026-08-22-visual-storytelling-design.md"
     ).read_text(encoding="utf-8")
     lowered = " ".join(design.lower().split())
 
-    assert "scripted" in lowered, (
-        "the design must acknowledge that the agent media comes from a scripted runtime"
-    )
     for rule in (
-        "deterministic scripted agentpanel walkthrough",
-        "not evidence of bounded fresh reads, live tool execution, or validated citations",
+        "deterministic synthetic-cluster walkthrough",
+        "not evidence of a live model, a live cluster, or answer quality",
     ):
         assert rule in lowered, f"the design must state the capture rule: {rule!r}"
+    for stale in (
+        "deterministic scripted agentpanel walkthrough",
+        "not evidence of bounded fresh reads, live tool execution, or validated citations",
+        "unsupported citation",
+    ):
+        assert stale not in lowered, (
+            f"the design must not keep the replaced capture's rule: {stale!r}"
+        )
 
     assert "embedded-agent answers with validated citations" not in lowered, (
-        "no mosaic criterion may require validated-citation evidence from a "
-        "capture whose citations are hard-coded"
+        "the mosaic criterion still names the walkthrough, not a product capability"
     )
     assert "the agent performs bounded reads" in lowered, (
         "the production capability statement stays: only the claim made about "

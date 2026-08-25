@@ -116,11 +116,11 @@ inspect its evidence, and navigate to the relevant logs or owner.
 - **Direct:** the operator filters and follows the relationship from the TUI.
 - **Agent:** the operator asks from `Ctrl-A`; in the product the agent performs
   bounded reads, cites evidence, and drives the TUI. The media this design
-  ships is a **deterministic scripted AgentPanel walkthrough** — the harness
-  runtime discards the prompt and screen context and emits fixed tool and
-  citation events — so the scene's own labels claim only real panel input,
-  submission, and rendering of scripted events, plus one sentence disclosing
-  that the capture does not execute the provider or tool pipeline.
+  ships is a **deterministic synthetic-cluster walkthrough** — korvid's real
+  runtime, executor and evidence ledger over a synthetic fixture, behind a
+  deterministic offline provider — so the scene's labels claim real panel
+  input, real read tools, and a grounded answer, plus one sentence disclosing
+  that it is not a live-model quality claim.
 - **MCP:** an editor or external assistant performs bounded reads and asks
   korvid to navigate or submit a write proposal when MCP writes are enabled.
 
@@ -198,8 +198,8 @@ Show six representative product scenes in an asymmetric mosaic:
 2. relationship graph navigation;
 3. a filtered, live single-pod log stream;
 4. diagnosis with events and evidence;
-5. an agent panel walkthrough rendering a prompt, a scripted tool event, and a
-   scripted answer whose citation marker the panel flags as unsupported; and
+5. an agent panel walkthrough rendering a prompt, real `diagnose_pod` and
+   `get_logs` tool events, and a grounded answer citing `[E1]`/`[E2]`; and
 6. an MCP-driven follow or navigation sequence.
 
 Use real screens captured from the deterministic in-memory synthetic harness
@@ -211,18 +211,20 @@ The harness has no metrics source, so its CPU/MEM columns render placeholders.
 No tile, caption, or criterion may present a capture from it as evidence of
 utilization.
 
-The agent media likewise comes from a scripted harness runtime rather than the
-product's agent pipeline: it discards the prompt and screen context and emits
-fixed tool and citation events. Because that turn mints no evidence, the
-harness reports its `[E1]` marker as **uncited**, so the recording shows
-korvid's own yellow **unsupported citation** note under the scripted answer —
-the product behaving correctly on an unsourced claim. Every surface that ships
-it labels it a deterministic scripted AgentPanel walkthrough whose citation the
-panel flags, and no tile, scene label, caption, or criterion may present it
-otherwise: the capture is **not evidence of bounded fresh reads, live tool
-execution, or validated citations**, and the row the demo happens to have
-selected is not grounding for the scripted answer. Documenting those production
-capabilities on the linked agent page is unaffected.
+The agent media runs the product's own pipeline against a deterministic
+cluster: the prompt is submitted through the real `AgentPanel`, the shipped
+`AgentRuntime` dispatches `diagnose_pod` and `get_logs` through the real
+`ToolExecutor`, and the real `EvidenceLedger` mints and validates
+`[E1]`/`[E2]`, so the frame carries no citation warning. What is fixed is the
+model's side: an offline provider that opens no socket, over a synthetic
+fixture. Every surface that ships it labels it a **deterministic
+synthetic-cluster walkthrough**, and no tile, scene label, caption, or
+criterion may present it otherwise: the capture is **not evidence of a live
+model, a live cluster, or answer quality**, the screen change beside the panel
+is `agent.follow` mirroring a read rather than a UI-drive tool call or a
+write, and the row the demo happens to have selected is not grounding for the
+answer. Documenting the production capabilities on the linked agent page is
+unaffected.
 
 The mosaic is not a feature dump. Every tile has the same structure:
 
@@ -273,8 +275,8 @@ page where a diagram or screen replaces substantial explanation:
 - **TUI:** an annotated interface anatomy screen and the core navigation loop.
 - **Embedded agent:** a four-step storyboard of a production turn — current
   selection to reads, citations, and UI drive — kept visibly separate from the
-  illustrative scripted capture beside it, which carries its own note that no
-  provider and no real read tool run.
+  deterministic synthetic-cluster capture beside it, which carries its own
+  note that the turn is real but the model and the cluster are not.
 - **MCP:** external client to MCP read/UI-drive flow, with the opt-in proposal
   boundary shown separately.
 - **Operations and safety:** the full confirmation, audit, and execution
@@ -403,8 +405,8 @@ This iteration does not add:
 - a JavaScript framework or new frontend build toolchain;
 - decorative animation unrelated to product behavior;
 - a visual rewrite of every reference page;
-- presenting the scripted AgentPanel capture as proof of the provider, tool, or
-  citation-validation pipeline; or
+- presenting the deterministic AgentPanel capture as proof of a live model, a
+  live cluster, or answer quality; or
 - claims that TUI, agent, and MCP reads always share an identical real-time
   snapshot.
 

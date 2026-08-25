@@ -117,6 +117,11 @@ are confirmed only by your keystrokes. With follow **off**, each external
 read still surfaces as a transient toast (`client-name: get_logs api-1 (ns
 prod)`), so nothing reads your cluster invisibly.
 
+The landing clip of this flow is recorded from this repository alone: a real
+MCP SDK client making read-only requests over Streamable HTTP to a loopback
+korvid serving a synthetic cluster, with follow mirroring each answer. Full
+provenance: [visual evidence](demo/visual-storytelling.md#mcp-follow).
+
 ## Propose a write
 
 Off by default. With

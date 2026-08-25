@@ -88,6 +88,13 @@ The capture's selected row is whatever the demo table happens to have
 highlighted; the answer is grounded in the two tool reads above, not in that
 selection, and no surface may present the row as its evidence.
 
+The describe pane filling the left of the frame is `agent.follow`: the
+shipped `AgentUiController` mirrors each successful read through the same
+`UIBridge` mapping MCP follow uses, so the pane is a reflection of
+`diagnose_pod`, not a UI-drive tool call and not a write. The `get_logs`
+mirror surfaces as the `agent logs →` toast instead, because the shipped
+user-priority guard refuses to cover a describe screen the user is reading.
+
 ```sh
 vhs docs/demo/agent.tape
 ffmpeg -y -ss 00:00:11 -i docs/assets/scenes/agent-demo.mp4 \
@@ -122,28 +129,47 @@ ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/relationship-demo.mp4 \
 ## MCP follow
 
 `docs/assets/scenes/mcp-follow-demo.mp4` is recorded from this repository
-alone. `docs/demo/mcp-follow.tape` composes two panes with tmux: on the left
-the `mcp` scene of `docs/demo/demo.py` (`--scene mcp`), which is korvid's real
-TUI over the
-synthetic fixture, serving the real `KorvidMCPServer` over Streamable HTTP on
-loopback port 7878; on the right `docs/demo/mcp_client.py`, a real MCP SDK
-`ClientSession` that calls four **read-only** tools — `list_resources`,
-`diagnose_pod`, `get_logs`, `helm_list_releases`. Every view the left pane
-opens is korvid's own follow bridge mirroring the answer the right pane just
+alone. `docs/demo/mcp-follow.tape` composes two panes with tmux over a fixed
+`139`×`42` grid — the terminal's own grid at the tape's geometry, so attaching
+resizes nothing — and splits it with `-p 45`, giving the client 45% of the
+width and korvid the remaining 55%. On the left is the `mcp` scene of
+`docs/demo/demo.py` (`--scene mcp`), korvid's real TUI over the synthetic
+fixture, serving the real `KorvidMCPServer` over Streamable HTTP on loopback
+port 7878. On the right is `docs/demo/mcp_client.py`, a real MCP SDK
+`ClientSession` that speaks Streamable HTTP to `http://127.0.0.1:7878/mcp`
+and calls four **read-only** tools. Every view the left pane opens is
+korvid's own follow bridge mirroring the answer the right pane just
 received; no keystroke is sent to the TUI and no frame is staged, redrawn or
 cleared.
 
-Nothing outside the checkout takes part. The client speaks only to
-`127.0.0.1:7878`, no credential is used, the demo server writes no MCP
-endpoint file, and the tape turns the tmux status line off before the first
-captured frame — that line is the only surface that would print a hostname, a
-user or today's date into a landing asset. The shell that composes the panes
-is never captured, and the handshake file the tape uses to release the client
-(`.korvid-mcp-demo-go`) is created and removed inside the checkout.
+Nothing outside the checkout takes part, and no external client metadata can
+reach a frame: the right pane is this repository's own client, so it prints
+no assistant name, no model, no token count, no working directory and no
+endpoint file. The client speaks only to `127.0.0.1:7878`, no credential is
+used, the demo server writes no MCP endpoint file, and the tape turns the
+tmux status line off before the first captured frame — that line is the only
+surface that would print a hostname, a user or today's date into a landing
+asset. The shell that composes the panes is never captured, and the handshake
+file the tape uses to release the client (`.korvid-mcp-demo-go`) is created
+and removed inside the checkout.
 
-The captured timeline runs the story once, at reading speed: the pod table,
-the failing pod's diagnosis in a describe pane, its log stream held long
-enough to read before the story moves on, then the Helm releases that own it.
+The captured timeline runs the story once, at reading speed. Each call is
+announced, answered, and then held for a fixed beat while the mirrored view
+is read:
+
+| Call | Hold | Mirrored view |
+| --- | --- | --- |
+| `list_resources` | 2.2 s | the `shop` pod table |
+| `diagnose_pod` | 3.2 s | the failing pod's describe pane |
+| `get_logs` | 3.6 s | its log pane |
+| `helm_list_releases` | 2.4 s | the Helm releases that own it |
+
+The client pane never clears and its lines are clipped rather than wrapped,
+so the logs remain visible under the Helm beat and the closing
+`read-only investigation complete` card: the whole read-only investigation
+stays legible in the final frame. The closing card's own `6.0`s hold outlasts
+the capture on purpose — a client that exited first would close its pane and
+reflow the TUI to full width inside the last captured frames.
 
 One piece of choreography, disclosed plainly: `diagnose_pod` opens a modal
 describe screen through korvid's own follow bridge, and the shipped
