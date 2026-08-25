@@ -164,7 +164,7 @@ Replace the current `<section class="hero">...</section>` and delete the separat
   <figure class="hero-demo">
     <div class="hero-demo__frame">
       <div class="hero-demo__bar" aria-hidden="true"><span></span><strong>ctx:(current) · ns:shop</strong></div>
-      <video src="assets/demo.mp4" poster="assets/scenes/cockpit-poster.png" controls muted loop playsinline preload="metadata" aria-label="korvid browsing, filtering, describing, and following logs for a failing workload">Your browser does not support the korvid demo video.</video>
+      <video src="assets/demo.mp4" poster="assets/scenes/cockpit-poster.png" data-autoplay-video controls muted loop playsinline preload="metadata" aria-label="korvid browsing, filtering, describing, and following logs for a failing workload">Your browser does not support the korvid demo video.</video>
     </div>
     <figcaption><strong>Real korvid, synthetic cluster.</strong> The cockpit needs only your kubeconfig; AI is optional.</figcaption>
   </figure>
@@ -899,7 +899,7 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
     assert hashlib.sha256(script).hexdigest() == (
-        "a6255deca2603a69e57e162583e0717331491c5dc2154277e2a4aa312e32f846"
+        "d295c46e2b78cc10b6d54939d1f15bcd9060ee86562bac09f7054010170bbfb3"
     )
     assert b"\r" not in script
 
@@ -950,7 +950,7 @@ with:
       <a href="tui/">Explore the TUI</a>
     </article>
     <article id="scene-agent" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-agent" tabindex="0">
-      <video src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="A deterministic scripted AgentPanel walkthrough: a prompt typed into korvid's real agent input, then scripted tool events and a scripted answer whose E1 marker the panel flags as an unsupported citation">Your browser does not support this scripted AgentPanel walkthrough.</video>
+      <video data-src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="A deterministic scripted AgentPanel walkthrough: a prompt typed into korvid's real agent input, then scripted tool events and a scripted answer whose E1 marker the panel flags as an unsupported citation">Your browser does not support this scripted AgentPanel walkthrough.</video>
       <img class="scene-panel__fallback" src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel in a deterministic scripted walkthrough, rendering a typed prompt, a scripted diagnose_pod tool event, and a scripted answer whose E1 marker the panel flags as an unsupported citation">
       <div><strong>Input</strong> Prompt typed and submitted in the real AgentPanel input</div>
       <div><strong>Evidence</strong> Scripted tool events and an E1 marker the panel flags as unsupported, not bounded reads</div>
@@ -959,7 +959,7 @@ with:
       <a href="agent/">Explore the embedded agent</a>
     </article>
     <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
-      <video src="assets/scenes/mcp-follow-demo.mp4" class="mcp-media" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
+      <video data-src="assets/scenes/mcp-follow-demo.mp4" class="mcp-media" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="An external MCP client reads the cluster while korvid follow mode mirrors its navigation">Your browser does not support this MCP follow demo.</video>
       <img class="scene-panel__fallback mcp-media" src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="An external MCP client reading disposable local cluster data while korvid mirrors the navigation">
       <div><strong>Input</strong> External assistant</div>
       <div><strong>Evidence</strong> Tool-specific bounded fresh reads</div>
@@ -1136,6 +1136,41 @@ final newline:
     }
   };
 
+  /* `prefers-reduced-motion: reduce` must suppress every programmatic
+     autoplay; native controls stay usable either way. Feature-detected so a
+     browser without `matchMedia` degrades to allowing motion. */
+  const motionAllowed = () =>
+    typeof matchMedia !== "function" || !matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* Below-fold scene video bytes are deferred behind `data-src` until the
+     scene is actually selected, mirroring `promotePoster` above. Idempotent:
+     a video with no deferred source (already promoted, or never deferred)
+     is left untouched. */
+  const promoteVideo = (video) => {
+    const source = video.dataset.src;
+    if (source) {
+      video.setAttribute("src", source);
+      video.removeAttribute("data-src");
+      video.load?.();
+    }
+  };
+
+  /* Restarting from the beginning — rather than resuming — is what makes a
+     scene feel like a looping GIF each time it becomes the visible one
+     again, whether by tab selection or by scrolling back into view. A
+     rejected `play()` promise (autoplay blocked by browser policy) is
+     expected, not an application error: the poster and native controls
+     remain exactly as they were. */
+  const startFromBeginning = (video) => {
+    if (!motionAllowed()) return;
+    promoteVideo(video);
+    video.currentTime = 0;
+    const playback = video.play();
+    if (playback && typeof playback.catch === "function") {
+      playback.catch(() => {});
+    }
+  };
+
   /* The authored markup is the no-JavaScript fallback: every panel visible,
      the tab strip hidden by CSS while `data-enhanced` is absent. Restoring
      it is what keeps a failed enhancement from leaving a half-switched page
@@ -1167,6 +1202,11 @@ final newline:
        partially rewritten. */
     const panels = new Map(tabs.map((tab) => [tab, panelFor(switcher, tab)]));
 
+    /* Unknown until `IntersectionObserver` reports in; a browser without it
+       is assumed always visible so playback still works, just without the
+       off-screen pause. */
+    let switcherVisible = typeof IntersectionObserver !== "function";
+
     const select = (nextTab, focus) => {
       for (const tab of tabs) {
         const selected = tab === nextTab;
@@ -1187,6 +1227,11 @@ final newline:
         }
       }
       if (focus) nextTab.focus();
+      const selectedVideo = panels.get(nextTab).querySelector("video");
+      if (selectedVideo) {
+        promoteVideo(selectedVideo);
+        if (switcherVisible) startFromBeginning(selectedVideo);
+      }
     };
 
     select(tabs.find((tab) => tab.getAttribute("aria-selected") === "true") ?? tabs[0], false);
@@ -1215,10 +1260,16 @@ final newline:
     if (typeof IntersectionObserver === "function") {
       const observer = new IntersectionObserver((entries) => {
         for (const entry of entries) {
-          if (entry.isIntersecting) continue;
-          for (const video of switcher.querySelectorAll("video")) {
-            video.pause();
+          switcherVisible = entry.isIntersecting;
+          if (!entry.isIntersecting) {
+            for (const video of switcher.querySelectorAll("video")) {
+              video.pause();
+            }
+            continue;
           }
+          const selectedTab = tabs.find((tab) => tab.getAttribute("aria-selected") === "true");
+          const selectedVideo = selectedTab ? panels.get(selectedTab).querySelector("video") : null;
+          if (selectedVideo) startFromBeginning(selectedVideo);
         }
       });
       observer.observe(switcher);
@@ -1237,6 +1288,27 @@ final newline:
       restoreFallback(switcher, authoredTabState);
       console.error("korvid: scene switcher left unenhanced", error);
     }
+  }
+
+  /* A standalone hero video (not part of a scene switcher) follows the same
+     enter/restart and leave/pause rules, independent of the switcher
+     enhancement above and its no-JavaScript rollback contract: there is no
+     tab strip to roll back, only a single always-visible-in-markup video. */
+  for (const hero of document.querySelectorAll("[data-autoplay-video]")) {
+    if (typeof IntersectionObserver !== "function") {
+      startFromBeginning(hero);
+      continue;
+    }
+    const heroObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          startFromBeginning(hero);
+        } else {
+          hero.pause();
+        }
+      }
+    });
+    heroObserver.observe(hero);
   }
 })();
 ```

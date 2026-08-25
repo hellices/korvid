@@ -30,6 +30,8 @@ class HTMLElement {
     this.focused = false;
     this.paused = 0;
     this.played = 0;
+    this.currentTime = 7;
+    this.playError = null;
     this.dataset = datasetFor(this);
   }
 
@@ -110,6 +112,7 @@ class HTMLElement {
 
   play() {
     this.played += 1;
+    return this.playError === null ? Promise.resolve() : Promise.reject(this.playError);
   }
 }
 
@@ -169,8 +172,10 @@ function buildSwitcher(prefix, { brokenTab = null, panelOutside = false } = {}) 
   );
   const videos = scenes.map((scene, index) =>
     element("video", {
-      src: `${scene}.mp4`,
-      ...(index === 0 ? { poster: `${scene}.png` } : { "data-poster": `${scene}.png` }),
+      controls: "",
+      ...(index === 0
+        ? { src: `${scene}.mp4`, poster: `${scene}.png` }
+        : { "data-src": `${scene}.mp4`, "data-poster": `${scene}.png` }),
     }),
   );
   const panels = scenes.map((scene, index) =>
@@ -198,13 +203,14 @@ function buildDocument(switchers, strays = []) {
   };
 }
 
-function run(document, { intersectionObserver = true } = {}) {
+function run(document, { intersectionObserver = true, reducedMotion = false } = {}) {
   const errors = [];
   const observers = [];
   const sandbox = {
     document,
     HTMLElement,
     console: { error: (...args) => errors.push(args.map(String).join(" ")) },
+    matchMedia: () => ({ matches: reducedMotion }),
   };
   if (intersectionObserver) {
     sandbox.IntersectionObserver = class {
@@ -268,6 +274,92 @@ const scenarios = {
     assert.ok(
       first.videos.every((video) => video.played === 0),
       "the controller never resumes playback itself",
+    );
+  },
+
+  "a visible switcher starts the selected scene and restarts the next one on selection"() {
+    const first = buildSwitcher("a");
+    const document = buildDocument([first.switcher]);
+    const { observers } = run(document);
+
+    observers[0].callback([{ isIntersecting: true }]);
+    assert.equal(
+      first.videos[0].played,
+      1,
+      "entering the viewport starts the already-selected scene",
+    );
+    assert.equal(
+      first.videos[0].currentTime,
+      0,
+      "playback must restart from the beginning, not resume mid-scene",
+    );
+    assert.equal(first.videos[1].played, 0, "an unselected scene must never be started");
+
+    first.tabs[1].dispatch("click", {});
+    assert.ok(first.videos[0].paused > 0, "switching away pauses the previously playing scene");
+    assert.equal(
+      first.videos[1].played,
+      1,
+      "the newly selected scene starts because the switcher is already visible",
+    );
+    assert.equal(
+      first.videos[1].getAttribute("src"),
+      "agent.mp4",
+      "selecting a scene promotes its deferred video source",
+    );
+    assert.equal(first.videos[1].getAttribute("data-src"), null, "the deferred attribute is dropped");
+
+    observers[0].callback([{ isIntersecting: false }]);
+    assert.ok(
+      first.videos.every((video) => video.paused > 0),
+      "leaving the viewport pauses every scene, playing or not",
+    );
+  },
+
+  "prefers-reduced-motion suppresses autoplay even while visible"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { observers } = run(document, { reducedMotion: true });
+
+    observers[0].callback([{ isIntersecting: true }]);
+    assert.equal(
+      built.videos[0].played,
+      0,
+      "a reduced-motion visitor must never see programmatic autoplay",
+    );
+
+    built.tabs[1].dispatch("click", {});
+    assert.equal(
+      built.videos[1].played,
+      0,
+      "selecting a scene under reduced motion must still wait for a manual play",
+    );
+  },
+
+  "a rejected play() promise is swallowed without rolling back the switcher"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors, observers } = run(document);
+    built.videos[0].playError = new Error("NotAllowedError");
+
+    assert.doesNotThrow(() => {
+      observers[0].callback([{ isIntersecting: true }]);
+    });
+    assert.deepEqual(errors, [], "a browser-blocked autoplay must not be reported as a failure");
+    assert.equal(
+      built.switcher.getAttribute("data-enhanced"),
+      "true",
+      "a blocked autoplay must not roll the switcher back to its no-JavaScript state",
+    );
+    assert.equal(
+      built.videos[0].getAttribute("controls"),
+      "",
+      "native controls must remain available after a blocked autoplay",
+    );
+    assert.equal(
+      built.videos[0].getAttribute("poster"),
+      "direct.png",
+      "a blocked autoplay must not remove the already-visible poster",
     );
   },
 

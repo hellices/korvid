@@ -610,14 +610,17 @@ def test_hero_media_is_controllable_and_has_a_text_fallback() -> None:
     hero = _section('<section class="hero">', "</section>")
     video = re.search(r"<video\b[^>]*>", hero)
     assert video is not None
-    opening = video.group(0)
-    assert "aria-label=" in opening or "aria-labelledby=" in opening, (
+    hero_video = video.group(0)
+    assert "aria-label=" in hero_video or "aria-labelledby=" in hero_video, (
         "the hero video must have an accessible name"
     )
     for attribute in ("controls", "muted", "loop", "playsinline"):
-        assert re.search(rf"\b{attribute}\b", opening)
-    assert 'preload="metadata"' in opening
-    assert "autoplay" not in opening
+        assert re.search(rf"\b{attribute}\b", hero_video)
+    assert 'preload="metadata"' in hero_video
+    assert not re.search(r"(?<!data-)\bautoplay\b", hero_video)
+    assert "data-autoplay-video" in hero_video, (
+        "the hero video must opt into the visibility-aware GIF-like controller behavior"
+    )
     assert "Your browser does not support the korvid demo video." in hero
     assert "<figcaption>" in hero
 
@@ -1011,15 +1014,15 @@ def test_controller_promotes_a_deferred_poster_only_when_its_scene_is_selected()
 def test_controller_pauses_off_screen_switcher_media_via_intersection_observer() -> None:
     """Scrolling a playing switcher off-screen must not leave it decoding forever.
 
-    The controller already pauses a panel's video when a visitor switches
-    tabs, but a visitor who presses play on the *selected* scene and then
-    scrolls the whole switcher out of the viewport keeps that video decoding
-    indefinitely — nothing watches the switcher's own visibility. The
-    controller must observe each `[data-scene-switcher]`'s intersection with
-    the viewport, and when it stops intersecting, pause every video inside
-    it (selected or not). It must never call `play()` itself; only a user
-    keystroke or click may resume playback. `IntersectionObserver` support
-    must be feature-detected so its absence cannot break the switcher.
+    A visitor who scrolls the whole switcher out of the viewport must not
+    keep its video decoding indefinitely — nothing else watches the
+    switcher's own visibility. The controller must observe each
+    `[data-scene-switcher]`'s intersection with the viewport, and when it
+    stops intersecting, pause every video inside it (selected or not).
+    Playback may resume only for the selected scene, and only when the
+    switcher is visible again and `prefers-reduced-motion` allows it.
+    `IntersectionObserver` support must be feature-detected so its absence
+    cannot break the switcher.
     """
     script = STORYTELLING_JS.read_text(encoding="utf-8")
     assert re.search(r'typeof IntersectionObserver === "function"', script), (
@@ -1039,9 +1042,6 @@ def test_controller_pauses_off_screen_switcher_media_via_intersection_observer()
     assert ".pause()" in observer_block
     assert "observer.observe(switcher)" in observer_block, (
         "every switcher instance must register itself with the observer"
-    )
-    assert ".play(" not in script, (
-        "the controller must never resume playback itself; user control is authoritative"
     )
 
 
@@ -1143,7 +1143,9 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
     the behaviour — that a broken switcher ends up in exactly the
     no-JavaScript state, that the next switcher still initializes, that
     posters are promoted on selection, that tab and off-screen pauses still
-    happen, and that nothing ever calls `play()`.
+    happen, that a visible switcher starts and restarts the selected scene,
+    that `prefers-reduced-motion` suppresses that autoplay, and that a
+    browser-blocked `play()` promise never rolls the switcher back.
     `tests/js/scene_switcher_harness.mjs` implements only the DOM surface the
     controller touches, so this needs no JavaScript dependency.
     """
@@ -1158,6 +1160,9 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
     assert "not ok" not in result.stdout, result.stdout
     for scenario in (
         "healthy switchers enhance",
+        "starts the selected scene and restarts",
+        "prefers-reduced-motion suppresses autoplay",
+        "rejected play() promise is swallowed",
         "prototype-named keys are ignored",
         "left in the no-JavaScript state",
         "outside its own switcher is rejected",
@@ -1308,16 +1313,40 @@ def test_visual_storytelling_plan_mcp_ratio_snippets_match_the_shipped_sources()
 
 
 def test_scene_videos_never_autoplay_and_below_fold_media_preloads_nothing() -> None:
-    """Bandwidth and motion are the visitor's choice on every landing video."""
+    """Bandwidth and motion are the visitor's choice on every landing video.
+
+    No `<video>` may declare the native `autoplay` attribute: playback is
+    driven entirely by the visibility-aware controller, gated on
+    `prefers-reduced-motion`, and never by the browser's own eager-fetch
+    behavior. The hero opts into that controller via `data-autoplay-video`.
+    The direct scene keeps its real `src` so the default scene is never
+    empty; the Agent and MCP scenes defer their video bytes behind
+    `data-src` until the controller promotes them on selection, so a
+    below-fold scene never downloads video before a visitor picks it.
+    """
     videos = re.findall(r"<video[^>]*>", _index())
     assert len(videos) == 4, "the hero video plus one per scene"
     for video in videos:
-        assert "autoplay" not in video, f"no landing video may autoplay: {video}"
-    hero, *scenes = videos
-    assert 'preload="metadata"' in hero, (
+        assert not re.search(r"(?<!data-)\bautoplay\b", video), (
+            f"no landing video may declare the native autoplay attribute: {video}"
+        )
+    hero_video, direct_video, *deferred_scene_videos = videos
+    assert "data-autoplay-video" in hero_video, (
+        "the hero is the only standalone (non-switcher) video, so it opts into "
+        "the visibility-aware controller through this data attribute"
+    )
+    assert 'preload="metadata"' in hero_video, (
         "the hero video is the page's lead evidence, so its metadata may load"
     )
-    for video in scenes:
+    assert 'src="assets/demo.mp4"' in direct_video, (
+        "the default scene must keep a real, immediately playable source"
+    )
+    assert 'preload="none"' in direct_video
+    for video in deferred_scene_videos:
+        assert 'data-src="' in video, f"a below-fold scene must defer its source: {video}"
+        assert not re.search(r'(?<!data-)src="', video), (
+            f"a deferred scene must not also declare a real, eagerly-fetchable src: {video}"
+        )
         assert 'preload="none"' in video, f"below-fold scene media must fetch nothing: {video}"
 
 

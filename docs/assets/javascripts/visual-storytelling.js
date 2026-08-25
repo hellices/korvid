@@ -23,6 +23,41 @@
     }
   };
 
+  /* `prefers-reduced-motion: reduce` must suppress every programmatic
+     autoplay; native controls stay usable either way. Feature-detected so a
+     browser without `matchMedia` degrades to allowing motion. */
+  const motionAllowed = () =>
+    typeof matchMedia !== "function" || !matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* Below-fold scene video bytes are deferred behind `data-src` until the
+     scene is actually selected, mirroring `promotePoster` above. Idempotent:
+     a video with no deferred source (already promoted, or never deferred)
+     is left untouched. */
+  const promoteVideo = (video) => {
+    const source = video.dataset.src;
+    if (source) {
+      video.setAttribute("src", source);
+      video.removeAttribute("data-src");
+      video.load?.();
+    }
+  };
+
+  /* Restarting from the beginning — rather than resuming — is what makes a
+     scene feel like a looping GIF each time it becomes the visible one
+     again, whether by tab selection or by scrolling back into view. A
+     rejected `play()` promise (autoplay blocked by browser policy) is
+     expected, not an application error: the poster and native controls
+     remain exactly as they were. */
+  const startFromBeginning = (video) => {
+    if (!motionAllowed()) return;
+    promoteVideo(video);
+    video.currentTime = 0;
+    const playback = video.play();
+    if (playback && typeof playback.catch === "function") {
+      playback.catch(() => {});
+    }
+  };
+
   /* The authored markup is the no-JavaScript fallback: every panel visible,
      the tab strip hidden by CSS while `data-enhanced` is absent. Restoring
      it is what keeps a failed enhancement from leaving a half-switched page
@@ -54,6 +89,11 @@
        partially rewritten. */
     const panels = new Map(tabs.map((tab) => [tab, panelFor(switcher, tab)]));
 
+    /* Unknown until `IntersectionObserver` reports in; a browser without it
+       is assumed always visible so playback still works, just without the
+       off-screen pause. */
+    let switcherVisible = typeof IntersectionObserver !== "function";
+
     const select = (nextTab, focus) => {
       for (const tab of tabs) {
         const selected = tab === nextTab;
@@ -74,6 +114,11 @@
         }
       }
       if (focus) nextTab.focus();
+      const selectedVideo = panels.get(nextTab).querySelector("video");
+      if (selectedVideo) {
+        promoteVideo(selectedVideo);
+        if (switcherVisible) startFromBeginning(selectedVideo);
+      }
     };
 
     select(tabs.find((tab) => tab.getAttribute("aria-selected") === "true") ?? tabs[0], false);
@@ -102,10 +147,16 @@
     if (typeof IntersectionObserver === "function") {
       const observer = new IntersectionObserver((entries) => {
         for (const entry of entries) {
-          if (entry.isIntersecting) continue;
-          for (const video of switcher.querySelectorAll("video")) {
-            video.pause();
+          switcherVisible = entry.isIntersecting;
+          if (!entry.isIntersecting) {
+            for (const video of switcher.querySelectorAll("video")) {
+              video.pause();
+            }
+            continue;
           }
+          const selectedTab = tabs.find((tab) => tab.getAttribute("aria-selected") === "true");
+          const selectedVideo = selectedTab ? panels.get(selectedTab).querySelector("video") : null;
+          if (selectedVideo) startFromBeginning(selectedVideo);
         }
       });
       observer.observe(switcher);
@@ -124,5 +175,26 @@
       restoreFallback(switcher, authoredTabState);
       console.error("korvid: scene switcher left unenhanced", error);
     }
+  }
+
+  /* A standalone hero video (not part of a scene switcher) follows the same
+     enter/restart and leave/pause rules, independent of the switcher
+     enhancement above and its no-JavaScript rollback contract: there is no
+     tab strip to roll back, only a single always-visible-in-markup video. */
+  for (const hero of document.querySelectorAll("[data-autoplay-video]")) {
+    if (typeof IntersectionObserver !== "function") {
+      startFromBeginning(hero);
+      continue;
+    }
+    const heroObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          startFromBeginning(hero);
+        } else {
+          hero.pause();
+        }
+      }
+    });
+    heroObserver.observe(hero);
   }
 })();

@@ -406,7 +406,7 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
     assert hashlib.sha256(script).hexdigest() == (
-        "a6255deca2603a69e57e162583e0717331491c5dc2154277e2a4aa312e32f846"
+        "d295c46e2b78cc10b6d54939d1f15bcd9060ee86562bac09f7054010170bbfb3"
     )
     assert b"\r" not in script, (
         "the reviewed bytes are LF-only; a CRLF checkout would break the pin above"
