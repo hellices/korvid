@@ -122,6 +122,39 @@ def test_the_low_tier_stops_and_asks_instead_of_retrying_forever() -> None:
     assert _contains_all(text, "ask the user") == []
 
 
+def test_the_low_tier_maps_on_screen_requests_to_ui_tools() -> None:
+    text = _low_text()
+    assert _contains_all(text, "show", "open", "display", "on screen", "open_*", "get_*") == []
+    assert (
+        _contains_all(
+            text,
+            "show me",
+            "always",
+            "open_logs",
+            "get_logs",
+            "open_describe",
+            "get_resource",
+        )
+        == []
+    )
+    assert (
+        _contains_all(text, "display-only", "also asks", "analysis", "first", "then", "read") == []
+    )
+    assert (
+        "For any request to show, open, or display logs, always call open_logs "
+        "first; never substitute get_logs."
+    ) in text
+    assert (
+        "For any request to show, open, or display details, always call "
+        "open_describe first; never substitute get_resource."
+    ) in text
+    assert "For a display-only request, stop after the open_* tool." in text
+    assert (
+        "If the user also asks for analysis, call the appropriate get_* read tool "
+        "only after opening the UI."
+    ) in text
+
+
 # ---------------------------------------------------------------------------
 # What must not come back with them
 # ---------------------------------------------------------------------------
@@ -184,6 +217,20 @@ def test_every_low_description_names_a_tool_the_low_surface_offers() -> None:
     assert set(LOW_TOOL_DESCRIPTIONS) <= low_only
 
 
+def test_low_log_tools_distinguish_reading_evidence_from_changing_the_ui() -> None:
+    assert "get_logs" in LOW_TOOL_DESCRIPTIONS
+    assert (
+        _contains_all(LOW_TOOL_DESCRIPTIONS["get_logs"], "read", "no UI", "not for", "show", "open")
+        == []
+    )
+    assert (
+        _contains_all(
+            LOW_TOOL_DESCRIPTIONS["open_logs"], "use for", "show", "open", "display", "TUI"
+        )
+        == []
+    )
+
+
 @pytest.mark.parametrize("name", sorted(LOW_TOOL_DESCRIPTIONS))
 def test_every_low_description_is_nonempty_and_bounded(name: str) -> None:
     description = LOW_TOOL_DESCRIPTIONS[name]
@@ -223,7 +270,7 @@ def test_every_low_description_is_shorter_than_the_registry_wording() -> None:
 #: eval artifact recorded under the old version unable to tell it apart from
 #: one recorded after a silent rewording. Bump both together when the
 #: wording changes on purpose.
-_LOW_TOOL_DESCRIPTIONS_DIGEST = "7b99bda640a3235f28c394ee343b0600140a9f53b9d4f5bd22d4481c868f8446"
+_LOW_TOOL_DESCRIPTIONS_DIGEST = "09343be750bb7d43fb45f6bcd723fa76ec2f7321bea088ceca0791d544a42005"
 
 
 def _low_tool_descriptions_digest() -> str:
@@ -244,4 +291,4 @@ def test_the_low_description_digest_is_pinned_to_its_shipped_version() -> None:
     on to tell old and new artifacts apart.
     """
     assert _low_tool_descriptions_digest() == _LOW_TOOL_DESCRIPTIONS_DIGEST
-    assert LOW_TOOL_DESCRIPTIONS_VERSION == 1
+    assert LOW_TOOL_DESCRIPTIONS_VERSION == 2

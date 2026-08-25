@@ -721,7 +721,7 @@ def test_the_fully_armed_low_tier_static_prompt_matches_the_migration_note_figur
     `len(prompt.system_message)` is exactly the static prompt's length.
 
     If this number drifts (a pack, the capability clauses, or a low tool
-    description changes), the release note's ~3,864 / 6,000 / ~2,136
+    description changes), the release note's 4,283 / 6,000 / 1,717
     figures have to move with it.
     """
     resolved = ModelRouter(MODEL_CATALOG).resolve(
@@ -741,8 +741,8 @@ def test_the_fully_armed_low_tier_static_prompt_matches_the_migration_note_figur
 
     assert resolved.max_history_chars == 24_000
     assert budget == 6_000
-    assert static_prompt_chars == 3_864
-    assert budget - static_prompt_chars == 2_136
+    assert static_prompt_chars == 4_283
+    assert budget - static_prompt_chars == 1_717
 
 
 # ---------------------------------------------------------------------------

@@ -85,7 +85,13 @@ LOW_KORVID_OPERATOR_PACK: Final[str] = (
     "'namespace/name' is two separate fields — split it, and never paste "
     "the combined value into either one. If a tool result is malformed or "
     "empty, or you cannot make progress after a few attempts, stop and ask "
-    "the user for guidance instead of retrying indefinitely. "
+    "the user for guidance instead of retrying indefinitely. For any request to "
+    "show, open, or display logs, always call open_logs first; never substitute "
+    "get_logs. For any request to show, open, or display details, always call "
+    "open_describe first; never substitute get_resource. For a display-only "
+    "request, stop after the open_* tool. If the user also asks for analysis, "
+    "call the appropriate get_* read tool only after opening the UI. Treat "
+    "'show me' and 'on screen' as display. "
     "Diagnose from the reason string in container states and events, never "
     "from an exit code alone: exit 137 only says the container was killed, "
     "and it means OOMKilled only when a state or event says OOMKilled — a "
@@ -147,7 +153,7 @@ MODEL_PROMPT_OVERLAYS: Final[Mapping[str, str]] = MappingProxyType({})
 #: be told apart from one recorded after it. The eval prompt digest
 #: already covers the schemas themselves; this is the human-readable
 #: handle for the same change.
-LOW_TOOL_DESCRIPTIONS_VERSION: Final[int] = 1
+LOW_TOOL_DESCRIPTIONS_VERSION: Final[int] = 2
 
 #: Hard bound on one low-tier tool description. The whole schema list is
 #: retransmitted on every request of every iteration, so on a 4k-token
@@ -182,6 +188,7 @@ LOW_TOOL_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
             "Warning events, owned ReplicaSets, and compact diagnoses of its "
             "non-ready pods. Prefer this when a Deployment is not progressing."
         ),
+        "get_logs": "Read only; no UI. Not for show/open.",
         "helm_list_releases": (
             "List installed Helm releases with revision, status, chart and app "
             "version. Read-only; parsed from cluster Secrets."
@@ -189,7 +196,7 @@ LOW_TOOL_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
         "list_operators": (
             "List OLM operator packages and installed subscriptions with their status. Read-only."
         ),
-        "open_logs": "Open the live log pane for a pod on the user's screen.",
+        "open_logs": "Use for show/open/display: open TUI logs.",
         "resize_pod": (
             "Request an in-place CPU/memory resize of a running pod (Kubernetes "
             "1.35+). Runs only after the user approves it in the TUI dialog."
