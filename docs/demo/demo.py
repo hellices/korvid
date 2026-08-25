@@ -15,24 +15,34 @@ import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from types import ModuleType
 from typing import Any
 
 from korvid.agent.runtime import AgentRuntime
 from korvid.core.config import KorvidConfig
+from korvid.core.mcp import MCPControllerBase
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
-from korvid.k8s.helm import HelmReleaseSummary
+from korvid.k8s.helm import HELM_RELEASES_META, HelmReleaseSummary, release_uid
 from korvid.k8s.logs import LogLine
-from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.k8s.models import GenericSummary, PodListSummary, PodSummary
 from korvid.k8s.reads import ReadOps
 from korvid.k8s.relationship_facts import (
     RelationKind,
     RelationshipFacts,
     extract_relationship_facts,
 )
-from korvid.ui.app import EventsFetcher, KorvidApp
+from korvid.tools.executor import ToolExecutor, UIBridge
+from korvid.tools.registry import mcp_tool_schemas
+from korvid.ui.app import AppUIBridge, EventsFetcher, KorvidApp
+from korvid.ui.widgets.describe_screen import DescribeScreen
+
+#: The loopback port the `mcp` scene serves and `docs/demo/mcp_client.py`
+#: connects to. korvid's own default, so the recorded status line reads the
+#: way a real session's does.
+MCP_DEMO_PORT = 7878
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
@@ -85,6 +95,28 @@ for _meta in _RELATIONSHIP_ONLY_METAS:
     for _alias in (_meta.kind.lower(), *_meta.shortnames):
         RELATIONSHIP_ALIASES.setdefault(_alias, _meta)
 
+#: The `mcp` scene's discovery surface. An external host that calls
+#: `helm_list_releases` is mirrored onto korvid's Helm browser
+#: (`tools/follow.py`), and that mirror is a plain view navigation — so the
+#: releases view has to exist here, or the last step of the follow story
+#: answers `ERROR: unknown view 'helm'` instead of moving the screen.
+MCP_ALIASES: dict[str, ResourceMeta] = dict(ALIASES)
+MCP_ALIASES[HELM_RELEASES_META.plural] = HELM_RELEASES_META
+for _alias in (HELM_RELEASES_META.kind.lower(), *HELM_RELEASES_META.shortnames):
+    MCP_ALIASES.setdefault(_alias, HELM_RELEASES_META)
+
+
+def _ago(**delta: float) -> str:
+    """An RFC 3339 UTC timestamp `delta` before now, to whole seconds.
+
+    Every age in the fixture is relative, so a capture made today and one
+    made a year later render identically and no frame bakes in a stale
+    calendar date. Whole seconds keep the tool output readable at the
+    recording's font size.
+    """
+    stamp = (datetime.now(UTC) - timedelta(**delta)).replace(microsecond=0)
+    return stamp.isoformat()
+
 
 def _pod(
     name: str,
@@ -97,6 +129,7 @@ def _pod(
     cpu: str = "100m",
     mem: str = "128Mi",
     *,
+    hours: float = 6.0,
     uid: str = "",
     labels: tuple[tuple[str, str], ...] = (),
     relationships: RelationshipFacts | None = None,
@@ -114,6 +147,10 @@ def _pod(
         containers=("app",),
         uid=uid,
         labels=labels,
+        # Relative, never absolute: the AGE column and every tool answer
+        # derived from it read the same way in a capture made today and one
+        # made next year, and no frame ever carries a calendar date.
+        created=_ago(hours=hours),
         relationships=relationships or RelationshipFacts(),
     )
 
@@ -148,6 +185,27 @@ POD_MANIFEST: dict[str, Any] = {
     "status": {
         "phase": "Running",
         "conditions": [{"type": "Ready", "status": "False", "reason": "ContainersNotReady"}],
+        "containerStatuses": [
+            {
+                "name": "app",
+                "ready": False,
+                "restartCount": 17,
+                "image": "registry.example.com/shop/payment-worker:2.4.1",
+                "state": {
+                    "waiting": {
+                        "reason": "CrashLoopBackOff",
+                        "message": "back-off 5m0s restarting failed container=app",
+                    }
+                },
+                "lastState": {
+                    "terminated": {
+                        "reason": "Error",
+                        "exitCode": 1,
+                        "message": "payment gateway unreachable: 503 after 3 retries",
+                    }
+                },
+            }
+        ],
     },
 }
 
@@ -161,10 +219,10 @@ _PAYMENT_RELATIONSHIPS = RelationshipFacts(
 
 
 PODS = [
-    _pod("web-frontend-7d4b9c-x2kfp", "shop", cpu="250m", mem="256Mi"),
-    _pod("web-frontend-7d4b9c-9qwzr", "shop", cpu="250m", mem="256Mi"),
-    _pod("cart-api-5f6d8b-mn4tp", "shop", node="node-2"),
-    _pod("cart-api-5f6d8b-kd82v", "shop", node="node-3"),
+    _pod("web-frontend-7d4b9c-x2kfp", "shop", cpu="250m", mem="256Mi", hours=9),
+    _pod("web-frontend-7d4b9c-9qwzr", "shop", cpu="250m", mem="256Mi", hours=9),
+    _pod("cart-api-5f6d8b-mn4tp", "shop", node="node-2", hours=31),
+    _pod("cart-api-5f6d8b-kd82v", "shop", node="node-3", hours=31),
     _pod(
         "payment-worker-6c9f7d-b3xnq",
         "shop",
@@ -172,19 +230,24 @@ PODS = [
         ready="0/1",
         restarts=17,
         node="node-2",
+        hours=5,
         uid="pod-payment",
         labels=_PAYMENT_LABELS,
         relationships=_PAYMENT_RELATIONSHIPS,
     ),
-    _pod("checkout-svc-84c5d6-ln7wk", "shop", restarts=2),
-    _pod("inventory-db-0", "shop", qos="Guaranteed", cpu="500m", mem="1Gi", node="node-3"),
-    _pod("search-indexer-59b8c7-tq5mz", "shop", phase="Pending", ready="0/1", node="-"),
-    _pod("grafana-7b5c9d-w8xkp", "monitoring", node="node-1"),
-    _pod("prometheus-0", "monitoring", qos="Guaranteed", cpu="1", mem="2Gi", node="node-2"),
-    _pod("loki-0", "monitoring", node="node-3"),
-    _pod("coredns-5d78c9b4-fh2mx", "kube-system", qos="Guaranteed"),
-    _pod("coredns-5d78c9b4-pk9vz", "kube-system", qos="Guaranteed", node="node-2"),
-    _pod("metrics-server-6f89b5-jw3qd", "kube-system", node="node-3"),
+    _pod("checkout-svc-84c5d6-ln7wk", "shop", restarts=2, hours=54),
+    _pod(
+        "inventory-db-0", "shop", qos="Guaranteed", cpu="500m", mem="1Gi", node="node-3", hours=792
+    ),
+    _pod("search-indexer-59b8c7-tq5mz", "shop", phase="Pending", ready="0/1", node="-", hours=0.2),
+    _pod("grafana-7b5c9d-w8xkp", "monitoring", node="node-1", hours=430),
+    _pod(
+        "prometheus-0", "monitoring", qos="Guaranteed", cpu="1", mem="2Gi", node="node-2", hours=430
+    ),
+    _pod("loki-0", "monitoring", node="node-3", hours=430),
+    _pod("coredns-5d78c9b4-fh2mx", "kube-system", qos="Guaranteed", hours=1080),
+    _pod("coredns-5d78c9b4-pk9vz", "kube-system", qos="Guaranteed", node="node-2", hours=1080),
+    _pod("metrics-server-6f89b5-jw3qd", "kube-system", node="node-3", hours=1080),
 ]
 
 
@@ -228,6 +291,53 @@ def _svc(
     )
 
 
+def _release(
+    name: str,
+    ns: str,
+    days: int,
+    *,
+    revision: int,
+    chart: str,
+    app_version: str,
+) -> HelmReleaseSummary:
+    """One synthetic release at its latest revision.
+
+    Both surfaces that answer for Helm read this fixture: the tool
+    (`DemoReadOps.list_helm_releases`, which is what an external MCP host
+    receives) and the store the releases view renders. A capture in which
+    they disagreed would show korvid following the client onto a screen
+    that contradicts the answer the client just printed.
+    """
+    created = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    return HelmReleaseSummary(
+        name=name,
+        namespace=ns,
+        kind="HelmRelease",
+        created=created,
+        uid=release_uid(ns, name),
+        revision=revision,
+        status="deployed",
+        chart=chart,
+        app_version=app_version,
+    )
+
+
+#: The `shop` namespace's releases: the umbrella chart behind the web,
+#: cart, payment, checkout and indexer workloads, and the database chart
+#: behind `inventory-db-0`.
+HELM_RELEASES: list[HelmReleaseSummary] = [
+    _release("shop", "shop", 41, revision=4, chart="shop-0.8.0", app_version="2.4.1"),
+    _release(
+        "inventory-db",
+        "shop",
+        33,
+        revision=2,
+        chart="postgresql-15.5.1",
+        app_version="16.2.0",
+    ),
+]
+
+
 EXTRA: dict[str, list[Summary]] = {
     "deployments": [
         _deploy("web-frontend", "shop", 2, 41),
@@ -260,6 +370,7 @@ EXTRA: dict[str, list[Summary]] = {
             uid="cm-payment",
         )
     ],
+    HELM_RELEASES_META.plural: list(HELM_RELEASES),
 }
 
 
@@ -359,21 +470,20 @@ class DemoEvents(EventsFetcher):
     async def fetch(
         self, namespace: str, name: str, *, uid: str | None = None
     ) -> list[dict[str, Any]]:
-        now = datetime.now(UTC)
         if name.startswith("payment-worker-"):
             # The crashlooping demo pod.
             return [
                 {
                     "type": "Warning",
                     "reason": "BackOff",
-                    "lastTimestamp": (now - timedelta(minutes=2)).isoformat(),
+                    "lastTimestamp": _ago(minutes=2),
                     "message": "Back-off restarting failed container app in pod " + name,
                     "involvedObject": {"name": name},
                 },
                 {
                     "type": "Normal",
                     "reason": "Pulled",
-                    "lastTimestamp": (now - timedelta(minutes=3)).isoformat(),
+                    "lastTimestamp": _ago(minutes=3),
                     "message": 'Container image "payment-worker:2.4.1" already present on machine',
                     "involvedObject": {"name": name},
                 },
@@ -382,7 +492,7 @@ class DemoEvents(EventsFetcher):
             {
                 "type": "Normal",
                 "reason": "ScalingReplicaSet",
-                "lastTimestamp": (now - timedelta(hours=4)).isoformat(),
+                "lastTimestamp": _ago(hours=4),
                 "message": f"Scaled up replica set {name}-7d4b9c to 2",
                 "involvedObject": {"name": name},
             },
@@ -420,6 +530,30 @@ async def stream_logs(
         yield LogLine(pod=pod, container=container, text=text, timestamp=datetime.now(UTC))
 
 
+def _pod_list_row(pod: PodSummary) -> PodListSummary:
+    """The fixture's pod as the summary type the tool LIST path returns.
+
+    The TUI's pods view streams the richer `PodSummary` through its own
+    watch path, while `list_objects` — the boundary `list_resources` reads
+    — answers with `PodListSummary` (issue #158). Both are built from the
+    one fixture row here, so the external client's answer and korvid's
+    table cannot disagree about a pod's status.
+    """
+    return PodListSummary(
+        name=pod.name,
+        namespace=pod.namespace,
+        kind="Pod",
+        created=pod.created,
+        uid=pod.uid,
+        labels=pod.labels,
+        phase=pod.phase,
+        ready=pod.ready,
+        restarts=pod.restarts,
+        node=pod.node or "",
+        ready_condition=pod.phase == "Running" and pod.ready.partition("/")[0] != "0",
+    )
+
+
 class DemoReadOps(ReadOps):
     """The synthetic fixture behind korvid's real agent read surface.
 
@@ -429,11 +563,18 @@ class DemoReadOps(ReadOps):
     against a cluster; only the bytes they read are synthetic.
     """
 
-    async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[Any]:
-        # `Any` rather than the ABC's `list[GenericSummary]`: the fixture's pods
-        # are `PodSummary`, which is a separate dataclass of the same shape, not
-        # a subclass. The read tools only ever read attributes off these rows.
-        rows: list[Any] = list(PODS) if meta.plural == "pods" else list(EXTRA.get(meta.plural, []))
+    async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
+        # Pods cross this boundary as `PodListSummary`, exactly as the real
+        # client returns them (issue #158's column-parity contract): the
+        # fixture's own `PodSummary` is a separate dataclass of the same
+        # shape, and `list_resources` dispatches its status facts on the
+        # summary *type*, so an unconverted row would answer name+age — or
+        # fail outright on the generic renderer's `desired`.
+        rows: list[GenericSummary] = (
+            [_pod_list_row(pod) for pod in PODS]
+            if meta.plural == "pods"
+            else list(EXTRA.get(meta.plural, []))
+        )
         return [row for row in rows if namespace is None or row.namespace == namespace]
 
     async def get_object(
@@ -442,20 +583,10 @@ class DemoReadOps(ReadOps):
         return await get_manifest(meta.plural, namespace, name)
 
     async def list_helm_releases(self, namespace: str | None) -> list[HelmReleaseSummary]:
-        releases = [
-            HelmReleaseSummary(
-                name="shop",
-                namespace="shop",
-                kind="HelmRelease",
-                created="",
-                revision=4,
-                status="deployed",
-                chart="shop-0.8.0",
-                app_version="2.4.1",
-            )
-        ]
         return [
-            release for release in releases if namespace is None or release.namespace == namespace
+            release
+            for release in HELM_RELEASES
+            if namespace is None or release.namespace == namespace
         ]
 
     async def list_events_for(
@@ -517,12 +648,22 @@ def build_demo_agent_runtime() -> AgentRuntime:
     return runtime
 
 
+#: Seconds a follow-opened describe modal stays on screen in the `mcp`
+#: scene before the harness dismisses it. Long enough to read the failing
+#: pod's manifest and its BackOff event, short enough that the external
+#: client's next read is not refused.
+MCP_DESCRIBE_HOLD = 2.2
+#: How often the `mcp` scene checks whether that modal is up.
+_DESCRIBE_POLL = 0.2
+
+
 class DemoKorvidApp(KorvidApp):
     """KorvidApp with documentation-only scene choreography."""
 
     def __init__(self, *args: Any, demo_scene: str, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._demo_scene = demo_scene
+        self._describe_shown_at: float | None = None
 
     async def on_mount(self) -> None:
         await super().on_mount()
@@ -532,6 +673,28 @@ class DemoKorvidApp(KorvidApp):
             # press Enter through the genuine Input/on_input_submitted
             # path, instead of the harness synthesizing the submission.
             self.set_timer(0.2, self.action_toggle_agent)
+        elif self._demo_scene == "mcp":
+            self.set_interval(_DESCRIBE_POLL, self._dismiss_settled_describe)
+
+    def _dismiss_settled_describe(self) -> None:
+        """Close a follow-opened describe modal after it has been read.
+
+        korvid refuses to follow an external read while a describe screen
+        is on top — the user is reading it, and user action takes priority
+        (`AgentUiController._describe_precheck`). That rule is real and must
+        not be weakened, so the capture needs the Esc a watching operator
+        would press: this timer is that keystroke's stand-in, and nothing
+        else in the scene bypasses the rule.
+        """
+        if not isinstance(self.screen, DescribeScreen):
+            self._describe_shown_at = None
+            return
+        now = monotonic()
+        if self._describe_shown_at is None:
+            self._describe_shown_at = now
+        elif now - self._describe_shown_at >= MCP_DESCRIBE_HOLD:
+            self._describe_shown_at = None
+            self.pop_screen()
 
 
 async def list_relationship_objects(
@@ -548,30 +711,195 @@ def _parse_scene() -> str:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--scene",
-        choices=("base", "agent", "relationships"),
+        choices=("base", "agent", "relationships", "mcp"),
         default="base",
     )
     return str(parser.parse_args().scene)
 
 
+class _UIBridgeProxy(UIBridge):
+    """Late-bound UI bridge, the same shape the composition root uses.
+
+    `ToolExecutor` and `KorvidMCPServer` are built before the app exists, so
+    they hold this proxy and the harness points `target` at the app's own
+    `AppUIBridge` right after construction. The lock matters for the same
+    reason it matters in `korvid/__main__.py`: an external host's reads are
+    concurrent, and log-pane swaps and describe views are not safe to
+    interleave.
+    """
+
+    _NOT_READY = "ERROR: UI not ready"
+
+    def __init__(self) -> None:
+        self.target: UIBridge | None = None
+        self._lock = asyncio.Lock()
+
+    async def _call(self, method: str, *args: Any, **kwargs: Any) -> str:
+        if self.target is None:
+            return self._NOT_READY
+        async with self._lock:
+            result: str = await getattr(self.target, method)(*args, **kwargs)
+            return result
+
+    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        return await self._call("agent_navigate", view, namespace)
+
+    async def agent_set_filter(self, pattern: str) -> str:
+        return await self._call("agent_set_filter", pattern)
+
+    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        return await self._call("agent_open_logs", pod, namespace, container)
+
+    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+        return await self._call("agent_open_describe", kind, name, namespace)
+
+    async def agent_drill_down(self, name: str) -> str:
+        return await self._call("agent_drill_down", name)
+
+    async def agent_request_write(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+    ) -> str:
+        return await self._call(
+            "agent_request_write", action, kind, name, namespace, replicas, resources
+        )
+
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        return await self._call(
+            "agent_submit_write_proposal",
+            action,
+            kind,
+            name,
+            namespace,
+            replicas,
+            resources,
+            session_id=session_id,
+            client_name=client_name,
+            client_version=client_version,
+        )
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        return await self._call("agent_get_write_proposal", proposal_id)
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        return await self._call("agent_cancel_write_proposal", proposal_id, session_id=session_id)
+
+
+class _MCPAppHooks:
+    """Late-bound follow hooks, the same shape the composition root uses.
+
+    The server reads follow state from — and sends activity notes to — the
+    live app's `IntegrationController`, which does not exist yet when the
+    server factory is built.
+    """
+
+    def __init__(self) -> None:
+        self.app: KorvidApp | None = None
+
+    def follow_enabled(self) -> bool:
+        return self.app is not None and self.app.integrations.follow_enabled
+
+    def note_activity(self, line: str) -> None:
+        if self.app is not None:
+            self.app.integrations.note_activity(line)
+
+
+def build_demo_mcp_controller(
+    ui: UIBridge,
+    hooks: _MCPAppHooks,
+) -> MCPControllerBase:
+    """korvid's own MCP server over the synthetic cluster.
+
+    Nothing here is a stand-in: the capture serves the shipped
+    `KorvidMCPServer` with the shipped `mcp_tool_schemas()` surface over the
+    shipped `ToolExecutor`, so an external SDK client really does drive the
+    running TUI through follow mode. Only the bytes the read tools return
+    are synthetic (`DemoReadOps`).
+
+    `endpoint_path=None` keeps the recording out of the user's XDG state
+    directory: the discovery file exists to auto-configure real hosts, and
+    the capture's client is handed the URL directly.
+    """
+    from korvid.mcp.server import KorvidMCPServer, MCPController
+
+    def factory() -> KorvidMCPServer:
+        return KorvidMCPServer(
+            ToolExecutor(DemoReadOps(), MCP_ALIASES, ui=ui),
+            mcp_tool_schemas(),
+            port=MCP_DEMO_PORT,
+            ui=ui,
+            follow_enabled=hooks.follow_enabled,
+            note_activity=hooks.note_activity,
+        )
+
+    return MCPController(factory)
+
+
+async def run_mcp_demo(app: DemoKorvidApp, controller: MCPControllerBase) -> None:
+    """Serve MCP for exactly as long as the TUI runs."""
+    await controller.start()
+    try:
+        await app.run_async()
+    finally:
+        await controller.stop()
+
+
 def main() -> None:
     scene = _parse_scene()
     store = ResourceStore()
+    ui_proxy = _UIBridgeProxy()
+    mcp_hooks = _MCPAppHooks()
+    controller = build_demo_mcp_controller(ui_proxy, mcp_hooks) if scene == "mcp" else None
+    aliases = ALIASES
+    if scene == "relationships":
+        aliases = RELATIONSHIP_ALIASES
+    elif scene == "mcp":
+        aliases = MCP_ALIASES
     app = DemoKorvidApp(
-        config=KorvidConfig(namespace="shop"),
+        config=KorvidConfig(
+            namespace="shop",
+            mcp_enabled=scene == "mcp",
+            mcp_port=MCP_DEMO_PORT,
+            mcp_follow=scene == "mcp",
+        ),
         store=store,
         watch_manager=WatchManager(store, source),
         list_namespaces=list_namespaces,
-        aliases=RELATIONSHIP_ALIASES if scene == "relationships" else ALIASES,
+        aliases=aliases,
         get_manifest=get_manifest,
         get_events=DemoEvents(),
         stream_logs=stream_logs,
         agent_runtime=build_demo_agent_runtime() if scene == "agent" else None,
         agent_model_name="korvid-demo" if scene == "agent" else None,
         list_relationship_objects=(list_relationship_objects if scene == "relationships" else None),
+        mcp=controller,
         demo_scene=scene,
     )
-    app.run()
+    if controller is None:
+        app.run()
+        return
+    # Late-bind exactly the way the composition root does: the executor and
+    # the server were built before the app existed.
+    ui_proxy.target = AppUIBridge(app)
+    mcp_hooks.app = app
+    asyncio.run(run_mcp_demo(app, controller))
 
 
 if __name__ == "__main__":

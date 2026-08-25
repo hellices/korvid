@@ -121,52 +121,55 @@ ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/relationship-demo.mp4 \
 
 ## MCP follow
 
-`docs/assets/mcp-follow-demo.gif` was recorded against the disposable local
-cluster documented by its repository design and test contract. Its right-hand
-pane is a third-party MCP client, and that window carries session details
-which have nothing to do with korvid: a startup banner and tool inventory
-above the exchange, and the client's working **directory** and branch, its
-**token** spend and its **model** name below it. No official-site page embeds
-or uses the unredacted GIF as visitor-facing evidence. Because the GIF remains
-a checked-in source asset under `docs/assets`, MkDocs still serves it at
-`assets/mcp-follow-demo.gif`. Sanitizing or re-recording that pre-existing
-README/source asset is a separate follow-up. The landing page uses only the
-sanitized derived MP4/poster.
+`docs/assets/scenes/mcp-follow-demo.mp4` is recorded from this repository
+alone. `docs/demo/mcp-follow.tape` composes two panes with tmux: on the left
+the `mcp` scene of `docs/demo/demo.py` (`--scene mcp`), which is korvid's real
+TUI over the
+synthetic fixture, serving the real `KorvidMCPServer` over Streamable HTTP on
+loopback port 7878; on the right `docs/demo/mcp_client.py`, a real MCP SDK
+`ClientSession` that calls four **read-only** tools — `list_resources`,
+`diagnose_pod`, `get_logs`, `helm_list_releases`. Every view the left pane
+opens is korvid's own follow bridge mirroring the answer the right pane just
+received; no keystroke is sent to the TUI and no frame is staged, redrawn or
+cleared.
 
-The published clip is a deterministic reframe of the same reviewed recording:
-its frames 36–83 (the four seconds in which korvid follows the client from
-the pod table to the log stream to the Helm releases), with the client pane's
-two off-topic bands cleared to that pane's own `#111111` background. Nothing
-inside the retained band — the operator's prompt, `list_resources`,
-`get_logs`, `helm_list_releases`, the summary — and nothing in korvid's own
-pane is altered or moved, so the follow evidence stays exactly as recorded.
+Nothing outside the checkout takes part. The client speaks only to
+`127.0.0.1:7878`, no credential is used, the demo server writes no MCP
+endpoint file, and the tape turns the tmux status line off before the first
+captured frame — that line is the only surface that would print a hostname, a
+user or today's date into a landing asset. The shell that composes the panes
+is never captured, and the handshake file the tape uses to release the client
+(`.korvid-mcp-demo-go`) is created and removed inside the checkout.
 
-The poster is frame 9 of that clip: the external client's full prompt and its
-first two tool calls beside korvid's own `agent logs → shop/payment-worker-…`
-follow toast and its `⇄MCP on :7878 ·follow` status line.
+The captured timeline runs the story once, at reading speed: the pod table,
+the failing pod's diagnosis in a describe pane, its log stream held long
+enough to read before the story moves on, then the Helm releases that own it.
 
-The chain also ends its geometry pass with `setsar=1`. The GIF is 1280×711
-with a 63:64 sample aspect ratio; rounding the height down to 710 for
-`yuv420p` otherwise preserves the *display* aspect by rewriting the sample
-aspect ratio to 2485:2528, which stores 1280×710 but lays out 1258×710 — so
-the landing page's `1280 / 710` reservation would pillarbox the clip inside
-its own box. Forcing square pixels changes no sample, only the metadata a
-browser lays out from, and it is what makes the reserved box true:
+The poster is cut from the log beat, where the external client's first three
+calls sit beside korvid's own log pane, its `agent logs →
+shop/payment-worker-…` follow toast and its `⇄MCP on :7878 ·follow` status
+line.
 
 ```sh
-ffmpeg -y -i docs/assets/mcp-follow-demo.gif -an -movflags +faststart \
-  -pix_fmt yuv420p -crf 20 \
-  -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2,trim=start_frame=36:end_frame=84,setpts=PTS-STARTPTS,setsar=1,drawbox=x=1000:y=22:w=280:h=320:color=0x111111:t=fill,drawbox=x=1000:y=578:w=280:h=132:color=0x111111:t=fill' \
-  docs/assets/scenes/mcp-follow-demo.mp4
-ffmpeg -y -i docs/assets/scenes/mcp-follow-demo.mp4 -vf "select='eq(n\,9)'" \
-  -frames:v 1 docs/assets/scenes/mcp-poster.png
+vhs docs/demo/mcp-follow.tape
+ffmpeg -y -ss 00:00:08.5 -i docs/assets/scenes/mcp-follow-demo.mp4 \
+  -frames:v 1 -vf setsar=1 docs/assets/scenes/mcp-poster.png
 ```
 
 The shipped clip answers `ffprobe -show_entries
 stream=width,height,sample_aspect_ratio,display_aspect_ratio` with
-`1280`, `710`, `1:1` and `128:71`.
+`1280`, `710`, `1:1` and `128:71`, and runs between 12 and 15 seconds.
 
-`tests/test_docs_visual_assets.py` decodes the poster and fails if either
-cleared band regains legible content — or if the retained band loses it. It
-also reads the MP4's own `tkhd`/`avc1`/`pasp` boxes and fails if the stored,
-displayed and declared geometry ever disagree again.
+`docs/assets/mcp-follow-demo.gif` is an older, unrelated capture whose
+right-hand pane is a third-party MCP client, carrying that session's own
+directory, branch, token spend and model name. No official-site page embeds
+or uses the unredacted GIF as visitor-facing evidence. Because the GIF remains
+a checked-in source asset under `docs/assets`, MkDocs still serves it at
+`assets/mcp-follow-demo.gif`. Sanitizing or re-recording that pre-existing
+README/source asset is a separate follow-up. The landing page uses only the
+locally recorded MP4/poster above, which is derived from no part of it.
+
+`tests/test_docs_visual_assets.py` decodes the poster and fails if either pane
+loses its legible evidence. It also reads the MP4's own `tkhd`/`avc1`/`pasp`
+boxes and fails if the stored, displayed and declared geometry ever disagree
+again.

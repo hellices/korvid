@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import importlib.util
 import math
 import re
@@ -78,37 +77,29 @@ MP4_GEOMETRY = {
     "mcp-follow-demo.mp4": (1280, 710),
     "relationship-demo.mp4": (1280, 720),
 }
-#: The MCP filter chain this repository published before square pixels were
-#: forced. `docs/assets/mcp-follow-demo.gif` is 1280x711 with SAR 63:64, and
-#: `scale`'s even-height correction (711 -> 710) preserves the display aspect
-#: by rewriting the SAR to 2485:2528 instead of dropping it — so the encode
-#: stored 1280x710 but displayed 1258x710. The contract below must reject it.
-MCP_UNNORMALIZED_CHAIN = (
-    "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-    "trim=start_frame=36:end_frame=84,setpts=PTS-STARTPTS,"
-    "drawbox=x=1000:y=22:w=280:h=320:color=0x111111:t=fill,"
-    "drawbox=x=1000:y=578:w=280:h=132:color=0x111111:t=fill"
-)
-#: One `ffmpeg` invocation that reads the reviewed GIF and writes the
-#: sanitised clip, without swallowing the commands published beside it.
-MCP_MP4_COMMAND = re.compile(
-    r"ffmpeg(?:(?!ffmpeg).)*?docs/assets/mcp-follow-demo\.gif"
-    r"(?:(?!ffmpeg).)*?docs/assets/scenes/mcp-follow-demo\.mp4",
-    re.S,
-)
-
-#: The MCP capture is a two-pane recording: korvid on the left of the divider
-#: at x=999, the external MCP client on the right.
-MCP_CLIENT_PANE = (1000, 1280)
-#: Rows of the client pane the sanitising `drawbox` pass clears. Everything
-#: outside the client's own prompt-and-tool-call exchange belongs to that
-#: third-party session (its startup banner and tool inventory above, its
-#: working directory, branch, token spend and model name below) and is
-#: unrelated to what korvid does.
-MCP_CLEARED_BANDS = ((22, 342), (578, 710))
-#: The rows that must keep carrying the evidence, so a future "fix" cannot
-#: satisfy the contract by blanking the whole pane.
-MCP_EVIDENCE_BAND = (342, 578)
+#: The MCP capture is a two-pane recording, split by the divider column the
+#: tape's `-p 45` puts at x=704: korvid's TUI to its left, the external MCP
+#: client to its right. Both columns are named because the clip's whole
+#: claim is that the two agree.
+MCP_TUI_PANE = (0, 700)
+MCP_CLIENT_PANE = (708, 1280)
+#: The reproducible MCP follow capture: a real `KorvidMCPServer` on
+#: `MCP_DEMO_URL`, driven by a clean MCP SDK client, recorded beside the TUI
+#: it makes follow.
+MCP_CLIENT = DEMO_DIR / "mcp_client.py"
+MCP_TAPE = DEMO_DIR / "mcp-follow.tape"
+MCP_DEMO_URL = "http://127.0.0.1:7878/mcp"
+#: The repository-local file the tape uses to hold the client back until the
+#: recorded timeline starts. It never leaves the checkout being recorded.
+MCP_GATE_FILE = ".korvid-mcp-demo-go"
+#: The story the external client tells, in the order korvid must mirror it:
+#: the pod table, the failing pod's diagnosis, its logs, then the release
+#: that owns it.
+MCP_CLIENT_CALLS = ("list_resources", "diagnose_pod", "get_logs", "helm_list_releases")
+#: Rows both panes must carry legible content across. The poster is cut
+#: mid-story, so the client's calls and korvid's mirrored view are on screen
+#: together; a blanked or half-drawn pane would prove nothing.
+MCP_EVIDENCE_BAND = (0, 690)
 MCP_EVIDENCE_MIN_PIXELS = 5_000
 
 
@@ -302,32 +293,6 @@ def _mp4_geometry(path: Path) -> tuple[tuple[int, int], tuple[float, float], tup
     return stored, displayed, pixel_aspect
 
 
-def _mcp_filter_chains(source: str, label: str) -> list[str]:
-    """Every `-vf` chain the MCP sanitising command publishes in `source`."""
-    chains = []
-    for command in MCP_MP4_COMMAND.finditer(source):
-        chain = re.search(r"-vf '([^']*)'", command.group(0))
-        assert chain is not None, f"{label} publishes an MCP command with no -vf chain"
-        chains.append(" ".join(chain.group(1).split()))
-    assert chains, f"{label} must publish the MCP sanitising command"
-    return chains
-
-
-def _forces_square_pixels(chain: str) -> bool:
-    """Does an ffmpeg filter chain drop a non-square SAR after its geometry?
-
-    `setsar=1` only governs what follows it, so it has to come after the
-    `scale`/`trim` pass that rewrites the sample aspect ratio in the first
-    place. None of the MCP chain's filters take a comma-bearing argument, so
-    splitting on commas is the filtergraph's own step separator here.
-    """
-    steps = [step.strip() for step in chain.split(",")]
-    if "setsar=1" not in steps:
-        return False
-    geometry = [index for index, step in enumerate(steps) if step.startswith(("scale=", "trim="))]
-    return steps.index("setsar=1") > max(geometry, default=-1)
-
-
 def _band_deviation(rows: list[bytearray], top: int, bottom: int, channels: int) -> int:
     """Largest colour distance from `#111111` inside the client pane.
 
@@ -365,9 +330,10 @@ def _band_contrast_pixels(
     channels: int,
     *,
     minimum_deviation: int,
+    columns: tuple[int, int] = MCP_CLIENT_PANE,
 ) -> int:
-    """Count client-pane pixels whose RGB contrast exceeds the floor."""
-    left, right = MCP_CLIENT_PANE
+    """Count pixels in one pane's band whose RGB contrast exceeds the floor."""
+    left, right = columns
     count = 0
     for row in rows[top:bottom]:
         for pixel in range(left, right):
@@ -965,6 +931,7 @@ def test_storytelling_capture_instructions_name_every_generated_asset() -> None:
     assert "synthetic" in instructions.lower()
     assert "vhs docs/demo/agent.tape" in instructions
     assert "vhs docs/demo/relationships.tape" in instructions
+    assert "vhs docs/demo/mcp-follow.tape" in instructions
     assert "docs/assets/mcp-follow-demo.gif" in instructions
 
 
@@ -977,7 +944,7 @@ def test_mcp_capture_instructions_distinguish_public_landing_media_from_the_serv
     checked-in GIF for README/source provenance is not the same claim as a
     visitor-facing page embedding it. The instructions must say that
     distinction plainly, and the landing sources must keep using only the
-    sanitised derived MP4/poster pair.
+    locally recorded MP4/poster pair.
     """
     mcp = INSTRUCTIONS.read_text(encoding="utf-8").split("## MCP follow", 1)[1]
     normalized_mcp = " ".join(mcp.split())
@@ -1010,7 +977,10 @@ def test_mcp_capture_instructions_distinguish_public_landing_media_from_the_serv
     assert (
         "Sanitizing or re-recording that pre-existing README/source asset is a separate follow-up."
     ) in normalized_mcp
-    assert "The landing page uses only the sanitized derived MP4/poster." in normalized_mcp
+    assert (
+        "The landing page uses only the locally recorded MP4/poster above, which is "
+        "derived from no part of it." in normalized_mcp
+    )
     assert not embeds, (
         "no official-site page should embed the raw MCP GIF as visitor-facing evidence; "
         f"found references in {embeds}"
@@ -1020,110 +990,210 @@ def test_mcp_capture_instructions_distinguish_public_landing_media_from_the_serv
     assert "assets/scenes/mcp-poster.png" in landing
 
 
-def test_mcp_landing_media_carries_no_third_party_session_internals() -> None:
-    """The MCP tile publishes an unrelated assistant's window; only its work may ship.
+def test_mcp_client_calls_the_follow_story_tools_in_order() -> None:
+    """The capture's right-hand pane must be a real MCP SDK client.
 
-    The recording's right-hand pane is a third-party MCP client. Its own
-    session chrome — the startup banner and tool inventory above the
-    exchange, and the working directory, branch, token spend and model name
-    below it — has nothing to do with korvid, but the landing page promotes
-    this frame to a scene poster and an evidence tile. The capture pipeline
-    clears exactly those two bands, so they must hold nothing but the pane's
-    own `#111111` background (codec noise aside), while the band between
-    them must still carry the client's prompt and tool calls: a blank pane
-    would prove nothing.
+    The published clip claims an external host drove korvid over MCP, so
+    the thing driving it has to be an actual `ClientSession` speaking
+    Streamable HTTP to the running server — not a printer that fakes the
+    exchange. The four calls are the story itself: the pod table, the
+    failing pod's diagnosis, its logs, then the release that owns it, and
+    korvid's follow mirror is only legible if they happen in that order.
+    """
+    client = MCP_CLIENT.read_text(encoding="utf-8")
+    positions = [client.index(f'call_tool("{name}"') for name in MCP_CLIENT_CALLS]
+
+    assert positions == sorted(positions), (
+        f"the client must call {list(MCP_CLIENT_CALLS)} in order; found offsets {positions}"
+    )
+    assert "from mcp import ClientSession" in client, (
+        "the pane must hold the real MCP SDK client session, not a transcript"
+    )
+    assert "streamable_http_client" in client, (
+        "the capture claims Streamable HTTP; the client must speak it"
+    )
+    assert MCP_DEMO_URL in client, f"the client must connect to the harness endpoint {MCP_DEMO_URL}"
+
+
+def test_mcp_client_publishes_nothing_but_korvids_own_work() -> None:
+    """Everything the recorded pane prints is authored here, and bounded.
+
+    This pane is promoted to a landing scene and a poster, so whatever it
+    writes ships. A client that echoed its endpoint file, its process, its
+    working directory, a model name, a token count — or an unbounded tool
+    result — would publish session internals that have nothing to do with
+    korvid, which is exactly what the previous third-party capture had to
+    redact after the fact. Authoring the pane is what removes the redaction
+    pass; this contract is what keeps it authored.
+    """
+    client = MCP_CLIENT.read_text(encoding="utf-8")
+    for leak in (
+        "getcwd",
+        "Path.cwd",
+        "os.environ",
+        "getpid",
+        "sys.argv",
+        "gethostname",
+        "mcp-endpoint",
+        "capability_token",
+        "model",
+    ):
+        assert leak not in client, (
+            f"the recorded client pane must not publish session internals; found {leak!r}"
+        )
+    assert "TAIL_LINES" in client, (
+        "tool results are unbounded text; the pane must print a fixed tail of "
+        "each one so a long result cannot scroll the story off screen"
+    )
+
+
+def test_mcp_follow_tape_composes_the_real_server_with_the_clean_client() -> None:
+    """The clip is regenerated by one command, from files in this repository.
+
+    The MCP scene is two processes — the TUI serving `KorvidMCPServer` and
+    the external client driving it — so the tape composes them in tmux and
+    records the pair. Naming both entry points here is what makes the clip
+    reproducible instead of a reviewed artefact nobody can rebuild.
+    """
+    tape = MCP_TAPE.read_text(encoding="utf-8")
+
+    assert "tmux" in tape, "the two-pane story needs a multiplexer"
+    assert "docs/demo/demo.py --scene mcp" in tape, (
+        "the left pane must be the real TUI serving the real MCP server"
+    )
+    assert "docs/demo/mcp_client.py" in tape, "the right pane must be the checked-in MCP SDK client"
+    assert COLD_START_SLEEP in tape, (
+        f"the tape must hide the shared cold-start allowance {COLD_START_SLEEP!r} "
+        "before Show, like every other tape"
+    )
+    assert COLD_START_REFERENCE in tape, (
+        f"the tape must point at {COLD_START_REFERENCE} for the reason behind the "
+        "allowance instead of restating it"
+    )
+    assert "uv run --frozen" in tape, (
+        "recording a capture must never re-resolve and rewrite uv.lock"
+    )
+    assert tape.count("uv run") == tape.count("uv run --frozen"), (
+        "every launch in the tape must be frozen, not just the first"
+    )
+
+
+def test_mcp_follow_tape_records_no_host_identity_and_leaves_no_scratch_file() -> None:
+    """A screen capture of a terminal publishes whatever the terminal shows.
+
+    tmux's status line carries the host name and the local date, and the
+    gate file that holds the client back until the visible timeline starts
+    is a side effect of recording. Neither belongs in a published clip or
+    in a contributor's checkout, so the tape turns the status line off
+    before it attaches and removes the gate file on both sides of the run.
+    """
+    tape = MCP_TAPE.read_text(encoding="utf-8")
+
+    assert "status off" in tape, (
+        "tmux's status line publishes the recording host's name and date; the "
+        "tape must turn it off before it attaches"
+    )
+    assert "/tmp" not in tape, (
+        "the gate file must live in the checkout being recorded, not in a "
+        "shared world-writable directory"
+    )
+    assert tape.count(f"rm -f {MCP_GATE_FILE}") >= 2, (
+        f"{MCP_GATE_FILE} must be removed before the run starts and again after "
+        "it ends, so an interrupted recording leaves nothing behind"
+    )
+    assert "kill-session" in tape, "the tape must tear its own tmux session down"
+
+
+def test_mcp_clip_duration_holds_the_whole_follow_story() -> None:
+    """Four mirrored reads need time on screen, and no more than that.
+
+    The previous clip was a four-second reframe of someone else's
+    recording: korvid moved three times with no room to read any of it.
+    The story is only evidence if the log pane is still legible when the
+    Helm view replaces it, and only a landing clip if it ends before a
+    visitor's attention does.
+    """
+    duration = _mp4_duration(SCENES / "mcp-follow-demo.mp4")
+    assert 12 <= duration <= 15, (
+        f"mcp-follow-demo.mp4 runs {duration:.2f}s; the four-read follow story "
+        "must settle on screen within a 12-15s clip"
+    )
+
+
+def test_mcp_clip_geometry_matches_the_reserved_landing_box() -> None:
+    """The landing page reserves 1280x710 for this clip; it must store it."""
+    stored = _mp4_geometry(SCENES / "mcp-follow-demo.mp4")[0]
+    assert stored == (1280, 710), (
+        f"mcp-follow-demo.mp4 stores {stored}, not the reserved (1280, 710) box"
+    )
+
+
+def test_mcp_landing_poster_shows_both_panes_of_korvids_own_capture() -> None:
+    """The MCP tile's whole claim is that two panes agree; both must be legible.
+
+    The poster is cut mid-story, while the external client's calls and the
+    view korvid mirrored for them are on screen together. It stands in for
+    the clip until the clip plays, so a poster cut from a frame where either
+    pane is blank, half-drawn or scrolled away would advertise the follow
+    story without showing it. Nothing here is cleared or redrawn: the
+    capture is korvid's own work end to end, so the contract asks for
+    evidence in both columns rather than for the absence of someone else's.
     """
     width, height, rows = _decode_png_rgb(SCENES / "mcp-poster.png")
     assert (width, height) == (1280, 710)
     channels = len(rows[0]) // width
 
-    for top, bottom in MCP_CLEARED_BANDS:
-        deviation = _band_deviation(rows, top, bottom, channels)
-        assert deviation <= 16, (
-            f"rows {top}-{bottom} of the external client's pane must be cleared to its "
-            f"background; found a pixel {deviation} off #111111, which is legible "
-            "content, not codec noise"
+    top, bottom = MCP_EVIDENCE_BAND
+    for label, columns in (("korvid", MCP_TUI_PANE), ("the MCP client", MCP_CLIENT_PANE)):
+        pixels = _band_contrast_pixels(
+            rows,
+            top,
+            bottom,
+            channels,
+            minimum_deviation=100,
+            columns=columns,
         )
-
-    evidence_pixels = _band_contrast_pixels(
-        rows,
-        *MCP_EVIDENCE_BAND,
-        channels,
-        minimum_deviation=100,
-    )
-    assert evidence_pixels >= MCP_EVIDENCE_MIN_PIXELS, (
-        "the retained band must still show the external client's prompt and tool "
-        f"calls; only {evidence_pixels} high-contrast pixels remain"
-    )
+        assert pixels >= MCP_EVIDENCE_MIN_PIXELS, (
+            f"{label}'s pane must carry legible content in the poster; only "
+            f"{pixels} high-contrast pixels remain in columns {columns[0]}-{columns[1]}"
+        )
 
 
 def test_mcp_evidence_coverage_rejects_a_single_bright_pixel() -> None:
     """Peak contrast alone must not make a blank evidence band pass."""
-    width = MCP_CLIENT_PANE[1]
-    rows = [bytearray([0x11] * width * 3)]
-    rows[0][MCP_CLIENT_PANE[0] * 3] = 0xFF
+    left, right = MCP_CLIENT_PANE
+    rows = [bytearray([0x11] * right * 3)]
+    rows[0][left * 3] = 0xFF
     assert _band_deviation(rows, 0, 1, 3) > 100
     assert _band_contrast_pixels(rows, 0, 1, 3, minimum_deviation=100) < MCP_EVIDENCE_MIN_PIXELS
 
 
-def test_mcp_capture_instructions_document_the_sanitising_pass() -> None:
-    """The published command must reproduce the sanitised asset exactly."""
+def test_mcp_capture_instructions_publish_the_whole_reproducible_recording() -> None:
+    """A contributor must be able to re-cut this clip from the repository alone.
+
+    The MCP tile used to be a re-encode of a third-party capture, kept
+    honest by a byte pin and a redaction recipe because nobody else could
+    reproduce it. It is now recorded here, so the provenance page has to
+    publish the three commands that make it — the tape, the poster cut and
+    the probe that proves the geometry — and name the two sources the tape
+    composes, or the pin's job falls to nothing.
+    """
     instructions = INSTRUCTIONS.read_text(encoding="utf-8")
     mcp = instructions[instructions.index("## MCP follow") :]
     for fragment in (
-        "trim=start_frame=36:end_frame=84",
-        "drawbox=x=1000:y=22:w=280:h=320",
-        "drawbox=x=1000:y=578:w=280:h=132",
-        "select='eq(n\\,9)'",
+        "vhs docs/demo/mcp-follow.tape",
+        "docs/demo/mcp_client.py",
+        "--scene mcp",
+        "docs/assets/scenes/mcp-poster.png",
+        "ffprobe",
     ):
-        assert fragment in mcp, f"the MCP capture recipe must publish `{fragment}`"
+        assert fragment in mcp, f"the MCP capture instructions must publish `{fragment}`"
     lowered = mcp.lower()
     assert "follow" in lowered
-    for reason in ("model", "token", "directory"):
+    for reason in ("loopback", "synthetic", "read-only"):
         assert reason in lowered, (
-            "the recipe must say which third-party session details the cleared bands "
-            f"remove; {reason!r} is missing"
+            f"the instructions must say why the capture is safe to publish; {reason!r} is missing"
         )
-
-
-def test_mcp_follow_demo_mp4_sha256_matches_the_reviewed_sanitized_bytes() -> None:
-    digest = hashlib.sha256((SCENES / "mcp-follow-demo.mp4").read_bytes()).hexdigest()
-    assert digest == "f4fe95f9109655124d0a16a6d6132e7396aeb14b2b22b89788c629378c59f2d5", (
-        "docs/assets/scenes/mcp-follow-demo.mp4 is a privacy-sensitive re-encode; "
-        "review any byte change explicitly alongside the redaction recipe in "
-        "docs/demo/visual-storytelling.md before updating this SHA-256 pin"
-    )
-
-
-def test_mcp_capture_recipe_forces_square_pixels_everywhere_it_is_published() -> None:
-    """Every replayable copy of the recipe must normalise the GIF's SAR.
-
-    The clip's bytes are pinned above, but a pin only proves the checked-in
-    file was reviewed — it cannot stop the next regeneration from restoring a
-    1258x710 display box. The command that produces those bytes is published
-    twice (the provenance page and the executable plan a contributor
-    replays), so `setsar=1` has to be in both, after the `scale`/`trim` pass
-    that rewrites the sample aspect ratio.
-    """
-    assert not _forces_square_pixels(MCP_UNNORMALIZED_CHAIN), (
-        "this contract must reject the chain that shipped the non-square encode, "
-        "or it would pass without normalising anything"
-    )
-    assert not _forces_square_pixels(f"setsar=1,{MCP_UNNORMALIZED_CHAIN}"), (
-        "a `setsar=1` placed before the geometry pass normalises nothing"
-    )
-
-    sources = {
-        "docs/demo/visual-storytelling.md": INSTRUCTIONS,
-        "docs/superpowers/plans/2026-08-22-visual-storytelling.md": VISUAL_STORYTELLING_PLAN,
-    }
-    for label, path in sources.items():
-        for chain in _mcp_filter_chains(path.read_text(encoding="utf-8"), label):
-            assert _forces_square_pixels(chain), (
-                "the published MCP command leaves the GIF's 63:64 pixels in the "
-                f"encode; it needs `setsar=1` after its geometry pass. {label} "
-                f"has {chain!r}"
-            )
 
 
 def test_mcp_landing_ratio_override_matches_the_clips_display_geometry() -> None:

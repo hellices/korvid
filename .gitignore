@@ -12,3 +12,7 @@ htmlcov/
 .config/
 /site/
 /.cache/plugin/privacy/
+
+# Handshake file the mcp-follow capture uses to release its client pane;
+# created and removed by docs/demo/mcp-follow.tape, never committed.
+.korvid-mcp-demo-go
