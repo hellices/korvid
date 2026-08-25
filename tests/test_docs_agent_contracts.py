@@ -129,7 +129,7 @@ def test_the_perimeter_pages_state_the_boundary_that_really_runs(page: str) -> N
 
 
 _SCHEMA_VALIDATION_OVERCLAIM = re.compile(
-    r"validat\w*\s+(?:the\s+)?arguments?\s+against\s+"
+    r"validate\w*\s+(?:the\s+)?arguments?\s+against\s+"
     r"(?:each\s+tool.s|its|the)\s+declared\s+schema",
     re.IGNORECASE,
 )

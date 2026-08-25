@@ -117,7 +117,7 @@ def test_omitting_the_tier_routes_from_the_catalog() -> None:
     assert policy.catalog_version == MODEL_CATALOG_VERSION
 
 
-def test_an_uncatalogued_model_falls_back_to_low() -> None:
+def test_an_uncataloged_model_falls_back_to_low() -> None:
     policy = resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]))
     assert policy.tier is ModelTier.LOW
     assert policy.route_source is CapabilitySource.FALLBACK

@@ -512,7 +512,7 @@ def _big_payload_messages() -> list[dict[str, Any]]:
     return [{"role": "user", "content": "pod api-0 restarted; " * 400}]
 
 
-def test_prepare_policy_derives_the_ceiling_from_the_policys_own_surface() -> None:
+def test_prepare_policy_derives_the_ceiling_from_its_own_surface() -> None:
     provider = _StreamProvider([{"type": "done"}])
     gateway = RequestGateway(provider, OutboundPolicy(max_request_chars=2_000))
     policy = make_policy(tool_names=("get_logs",), max_history_chars=24_000)

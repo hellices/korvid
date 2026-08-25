@@ -618,7 +618,7 @@ def _parse_arguments(arguments: str) -> dict[str, Any] | None:
     """Parse a call's arguments, or None when they are not a JSON object.
 
     Only an object can be a tool's keyword arguments. A list, a bare
-    scalar, or anything unparseable is refused here, before a port sees it.
+    scalar, or anything unparsable is refused here, before a port sees it.
     """
     text = arguments.strip()
     if not text:
