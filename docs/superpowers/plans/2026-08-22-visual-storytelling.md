@@ -16,7 +16,7 @@
 - Direct writes, agent requests, and opt-in MCP proposals all require a fresh in-TUI human keystroke and a successful fail-closed audit append before execution.
 - Embedded-agent provider payloads use the outbound masking boundary; MCP results retain their separate per-tool disclosure contracts.
 - Every new product image or recording must use synthetic data from a documented disposable or in-memory scenario.
-- The agent media comes from `ScriptedAgentRuntime`, which discards the prompt and screen context and emits fixed tool and citation events: every surface embedding it labels it a deterministic scripted AgentPanel walkthrough and never claims bounded reads, live tool execution, or validated citations from it.
+- The agent media comes from the deterministic `DemoAgentProvider` in `docs/demo/agent_story.py` driving korvid's real `AgentRuntime`, `ToolExecutor`, and `EvidenceLedger` over the synthetic fixture: every surface embedding it labels it a deterministic synthetic-cluster walkthrough and never claims a live provider, a live cluster, or model quality from it.
 - The actual product occupies at least half of the desktop hero; every other landing section is led by real media, a semantic diagram, or an ordered flow.
 - Each scene, evidence tile, and destination card has no more than one sentence of body copy.
 - New below-fold media is lazy or `preload="none"`; only the active hero medium may load eagerly.
@@ -290,6 +290,7 @@ git commit -m "docs: put the real cockpit in the site hero" \
 
 **Files:**
 - Modify: `docs/demo/demo.py`
+- Create: `docs/demo/agent_story.py`
 - Create: `docs/demo/agent.tape`
 - Create: `docs/demo/relationships.tape`
 - Create: `docs/demo/visual-storytelling.md`
@@ -494,44 +495,33 @@ existing `payment-worker-6c9f7d-b3xnq` call. Add this entry to `EXTRA`:
 Add the documentation-only collaborators:
 
 ```python
-class ScriptedAgentRuntime:
-    """Deterministic real AgentPanel input for documentation captures."""
+class DemoReadOps(ReadOps):
+    """The synthetic fixture behind korvid's real agent read surface."""
 
-    def __init__(self) -> None:
-        self.total_tokens = (0, 0)
-        self.usage_estimated = False
-        self.evidence = EvidenceLedger()
-        self.latest_outbound_payload = None
+    async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[Any]:
+        rows: list[Any] = list(PODS) if meta.plural == "pods" else list(EXTRA.get(meta.plural, []))
+        return [row for row in rows if namespace is None or row.namespace == namespace]
 
-    async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
-        del user_text, screen_context
-        yield ToolCallStarted(
-            call_id="demo-diagnose",
-            name="diagnose_pod",
-            arguments='{"namespace":"shop","name":"payment-worker-6c9f7d-b3xnq"}',
-        )
-        await asyncio.sleep(0.8)
-        yield ToolCallFinished(
-            call_id="demo-diagnose",
-            name="diagnose_pod",
-            ok=True,
-            summary="CrashLoopBackOff · 17 restarts · gateway 503 evidence [E1]",
-        )
-        await asyncio.sleep(0.5)
-        yield TextDelta(
-            text=(
-                "The payment worker is crash-looping after repeated gateway 503s. "
-                "Open its logs and inspect the owner before changing it. [E1]"
-            )
-        )
-        yield TurnComplete(
-            input_tokens=612,
-            output_tokens=43,
-            estimated=False,
-            # Nothing was read this turn and no evidence was minted, so `[E1]`
-            # remains an unsupported marker in the real AgentPanel.
-            uncited=("E1",),
-        )
+    async def get_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> dict[str, Any]:
+        return await get_manifest(meta.plural, namespace, name)
+
+    # ... list_helm_releases / list_events_for / stream_logs complete the ABC;
+    # see docs/demo/demo.py for the shipped implementation.
+
+
+def build_demo_agent_runtime() -> AgentRuntime:
+    """korvid's own `AgentRuntime` over the synthetic cluster.
+
+    `docs/demo/agent_story.py` supplies only the deterministic
+    `LLMProvider`; the tool dispatch, the results, and the `[E1]`/`[E2]`
+    references all come from the shipped runtime, executor and evidence
+    ledger, so the capture cannot show a citation nothing read.
+    """
+    story = load_agent_story()
+    runtime: AgentRuntime = story.build_demo_agent_runtime(DemoReadOps(), ALIASES)
+    return runtime
 
 
 class DemoKorvidApp(KorvidApp):
@@ -582,7 +572,7 @@ def main() -> None:
         get_manifest=get_manifest,
         get_events=DemoEvents(),
         stream_logs=stream_logs,
-        agent_runtime=ScriptedAgentRuntime() if scene == "agent" else None,
+        agent_runtime=build_demo_agent_runtime() if scene == "agent" else None,
         agent_model_name="korvid-demo" if scene == "agent" else None,
         list_relationship_objects=(
             list_relationship_objects if scene == "relationships" else None
@@ -618,7 +608,9 @@ Show
 # Enter through the genuine Input/on_input_submitted path.
 Type "Why is the payment worker failing?"
 Enter
-Sleep 8s
+# The grounded turn runs two real read tools before it answers; hold on the
+# settled answer long enough to read both tool rows and both citations.
+Sleep 12s
 Hide
 # The focused input owns printable keys; close the panel through its
 # priority binding before sending the app-level quit key.
@@ -668,7 +660,7 @@ Run:
 vhs docs/demo/agent.tape
 vhs docs/demo/relationships.tape
 
-ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/agent-demo.mp4 \
+ffmpeg -y -ss 00:00:11 -i docs/assets/scenes/agent-demo.mp4 \
   -frames:v 1 docs/assets/scenes/agent-poster.png
 ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/relationship-demo.mp4 \
   -frames:v 1 docs/assets/scenes/relationship-graph.png
@@ -736,21 +728,26 @@ ffmpeg -y -ss 00:00:23 -i docs/assets/demo.mp4 -frames:v 1 \
 
 ## Embedded agent
 
-`docs/demo/agent.tape` drives the real AgentPanel against the deterministic
-`ScriptedAgentRuntime` in `docs/demo/demo.py`.
+`docs/demo/agent.tape` drives the real AgentPanel against korvid's real
+`AgentRuntime`, wired in `docs/demo/demo.py` to the real `ToolExecutor` over
+the synthetic `DemoReadOps` fixture.
 
-What that runtime **proves**: the real `AgentPanel` accepts a typed prompt,
-submits it through the product's own `Input` path, and renders the turn.
+What that capture **proves**: the real `AgentPanel` accepts a typed prompt and
+submits it through the product's own `Input` path; the shipped runtime
+dispatches `diagnose_pod` and `get_logs` through the real executor, and the
+`[E1]`/`[E2]` markers in the answer are references the real `EvidenceLedger`
+minted for those reads and validated against them.
 
-What it **does not prove**: anything about the provider, tool, or evidence
-pipeline — it discards the prompt and screen context, contacts no provider,
-executes no read tool, and emits hard-coded tool, text, citation, and token
-events, so its `[E1]` marker is not validated. Every page embedding this media
-calls it a scripted AgentPanel walkthrough.
+What it **does not prove**: anything about a live model or a live cluster. The
+`DemoAgentProvider` in `docs/demo/agent_story.py` is deterministic and offline
+— it opens no socket, reads no credential, and always chooses the same two
+tool calls and the same answer — and every byte the tools read comes from the
+synthetic fixture. Every page embedding this media calls it a deterministic
+synthetic-cluster walkthrough.
 
 ```sh
 vhs docs/demo/agent.tape
-ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/agent-demo.mp4 \
+ffmpeg -y -ss 00:00:11 -i docs/assets/scenes/agent-demo.mp4 \
   -frames:v 1 docs/assets/scenes/agent-poster.png
 ```
 

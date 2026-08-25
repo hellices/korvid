@@ -9,25 +9,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import random
+import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 
-from korvid.agent.events import (
-    AgentEvent,
-    TextDelta,
-    ToolCallFinished,
-    ToolCallStarted,
-    TurnComplete,
-)
-from korvid.agent.evidence import EvidenceLedger
+from korvid.agent.runtime import AgentRuntime
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.helm import HelmReleaseSummary
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.k8s.reads import ReadOps
 from korvid.k8s.relationship_facts import (
     RelationKind,
     RelationshipFacts,
@@ -421,46 +420,101 @@ async def stream_logs(
         yield LogLine(pod=pod, container=container, text=text, timestamp=datetime.now(UTC))
 
 
-class ScriptedAgentRuntime:
-    """Deterministic real AgentPanel input for documentation captures."""
+class DemoReadOps(ReadOps):
+    """The synthetic fixture behind korvid's real agent read surface.
 
-    def __init__(self) -> None:
-        self.total_tokens = (0, 0)
-        self.usage_estimated = False
-        self.evidence = EvidenceLedger()
-        self.latest_outbound_payload = None
+    `ToolExecutor` depends on this ABC rather than on `KubeClient`, so the
+    documentation capture can run the *shipped* read tools — `diagnose_pod`
+    and `get_logs` gather, redact, bound and cite exactly as they would
+    against a cluster; only the bytes they read are synthetic.
+    """
 
-    async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
-        del user_text, screen_context
-        yield ToolCallStarted(
-            call_id="demo-diagnose",
-            name="diagnose_pod",
-            arguments='{"namespace":"shop","name":"payment-worker-6c9f7d-b3xnq"}',
-        )
-        await asyncio.sleep(0.8)
-        yield ToolCallFinished(
-            call_id="demo-diagnose",
-            name="diagnose_pod",
-            ok=True,
-            summary="CrashLoopBackOff · 17 restarts · gateway 503 evidence [E1]",
-        )
-        await asyncio.sleep(0.5)
-        yield TextDelta(
-            text=(
-                "The payment worker is crash-looping after repeated gateway 503s. "
-                "Open its logs and inspect the owner before changing it. [E1]"
+    async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[Any]:
+        # `Any` rather than the ABC's `list[GenericSummary]`: the fixture's pods
+        # are `PodSummary`, which is a separate dataclass of the same shape, not
+        # a subclass. The read tools only ever read attributes off these rows.
+        rows: list[Any] = list(PODS) if meta.plural == "pods" else list(EXTRA.get(meta.plural, []))
+        return [row for row in rows if namespace is None or row.namespace == namespace]
+
+    async def get_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> dict[str, Any]:
+        return await get_manifest(meta.plural, namespace, name)
+
+    async def list_helm_releases(self, namespace: str | None) -> list[HelmReleaseSummary]:
+        releases = [
+            HelmReleaseSummary(
+                name="shop",
+                namespace="shop",
+                kind="HelmRelease",
+                created="",
+                revision=4,
+                status="deployed",
+                chart="shop-0.8.0",
+                app_version="2.4.1",
             )
+        ]
+        return [
+            release for release in releases if namespace is None or release.namespace == namespace
+        ]
+
+    async def list_events_for(
+        self,
+        namespace: str,
+        name: str,
+        *,
+        kind: str | None = None,
+        uid: str | None = None,
+    ) -> list[dict[str, Any]]:
+        del kind
+        return await DemoEvents().fetch(namespace, name, uid=uid)
+
+    def stream_logs(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncIterator[LogLine]:
+        del tail_lines
+        return stream_logs(
+            namespace,
+            pod,
+            container,
+            previous=previous,
+            follow=follow,
         )
-        yield TurnComplete(
-            input_tokens=612,
-            output_tokens=43,
-            estimated=False,
-            # Nothing was read this turn and no evidence was minted, so `[E1]`
-            # is an unsourced marker. Reporting it as `cited` would suppress
-            # the panel's own unsupported-citation warning (issue #192) and
-            # publish a frame that contradicts the product's behaviour.
-            uncited=("E1",),
-        )
+
+
+def load_agent_story() -> ModuleType:
+    """Import the sibling deterministic-provider module by path.
+
+    This harness is executed as a script *and* imported by path from the
+    documentation contracts, so a plain `import agent_story` would only
+    resolve in the first case.
+    """
+    cached = sys.modules.get("korvid_docs_agent_story")
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(
+        "korvid_docs_agent_story", Path(__file__).with_name("agent_story.py")
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError("docs/demo/agent_story.py could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["korvid_docs_agent_story"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def build_demo_agent_runtime() -> AgentRuntime:
+    """korvid's own `AgentRuntime` over the synthetic cluster."""
+    story = load_agent_story()
+    runtime: AgentRuntime = story.build_demo_agent_runtime(DemoReadOps(), ALIASES)
+    return runtime
 
 
 class DemoKorvidApp(KorvidApp):
@@ -512,7 +566,7 @@ def main() -> None:
         get_manifest=get_manifest,
         get_events=DemoEvents(),
         stream_logs=stream_logs,
-        agent_runtime=ScriptedAgentRuntime() if scene == "agent" else None,
+        agent_runtime=build_demo_agent_runtime() if scene == "agent" else None,
         agent_model_name="korvid-demo" if scene == "agent" else None,
         list_relationship_objects=(list_relationship_objects if scene == "relationships" else None),
         demo_scene=scene,

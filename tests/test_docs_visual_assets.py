@@ -14,7 +14,7 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from types import ModuleType
 
-from korvid.agent.events import AgentEvent, TextDelta, TurnComplete
+from korvid.agent.events import AgentEvent, TextDelta, ToolCallStarted, TurnComplete
 from korvid.core.relationships import GraphResource, SummaryLike
 from korvid.k8s.discovery import ResourceMeta
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader, graph_source_metas
@@ -639,108 +639,200 @@ def test_visual_storytelling_plan_tape_snippets_match_the_shipped_cold_start() -
     )
 
 
-def test_scripted_agent_runtime_reports_its_hard_coded_marker_as_unsupported() -> None:
-    """The scripted turn mints no evidence, so its `[E1]` must not read as cited.
+def test_demo_agent_turn_uses_real_tools_and_mints_citations() -> None:
+    """The captured turn must be korvid's own loop, not a replayed transcript.
 
-    `TurnComplete.cited` means "the ledger actually minted this reference".
-    `ScriptedAgentRuntime` reads nothing, executes no tool and mints no
-    evidence — its `[E1]` is a string in a hard-coded answer. Reporting it as
-    `cited` made the panel treat an unsourced claim as a supported one and
-    suppressed the very warning korvid ships for this case (issue #192), so
-    the capture published a frame that contradicts the product's own
-    behaviour. `uncited` is what the panel is owed, and what it renders as
-    the yellow "unsupported citation" note.
-
-    This runs the real runtime rather than reading its source: the event is
-    the contract.
+    The Agent capture used to inject hard-coded panel events, so the frame
+    proved the `AgentPanel` and nothing behind it. The harness now builds the
+    shipped `AgentRuntime` over the real `ToolExecutor` and the synthetic
+    fixture, so the tool calls are dispatched, the results are read, and every
+    `[E]` marker in the answer is a reference the real `EvidenceLedger` minted
+    for a read that happened. `uncited == ()` is the load-bearing half: it can
+    only hold when the ledger recognises both markers.
     """
     harness = _demo_harness()
+    runtime = harness.build_demo_agent_runtime()
 
     async def drain() -> list[AgentEvent]:
         return [
             event
-            async for event in harness.ScriptedAgentRuntime().run_turn(
-                "Why is the payment worker failing?", "selected: shop/payment-worker"
+            async for event in runtime.run_turn(
+                "Why is the payment worker failing?",
+                "view=pods ns=shop selected=payment-worker-6c9f7d-b3xnq",
             )
         ]
 
     events = asyncio.run(drain())
+    started = [event.name for event in events if isinstance(event, ToolCallStarted)]
     completions = [event for event in events if isinstance(event, TurnComplete)]
-    assert len(completions) == 1, f"the scripted turn ends exactly once: {events}"
+    assert len(completions) == 1, f"the grounded turn ends exactly once: {events}"
     complete = completions[0]
-
-    assert complete.uncited == ("E1",), (
-        "the scripted marker must be reported as unsupported, so the panel renders "
-        f"its citation warning; found uncited={complete.uncited!r}"
-    )
-    assert complete.cited == (), (
-        "nothing was read this turn, so no reference may be reported as minted "
-        f"evidence; found cited={complete.cited!r}"
-    )
-
     answer = "".join(event.text for event in events if isinstance(event, TextDelta))
+
+    assert started == ["diagnose_pod", "get_logs"], (
+        f"the capture's story is a diagnosis followed by its logs; found {started}"
+    )
+    assert complete.cited == ("E1", "E2"), (
+        f"both markers must resolve to minted evidence; found cited={complete.cited!r}"
+    )
+    assert complete.uncited == (), (
+        "a grounded answer leaves nothing unsupported, so the panel renders no "
+        f"citation warning; found uncited={complete.uncited!r}"
+    )
+    assert runtime.evidence.resolve("E1") is not None
+    assert runtime.evidence.resolve("E2") is not None
     assert "[E1]" in answer, (
-        "the warning is only meaningful beside the marker it flags, so the "
-        f"scripted answer must keep it: {answer!r}"
+        f"the rendered answer must carry the first validated marker: {answer!r}"
+    )
+    assert "[E2]" in answer, (
+        f"the rendered answer must carry the second validated marker: {answer!r}"
     )
 
 
-def test_scripted_agent_runtime_exposes_an_empty_evidence_ledger() -> None:
-    """Opening the scripted `[E1]` must report missing evidence, not crash."""
-    runtime = _demo_harness().ScriptedAgentRuntime()
-    assert hasattr(runtime, "evidence"), "the Agent UI reads runtime.evidence directly"
-    assert runtime.evidence.resolve("E1") is None
+def test_demo_agent_provider_is_answered_with_real_tool_results() -> None:
+    """The capture cannot be satisfied by injecting panel events.
 
-
-def test_scripted_agent_runtime_exposes_no_outbound_payload() -> None:
-    """Opening the payload inspector must see an empty snapshot, not crash."""
-    runtime = _demo_harness().ScriptedAgentRuntime()
-    assert hasattr(runtime, "latest_outbound_payload"), (
-        "the Agent UI reads runtime.latest_outbound_payload directly"
+    Panel events can be forged; a conversation cannot. The deterministic
+    provider is called once per iteration, and the second and third calls must
+    carry `role="tool"` messages whose text is what the real executor read out
+    of the synthetic fixture — the pod's own identity and its log lines. If the
+    harness ever went back to emitting events directly, no tool message would
+    exist to find.
+    """
+    harness = _demo_harness()
+    story = harness.load_agent_story()
+    provider = story.DemoAgentProvider()
+    runtime = story.build_demo_agent_runtime(
+        harness.DemoReadOps(), harness.ALIASES, provider=provider
     )
-    assert runtime.latest_outbound_payload is None
+
+    async def drain() -> None:
+        async for _event in runtime.run_turn(
+            "Why is the payment worker failing?",
+            "view=pods ns=shop selected=payment-worker-6c9f7d-b3xnq",
+        ):
+            pass
+
+    asyncio.run(drain())
+
+    assert len(provider.seen_messages) == 3, (
+        f"one provider call per iteration: diagnosis, logs, answer; found "
+        f"{len(provider.seen_messages)}"
+    )
+    assert not [m for m in provider.seen_messages[0] if m.get("role") == "tool"], (
+        "nothing has been read before the first call, so it must carry no tool result"
+    )
+    for index in (1, 2):
+        results = [m for m in provider.seen_messages[index] if m.get("role") == "tool"]
+        assert results, (
+            f"provider call {index + 1} must be answered with the real tool results; "
+            f"roles were {[m.get('role') for m in provider.seen_messages[index]]}"
+        )
+    diagnosis = "".join(
+        str(m.get("content") or "") for m in provider.seen_messages[1] if m.get("role") == "tool"
+    )
+    assert "payment-worker-6c9f7d-b3xnq" in diagnosis, (
+        f"the diagnosis result must come from the synthetic pod: {diagnosis!r}"
+    )
+    logs = "".join(
+        str(m.get("content") or "") for m in provider.seen_messages[2] if m.get("role") == "tool"
+    )
+    assert "gateway" in logs, f"the log result must be the fixture's log stream: {logs!r}"
 
 
-def test_visual_storytelling_plan_keeps_the_scripted_runtime_safety_contract() -> None:
-    """Replaying the executable plan must preserve the demo runtime boundary."""
+def test_visual_storytelling_plan_no_longer_ships_the_injected_agent_runtime() -> None:
+    """The historical plan must not re-create the event injector it replaced.
+
+    That plan is still an executable recipe, so a contributor replaying it
+    would otherwise restore a demo runtime that mints no evidence and reports
+    its own `[E1]` as unsupported. Its Agent snippets are pinned to the shipped
+    harness instead; the rest of the recipe (scene app, auto-open timer) is
+    unchanged and still checked here.
+    """
     plan = VISUAL_STORYTELLING_PLAN.read_text(encoding="utf-8")
-    runtime = plan.split("class ScriptedAgentRuntime:", 1)[1].split("\n```", 1)[0]
-    assert "self.evidence = EvidenceLedger()" in runtime
-    assert "self.latest_outbound_payload = None" in runtime
-    assert 'uncited=("E1",)' in runtime
-    assert not any(line.strip().startswith('cited=("E1",)') for line in runtime.splitlines())
+    assert "class ScriptedAgentRuntime:" not in plan, (
+        "the plan must not recreate the injected runtime this change removed"
+    )
+    assert 'uncited=("E1",)' not in plan, (
+        "no plan snippet may hard-code an unsupported citation into the capture"
+    )
+    assert "build_demo_agent_runtime" in plan, (
+        "the plan must build the grounded runtime the harness ships"
+    )
     assert "class DemoKorvidApp(KorvidApp):" in plan
     assert "self.set_timer(0.2, self.action_toggle_agent)" in plan
     assert "app = DemoKorvidApp(" in plan
     assert "demo_scene=scene" in plan
 
 
-def test_agent_capture_copy_says_the_scripted_marker_is_flagged_unsupported() -> None:
-    """Every surface that publishes this frame must explain the yellow note.
+def test_agent_capture_copy_states_the_grounded_path_and_its_offline_limit() -> None:
+    """The provenance page must say exactly which parts of the turn are real.
 
-    The recording now shows korvid's own unsupported-citation warning under
-    the scripted answer. A visitor who is not told why would read it as a
-    product defect instead of the product working exactly as designed on an
-    unsourced claim, so the provenance page states it and the embedding
-    pages inherit it.
+    The capture now runs korvid's own runtime, executor and evidence ledger
+    over a synthetic fixture, and the only scripted participant is the
+    model's side of the conversation. Both halves have to be published: a
+    reader who is told "deterministic" without being told the tools are real
+    would discount the frame, and a reader told "real agent turn" without the
+    offline limit would read it as a model-quality claim.
     """
     instructions = INSTRUCTIONS.read_text(encoding="utf-8")
     section = instructions.split("## Embedded agent", 1)[1].split("\n## ", 1)[0]
     lowered = " ".join(section.lower().split())
 
-    assert "uncited" in lowered, (
-        "the provenance page must name the field the scripted runtime reports"
-    )
-    assert "unsupported citation" in lowered, (
-        "and the warning the panel renders from it, so the frame is explainable"
-    )
-    for fact in ("no evidence", "yellow"):
-        assert fact in lowered, (
-            f"the provenance must say why the marker is unsupported and what the "
-            f"capture shows; {fact!r} is missing"
+    for real in ("agentruntime", "toolexecutor", "evidenceledger", "diagnose_pod", "get_logs"):
+        assert real.lower() in lowered, (
+            f"the provenance must name the shipped component the capture runs; {real!r} is missing"
         )
-    assert "validated citation" not in lowered.replace("not validated", ""), (
-        "the capture still validates nothing"
+    for limit in ("deterministic", "offline", "synthetic", "no credential", "opens no socket"):
+        assert limit in lowered, (
+            f"the provenance must state the capture's limit; {limit!r} is missing"
+        )
+    assert "unsupported citation" in lowered, (
+        "the page must say why the frame carries no citation warning, since the "
+        "previous capture did"
+    )
+    assert "quality" in lowered, (
+        "a deterministic provider says nothing about answer quality, and the page "
+        "must refuse that claim explicitly"
+    )
+
+
+def _mp4_duration(path: Path) -> float:
+    """Seconds of presentation time, read from the movie header.
+
+    The repository ships no media dependency and the contracts already read
+    ISO-BMFF boxes directly, so `mvhd`'s timescale and duration are read the
+    same way rather than shelling out to `ffprobe`.
+
+    Args:
+        path: The MP4 to read.
+
+    Returns:
+        The movie duration in seconds.
+    """
+    payload = path.read_bytes()
+    mvhd, _ = _find_mp4_box(payload, (b"moov", b"mvhd"))
+    version = payload[mvhd]
+    if version == 1:
+        timescale, duration = struct.unpack(">IQ", payload[mvhd + 20 : mvhd + 32])
+    else:
+        timescale, duration = struct.unpack(">II", payload[mvhd + 12 : mvhd + 20])
+    assert timescale, f"{path.name} declares a zero timescale"
+    return float(duration) / float(timescale)
+
+
+def test_agent_clip_runs_long_enough_to_read_the_whole_grounded_turn() -> None:
+    """The Agent story needs time on screen, and no more than that.
+
+    The turn dispatches two real read tools before it answers, so a clip cut
+    at the old eight-second hold ended while the answer was still streaming.
+    The upper bound is the other half of the contract: a landing clip that
+    outruns a visitor's attention is padding, not evidence.
+    """
+    duration = _mp4_duration(SCENES / "agent-demo.mp4")
+    assert 12.0 <= duration <= 15.0, (
+        f"agent-demo.mp4 runs {duration:.2f}s; the grounded story must settle "
+        "on screen within a 12-15s clip"
     )
 
 
@@ -1116,26 +1208,25 @@ def test_demo_harness_never_synthesizes_the_agent_prompt_submission() -> None:
     assert "on_agent_prompt_submitted(" not in source
 
 
-def test_agent_capture_provenance_states_what_the_scripted_runtime_proves() -> None:
-    """`ScriptedAgentRuntime` proves korvid's panel, never its pipeline.
+def test_agent_capture_provenance_states_what_the_grounded_turn_proves() -> None:
+    """The provenance must draw the boundary where the code now draws it.
 
-    The tape drives the product's real `AgentPanel`: VHS types the prompt into
-    `#agent-input` and presses Enter, so the submission crosses the genuine
-    `Input`/`on_input_submitted` path and the panel renders the turn itself.
-    Everything behind that boundary is fabricated — the runtime discards the
-    prompt text and the screen context it is handed, contacts no provider,
-    executes no read tool, and yields hard-coded tool, text, citation, and
-    token events.
-
-    That distinction is what every embedding page has to inherit, so it is
-    written down where the media's provenance lives instead of being
-    rediscovered by the next reviewer.
+    The tape drives the product's real `AgentPanel`, and behind it the real
+    `AgentRuntime` executes the real read tools against a synthetic fixture —
+    so the capture proves the pipeline, and the only thing it cannot speak
+    for is a live model or a live cluster. The harness is read here as well as
+    the page: if the demo ever stopped handing the prompt and screen context
+    to a real runtime, this wording would have to be revisited rather than
+    silently kept.
     """
     harness = DEMO_HARNESS.read_text(encoding="utf-8")
-    assert "del user_text, screen_context" in harness, (
-        "this contract is written against a runtime that ignores its prompt and "
-        "screen context; if the harness stopped discarding them the provenance "
-        "wording has to be revisited rather than silently kept"
+    assert "del user_text, screen_context" not in harness, (
+        "this contract is written against a harness that hands the prompt and "
+        "screen context to a real AgentRuntime; a demo runtime that discards "
+        "them needs the provenance wording revisited"
+    )
+    assert "build_demo_agent_runtime()" in harness, (
+        "the agent scene must be wired to the grounded runtime builder"
     )
 
     instructions = INSTRUCTIONS.read_text(encoding="utf-8")
@@ -1144,18 +1235,17 @@ def test_agent_capture_provenance_states_what_the_scripted_runtime_proves() -> N
 
     assert "proves" in lowered, "the provenance section must state what the capture does prove"
     assert "does not prove" in lowered, "and must state the other half of the boundary explicitly"
-    for proof in ("agentpanel", "input", "renders"):
+    for proof in ("agentpanel", "input", 'role="tool"', "e1", "e2"):
         assert proof in lowered, f"the section must name what the capture does prove: {proof!r}"
     for limit in (
-        "discards",
-        "screen context",
-        "contacts no provider",
-        "executes no read tool",
-        "hard-coded",
-        "not validated",
+        "live model",
+        "live cluster",
+        "deterministic",
+        "synthetic",
+        "no network",
     ):
         assert limit in lowered, f"the section must name what it does not prove: {limit!r}"
-    assert "scripted agentpanel walkthrough" in lowered, (
+    assert "deterministic synthetic-cluster walkthrough" in lowered, (
         "the provenance page must give the embedding surfaces the label they use"
     )
 

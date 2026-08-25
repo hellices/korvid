@@ -52,43 +52,45 @@ utilization.
 
 ## Embedded agent
 
-`docs/demo/agent.tape` records the real AgentPanel: the documentation-only
-`agent` scene in `docs/demo/demo.py` auto-opens and focuses the panel's real
-`#agent-input` widget after mount, then VHS types the prompt itself and
-presses Enter, submitting it through the genuine
-`Input`/`on_input_submitted` path to the deterministic `ScriptedAgentRuntime`.
+`docs/demo/agent.tape` records the real AgentPanel driving korvid's real agent
+loop. The documentation-only `agent` scene in `docs/demo/demo.py` auto-opens
+and focuses the panel's real `#agent-input` widget after mount, then VHS types
+the prompt itself and presses Enter, submitting it through the genuine
+`Input`/`on_input_submitted` path to a real `AgentRuntime`.
 
-What `ScriptedAgentRuntime` **proves**: korvid's real `AgentPanel` accepts a
-typed prompt, submits it through the product's own `Input` path, and renders
-the resulting turn — the prompt echo, a tool line, streamed answer text, a
-citation marker, korvid's own citation warning, and the header's model and
-token counters — exactly as the widget does in production.
+What the capture **proves**: the shipped pipeline runs end to end. The panel
+accepts and submits the typed prompt; the real `AgentRuntime` calls
+`diagnose_pod` and then `get_logs` through the real `ToolExecutor`; each result
+comes back into the conversation as a `role="tool"` message; the real
+`EvidenceLedger` mints `[E1]` and `[E2]` for those two reads; and the runtime
+validates the answer's markers against the ledger, so `TurnComplete.cited` is
+`("E1", "E2")` and `uncited` is empty — which is why the panel renders no
+unsupported citation warning under this answer.
 
-What it **does not prove**: anything about korvid's provider, tool, or
-evidence pipeline. The runtime discards the prompt text and the screen context
-the panel hands it, contacts no provider, executes no read tool, and reads no
-cluster; it yields a fixed
-`ToolCallStarted`/`ToolCallFinished`/`TextDelta`/`TurnComplete` sequence whose
-arguments, summary, answer, token counts, and `[E1]` marker are hard-coded, so
-the citation is **not validated** against any evidence store. Because the turn
-mints no evidence, the runtime reports that marker in `TurnComplete.uncited`,
-never in `cited`: the panel therefore renders its **unsupported citation: E1 —
-no such evidence was read this turn** note in **yellow** under the scripted
-answer, which is the product behaving correctly on an unsourced claim, not a
-defect. Every surface that embeds this media — the landing Agent scene, the
-landing evidence tile, and the `docs/agent.md` storyboard — must therefore call
-it a scripted AgentPanel walkthrough whose citation the panel flags, and must
-never present it as bounded-read, live tool-execution, or validated-citation
-evidence. The production behaviour those pages link to is documented in
-`docs/agent.md`, which this capture illustrates rather than demonstrates.
+What it **does not prove**: anything about a live model, a live cluster, or
+answer quality. The only scripted part is the model's side of the
+conversation: `DemoAgentProvider` in `docs/demo/agent_story.py` is a real
+`LLMProvider` implementation that is deterministic and offline — it opens no
+socket, reads no credential, and always chooses the same two tool calls and
+streams the same answer text, with short pauses purely for pacing. Everything
+those tools read is the synthetic fixture in `docs/demo/demo.py`
+(`DemoReadOps`), served through the same `ReadOps` boundary a cluster is served
+through: the CrashLoopBackOff pod `shop/payment-worker-6c9f7d-b3xnq`, its
+synthetic Warning events, and its generated log lines. No credential, no
+network, no cluster, and no external provider takes part in the recording.
+Every surface that embeds this media — the landing Agent scene, the landing
+evidence tile, and the `docs/agent.md` storyboard — must therefore call it a
+deterministic synthetic-cluster walkthrough, and must never present it as a
+live-provider or model-quality claim. The production behaviour those pages
+link to is documented in `docs/agent.md`.
 
 The capture's selected row is whatever the demo table happens to have
-highlighted; it is not context the scripted answer used, and no surface may
-present it as grounding for the answer.
+highlighted; the answer is grounded in the two tool reads above, not in that
+selection, and no surface may present the row as its evidence.
 
 ```sh
 vhs docs/demo/agent.tape
-ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/agent-demo.mp4 \
+ffmpeg -y -ss 00:00:11 -i docs/assets/scenes/agent-demo.mp4 \
   -frames:v 1 docs/assets/scenes/agent-poster.png
 ```
 

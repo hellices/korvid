@@ -19,7 +19,9 @@ Show
 # Enter through the genuine Input/on_input_submitted path.
 Type "Why is the payment worker failing?"
 Enter
-Sleep 8s
+# The grounded turn runs two real read tools before it answers; hold on the
+# settled answer long enough to read both tool rows and both citations.
+Sleep 12s
 Hide
 # The focused input owns printable keys; close the panel through its
 # priority binding before sending the app-level quit key.
