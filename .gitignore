@@ -19,3 +19,10 @@ htmlcov/
 # docs/demo/mcp-follow.tape and docs/demo/demo.py, never committed.
 .korvid-mcp-demo-go
 .korvid-mcp-demo-ready
+
+# The client pane's verdict on its own run, written by docs/demo/mcp_client.py
+# and read by the tape once it has stopped recording: VHS records a fixed
+# window and cannot tell a complete story from a client that died in the
+# middle of one. Recording side effects like the two above, never committed.
+.korvid-mcp-demo-client-ok
+.korvid-mcp-demo-client-failed

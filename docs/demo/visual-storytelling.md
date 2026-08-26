@@ -161,8 +161,10 @@ endpoint file. The client speaks only to `127.0.0.1:7878`, no credential is
 used, the demo server writes no MCP endpoint file, and the tape turns the
 tmux status line off before the first captured frame — that line is the only
 surface that would print a hostname, a user or today's date into a landing
-asset. The shell that composes the panes is never captured, and the two
-handshake files it uses (`.korvid-mcp-demo-ready` and `.korvid-mcp-demo-go`)
+asset. The shell that composes the panes is never captured, and the four
+repository-local files it uses — the handshake pair
+(`.korvid-mcp-demo-ready` and `.korvid-mcp-demo-go`) and the client's status
+pair (`.korvid-mcp-demo-client-ok` and `.korvid-mcp-demo-client-failed`) —
 are created and removed inside the checkout.
 
 The client is never released on a timer. `--scene mcp` publishes
@@ -198,6 +200,27 @@ failed recording rather than a plausible-looking wrong one. A fixed sleep
 would release the client whether or not port 7878 was listening, so a slow
 cold checkout would open the story on the client's connection error rather
 than on the follow story.
+
+A failed client fails the recording. VHS records the visible 15 s on
+its own clock and stops; it never observes the client pane, so a client that
+raised on its second call would still produce an apparently finished asset —
+with a traceback in the frames and the TUI reflowed to full width once the
+pane closed. So `docs/demo/mcp_client.py` lets no exception reach the
+terminal: it catches the failure, publishes `.korvid-mcp-demo-client-failed`,
+prints one fixed line — no traceback, no error text, no tool result — and
+holds the pane open for a bounded 30 s, past the visible window, so the
+composition survives intact to the teardown. `.korvid-mcp-demo-client-ok` is
+published only after all four calls and the closing card have been printed,
+before the closing hold, so it certifies a story that finished rather than a
+process that survived.
+
+After `Hide`, the tape detaches and reads those two files: it accepts the
+recording only when the failure file is **absent** and the success file is
+**present**. Failure outranks success — a client that raised inside its own
+closing hold, after publishing success, is still a failed run. On anything
+else the tape prints the reason, kills the session, removes all four files
+and exits non-zero, so a failed or truncated run leaves an obviously failed
+recording rather than a complete-looking wrong one.
 
 The captured timeline runs the story once, at reading speed. Each call is
 announced, answered, and then held for a fixed beat while the mirrored view

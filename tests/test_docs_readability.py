@@ -1300,3 +1300,57 @@ def test_readability_plan_recording_outline_states_the_real_agent_path() -> None
     )
     assert "live cluster" in lowered, "the live-cluster limitation must survive"
     assert "quality" in lowered, "the answer-quality limitation must survive"
+
+
+def test_observability_connector_diagram_claims_provenance_not_citations() -> None:
+    """Post-merge review: citations are minted by the agent, not by MCP.
+
+    This page documents one connector pair for two consumers. Only one of
+    them mints citations: `AgentRuntime` records a read into its
+    `EvidenceLedger` and hands the model an `[E1]`-style reference, while
+    `KorvidMCPServer` returns the executor's content to the host directly
+    and keeps no ledger at all. The single node both paths flow into may
+    therefore claim only what both actually receive — bounded, masked
+    output that carries its own provenance — and the citation statement
+    has to stay in prose, scoped to the agent.
+    """
+    source = _source("observability.md")
+    diagram = source.split("```mermaid", 1)[1].split("```", 1)[0]
+
+    label = re.search(r'MASK\["([^"]+)"\]', diagram)
+    assert label is not None, "the diagram must keep the shared bound/masked node"
+    shared = label.group(1).lower()
+
+    for claim in ("cite", "citation"):
+        assert claim not in shared, (
+            f"the shared node is on both the agent and MCP paths, and an MCP call mints "
+            f"no citation; it may not claim {claim!r}: {label.group(1)!r}"
+        )
+    assert "provenance" in shared, (
+        f"the property both consumers do share is provenance: {label.group(1)!r}"
+    )
+    for kept in ("bound", "mask"):
+        assert kept in shared, f"the node's existing {kept!r} claim must survive"
+    inbound = [line for line in diagram.splitlines() if "--> MASK" in line]
+    assert len(inbound) >= 2, (
+        f"both the metrics and the logs path must still land on the shared node: {inbound}"
+    )
+
+    section = _section("observability.md", "Independent reads, not the watch snapshot")
+    lowered = " ".join(section.split()).lower()
+    for field in ("endpoint", "window", "query"):
+        assert field in lowered, (
+            f"the provenance the diagram now names must stay spelled out in prose: {field!r}"
+        )
+    assert re.search(r"agent[^.]{0,120}cit", lowered), (
+        "the prose must keep the citation claim, and keep it agent-only"
+    )
+    assert re.search(r"mcp host[^.]{0,160}(directly|no citation|nothing to cite)", lowered), (
+        "the prose must state the other half: an MCP host receives the same bounded, "
+        "masked content directly and mints no citation"
+    )
+
+    bounds = " ".join(_section("observability.md", "Bounds and masking").split()).lower()
+    assert "agent's evidence citations" in bounds, (
+        "the existing agent-scoped citation sentence must survive the diagram change"
+    )

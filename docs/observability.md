@@ -69,7 +69,7 @@ flowchart LR
     WATCH["Watch-backed resource table"] --> UI["Korvid context"]
     UI --> METRICS["Bounded metrics query"] --> PROM[("Prometheus")]
     UI --> LOGS["Bounded log search"] --> LOKI[("Loki")]
-    METRICS --> MASK["Bound + mask + cite"]
+    METRICS --> MASK["Bound + mask + provenance"]
     LOGS --> MASK
 ```
 
@@ -81,6 +81,12 @@ triggers appears as an activity note rather than a screen navigation: there
 is no Prometheus view to mirror a query to, and no resource screen owns the
 result. Every answer carries its own provenance (endpoint, window, query)
 independent of whatever the resource table shows at that instant.
+
+Provenance is what the two consumers share; a citation is not. The embedded
+agent records the answer into its evidence ledger and can cite it `[E1]` like
+any cluster read, but an **MCP host receives the same bounded, masked text
+directly** — korvid keeps no ledger for it and mints no citation, so the
+provenance carried inside the answer is all the host has to attribute it by.
 
 ## Query examples
 

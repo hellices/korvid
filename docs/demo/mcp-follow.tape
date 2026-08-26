@@ -25,7 +25,7 @@ Set Padding 0
 # --- composition, never captured -------------------------------------
 Hide
 
-Type "rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready; tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
+Type "rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
 Enter
 Sleep 1s
 
@@ -93,7 +93,7 @@ Sleep 65s
 # attaching. `[ -f ready ] && ( ... ) & clear; tmux attach-session` does not
 # express that — bash's `&` terminates the whole and_or list, so the attach
 # is a separate, unconditional command.
-Type "if [ -f .korvid-mcp-demo-ready ]; then ( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux attach-session -t korvid-mcp-demo; else echo 'mcp-follow.tape: .korvid-mcp-demo-ready never appeared; failing without attach'; tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready; exit 1; fi"
+Type "if [ -f .korvid-mcp-demo-ready ]; then ( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux attach-session -t korvid-mcp-demo; else echo 'mcp-follow.tape: .korvid-mcp-demo-ready never appeared; failing without attach'; tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; exit 1; fi"
 Enter
 Sleep 400ms
 
@@ -110,6 +110,24 @@ Hide
 Ctrl+B
 Type "d"
 Sleep 500ms
-Type "tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready"
+
+# VHS records the 15s above on its own clock and stops; it never observes
+# the client pane, so a client that raised on its second call still yields
+# an apparently finished asset. The client publishes its verdict into two
+# repo-local files instead — .korvid-mcp-demo-client-ok only after all four
+# calls and the closing card were printed, .korvid-mcp-demo-client-failed
+# on any exception (no traceback, no error text, and the pane held open
+# past this capture so it cannot close and reflow the TUI mid-frame).
+#
+# The recording is accepted only when failure is absent *and* success is
+# present, and the failure file outranks the success file: a client that
+# raised inside its own closing hold, after publishing success, is still a
+# failed run. Anything else — a failure, or a run that never reached its
+# fourth answer — tears the session down, removes every recording side
+# effect and exits non-zero, so a truncated story cannot be published as a
+# complete one. This runs after Hide and after the detach above: before
+# Hide it would type a shell command into the captured frames, and before
+# the detach it would type it into the attached TUI.
+Type "if [ ! -f .korvid-mcp-demo-client-failed ] && [ -f .korvid-mcp-demo-client-ok ]; then tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; else echo 'mcp-follow.tape: the client pane did not report a completed run; rejecting this recording'; tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; exit 1; fi"
 Enter
 Sleep 1s

@@ -14,11 +14,20 @@ any assistant, a token count, or an unbounded tool result: it prints a fixed
 excerpt of each answer and holds long enough for the mirrored view to be
 read. An answer the SDK flags as an error is not an excerpt of korvid's
 work at all, so the run aborts on it rather than publishing it.
+
+Aborting is not enough on its own. VHS records for a fixed window and never
+observes this pane, so a run that raised would still yield an apparently
+finished asset — with a traceback in the frames and the TUI reflowed to full
+width once the pane closed. :func:`run` therefore turns any failure into two
+repository-local status files, :data:`OK_FILE` and :data:`FAILED_FILE`, that
+``docs/demo/mcp-follow.tape`` reads once it has stopped recording; the tape
+publishes the capture only when success is present and failure is absent.
 """
 
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession
@@ -27,6 +36,18 @@ from mcp.client.streamable_http import streamable_http_client
 #: The loopback endpoint the `mcp` demo scene binds. Nothing outside this
 #: machine is contacted, and no credential takes part.
 URL = "http://127.0.0.1:7878/mcp"
+
+#: Published once all four calls and the closing card have been printed —
+#: the one thing that distinguishes a complete story from a pane that
+#: connected, printed two beats and died. VHS cannot tell those apart.
+OK_FILE = Path(".korvid-mcp-demo-client-ok")
+
+#: Published instead when the run fails. The tape rejects on this file even
+#: if the success file is also present: a failure raised inside the closing
+#: hold is still a failed run. Both files live in the checkout being
+#: recorded, like the two handshake files, and are removed on both sides of
+#: a run.
+FAILED_FILE = Path(".korvid-mcp-demo-client-failed")
 
 NAMESPACE = "shop"
 POD = "payment-worker-6c9f7d-b3xnq"
@@ -40,6 +61,15 @@ TAIL_LINES = 5
 #: elapses: a client that exited first would close its pane and reflow the
 #: TUI to full width inside the last captured frames.
 CLOSING_HOLD = 6.0
+
+#: How long a failed run holds its pane open. The same reflow argument that
+#: sizes :data:`CLOSING_HOLD` applies to a failure, only harder — nothing
+#: about the run is worth publishing, but a pane that closes mid-capture
+#: corrupts the *left* pane's frames too, and the tape's own teardown has
+#: not run yet. So the hold outlasts the tape's 15 s visible window rather
+#: than the remainder of one beat. Bounded, so a failed run still ends on
+#: its own instead of hanging the recording.
+FAILURE_HOLD = 30.0
 
 #: Printable width of one pane line: one column short of the 62 the tape's
 #: split leaves this pane. Tool results are far wider than that, and a
@@ -157,7 +187,28 @@ async def _answered(lines: list[str], hold: float) -> None:
     await asyncio.sleep(hold)
 
 
+def _publish(status: Path) -> None:
+    """Publish one status file for the tape to read after it stops recording.
+
+    The marker is empty, so creating it is a single `open(O_CREAT)`: the
+    tape either sees the file or does not, and there is no content it could
+    observe half-written. Nothing is stored *in* it — a status file that
+    carried the reason would be one more unbounded, unreviewed string
+    living in the checkout.
+
+    Args:
+        status: :data:`OK_FILE` or :data:`FAILED_FILE`.
+    """
+    status.touch()
+
+
 async def main() -> None:
+    """The story itself: four read-only calls, printed at reading speed.
+
+    Publishes :data:`OK_FILE` once the closing card is printed and before
+    the closing hold, so the marker certifies a story that finished rather
+    than a process that survived. Failures propagate to :func:`run`.
+    """
     print("external MCP client — MCP SDK over Streamable HTTP")
     print(f"connecting to {URL}")
     print("read-only tools only; korvid follows every answer")
@@ -193,8 +244,36 @@ async def main() -> None:
 
         print("\nread-only investigation complete —")
         print("korvid followed every answer onto the screen.")
+        _publish(OK_FILE)
         await asyncio.sleep(CLOSING_HOLD)
 
 
+async def run() -> None:
+    """Run :func:`main` behind the status handshake the tape reads.
+
+    Raises:
+        SystemExit: with status 1 if the story failed, so a direct run still
+            reports the failure — and reports it as the one exception the
+            interpreter exits on silently. Letting the original propagate
+            would print a traceback into a pane that is being recorded, and
+            printing the exception would publish an unbounded string that
+            may hold sensitive cluster text. Neither reaches a frame: the
+            verdict travels in :data:`FAILED_FILE` instead, and the pane is
+            held open past the capture so it cannot close and reflow the
+            TUI inside the last frames.
+
+    `BaseException` is deliberately not caught: an interrupt or a cancelled
+    run must stay interrupting. Neither can forge a success, because
+    :data:`OK_FILE` is published only after the closing card is printed.
+    """
+    try:
+        await main()
+    except Exception:
+        _publish(FAILED_FILE)
+        print(_line("\nclient run failed — this recording will be rejected."))
+        await asyncio.sleep(FAILURE_HOLD)
+        raise SystemExit(1) from None
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run())

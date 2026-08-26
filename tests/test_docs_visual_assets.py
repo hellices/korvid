@@ -112,6 +112,18 @@ MCP_READY_FILE = ".korvid-mcp-demo-ready"
 #: fail-closed contract below is precisely that `attach-session` never runs
 #: without the readiness signal.
 MCP_TMUX_SESSION = "korvid-mcp-demo"
+#: The two repository-local status files the client pane publishes, and the
+#: only channel that carries its verdict back to the tape. VHS records for a
+#: fixed window no matter what the pane does, so a client that raised
+#: mid-story would otherwise still produce a complete-looking asset.
+MCP_CLIENT_OK_FILE = ".korvid-mcp-demo-client-ok"
+MCP_CLIENT_FAILED_FILE = ".korvid-mcp-demo-client-failed"
+#: The line the tape prints when it refuses a recording on those files. It is
+#: also the needle that picks the status check out of the tape, so a test can
+#: hand the shipped command to bash instead of matching substrings.
+MCP_STATUS_REJECT_MESSAGE = (
+    "mcp-follow.tape: the client pane did not report a completed run; rejecting this recording"
+)
 #: The bound the tape's typed readiness loop enforces: a wall-clock deadline
 #: on bash's own `SECONDS` builtin, reset with `SECONDS=0` and checked with
 #: `[ $SECONDS -lt 60 ]`. Counting `sleep 0.1` iterations instead assumes
@@ -2966,3 +2978,349 @@ def test_demo_manifest_configmap_data_is_not_shared_between_answers() -> None:
     finally:
         harness.CONFIGMAP_MANIFEST.clear()
         harness.CONFIGMAP_MANIFEST.update(copy.deepcopy(pristine))
+
+
+#: One `await asyncio.sleep(...)` the client took, as
+#: `(seconds, ok-marker exists, failure-marker exists, output since the
+#: previous hold)`. Recording the markers *and* the output at each beat is
+#: what makes the ordering of the status handshake observable: a success file
+#: published one line too early shows up on the wrong beat.
+_ClientHold = tuple[float, bool, bool, str]
+
+
+def _mcp_visible_window_seconds() -> float:
+    """The wall-clock length of the tape's captured block.
+
+    Everything between `Show` and the following `Hide` reaches the asset,
+    and VHS runs that clock itself — it never observes the client pane. So
+    a failed client has to outlive this window rather than exit inside it.
+    """
+    lines = [line.strip() for line in MCP_TAPE.read_text(encoding="utf-8").splitlines()]
+    show = lines.index("Show")
+    hide = next(index for index in range(show, len(lines)) if lines[index] == "Hide")
+    total = 0.0
+    for line in lines[show:hide]:
+        match = re.fullmatch(r"Sleep (\d+(?:\.\d+)?)(ms|s)", line)
+        if match is not None:
+            total += float(match.group(1)) / (1000 if match.group(2) == "ms" else 1)
+    return total
+
+
+def _mcp_client_answers() -> dict[str, _FakeCallToolResult]:
+    """One well-formed answer per call of the follow story."""
+    return {
+        "list_resources": _FakeCallToolResult("NAME READY\npayment-worker-6c9f7d-b3xnq 0/1"),
+        "diagnose_pod": _FakeCallToolResult(
+            "CURRENT HEALTH\n  status: CrashLoopBackOff\nCONTAINERS\n  app: restarting"
+        ),
+        "get_logs": _FakeCallToolResult("connection refused\nconnection refused"),
+        "helm_list_releases": _FakeCallToolResult("NAME REVISION\nshop 4"),
+    }
+
+
+def _drive_mcp_client(
+    module: ModuleType,
+    session: _FakeSession,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    holds: list[_ClientHold],
+) -> None:
+    """Point the client at `session` and record every hold it takes."""
+
+    @contextlib.asynccontextmanager
+    async def _fake_transport(url: str) -> AsyncIterator[tuple[object, object]]:
+        assert url == module.URL
+        yield (object(), object())
+
+    async def _fake_sleep(seconds: float) -> None:
+        captured = capsys.readouterr()
+        holds.append(
+            (
+                seconds,
+                module.OK_FILE.exists(),
+                module.FAILED_FILE.exists(),
+                captured.out + captured.err,
+            )
+        )
+
+    monkeypatch.setattr(module, "streamable_http_client", _fake_transport)
+    monkeypatch.setattr(module, "ClientSession", lambda _read, _write: session)
+    monkeypatch.setattr(module.asyncio, "sleep", _fake_sleep)
+
+
+def test_mcp_client_publishes_success_only_after_the_whole_story_is_printed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The success file is the tape's evidence that the story actually ran.
+
+    VHS records a fixed window and stops; it cannot tell a complete run from
+    a client that connected, printed two beats and died. The success file is
+    what carries that verdict out, so it may only appear once all four calls
+    and the closing card have been printed — published one beat early it
+    would certify exactly the truncated story it exists to reject.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    session = _FakeSession(_mcp_client_answers())
+    holds: list[_ClientHold] = []
+    _drive_mcp_client(module, session, monkeypatch, capsys, holds)
+
+    asyncio.run(module.main())
+
+    assert session.calls == list(MCP_CLIENT_CALLS), "the whole story must have run"
+    assert len(holds) == len(MCP_CLIENT_CALLS) + 1, (
+        f"four answered beats and one closing hold; recorded {len(holds)}"
+    )
+    for seconds, ok, failed, _printed in holds[:-1]:
+        assert not ok, f"the success file may not exist during the {seconds}s answer beat"
+        assert not failed, f"a healthy run may not publish a failure at the {seconds}s beat"
+
+    seconds, ok, failed, printed = holds[-1]
+    assert seconds == module.CLOSING_HOLD, (
+        f"the last hold must be the existing closing hold, not a new one: {seconds}"
+    )
+    assert ok, "the success file must be published before the closing hold, not after it"
+    assert not failed, "a completed run must not publish the failure file"
+    assert "investigation complete" in printed, (
+        "the success file must be published after the closing summary is printed"
+    )
+
+
+def test_mcp_client_entry_point_holds_a_failed_pane_and_publishes_no_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failed call must reject the recording, not decorate it.
+
+    Unwrapped, an exception here printed a traceback into a pane that is
+    being recorded and then closed it — which also reflows the TUI to full
+    width inside the last captured frames — while VHS went on recording and
+    produced an apparently finished asset. The entry point therefore catches
+    the failure, publishes the failure file, never publishes success, prints
+    no traceback and no error or result text, and holds the pane past the
+    tape's own visible window so the composition it was recorded in survives
+    to the teardown that rejects it.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    sentinel = "leaked-token=abc123 from /home/whoever/.kube/config"
+    answers = _mcp_client_answers()
+    answers["get_logs"] = _FakeCallToolResult(sentinel, is_error=True)
+    session = _FakeSession(answers)
+    holds: list[_ClientHold] = []
+    _drive_mcp_client(module, session, monkeypatch, capsys, holds)
+
+    with pytest.raises(SystemExit) as excinfo:
+        asyncio.run(module.run())
+
+    assert excinfo.value.code != 0, "a failed run must leave a non-zero status behind"
+    assert module.FAILED_FILE.exists(), "the failure must be published for the tape to read"
+    assert not module.OK_FILE.exists(), "a failed run may never publish success"
+    assert session.calls == ["list_resources", "diagnose_pod", "get_logs"], (
+        "the story must stop at the failed call"
+    )
+
+    seconds, ok, failed, _printed = holds[-1]
+    assert failed, "the pane must be held *after* the failure was published"
+    assert not ok, "the held pane may not also carry a success marker"
+    assert seconds == module.FAILURE_HOLD, f"the hold must be the bounded failure hold: {seconds}"
+    visible = _mcp_visible_window_seconds()
+    assert visible < module.FAILURE_HOLD, (
+        f"the failure hold ({module.FAILURE_HOLD}s) must outlast the tape's visible "
+        f"window ({visible}s), or the pane closes inside the capture"
+    )
+    assert math.isfinite(module.FAILURE_HOLD), "the hold must be bounded, not indefinite"
+
+    published = "".join(chunk for *_rest, chunk in holds)
+    assert sentinel not in published, "the failed result may not reach the recorded pane"
+    for leak in ("Traceback", "RuntimeError", "Error:"):
+        assert leak not in published, f"the pane must publish no {leak!r}"
+    assert "investigation complete" not in published, (
+        "a failed run must never print the success card"
+    )
+
+    client = MCP_CLIENT.read_text(encoding="utf-8")
+    for formatter in ("import traceback", "print_exc", "format_exc"):
+        assert formatter not in client, f"the client may not format a traceback: {formatter!r}"
+    assert not re.search(r"print\([^)]*\bexc\b", client), (
+        "the caught exception may not be printed; it is unbounded and may hold "
+        "sensitive cluster text"
+    )
+
+
+def test_mcp_client_status_files_are_repo_local_and_never_committable() -> None:
+    """Two more recording side effects, held to the handshake files' rules."""
+    module = _mcp_client_module()
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    tape = MCP_TAPE.read_text(encoding="utf-8")
+
+    for path, name in (
+        (module.OK_FILE, MCP_CLIENT_OK_FILE),
+        (module.FAILED_FILE, MCP_CLIENT_FAILED_FILE),
+    ):
+        assert str(path) == name, f"the client must publish {name}, not {path}"
+        assert not Path(path).is_absolute(), (
+            f"{name} must live in the checkout being recorded, not at an absolute path"
+        )
+        assert re.search(rf"^{re.escape(name)}$", gitignore, re.MULTILINE), (
+            f"{name} is a recording side effect; it must never be committable"
+        )
+        removals = [line for line in tape.splitlines() if "rm -f" in line and name in line]
+        assert len(removals) >= 2, (
+            f"{name} must be removed before the run starts and again after it ends, so a "
+            f"stale marker from an interrupted recording cannot certify the next one; "
+            f"found {removals}"
+        )
+
+
+def _run_mcp_status_check(workdir: Path, *, ok: bool, failed: bool) -> tuple[int, str, str]:
+    """Run the tape's post-capture status check against a stubbed `tmux`.
+
+    Returns the exit status, everything the stub recorded, and everything
+    the command printed. The handshake files are seeded as an interrupted
+    or finished run would leave them, so the branch is decided by real bash
+    rather than by a substring sharing a line.
+    """
+    stub_dir = workdir / "stubs"
+    stub_dir.mkdir()
+    invocations = workdir / "invocations.log"
+    stub = stub_dir / "tmux"
+    stub.write_text(f'#!/bin/sh\necho "tmux $*" >> "{invocations}"\n', encoding="utf-8")
+    stub.chmod(0o755)
+
+    for name in (MCP_GATE_FILE, MCP_READY_FILE):
+        (workdir / name).touch()
+    if ok:
+        (workdir / MCP_CLIENT_OK_FILE).touch()
+    if failed:
+        (workdir / MCP_CLIENT_FAILED_FILE).touch()
+
+    environment = dict(os.environ)
+    environment["PATH"] = f"{stub_dir}{os.pathsep}{environment.get('PATH', '')}"
+    completed = subprocess.run(
+        ["bash", "-c", _mcp_typed_command(MCP_STATUS_REJECT_MESSAGE)],
+        cwd=workdir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    recorded = invocations.read_text(encoding="utf-8") if invocations.exists() else ""
+    return completed.returncode, recorded, completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("ok", "failed", "accepted"),
+    [
+        (True, False, True),
+        (False, True, False),
+        (False, False, False),
+        (True, True, False),
+    ],
+)
+def test_mcp_follow_tape_accepts_only_a_completed_client_run(
+    tmp_path: Path, ok: bool, failed: bool, accepted: bool
+) -> None:
+    """The recording is accepted on both status files, never on one of them.
+
+    A failure published after the success file — the client raising inside
+    its own closing hold — is still a failed run, so presence of the failure
+    file outranks success. An absent success file is a run that never
+    reached its fourth answer, which VHS cannot tell from a complete one.
+    Either way the session is torn down, every recording side effect is
+    removed, and the tape exits non-zero so the asset is not published.
+    """
+    workdir = tmp_path / f"ok{int(ok)}-failed{int(failed)}"
+    workdir.mkdir()
+
+    status, recorded, output = _run_mcp_status_check(workdir, ok=ok, failed=failed)
+
+    if accepted:
+        assert status == 0, f"a completed client run must be accepted; exited {status}: {output!r}"
+        assert MCP_STATUS_REJECT_MESSAGE not in output, (
+            f"an accepted recording must print no rejection: {output!r}"
+        )
+    else:
+        assert status != 0, (
+            f"ok={ok} failed={failed} is not a completed run and must fail the recording; "
+            f"exited {status}"
+        )
+        assert MCP_STATUS_REJECT_MESSAGE in output, (
+            f"a rejected recording must say why it was rejected: {output!r}"
+        )
+
+    assert f"kill-session -t {MCP_TMUX_SESSION}" in recorded, (
+        f"both branches must tear the session down; the stub recorded {recorded!r}"
+    )
+    for name in (MCP_GATE_FILE, MCP_READY_FILE, MCP_CLIENT_OK_FILE, MCP_CLIENT_FAILED_FILE):
+        assert not (workdir / name).exists(), (
+            f"both branches must clean {name}; a stale marker would certify the next recording"
+        )
+
+
+def test_mcp_follow_tape_checks_the_client_status_after_it_stops_recording() -> None:
+    """The check belongs in the teardown, after the capture and the detach.
+
+    Run before `Hide` it would type a shell command into the captured
+    frames; run before the detach it would type it into the attached TUI.
+    """
+    lines = [line.rstrip() for line in MCP_TAPE.read_text(encoding="utf-8").splitlines()]
+    status = next(index for index, line in enumerate(lines) if MCP_STATUS_REJECT_MESSAGE in line)
+    hides = [index for index, line in enumerate(lines) if line.strip() == "Hide"]
+    detaches = [index for index, line in enumerate(lines) if line.strip() == 'Type "d"']
+
+    assert hides, "the tape must still hide its teardown"
+    assert hides[-1] < status, "the status check must run after the capture is hidden"
+    assert detaches, "the tape must still detach before its teardown"
+    assert detaches[-1] < status, (
+        "the tape must detach before it types the status check, so no keystroke of it "
+        "reaches the attached TUI"
+    )
+    assert all(line.strip() != "Show" for line in lines[status:]), (
+        "nothing may be captured after the status check"
+    )
+
+    start = next(index for index, line in enumerate(lines) if "new-session" in line)
+    cleared = [
+        index
+        for index, line in enumerate(lines)
+        if "rm -f" in line and MCP_CLIENT_OK_FILE in line and MCP_CLIENT_FAILED_FILE in line
+    ]
+    assert any(index < start for index in cleared), (
+        "both status files must be removed before the panes are launched, so a marker "
+        "left by an earlier run cannot decide this one"
+    )
+
+
+def test_mcp_capture_provenance_publishes_the_client_status_handshake() -> None:
+    """The published recipe must describe the verdict channel it depends on.
+
+    The page already documents how the capture *starts* fail-closed. It
+    must document how it *ends* fail-closed too, because the reason a
+    reader can trust the shipped clip is no longer only that the client
+    was released on a real signal — it is also that a client which failed
+    could not have produced this asset.
+    """
+    module = _mcp_client_module()
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    mcp = instructions[instructions.index("## MCP follow") :]
+    lowered = " ".join(mcp.split()).lower()
+
+    for status in (MCP_CLIENT_OK_FILE, MCP_CLIENT_FAILED_FILE):
+        assert status in mcp, f"the provenance page must name {status}"
+    assert "created and removed inside the checkout" in lowered, (
+        "the status files are recording side effects like the handshake pair; say so"
+    )
+    assert re.search(r"absent[^.]{0,120}present", lowered), (
+        "the page must state the acceptance rule: failure absent *and* success present"
+    )
+    assert "traceback" in lowered, (
+        "the page must state that a failure publishes no traceback into the frames"
+    )
+    assert f"{module.FAILURE_HOLD:g} s" in lowered, (
+        f"the page must publish the bounded failure hold the client ships ({module.FAILURE_HOLD}s)"
+    )
+    assert re.search(r"closing card[^.]{0,120}closing hold", lowered), (
+        "the page must state when success is published: after the closing card, before "
+        "the closing hold"
+    )

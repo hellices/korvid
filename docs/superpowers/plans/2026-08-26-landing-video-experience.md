@@ -709,6 +709,18 @@ if __name__ == "__main__":
 Do not print the endpoint file, process ID, working directory, model, tokens, or
 full unbounded tool results.
 
+Wrap that entry point so the recording learns whether it succeeded. VHS records
+a fixed window on its own clock and never observes this pane, so an unwrapped
+exception prints a traceback into the captured frames, closes the pane — which
+reflows the TUI to full width inside the last frames — and still yields an
+apparently finished asset. Publish `.korvid-mcp-demo-client-ok` only after all
+four calls and the closing card have been printed and before the closing hold;
+catch any exception, publish `.korvid-mcp-demo-client-failed` instead, print no
+traceback and no error or result text, and hold the pane open for a bounded
+period longer than the tape's 15-second visible window. Both files are
+repository-local recording side effects: gitignored, and removed on both sides
+of a run like the two handshake files.
+
 - [ ] **Step 4: Compose a real local MCP server with the demo app**
 
 Extend `_parse_scene()` with `"mcp"`. For that scene, build:
@@ -783,7 +795,7 @@ Set Padding 0
 # --- composition, never captured -------------------------------------
 Hide
 
-Type "rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready; tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
+Type "rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
 Enter
 Sleep 1s
 
@@ -851,7 +863,7 @@ Sleep 65s
 # attaching. `[ -f ready ] && ( ... ) & clear; tmux attach-session` does not
 # express that — bash's `&` terminates the whole and_or list, so the attach
 # is a separate, unconditional command.
-Type "if [ -f .korvid-mcp-demo-ready ]; then ( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux attach-session -t korvid-mcp-demo; else echo 'mcp-follow.tape: .korvid-mcp-demo-ready never appeared; failing without attach'; tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready; exit 1; fi"
+Type "if [ -f .korvid-mcp-demo-ready ]; then ( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux attach-session -t korvid-mcp-demo; else echo 'mcp-follow.tape: .korvid-mcp-demo-ready never appeared; failing without attach'; tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; exit 1; fi"
 Enter
 Sleep 400ms
 
@@ -868,7 +880,25 @@ Hide
 Ctrl+B
 Type "d"
 Sleep 500ms
-Type "tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready"
+
+# VHS records the 15s above on its own clock and stops; it never observes
+# the client pane, so a client that raised on its second call still yields
+# an apparently finished asset. The client publishes its verdict into two
+# repo-local files instead — .korvid-mcp-demo-client-ok only after all four
+# calls and the closing card were printed, .korvid-mcp-demo-client-failed
+# on any exception (no traceback, no error text, and the pane held open
+# past this capture so it cannot close and reflow the TUI mid-frame).
+#
+# The recording is accepted only when failure is absent *and* success is
+# present, and the failure file outranks the success file: a client that
+# raised inside its own closing hold, after publishing success, is still a
+# failed run. Anything else — a failure, or a run that never reached its
+# fourth answer — tears the session down, removes every recording side
+# effect and exits non-zero, so a truncated story cannot be published as a
+# complete one. This runs after Hide and after the detach above: before
+# Hide it would type a shell command into the captured frames, and before
+# the detach it would type it into the attached TUI.
+Type "if [ ! -f .korvid-mcp-demo-client-failed ] && [ -f .korvid-mcp-demo-client-ok ]; then tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; else echo 'mcp-follow.tape: the client pane did not report a completed run; rejecting this recording'; tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; exit 1; fi"
 Enter
 Sleep 1s
 ```
@@ -1065,3 +1095,89 @@ git add docs/index.md docs/agent.md docs/mcp.md \
   tests/test_docs_landing_design.py tests/test_docs_visual_assets.py
 git commit -m "docs: explain the complete landing demos"
 ```
+
+## Post-merge review report
+
+Two credible findings raised by Copilot after `79583ef` merged `origin/main`
+into `docs/visual-storytelling`. Both were fixed test-first on top of that
+merge; no media was regenerated, because no successful visible frame changed.
+
+### 1. The observability diagram claimed a citation both consumers do not get
+
+*Inline comment `3859923950`, `docs/observability.md`.*
+
+The shared node the metrics and the logs path both flow into read
+`Bound + mask + cite`. Citations are minted in one place only:
+`AgentRuntime` records a read into its `EvidenceLedger` and hands the model an
+`[E1]`-style reference (`src/korvid/agent/runtime.py`). An MCP `tools/call`
+returns the executor's content to the host directly and keeps no ledger
+(`src/korvid/mcp/server.py`), and this page documents both consumers.
+
+The node now reads `Bound + mask + provenance` — the property both actually
+receive — and the distinction is stated once in the prose under the diagram:
+the agent can cite the answer `[E1]`, while an MCP host receives the same
+bounded, masked text directly and has only the provenance carried inside it.
+The pre-existing agent-scoped citation sentence under "Bounds and masking" is
+unchanged. `tests/test_docs_readability.py::
+test_observability_connector_diagram_claims_provenance_not_citations` parses
+the mermaid node label, rejects any `cite`/`citation` claim on it, requires
+`provenance` alongside the surviving `bound`/`mask` claims, and pins the
+`endpoint`/`window`/`query` triple plus both halves of the prose distinction.
+
+### 2. A failed client pane could still produce a finished-looking asset
+
+*Inline comment `3859923996`, `docs/demo/mcp_client.py`.*
+
+VHS records a fixed 15-second window on its own clock and never observes the
+client pane. An exception there printed a traceback into the captured frames
+and closed the pane — reflowing the TUI to full width inside the last frames —
+while the tape went on to publish an apparently complete recording.
+
+`docs/demo/mcp_client.py` now carries the verdict out of the pane in two
+repository-local status files. `main` publishes `.korvid-mcp-demo-client-ok`
+only after all four calls and the closing card have been printed, before the
+existing closing hold, so the marker certifies a story that finished rather
+than a process that survived. The new `run` entry point catches any
+`Exception`, publishes `.korvid-mcp-demo-client-failed`, prints one fixed line
+— no traceback, no error text, no tool result — holds the pane for a bounded
+`FAILURE_HOLD = 30.0` s (longer than the visible window, so the composition
+survives to the teardown) and exits `SystemExit(1)`, the one exception the
+interpreter reports without a traceback. `BaseException` is deliberately not
+caught. Normal visible output and timing are untouched.
+
+`docs/demo/mcp-follow.tape` removes both status files before it launches the
+panes, and after `Hide` — and after the detach, so no keystroke reaches the
+attached TUI — accepts the recording only when the failure file is **absent**
+and the success file is **present**. Failure outranks success, so a client
+that raised inside its own closing hold is still a failed run. Every other
+combination prints the reason, kills the session, removes all four recording
+side effects and exits non-zero.
+
+Contracts added in `tests/test_docs_visual_assets.py`:
+
+- `test_mcp_client_publishes_success_only_after_the_whole_story_is_printed` —
+  patches the client's sleep and records `(seconds, ok, failed, output)` at
+  every beat, so the success file is proven absent on all four answer beats
+  and present on the closing hold, after the closing card was printed.
+- `test_mcp_client_entry_point_holds_a_failed_pane_and_publishes_no_success` —
+  fails the third call with a sensitive sentinel and proves `SystemExit`
+  rather than a propagated exception, the failure file written, no success
+  file, no sentinel/traceback/`RuntimeError` in either stream, no success
+  card, and a final hold equal to `FAILURE_HOLD` and longer than the visible
+  window parsed out of the shipped tape.
+- `test_mcp_client_status_files_are_repo_local_and_never_committable` —
+  relative paths, gitignored, removed on both sides of a run.
+- `test_mcp_follow_tape_accepts_only_a_completed_client_run` — hands the
+  shipped teardown command to **real bash** with a stubbed `tmux` across all
+  four status combinations, asserting the exit status, the rejection message,
+  the teardown and the cleanup of all four files in every branch.
+- `test_mcp_follow_tape_checks_the_client_status_after_it_stops_recording` —
+  the check runs after the last `Hide` and after the detach, nothing is
+  captured afterwards, and both status files are cleared before the panes
+  start.
+- `test_mcp_capture_provenance_publishes_the_client_status_handshake` — keeps
+  `docs/demo/visual-storytelling.md` in step with the shipped hold and rule.
+
+`docs/demo/visual-storytelling.md` and this plan's Step 3 prose and Step 5 tape
+snippet are resynced; the existing snippet-equality contract covers the tape
+verbatim.
