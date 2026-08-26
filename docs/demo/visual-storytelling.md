@@ -138,10 +138,16 @@ ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/relationship-demo.mp4 \
 alone. `docs/demo/mcp-follow.tape` composes two panes with tmux over a fixed
 `139`×`42` grid — the terminal's own grid at the tape's geometry, so attaching
 resizes nothing — and splits it with `-p 45`, giving the client 45% of the
-width and korvid the remaining 55%. On the left is the `mcp` scene of
-`docs/demo/demo.py` (`--scene mcp`), korvid's real TUI over the synthetic
-fixture, serving the real `KorvidMCPServer` over Streamable HTTP on loopback
-port 7878. On the right is `docs/demo/mcp_client.py`, a real MCP SDK
+width and korvid the remaining 55%. Both panes are launched with
+`uv run --frozen --extra mcp`: korvid's MCP stack is an optional extra rather
+than a dependency group, so `uv run --frozen` on its own leaves a clean
+checkout without the scene's lazily imported `korvid.mcp.server` or the
+client's MCP SDK. The flag reaches no frame — the same code runs and prints
+the same output — so enabling it does not invalidate the recorded clip. On the
+left is the `mcp` scene of `docs/demo/demo.py` (`--scene mcp`), korvid's real
+TUI over the synthetic fixture, serving the real `KorvidMCPServer` over
+Streamable HTTP on loopback port 7878. On the right is
+`docs/demo/mcp_client.py`, a real MCP SDK
 `ClientSession` that speaks Streamable HTTP to `http://127.0.0.1:7878/mcp`
 and calls four **read-only** tools. Every view the left pane opens is
 korvid's own follow bridge mirroring the answer the right pane just

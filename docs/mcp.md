@@ -22,13 +22,23 @@ surface at all. Disclosure is **tool-specific**, and what an MCP client
 receives is **not necessarily the same snapshot** a Direct keybinding or the
 embedded Agent would show for the same object:
 
-- **Structured manifests** (`get_resource`) and **compound diagnoses**
-  (`diagnose_workload`) are recursively redacted where they are produced, by
-  the same `korvid.core.redaction` primitive the embedded agent's boundary
-  uses: `Secret` data, the `kubectl.kubernetes.io/last-applied-configuration`
-  annotation, and credential-named keys/values are masked before the
-  document is bounded and returned. An MCP client sees the same redacted
-  document the model would.
+- **Structured manifests** (`get_resource`) are recursively redacted where
+  they are produced, by the same `korvid.core.redaction` primitive the
+  embedded agent's boundary uses: `Secret` data, the
+  `kubectl.kubernetes.io/last-applied-configuration` annotation, and
+  credential-named keys/values are masked **structurally** — by where they
+  sit in the parsed document, not by how they look — before the document is
+  bounded and returned. An MCP client sees the same redacted document the
+  model would.
+- **Compound workload diagnoses** (`diagnose_workload`) are a shaped text
+  report rather than a parsed document, so the structural pass above never
+  runs over them. What they do get is producer-side **credential-pattern
+  text redaction**: korvid masks credential-shaped text in every shaped
+  section of the report, and in each embedded pod diagnosis, *before* the
+  report is compacted to its size cap — a cut taken first would split a
+  credential across the boundary and leave the tail unclassifiable. Pattern
+  matching is weaker than the structural guarantee above: a secret no
+  pattern recognises is not masked here.
 - **Service and PVC binding diagnoses** (`diagnose_service`, `diagnose_pvc`)
   are deterministic structured YAML: EndpointSlice or secondary-read RBAC
   denials become explicit `gaps[]` entries rather than an error, so the
@@ -170,7 +180,8 @@ it is disclosed:
 
 | Family | Examples | Backend | Disclosure / follow |
 |---|---|---|---|
-| Redacted Kubernetes reads | `get_resource`, `diagnose_workload` | Kubernetes API | Producer-side recursive redaction; may emit a follow activity note |
+| Recursively redacted manifests | `get_resource` | Kubernetes API | Producer-side recursive **document** redaction (`Secret` data, last-applied annotation, credential-named keys); may emit a follow activity note |
+| Pattern-masked compound diagnoses | `diagnose_workload` | Kubernetes API | Producer-side **credential-pattern text** redaction of each shaped section, applied before compaction — not a recursive document pass; may emit a follow activity note |
 | Shaped Kubernetes reads | `list_resources`, `get_logs`, `get_events`, `diagnose_pod`/`_service`/`_pvc`, `helm_list_releases` | Kubernetes API | Tool-specific shaping and size caps only — **not** credential-pattern masked; may emit a follow activity note |
 | Observability reads | Prometheus / Loki query tools | Prometheus / Loki | Activity note only — never followable navigation |
 | Write proposals (opt-in) | `propose_write`, `get_write_proposal`, `cancel_write_proposal` | Kubernetes API, gated | Inert until a fresh user keystroke in the TUI |

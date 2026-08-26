@@ -40,7 +40,7 @@ described below.
 | Process start to interactive | ≤ 10 s | 2.75 s | 2.88 s | pass |
 | Peak RSS | ≤ 512 MiB | 276 MiB | 271 MiB | pass |
 | Post-warm-up RSS slope | ≤ 1 MiB/min | 1.06 MiB/min | 0.53 MiB/min | fixed |
-| Event-to-render p95 | ≤ 250 ms @ 20 ev/s | 527 ms @ 24 ev/s | 299 ms @ 24 ev/s | **miss** |
+| Event-to-render p95 | ≤ 250 ms @ 20 ev/s | 527 ms @ 24 ev/s | 299 ms @ 24 ev/s | **diagnostic** |
 | Cursor-input p95 | ≤ 100 ms | 2,311 ms | 2,447 ms | **invalid** |
 
 **The 2,311 ms and 2,447 ms cursor figures are not measurements of korvid.**
@@ -52,13 +52,19 @@ heuristic plus a ~2 s constant, not user-visible input latency. They are
 retained here only to invalidate them; do not compare them to any budget or to
 any corrected figure.
 
-**Event-to-render is a no-op-diff interval here.** Live churn is metadata-only,
-so the recorded interval ends when the table diff completes without writing a
-cell. The 527 → 299 ms improvement is a real reduction in per-event diff cost,
-but the figure is not a to-screen measurement. The **miss** verdict still
-holds: a no-op diff is strictly less work than one that writes cells and
-repaints, so 299 ms is a lower bound on a rendered-cell workload at the same
-rate, and a lower bound already over the 250 ms budget refutes it.
+**Event-to-render is a no-op-diff interval here, so its row is diagnostic
+rather than a verdict.** Live churn is metadata-only, so the recorded interval
+ends when the table diff completes without writing a cell. The 527 → 299 ms
+improvement is a real reduction in per-event diff cost, but the figure is not a
+to-screen measurement, and it cannot pass or fail the qualification budget. That
+budget is ≤ 250 ms at 20 ev/s over churn that changes a **rendered cell**; this
+run measured a different workload — a no-op diff — at 24 ev/s, above the 20 ev/s
+the budget names. A no-op diff is strictly less work than one that writes cells
+and repaints, so 299 ms does bound a rendered-cell workload from below *at
+24 ev/s*. It says nothing about 20 ev/s in either direction: per-event latency
+moves with the arrival rate, and a bound taken at a higher rate is not a bound at
+a lower one. The 250 ms rendered-cell contract therefore stays unqualified live
+(see [Known limits](#known-limits)) — neither passed nor missed by this run.
 
 Supporting numbers: event-to-render p50 266 → 156 ms, p99 659 → 356 ms, max
 1,628 → 714 ms; max backlog depth 42 → 39; achieved churn 23.18 → 23.996 ev/s

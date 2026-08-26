@@ -306,11 +306,14 @@ def _representative_tool_rows() -> dict[str, str]:
 
 
 def test_mcp_tools_table_separates_producer_side_redaction_from_shaping() -> None:
-    """Video round 1, finding 2: the compact summary must not overclaim.
+    """Video round 1, finding 2, corrected by round 4: the summary must not overclaim.
 
-    Only `get_resource` and `diagnose_workload` are recursively redacted
-    where they are produced (`ToolExecutor._get_resource` → `_mask_manifest`,
-    `_diagnose_workload` → `redacted_and_compacted`). Logs, events, lists,
+    Two Kubernetes reads are redacted where they are produced, by two
+    different passes (`ToolExecutor._get_resource` → `_mask_manifest`, a
+    recursive walk of the parsed document; `_diagnose_workload` →
+    `redacted_and_compacted`, credential-*pattern* text masking of a shaped
+    report). Round 1 gave them one shared row, which promised the
+    structural pass on a report that never gets one. Logs, events, lists,
     single-pod diagnoses and Helm status get their own shaping and size caps
     only, and can carry credential-shaped text verbatim — which the prose
     above the table already discloses. A single "tool-specific redaction"
@@ -321,16 +324,19 @@ def test_mcp_tools_table_separates_producer_side_redaction_from_shaping() -> Non
     assert rows, "mcp.md must keep its representative-tools table"
 
     redacted = [key for key, cell in rows.items() if "redact" in cell.lower()]
-    assert len(redacted) == 1, (
-        f"exactly one Kubernetes-read row may claim redaction; found {redacted}"
+    assert len(redacted) == 2, f"the two producer-side passes need one row each; found {redacted}"
+    by_tool = {
+        tool: next(key for key in redacted if tool in key)
+        for tool in ("get_resource", "diagnose_workload")
+    }
+    assert by_tool["get_resource"] != by_tool["diagnose_workload"], (
+        "a structural document pass and a text-pattern pass cannot share a row"
     )
-    redacted_row = redacted[0]
-    for tool in ("get_resource", "diagnose_workload"):
-        assert tool in redacted_row, f"the redacted row must name {tool}"
     for tool in ("get_logs", "list_resources", "diagnose_pod", "helm_list_releases"):
-        assert tool not in redacted_row, (
-            f"{tool} is not credential-pattern masked; it must not sit in the redacted row"
-        )
+        for redacted_row in redacted:
+            assert tool not in redacted_row, (
+                f"{tool} is not credential-pattern masked; it must not sit in a redacted row"
+            )
 
     shaped = [
         key
@@ -699,3 +705,193 @@ def test_ops_approval_claim_matches_what_the_confirm_dialog_can_check() -> None:
         "the page must disclaim OS-level input automation detection"
     )
     assert "typed" in lowered, "the typed resource/context gates must stay described"
+
+
+def _section(name: str, heading: str) -> str:
+    """The body of one `## heading` section of `name`."""
+    return _source(name).split(f"\n## {heading}\n", 1)[1].split("\n## ", 1)[0]
+
+
+def _table_row(source: str, needle: str) -> str:
+    """The single markdown table row of `source` containing `needle`."""
+    rows = [line for line in source.splitlines() if line.startswith("|") and needle in line]
+    assert len(rows) == 1, f"expected exactly one table row naming {needle!r}, found {len(rows)}"
+    return rows[0]
+
+
+def test_performance_live_event_to_render_is_diagnostic_not_a_budget_verdict() -> None:
+    """Round-4 review, finding 1: a 24 ev/s no-op diff cannot miss a 20 ev/s budget.
+
+    The budget is "event-to-render p95 <= 250 ms at 20 ev/s" over churn that
+    changes a rendered cell. Run `i186`'s live driver is metadata-only, so
+    its recorded interval ends at a table diff that writes nothing, and it
+    ran at 24 ev/s — above the rate the budget names. A figure taken on a
+    different workload at a higher rate is not a lower bound *at 20 ev/s*,
+    so it can neither pass nor fail that contract. The empirical values and
+    the render-path optimisation story stay; only the verdict changes.
+    """
+    live = _section("performance.md", "Live 1,000-pod results")
+    # `i186`'s own baseline/optimised table and prose, not the later `i279` run's.
+    i186 = live.split("**Run `i279", 1)[0]
+    row = _table_row(i186, "527 ms")
+    verdict = row.rstrip("|").rsplit("|", 1)[1].strip().strip("*").lower()
+    flat = " ".join(i186.split())
+    lowered = flat.lower()
+
+    assert "miss" not in verdict, (
+        f"{verdict!r} classifies a 20 ev/s rendered-cell budget from a 24 ev/s "
+        "metadata-only no-op diff; the row can only be diagnostic"
+    )
+    assert re.search(r"diagnostic|unqualified|not measured", verdict), (
+        f"the verdict cell must say the result is unqualified, not {verdict!r}"
+    )
+
+    for value in ("527 ms", "299 ms", "24 ev/s", "≤ 250 ms @ 20 ev/s"):
+        assert value in flat, f"the empirical record must keep {value!r}"
+    assert re.search(r"(neither pass\w* nor|cannot pass or fail|can neither pass nor)", lowered), (
+        "the page must say this run can neither pass nor fail the qualification budget"
+    )
+    assert re.search(r"(rendered[- ]cell|writes? (a )?cell)", lowered), (
+        "the budget is about churn that changes a rendered cell; say so"
+    )
+    assert re.search(r"(above|higher than|faster than).{0,80}20 ev/s", lowered), (
+        "the rate mismatch — 24 ev/s measured against a 20 ev/s budget — must be stated"
+    )
+    assert not re.search(r"refut\w+", lowered), (
+        "a figure from a different workload at a higher rate refutes nothing"
+    )
+    assert not re.search(r"\*{0,2}miss\*{0,2} verdict.{0,40}holds", lowered), (
+        "the miss verdict does not hold; it was never a verdict this run could reach"
+    )
+    for kept in ("memoised", "get_row", "format_age", "phase_style"):
+        assert kept in flat, f"the optimisation discussion must keep {kept!r}"
+
+
+def test_mcp_separates_document_redaction_from_credential_pattern_masking() -> None:
+    """Round-4 review, finding 2: two different passes, two different tools.
+
+    `tools/registry.py` declares `get_resource` as `structured_yaml`, so
+    `executor._get_resource` runs `_mask_manifest` — `redact_document`
+    over the whole parsed manifest — before the document is bounded.
+    `diagnose_workload` is `untrusted_text`: `_diagnose_deployment` shapes
+    its own sections and applies `redact_text` (credential-*pattern*
+    masking) to each of them, and to each embedded pod block *before*
+    `compact_result` cuts it. Calling both "recursive redaction" promises
+    the structural pass on a report that never gets one.
+    """
+    from korvid.tools.registry import tool_result_format
+
+    assert tool_result_format("get_resource") == "structured_yaml"
+    assert tool_result_format("diagnose_workload") == "untrusted_text"
+
+    source = _source("mcp.md")
+    bullets = _section("mcp.md", "Evidence crosses a tool boundary").split("\n- ")[1:]
+    manifest = [b for b in bullets if "`get_resource`" in b]
+    workload = [b for b in bullets if "`diagnose_workload`" in b]
+    assert len(manifest) == 1, "`get_resource` needs its own bullet"
+    assert len(workload) == 1, (
+        "`diagnose_workload` needs its own bullet: it is disclosed by a different pass"
+    )
+    manifest_text = " ".join(manifest[0].split())
+    workload_text = " ".join(workload[0].split())
+
+    assert "`diagnose_workload`" not in manifest_text, (
+        "the recursive-document bullet must not also claim `diagnose_workload`"
+    )
+    assert re.search(r"recursiv", manifest_text, re.I), (
+        "`get_resource` is the structural pass: say it is recursively redacted"
+    )
+    assert re.search(r"last-applied-configuration", manifest_text), (
+        "the structural pass's evidence (Secret data, last-applied annotation) must survive"
+    )
+    assert not re.search(r"recursiv", workload_text, re.I), (
+        "`diagnose_workload` never gets recursive document redaction"
+    )
+    assert re.search(r"credential-pattern", workload_text, re.I), (
+        "`diagnose_workload` gets credential-pattern text redaction; name the pass"
+    )
+    assert re.search(r"before.{0,80}(compact|bound|cut)", workload_text, re.I), (
+        "the text pass runs before compaction — that ordering is the guarantee"
+    )
+
+    manifest_row = _table_row(source, "`get_resource`")
+    workload_row = _table_row(source, "`diagnose_workload`")
+    assert manifest_row != workload_row, "one table row cannot describe both passes"
+    assert re.search(r"recursiv", manifest_row, re.I)
+    # An explicit "not a recursive …" denial is the point; a positive claim is not.
+    claimed = re.sub(r"not a recursive[^;,|]*", "", workload_row, flags=re.I)
+    assert not re.search(r"recursiv", claimed, re.I), (
+        "the compound-diagnosis row may deny recursion, never claim it"
+    )
+    assert re.search(r"credential-pattern", workload_row, re.I)
+
+    shaped_row = _table_row(source, "`get_logs`")
+    assert re.search(r"not\*{0,2} credential-pattern masked", shaped_row, re.I), (
+        "shaped-only reads must stay explicitly not credential-pattern masked"
+    )
+    assert "`diagnose_pod`" in shaped_row or "`diagnose_pod`/" in shaped_row, (
+        "single-pod diagnoses stay in the shaped-only family"
+    )
+
+
+def test_ops_fail_closed_audit_invariant_is_scoped_to_mutations() -> None:
+    """Round-4 review, finding 3: the audit record gates writes, not reads.
+
+    `core/audit.py` is appended from the write path only — a describe, a
+    log tail or a watch update writes no audit entry and is not blocked by
+    a full disk. "Nothing reaches the cluster without a matching audit
+    record" reads as a claim over every request. The invariant that must
+    survive is the one the code makes: no *mutation* reaches the cluster
+    without its record, and a failed append blocks before the mutation.
+    """
+    section = _section("ops.md", "What happens when audit fails")
+    lowered = " ".join(section.split()).lower()
+
+    assert "blocked before the mutation happens" in lowered, (
+        "the blocked-before-mutation guarantee must survive"
+    )
+    assert "nothing reaches the cluster" not in lowered, (
+        "that phrasing extends a write-path invariant over every read korvid makes"
+    )
+    assert re.search(r"no mutation reaches the cluster without.{0,40}audit record", lowered), (
+        "the invariant must be stated over mutations"
+    )
+    assert re.search(r"read\w*.{0,120}(no|not|never).{0,40}audit", lowered), (
+        "ordinary reads write no audit entry; say so rather than implying they do"
+    )
+    assert "fail-closed" in lowered, "the fail-closed name must survive"
+
+
+def test_observability_bounds_table_publishes_the_enforced_concurrency_cap() -> None:
+    """Round-4 review, finding 4: the concurrency bound is enforced, not absent.
+
+    `obs/connector.py::QueryLimits.max_concurrency` defaults to 2 and
+    `obs/http.py` holds an `asyncio.Semaphore` of that size *inside* the
+    `asyncio.timeout(timeout_seconds)` block, so a queued call spends the
+    same whole-call budget waiting for a slot. A bounds table that omits
+    it under-reports what korvid enforces per backend.
+    """
+    from korvid.core.config import ObservabilityBackend
+    from korvid.obs.connector import QueryLimits
+
+    assert QueryLimits().max_concurrency == 2
+    assert ObservabilityBackend(url="https://p.example.com").max_concurrency == 2
+
+    section = _section("observability.md", "Bounds and masking")
+    row = _table_row(section, "concurren")
+    lowered = " ".join(section.split()).lower()
+
+    assert re.search(r"\|\s*2\s*(per backend)?\s*\|", row), (
+        f"the concurrency row must publish the enforced default of 2: {row!r}"
+    )
+    assert re.search(r"queue", row, re.I), "excess calls queue rather than being refused"
+    assert re.search(r"(semaphore|slot)", row, re.I), "name the gate that queues them"
+    assert re.search(r"(timeout|whole call|budget)", row, re.I), (
+        "the wait for a slot is inside the whole-call timeout; the row must say so"
+    )
+    assert "max_concurrency" in section, "name the configurable key, as the other bounds do"
+
+    for kept in ("time window", "response bytes", "request timeout", "60 min (max 360)"):
+        assert kept in section, f"the existing bounds must survive: {kept!r}"
+    assert "credential-shaped" in lowered, "the credential-shaped masking pass must survive"
+    assert "`mask_labels`" in section, "the mask_labels pass must survive"

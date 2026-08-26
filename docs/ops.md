@@ -136,10 +136,15 @@ prompt outright.
 
 ## What happens when audit fails
 
-The audit log is fail-closed by design: if the entry cannot be written —
-a full disk, an unwritable state directory — the action is **blocked
-before the mutation happens**. Nothing reaches the cluster without a
-matching audit record.
+The audit log is fail-closed on the **write** path: if the entry cannot be
+written — a full disk, an unwritable state directory — the action is
+**blocked before the mutation happens**. No mutation reaches the cluster
+without a matching audit record.
+
+That scope is exactly writes. Ordinary reads — a describe, a log tail, the
+watch stream behind every table — write no audit entry, are not gated on one,
+and are unaffected by a failed append: `audit.jsonl` records what korvid
+changed, not everything it looked at.
 
 ## Representative operations
 

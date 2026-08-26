@@ -749,7 +749,14 @@ Sleep 1s
 # anyone's tmux.conf, and the status line — the one surface that would
 # print a hostname, a user and today's date into a frame — is turned off
 # before the split, so both panes are laid out over the full 42 rows.
-Type "tmux -f /dev/null new-session -d -s korvid-mcp-demo -x 139 -y 42 'uv run --frozen python docs/demo/demo.py --scene mcp'"
+#
+# Both panes are launched with `--extra mcp`. The MCP stack is an optional
+# extra, not a dependency group, so a clean checkout running `uv run --frozen`
+# alone gets an environment where neither the scene's lazy
+# `korvid.mcp.server` import nor the client's MCP SDK import resolves. The
+# flag changes nothing that reaches a frame: the same code runs and prints
+# the same output.
+Type "tmux -f /dev/null new-session -d -s korvid-mcp-demo -x 139 -y 42 'uv run --frozen --extra mcp python docs/demo/demo.py --scene mcp'"
 Enter
 Sleep 1s
 
@@ -761,7 +768,7 @@ Sleep 500ms
 # korvid's first start is slow and variable, and a client that raced it
 # would open the story on a connection error. The gate below is dropped only
 # after the scene publishes .korvid-mcp-demo-ready.
-Type "tmux split-window -h -t korvid-mcp-demo -p 45 'while [ ! -f .korvid-mcp-demo-go ]; do sleep 0.1; done; uv run --frozen python docs/demo/mcp_client.py'"
+Type "tmux split-window -h -t korvid-mcp-demo -p 45 'while [ ! -f .korvid-mcp-demo-go ]; do sleep 0.1; done; uv run --frozen --extra mcp python docs/demo/mcp_client.py'"
 Enter
 Sleep 1s
 

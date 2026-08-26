@@ -11,6 +11,7 @@ import re
 import struct
 import subprocess
 import sys
+import tomllib
 import zlib
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from pathlib import Path
@@ -1277,6 +1278,58 @@ def test_mcp_follow_tape_composes_the_real_server_with_the_clean_client() -> Non
     )
     assert tape.count("uv run") == tape.count("uv run --frozen"), (
         "every launch in the tape must be frozen, not just the first"
+    )
+
+
+def _project_optional_extras() -> set[str]:
+    """The extras `pyproject.toml` declares, which `uv run` does not install."""
+    manifest = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    return set(manifest["project"]["optional-dependencies"])
+
+
+def test_mcp_follow_tape_launches_both_panes_with_the_optional_mcp_extra() -> None:
+    """Round-4 review: neither pane can start from a clean checkout without `[mcp]`.
+
+    `mcp` is an optional extra in `pyproject.toml`, not a dependency group,
+    so `uv run --frozen` alone syncs an environment without it. The left
+    pane's scene lazily imports `korvid.mcp.server` (`docs/demo/demo.py`)
+    and the right pane imports the MCP SDK itself
+    (`docs/demo/mcp_client.py`), so both launches must ask for the extra or
+    the "reproducible from this repository alone" claim fails on the first
+    clean checkout that tries it. `--extra mcp` adds nothing to a frame:
+    the panes run the same code and print the same output.
+    """
+    tape = MCP_TAPE.read_text(encoding="utf-8")
+    plan = LANDING_VIDEO_PLAN.read_text(encoding="utf-8")
+    launches = [
+        line for line in tape.splitlines() if not line.lstrip().startswith("#") and "uv run" in line
+    ]
+
+    assert "mcp" in _project_optional_extras(), (
+        "this guard exists because the MCP stack is an extra, not a default group"
+    )
+    assert len(launches) == 2, f"the tape composes exactly two launches; found {launches}"
+    assert all("uv run --frozen --extra mcp python" in line for line in launches), (
+        f"both the demo scene and the SDK client need the `[mcp]` extra enabled: {launches}"
+    )
+    for pane in ("docs/demo/demo.py --scene mcp", "docs/demo/mcp_client.py"):
+        matched = [line for line in launches if pane in line]
+        assert len(matched) == 1, f"the {pane} pane must be launched exactly once"
+    assert plan.count("uv run --frozen --extra mcp python") == 2, (
+        "the plan's executable tape snippet must carry the same two launches"
+    )
+
+
+def test_mcp_capture_provenance_names_the_extra_the_recording_needs() -> None:
+    """A reproducibility claim has to name what the reproduction requires."""
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    mcp = instructions[instructions.index("## MCP follow") :]
+
+    assert "--extra mcp" in mcp, (
+        "the provenance section must publish the extra both panes are launched with"
+    )
+    assert re.search(r"extra|optional", mcp, re.I), (
+        "the page must say the MCP stack is optional, which is why the flag exists"
     )
 
 

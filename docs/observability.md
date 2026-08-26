@@ -37,6 +37,7 @@ observability:
     max_window_minutes: 360
     max_series: 50
     max_response_bytes: 1048576
+    max_concurrency: 2             # in-flight requests to this backend
 
   loki:
     url: https://loki.internal
@@ -103,6 +104,7 @@ label scope beyond what `label_mappings` resolved.
 | time window | 60 min (max 360) | **refused**, not shortened |
 | result series / log lines | 50 / 200 | truncated, and the result says so |
 | response bytes | 1 MiB | request aborted |
+| concurrent requests (`max_concurrency`) | 2 per backend | excess calls queue on a semaphore; the wait is inside the request timeout |
 | request timeout | 10 s | reported as a timeout, budgets the whole call |
 
 An over-long window is refused rather than clamped, because silently
@@ -110,6 +112,14 @@ shrinking it would answer a different question from the one that was asked.
 Truncation is never silent: every result carries `truncated: yes|no`, the
 window it covers, the endpoint that answered, and the query that ran, so it
 participates in the agent's evidence citations like any cluster read.
+
+Concurrency is a bound like the others, not a tuning hint: each backend
+admits `max_concurrency` requests at a time — **2** by default — and queues
+the rest on a semaphore, so a burst of tool calls cannot open an unbounded
+number of connections to your Prometheus. That wait happens *inside* the
+request timeout rather than before it: a call that spends nine seconds queued
+and two in flight is reported as a timeout, because the 10 s budget covers
+the whole call, not just the socket.
 
 Results are masked before they leave korvid, in two passes — a host
 receives them directly, so masking cannot depend on a downstream provider.
