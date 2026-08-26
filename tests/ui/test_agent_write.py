@@ -574,6 +574,29 @@ async def test_uid_lookup_times_out_fail_open(tmp_path: Path) -> None:
     assert started.is_set()  # the lookup really ran and was cancelled by the bound
 
 
+async def test_direct_agent_write_blocks_when_uid_lookup_times_out(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    recorder = Recorder()
+
+    async def hanging(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        await asyncio.Event().wait()
+        return {}
+
+    app = make_app(recorder, tmp_path / "audit.jsonl", get_manifest=hanging)
+    with (
+        patch("korvid.ui.agent_ui_controller.UID_LOOKUP_TIMEOUT", 0.05),
+        patch("korvid.ui.agent_ui_controller.APPROVAL_TIMEOUT", 0.05),
+    ):
+        result = await app._agent_ui.agent_request_write(
+            "delete", "deployments", "web", namespace="default"
+        )
+
+    assert result.startswith("ERROR:")
+    assert "identity" in result
+    assert recorder.calls == []
+
+
 async def test_agent_write_dialog_shows_the_ownership_banner(tmp_path: Path) -> None:
     """Agent-requested writes go through the same ConfirmScreen — the
     ownership banner covers them too (issue #119)."""

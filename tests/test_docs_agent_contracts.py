@@ -118,7 +118,7 @@ def test_the_perimeter_pages_state_the_boundary_that_really_runs(page: str) -> N
     # The controls that actually run, stated precisely, on both pages.
     assert "approval dialog" in text
     assert "keystroke" in text
-    assert "resourceVersion" in text
+    assert "UID" in text
     assert "fail-closed" in text
     assert "masking" in text
     assert "exact" in text

@@ -85,7 +85,7 @@ def _validate_plugin_descriptor(descriptor: object, provider_id: str | None) -> 
     `descriptor.provider` means the plugin is claiming to be a different
     provider than the one it was loaded as, which is rejected.
     """
-    if not isinstance(descriptor, ModelDescriptor):
+    if type(descriptor) is not ModelDescriptor:
         raise ProviderPluginContractError(
             "provider plugin descriptor must be a ModelDescriptor instance"
         )
@@ -100,7 +100,7 @@ def _validate_plugin_descriptor(descriptor: object, provider_id: str | None) -> 
 
 def _validate_descriptor_field(value: object, name: str) -> str:
     """Return one bounded, non-blank plugin descriptor field."""
-    if not isinstance(value, str) or not value.strip() or len(value) > _MAX_MODEL_ID_LENGTH:
+    if type(value) is not str or not value.strip() or len(value) > _MAX_MODEL_ID_LENGTH:
         raise ProviderPluginContractError(
             f"provider plugin descriptor {name} must be a non-blank string of at most "
             f"{_MAX_MODEL_ID_LENGTH} characters"
@@ -115,52 +115,63 @@ def _validate_plugin_capabilities(capabilities: object) -> ModelCapabilities:
     must be a real `CapabilitySource` member — a plugin's own object is
     never trusted; a fresh instance is built from its (validated) fields.
     """
-    if not isinstance(capabilities, ModelCapabilities):
+    if type(capabilities) is not ModelCapabilities:
         raise ProviderPluginContractError(
             "provider plugin capabilities must be a ModelCapabilities instance"
         )
     context_window_tokens = capabilities.context_window_tokens
     if context_window_tokens is not None and (
-        isinstance(context_window_tokens, bool)
-        or not isinstance(context_window_tokens, int)
-        or context_window_tokens <= 0
+        type(context_window_tokens) is not int or context_window_tokens <= 0
     ):
         raise ProviderPluginContractError(
             "provider plugin capabilities context_window_tokens must be a positive integer or None"
         )
     for name in ("supports_tools", "supports_parallel_tools", "supports_reasoning"):
         value = getattr(capabilities, name)
-        if value is not None and not isinstance(value, bool):
+        if value is not None and type(value) is not bool:
             raise ProviderPluginContractError(
                 f"provider plugin capabilities {name} must be a boolean or None"
             )
-    if capabilities.recommended_tier is not None and not isinstance(
-        capabilities.recommended_tier, ModelTier
+    if (
+        capabilities.recommended_tier is not None
+        and type(capabilities.recommended_tier) is not ModelTier
     ):
         raise ProviderPluginContractError(
             "provider plugin capabilities recommended_tier must be a ModelTier or None"
         )
-    if not isinstance(capabilities.provenance, Mapping):
-        raise ProviderPluginContractError(
-            "provider plugin capabilities provenance must be a mapping"
-        )
-    for fact, source in capabilities.provenance.items():
-        if fact not in _KNOWN_CAPABILITY_FACTS:
-            raise ProviderPluginContractError(
-                "provider plugin capabilities provenance names an unknown fact"
-            )
-        if not isinstance(source, CapabilitySource):
-            raise ProviderPluginContractError(
-                "provider plugin capabilities provenance values must be CapabilitySource"
-            )
+    provenance = _copy_plugin_provenance(capabilities.provenance)
     return ModelCapabilities(
         context_window_tokens=capabilities.context_window_tokens,
         supports_tools=capabilities.supports_tools,
         supports_parallel_tools=capabilities.supports_parallel_tools,
         supports_reasoning=capabilities.supports_reasoning,
         recommended_tier=capabilities.recommended_tier,
-        provenance=dict(capabilities.provenance),
+        provenance=provenance,
     )
+
+
+def _copy_plugin_provenance(value: object) -> dict[str, CapabilitySource]:
+    """Copy validated provenance without dispatching to plugin methods."""
+    if type(value) is not MappingProxyType:
+        raise ProviderPluginContractError(
+            "provider plugin capabilities provenance must be a mapping"
+        )
+    try:
+        provenance = dict(value)
+    except Exception:
+        raise ProviderPluginContractError(
+            "provider plugin capabilities provenance could not be read"
+        ) from None
+    for fact, source in provenance.items():
+        if type(fact) is not str or fact not in _KNOWN_CAPABILITY_FACTS:
+            raise ProviderPluginContractError(
+                "provider plugin capabilities provenance names an unknown fact"
+            )
+        if type(source) is not CapabilitySource:
+            raise ProviderPluginContractError(
+                "provider plugin capabilities provenance values must be CapabilitySource"
+            )
+    return provenance
 
 
 def _read_plugin_fact(provider: LLMProvider, name: str) -> object:

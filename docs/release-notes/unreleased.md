@@ -98,7 +98,7 @@ worked adapter.
 Nothing in this rebuild moved a security boundary. Every write tool the
 environment arms still opens the same approval dialog, at every tier, and
 only a user keystroke executes it; a write still carries the preconditions
-(UID and resourceVersion) the read observed; audit logging is still
+for the exact target UID established before approval; audit logging is still
 fail-closed, so a write whose audit record cannot be written does not run;
 read-only mode still means no write schema is offered at all; there is
 still no shell or free-form `kubectl` tool at either tier, so the agent's

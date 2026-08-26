@@ -97,9 +97,14 @@ APPROVAL_TIMEOUT = 120.0
 
 #: Upper bound on the pre-approval uid lookup: a stalled API server must
 #: never leave an agent tool call (or the debug offer) pending indefinitely.
-#: On timeout the lookup fails open (write proceeds without a precondition,
-#: still approval-gated and audited).
+#: Best-effort inspection callers fail open; direct agent writes opt into the
+#: strict path and are blocked when identity cannot be established.
 UID_LOOKUP_TIMEOUT = 10.0
+
+
+class TargetIdentityUnavailable(RuntimeError):
+    """A direct agent write could not establish its target incarnation."""
+
 
 #: `KorvidApp._get_manifest`: (kind alias, namespace, name) -> manifest.
 ManifestFetcher = Callable[[str, str | None, str], Awaitable[dict[str, Any]]]
@@ -1642,10 +1647,25 @@ class AgentUiController:
             # plural that collides across groups could otherwise resolve to
             # a different resource than the one validated above. The same
             # snapshot feeds the ownership banner - no second round trip.
-            snapshot = await self.target_manifest(kind.strip().lower(), ns, name)
+            snapshot = await self.target_manifest(
+                kind.strip().lower(),
+                ns,
+                name,
+                strict=True,
+            )
         except ApiStatusError:
             return f"ERROR: {gvr_label(meta)}/{name} not found{write_locus(ns)}"
+        except TargetIdentityUnavailable:
+            return (
+                f"ERROR: target identity unavailable for {gvr_label(meta)}/{name}"
+                f"{write_locus(ns)}; write blocked"
+            )
         uid = manifest_uid(snapshot) if snapshot is not None else None
+        if uid is None:
+            return (
+                f"ERROR: target identity has no UID for {gvr_label(meta)}/{name}"
+                f"{write_locus(ns)}; write blocked"
+            )
         preview = await self.preview_for_action(
             action, meta, ns, name, replicas, resources, uid, stamp
         )
@@ -1735,7 +1755,12 @@ class AgentUiController:
         return compose_resize_impact_lines(graph_lines, context)
 
     async def target_manifest(
-        self, kind_alias: str, ns: str | None, name: str
+        self,
+        kind_alias: str,
+        ns: str | None,
+        name: str,
+        *,
+        strict: bool = False,
     ) -> dict[str, Any] | None:
         """Manifest of a write target at request time, looked up by the same
         alias the write was validated with (both resolve through the one
@@ -1743,25 +1768,33 @@ class AgentUiController:
         address the same resource even when plurals collide across groups).
         Raises ApiStatusError(404) when the target does not exist (the caller
         turns that into an actionable error before bothering the user with a
-        dialog). Fails open (None -> no precondition, matching the previous
-        behaviour) when no manifest source is wired or the lookup fails for
-        infrastructure reasons - including a lookup slower than
-        UID_LOOKUP_TIMEOUT, so a stalled API server cannot leave the caller
-        pending forever - the write stays approval-gated and audited."""
+        dialog). Best-effort callers fail open when no manifest source is
+        wired or infrastructure lookup fails. Direct agent writes pass
+        `strict=True`, translating those failures to
+        `TargetIdentityUnavailable` so no approval can execute against an
+        unverified replacement."""
         get_manifest = self._get_manifest()
         if get_manifest is None:
+            if strict:
+                raise TargetIdentityUnavailable
             return None
         try:
             return await asyncio.wait_for(get_manifest(kind_alias, ns, name), UID_LOOKUP_TIMEOUT)
         except ApiStatusError as exc:
             if exc.status == 404:
                 raise
+            if strict:
+                raise TargetIdentityUnavailable from None
             logger.warning("uid lookup for %s/%s failed; writing without precondition", ns, name)
             return None
         except TimeoutError:
+            if strict:
+                raise TargetIdentityUnavailable from None
             logger.warning("uid lookup for %s/%s timed out; writing without precondition", ns, name)
             return None
         except Exception:
+            if strict:
+                raise TargetIdentityUnavailable from None
             logger.exception("uid lookup for %s/%s failed; writing without precondition", ns, name)
             return None
 

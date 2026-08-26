@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import FrozenInstanceError, fields
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -292,6 +293,43 @@ def test_validated_plugin_provider_rejects_invalid_recommended_tier() -> None:
 
     with pytest.raises(ProviderPluginContractError, match="recommended_tier"):
         ValidatedPluginProvider(_InvalidCapabilitiesProvider([{"type": "done"}]))
+
+
+def test_descriptor_validation_never_invokes_plugin_string_methods() -> None:
+    class _HostileString(str):
+        def strip(self, chars: str | None = None) -> str:
+            raise RuntimeError("PLUGIN_DESCRIPTOR_SECRET")
+
+    class _HostileDescriptorProvider(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor(_HostileString("test"), "model")
+
+    with pytest.raises(ProviderPluginContractError, match="provider") as caught:
+        ValidatedPluginProvider(_HostileDescriptorProvider([{"type": "done"}]))
+
+    assert "PLUGIN_DESCRIPTOR_SECRET" not in str(caught.value)
+
+
+def test_capability_validation_copies_mapping_proxy_without_plugin_dispatch() -> None:
+    class _HostileMapping(dict[str, CapabilitySource]):
+        def items(self) -> Any:
+            raise RuntimeError("PLUGIN_CAPABILITIES_SECRET")
+
+    class _HostileCapabilitiesProvider(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            capabilities = ModelCapabilities.unknown()
+            object.__setattr__(
+                capabilities,
+                "provenance",
+                MappingProxyType(_HostileMapping()),
+            )
+            return capabilities
+
+    wrapped = ValidatedPluginProvider(_HostileCapabilitiesProvider([{"type": "done"}]))
+
+    assert wrapped.capabilities.provenance == {}
 
 
 def test_validated_plugin_provider_accepts_valid_capability_values() -> None:
