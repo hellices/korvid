@@ -31,6 +31,7 @@ from korvid.agent.interaction import (
 )
 from korvid.core.config import KorvidConfig
 from korvid.ui.agent_ui_controller import AgentScreens
+from korvid.ui.bridge_dispatch import BridgeDispatch
 from korvid.ui.workspace_controller import ContextGuard
 from korvid.ui.workspace_state import WorkspaceState
 
@@ -86,6 +87,7 @@ class AgentWorkspaceBridge(AgentUiBridge):
         workspace: WorkspaceState,
         screens: AgentScreens,
         controller: _ControllerOps,
+        dispatch: BridgeDispatch,
         timeline_cursor: Callable[[], str | None] = lambda: None,
     ) -> None:
         self._config = config
@@ -93,6 +95,7 @@ class AgentWorkspaceBridge(AgentUiBridge):
         self._workspace = workspace
         self._screens = screens
         self._controller = controller
+        self._dispatch = dispatch
         self._timeline_cursor = timeline_cursor
 
     # ------------------------------------------------------------------
@@ -145,7 +148,7 @@ class AgentWorkspaceBridge(AgentUiBridge):
     async def apply(self, action: UiAction) -> UiActionResult:
         """Apply one typed action; catches only expected domain errors."""
         try:
-            message = await self._apply(action)
+            message = await self._dispatch.run(self._apply(action))
         except (KeyError, ValueError) as exc:
             return UiActionResult(False, f"ERROR: {exc}", self.snapshot())
         return UiActionResult(

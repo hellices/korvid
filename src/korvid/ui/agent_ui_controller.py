@@ -656,6 +656,7 @@ class AgentUiController:
                 workspace=self._workspace,
                 screens=self._screens,
                 controller=self,
+                dispatch=self._dispatch,
             )
             self._workspace_bridge = bridge
         return bridge

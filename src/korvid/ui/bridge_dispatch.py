@@ -50,6 +50,7 @@ class AppContextDispatch(BridgeDispatch):
     def __init__(self) -> None:
         self._context: contextvars.Context | None = None
         self._tasks: set[asyncio.Task[str]] = set()
+        self._operation_lock = asyncio.Lock()
 
     def activate(self) -> None:
         """Capture the calling context as the one bridge calls run in.
@@ -73,22 +74,23 @@ class AppContextDispatch(BridgeDispatch):
         Cancellation propagates into the inner task so shutdown never
         strands UI work.
         """
-        snapshot = self._context
-        if snapshot is None:
-            coro.close()
-            return self._NOT_READY
-        task = asyncio.get_running_loop().create_task(
-            coro, context=snapshot.run(contextvars.copy_context)
-        )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        try:
-            return await task
-        except asyncio.CancelledError:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-            raise
+        async with self._operation_lock:
+            snapshot = self._context
+            if snapshot is None:
+                coro.close()
+                return self._NOT_READY
+            task = asyncio.get_running_loop().create_task(
+                coro, context=snapshot.run(contextvars.copy_context)
+            )
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            try:
+                return await task
+            except asyncio.CancelledError:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                raise
 
     async def shutdown(self) -> None:
         """Refuse new foreign UI work and reap the in-flight dispatches."""

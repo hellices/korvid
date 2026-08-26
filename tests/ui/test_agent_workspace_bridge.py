@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Coroutine
 from typing import Any, get_args
 
 import pytest
@@ -21,6 +22,7 @@ from korvid.core.config import KorvidConfig
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.agent_ui_controller import AgentScreens, DisplayedPaneContext
 from korvid.ui.agent_workspace_bridge import AgentWorkspaceBridge
+from korvid.ui.bridge_dispatch import BridgeDispatch
 from korvid.ui.workspace_controller import ContextGuard
 from korvid.ui.workspace_state import WorkspaceState
 
@@ -151,6 +153,11 @@ class FakeController:
         return self._return
 
 
+class FakeDispatch(BridgeDispatch):
+    async def run(self, coro: Coroutine[Any, Any, str]) -> str:
+        return await coro
+
+
 def _config(kube_context: str = "kind-dev") -> KorvidConfig:
     return KorvidConfig(kube_context=kube_context)
 
@@ -188,6 +195,7 @@ def _make_bridge(
         workspace=ws,
         screens=sc,
         controller=ctrl,
+        dispatch=FakeDispatch(),
         timeline_cursor=lambda: None,
     )
     return bridge, ctrl, sc
@@ -268,6 +276,7 @@ def test_snapshot_timeline_cursor_from_callback() -> None:
         workspace=ws,
         screens=FakeScreensBridge(),
         controller=FakeController(),
+        dispatch=FakeDispatch(),
         timeline_cursor=lambda: "event/2024-01-01T00:00:00",
     )
     ctx = bridge.snapshot()

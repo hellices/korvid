@@ -80,6 +80,10 @@ _DISCARD_EXCESS = "discarded: too many tool calls in one response"
 _BAD_ARGUMENTS = "tool arguments must be a JSON object"
 
 
+class ProviderResponseLimitError(RuntimeError):
+    """A provider stream exceeded the resolved turn response budget."""
+
+
 @dataclass(frozen=True, slots=True)
 class _Call:
     """One streamed tool call, as the provider spelled it."""
@@ -93,13 +97,24 @@ class _Call:
 class _Round:
     """What one provider round produced, and whether it ended the turn."""
 
-    text: str = ""
+    text_chunks: list[str] = field(default_factory=list)
+    text_chars: int = 0
     calls: list[_Call] = field(default_factory=list)
     discarded: list[tuple[_Call, str]] = field(default_factory=list)
     #: How many calls the policy's per-iteration cap discarded. Only these
     #: earn the one-tool-at-a-time notice: a malformed call is answered.
     excess: int = 0
     done: bool = False
+
+    @property
+    def text(self) -> str:
+        """Assistant text joined once when the completed round needs it."""
+        return "".join(self.text_chunks)
+
+    def append_text(self, text: str) -> None:
+        """Record one bounded stream chunk without quadratic concatenation."""
+        self.text_chunks.append(text)
+        self.text_chars += len(text)
 
 
 class NativeAgentEngine(AgentEngine):
@@ -303,7 +318,11 @@ class NativeAgentEngine(AgentEngine):
         self._conversation.start_iteration(prepared.prompt_estimate)
         self._tools.begin_iteration()
         try:
-            async for event in self._consume(prepared, round_):
+            async for event in self._consume(
+                prepared,
+                round_,
+                response_limit=request.policy.max_history_chars,
+            ):
                 yield event
         except Exception as exc:  # provider transport, adapter, or protocol
             round_.done = True
@@ -376,7 +395,11 @@ class NativeAgentEngine(AgentEngine):
         return [{"role": "system", "content": content}]
 
     async def _consume(
-        self, prepared: PreparedGatewayRequest, round_: _Round
+        self,
+        prepared: PreparedGatewayRequest,
+        round_: _Round,
+        *,
+        response_limit: int,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Stream one request, accumulating text, calls and usage."""
         # Seeded from history, not empty: an id a previous iteration or a
@@ -392,14 +415,22 @@ class NativeAgentEngine(AgentEngine):
             "AsyncGenerator[dict[str, Any], None]",
             self._gateway.stream(prepared, self._conversation.mark_transmitted),
         )
+        event_count = 0
+        response_chars = 0
         async with contextlib.aclosing(stream) as events:
             async for event in events:
+                event_count += 1
+                response_chars += _stream_event_chars(event)
+                if event_count > response_limit or response_chars > response_limit:
+                    raise ProviderResponseLimitError(
+                        f"provider response exceeded the {response_limit}-character policy limit"
+                    )
                 kind = str(event.get("type", ""))
                 if kind == "text_delta":
                     text = str(event.get("text", ""))
                     if text:
                         self._conversation.record_stream_text(text)
-                        round_.text += text
+                        round_.append_text(text)
                         yield TextDelta(text=text)
                 elif kind == "tool_call":
                     self._collect_call(event, round_, seen)
@@ -615,6 +646,16 @@ def _excess_notice(count: int) -> str:
         f"\n\nNOTE: {count} extra tool call(s) in this response were discarded "
         "— call one tool at a time and wait for its result."
     )
+
+
+def _stream_event_chars(event: Mapping[str, Any]) -> int:
+    """Character cost of one normalized provider stream event."""
+    kind = str(event.get("type", ""))
+    if kind == "text_delta":
+        return len(str(event.get("text", "")))
+    if kind == "tool_call":
+        return sum(len(str(event.get(field, ""))) for field in ("id", "name", "arguments"))
+    return 1
 
 
 def _parse_arguments(arguments: str) -> dict[str, Any] | None:

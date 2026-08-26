@@ -390,6 +390,22 @@ async def test_excess_calls_are_discarded_and_the_notice_rides_the_last_kept_res
     assert last.summary == "discarded: too many tool calls in one response"
 
 
+async def test_provider_response_is_bounded_by_the_history_policy(
+    engine_factory: EngineFactory,
+) -> None:
+    harness = engine_factory(
+        [[text_delta("x" * 200), text_delta("y" * 200), DONE]],
+        policy=make_policy(max_history_chars=256),
+    )
+
+    events = await harness.run()
+
+    errors = [event for event in events if isinstance(event, AgentError)]
+    assert errors
+    assert "ProviderResponseLimitError" in errors[-1].message
+    assert sum(len(event.text) for event in events if isinstance(event, TextDelta)) <= 256
+
+
 # -- how many calls one response may make ------------------------------------
 
 

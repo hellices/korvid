@@ -1718,6 +1718,38 @@ def test_the_controller_module_imports_nothing_from_the_app_module() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_app_dispatch_serializes_concurrent_ui_operations() -> None:
+    dispatch = AppContextDispatch()
+    dispatch.activate()
+    gate = asyncio.Event()
+    first_started = asyncio.Event()
+    active = 0
+    max_active = 0
+
+    async def operation(*, first: bool) -> str:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        if first:
+            first_started.set()
+        await gate.wait()
+        active -= 1
+        return "ok"
+
+    first = asyncio.create_task(dispatch.run(operation(first=True)))
+    await first_started.wait()
+    second = asyncio.create_task(dispatch.run(operation(first=False)))
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert max_active == 1
+
+    gate.set()
+    results = await asyncio.gather(first, second)
+    assert list(results) == ["ok", "ok"]
+    await dispatch.shutdown()
+
+
 async def test_the_bridge_refuses_dispatch_before_the_app_is_mounted(tmp_path: Path) -> None:
     env = Env(tmp_path=tmp_path)
     dispatch = AppContextDispatch()  # never activated: pre-mount

@@ -305,9 +305,21 @@ class EvalUiBridge(AgentUiBridge):
         # The selection does not survive: it names a row of the list the
         # operator just left, and the new list has its own rows. Keeping
         # it would tell the next turn a resource is on screen that is not.
+        from korvid.evals.fake_kube import builtin_aliases
+
+        key = action.view.strip().lower()
+        meta = builtin_aliases().get(key)
+        if meta is None:
+            return False, f"ERROR: unknown view {action.view!r}", self._context
+        namespace = action.namespace
+        if namespace is not None and namespace.strip().lower() in (
+            "all",
+            ALL_NAMESPACES_SCOPE,
+        ):
+            namespace = ALL_NAMESPACES_SCOPE
         pane = PaneContext(
-            kind=action.view,
-            scope=self._focused.scope if action.namespace is None else action.namespace,
+            kind=meta.plural,
+            scope=self._focused.scope if namespace is None else namespace,
             filter_pattern=self._focused.filter_pattern,
             selected=None,
         )

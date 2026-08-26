@@ -24,7 +24,12 @@ from korvid.agent.interaction import (
     ResourceIdentity,
     SetFilter,
 )
-from korvid.evals.interaction import EvalUiBridge, interaction_payload, load_interaction
+from korvid.evals.interaction import (
+    ALL_NAMESPACES_SCOPE,
+    EvalUiBridge,
+    interaction_payload,
+    load_interaction,
+)
 
 _FULL: dict[str, Any] = {
     "kube_context": "eval-cluster",
@@ -277,7 +282,10 @@ async def test_bridge_drill_down_opens_the_child_resource_list() -> None:
 
 async def test_bridge_drill_down_resolves_a_supported_navigation_alias() -> None:
     bridge = EvalUiBridge(load_interaction(_minimal(), "fixture.yaml: interaction"))
-    await bridge.apply(Navigate(view="deploy", namespace="jobs"))
+    await bridge.apply(Navigate(view="deploy", namespace="all"))
+
+    navigated = bridge.snapshot().focused_pane
+    assert (navigated.kind, navigated.scope) == ("deployments", ALL_NAMESPACES_SCOPE)
 
     result = await bridge.apply(DrillDown(name="api"))
 

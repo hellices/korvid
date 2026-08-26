@@ -14,7 +14,7 @@ from korvid.evals.grader import GradeResult
 from korvid.evals.harness import resolve_eval_policy
 from korvid.evals.interaction import EvalUiBridge
 from korvid.evals.journey import bundled_journeys_dir, load_journeys
-from korvid.evals.journey_runner import JourneyTurnResult, run_journey
+from korvid.evals.journey_runner import JourneyTurnResult, _close_run_resources, run_journey
 from korvid.evals.live_journey import NamespaceBoundReadOps
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import ToolExecutor
@@ -27,6 +27,24 @@ def _call(name: str, args: dict[str, object], call_id: str) -> dict[str, Any]:
         "name": name,
         "arguments": json.dumps(args),
     }
+
+
+async def test_provider_closes_even_when_session_close_fails() -> None:
+    class _Session:
+        async def aclose(self) -> None:
+            raise RuntimeError("session close failed")
+
+    class _Provider:
+        closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    provider = _Provider()
+    with pytest.raises(RuntimeError, match="session close failed"):
+        await _close_run_resources(_Session(), provider)
+
+    assert provider.closed is True
 
 
 def _text(text: str) -> list[dict[str, Any]]:

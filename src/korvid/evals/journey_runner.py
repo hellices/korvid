@@ -437,10 +437,7 @@ async def _run_once(
                 )
             )
     finally:
-        await harness.session.aclose()
-        aclose = getattr(raw_provider, "aclose", None)
-        if callable(aclose):
-            await aclose()
+        await _close_run_resources(harness.session, raw_provider)
     in_tokens, out_tokens = harness.session.total_tokens
     return JourneyRun(
         turns=tuple(results),
@@ -448,6 +445,16 @@ async def _run_once(
         output_tokens=out_tokens,
         tokens_estimated=harness.session.usage_estimated,
     )
+
+
+async def _close_run_resources(session: Any, provider: Any) -> None:
+    """Close session and provider independently, preserving session failure."""
+    try:
+        await session.aclose()
+    finally:
+        aclose = getattr(provider, "aclose", None)
+        if callable(aclose):
+            await aclose()
 
 
 async def run_journey(
