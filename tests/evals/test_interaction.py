@@ -266,6 +266,175 @@ async def test_bridge_open_describe_selects_the_named_resource() -> None:
     assert (selected.kind, selected.namespace, selected.name) == ("deployments", "shop", "api")
 
 
+async def test_bridge_refuses_a_display_target_missing_from_the_fixture() -> None:
+    bridge = EvalUiBridge(load_interaction(_minimal(), "fixture.yaml: interaction"))
+    bridge.bind_objects(
+        (
+            {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "namespace": "jobs",
+                    "name": "worker-1",
+                    "uid": "pod-1",
+                },
+            },
+        )
+    )
+    before = bridge.snapshot()
+
+    result = await bridge.apply(OpenLogs(pod="ghost", namespace="jobs"))
+
+    assert result.ok is False
+    assert result.context == before
+
+
+async def test_bridge_applies_namespaced_and_cluster_scoped_target_rules() -> None:
+    bridge = EvalUiBridge(load_interaction(_minimal(), "fixture.yaml: interaction"))
+    bridge.bind_objects(
+        (
+            {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"namespace": "jobs", "name": "worker-1", "uid": "pod-1"},
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "Node",
+                "metadata": {"name": "node-a", "uid": "node-1"},
+            },
+        )
+    )
+
+    missing_namespace = await bridge.apply(OpenDescribe(kind="pods", name="worker-1"))
+    node = await bridge.apply(OpenDescribe(kind="nodes", name="node-a", namespace="jobs"))
+
+    assert missing_namespace.ok is False
+    assert node.ok is True
+    assert node.context.focused_pane.scope == ALL_NAMESPACES_SCOPE
+    assert node.context.focused_pane.selected is not None
+    assert node.context.focused_pane.selected.namespace is None
+
+
+async def test_bridge_refuses_drill_for_a_parent_missing_from_the_fixture() -> None:
+    source = _FULL | {
+        "focused_pane": _FULL["focused_pane"] | {"kind": "deployments"},
+    }
+    bridge = EvalUiBridge(load_interaction(source, "fixture.yaml: interaction"))
+    bridge.bind_objects(())
+
+    result = await bridge.apply(DrillDown(name="ghost"))
+
+    assert result.ok is False
+    assert result.context.focused_pane.kind == "deployments"
+
+
+async def test_bridge_drill_resolves_one_parent_across_all_namespaces() -> None:
+    source = _FULL | {
+        "focused_pane": _FULL["focused_pane"]
+        | {"kind": "deployments", "scope": ALL_NAMESPACES_SCOPE, "filter": None},
+    }
+    bridge = EvalUiBridge(load_interaction(source, "fixture.yaml: interaction"))
+    bridge.bind_objects(
+        (
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                    "namespace": "shop",
+                    "name": "api",
+                    "uid": "deploy-api",
+                },
+            },
+        )
+    )
+
+    result = await bridge.apply(DrillDown(name="api"))
+
+    assert result.ok is True
+    assert result.context.focused_pane.kind == "replicasets"
+
+
+async def test_bridge_refuses_a_log_container_missing_from_the_pod() -> None:
+    bridge = EvalUiBridge(load_interaction(_minimal(), "fixture.yaml: interaction"))
+    bridge.bind_objects(
+        (
+            {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"namespace": "jobs", "name": "worker-1", "uid": "pod-1"},
+                "spec": {"containers": [{"name": "main"}]},
+            },
+        )
+    )
+
+    result = await bridge.apply(OpenLogs(pod="worker-1", namespace="jobs", container="ghost"))
+
+    assert result.ok is False
+
+
+async def test_bridge_drill_uses_the_production_filter_semantics() -> None:
+    source = _FULL | {
+        "focused_pane": _FULL["focused_pane"] | {"kind": "deployments", "filter": "/api/"},
+    }
+    bridge = EvalUiBridge(load_interaction(source, "fixture.yaml: interaction"))
+    bridge.bind_objects(
+        (
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                    "namespace": "jobs",
+                    "name": "api",
+                    "uid": "deploy-api",
+                    "labels": {"app": "api"},
+                },
+                "status": {"phase": "Running"},
+            },
+        )
+    )
+
+    result = await bridge.apply(DrillDown(name="api"))
+
+    assert result.ok is True
+    assert result.context.focused_pane.kind == "replicasets"
+
+
+async def test_bridge_drill_filter_uses_the_parent_resources_metadata() -> None:
+    source = _FULL | {
+        "focused_pane": _FULL["focused_pane"] | {"kind": "deployments", "filter": "-l team=green"},
+    }
+    bridge = EvalUiBridge(load_interaction(source, "fixture.yaml: interaction"))
+    bridge.bind_objects(
+        (
+            {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "namespace": "jobs",
+                    "name": "api",
+                    "uid": "pod-api",
+                    "labels": {"team": "green"},
+                },
+            },
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                    "namespace": "jobs",
+                    "name": "api",
+                    "uid": "deploy-api",
+                    "labels": {"team": "red"},
+                },
+            },
+        )
+    )
+
+    result = await bridge.apply(DrillDown(name="api"))
+
+    assert result.ok is False
+
+
 async def test_bridge_drill_down_opens_the_child_resource_list() -> None:
     source = _FULL | {
         "focused_pane": _FULL["focused_pane"] | {"kind": "deployments"},

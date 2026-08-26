@@ -48,6 +48,7 @@ from korvid.tools.executor import (
     ToolOutcome,
     ToolResultBlocked,
     cap_result,
+    compact_result,
 )
 from korvid.tools.registry import ToolDef, tool_def, tool_schema_names
 
@@ -340,7 +341,7 @@ class ToolHarness:
             return cap_result(text, limit=limit)
         if len(suffix) >= limit:
             return cap_result(suffix, limit=limit)
-        return cap_result(text, limit=limit - len(suffix)) + suffix
+        return compact_result(text, limit=limit - len(suffix)) + suffix
 
 
 def _armed_surface(

@@ -26,6 +26,7 @@ from korvid.agent.prompt_packs import (
     LOW_TOOL_DESCRIPTION_MAX_CHARS,
     LOW_TOOL_DESCRIPTIONS,
 )
+from korvid.tools.executor import MAX_RESULT_CHARS
 from korvid.tools.registry import agent_tool_schemas
 
 # ---------------------------------------------------------------------------
@@ -602,7 +603,7 @@ def test_high_tier_budgets_and_prompt_pack_are_exact() -> None:
     assert policy.prompt_pack_id == "high-korvid-operator"
     assert policy.max_iterations == 15
     assert policy.max_history_chars == 120_000
-    assert policy.max_result_chars is None
+    assert policy.max_result_chars == MAX_RESULT_CHARS
     assert policy.max_tool_calls_per_iteration is None
     assert policy.allow_parallel_tool_calls is True
     assert policy.strict_history_budget is False
@@ -721,7 +722,7 @@ def test_the_low_tier_answers_in_fewer_iterations_and_less_history_than_high() -
     assert low.max_iterations < high.max_iterations
     assert low.max_history_chars < high.max_history_chars
     assert low.max_tool_calls_per_iteration == 1
-    assert high.max_result_chars is None
+    assert high.max_result_chars == MAX_RESULT_CHARS
     assert len(low.tools) < len(high.tools)
 
 

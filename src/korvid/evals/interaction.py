@@ -43,6 +43,7 @@ from korvid.agent.interaction import (
     SetFilter,
     UiAction,
     UiActionResult,
+    pane_filter_matches,
 )
 from korvid.k8s.relations import drill_child
 
@@ -206,6 +207,11 @@ class EvalUiBridge(AgentUiBridge):
         self._context = context
         self._actions: list[UiAction] = []
         self._sink: ActionSink | None = None
+        self._objects: tuple[dict[str, Any], ...] | None = None
+
+    def bind_objects(self, objects: tuple[dict[str, Any], ...]) -> None:
+        """Bind the fixture objects that screen actions may display."""
+        self._objects = tuple(objects)
 
     def record_into(self, sink: ActionSink) -> None:
         """Report each applied action as `(tool name, arguments, result)`.
@@ -255,38 +261,101 @@ class EvalUiBridge(AgentUiBridge):
             pane = replace(self._focused, filter_pattern=action.filter_pattern)
             return True, f"filter set to {action.filter_pattern or '(cleared)'}", self._focus(pane)
         if isinstance(action, OpenLogs):
-            return self._display(
-                ResourceIdentity(
-                    kind="pods", namespace=action.namespace, name=action.pod, uid=None
-                ),
-                f"opened logs for {action.pod}",
-                kind="pods",
-                scope=action.namespace,
-            )
+            return self._open_logs(action)
         if isinstance(action, OpenDescribe):
-            return self._display(
-                ResourceIdentity(
-                    kind=action.kind, namespace=action.namespace, name=action.name, uid=None
-                ),
-                f"opened describe for {action.name}",
-                kind=action.kind,
-                scope=action.namespace or ALL_NAMESPACES_SCOPE,
-            )
+            return self._open_describe(action)
         if isinstance(action, DrillDown):
-            child = drill_child(self._focused.kind.lower())
-            if child is None:
-                return (
-                    False,
-                    f"ERROR: {self._focused.kind} does not support drill-down",
-                    self._context,
-                )
-            pane = replace(self._focused, kind=child, selected=None)
-            return True, f"drilled into {action.name}", self._focus(pane)
+            return self._drill_down(action)
         # `UiAction` is a closed union of five members and every one is
         # handled above; the fall-through keeps the function total for
         # mypy without inventing a transition for an action korvid cannot
         # produce.
         raise ValueError(f"unhandled UI action {type(action).__name__}")
+
+    def _open_logs(self, action: OpenLogs) -> tuple[bool, str, InteractionContext]:
+        resolved = self._fixture_resource("pods", action.namespace, action.pod)
+        if self._objects is not None and resolved is None:
+            return False, f"ERROR: pod {action.namespace}/{action.pod} not found", self._context
+        if (
+            resolved is not None
+            and action.container is not None
+            and action.container not in self._manifest_containers(resolved)
+        ):
+            return (
+                False,
+                f"ERROR: container {action.container!r} not found in pod {action.pod}",
+                self._context,
+            )
+        resource = (
+            replace(resolved, kind="pods")
+            if resolved is not None
+            else ResourceIdentity(
+                kind="pods", namespace=action.namespace, name=action.pod, uid=None
+            )
+        )
+        return self._display(
+            resource,
+            f"opened logs for {action.pod}",
+            kind="pods",
+            scope=action.namespace,
+        )
+
+    def _manifest_containers(self, resource: ResourceIdentity) -> set[str]:
+        """Container names carried by one fixture pod manifest."""
+        manifest = self._fixture_manifest(resource)
+        spec = manifest.get("spec") if manifest is not None else None
+        if not isinstance(spec, dict):
+            return set()
+        return {
+            str(container.get("name"))
+            for section in ("containers", "initContainers", "ephemeralContainers")
+            for container in (
+                spec.get(section, []) if isinstance(spec.get(section, []), list) else []
+            )
+            if isinstance(container, dict) and container.get("name")
+        }
+
+    def _open_describe(self, action: OpenDescribe) -> tuple[bool, str, InteractionContext]:
+        resolved = self._fixture_resource(action.kind, action.namespace, action.name)
+        if self._objects is not None and resolved is None:
+            return (
+                False,
+                f"ERROR: {action.kind} {action.namespace or ''}/{action.name} not found",
+                self._context,
+            )
+        resource = resolved or ResourceIdentity(
+            kind=action.kind, namespace=action.namespace, name=action.name, uid=None
+        )
+        return self._display(
+            resource,
+            f"opened describe for {action.name}",
+            kind=resource.kind,
+            scope=resource.namespace or ALL_NAMESPACES_SCOPE,
+        )
+
+    def _drill_down(self, action: DrillDown) -> tuple[bool, str, InteractionContext]:
+        all_namespaces = self._focused.scope == ALL_NAMESPACES_SCOPE
+        parent = self._fixture_resource(
+            self._focused.kind,
+            None if all_namespaces else self._focused.scope,
+            action.name,
+            allow_all_namespaces=all_namespaces,
+        )
+        if self._objects is not None and (parent is None or not self._matches_filter(parent)):
+            return (
+                False,
+                f"ERROR: {action.name!r} is not visible in the current pane",
+                self._context,
+            )
+        child = drill_child(self._focused.kind.lower())
+        if child is None:
+            return (
+                False,
+                f"ERROR: {self._focused.kind} does not support drill-down",
+                self._context,
+            )
+        pane = replace(self._focused, kind=child, selected=None)
+        return True, f"drilled into {action.name}", self._focus(pane)
 
     @property
     def _focused(self) -> PaneContext:
@@ -340,6 +409,90 @@ class EvalUiBridge(AgentUiBridge):
             selected=resource,
         )
         return True, message, self._focus(pane)
+
+    def _fixture_resource(
+        self,
+        kind: str,
+        namespace: str | None,
+        name: str,
+        *,
+        allow_all_namespaces: bool = False,
+    ) -> ResourceIdentity | None:
+        """Resolve one unambiguous fixture object through eval discovery aliases."""
+        if self._objects is None:
+            return None
+        from korvid.evals.fake_kube import builtin_aliases
+
+        meta = builtin_aliases().get(kind.strip().lower())
+        if meta is None:
+            return None
+        if meta.namespaced and not namespace and not allow_all_namespaces:
+            return None
+        effective_namespace = namespace if meta.namespaced else None
+        matches: list[ResourceIdentity] = []
+        for manifest in self._objects:
+            if str(manifest.get("kind", "")).lower() != meta.kind.lower():
+                continue
+            metadata = manifest.get("metadata")
+            if not isinstance(metadata, dict) or metadata.get("name") != name:
+                continue
+            object_namespace = metadata.get("namespace")
+            if (
+                meta.namespaced
+                and not allow_all_namespaces
+                and object_namespace != effective_namespace
+            ):
+                continue
+            if not meta.namespaced and object_namespace is not None:
+                continue
+            uid = metadata.get("uid")
+            matches.append(
+                ResourceIdentity(
+                    kind=meta.kind,
+                    namespace=object_namespace if isinstance(object_namespace, str) else None,
+                    name=name,
+                    uid=uid if isinstance(uid, str) and uid else None,
+                )
+            )
+        return matches[0] if len(matches) == 1 else None
+
+    def _fixture_manifest(self, resource: ResourceIdentity) -> dict[str, Any] | None:
+        """Manifest backing one resolved fixture identity."""
+        if self._objects is None:
+            return None
+        for manifest in self._objects:
+            if str(manifest.get("kind", "")).lower() != resource.kind.lower():
+                continue
+            metadata = manifest.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if metadata.get("name") != resource.name:
+                continue
+            if metadata.get("namespace") != resource.namespace:
+                continue
+            return manifest
+        return None
+
+    def _matches_filter(self, resource: ResourceIdentity) -> bool:
+        """Whether a fixture name is visible under the current pane filter."""
+        pattern = self._focused.filter_pattern
+        if pattern is None:
+            return True
+        if self._objects is None:
+            return False
+        manifest = self._fixture_manifest(resource)
+        if manifest is None:
+            return False
+        metadata = manifest.get("metadata")
+        labels = metadata.get("labels") if isinstance(metadata, dict) else None
+        status = manifest.get("status")
+        phase = status.get("phase") if isinstance(status, dict) else None
+        return pane_filter_matches(
+            pattern,
+            resource.name,
+            labels if isinstance(labels, dict) else None,
+            phase if isinstance(phase, str) else None,
+        )
 
 
 def _action_call(action: UiAction) -> tuple[str, dict[str, Any]]:

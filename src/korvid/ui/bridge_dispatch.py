@@ -74,7 +74,11 @@ class AppContextDispatch(BridgeDispatch):
         Cancellation propagates into the inner task so shutdown never
         strands UI work.
         """
-        async with self._operation_lock:
+        acquired = False
+        task: asyncio.Task[str] | None = None
+        try:
+            await self._operation_lock.acquire()
+            acquired = True
             snapshot = self._context
             if snapshot is None:
                 coro.close()
@@ -84,13 +88,18 @@ class AppContextDispatch(BridgeDispatch):
             )
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
-            try:
-                return await task
-            except asyncio.CancelledError:
+            return await task
+        except asyncio.CancelledError:
+            if task is None:
+                coro.close()
+            else:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
-                raise
+            raise
+        finally:
+            if acquired:
+                self._operation_lock.release()
 
     async def shutdown(self) -> None:
         """Refuse new foreign UI work and reap the in-flight dispatches."""

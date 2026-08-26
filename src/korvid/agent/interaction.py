@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TypeAlias
+
+from korvid.core.filters import parse_filter
 
 
 def _require_nonblank(value: str, field_name: str) -> None:
@@ -30,6 +33,16 @@ class PaneContext:
     scope: str
     filter_pattern: str | None
     selected: ResourceIdentity | None
+
+
+def pane_filter_matches(
+    pattern: str,
+    name: str,
+    labels: Mapping[str, str] | None = None,
+    phase: str | None = None,
+) -> bool:
+    """Apply the same resource filter semantics the live workspace uses."""
+    return parse_filter(pattern).matches(name, labels, phase)
 
 
 @dataclass(frozen=True, slots=True)

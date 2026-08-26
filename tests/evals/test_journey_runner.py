@@ -488,7 +488,7 @@ async def test_each_turn_records_the_screen_it_started_and_ended_on() -> None:
     assert selected is not None
     assert selected.name == "payments-1"
     assert last.interaction is not None
-    assert last.interaction.focused_pane.selected != selected
+    assert last.interaction.focused_pane != last.final_interaction.focused_pane
 
 
 async def test_a_clean_turn_publishes_a_success_outcome() -> None:

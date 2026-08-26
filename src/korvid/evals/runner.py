@@ -452,6 +452,7 @@ async def _drive_turn(
     )
     executor = _RecordingExecutor(raw_executor, max_result_chars=policy.max_result_chars)
     bridge = EvalUiBridge(scenario.interaction)
+    bridge.bind_objects(scenario.objects)
     bridge.record_into(executor.record_action)
     harness = _build_harness(bridge, provider, executor, replace(config, policy=policy))
     armed = _armed_schemas(harness.policy)

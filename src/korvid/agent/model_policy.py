@@ -20,6 +20,7 @@ from types import MappingProxyType
 from typing import Any
 
 from korvid.agent.prompt_packs import LOW_TOOL_DESCRIPTIONS
+from korvid.tools.executor import MAX_RESULT_CHARS
 from korvid.tools.registry import agent_tool_schemas
 
 #: Version of the shipped exact-match model catalog (`model_catalog.py`).
@@ -180,7 +181,7 @@ _HIGH_TIER_BUDGET = _TierBudget(
     prompt_pack_id="high-korvid-operator",
     max_iterations=15,
     max_history_chars=120_000,
-    max_result_chars=None,
+    max_result_chars=MAX_RESULT_CHARS,
     max_tool_calls_per_iteration=None,
     strict_history_budget=False,
 )

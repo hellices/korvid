@@ -71,6 +71,20 @@ def test_a_non_string_tier_is_refused_too() -> None:
         _settings(model_tier=1)
 
 
+def test_a_hostile_non_string_tier_is_rejected_without_plugin_dispatch() -> None:
+    class _HostileTier:
+        def __eq__(self, other: object) -> bool:
+            raise RuntimeError("PLUGIN_TIER_SECRET")
+
+        def __repr__(self) -> str:
+            raise RuntimeError("PLUGIN_TIER_SECRET")
+
+    with pytest.raises(ValueError, match="model_tier") as caught:
+        _settings(model_tier=_HostileTier())
+
+    assert "PLUGIN_TIER_SECRET" not in str(caught.value)
+
+
 class _ExplodingOptions(Mapping[str, object]):
     """A mapping that refuses to be read.
 

@@ -399,6 +399,7 @@ async def _run_once(
         max_result_chars=policy.max_result_chars,
     )
     bridge = config.bridge_factory(journey.interaction)
+    bridge.bind_objects(journey.objects)
     bridge.record_into(executor.record_action)
     harness = build_eval_harness(
         provider=provider,

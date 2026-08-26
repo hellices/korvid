@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -1747,6 +1748,33 @@ async def test_app_dispatch_serializes_concurrent_ui_operations() -> None:
     gate.set()
     results = await asyncio.gather(first, second)
     assert list(results) == ["ok", "ok"]
+    await dispatch.shutdown()
+
+
+async def test_cancelled_queued_dispatch_closes_its_unstarted_coroutine() -> None:
+    dispatch = AppContextDispatch()
+    dispatch.activate()
+    gate = asyncio.Event()
+    first_started = asyncio.Event()
+
+    async def blocked() -> str:
+        first_started.set()
+        await gate.wait()
+        return "ok"
+
+    first = asyncio.create_task(dispatch.run(blocked()))
+    await first_started.wait()
+    queued_coro = blocked()
+    queued = asyncio.create_task(dispatch.run(queued_coro))
+    await asyncio.sleep(0)
+    queued.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await queued
+
+    assert inspect.getcoroutinestate(queued_coro) == inspect.CORO_CLOSED
+
+    gate.set()
+    assert await first == "ok"
     await dispatch.shutdown()
 
 

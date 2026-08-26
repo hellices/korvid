@@ -52,10 +52,13 @@ class AgentSettings:
         # without falling back, and `save_agent_config` writes whatever
         # it is handed. An unroutable value would otherwise surface as a
         # policy nobody chose, reported in the header as the user's.
-        if self.model_tier is not None and self.model_tier not in MODEL_TIERS:
+        if self.model_tier is not None and (
+            type(self.model_tier) is not str or self.model_tier not in MODEL_TIERS
+        ):
+            detail = repr(self.model_tier) if type(self.model_tier) is str else "<invalid type>"
             raise ValueError(
                 f"model_tier must be one of {', '.join(MODEL_TIERS)} or None for automatic "
-                f"routing, got {self.model_tier!r}"
+                f"routing, got {detail}"
             )
         object.__setattr__(self, "options", _freeze_options(self.options))
 
