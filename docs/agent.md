@@ -411,7 +411,7 @@ retransmitted on every request of every iteration.
   that points at another object before answering; name exactly one root
   cause and no fault you ruled out; quote the decisive reason string; and
   do not call a resource healthy while its warning events say otherwise.
-  It also carries the **operation-first** rule introduced in Task 3:
+  It also carries the **operation-first** rule enforced by the LOW pack:
   dispatch the next tool immediately without narrating the plan first
   (call the tool — do not describe what you are about to call); limit the
   final answer to root cause, evidence, and the next operation — no

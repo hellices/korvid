@@ -5,8 +5,7 @@ The harness binds a `ResolvedAgentPolicy` and an
 `ComposedPrompt`, in the exact layer order the design doc pins (§7):
 immutable safety contract, common role, tier pack, provider overlay,
 exact-model overlay, additive user rules, armed capability clauses, then
-bounded dynamic context. Nothing here exercises `AgentSession` (task 11
-consumes this harness) or the old v1 runtime/prompts modules.
+bounded dynamic context. Nothing here exercises `AgentSession` (the session layer consumes this harness) or the old v1 runtime/prompts modules.
 """
 
 from __future__ import annotations
@@ -545,7 +544,7 @@ def test_a_handoff_from_an_unnamed_context_still_names_both_sides() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Eager static validation (task 11 refuses an unusable policy before a swap)
+# Eager static validation (the session layer refuses an unusable policy before a swap)
 # ---------------------------------------------------------------------------
 
 
@@ -817,8 +816,8 @@ def test_secret_like_values_in_context_fields_still_pass_through_outbound_maskin
 
     The composed strings are plain text (issue #316 task 6 decision), so
     nothing here calls `OutboundPolicy` itself - that happens later, when
-    `AgentSession`/`RequestGateway` build the actual provider request
-    (task 11). This proves that later pass still finds and masks a
+    `AgentSession`/`RequestGateway` build the actual provider request.
+    This proves that later pass still finds and masks a
     secret-shaped value the harness merely bounded and JSON-encoded.
     """
     harness = PromptHarness()
