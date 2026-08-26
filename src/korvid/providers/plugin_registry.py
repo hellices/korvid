@@ -198,7 +198,7 @@ def _safe_api_version_label(value: int) -> str:
     """
     try:
         text = str(value)
-    except ValueError:
+    except Exception:
         return "<unrepresentable>"
     return _bounded(text, max_length=20)
 
@@ -210,7 +210,7 @@ def _validate_metadata_fields(
 ) -> None:
     """Validate all ProviderPluginMetadata field types and values."""
     # api_version: exact non-bool int == PROVIDER_PLUGIN_API_VERSION
-    if isinstance(meta.api_version, bool) or not isinstance(meta.api_version, int):
+    if type(meta.api_version) is not int:
         raise _bounded_error(f"provider plugin {safe_name!r}: api_version must be int")
     if meta.api_version != PROVIDER_PLUGIN_API_VERSION:
         # A fixed, actionable migration message naming both the version the

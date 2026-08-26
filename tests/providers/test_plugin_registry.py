@@ -1170,6 +1170,41 @@ class TestMetadataBoundary:
             with pytest.raises(ProviderPluginError, match="api_version"):
                 reg.load_selected("company-llm")
 
+    def test_api_version_int_subclass_is_rejected_without_stringifying(
+        self, plugin_site: Any
+    ) -> None:
+        class _HostileInt(int):
+            def __str__(self) -> str:
+                raise RuntimeError("PLUGIN_API_VERSION_SECRET")
+
+            def __ne__(self, other: object) -> bool:
+                raise RuntimeError("PLUGIN_API_VERSION_SECRET")
+
+        class _HostileVersionPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=_HostileInt(PROVIDER_PLUGIN_API_VERSION),
+                    name="company-llm",
+                    display_name="Hostile",
+                    auth_methods=("api_key",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_HostileVersionPlugin,
+        ):
+            registry = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="api_version") as caught:
+                registry.load_selected("company-llm")
+
+        assert "PLUGIN_API_VERSION_SECRET" not in str(caught.value)
+
     def test_name_empty_rejected(self, plugin_site: Any) -> None:
         """metadata.name that is empty string is rejected."""
 

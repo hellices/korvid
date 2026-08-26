@@ -9,6 +9,7 @@ import pytest
 from textual.css.query import NoMatches
 
 from korvid.agent.interaction import ResourceIdentity
+from korvid.core.store import ALL_NAMESPACES
 from korvid.ui.app import AppAgentScreens, KorvidApp
 from korvid.ui.widgets.describe_screen import DescribeScreen
 
@@ -108,6 +109,11 @@ def test_displayed_pane_context_reads_the_open_log_target() -> None:
             current_triples=[("prod", "api-2", "main"), ("prod", "api-2", "sidecar")],
             owner=None,
         ),
+        _view=SimpleNamespace(
+            resources=lambda kind, scope: [
+                SimpleNamespace(name="api-2", namespace="prod", uid="uid-2")
+            ]
+        ),
     )
 
     displayed = screens.displayed_pane_context()
@@ -118,6 +124,52 @@ def test_displayed_pane_context_reads_the_open_log_target() -> None:
     assert pane.scope == "prod"
     assert pane.selected is not None
     assert pane.selected.name == "api-2"
+    assert pane.selected.uid == "uid-2"
+
+
+def test_open_log_uid_falls_back_to_the_all_namespaces_store_bucket() -> None:
+    summary = SimpleNamespace(name="api-2", namespace="prod", uid="uid-all")
+    screens = _display_screens(
+        screen=object(),
+        _describe_pane=SimpleNamespace(display=False, resource_identity=None),
+        _logs=SimpleNamespace(
+            mode="l",
+            current_triples=[("prod", "api-2", "main")],
+            owner=None,
+        ),
+        _view=SimpleNamespace(
+            resources=lambda kind, scope: [summary] if scope == ALL_NAMESPACES else []
+        ),
+    )
+
+    displayed = screens.displayed_pane_context()
+
+    assert displayed is not None
+    assert displayed.context.selected is not None
+    assert displayed.context.selected.uid == "uid-all"
+
+
+def test_open_log_uid_prefers_the_owner_panes_active_store_bucket() -> None:
+    stale = SimpleNamespace(name="api-2", namespace="prod", uid="uid-stale")
+    current = SimpleNamespace(name="api-2", namespace="prod", uid="uid-current")
+    screens = _display_screens(
+        screen=object(),
+        _describe_pane=SimpleNamespace(display=False, resource_identity=None),
+        _logs=SimpleNamespace(
+            mode="l",
+            current_triples=[("prod", "api-2", "main")],
+            owner=SimpleNamespace(scope=ALL_NAMESPACES),
+        ),
+        _view=SimpleNamespace(
+            resources=lambda kind, scope: [current] if scope == ALL_NAMESPACES else [stale]
+        ),
+    )
+
+    displayed = screens.displayed_pane_context()
+
+    assert displayed is not None
+    assert displayed.context.selected is not None
+    assert displayed.context.selected.uid == "uid-current"
 
 
 def test_displayed_pane_context_does_not_reuse_table_identity_for_multi_pod_logs() -> None:
@@ -160,6 +212,7 @@ def test_open_logs_take_precedence_over_an_inline_describe_pane() -> None:
             current_triples=[("prod", "live-pod", "main")],
             owner=None,
         ),
+        _view=SimpleNamespace(resources=lambda kind, scope: []),
     )
 
     displayed = screens.displayed_pane_context()

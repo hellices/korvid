@@ -2294,7 +2294,9 @@ class AppAgentScreens(AgentScreens):
                     kind="pods",
                     namespace=namespace,
                     name=pod,
-                    uid=None,
+                    uid=self._displayed_resource_uid(
+                        "pods", namespace, pod, owner=self._app._logs.owner
+                    ),
                 )
             return DisplayedPaneContext(
                 context=PaneContext(
@@ -2310,6 +2312,25 @@ class AppAgentScreens(AgentScreens):
             identity = self._app._describe_pane.resource_identity
             if identity is not None:
                 return _displayed_resource_context(identity, owner=self._describe_owner)
+        return None
+
+    def _displayed_resource_uid(
+        self,
+        kind: str,
+        namespace: str,
+        name: str,
+        *,
+        owner: object | None,
+    ) -> str | None:
+        """Resolve the current store UID for a displayed namespaced resource."""
+        owner_scope = getattr(owner, "scope", None)
+        scopes = dict.fromkeys(
+            scope for scope in (owner_scope, namespace, ALL_NAMESPACES) if isinstance(scope, str)
+        )
+        for scope in scopes:
+            for summary in self._app._view.resources(kind, scope):
+                if summary.name == name and summary.namespace == namespace:
+                    return getattr(summary, "uid", None) or None
         return None
 
 

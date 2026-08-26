@@ -254,16 +254,22 @@ class EvalUiBridge(AgentUiBridge):
             pane = replace(self._focused, filter_pattern=action.filter_pattern)
             return True, f"filter set to {action.filter_pattern or '(cleared)'}", self._focus(pane)
         if isinstance(action, OpenLogs):
-            return self._select(
-                ResourceIdentity(kind="Pod", namespace=action.namespace, name=action.pod, uid=None),
+            return self._display(
+                ResourceIdentity(
+                    kind="pods", namespace=action.namespace, name=action.pod, uid=None
+                ),
                 f"opened logs for {action.pod}",
+                kind="pods",
+                scope=action.namespace,
             )
         if isinstance(action, OpenDescribe):
-            return self._select(
+            return self._display(
                 ResourceIdentity(
                     kind=action.kind, namespace=action.namespace, name=action.name, uid=None
                 ),
                 f"opened describe for {action.name}",
+                kind=action.kind,
+                scope=action.namespace or ALL_NAMESPACES_SCOPE,
             )
         if isinstance(action, DrillDown):
             return self._select(
@@ -314,6 +320,22 @@ class EvalUiBridge(AgentUiBridge):
         self, resource: ResourceIdentity, message: str
     ) -> tuple[bool, str, InteractionContext]:
         return True, message, self._focus(replace(self._focused, selected=resource))
+
+    def _display(
+        self,
+        resource: ResourceIdentity,
+        message: str,
+        *,
+        kind: str,
+        scope: str,
+    ) -> tuple[bool, str, InteractionContext]:
+        pane = PaneContext(
+            kind=kind,
+            scope=scope,
+            filter_pattern=None,
+            selected=resource,
+        )
+        return True, message, self._focus(pane)
 
 
 def _action_call(action: UiAction) -> tuple[str, dict[str, Any]]:

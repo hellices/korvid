@@ -240,18 +240,28 @@ async def test_clearing_the_filter_before_navigating_leaves_it_clear() -> None:
 
 
 async def test_bridge_open_logs_selects_the_named_pod() -> None:
-    bridge = EvalUiBridge(load_interaction(_minimal(), "fixture.yaml: interaction"))
+    source = _minimal()
+    source["focused_pane"] = {
+        "kind": "deployments",
+        "scope": "legacy",
+        "filter": "api",
+    }
+    bridge = EvalUiBridge(load_interaction(source, "fixture.yaml: interaction"))
     result = await bridge.apply(OpenLogs(pod="worker-9", namespace="jobs", container="app"))
     assert result.ok
-    selected = bridge.snapshot().focused_pane.selected
+    pane = bridge.snapshot().focused_pane
+    assert (pane.kind, pane.scope, pane.filter_pattern) == ("pods", "jobs", None)
+    selected = pane.selected
     assert selected is not None
-    assert (selected.kind, selected.namespace, selected.name) == ("Pod", "jobs", "worker-9")
+    assert (selected.kind, selected.namespace, selected.name) == ("pods", "jobs", "worker-9")
 
 
 async def test_bridge_open_describe_selects_the_named_resource() -> None:
     bridge = EvalUiBridge(load_interaction(_minimal(), "fixture.yaml: interaction"))
     await bridge.apply(OpenDescribe(kind="deployments", name="api", namespace="shop"))
-    selected = bridge.snapshot().focused_pane.selected
+    pane = bridge.snapshot().focused_pane
+    assert (pane.kind, pane.scope, pane.filter_pattern) == ("deployments", "shop", None)
+    selected = pane.selected
     assert selected is not None
     assert (selected.kind, selected.namespace, selected.name) == ("deployments", "shop", "api")
 
