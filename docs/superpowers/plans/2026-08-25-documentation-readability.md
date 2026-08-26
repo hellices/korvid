@@ -263,7 +263,7 @@ Use this exact outline and content boundaries:
 
 Korvid shows only the keys that act on the current view. Press `?` for the complete effective set, including remaps; press `~` to expand the top-bar legend.
 
-<img class="docs-keymap" src="../assets/keybindings-context-map.svg" width="460" height="820" alt="Context map of Korvid's keys by context. GLOBAL keys : ? 0 — command bar, effective-key help, namespace scope — work in every view and lead to TABLE keys Enter d g l, where / filters the table. TABLE branches down to LOGS keys / f w p — search, follow, wrap, previous — and across to guarded WRITE keys r S Ctrl-D, restart, scale and drain, each of which still requires a fresh approval keystroke.">
+<img class="docs-keymap" src="../assets/keybindings-context-map.svg" width="460" height="820" alt="Context map of Korvid's keys by context. GLOBAL keys : ? 0 — command bar, effective-key help, namespace scope — work in every view and lead to TABLE keys Enter d g l, where / filters the table. TABLE branches down to LOGS keys / f w p — search, JSON/raw format, wrap, previous — and across to guarded WRITE keys r S Ctrl-D — restart, scale, delete — each of which still requires a fresh approval keystroke.">
 
 ## Move and inspect
 

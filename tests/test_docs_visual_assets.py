@@ -2265,6 +2265,7 @@ def _run_mcp_release(workdir: Path, *, ready: bool) -> tuple[int, str, str]:
     the command printed. `tmux` and `clear` are shell stubs on `PATH`, so no
     multiplexer, terminal or korvid process is involved.
     """
+    _require_posix_recorder()
     stub_dir = workdir / "stubs"
     stub_dir.mkdir()
     invocations = workdir / "invocations.log"
@@ -4883,6 +4884,7 @@ def _run_hostile_tape(
             a contract asks for a tape the pin cannot catch — the case that
             grades the byte guard standing behind it.
     """
+    _require_posix_recorder()
     workdir.mkdir(parents=True)
     scenes = workdir / "scenes"
     scenes.mkdir()

@@ -638,6 +638,12 @@ def test_keybindings_context_map_alt_carries_the_relationships_it_draws() -> Non
         "the map's own note — a write still requires a fresh approval keystroke — is a "
         "safety claim, not decoration; the alt text must carry it"
     )
+    logs = segments["LOGS"]
+    assert "json/raw" in logs.lower(), "`f` toggles JSON/raw formatting in the log pane"
+    assert "follow" not in logs.lower(), "the log pane has no `f` follow binding"
+    writes = segments["WRITE"]
+    assert "delete" in writes.lower(), "`Ctrl-D` deletes the selected resource"
+    assert "drain" not in writes.lower(), "node drain is `Shift-D`, not `Ctrl-D`"
     assert len(flat.split()) <= 80, (
         f"alt text is announced in one breath; {len(flat.split())} words is a paragraph"
     )
