@@ -39,9 +39,12 @@ from korvid.agent.interaction import (
     OpenLogs,
     SetFilter,
     UiAction,
+    UiActionResult,
 )
 from korvid.agent.model_policy import ResolvedAgentPolicy
 from korvid.agent.outbound import ToolResultBlockedError, sanitize_recorded_tool_result
+from korvid.agent.prompt_harness import interaction_context_note_with_redactions
+from korvid.core.redaction import RedactionRecord
 from korvid.tools.executor import (
     MAX_RESULT_CHARS,
     RecordedExecution,
@@ -297,9 +300,41 @@ class ToolHarness:
         except ValueError as exc:
             return self._error(call_id, definition.name, f"invalid arguments: {exc}")
         result = await self._bridge.apply(action)
-        outcome = self._sanitize(definition, ToolOutcome(text=result.message, error=not result.ok))
+        outcome = self._sanitize_ui_result(definition, result)
         return ToolExecution(
             call_id=call_id, name=definition.name, outcome=outcome, evidence_ref=None
+        )
+
+    def _sanitize_ui_result(
+        self,
+        definition: ToolDef,
+        result: UiActionResult,
+    ) -> ToolOutcome:
+        """Preserve post-action context as valid JSON inside the result cap."""
+        limit = self._max_result_chars or MAX_RESULT_CHARS
+        context_budget = max(256, limit * 2 // 3)
+        context_text, context_redactions = interaction_context_note_with_redactions(
+            result.context,
+            max_chars=context_budget,
+        )
+        separator = "\n\n"
+        message_budget = max(limit - len(context_text) - len(separator), 0)
+        message_text = ""
+        message_redactions: tuple[RedactionRecord, ...] = ()
+        if message_budget:
+            message_text, message_redactions = sanitize_recorded_tool_result(
+                definition.name,
+                result.message,
+                (),
+                max_chars=message_budget,
+                error=not result.ok,
+                result_format=definition.result_format,
+            )
+        text = f"{message_text}{separator if message_text else ''}{context_text}"
+        return ToolOutcome(
+            text=text,
+            redactions=(*message_redactions, *context_redactions),
+            error=not result.ok,
         )
 
     def _sanitize(self, definition: ToolDef, produced: ToolOutcome) -> ToolOutcome:
@@ -422,4 +457,5 @@ def _optional_str(arguments: dict[str, Any], key: str) -> str | None:
         return None
     if not isinstance(value, str):
         raise ValueError(f"{key!r} must be a string when provided")
-    return value
+    normalized = value.strip()
+    return normalized or None

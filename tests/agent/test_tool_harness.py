@@ -11,6 +11,7 @@ the policy's per-iteration tool-call budget before touching any port.
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any, get_args
 
 import pytest
@@ -125,17 +126,24 @@ class _MutatingExecution(RecordedExecution):
 class _RecordingBridge(AgentUiBridge):
     """Records the typed UI actions applied to it."""
 
-    def __init__(self, *, ok: bool = True, message: str = "done") -> None:
+    def __init__(
+        self,
+        *,
+        ok: bool = True,
+        message: str = "done",
+        context: InteractionContext | None = None,
+    ) -> None:
         self.actions: list[UiAction] = []
         self._ok = ok
         self._message = message
+        self._context = context or _context()
 
     def snapshot(self) -> InteractionContext:
-        return _context()
+        return self._context
 
     async def apply(self, action: UiAction) -> UiActionResult:
         self.actions.append(action)
-        return UiActionResult(ok=self._ok, message=self._message, context=_context())
+        return UiActionResult(ok=self._ok, message=self._message, context=self._context)
 
 
 class _ApprovalBridge(UIBridge):
@@ -240,8 +248,60 @@ async def test_ui_tool_routes_only_to_bridge_as_typed_action() -> None:
 
     assert bridge.actions == [Navigate(view="deployments", namespace="default")]
     assert execution.calls == []  # a UI action never touches the executor
-    assert result.outcome.text == "switched to deployments"
+    assert result.outcome.text.startswith("switched to deployments")
+    assert "Workspace context (JSON):" in result.outcome.text
+    assert "api-1" in result.outcome.text
     assert result.evidence_ref is None
+
+
+async def test_ui_tool_normalizes_a_blank_optional_namespace_to_none() -> None:
+    bridge = _RecordingBridge()
+    harness = _harness(
+        _policy(["navigate"], max_tool_calls=None),
+        bridge=bridge,
+    )
+
+    result = await harness.execute(
+        "c1",
+        "navigate",
+        {"view": "deployments", "namespace": "   "},
+    )
+
+    assert result.outcome.error is False
+    assert bridge.actions == [Navigate(view="deployments", namespace=None)]
+
+
+async def test_ui_tool_keeps_large_post_action_context_as_valid_bounded_json() -> None:
+    context = InteractionContext(
+        kube_context="cluster-" + "x" * 5_000,
+        context_epoch=1,
+        focused_pane=PaneContext(
+            kind="pods",
+            scope="default",
+            filter_pattern="token: workspace-secret " + "f" * 5_000,
+            selected=ResourceIdentity(
+                "Pod",
+                "default",
+                "pod-" + "n" * 5_000,
+                "uid-" + "u" * 5_000,
+            ),
+        ),
+        secondary_pane=None,
+        timeline_cursor=None,
+    )
+    harness = _harness(
+        _policy(["navigate"], max_tool_calls=None, max_result_chars=3_000),
+        bridge=_RecordingBridge(context=context),
+    )
+
+    result = await harness.execute("c1", "navigate", {"view": "pods"})
+
+    assert len(result.outcome.text) <= 3_000
+    encoded = result.outcome.text.split("Workspace context (JSON): ", 1)[1]
+    payload = json.loads(encoded)
+    assert payload["context_epoch"] == 1
+    assert payload["focused_pane"]["selected"]["name"].startswith("pod-")
+    assert "workspace-secret" not in result.outcome.text
 
 
 async def test_write_routes_through_executor_approval_not_ui_bridge() -> None:

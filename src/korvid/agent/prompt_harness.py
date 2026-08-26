@@ -44,6 +44,7 @@ from korvid.agent.prompt_packs import (
     PROVIDER_PROMPT_OVERLAYS,
     SAFETY_CONTRACT,
 )
+from korvid.core.redaction import RedactionRecord, redact_document
 from korvid.k8s.csp import UNKNOWN_PROVIDER
 from korvid.tools.executor import UI_TOOL_NAMES, WRITE_TOOL_NAMES
 
@@ -281,8 +282,7 @@ class PromptHarness:
         ]
         system_message = "\n\n".join([static_prompt, *dynamic_layers])
 
-        encoded_context = _encode(_interaction_payload(inputs.interaction))
-        user_message = f"{user_text}\n\n{_WORKSPACE_CONTEXT_LABEL}{encoded_context}"
+        user_message = f"{user_text}\n\n{interaction_context_note(inputs.interaction)}"
 
         return ComposedPrompt(system_message=system_message, user_message=user_message)
 
@@ -499,3 +499,69 @@ def _interaction_payload(interaction: InteractionContext) -> dict[str, Any]:
         "secondary_pane": _pane_payload(interaction.secondary_pane),
         "timeline_cursor": _bounded(interaction.timeline_cursor, _DEFAULT_FIELD_BOUND),
     }
+
+
+def interaction_context_note(
+    interaction: InteractionContext,
+    *,
+    max_chars: int | None = None,
+) -> str:
+    """Bounded model-facing encoding of the currently visible workspace."""
+    return _bounded_interaction_note(
+        _interaction_payload(interaction),
+        max_chars,
+    )
+
+
+def interaction_context_note_with_redactions(
+    interaction: InteractionContext,
+    *,
+    max_chars: int | None = None,
+) -> tuple[str, tuple[RedactionRecord, ...]]:
+    """Structurally redact and encode the visible workspace as valid JSON."""
+    payload, records = redact_document(
+        _interaction_payload(interaction),
+        path="workspace_context",
+    )
+    return (
+        _bounded_interaction_note(payload, max_chars),
+        tuple(records),
+    )
+
+
+def _bounded_interaction_note(
+    payload: Any,
+    max_chars: int | None,
+) -> str:
+    """Encode one payload while keeping truncation structurally valid."""
+    note = f"{_WORKSPACE_CONTEXT_LABEL}{_encode(payload)}"
+    if max_chars is None or len(note) <= max_chars:
+        return note
+    for field_limit in (256, 128, 64, 32):
+        compact = _bound_payload_strings(payload, field_limit)
+        note = f"{_WORKSPACE_CONTEXT_LABEL}{_encode(compact)}"
+        if len(note) <= max_chars:
+            return note
+    source = payload if isinstance(payload, dict) else {}
+    focused = source.get("focused_pane")
+    focused_source = focused if isinstance(focused, dict) else {}
+    minimal = {
+        "context_epoch": source.get("context_epoch"),
+        "focused_pane": {
+            "kind": _bounded(focused_source.get("kind"), 32),
+            "scope": _bounded(focused_source.get("scope"), 32),
+        },
+        "truncated": True,
+    }
+    return f"{_WORKSPACE_CONTEXT_LABEL}{_encode(minimal)}"
+
+
+def _bound_payload_strings(value: Any, limit: int) -> Any:
+    """Recursively bound strings while preserving JSON structure."""
+    if isinstance(value, str):
+        return _bounded(value, limit)
+    if isinstance(value, dict):
+        return {key: _bound_payload_strings(item, limit) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_bound_payload_strings(item, limit) for item in value]
+    return value
