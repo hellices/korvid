@@ -13,7 +13,9 @@ server's endpoint file, its own process, its working directory, the name of
 any assistant, a token count, or an unbounded tool result: it prints a fixed
 excerpt of each answer and holds long enough for the mirrored view to be
 read. An answer the SDK flags as an error is not an excerpt of korvid's
-work at all, so the run aborts on it rather than publishing it.
+work at all, so the run aborts on it rather than publishing it — as it does
+on an answer whose error flag cannot be read, which is the same thing not
+yet known to be safe.
 
 Aborting is not enough on its own. VHS records for a fixed window and never
 observes this pane, so a run that raised would still yield an apparently
@@ -126,14 +128,25 @@ def _text(result: Any, call: str) -> str:
         The answer's text blocks joined by newlines.
 
     Raises:
-        RuntimeError: if the SDK flagged the answer as an error. A failed
-            `tools/call` still carries `content` — the server's error text
-            — so joining it would publish a failure as though it were
-            korvid's answer and let the run reach its closing card. The
-            message names `call` only; it never echoes the result, which
-            is unbounded and may hold sensitive cluster text.
+        RuntimeError: if the SDK flagged the answer as an error, or if its
+            verdict cannot be read at all. A failed `tools/call` still
+            carries `content` — the server's error text — so joining it
+            would publish a failure as though it were korvid's answer and
+            let the run reach its closing card. `content` is read as a
+            plain attribute, and the verdict is graded no more leniently:
+            an absent `is_error` (a renamed SDK field, a result type some
+            shim substituted) and a non-boolean one are refusals, not
+            successes, because truthiness would silently pass `0`, `""`
+            and `()` — and `1` or `"true"` would abort for the wrong
+            reason. The message names `call`, and for an unreadable
+            verdict the attribute; it never echoes the result or the flag
+            value, both of which are unbounded and may hold sensitive
+            cluster text.
     """
-    if getattr(result, "is_error", False):
+    flag = getattr(result, "is_error", None)
+    if not isinstance(flag, bool):
+        raise RuntimeError(f"MCP result carries no readable is_error flag: {call}")
+    if flag:
         raise RuntimeError(f"MCP tool call failed: {call}")
     return "\n".join(
         str(getattr(item, "text", "")) for item in result.content if getattr(item, "text", "")

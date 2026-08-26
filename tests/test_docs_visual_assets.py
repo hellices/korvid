@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tomllib
 import zlib
-from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -28,7 +28,7 @@ from korvid.agent.events import AgentEvent, TextDelta, ToolCallStarted, TurnComp
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.relationships import GraphResource, SummaryLike
 from korvid.k8s.discovery import ResourceMeta
-from korvid.k8s.models import format_age
+from korvid.k8s.models import GenericSummary, PodListSummary, format_age
 from korvid.tools.executor import ToolExecutor
 from korvid.tools.structured import ERROR_PREFIX
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader, graph_source_metas
@@ -2053,21 +2053,15 @@ def test_demo_ui_bridge_proxy_composes_not_ready_from_the_shared_error_prefix() 
     `ERROR_PREFIX`, so the same module stating the same contract as a
     literal is drift waiting to happen: if the product's prefix changed,
     this return value alone would stop being an error line and the external
-    MCP host would read "UI not ready" as an ordinary text answer.
+    MCP host would read "UI not ready" as an ordinary text answer. Both the
+    value the proxy holds and the answer it returns are checked against the
+    constant itself.
     """
     harness = _demo_harness()
     proxy = harness._UIBridgeProxy()
 
     assert f"{ERROR_PREFIX} UI not ready" == proxy._NOT_READY
     assert asyncio.run(proxy.agent_navigate("pods")).startswith(ERROR_PREFIX)
-
-    source = DEMO_HARNESS.read_text(encoding="utf-8")
-    assert '_NOT_READY = f"{ERROR_PREFIX} UI not ready"' in source, (
-        "the harness must compose its not-ready line from the imported constant"
-    )
-    assert '"ERROR: UI not ready"' not in source, (
-        "a hardcoded prefix drifts silently from korvid.tools.structured.ERROR_PREFIX"
-    )
 
 
 def test_every_demo_fixture_row_carries_a_relative_creation_timestamp() -> None:
@@ -3192,18 +3186,32 @@ def test_configmap_discovery_is_scoped_to_the_relationship_scene() -> None:
 
 
 def test_every_relationship_kind_describes_a_matching_manifest() -> None:
-    """Known empty fixture kinds must never fall back to a Pod manifest."""
+    """Known kinds describe their own rows; empty ones describe nothing.
+
+    No kind may fall back to a Pod manifest — the failure this contract was
+    written for — and no kind may invent an object either. The relationship
+    scene lists fourteen kinds it holds no rows for, so a describe of one
+    of them has nothing truthful to answer and must refuse instead.
+    """
     harness = _demo_harness()
     metas = {meta.plural: meta for meta in harness.RELATIONSHIP_ALIASES.values()}
+    described = 0
     for plural, meta in metas.items():
-        namespace = "shop" if meta.namespaced else None
-        manifest = asyncio.run(harness.get_manifest(plural, namespace, f"demo-{plural}"))
+        rows = asyncio.run(harness.DemoReadOps().list_objects(meta, None))
+        if not rows:
+            with pytest.raises(KeyError, match="unknown demo object"):
+                asyncio.run(harness.get_manifest(plural, "shop", f"demo-{plural}"))
+            continue
+        row = rows[0]
+        manifest = asyncio.run(harness.get_manifest(plural, row.namespace or None, row.name))
         expected_api_version = f"{meta.group}/{meta.version}" if meta.group else meta.version
         assert manifest["apiVersion"] == expected_api_version
         assert manifest["kind"] == meta.kind
-        assert manifest["metadata"]["name"] == f"demo-{plural}"
-        if namespace is not None:
-            assert manifest["metadata"]["namespace"] == namespace
+        assert manifest["metadata"]["name"] == row.name
+        if meta.namespaced:
+            assert manifest["metadata"]["namespace"] == row.namespace
+        described += 1
+    assert described == 4, f"pods, deployments, services and configmaps have rows; got {described}"
 
 
 def test_payment_relationship_facts_come_from_the_described_pod_manifest() -> None:
@@ -3310,10 +3318,38 @@ class _FakeCallToolResult:
         self.is_error = is_error
 
 
+#: Stands for "this fake result has no `is_error` attribute at all", so the
+#: absent case and a present-but-unreadable value can share one fake.
+_NO_ERROR_FLAG = object()
+
+
+class _UnflaggedCallToolResult:
+    """A `tools/call` answer whose error flag is absent or not a bool.
+
+    The pinned SDK's `CallToolResult` always carries a boolean `is_error`,
+    so nothing shaped like this can arrive from it. It stands for what the
+    client may never treat as a success: a renamed field, a result type a
+    shim substituted, or a flag whose value is not a verdict at all.
+    `content` is filled either way — that is what a fail-open guard would
+    publish as though it were korvid's answer.
+    """
+
+    is_error: object
+
+    def __init__(self, text: str, flag: object = _NO_ERROR_FLAG) -> None:
+        self.content = [_FakeBlock(text)]
+        if flag is not _NO_ERROR_FLAG:
+            self.is_error = flag
+
+
+#: Either result shape the follow story's fakes can answer with.
+_CallToolAnswer = _FakeCallToolResult | _UnflaggedCallToolResult
+
+
 class _FakeSession:
     """A `ClientSession` stand-in that answers the follow story's calls."""
 
-    def __init__(self, answers: dict[str, _FakeCallToolResult]) -> None:
+    def __init__(self, answers: Mapping[str, _CallToolAnswer]) -> None:
         self._answers = answers
         self.calls: list[str] = []
 
@@ -3326,7 +3362,7 @@ class _FakeSession:
     async def initialize(self) -> None:
         return None
 
-    async def call_tool(self, name: str, arguments: dict[str, object]) -> _FakeCallToolResult:
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> _CallToolAnswer:
         self.calls.append(name)
         return self._answers[name]
 
@@ -3361,6 +3397,100 @@ def test_mcp_client_text_fails_closed_when_the_sdk_flags_an_error() -> None:
     assert sentinel not in str(excinfo.value), (
         "the failure must name the call, not echo the tool result it refused"
     )
+
+
+def test_mcp_client_text_fails_closed_when_the_error_flag_is_absent() -> None:
+    """A result without `is_error` is a refusal, not a success.
+
+    `_text` reads `result.content` as an attribute — a result type that
+    does not carry it fails immediately — while the verdict was read with
+    a default of `False`. So the one branch that decides whether an answer
+    may be published at all was the only fail-*open* read in the function:
+    a renamed SDK field, or a result a shim substituted, would send the
+    server's error text through `_tail`/`_sections` into the pane as
+    korvid's answer, and let the run reach its closing card and publish
+    `OK_FILE`. Absence must be graded like a failure.
+    """
+    module = _mcp_client_module()
+    sentinel = "leaked-token=abc123 from /home/whoever/.kube/config"
+    result = _UnflaggedCallToolResult(sentinel)
+
+    with pytest.raises(RuntimeError, match=r"is_error") as excinfo:
+        module._text(result, "get_logs")
+
+    assert "get_logs" in str(excinfo.value), "the refusal must name the call it made"
+    assert sentinel not in str(excinfo.value), (
+        "the refusal must name the call, not echo the content it would not read"
+    )
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [None, 1, 0, "true", "", (), object()],
+    ids=["none", "int-true", "int-false", "str", "empty-str", "tuple", "object"],
+)
+def test_mcp_client_text_fails_closed_when_the_error_flag_is_not_a_bool(flag: object) -> None:
+    """Only a boolean is a verdict; anything else is unreadable, so it fails.
+
+    `None` and a non-boolean value are the shapes a drifted SDK or a shim
+    produces, and truthiness would grade them silently: `1` and `"true"`
+    would abort with the wrong reason, while `0`, `""` and `()` would pass
+    a possibly-failed answer straight into the pane. The client refuses
+    every one of them by name of the call.
+    """
+    module = _mcp_client_module()
+    result = _UnflaggedCallToolResult("CURRENT HEALTH\n  status: CrashLoopBackOff", flag)
+
+    with pytest.raises(RuntimeError, match=r"is_error") as excinfo:
+        module._text(result, "diagnose_pod")
+
+    assert "diagnose_pod" in str(excinfo.value), "the refusal must name the call it made"
+
+
+def test_mcp_client_text_never_echoes_an_unreadable_error_flag() -> None:
+    """A flag it could not read is not evidence either.
+
+    The value is as unbounded as the content is — an SDK that answered with
+    a string put whatever the server sent in it — so the refusal names the
+    call and nothing else.
+    """
+    module = _mcp_client_module()
+    sentinel = "bearer sha256~leaked-from-a-flag"
+    result = _UnflaggedCallToolResult("NAME READY", sentinel)
+
+    with pytest.raises(RuntimeError, match=r"is_error") as excinfo:
+        module._text(result, "list_resources")
+
+    assert "list_resources" in str(excinfo.value), "the refusal must name the call it made"
+    assert sentinel not in str(excinfo.value), (
+        "the refusal must not publish the flag value it refused to read"
+    )
+
+
+def test_mcp_client_never_closes_the_story_on_a_flagless_answer(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The whole run stops on the first answer whose verdict cannot be read."""
+    module = _mcp_client_module()
+    session = _FakeSession({"list_resources": _UnflaggedCallToolResult("boom: forbidden")})
+
+    @contextlib.asynccontextmanager
+    async def _fake_transport(url: str) -> AsyncIterator[tuple[object, object]]:
+        assert url == module.URL
+        yield (object(), object())
+
+    monkeypatch.setattr(module, "streamable_http_client", _fake_transport)
+    monkeypatch.setattr(module, "ClientSession", lambda _read, _write: session)
+
+    with pytest.raises(RuntimeError, match=r"list_resources"):
+        asyncio.run(module.main())
+
+    printed = capsys.readouterr().out
+    assert "investigation complete" not in printed, (
+        "an unreadable verdict must never be followed by the success card"
+    )
+    assert "boom: forbidden" not in printed, "the unread result must not be published"
+    assert session.calls == ["list_resources"], "the story must stop at the unreadable answer"
 
 
 def test_mcp_client_checks_the_error_flag_on_every_follow_story_answer() -> None:
@@ -3416,11 +3546,14 @@ def test_demo_manifest_covers_the_mcp_scenes_helm_releases() -> None:
     a Pod manifest for anything it did not recognise.
     """
     harness = _demo_harness()
+    release = next(row for row in harness.HELM_RELEASES if row.name == "shop")
     for alias in ("helmreleases", "helmrelease", "helm"):
         manifest = asyncio.run(harness.get_manifest(alias, "shop", "shop"))
         assert manifest["kind"] == "HelmRelease"
         assert manifest["apiVersion"] == "v1"
-        assert manifest["metadata"] == {"name": "shop", "namespace": "shop"}
+        assert manifest["metadata"]["name"] == "shop"
+        assert manifest["metadata"]["namespace"] == "shop"
+        assert manifest["metadata"]["creationTimestamp"] == release.created
 
     with pytest.raises(KeyError, match="unknown demo kind"):
         asyncio.run(harness.get_manifest("widgets", "shop", "whatever"))
@@ -3497,7 +3630,9 @@ def test_demo_manifest_isolates_the_generic_helm_answer_too() -> None:
 
     assert second["kind"] == "HelmRelease"
     assert second["apiVersion"] == "v1"
-    assert second["metadata"] == {"name": "shop", "namespace": "shop"}, (
+    assert second["metadata"]["name"] == "shop"
+    assert second["metadata"]["namespace"] == "shop"
+    assert "labels" not in second["metadata"], (
         "the synthesised Helm manifest must not carry an earlier answer's edit"
     )
 
@@ -3518,6 +3653,227 @@ def test_demo_manifest_configmap_data_is_not_shared_between_answers() -> None:
     finally:
         harness.CONFIGMAP_MANIFEST.clear()
         harness.CONFIGMAP_MANIFEST.update(copy.deepcopy(pristine))
+
+
+#: The one pod the fixture describes with a hand-written manifest: the
+#: crashlooping subject of the agent and MCP stories.
+_DETAILED_POD = "payment-worker-6c9f7d-b3xnq"
+
+#: Facts that belong to that pod alone. A manifest answered for any other
+#: row that carried one of them would contradict the table the same frame
+#: shows — a Running pod described as crashlooping on the payment image.
+_PAYMENT_ONLY_FACTS = (
+    "CrashLoopBackOff",
+    "payment-worker",
+    "payment-config",
+    "payment gateway unreachable",
+    "pay.example.com",
+)
+
+
+@pytest.mark.parametrize(
+    ("plural", "namespace", "name"),
+    [
+        ("pods", "shop", "payment-worker-6c9f7d-b3xnq-typo"),
+        ("pods", "kube-system", "payment-worker-6c9f7d-b3xnq"),
+        ("pods", "shop", "coredns-5d78c9b4-fh2mx"),
+        ("deployments", "shop", "no-such-deployment"),
+        ("services", "monitoring", "cart-api"),
+        ("configmaps", "shop", "payment-secrets"),
+        ("helmreleases", "shop", "no-such-release"),
+        ("secrets", "shop", "payment-token"),
+    ],
+    ids=[
+        "misspelled-pod",
+        "pod-in-another-namespace",
+        "kube-system-pod-asked-for-in-shop",
+        "absent-deployment",
+        "service-in-another-namespace",
+        "absent-configmap",
+        "absent-release",
+        "kind-with-no-rows",
+    ],
+)
+def test_demo_manifest_refuses_an_object_the_fixture_does_not_hold(
+    plural: str, namespace: str, name: str
+) -> None:
+    """Round-16 review (comment 3863773998): describing invented objects.
+
+    `get_manifest` resolved the *kind* and then answered for any name at
+    all, so `DemoReadOps.get_object` — the boundary an external MCP host
+    reaches — succeeded for objects `list_objects` does not list. Two
+    tools reading one fixture then contradicted each other, and the
+    fabricated answer was the detailed `POD_MANIFEST`: an arbitrary pod
+    name came back crashlooping on the payment image. Refusing an unknown
+    *kind* while inventing an unknown *name* was the asymmetry; both fail
+    now.
+    """
+    harness = _demo_harness()
+
+    with pytest.raises(KeyError, match="unknown demo object"):
+        asyncio.run(harness.get_manifest(plural, namespace, name))
+
+
+def test_demo_manifest_refusal_names_the_object_within_a_bound() -> None:
+    """The refusal identifies the request without republishing it.
+
+    `name` and `namespace` are caller-supplied — an external host can ask
+    for an arbitrarily long one — and the describe path renders a failure
+    into the UI, which is what a landing clip publishes. So the message
+    carries a clipped identity, never the raw request.
+    """
+    harness = _demo_harness()
+    huge = "a" * 4000
+
+    with pytest.raises(KeyError, match="unknown demo object") as excinfo:
+        asyncio.run(harness.get_manifest("pods", "shop", huge))
+
+    message = str(excinfo.value)
+    assert huge not in message, "the refusal must not echo an unbounded request"
+    assert len(message) < 200, f"the refusal must stay bounded; it is {len(message)} characters"
+    assert "pods" in message, "the refusal must still identify what was asked for"
+
+
+@pytest.mark.parametrize(
+    ("namespace", "name"),
+    [
+        ("shop", "web-frontend-7d4b9c-x2kfp"),
+        ("kube-system", "coredns-5d78c9b4-fh2mx"),
+        ("monitoring", "prometheus-0"),
+    ],
+)
+def test_demo_manifest_of_a_running_pod_inherits_no_crash_facts(namespace: str, name: str) -> None:
+    """A Running row must not be described with the failing pod's status.
+
+    Every unlisted name used to be answered with `POD_MANIFEST`, and the
+    fabricated part was never neutral: it carries `restartCount: 17`, a
+    `CrashLoopBackOff` waiting reason and the payment gateway image. A
+    describe of `web-frontend-*` or `coredns-*` therefore put a frame on
+    screen that contradicted the `Running 1/1` the same table showed.
+    """
+    harness = _demo_harness()
+
+    manifest = asyncio.run(harness.get_manifest("pods", namespace, name))
+
+    assert manifest["apiVersion"] == "v1"
+    assert manifest["kind"] == "Pod"
+    assert manifest["metadata"]["name"] == name
+    assert manifest["metadata"]["namespace"] == namespace
+    assert manifest["status"]["phase"] == "Running"
+    statuses = manifest["status"]["containerStatuses"]
+    assert [status["restartCount"] for status in statuses] == [0]
+    assert all(status["ready"] for status in statuses)
+    rendered = repr(manifest)
+    for fact in _PAYMENT_ONLY_FACTS:
+        assert fact not in rendered, f"{name}'s manifest must not carry {fact!r}"
+
+
+def test_demo_manifest_still_answers_the_detailed_fixtures_verbatim() -> None:
+    """The hand-written manifests are unchanged, and still their own object.
+
+    Validating the request must not cost the fixture its detail: the four
+    objects the stories actually describe keep the exact manifests the
+    capture was designed around, deep-copied per answer.
+    """
+    harness = _demo_harness()
+    detailed = {
+        ("pods", _DETAILED_POD): harness.POD_MANIFEST,
+        ("deployments", "payment-worker"): harness.DEPLOY_MANIFEST,
+        ("services", "payment-worker"): harness.SVC_MANIFEST,
+        ("configmaps", "payment-config"): harness.CONFIGMAP_MANIFEST,
+    }
+
+    for (plural, name), fixture in detailed.items():
+        manifest = asyncio.run(harness.get_manifest(plural, "shop", name))
+        assert manifest == fixture, f"{plural}/{name} must keep its detailed fixture"
+        assert manifest is not fixture, "each answer must be its own object"
+
+
+def test_demo_manifest_of_a_synthesised_deployment_agrees_with_its_desired_count() -> None:
+    """A described Deployment must show the replica count its row does.
+
+    `web-frontend` has no detailed fixture, so its manifest is synthesised
+    — and DESIRED is the column the deployments table shows. A manifest
+    without `spec.replicas` (or with the payment fixture's 1) would
+    disagree with the 2 beside it.
+    """
+    harness = _demo_harness()
+    row = next(row for row in harness.EXTRA["deployments"] if row.name == "web-frontend")
+
+    manifest = asyncio.run(harness.get_manifest("deployments", "shop", "web-frontend"))
+
+    assert manifest["apiVersion"] == "apps/v1"
+    assert manifest["kind"] == "Deployment"
+    assert manifest["metadata"]["name"] == "web-frontend"
+    assert manifest["spec"]["replicas"] == row.desired == 2
+    assert "payment-worker" not in repr(manifest)
+
+
+def test_demo_manifest_of_a_helm_release_agrees_with_the_releases_table() -> None:
+    """A described release must report the revision the browser lists."""
+    harness = _demo_harness()
+    release = next(row for row in harness.HELM_RELEASES if row.name == "inventory-db")
+
+    manifest = asyncio.run(harness.get_manifest("helm", "shop", "inventory-db"))
+
+    assert manifest["kind"] == "HelmRelease"
+    assert manifest["metadata"]["name"] == "inventory-db"
+    assert manifest["status"]["status"] == release.status
+    assert manifest["status"]["revision"] == release.revision
+    assert manifest["status"]["chart"] == release.chart
+    assert manifest["status"]["appVersion"] == release.app_version
+
+
+def test_demo_list_and_describe_answer_the_same_pod_facts() -> None:
+    """Every listed pod describes back into the row that listed it.
+
+    `list_resources` and a describe read one fixture, so korvid's own
+    parser must recover the listed row from the manifest: STATUS, READY,
+    RESTARTS and NODE are what the table shows and what an external host
+    was told.
+    """
+    harness = _demo_harness()
+    reads = harness.DemoReadOps()
+    meta = harness.ALIASES["pods"]
+
+    rows = asyncio.run(reads.list_objects(meta, None))
+
+    assert len(rows) == len(harness.PODS), "every fixture pod must be listed"
+    for row in rows:
+        manifest = asyncio.run(reads.get_object(meta, row.namespace, row.name))
+        described = PodListSummary.from_pod_manifest("Pod", manifest)
+        assert described.name == row.name
+        assert described.namespace == row.namespace
+        assert described.phase == row.phase, f"{row.name} describes a different STATUS"
+        assert described.ready == row.ready, f"{row.name} describes a different READY"
+        assert described.restarts == row.restarts, f"{row.name} describes a different RESTARTS"
+        # "-" is korvid's placeholder for an unscheduled pod; a manifest
+        # says the same thing by carrying no `spec.nodeName` at all.
+        assert described.node == ("" if row.node == "-" else row.node)
+        assert described.ready_condition == row.ready_condition
+        if row.name != _DETAILED_POD:
+            # The one hand-written manifest predates this contract and
+            # carries no `creationTimestamp`; every synthesised one agrees
+            # with the AGE its row renders.
+            assert described.created == row.created, f"{row.name} describes a different AGE"
+
+
+def test_demo_list_and_describe_answer_the_same_facts_for_every_other_kind() -> None:
+    """The same round trip for the kinds the relationship scene browses."""
+    harness = _demo_harness()
+    reads = harness.DemoReadOps()
+
+    for plural in ("deployments", "services", "configmaps", "helmreleases"):
+        meta = harness.MANIFEST_ALIASES[plural]
+        rows = asyncio.run(reads.list_objects(meta, None))
+        assert rows, f"{plural} must still list its fixture rows"
+        for row in rows:
+            manifest = asyncio.run(reads.get_object(meta, row.namespace, row.name))
+            described = GenericSummary.from_manifest(meta.kind, manifest)
+            assert manifest["kind"] == meta.kind
+            assert described.name == row.name
+            assert described.namespace == row.namespace
+            assert described.desired == row.desired, f"{row.name} describes a different DESIRED"
 
 
 #: A bound no fixture can reach, used to read the whole synthetic log stream

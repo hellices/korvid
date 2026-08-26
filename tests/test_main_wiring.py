@@ -164,22 +164,17 @@ async def test_proxy_not_ready_line_is_composed_from_the_shared_error_prefix() -
 
     Every consumer of a UI tool result — the agent loop and any external
     MCP host — decides "this failed" by testing
-    `korvid.tools.structured.ERROR_PREFIX`. Spelling the prefix out again
-    here would let a change to that constant silently demote this answer
-    to an ordinary text result, so the host would read "UI not ready" as
-    the outcome of the operation it asked for.
+    `korvid.tools.structured.ERROR_PREFIX`. So the contract is checked
+    against that constant rather than against a spelling of it: the value
+    the proxy holds, and the answer it actually returns, both have to move
+    with the prefix if the prefix ever changes.
     """
     from korvid.__main__ import _UIBridgeProxy
 
-    assert f"{ERROR_PREFIX} UI not ready" == _UIBridgeProxy._NOT_READY
+    proxy = _UIBridgeProxy()
 
-    source = (Path(korvid.__file__).parent / "__main__.py").read_text(encoding="utf-8")
-    assert '_NOT_READY = f"{ERROR_PREFIX} UI not ready"' in source, (
-        "the proxy must compose its not-ready line from the shared constant"
-    )
-    assert '"ERROR: UI not ready"' not in source, (
-        "a hardcoded prefix drifts silently from korvid.tools.structured.ERROR_PREFIX"
-    )
+    assert f"{ERROR_PREFIX} UI not ready" == _UIBridgeProxy._NOT_READY
+    assert (await proxy.agent_navigate("pods")).startswith(ERROR_PREFIX)
 
 
 async def test_proxy_forwards_to_target() -> None:

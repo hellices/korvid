@@ -341,7 +341,7 @@ HELM_RELEASES: list[HelmReleaseSummary] = [
 ]
 
 
-EXTRA: dict[str, list[Summary]] = {
+EXTRA: dict[str, list[GenericSummary]] = {
     "deployments": [
         _deploy("web-frontend", "shop", 2, 41),
         _deploy("cart-api", "shop", 2, 41),
@@ -465,19 +465,229 @@ _MANIFESTS: dict[str, dict[str, Any]] = {
 #: as Pods is what this lookup exists to prevent.
 MANIFEST_ALIASES: dict[str, ResourceMeta] = {**MCP_ALIASES, **RELATIONSHIP_ALIASES}
 
+#: Longest slice of a requested identity a refusal repeats. `kind`,
+#: `namespace` and `name` are all caller-supplied — an external MCP host
+#: can ask for an arbitrarily long one — and a failed describe is rendered
+#: by the UI, which is what a landing clip publishes. 63 is the DNS-1123
+#: label limit a namespace obeys; every identity in this fixture is far
+#: shorter, so no answerable request is ever clipped.
+_IDENTITY_CLIP = 63
+
+#: The five values `status.phase` can hold. A fixture row's STATUS column
+#: may carry a display status kubectl derives instead (`CrashLoopBackOff`),
+#: which lives in a container's waiting reason — korvid reads it back from
+#: there (`_display_phase`), so putting it in `phase` would describe a pod
+#: state the API server never reports.
+_POD_PHASES = frozenset({"Pending", "Running", "Succeeded", "Failed", "Unknown"})
+
+#: Either shape a fixture row takes: the pods view's own summary, or the
+#: generic one every other kind — Helm releases included — is listed with.
+FixtureRow = PodSummary | GenericSummary
+
+
+def _clipped(value: str) -> str:
+    """`value`, shortened to something a failure message can safely carry."""
+    return value if len(value) <= _IDENTITY_CLIP else value[:_IDENTITY_CLIP] + "…"
+
+
+def _fixture_rows(plural: str) -> list[FixtureRow]:
+    """Every fixture row of one kind — the rows `list_objects` answers with."""
+    rows: list[FixtureRow] = list(PODS) if plural == "pods" else list(EXTRA.get(plural, []))
+    return rows
+
+
+def _fixture_row(plural: str, namespace: str | None, name: str) -> FixtureRow:
+    """The fixture row `namespace/name` names.
+
+    Args:
+        plural: The resolved kind's plural, as `list_objects` keys it.
+        namespace: The requested namespace, or None to match on name alone.
+        name: The requested object name.
+
+    Returns:
+        The one row the fixture holds for that identity.
+
+    Raises:
+        KeyError: if no row matches. Answering anyway is what let
+            `get_object` succeed for objects `list_objects` never lists.
+    """
+    for row in _fixture_rows(plural):
+        if row.name == name and (namespace is None or row.namespace == namespace):
+            return row
+    identity = f"{plural}/{_clipped(namespace or '-')}/{_clipped(name)}"
+    raise KeyError(f"unknown demo object: {identity}")
+
+
+def _describes(base: dict[str, Any], namespace: str | None, name: str) -> bool:
+    """Whether the hand-written `base` is the manifest of `namespace/name`.
+
+    Each detailed fixture describes exactly one object — the payment
+    worker's pod, its Deployment, its Service and its ConfigMap. Stamping
+    another row's name onto one of them is what described a Running pod as
+    crashlooping on the payment image, so a base is used only for the
+    object it was written for.
+    """
+    metadata = base.get("metadata") or {}
+    if metadata.get("name") != name:
+        return False
+    return not namespace or metadata.get("namespace") == namespace
+
+
+def _container_names(pod: PodSummary) -> list[str]:
+    """One container name per entry the row's READY cell counts.
+
+    The count comes from the cell rather than from `containers` because
+    READY is what korvid renders and what an external host was told; the
+    two agree throughout this fixture, and reading the cell is what keeps
+    a future row's manifest agreeing with its table row if they stop.
+    """
+    _ready, _, total = pod.ready.partition("/")
+    count = int(total) if total.isdigit() else len(pod.containers)
+    names = list(pod.containers)
+    return [names[index] if index < len(names) else f"container-{index}" for index in range(count)]
+
+
+def _container_resources(pod: PodSummary) -> dict[str, Any]:
+    """The row's requests, plus the limits that make a Guaranteed pod one."""
+    requests = {
+        key: value
+        for key, value in (("cpu", pod.cpu_request), ("memory", pod.mem_request))
+        if value and value != "-"
+    }
+    if not requests:
+        return {}
+    resources: dict[str, Any] = {"requests": requests}
+    if pod.qos == "Guaranteed":
+        # Guaranteed *is* limits equal to requests. Reporting the class
+        # beside requests alone would describe a Burstable pod.
+        resources["limits"] = dict(requests)
+    return resources
+
+
+def _pod_spec(pod: PodSummary) -> dict[str, Any]:
+    """A `spec` stating only what the pods table already shows."""
+    containers: list[dict[str, Any]] = []
+    for name in _container_names(pod):
+        container: dict[str, Any] = {"name": name}
+        resources = _container_resources(pod)
+        if resources:
+            container["resources"] = resources
+        containers.append(container)
+    spec: dict[str, Any] = {"containers": containers, "restartPolicy": "Always"}
+    if pod.node and pod.node != "-":
+        # "-" is korvid's placeholder for an unscheduled pod, and a real
+        # manifest says exactly that by carrying no `nodeName` at all.
+        spec["nodeName"] = pod.node
+    return spec
+
+
+def _pod_status(pod: PodSummary) -> dict[str, Any]:
+    """A `status` korvid's own parser reads back as the row it came from."""
+    ready_text, _, _total = pod.ready.partition("/")
+    ready_count = int(ready_text) if ready_text.isdigit() else 0
+    waiting = None if pod.phase in _POD_PHASES else pod.phase
+    statuses: list[dict[str, Any]] = []
+    for index, name in enumerate(_container_names(pod)):
+        ready = index < ready_count
+        state: dict[str, Any] = {"running": {"startedAt": pod.created}} if ready else {}
+        if waiting is not None:
+            state = {"waiting": {"reason": waiting}}
+        statuses.append(
+            {
+                "name": name,
+                "ready": ready,
+                # korvid sums this list into one RESTARTS cell and the row
+                # carries one total, so it sits on the first container
+                # rather than being split into counts the fixture has not
+                # got.
+                "restartCount": pod.restarts if index == 0 else 0,
+                "state": state,
+            }
+        )
+    return {
+        "phase": pod.phase if pod.phase in _POD_PHASES else "Running",
+        "qosClass": pod.qos,
+        "conditions": [{"type": "Ready", "status": "True" if _pod_is_ready(pod) else "False"}],
+        "containerStatuses": statuses,
+    }
+
+
+def _synthesised_manifest(meta: ResourceMeta, row: FixtureRow) -> dict[str, Any]:
+    """A minimal manifest for a fixture row that has no hand-written one.
+
+    Minimal, never contradictory: every fact in it is read from the row the
+    tables and the tool answers are built from, so a describe frame and the
+    list beside it say the same thing. Only the facts korvid actually
+    renders are stated — inventing the rest is what this function exists to
+    stop.
+    """
+    api_version = f"{meta.group}/{meta.version}" if meta.group else meta.version
+    metadata: dict[str, Any] = {"creationTimestamp": row.created}
+    if row.labels:
+        metadata["labels"] = dict(row.labels)
+    manifest: dict[str, Any] = {
+        "apiVersion": api_version,
+        "kind": meta.kind,
+        "metadata": metadata,
+    }
+    if isinstance(row, PodSummary):
+        manifest["spec"] = _pod_spec(row)
+        manifest["status"] = _pod_status(row)
+    elif isinstance(row, HelmReleaseSummary):
+        # korvid's HelmRelease is synthetic — derived from Helm's release
+        # secret, with no upstream schema — so the manifest reports exactly
+        # the four facts the releases browser lists.
+        manifest["status"] = {
+            "status": row.status,
+            "revision": row.revision,
+            "chart": row.chart,
+            "appVersion": row.app_version,
+        }
+    elif row.desired is not None:
+        manifest["spec"] = {"replicas": row.desired}
+    return manifest
+
 
 async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+    """The manifest of one fixture object.
+
+    The describe path and `DemoReadOps.get_object` — the boundary an
+    external MCP host reaches — both answer from here, so this must return
+    the object the tables and `list_resources` already describe. Kind and
+    object are resolved in that order and neither is invented: answering
+    an unknown name used to hand back the crashlooping payment fixture
+    under whatever name was asked for, which contradicted the `Running
+    1/1` the same frame showed and let two tools reading one fixture
+    disagree.
+
+    Args:
+        kind: A kind alias from either scene's discovery surface.
+        namespace: The requested namespace, or None to match on name alone.
+        name: The requested object name.
+
+    Returns:
+        The hand-written fixture when one was written for exactly this
+        object, and a minimal manifest agreeing with the row's own table
+        facts otherwise. Always a fresh deep copy.
+
+    Raises:
+        KeyError: if `kind` is not a demo kind, or the fixture holds no
+            such object. Both messages carry a clipped identity: a failed
+            describe is rendered by the UI and can reach a recorded frame.
+    """
     meta = MANIFEST_ALIASES.get(kind)
     if meta is None:
-        raise KeyError(f"unknown demo kind: {kind}")
+        raise KeyError(f"unknown demo kind: {_clipped(kind)}")
+    row = _fixture_row(meta.plural, namespace, name)
     base = _MANIFESTS.get(meta.plural)
-    if base is None:
-        api_version = f"{meta.group}/{meta.version}" if meta.group else meta.version
-        base = {"apiVersion": api_version, "kind": meta.kind, "metadata": {}}
-    # Deep, not shallow: the describe screen and `DemoReadOps.get_object`
-    # both return these fixtures, so sharing nested branches would let one
-    # consumer's in-place edit rewrite every later frame and tool answer.
-    manifest = copy.deepcopy(base)
+    manifest = (
+        # Deep, not shallow: the describe screen and `DemoReadOps.get_object`
+        # both return these fixtures, so sharing nested branches would let one
+        # consumer's in-place edit rewrite every later frame and tool answer.
+        copy.deepcopy(base)
+        if base is not None and _describes(base, namespace, name)
+        else _synthesised_manifest(meta, row)
+    )
     manifest["metadata"]["name"] = name
     if namespace:
         manifest["metadata"]["namespace"] = namespace
@@ -548,6 +758,16 @@ async def stream_logs(
         yield LogLine(pod=pod, container=container, text=text, timestamp=datetime.now(UTC))
 
 
+def _pod_is_ready(pod: PodSummary) -> bool:
+    """Whether korvid would call `pod` Ready.
+
+    One rule, two readers: the `PodListSummary` an external MCP host is
+    answered with, and the `status.conditions` of the manifest a describe
+    renders. Spelled twice, the two could disagree inside a single frame.
+    """
+    return pod.phase == "Running" and pod.ready.partition("/")[0] != "0"
+
+
 def _pod_list_row(pod: PodSummary) -> PodListSummary:
     """The fixture's pod as the summary type the tool LIST path returns.
 
@@ -568,7 +788,7 @@ def _pod_list_row(pod: PodSummary) -> PodListSummary:
         ready=pod.ready,
         restarts=pod.restarts,
         node=pod.node or "",
-        ready_condition=pod.phase == "Running" and pod.ready.partition("/")[0] != "0",
+        ready_condition=_pod_is_ready(pod),
     )
 
 
