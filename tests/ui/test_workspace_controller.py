@@ -674,6 +674,32 @@ async def test_drill_into_pushes_level_and_navigates() -> None:
     assert b.state.focused.drill.parent_uid == "dep-uid"
 
 
+async def test_drill_render_failure_keeps_the_committed_drill_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    b = _make(kind="deployments", scope="default")
+    b.store.apply_event(
+        "deployments", "default", "ADDED", _summary("web", kind="Deployment", uid="dep-uid")
+    )
+    b.store.apply_event(
+        "replicasets",
+        "default",
+        "ADDED",
+        _summary("web-rs", kind="ReplicaSet", uid="rs", owner_uids=("dep-uid",)),
+    )
+
+    def fail_render(kind: str, *, only: PaneState | None = None) -> None:
+        raise RuntimeError("render failed")
+
+    monkeypatch.setattr(b.surface, "render_table", fail_render)
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        await b.ctl.drill_into("default", "web")
+
+    assert b.state.current_kind == "replicasets"
+    assert b.state.focused.drill.parent_uid == "dep-uid"
+
+
 async def test_drill_into_reports_missing_object() -> None:
     b = _make(kind="deployments", scope="default")
     err = await b.ctl.drill_into("default", "ghost")

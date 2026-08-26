@@ -969,7 +969,8 @@ class WorkspaceController:
                 try:
                     await self._navigate_locked(pane, child, None)
                 except BaseException:
-                    pane.drill.pop()
+                    if (pane.kind, pane.scope) == origin:
+                        pane.drill.pop()
                     raise
         finally:
             await self.stop_watch_if_unused(child, prewarm_scope)

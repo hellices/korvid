@@ -2179,6 +2179,8 @@ class AppAgentScreens(AgentScreens):
     def __init__(self, app: KorvidApp) -> None:
         self._app = app
         self._describe_owner: object | None = None
+        self._log_generation: int | None = None
+        self._log_uids: dict[tuple[str, str], str | None] = {}
 
     def approval_dialog_active(self) -> bool:
         return isinstance(
@@ -2285,6 +2287,18 @@ class AppAgentScreens(AgentScreens):
         triples = self._app._logs.current_triples if self._app._logs.mode else []
         if triples:
             pods = {(namespace, pod) for namespace, pod, _container in triples}
+            generation = int(getattr(self._app._logs, "pane_gen", 0))
+            if generation != self._log_generation:
+                self._log_generation = generation
+                self._log_uids = {
+                    (namespace, pod): self._displayed_resource_uid(
+                        "pods",
+                        namespace,
+                        pod,
+                        owner=self._app._logs.owner,
+                    )
+                    for namespace, pod in pods
+                }
             namespaces = {namespace for namespace, _pod in pods}
             scope = namespaces.pop() if len(namespaces) == 1 else ALL_NAMESPACES
             selected: ResourceIdentity | None = None
@@ -2294,9 +2308,7 @@ class AppAgentScreens(AgentScreens):
                     kind="pods",
                     namespace=namespace,
                     name=pod,
-                    uid=self._displayed_resource_uid(
-                        "pods", namespace, pod, owner=self._app._logs.owner
-                    ),
+                    uid=self._log_uids.get((namespace, pod)),
                 )
             return DisplayedPaneContext(
                 context=PaneContext(

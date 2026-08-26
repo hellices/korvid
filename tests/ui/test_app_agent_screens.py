@@ -172,6 +172,42 @@ def test_open_log_uid_prefers_the_owner_panes_active_store_bucket() -> None:
     assert displayed.context.selected.uid == "uid-current"
 
 
+def test_open_log_uid_stays_bound_to_the_visible_log_generation() -> None:
+    current_uid = ["uid-old"]
+
+    def resources(kind: str, scope: str) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(
+                name="api-2",
+                namespace="prod",
+                uid=current_uid[0],
+            )
+        ]
+
+    screens = _display_screens(
+        screen=object(),
+        _describe_pane=SimpleNamespace(display=False, resource_identity=None),
+        _logs=SimpleNamespace(
+            mode="l",
+            pane_gen=7,
+            current_triples=[("prod", "api-2", "main")],
+            owner=SimpleNamespace(scope="prod"),
+        ),
+        _view=SimpleNamespace(resources=resources),
+    )
+
+    first = screens.displayed_pane_context()
+    current_uid[0] = "uid-replacement"
+    second = screens.displayed_pane_context()
+
+    assert first is not None
+    assert first.context.selected is not None
+    assert second is not None
+    assert second.context.selected is not None
+    assert first.context.selected.uid == "uid-old"
+    assert second.context.selected.uid == "uid-old"
+
+
 def test_displayed_pane_context_does_not_reuse_table_identity_for_multi_pod_logs() -> None:
     screens = _display_screens(
         screen=object(),
@@ -184,6 +220,7 @@ def test_displayed_pane_context_does_not_reuse_table_identity_for_multi_pod_logs
             ],
             owner=None,
         ),
+        _view=SimpleNamespace(resources=lambda kind, scope: []),
     )
 
     displayed = screens.displayed_pane_context()
