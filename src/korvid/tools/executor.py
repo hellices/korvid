@@ -247,7 +247,7 @@ def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
     history budget."""
     if len(result) > limit:
         if limit <= len(_TRUNCATION_SUFFIX):
-            return result[:limit]
+            return "…"[:limit]
         return result[: limit - len(_TRUNCATION_SUFFIX)] + _TRUNCATION_SUFFIX
     return result
 

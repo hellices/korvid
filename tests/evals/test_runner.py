@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -17,9 +18,9 @@ import pytest
 from korvid.agent.prompt_packs import LOW_KORVID_OPERATOR_PACK, SAFETY_CONTRACT
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.grader import CitationReport, citation_report
-from korvid.evals.harness import PromptGrind, build_eval_harness
+from korvid.evals.harness import PromptGrind, build_eval_harness, resolve_eval_policy
 from korvid.evals.interaction import EvalUiBridge
-from korvid.evals.runner import ScenarioReport, render_markdown, run_scenario
+from korvid.evals.runner import ScenarioReport, _armed_schemas, render_markdown, run_scenario
 from korvid.evals.scenario import ContainerLogs, Evidence, Scenario
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import RecordedExecution
@@ -89,6 +90,26 @@ def _oom_scenario() -> Scenario:
             )
         },
     )
+
+
+def test_armed_schema_accepts_a_no_argument_tool_without_parameters() -> None:
+    policy = resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]), model_tier="low")
+    no_argument_tool = {
+        "type": "function",
+        "function": {
+            "name": "health_check",
+            "description": "Check provider health.",
+        },
+    }
+
+    armed = _armed_schemas(replace(policy, tools=(no_argument_tool,)))
+
+    assert armed == {
+        "health_check": {
+            "required": frozenset(),
+            "types": {},
+        }
+    }
 
 
 def _no_citations() -> CitationReport:

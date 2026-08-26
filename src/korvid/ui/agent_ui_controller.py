@@ -517,7 +517,7 @@ class AgentUiController:
         #: asks: the app's unmount path and a defensive `shutdown` both
         #: run on the way down.
         self._session_closed = False
-        self._model_name = model_name
+        self._model_name = session.policy.model.model if session is not None else model_name
         self._configurator = configurator
         self._rebuild = rebuild
         #: Releases the live provider on `:ai off` (issue #167) — session
@@ -835,7 +835,7 @@ class AgentUiController:
         self._session = session
         self._session_closed = False  # a fresh session, not the closed one
         self._disconnected = False  # reconnected (issue #167)
-        self._model_name = settings.model
+        self._model_name = session.policy.model.model
         self._settings = settings
         # Once applied (and persisted by the wizard) the tier is an explicit
         # choice — reopening :ai must preserve it.
@@ -846,7 +846,7 @@ class AgentUiController:
         # visibility.
         self._panel.enable_input()
         if self._panel.expanded():
-            self._render_header(session, settings.model)
+            self._render_header(session, self._model_name)
             self._panel.focus_input()
         return True
 
@@ -1026,6 +1026,8 @@ class AgentUiController:
             async for event in gen:
                 self._panel.apply_event(event)
                 await self._maybe_follow_read(event, pending_reads)
+            with contextlib.suppress(Exception):
+                self._render_header(session, self._model_name)
         except asyncio.CancelledError:
             # Close the generator first: if the cancel landed between
             # yields the generator is still suspended, and finalize must

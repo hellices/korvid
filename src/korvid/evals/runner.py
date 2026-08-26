@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import statistics
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -264,16 +264,29 @@ def _armed_schemas(policy: ResolvedAgentPolicy) -> _ArmedSchemas:
     a controlled arm that unarms a tool (#221) and a tier that never
     offered it are the same fact to every metric below.
     """
-    return {
-        str(tool["function"]["name"]): {
-            "required": frozenset(tool["function"]["parameters"].get("required", ())),
+    armed: _ArmedSchemas = {}
+    for tool in policy.tools:
+        function = tool.get("function")
+        if not isinstance(function, Mapping):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str):
+            continue
+        parameters = function.get("parameters")
+        if not isinstance(parameters, Mapping):
+            parameters = {}
+        properties = parameters.get("properties")
+        if not isinstance(properties, Mapping):
+            properties = {}
+        armed[name] = {
+            "required": frozenset(parameters.get("required", ())),
             "types": {
-                prop: spec.get("type", "string")
-                for prop, spec in tool["function"]["parameters"].get("properties", {}).items()
+                str(prop): spec.get("type", "string")
+                for prop, spec in properties.items()
+                if isinstance(spec, Mapping)
             },
         }
-        for tool in policy.tools
-    }
+    return armed
 
 
 def _read_names(armed: _ArmedSchemas) -> frozenset[str]:

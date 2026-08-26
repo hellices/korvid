@@ -90,6 +90,7 @@ def _retarget_pane(pane: PaneContext, source: str, namespace: str) -> PaneContex
             else replace(
                 selected,
                 namespace=namespace if selected.namespace == source else selected.namespace,
+                uid=None,
             )
         ),
     )

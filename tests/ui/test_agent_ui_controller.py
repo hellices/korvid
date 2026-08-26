@@ -580,6 +580,15 @@ async def test_toggling_a_configured_panel_sets_the_header_and_focuses_the_input
     assert env.panel.visible is False
 
 
+async def test_header_uses_the_session_resolved_model_name(tmp_path: Path) -> None:
+    session = ScriptedSession(policy=fake_policy(model="plugin-resolved-model"))
+    env = Env(tmp_path=tmp_path, session=session)
+
+    env.controller.toggle_panel()
+
+    assert env.panel.headers == ["plugin-resolved-model"]
+
+
 async def test_agent_setup_without_a_configurator_reports_the_install_hint(env: Env) -> None:
     env.controller.handle_command([])
     assert env.ui.screens == []
@@ -608,7 +617,7 @@ async def test_model_command_rejects_trailing_arguments(env: Env) -> None:
 async def test_applying_settings_swaps_the_session_and_the_configured_tier(
     tmp_path: Path,
 ) -> None:
-    fresh = ScriptedSession()
+    fresh = ScriptedSession(policy=fake_policy(model="m-2"))
     env = Env(tmp_path=tmp_path, rebuild=lambda settings: fresh)
     settings = AgentSettings(
         provider="ollama", auth_method="none", base_url=None, model="m-2", model_tier="low"
@@ -682,7 +691,7 @@ async def test_model_recovers_a_degraded_startup_without_the_wizard(tmp_path: Pa
         async def save(self, settings: AgentSettings) -> None:
             self.saved.append(settings)
 
-    fresh = ScriptedSession()
+    fresh = ScriptedSession(policy=fake_policy(model="llama3.2"))
     configurator = _Configurator()
     env = Env(
         tmp_path=tmp_path,
@@ -704,7 +713,7 @@ async def test_model_recovers_a_degraded_startup_without_the_wizard(tmp_path: Pa
 async def test_a_degraded_startup_reconnects_into_the_configured_state(tmp_path: Path) -> None:
     """After the recovery the panel is a working agent again: the input is
     enabled and the header renders, never the setup hint."""
-    fresh = ScriptedSession()
+    fresh = ScriptedSession(policy=fake_policy(model="llama3"))
     env = Env(
         tmp_path=tmp_path,
         session=None,
@@ -940,6 +949,18 @@ async def test_a_session_error_is_reported_in_the_panel(tmp_path: Path) -> None:
     env.controller.submit_prompt("hi")
     await env.controller.wait_for_turn()
     assert any(isinstance(event, AgentError) for event in env.panel.events)
+
+
+async def test_a_provider_error_repaints_failed_turn_token_totals(tmp_path: Path) -> None:
+    session = ScriptedSession([AgentError(message="provider failed")])
+    session.total_tokens = (140, 22)
+    env = Env(tmp_path=tmp_path, session=session)
+    env.panel.header_totals.clear()
+
+    env.controller.submit_prompt("hi")
+    await env.controller.wait_for_turn()
+
+    assert env.panel.header_totals[-1] == (140, 22)
 
 
 # ---------------------------------------------------------------------------

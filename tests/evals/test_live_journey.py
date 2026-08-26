@@ -202,6 +202,9 @@ def test_retargeting_reports_the_context_the_live_run_connected_to() -> None:
     assert restated
     for interaction in restated:
         assert interaction.kube_context == "aks-korvid-contract-test"
+        for pane in (interaction.focused_pane, interaction.secondary_pane):
+            if pane is not None and pane.selected is not None:
+                assert pane.selected.uid is None
 
 
 def test_a_default_context_is_reported_as_none_not_as_a_fixture_name() -> None:
