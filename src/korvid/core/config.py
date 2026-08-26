@@ -849,7 +849,7 @@ def _parse_num_ctx(value: Any) -> int:
 
 
 def _parse_positive_int(value: Any) -> int | None:
-    """Coerce `agent.ollama.num_ctx` to a positive int, or None."""
+    """Coerce a value to a positive int, or None."""
     if isinstance(value, bool):  # YAML `true` would silently become 1
         return None
     try:

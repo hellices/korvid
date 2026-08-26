@@ -476,12 +476,14 @@ def _ui_action(definition: ToolDef, arguments: dict[str, Any]) -> UiAction:
         # which the typed action spells as a None pattern.
         return SetFilter(filter_pattern=pattern or None)
     if dispatch == "agent_open_logs":
+        _optional_bool(arguments, "continue_analysis")
         return OpenLogs(
             pod=_require_str(arguments, "pod"),
             namespace=_require_str(arguments, "namespace"),
             container=_optional_str(arguments, "container"),
         )
     if dispatch == "agent_open_describe":
+        _optional_bool(arguments, "continue_analysis")
         return OpenDescribe(
             kind=_require_str(arguments, "kind"),
             name=_require_str(arguments, "name"),
@@ -509,3 +511,21 @@ def _optional_str(arguments: dict[str, Any], key: str) -> str | None:
         raise ValueError(f"{key!r} must be a string when provided")
     normalized = value.strip()
     return normalized or None
+
+
+def _optional_bool(arguments: dict[str, Any], key: str) -> bool | None:
+    """An optional boolean argument: absent/None is None; non-bool is refused.
+
+    Strings like `"true"` and integers like `1` are refused because they
+    indicate a misbehaving model that coerced the value from a schema that
+    declares the field as a JSON boolean.
+    """
+    value = arguments.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"{key!r} must be a JSON boolean (true/false) when provided,"
+            f" got {type(value).__name__!r}"
+        )
+    return value

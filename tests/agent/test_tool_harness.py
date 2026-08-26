@@ -475,6 +475,59 @@ async def test_a_failed_open_describe_returns_no_terminal_message() -> None:
     assert result.terminal_message is None
 
 
+@pytest.mark.parametrize(
+    "bad_value",
+    ["true", "false", "1", "0", 1, 0],
+    ids=["str-true", "str-false", "str-1", "str-0", "int-1", "int-0"],
+)
+async def test_open_logs_with_non_bool_continue_analysis_is_rejected_before_bridge(
+    bad_value: object,
+) -> None:
+    """A string or integer `continue_analysis` must be rejected (invalid args)
+    before the UI bridge is ever called."""
+    bridge = _RecordingBridge()
+    harness = _harness(_policy(["open_logs"], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute(
+        "c1",
+        "open_logs",
+        {"pod": "api-1", "namespace": "default", "continue_analysis": bad_value},
+    )
+
+    assert result.outcome.error is True
+    assert "continue_analysis" in result.outcome.text
+    assert bridge.actions == [], "bridge must not be called when arguments are invalid"
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    ["true", "false", "1", "0", 1, 0],
+    ids=["str-true", "str-false", "str-1", "str-0", "int-1", "int-0"],
+)
+async def test_open_describe_with_non_bool_continue_analysis_is_rejected_before_bridge(
+    bad_value: object,
+) -> None:
+    """A string or integer `continue_analysis` must be rejected (invalid args)
+    before the UI bridge is ever called."""
+    bridge = _RecordingBridge()
+    harness = _harness(_policy(["open_describe"], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute(
+        "c1",
+        "open_describe",
+        {
+            "kind": "pods",
+            "name": "api-1",
+            "namespace": "default",
+            "continue_analysis": bad_value,
+        },
+    )
+
+    assert result.outcome.error is True
+    assert "continue_analysis" in result.outcome.text
+    assert bridge.actions == [], "bridge must not be called when arguments are invalid"
+
+
 async def test_the_terminal_message_never_echoes_arguments_or_bridge_text() -> None:
     """Security boundary: the acknowledgement is a fixed constant. Neither
     the model's own arguments nor the bridge's (screen-controlled) message
