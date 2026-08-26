@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import math
+import os
 import re
 import struct
+import subprocess
 import sys
 import zlib
 from collections.abc import Callable, Iterator, Sequence
@@ -103,6 +105,23 @@ MCP_GATE_FILE = ".korvid-mcp-demo-go"
 #: listening, so a slow cold checkout would open the story on a connection
 #: error instead of the follow story.
 MCP_READY_FILE = ".korvid-mcp-demo-ready"
+#: The tmux session the tape composes and attaches. Named here because the
+#: fail-closed contract below is precisely that `attach-session` never runs
+#: without the readiness signal.
+MCP_TMUX_SESSION = "korvid-mcp-demo"
+#: The bound the tape's typed readiness loop enforces: 600 iterations of
+#: `sleep 0.1`, so 60 seconds at the outside.
+MCP_READY_WAIT_SECONDS = 60.0
+#: VHS's `Sleep` runs on VHS's own clock. It does *not* observe the shell it
+#: typed into finishing, so it advances while the readiness loop is still
+#: spinning. The hidden allowance must therefore outlast the loop's own bound
+#: with margin, or VHS types the release and reaches `Show` mid-wait and the
+#: composing shell lands in the captured frames.
+MCP_HIDDEN_ALLOWANCE = "Sleep 65s"
+#: How far the hidden allowance must exceed the bounded wait. A margin, not
+#: an equality: VHS starts its `Sleep` a keystroke before the shell starts
+#: its loop, so an exact match would still be a race.
+MCP_HIDDEN_ALLOWANCE_MARGIN_SECONDS = 5.0
 #: The story the external client tells, in the order korvid must mirror it:
 #: the pod table, the failing pod's diagnosis, its logs, then the release
 #: that owns it.
@@ -1169,9 +1188,9 @@ def test_mcp_follow_tape_composes_the_real_server_with_the_clean_client() -> Non
         "the left pane must be the real TUI serving the real MCP server"
     )
     assert "docs/demo/mcp_client.py" in tape, "the right pane must be the checked-in MCP SDK client"
-    assert COLD_START_SLEEP in tape, (
-        f"the tape must hide the shared cold-start allowance {COLD_START_SLEEP!r} "
-        "before Show, like every other tape"
+    assert MCP_HIDDEN_ALLOWANCE in tape, (
+        f"the tape must hide its composition behind {MCP_HIDDEN_ALLOWANCE!r} before "
+        "Show, an allowance sized to outlast its own bounded readiness wait"
     )
     assert COLD_START_REFERENCE in tape, (
         f"the tape must point at {COLD_START_REFERENCE} for the reason behind the "
@@ -1438,14 +1457,206 @@ def test_mcp_follow_tape_releases_its_client_on_readiness_not_on_a_timer() -> No
         f"recording instead of hanging the tape forever: {lines[wait_index]!r}"
     )
 
-    cold_start = [index for index, line in enumerate(lines) if line.strip() == COLD_START_SLEEP]
-    assert cold_start, f"the tape must still hide the shared {COLD_START_SLEEP!r} allowance"
+    cold_start = [index for index, line in enumerate(lines) if line.strip() == MCP_HIDDEN_ALLOWANCE]
+    assert cold_start, f"the tape must still hide the {MCP_HIDDEN_ALLOWANCE!r} allowance"
     assert cold_start[-1] < release_index, (
-        f"the shared {COLD_START_SLEEP!r} allowance must still be hidden before the "
+        f"the hidden {MCP_HIDDEN_ALLOWANCE!r} allowance must still be hidden before the "
         "release, with the readiness wait layered on top of it"
     )
     assert all("Show" not in line for line in lines[:release_index]), (
         "the whole handshake must stay inside the hidden composition block"
+    )
+
+
+def _mcp_typed_command(needle: str) -> str:
+    """The one shell command the tape types that contains `needle`.
+
+    The tape drives a real bash session, so its contracts are about shell
+    semantics rather than about substrings sharing a line. Pulling the exact
+    command out lets a test hand it to bash and watch what runs.
+    """
+    typed = [
+        line
+        for line in MCP_TAPE.read_text(encoding="utf-8").splitlines()
+        if line.startswith('Type "') and needle in line
+    ]
+    assert len(typed) == 1, f"exactly one typed command may contain {needle!r}; found {typed}"
+    command = typed[0]
+    assert command.endswith('"'), f"a typed command must be a closed VHS string: {command!r}"
+    return command[len('Type "') : -1]
+
+
+def _run_mcp_release(workdir: Path, *, ready: bool) -> tuple[int, str, str]:
+    """Run the tape's release command against stubbed `tmux`/`clear`.
+
+    Returns the exit status, everything the stubs recorded, and everything
+    the command printed. `tmux` and `clear` are shell stubs on `PATH`, so no
+    multiplexer, terminal or korvid process is involved.
+    """
+    stub_dir = workdir / "stubs"
+    stub_dir.mkdir()
+    invocations = workdir / "invocations.log"
+    for name in ("tmux", "clear"):
+        stub = stub_dir / name
+        stub.write_text(f'#!/bin/sh\necho "{name} $*" >> "{invocations}"\n', encoding="utf-8")
+        stub.chmod(0o755)
+
+    if ready:
+        (workdir / MCP_READY_FILE).touch()
+
+    environment = dict(os.environ)
+    environment["PATH"] = f"{stub_dir}{os.pathsep}{environment.get('PATH', '')}"
+    completed = subprocess.run(
+        ["bash", "-c", _mcp_typed_command(f"touch {MCP_GATE_FILE}")],
+        cwd=workdir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    recorded = invocations.read_text(encoding="utf-8") if invocations.exists() else ""
+    return completed.returncode, recorded, completed.stdout + completed.stderr
+
+
+def test_mcp_follow_tape_never_attaches_without_the_readiness_signal(tmp_path: Path) -> None:
+    """The guard must be a branch bash honours, not two clauses on one line.
+
+    The release used to read
+    `[ -f READY ] && ( sleep 0.7; touch GO ) & clear; tmux attach-session ...`.
+    Bash parses `&` as a list terminator, not as an operand of `&&`: the whole
+    `and_or` list — readiness test included — is what gets backgrounded, and
+    `clear; tmux attach-session` is a *separate* command that runs
+    unconditionally. So the tape attached and recorded the story even when
+    readiness never arrived, which is exactly the connection-error capture the
+    handshake exists to prevent.
+
+    This contract runs the shipped command under bash with stubbed `tmux` and
+    `clear`, so it proves the guard by observing whether `attach-session` is
+    reached — not by observing that a substring shares a line with it.
+    """
+    absent = tmp_path / "readiness-absent"
+    absent.mkdir()
+    status, recorded, output = _run_mcp_release(absent, ready=False)
+
+    assert "attach-session" not in recorded, (
+        "without the readiness signal the tape must not attach; bash reached "
+        f"attach-session anyway: {recorded!r}"
+    )
+    assert status != 0, (
+        "a recording whose scene never became ready must fail loudly rather than "
+        f"capture whatever the terminal happened to show; exit status was {status}"
+    )
+    assert output.strip(), (
+        "the missing-readiness branch must print why the capture was abandoned; it printed nothing"
+    )
+    assert not (absent / MCP_GATE_FILE).exists(), (
+        "the client gate must stay shut when readiness never arrived"
+    )
+
+    present = tmp_path / "readiness-present"
+    present.mkdir()
+    status, recorded, output = _run_mcp_release(present, ready=True)
+
+    assert status == 0, f"the readiness-success branch must succeed; it exited {status}: {output!r}"
+    assert f"attach-session -t {MCP_TMUX_SESSION}" in recorded, (
+        f"with readiness published the tape must attach {MCP_TMUX_SESSION}; the stubs "
+        f"recorded {recorded!r}"
+    )
+    assert (present / MCP_GATE_FILE).exists(), (
+        "the readiness-success branch must also arm the client gate, from the same branch"
+    )
+
+
+def test_mcp_follow_tape_hidden_allowance_outlasts_its_bounded_readiness_wait() -> None:
+    """VHS's clock and the shell's clock are independent; only one is typed into.
+
+    `Type` puts the readiness loop into the shell and returns; the following
+    `Sleep` then runs on VHS's own timeline. VHS never learns that the loop
+    finished, so an allowance shorter than the loop's own bound lets VHS type
+    the release and reach `Show` while the shell is still spinning — the
+    composing shell, the release command and an unattached prompt would all
+    land in the captured frames.
+
+    The fix is an ordering between two numbers that live in different files'
+    worth of reasoning but in one tape: the loop is bounded at
+    600 x 0.1 s = 60 s, so the hidden allowance is 65 s. Releasing early is
+    harmless in the other direction — the client pane is blocked on the
+    separate gate file, so no part of the story can run inside the hidden
+    block.
+    """
+    lines = MCP_TAPE.read_text(encoding="utf-8").splitlines()
+
+    wait_indices = [
+        index
+        for index, line in enumerate(lines)
+        if MCP_READY_FILE in line and re.search(r"while .*-f |until .*-f ", line)
+    ]
+    assert wait_indices, f"the tape must wait for {MCP_READY_FILE} inside its hidden block"
+    wait_line = lines[wait_indices[0]]
+
+    bound = re.search(r"-lt (\d+)", wait_line)
+    assert bound, f"the readiness wait must state its iteration bound: {wait_line!r}"
+    step = re.search(r"sleep ([0-9.]+)", wait_line)
+    assert step, f"the readiness wait must state its step: {wait_line!r}"
+    wait_seconds = int(bound.group(1)) * float(step.group(1))
+    assert wait_seconds == pytest.approx(MCP_READY_WAIT_SECONDS), (
+        f"the readiness loop must stay bounded at {MCP_READY_WAIT_SECONDS} s; "
+        f"{wait_line!r} bounds it at {wait_seconds} s"
+    )
+
+    allowances = [
+        (index, float(match.group(1)))
+        for index, line in enumerate(lines)
+        if index > wait_indices[0]
+        and (match := re.fullmatch(r"Sleep (\d+(?:\.\d+)?)s", line.strip()))
+    ]
+    assert allowances, "the tape must hide the bounded wait behind a VHS Sleep"
+    allowance_index, allowance_seconds = allowances[0]
+
+    assert allowance_seconds >= wait_seconds + MCP_HIDDEN_ALLOWANCE_MARGIN_SECONDS, (
+        f"VHS advances independently of the shell, so the hidden allowance must cover "
+        f"the whole {wait_seconds} s bound with at least "
+        f"{MCP_HIDDEN_ALLOWANCE_MARGIN_SECONDS} s of margin; it is {allowance_seconds} s"
+    )
+    assert lines[allowance_index].strip() == MCP_HIDDEN_ALLOWANCE, (
+        f"the allowance covering the bounded wait must be {MCP_HIDDEN_ALLOWANCE!r}; "
+        f"found {lines[allowance_index]!r}"
+    )
+
+    show = [index for index, line in enumerate(lines) if line.strip() == "Show"]
+    assert show, "the tape must still reveal a captured story"
+    assert allowance_index < show[0], (
+        "the allowance must run inside the hidden composition block, so raising it "
+        "costs the captured story nothing"
+    )
+
+
+def test_mcp_provenance_states_the_allowance_covers_the_bounded_wait() -> None:
+    """The page must not claim VHS watches the shell finish; it cannot.
+
+    The published recipe described the readiness wait as running "inside the
+    hidden cold-start allowance", which reads as if VHS resumed when the loop
+    returned. It does not: the allowance is a fixed sleep on VHS's own clock,
+    and the only thing that makes it safe is that it is longer than the bound
+    the loop enforces. A contributor who trusted the old wording would size
+    the allowance to a typical start and reintroduce the race.
+    """
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    mcp = instructions[instructions.index("## MCP follow") :]
+    lowered = " ".join(mcp.lower().split())
+
+    assert "65" in mcp, "the page must publish the hidden allowance that covers the bounded wait"
+    assert "60 s" in mcp, "the page must publish the bound the readiness loop enforces"
+    assert re.search(r"own clock|independent|does not (wait|observe)", lowered), (
+        "the page must say VHS advances on its own clock rather than on the shell's, "
+        "since that is why the allowance has to outlast the bound"
+    )
+    assert not re.search(r"vhs (waits|resumes|continues) (for|when|once|until)", lowered), (
+        "VHS never observes the typed shell finishing; the page may not say it does"
+    )
+    assert re.search(r"without attach|not attach|never attach", lowered), (
+        "the page must state the fail-closed half: no readiness signal, no attach"
     )
 
 

@@ -54,21 +54,32 @@ Type "tmux select-pane -t korvid-mcp-demo:0.0"
 Enter
 
 # korvid's own startup: mount, first watch, and the MCP server's bind. The
-# shared cold-start allowance every tape hides; see the reasoning in
-# docs/demo/visual-storytelling.md. The allowance runs the scene's own
-# readiness wait rather than an idle sleep: `--scene mcp` publishes
+# hidden allowance runs the scene's own readiness wait rather than an idle
+# sleep; the reason the allowance is hidden at all is written down once, in
+# docs/demo/visual-storytelling.md. `--scene mcp` publishes
 # .korvid-mcp-demo-ready from its Textual mount, and only after the MCP
-# server reported itself bound. Bounded at 60s, so a server that never binds
-# fails the recording instead of hanging it.
+# server reported itself bound. The loop is bounded at 600 x 0.1s = 60s, so
+# a server that never binds fails the recording instead of hanging it.
+#
+# The Sleep below is VHS's own clock, and VHS never learns that the loop it
+# typed has returned. So the allowance must outlast the loop's whole 60s
+# bound rather than a typical start: at 65s the composition stays hidden even
+# in the worst case. Readiness arriving early costs nothing — the client pane
+# is still held by the separate .korvid-mcp-demo-go gate, dropped only below,
+# so no part of the story can run inside the hidden block.
 Type "waited=0; while [ ! -f .korvid-mcp-demo-ready ] && [ $waited -lt 600 ]; do sleep 0.1; waited=$((waited+1)); done"
 Enter
-Sleep 20s
+Sleep 65s
 
 # Release the client from a background subshell, so the gate is dropped from
-# outside tmux and no keystroke of the trigger can reach the attached TUI —
-# and only if that readiness signal really arrived, so the story can never
-# open on a connection error.
-Type "[ -f .korvid-mcp-demo-ready ] && ( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux attach-session -t korvid-mcp-demo"
+# outside tmux and no keystroke of the trigger can reach the attached TUI.
+# Fail-closed, in an explicit branch: the release *and* the attach happen
+# only where readiness is known to exist, and a missing signal prints the
+# reason into the hidden block, tears the session down and exits without
+# attaching. `[ -f ready ] && ( ... ) & clear; tmux attach-session` does not
+# express that — bash's `&` terminates the whole and_or list, so the attach
+# is a separate, unconditional command.
+Type "if [ -f .korvid-mcp-demo-ready ]; then ( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux attach-session -t korvid-mcp-demo; else echo 'mcp-follow.tape: .korvid-mcp-demo-ready never appeared; failing without attach'; tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready; exit 1; fi"
 Enter
 Sleep 400ms
 

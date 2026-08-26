@@ -162,14 +162,28 @@ are created and removed inside the checkout.
 The client is never released on a timer. `--scene mcp` publishes
 `.korvid-mcp-demo-ready` from its real Textual mount, and only after its
 `KorvidMCPServer` reported itself bound — the first moment an external call
-can be both answered and mirrored on screen. The tape waits for that file
-inside the hidden cold-start allowance (bounded at 60 s, so a server that
-never binds fails the recording instead of hanging it) and only then drops
+can be both answered and mirrored on screen. The tape types a wait for that
+file into the hidden shell and bounds it at 60 s, so a server that never
+binds fails the recording instead of hanging it.
+
+VHS advances on its own clock: `Type` hands the loop to the shell and
+returns, and the `Sleep` that follows never observes the loop returning. The
+hidden allowance is therefore sized to cover the whole bound — 65 s against a
+60 s wait — rather than to match a typical start, so VHS cannot type the
+release or reach `Show` while the shell is still waiting. Readiness arriving
+early costs nothing, because the client pane is still held by the separate
+gate file and no part of the story can run inside the hidden block.
+
+Only where readiness is known to exist does the tape drop
 `.korvid-mcp-demo-go`, the gate the client pane waits on, from a background
-subshell outside tmux — no keystroke of the trigger reaches the attached TUI.
-A fixed sleep would release the client whether or not port 7878 was
-listening, so a slow cold checkout would open the story on the client's
-connection error rather than on the follow story.
+subshell outside tmux — no keystroke of the trigger reaches the attached
+TUI — and attach the session. Both live in the same branch, so neither can
+happen without the signal; if the signal never arrives the tape prints the
+reason into the hidden block and exits without attaching, leaving an obvious
+failed recording rather than a plausible-looking wrong one. A fixed sleep
+would release the client whether or not port 7878 was listening, so a slow
+cold checkout would open the story on the client's connection error rather
+than on the follow story.
 
 The captured timeline runs the story once, at reading speed. Each call is
 announced, answered, and then held for a fixed beat while the mirrored view
