@@ -256,6 +256,101 @@ def test_helm_storyboard_inline_code_is_real_markup_not_literal_backticks() -> N
     assert "<code>--dry-run</code>" in block
 
 
+def test_helm_preview_masking_keeps_the_old_helm_compatibility_caveat() -> None:
+    """Video round 1, finding 1: `--hide-secret` is a helm 3.15+ flag.
+
+    `HelmCLI._dry_run` re-renders *without* it on older helm purely to learn
+    the render verdict, discards that unmasked output, and still raises
+    `HelmPreviewUnsupported` — so `HelmController._preview` returns `None`
+    and the confirmation opens marked "preview unavailable", while a real
+    render error keeps stopping the flow before the dialog. Promising that
+    every preview carries the flag would tell those users to expect a masked
+    preview they never get.
+    """
+    flat = " ".join(_source("helm-operators.md").split())
+    lowered = flat.lower()
+
+    assert "--hide-secret" in flat, "the masking guarantee itself must survive this caveat"
+    assert "never surfaced in a tool result" in flat, (
+        "the raw-manifest guarantee must not be weakened by the compatibility note"
+    )
+    assert "always passed `--hide-secret`" not in flat, (
+        "helm < 3.15 rejects the flag, so no preview can always be passed it"
+    )
+    assert "3.15" in flat, "the caveat must name the helm version that introduced the flag"
+    assert "preview unavailable" in lowered, (
+        "on older helm the confirmation opens without a preview; the page must say so"
+    )
+    assert "discard" in lowered, (
+        "the unmasked fallback render is discarded rather than shown — the masking "
+        "claim rests on exactly that"
+    )
+    assert re.search(r"still stops|still blocks|keeps stopping", lowered), (
+        "issue #139's rule survives on old helm: a render failure the real command "
+        "would hit must still stop the approval flow"
+    )
+
+
+def _representative_tool_rows() -> dict[str, str]:
+    """The `Representative tools` table, mapping each family to its disclosure."""
+    section = _source("mcp.md").split("## Representative tools", 1)[1].split("\n## ", 1)[0]
+    rows: dict[str, str] = {}
+    for line in section.splitlines():
+        if not re.match(r"^\|.*\|$", line):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) != 4 or cells[0] in {"Family", "---"} or set(cells[0]) <= {"-"}:
+            continue
+        rows[f"{cells[0]} :: {cells[1]}"] = cells[3]
+    return rows
+
+
+def test_mcp_tools_table_separates_producer_side_redaction_from_shaping() -> None:
+    """Video round 1, finding 2: the compact summary must not overclaim.
+
+    Only `get_resource` and `diagnose_workload` are recursively redacted
+    where they are produced (`ToolExecutor._get_resource` → `_mask_manifest`,
+    `_diagnose_workload` → `redacted_and_compacted`). Logs, events, lists,
+    single-pod diagnoses and Helm status get their own shaping and size caps
+    only, and can carry credential-shaped text verbatim — which the prose
+    above the table already discloses. A single "tool-specific redaction"
+    cell covering every Kubernetes read contradicts it, and this table is the
+    part a reader skims.
+    """
+    rows = _representative_tool_rows()
+    assert rows, "mcp.md must keep its representative-tools table"
+
+    redacted = [key for key, cell in rows.items() if "redact" in cell.lower()]
+    assert len(redacted) == 1, (
+        f"exactly one Kubernetes-read row may claim redaction; found {redacted}"
+    )
+    redacted_row = redacted[0]
+    for tool in ("get_resource", "diagnose_workload"):
+        assert tool in redacted_row, f"the redacted row must name {tool}"
+    for tool in ("get_logs", "list_resources", "diagnose_pod", "helm_list_releases"):
+        assert tool not in redacted_row, (
+            f"{tool} is not credential-pattern masked; it must not sit in the redacted row"
+        )
+
+    shaped = [
+        key
+        for key, cell in rows.items()
+        if "shaping" in cell.lower() and "redact" not in cell.lower()
+    ]
+    assert len(shaped) == 1, f"the shaped-only Kubernetes reads need their own row; found {shaped}"
+    shaped_row, shaped_cell = shaped[0], rows[shaped[0]]
+    for tool in ("list_resources", "get_logs", "diagnose_pod", "helm_list_releases"):
+        assert tool in shaped_row, f"the shaping-only row must name {tool}"
+    lowered_cell = shaped_cell.lower()
+    assert "not" in lowered_cell, (
+        f"the shaping-only row must deny the masking, not merely omit it: {shaped_cell!r}"
+    )
+    assert "mask" in lowered_cell, (
+        f"the shaping-only row must name credential-pattern masking as what it lacks: "
+        f"{shaped_cell!r}"
+    )
+
+
 #: Narrowest realistic content column: Material renders the 360 px viewport
 #: body at 360 px minus the .md-content padding either side.
 _MOBILE_CONTENT_PX = 328.0

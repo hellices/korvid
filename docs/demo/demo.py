@@ -12,7 +12,7 @@ import asyncio
 import importlib.util
 import random
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
@@ -656,6 +656,25 @@ MCP_DESCRIBE_HOLD = 2.2
 #: How often the `mcp` scene checks whether that modal is up.
 _DESCRIBE_POLL = 0.2
 
+#: The repository-local file the `mcp` scene publishes once its MCP server
+#: is bound *and* the TUI has mounted. `docs/demo/mcp-follow.tape` waits for
+#: it before releasing the external client: a fixed sleep releases the client
+#: whether or not port 7878 is listening, so a slow cold checkout would open
+#: the recorded story on a connection error. It never leaves the checkout
+#: being recorded — the tape removes it on both sides of the run, and so does
+#: `run_mcp_demo`.
+MCP_READY_FILE = Path(".korvid-mcp-demo-ready")
+
+
+def signal_mcp_ready(path: Path = MCP_READY_FILE) -> None:
+    """Publish the readiness signal the recording tape waits for."""
+    path.write_text("", encoding="utf-8")
+
+
+def clear_mcp_ready(path: Path = MCP_READY_FILE) -> None:
+    """Drop the readiness signal, including one an interrupted run left."""
+    path.unlink(missing_ok=True)
+
 
 class DemoKorvidApp(KorvidApp):
     """KorvidApp with documentation-only scene choreography."""
@@ -664,6 +683,9 @@ class DemoKorvidApp(KorvidApp):
         super().__init__(*args, **kwargs)
         self._demo_scene = demo_scene
         self._describe_shown_at: float | None = None
+        #: Armed by `run_mcp_demo` once the MCP server reports itself bound,
+        #: so mounting can only publish readiness when both halves are up.
+        self.on_mcp_ready: Callable[[], None] | None = None
 
     async def on_mount(self) -> None:
         await super().on_mount()
@@ -675,6 +697,11 @@ class DemoKorvidApp(KorvidApp):
             self.set_timer(0.2, self.action_toggle_agent)
         elif self._demo_scene == "mcp":
             self.set_interval(_DESCRIBE_POLL, self._dismiss_settled_describe)
+            if self.on_mcp_ready is not None:
+                # First frame of a mounted TUI over a bound server: the
+                # earliest moment an external call can be answered *and*
+                # mirrored on screen.
+                self.on_mcp_ready()
 
     def _dismiss_settled_describe(self) -> None:
         """Close a follow-opened describe modal after it has been read.
@@ -852,32 +879,71 @@ def build_demo_mcp_controller(
     return MCPController(factory)
 
 
-async def run_mcp_demo(app: DemoKorvidApp, controller: MCPControllerBase) -> None:
-    """Serve MCP for exactly as long as the TUI runs."""
-    await controller.start()
+async def run_mcp_demo(
+    app: DemoKorvidApp,
+    controller: MCPControllerBase,
+    *,
+    ready_file: Path = MCP_READY_FILE,
+) -> None:
+    """Serve MCP for exactly as long as the TUI runs.
+
+    The readiness signal the recording waits for is published here rather
+    than at process start, and only through the app's mount hook: the server
+    is bound first, so the file appears at the one moment an external client
+    can both be answered and be mirrored on screen.
+
+    `MCPController.start` reports a bind failure by *returning* an error line,
+    so a failure is turned into an exception instead of a TUI with no server
+    quietly publishing readiness — the tape's bounded wait then expires and
+    the recording fails loudly rather than capturing a connection error.
+
+    Args:
+        app: The mounted scene app; its `on_mcp_ready` hook is armed here.
+        controller: The MCP controller serving the scene.
+        ready_file: Where to publish readiness. Overridden by the contract
+            tests so a run never touches the checkout.
+
+    Raises:
+        RuntimeError: The MCP server did not bind.
+    """
+    clear_mcp_ready(ready_file)
+    status = await controller.start()
+    if not controller.running:
+        raise RuntimeError(f"the mcp scene needs a bound MCP server; start reported: {status}")
+    app.on_mcp_ready = lambda: signal_mcp_ready(ready_file)
     try:
         await app.run_async()
     finally:
+        clear_mcp_ready(ready_file)
         await controller.stop()
 
 
-def main() -> None:
-    scene = _parse_scene()
+def build_demo_app(scene: str, controller: MCPControllerBase | None) -> DemoKorvidApp:
+    """The scene's app, wired the one way `main` wires it.
+
+    Exposed so the capture contracts can mount the real app and watch the
+    readiness signal fire, instead of trusting a reading of `on_mount`.
+
+    Args:
+        scene: One of `base`, `agent`, `relationships`, `mcp`.
+        controller: The MCP controller for the `mcp` scene; `None` elsewhere.
+
+    Returns:
+        The demo app, not yet running.
+    """
     store = ResourceStore()
-    ui_proxy = _UIBridgeProxy()
-    mcp_hooks = _MCPAppHooks()
-    controller = build_demo_mcp_controller(ui_proxy, mcp_hooks) if scene == "mcp" else None
     aliases = ALIASES
     if scene == "relationships":
         aliases = RELATIONSHIP_ALIASES
     elif scene == "mcp":
         aliases = MCP_ALIASES
-    app = DemoKorvidApp(
+    serving_mcp = controller is not None
+    return DemoKorvidApp(
         config=KorvidConfig(
             namespace="shop",
-            mcp_enabled=scene == "mcp",
+            mcp_enabled=serving_mcp,
             mcp_port=MCP_DEMO_PORT,
-            mcp_follow=scene == "mcp",
+            mcp_follow=serving_mcp,
         ),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -892,6 +958,14 @@ def main() -> None:
         mcp=controller,
         demo_scene=scene,
     )
+
+
+def main() -> None:
+    scene = _parse_scene()
+    ui_proxy = _UIBridgeProxy()
+    mcp_hooks = _MCPAppHooks()
+    controller = build_demo_mcp_controller(ui_proxy, mcp_hooks) if scene == "mcp" else None
+    app = build_demo_app(scene, controller)
     if controller is None:
         app.run()
         return

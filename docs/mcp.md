@@ -170,6 +170,7 @@ it is disclosed:
 
 | Family | Examples | Backend | Disclosure / follow |
 |---|---|---|---|
-| Kubernetes reads | `list_resources`, `get_resource`, `get_logs`, `diagnose_pod`/`_service`/`_pvc`/`_workload`, `helm_list_releases` | Kubernetes API | Tool-specific redaction; may emit a follow activity note |
+| Redacted Kubernetes reads | `get_resource`, `diagnose_workload` | Kubernetes API | Producer-side recursive redaction; may emit a follow activity note |
+| Shaped Kubernetes reads | `list_resources`, `get_logs`, `get_events`, `diagnose_pod`/`_service`/`_pvc`, `helm_list_releases` | Kubernetes API | Tool-specific shaping and size caps only — **not** credential-pattern masked; may emit a follow activity note |
 | Observability reads | Prometheus / Loki query tools | Prometheus / Loki | Activity note only — never followable navigation |
 | Write proposals (opt-in) | `propose_write`, `get_write_proposal`, `cancel_write_proposal` | Kubernetes API, gated | Inert until a fresh user keystroke in the TUI |

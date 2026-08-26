@@ -155,9 +155,21 @@ endpoint file. The client speaks only to `127.0.0.1:7878`, no credential is
 used, the demo server writes no MCP endpoint file, and the tape turns the
 tmux status line off before the first captured frame — that line is the only
 surface that would print a hostname, a user or today's date into a landing
-asset. The shell that composes the panes is never captured, and the handshake
-file the tape uses to release the client (`.korvid-mcp-demo-go`) is created
-and removed inside the checkout.
+asset. The shell that composes the panes is never captured, and the two
+handshake files it uses (`.korvid-mcp-demo-ready` and `.korvid-mcp-demo-go`)
+are created and removed inside the checkout.
+
+The client is never released on a timer. `--scene mcp` publishes
+`.korvid-mcp-demo-ready` from its real Textual mount, and only after its
+`KorvidMCPServer` reported itself bound — the first moment an external call
+can be both answered and mirrored on screen. The tape waits for that file
+inside the hidden cold-start allowance (bounded at 60 s, so a server that
+never binds fails the recording instead of hanging it) and only then drops
+`.korvid-mcp-demo-go`, the gate the client pane waits on, from a background
+subshell outside tmux — no keystroke of the trigger reaches the attached TUI.
+A fixed sleep would release the client whether or not port 7878 was
+listening, so a slow cold checkout would open the story on the client's
+connection error rather than on the follow story.
 
 The captured timeline runs the story once, at reading speed. Each call is
 announced, answered, and then held for a fixed beat while the mirrored view

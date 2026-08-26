@@ -9,11 +9,14 @@ import re
 import struct
 import sys
 import zlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 from korvid.agent.events import AgentEvent, TextDelta, ToolCallStarted, TurnComplete
+from korvid.core.mcp import MCPControllerBase
 from korvid.core.relationships import GraphResource, SummaryLike
 from korvid.k8s.discovery import ResourceMeta
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader, graph_source_metas
@@ -30,6 +33,7 @@ AGENT_PAGE = DOCS / "agent.md"
 MCP_PAGE = DOCS / "mcp.md"
 DEMO_HARNESS = DEMO_DIR / "demo.py"
 VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
+LANDING_VIDEO_PLAN = DOCS / "superpowers" / "plans" / "2026-08-26-landing-video-experience.md"
 _MARKDOWN_FENCE = re.compile(
     r"^(?P<fence>`{3,}|~{3,}).*?^(?P=fence)",
     re.DOTALL | re.MULTILINE,
@@ -93,6 +97,12 @@ MCP_DEMO_URL = "http://127.0.0.1:7878/mcp"
 #: The repository-local file the tape uses to hold the client back until the
 #: recorded timeline starts. It never leaves the checkout being recorded.
 MCP_GATE_FILE = ".korvid-mcp-demo-go"
+#: The repository-local file the `mcp` scene publishes once its MCP server is
+#: bound *and* the TUI has mounted. The tape waits for it before it arms the
+#: gate above: a fixed sleep releases the client whether or not port 7878 is
+#: listening, so a slow cold checkout would open the story on a connection
+#: error instead of the follow story.
+MCP_READY_FILE = ".korvid-mcp-demo-ready"
 #: The story the external client tells, in the order korvid must mirror it:
 #: the pod table, the failing pod's diagnosis, its logs, then the release
 #: that owns it.
@@ -1199,6 +1209,260 @@ def test_mcp_follow_tape_records_no_host_identity_and_leaves_no_scratch_file() -
         "it ends, so an interrupted recording leaves nothing behind"
     )
     assert "kill-session" in tape, "the tape must tear its own tmux session down"
+
+
+class _RecordingController(MCPControllerBase):
+    """A controller shaped like the real one, without binding a socket.
+
+    Only the ordering matters here: whether the readiness file exists when
+    the server binds, when the TUI mounts, and when the run tears down.
+    """
+
+    def __init__(self, log: list[str], ready: Path, *, binds: bool = True) -> None:
+        self._log = log
+        self._ready = ready
+        self._binds = binds
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def status(self) -> str:
+        return "MCP on :7878" if self._running else "MCP off"
+
+    async def start(self) -> str:
+        self._log.append(f"bind ready={self._ready.exists()}")
+        if not self._binds:
+            # Exactly how `MCPController.start` reports a bind failure.
+            return "ERROR: MCP failed to start (port in use?)"
+        self._running = True
+        return self.status()
+
+    async def stop(self) -> str:
+        self._running = False
+        self._log.append(f"stop ready={self._ready.exists()}")
+        return "MCP off"
+
+    async def shutdown(self) -> asyncio.Task[None] | None:
+        return None
+
+
+class _MountRecordingApp:
+    """The two surfaces `run_mcp_demo` touches: the mount hook and the run."""
+
+    def __init__(self, log: list[str], ready: Path) -> None:
+        self._log = log
+        self._ready = ready
+        self.on_mcp_ready: Callable[[], None] | None = None
+
+    async def run_async(self) -> None:
+        self._log.append(f"mount ready={self._ready.exists()}")
+        assert self.on_mcp_ready is not None, "run_mcp_demo must arm the mount hook"
+        self.on_mcp_ready()
+        self._log.append(f"story ready={self._ready.exists()}")
+
+
+def test_mcp_scene_publishes_readiness_only_after_the_server_bound_and_the_tui_mounted(
+    tmp_path: Path,
+) -> None:
+    """The signal the tape waits for must mean both halves of the scene are up.
+
+    A file touched when the process starts would be exactly the timer the
+    tape replaced. `run_mcp_demo` clears any signal an interrupted run left
+    behind, starts the server, and only arms the mount hook once the
+    controller reports it bound — so the file appears when the TUI mounts,
+    which is the first moment the client can connect *and* be mirrored.
+    """
+    harness = _demo_harness()
+    ready = tmp_path / MCP_READY_FILE
+    ready.write_text("stale run", encoding="utf-8")
+    log: list[str] = []
+
+    controller = _RecordingController(log, ready)
+    app = _MountRecordingApp(log, ready)
+    asyncio.run(harness.run_mcp_demo(app, controller, ready_file=ready))
+
+    assert log == [
+        "bind ready=False",
+        "mount ready=False",
+        "story ready=True",
+        "stop ready=False",
+    ], f"readiness must be published at mount and cleared at teardown; got {log}"
+    assert not ready.exists(), "a finished recording must leave no readiness file behind"
+
+
+def test_mcp_scene_publishes_no_readiness_when_the_server_never_binds(
+    tmp_path: Path,
+) -> None:
+    """A failed bind must fail the recording, never release the client.
+
+    `MCPController.start` reports a bind failure by returning an error line
+    rather than raising, so a scene that ignored it would run a TUI with no
+    server and publish readiness anyway — the exact connection-error capture
+    this handshake exists to prevent.
+    """
+    harness = _demo_harness()
+    ready = tmp_path / MCP_READY_FILE
+    log: list[str] = []
+    controller = _RecordingController(log, ready, binds=False)
+    app = _MountRecordingApp(log, ready)
+
+    with pytest.raises(RuntimeError, match="MCP"):
+        asyncio.run(harness.run_mcp_demo(app, controller, ready_file=ready))
+
+    assert not ready.exists(), "an unbound server must never publish readiness"
+    assert "mount ready=False" not in log, "the TUI must not run without its server"
+
+
+async def test_mcp_scene_signals_readiness_from_the_real_textual_mount() -> None:
+    """Reading the hook proves its shape; mounting the app proves it fires.
+
+    The recording's whole guarantee is that the file appears when korvid is
+    on screen, so the contract is taken from `DemoKorvidApp`'s real Textual
+    mount rather than from a call to the handler.
+    """
+    harness = _demo_harness()
+    app = harness.build_demo_app("mcp", None)
+    published: list[str] = []
+    app.on_mcp_ready = lambda: published.append("ready")
+
+    async with app.run_test():
+        pass
+
+    assert published == ["ready"], (
+        "the mcp scene must publish its readiness signal exactly once, at mount"
+    )
+
+
+def test_mcp_capture_provenance_publishes_the_readiness_handshake() -> None:
+    """The published recipe must describe the handshake it actually runs.
+
+    The page told contributors about one scratch file and called it "the
+    handshake file the tape uses to release the client", which described a
+    release driven by a timer. There are two files now, and the point of the
+    second one is that the release is not a timer at all: the scene publishes
+    readiness from its Textual mount, over a server it has already bound, and
+    only then may the client be let go.
+    """
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    mcp = instructions[instructions.index("## MCP follow") :]
+    lowered = mcp.lower()
+
+    for scratch in (MCP_READY_FILE, MCP_GATE_FILE):
+        assert scratch in mcp, f"the provenance page must name {scratch}"
+    assert "created and removed inside the checkout" in lowered, (
+        "both handshake files stay in the checkout being recorded; the page must say so"
+    )
+    assert "bound" in lowered, (
+        "the page must state the first half of readiness: the MCP server is bound"
+    )
+    assert "mount" in lowered, (
+        "the page must state the second half of readiness: the TUI has mounted"
+    )
+    assert re.search(r"not (released )?on a timer|never (released )?on a timer", lowered), (
+        "the page must say the client is not released by a timer, since that is the "
+        "failure mode the readiness file removes"
+    )
+    assert "connection error" in lowered, (
+        "the page must name what the handshake prevents: a capture that opens on the "
+        "client's connection error"
+    )
+
+
+def test_landing_video_plan_ships_the_recorded_mcp_tape_not_a_timer_gate() -> None:
+    """This plan is new and executable, so its tape must be the shipped tape.
+
+    Replaying its `Step 5` verbatim would otherwise recreate a gate file in
+    the shared world-writable `/tmp`, a client released by a fixed sleep, and
+    a `Ctrl+B :run-shell` trigger typed *into the attached session* — the
+    keystroke path the capture's own provenance promises never happens.
+    """
+    plan = LANDING_VIDEO_PLAN.read_text(encoding="utf-8")
+    marker = "Create `docs/demo/mcp-follow.tape`:"
+    assert marker in plan, "the plan must still create the MCP tape"
+    snippet = plan.split(marker, 1)[1].split("```", 2)[1].split("\n", 1)[1]
+    assert snippet.strip() == MCP_TAPE.read_text(encoding="utf-8").strip(), (
+        "the plan's mcp-follow.tape snippet must be the shipped tape, readiness "
+        "handshake and repo-local scratch files included"
+    )
+    assert "/tmp/korvid-mcp-demo" not in plan, (
+        "no plan snippet may put the recording's handshake in a shared world-writable directory"
+    )
+    assert MCP_READY_FILE in plan, (
+        "the plan must describe the readiness signal the release now waits for"
+    )
+
+
+def test_mcp_follow_tape_releases_its_client_on_readiness_not_on_a_timer() -> None:
+    """A fixed sleep is an allowance, not a signal.
+
+    The client pane blocks on a gate file, but the gate used to be dropped by
+    a background timer that started as soon as the shared 20-second cold-start
+    allowance elapsed. On a cold checkout — `uv` resolving the project, the
+    first watch, uvicorn binding — that allowance can expire before port 7878
+    is listening, and the "reproducible" capture then opens on the client's
+    connection error. The allowance stays (it is what keeps the composition
+    off screen), but the release itself must wait for the scene's own
+    readiness file, and the wait must be bounded so a server that never binds
+    fails the recording loudly instead of hanging forever.
+    """
+    tape = MCP_TAPE.read_text(encoding="utf-8")
+    lines = tape.splitlines()
+
+    releases = [line for line in lines if f"touch {MCP_GATE_FILE}" in line]
+    assert len(releases) == 1, f"exactly one line may arm the client gate; found {releases}"
+    release = releases[0]
+    assert MCP_READY_FILE in release, (
+        f"the gate must be armed only after {MCP_READY_FILE} exists, not by a timer alone"
+    )
+    assert release.index(MCP_READY_FILE) < release.index(f"touch {MCP_GATE_FILE}"), (
+        "the readiness check must guard the release inside the same command, so no "
+        "shell scheduling can reorder them"
+    )
+    assert "attach-session" in release, (
+        "the attach must ride the same command as the release, so the recorded "
+        "timeline and the client start from one decision"
+    )
+
+    waits = [
+        index
+        for index, line in enumerate(lines)
+        if MCP_READY_FILE in line and re.search(r"while .*-f |until .*-f ", line)
+    ]
+    assert waits, f"the tape must actually wait for {MCP_READY_FILE} before it releases"
+    wait_index, release_index = waits[0], lines.index(release)
+    assert wait_index < release_index, "the wait must come before the release"
+    assert re.search(r"-lt \d+|-le \d+|seq \d+", lines[wait_index]), (
+        "the readiness wait must be bounded, so a server that never binds fails the "
+        f"recording instead of hanging the tape forever: {lines[wait_index]!r}"
+    )
+
+    cold_start = [index for index, line in enumerate(lines) if line.strip() == COLD_START_SLEEP]
+    assert cold_start, f"the tape must still hide the shared {COLD_START_SLEEP!r} allowance"
+    assert cold_start[-1] < release_index, (
+        f"the shared {COLD_START_SLEEP!r} allowance must still be hidden before the "
+        "release, with the readiness wait layered on top of it"
+    )
+    assert all("Show" not in line for line in lines[:release_index]), (
+        "the whole handshake must stay inside the hidden composition block"
+    )
+
+
+def test_mcp_follow_tape_cleans_both_of_its_handshake_files() -> None:
+    """Two scratch files now, both born of recording and neither committed."""
+    tape = MCP_TAPE.read_text(encoding="utf-8")
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    for scratch in (MCP_GATE_FILE, MCP_READY_FILE):
+        removals = [line for line in tape.splitlines() if "rm -f" in line and scratch in line]
+        assert len(removals) >= 2, (
+            f"{scratch} must be removed before the run starts and again after it "
+            f"ends, so an interrupted recording leaves nothing behind; found {removals}"
+        )
+        assert re.search(rf"^{re.escape(scratch)}$", gitignore, re.MULTILINE), (
+            f"{scratch} is a recording side effect; it must never be committable"
+        )
 
 
 def test_mcp_clip_duration_holds_the_whole_follow_story() -> None:

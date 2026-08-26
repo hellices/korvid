@@ -33,9 +33,14 @@ previews the removal with `helm uninstall --dry-run` and, because it
 destroys every resource the release owns, requires **typing the release
 name** in the confirmation dialog before it runs; release history is removed
 with the release. Values entered through `$EDITOR` pass through a private
-temp file deleted as soon as helm returns. The `--dry-run` preview is always
-passed `--hide-secret` so Secret values are masked in the preview output —
-the raw manifest is never surfaced in a tool result, log line, or audit record.
+temp file deleted as soon as helm returns. The `--dry-run` preview is passed
+`--hide-secret` (helm 3.15+) so Secret values are masked in the preview
+output — the raw manifest is never surfaced in a tool result, log line, or
+audit record. Older helm rejects that flag: korvid re-renders once *without*
+it purely to learn whether the chart renders at all, discards that unmasked
+output unread, and opens the confirmation marked **preview unavailable** — a
+render failure the real command would hit still stops the flow before the
+dialog, on old helm too.
 
 ## Operator uninstall
 

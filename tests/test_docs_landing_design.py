@@ -1386,6 +1386,54 @@ def test_scene_videos_never_autoplay_and_below_fold_media_preloads_nothing() -> 
         assert 'preload="none"' in video, f"below-fold scene media must fetch nothing: {video}"
 
 
+def test_design_asset_rule_states_the_playback_contract_the_controller_ships() -> None:
+    """Video round 1, finding 4: the design must describe the shipped playback.
+
+    The asset rule was written for a page whose only motion was the hero, and
+    it still said so. The shipped controller now also starts the *selected*
+    scene of a visible switcher (`select()` calls `startFromBeginning` while
+    `switcherVisible`), pauses every unselected panel's video and every video
+    of an off-screen switcher, and suppresses all of that under
+    `prefers-reduced-motion`. A design document that still forbids anything
+    beyond "the single muted hero" is an inaccurate source for the next
+    maintainer, so it is pinned to the behaviour the controller and the
+    landing contracts already enforce.
+    """
+    design = (
+        DOCS / "superpowers" / "specs" / "2026-08-22-visual-storytelling-design.md"
+    ).read_text(encoding="utf-8")
+    lowered = " ".join(design.lower().split())
+
+    assert "do not autoplay more than the single muted hero demonstration" not in lowered, (
+        "the selected visible scene autoplays too; this rule contradicts the controller"
+    )
+    assert re.search(
+        r"autoplay only the muted hero[^;]*and the currently selected scene of a visible switcher",
+        lowered,
+    ), "the asset rule must name both surfaces that autoplay: the hero and the selected scene"
+    assert "no other media may start on its own" in lowered, (
+        "the rule must still forbid every *other* video starting by itself"
+    )
+    assert "pause inactive or off-screen scene media" in lowered, (
+        "the pause half of the contract must survive the correction"
+    )
+    assert "prefers-reduced-motion" in lowered, (
+        "reduced motion must keep suppressing programmatic playback"
+    )
+    assert "programmatic autoplay" in lowered, (
+        "the design must keep naming what reduced motion suppresses"
+    )
+
+    controller = STORYTELLING_JS.read_text(encoding="utf-8")
+    assert "startFromBeginning(selectedVideo)" in controller, (
+        "the design is only accurate while the controller really does start the "
+        "selected scene; update both together"
+    )
+    assert "prefers-reduced-motion: reduce" in controller, (
+        "the controller must keep feature-detecting the reduced-motion preference"
+    )
+
+
 def test_product_contract_map_keeps_the_read_paths_truthful() -> None:
     contract = _section('<section class="contract-map"', "</section>")
     lowered = " ".join(re.sub(r"<[^>]+>", " ", contract).lower().split())

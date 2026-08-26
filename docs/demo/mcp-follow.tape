@@ -25,7 +25,7 @@ Set Padding 0
 # --- composition, never captured -------------------------------------
 Hide
 
-Type "rm -f .korvid-mcp-demo-go; tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
+Type "rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready; tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
 Enter
 Sleep 1s
 
@@ -42,9 +42,10 @@ Type "tmux set -t korvid-mcp-demo status off"
 Enter
 Sleep 500ms
 
-# The client blocks on a repo-local gate file rather than a fixed sleep:
+# The client waits on a repo-local gate file rather than a fixed sleep:
 # korvid's first start is slow and variable, and a client that raced it
-# would open the story on a connection error.
+# would open the story on a connection error. The gate below is dropped only
+# after the scene publishes .korvid-mcp-demo-ready.
 Type "tmux split-window -h -t korvid-mcp-demo -p 45 'while [ ! -f .korvid-mcp-demo-go ]; do sleep 0.1; done; uv run --frozen python docs/demo/mcp_client.py'"
 Enter
 Sleep 1s
@@ -54,12 +55,20 @@ Enter
 
 # korvid's own startup: mount, first watch, and the MCP server's bind. The
 # shared cold-start allowance every tape hides; see the reasoning in
-# docs/demo/visual-storytelling.md.
+# docs/demo/visual-storytelling.md. The allowance runs the scene's own
+# readiness wait rather than an idle sleep: `--scene mcp` publishes
+# .korvid-mcp-demo-ready from its Textual mount, and only after the MCP
+# server reported itself bound. Bounded at 60s, so a server that never binds
+# fails the recording instead of hanging it.
+Type "waited=0; while [ ! -f .korvid-mcp-demo-ready ] && [ $waited -lt 600 ]; do sleep 0.1; waited=$((waited+1)); done"
+Enter
 Sleep 20s
 
-# Release the client from a background timer, so the gate is dropped from
-# outside tmux and no keystroke of the trigger can reach the attached TUI.
-Type "( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux attach-session -t korvid-mcp-demo"
+# Release the client from a background subshell, so the gate is dropped from
+# outside tmux and no keystroke of the trigger can reach the attached TUI —
+# and only if that readiness signal really arrived, so the story can never
+# open on a connection error.
+Type "[ -f .korvid-mcp-demo-ready ] && ( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux attach-session -t korvid-mcp-demo"
 Enter
 Sleep 400ms
 
@@ -76,6 +85,6 @@ Hide
 Ctrl+B
 Type "d"
 Sleep 500ms
-Type "tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go"
+Type "tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready"
 Enter
 Sleep 1s

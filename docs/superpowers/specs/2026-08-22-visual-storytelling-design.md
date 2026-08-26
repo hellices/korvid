@@ -323,7 +323,8 @@ the assets.
 Asset rules:
 
 - prefer MP4 plus a WebP or PNG poster for motion;
-- do not autoplay more than the single muted hero demonstration;
+- autoplay only the muted hero demonstration and the currently selected scene
+  of a visible switcher; no other media may start on its own;
 - lazy-load media below the first viewport;
 - pause inactive or off-screen scene media;
 - avoid animated GIF for newly produced long recordings;
