@@ -43,6 +43,7 @@ from korvid.agent.interaction import (
 from korvid.agent.model_policy import ResolvedAgentPolicy
 from korvid.agent.outbound import ToolResultBlockedError, sanitize_recorded_tool_result
 from korvid.tools.executor import (
+    MAX_RESULT_CHARS,
     RecordedExecution,
     ToolOutcome,
     ToolResultBlocked,
@@ -325,18 +326,21 @@ class ToolHarness:
 
     def _error(self, call_id: str, name: str, message: str) -> ToolExecution:
         """A bounded deterministic error outcome that touches no port."""
-        text = f"ERROR: {message}"
-        bounded = (
-            cap_result(text)
-            if self._max_result_chars is None
-            else cap_result(text, limit=self._max_result_chars)
-        )
         return ToolExecution(
             call_id=call_id,
             name=name,
-            outcome=ToolOutcome(text=bounded, error=True),
+            outcome=ToolOutcome(text=self.cap_text(f"ERROR: {message}"), error=True),
             evidence_ref=None,
         )
+
+    def cap_text(self, text: str, *, suffix: str = "") -> str:
+        """Bound text to the policy result budget while retaining a suffix."""
+        limit = self._max_result_chars or MAX_RESULT_CHARS
+        if not suffix:
+            return cap_result(text, limit=limit)
+        if len(suffix) >= limit:
+            return cap_result(suffix, limit=limit)
+        return cap_result(text, limit=limit - len(suffix)) + suffix
 
 
 def _armed_surface(

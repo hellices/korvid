@@ -44,6 +44,7 @@ from korvid.agent.interaction import (
     UiAction,
     UiActionResult,
 )
+from korvid.k8s.relations import drill_child
 
 #: How a pane that is not confined to one namespace spells its scope. The
 #: TUI's own sentinel lives in `korvid.core.store`, which the eval layer
@@ -272,19 +273,15 @@ class EvalUiBridge(AgentUiBridge):
                 scope=action.namespace or ALL_NAMESPACES_SCOPE,
             )
         if isinstance(action, DrillDown):
-            return self._select(
-                ResourceIdentity(
-                    kind=self._focused.kind,
-                    # Drilling stays inside the pane, so the pane's scope
-                    # is the namespace unless the pane spans all of them.
-                    namespace=None
-                    if self._focused.scope == ALL_NAMESPACES_SCOPE
-                    else (self._focused.scope),
-                    name=action.name,
-                    uid=None,
-                ),
-                f"drilled into {action.name}",
-            )
+            child = drill_child(self._focused.kind.lower())
+            if child is None:
+                return (
+                    False,
+                    f"ERROR: {self._focused.kind} does not support drill-down",
+                    self._context,
+                )
+            pane = replace(self._focused, kind=child, selected=None)
+            return True, f"drilled into {action.name}", self._focus(pane)
         # `UiAction` is a closed union of five members and every one is
         # handled above; the fall-through keeps the function total for
         # mypy without inventing a transition for an action korvid cannot
@@ -310,16 +307,11 @@ class EvalUiBridge(AgentUiBridge):
         # it would tell the next turn a resource is on screen that is not.
         pane = PaneContext(
             kind=action.view,
-            scope=action.namespace or ALL_NAMESPACES_SCOPE,
+            scope=self._focused.scope if action.namespace is None else action.namespace,
             filter_pattern=self._focused.filter_pattern,
             selected=None,
         )
         return True, f"navigated to {action.view}", self._focus(pane)
-
-    def _select(
-        self, resource: ResourceIdentity, message: str
-    ) -> tuple[bool, str, InteractionContext]:
-        return True, message, self._focus(replace(self._focused, selected=resource))
 
     def _display(
         self,

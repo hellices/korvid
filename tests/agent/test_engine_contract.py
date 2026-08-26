@@ -355,7 +355,7 @@ async def test_a_call_the_protocol_cannot_pair_ends_the_turn_without_dispatch(
 async def test_excess_calls_are_discarded_and_the_notice_rides_the_last_kept_result(
     engine_factory: EngineFactory,
 ) -> None:
-    execution = RecordingExecution()
+    execution = RecordingExecution(default="x" * 160)
     harness = engine_factory(
         [
             [
@@ -365,7 +365,11 @@ async def test_excess_calls_are_discarded_and_the_notice_rides_the_last_kept_res
             ],
             text_turn(),
         ],
-        policy=make_policy(tool_names=("get_logs", "get_events"), max_tool_calls=1),
+        policy=make_policy(
+            tool_names=("get_logs", "get_events"),
+            max_tool_calls=1,
+            max_result_chars=160,
+        ),
         execution=execution,
     )
 
@@ -377,6 +381,7 @@ async def test_excess_calls_are_discarded_and_the_notice_rides_the_last_kept_res
     results = tool_results(second)
     assert len(results) == 1
     assert "one tool at a time" in str(results[0]["content"])
+    assert len(str(results[0]["content"])) <= 160
     # The discarded call's arguments never entered durable history.
     assert "get_events" not in json.dumps(second)
     last = [event for event in events if isinstance(event, ToolCallFinished)][-1]

@@ -461,7 +461,10 @@ class NativeAgentEngine(AgentEngine):
                 execution = self._contain(call, exc)
             text = execution.outcome.text
             if round_.excess and index == last:
-                text += _excess_notice(round_.excess)
+                text = self._tools.cap_text(
+                    text,
+                    suffix=_excess_notice(round_.excess),
+                )
             yield ToolCallFinished(
                 call_id=call.call_id,
                 name=call.name,

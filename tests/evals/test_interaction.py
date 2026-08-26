@@ -24,12 +24,7 @@ from korvid.agent.interaction import (
     ResourceIdentity,
     SetFilter,
 )
-from korvid.evals.interaction import (
-    ALL_NAMESPACES_SCOPE,
-    EvalUiBridge,
-    interaction_payload,
-    load_interaction,
-)
+from korvid.evals.interaction import EvalUiBridge, interaction_payload, load_interaction
 
 _FULL: dict[str, Any] = {
     "kube_context": "eval-cluster",
@@ -193,10 +188,10 @@ async def test_bridge_navigate_repoints_the_focused_pane() -> None:
     assert bridge.snapshot() == result.context
 
 
-async def test_bridge_navigate_without_a_namespace_widens_the_scope() -> None:
+async def test_bridge_navigate_without_a_namespace_preserves_the_scope() -> None:
     bridge = EvalUiBridge(load_interaction(_FULL, "fixture.yaml: interaction"))
     result = await bridge.apply(Navigate(view="nodes"))
-    assert result.context.focused_pane.scope == ALL_NAMESPACES_SCOPE
+    assert result.context.focused_pane.scope == "jobs"
 
 
 async def test_bridge_set_filter_updates_and_clears_the_pattern() -> None:
@@ -266,13 +261,28 @@ async def test_bridge_open_describe_selects_the_named_resource() -> None:
     assert (selected.kind, selected.namespace, selected.name) == ("deployments", "shop", "api")
 
 
-async def test_bridge_drill_down_selects_within_the_focused_pane() -> None:
-    bridge = EvalUiBridge(load_interaction(_FULL, "fixture.yaml: interaction"))
-    await bridge.apply(DrillDown(name="worker-3"))
-    selected = bridge.snapshot().focused_pane.selected
-    assert selected is not None
-    assert selected.name == "worker-3"
-    assert selected.namespace == "jobs"
+async def test_bridge_drill_down_opens_the_child_resource_list() -> None:
+    source = _FULL | {
+        "focused_pane": _FULL["focused_pane"] | {"kind": "deployments"},
+    }
+    bridge = EvalUiBridge(load_interaction(source, "fixture.yaml: interaction"))
+
+    result = await bridge.apply(DrillDown(name="api"))
+
+    assert result.ok is True
+    pane = result.context.focused_pane
+    assert (pane.kind, pane.scope, pane.filter_pattern) == ("replicasets", "jobs", "worker")
+    assert pane.selected is None
+
+
+async def test_bridge_drill_down_resolves_a_supported_navigation_alias() -> None:
+    bridge = EvalUiBridge(load_interaction(_minimal(), "fixture.yaml: interaction"))
+    await bridge.apply(Navigate(view="deploy", namespace="jobs"))
+
+    result = await bridge.apply(DrillDown(name="api"))
+
+    assert result.ok is True
+    assert result.context.focused_pane.kind == "replicasets"
 
 
 async def test_bridge_records_every_applied_action_in_order() -> None:
