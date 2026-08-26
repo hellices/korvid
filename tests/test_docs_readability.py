@@ -947,3 +947,124 @@ def test_airgap_names_both_the_pod_debug_and_node_shell_image_keys() -> None:
         "operator who runs it still cannot see the second image source"
     )
     assert "korvid never pulls" in source, "the existing ownership boundary must survive"
+
+
+def test_tui_puts_the_status_row_where_the_poster_measured_it() -> None:
+    """Round-7 review, finding 1: the status row sits at the *bottom*.
+
+    `KorvidApp.compose` yields `TopBar()` first — and `TopBar`'s own CSS
+    docks it `top` — while `StatusBar()` is yielded last, below a
+    `height: 1fr` workspace. The annotated poster agrees and
+    `tests/test_docs_build_config.py::test_tui_annotation_pins_match_the_poster_layout`
+    pins it: the `ctx:… ns:…` row is at `--y: 97%`, the effective-key
+    legend at `--y: 3%`. Calling the status row a top row contradicted both
+    the code and the figure directly beneath the sentence.
+    """
+    source = _source("tui.md")
+    flat = " ".join(source.split())
+    assert "status row at the top" not in flat, (
+        "tui.md must not place the status row at the top; the poster pins it at 97%"
+    )
+    assert re.search(r"status row[^.]*\bbottom\b", flat), (
+        "tui.md must say the status row runs along the bottom of the screen"
+    )
+    assert re.search(r"status row[^.]*always\b", flat), (
+        "the status row's always-on-screen guarantee must survive the correction"
+    )
+    # The `~`-collapsible legend is a separate, top-docked row; it must keep
+    # its own accurate description rather than be folded into the status row.
+    assert re.search(r"legend[^.]*\btop\b|\btop\b[^.]*legend", flat), (
+        "tui.md must place the collapsible key legend at the top, where TopBar docks"
+    )
+    assert "collapsed by default" in flat
+    assert "`~` expands the full grouped legend" in flat
+    # Both pins the build-config test asserts must still be explained.
+    assert "--x: 12%; --y: 97%;" in source
+    assert "--x: 50%; --y: 3%;" in source
+
+
+def test_tui_calls_the_watch_backed_row_a_live_not_static_snapshot() -> None:
+    """Round-7 review, finding 2: a watch-backed row *is* a snapshot.
+
+    Every table renders `ResourceStore`'s cached objects, kept current by
+    watches. Saying it "is not a snapshot" overclaims: the row is a
+    snapshot that watches keep live, and it is still distinct from the
+    fresh reads `d`/`l`/agent tools issue against the API server.
+    """
+    flat = " ".join(_source("tui.md").split())
+    assert "The selected row is not a snapshot" not in flat, (
+        "a watch-backed row is a snapshot kept live, not the absence of one"
+    )
+    assert re.search(r"not a (?:static|frozen) snapshot", flat), (
+        "tui.md must call it a live rather than a static snapshot"
+    )
+    assert "watch-backed" in flat, "the reason it stays live must survive"
+    assert re.search(r"update[s]? live", flat)
+    assert re.search(r"(?:fresh|own) read", flat), (
+        "the distinction from a fresh describe/log/tool read must be stated, "
+        "not left for the reader to infer"
+    )
+
+
+def test_tui_describes_g_as_direct_edges_and_d_as_the_bounded_expansion() -> None:
+    """Round-7 review, finding 3: `g` opens *one hop, both directions*.
+
+    `RelationshipScreen._render_table` always renders the root's direct
+    dependencies and direct dependents, and only walks further when
+    `self._expanded` — the flag `d` (`toggle_expand`) flips, defaulting to
+    `False`. Describing `g`'s initial view as "dependents and
+    dependents-of-dependents" both drops the dependencies pane and implies
+    an automatic second hop that no keystroke asked for.
+    """
+    from korvid.core.relationships import GraphLimits
+
+    flat = " ".join(_source("tui.md").split())
+    assert "dependents-of-dependents" not in flat, (
+        "`g` does not expand to a second dependents hop on its own; `d` does"
+    )
+    assert re.search(r"`g`[^.]*direct dependencies and[^.]*direct dependents", flat), (
+        "`g`'s initial view is both direct panes, not the dependents side alone"
+    )
+    assert re.search(r"`d` toggles[^.]*bounded[^.]*expansion", flat), (
+        "tui.md must attribute the bounded transitive expansion to `d`"
+    )
+    assert "coverage banner" in flat, "the coverage-completeness banner must survive"
+    assert "resource-relationships.md" in flat, (
+        "the caps belong on the relationships page; tui.md must link there"
+    )
+
+    # The caps stay documented where tui.md sends the reader, at the values
+    # `GraphLimits` actually defaults to.
+    limits = GraphLimits()
+    relationships = " ".join(_source("resource-relationships.md").split())
+    assert f"`max_depth = {limits.max_depth}`" in relationships
+    assert f"`max_nodes = {limits.max_nodes}`" in relationships
+
+
+def test_tui_states_the_multi_pod_log_stream_cap() -> None:
+    """Round-7 review, finding 4: `L` streams the first 8 pods, not all.
+
+    `LogController._build_multi_stream_triples` truncates the visible pod
+    keys to `_MAX_MULTI_STREAM_PODS` and notifies "Streaming first N of M
+    matching pods". Promising every visible pod's logs sets up a reader to
+    read that notification as a bug.
+    """
+    from korvid.ui.log_controller import _MAX_MULTI_STREAM_PODS
+
+    assert _MAX_MULTI_STREAM_PODS == 8, (
+        "this test pins documentation against the real cap; update both together"
+    )
+
+    flat = " ".join(_source("tui.md").split())
+    assert "`L` streams every currently visible pod" not in flat
+    assert "`L` merges every currently filtered pod" not in flat
+    assert re.search(rf"`L`[^.]*first {_MAX_MULTI_STREAM_PODS}", flat), (
+        "tui.md must state the cap `L` actually applies"
+    )
+    assert re.search(r"notif", flat, re.I), (
+        "the notification that names the cap and the match count must be mentioned"
+    )
+    # The facts that were already right must survive the correction.
+    assert "`[pod/container]`" in flat
+    assert "bounded ring buffer of 5000" in flat
+    assert "reconnect automatically" in flat

@@ -23,13 +23,16 @@ and context switching. Keys referenced here are listed in
 
 ## Read the cockpit
 
-The status row at the top is always on screen: current kube context, the
-active namespace scope (or `all`), and — collapsed by default — the few keys
-that matter most in the current view (`~` expands the full grouped legend).
-The selected row is not a snapshot: every table is watch-backed, so its
-fields update live as the cluster changes underneath your cursor. Press `?`
-at any time to see the complete effective key set for the current view,
-including any remaps from your config.
+The status row along the bottom is always on screen: current kube context
+and the active namespace scope (or `all`). The key legend rides the top of
+the screen and is collapsed by default to the few keys that matter most in
+the current view (`~` expands the full grouped legend). The selected row is
+not a static snapshot: every table is watch-backed, so its fields update
+live as the cluster changes underneath your cursor. It is still a *view of
+what korvid has watched* — a describe, a log stream, or an agent tool
+issues its own fresh read against the API server. Press `?` at any time to
+see the complete effective key set for the current view, including any
+remaps from your config.
 
 ## Follow one signal
 
@@ -39,19 +42,24 @@ A typical investigation starts at a troubled row and ends at its cause:
    `~fuzzy`, `/regex/`, a label selector, or `-s` to hide Completed).
 2. `d` describes the selected resource — its manifest and recent events —
    for the full picture behind a status like `CrashLoopBackOff`.
-3. `l` opens the log pane for the selected pod (`L` merges every currently
-   filtered pod instead).
+3. `l` opens the log pane for the selected pod (`L` merges the first 8
+   currently filtered pods instead).
 4. `g` opens the operational relationship graph: the resource's direct
-   dependents and dependents-of-dependents, with a coverage banner stating
-   how complete that view is.
+   dependencies and its direct dependents — one hop each way — with a
+   coverage banner stating how complete that view is. `d` toggles a
+   bounded transitive expansion of the dependents side; see
+   [resource-relationships.md](resource-relationships.md) for its depth and
+   node caps.
 
 ## Work with logs
 
-`L` streams every currently visible pod's logs together, each line prefixed
-`[pod/container]`. `f` toggles between raw text and colour-highlighted
-JSON for lines that look like JSON; `p` reloads the pane from the previous
-(terminated) container instance. `/` opens inline search in the pane, and
-`n` / `N` jump between hits. The pane holds a bounded ring buffer of 5000
+`L` streams the first 8 currently visible pods' logs together, each line
+prefixed `[pod/container]`; when more pods match, a notification names the
+cap and how many matched rather than quietly widening the stream. `f`
+toggles between raw text and colour-highlighted JSON for lines that look
+like JSON; `p` reloads the pane from the previous (terminated) container
+instance. `/` opens inline search in the pane, and `n` / `N` jump between
+hits. The pane holds a bounded ring buffer of 5000
 lines — a one-time banner marks the pane once older lines have been
 dropped. Streams reconnect automatically on a transient error or an
 unexpected EOF; after five consecutive failed attempts the header shows an
