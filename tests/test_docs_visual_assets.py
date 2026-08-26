@@ -2208,6 +2208,33 @@ def test_cluster_scoped_demo_rows_ignore_a_requested_namespace() -> None:
     assert "namespace" not in manifest["metadata"]
 
 
+def test_partial_ready_demo_pod_keeps_ready_and_waiting_containers_coherent() -> None:
+    harness = _demo_harness()
+    pod = harness._pod(
+        "mixed-worker",
+        "shop",
+        phase="CrashLoopBackOff",
+        ready="1/2",
+    )
+
+    status = harness._pod_status(pod)
+
+    assert harness._pod_is_ready(pod) is False
+    assert status["conditions"] == [{"type": "Ready", "status": "False"}]
+    assert status["containerStatuses"][0]["ready"] is True
+    assert "running" in status["containerStatuses"][0]["state"]
+    assert status["containerStatuses"][1]["ready"] is False
+    assert status["containerStatuses"][1]["state"] == {"waiting": {"reason": "CrashLoopBackOff"}}
+
+
+def test_running_demo_pod_is_ready_only_when_every_container_is_ready() -> None:
+    harness = _demo_harness()
+    pod = harness._pod("partially-ready", "shop", phase="Running", ready="1/2")
+
+    assert harness._pod_is_ready(pod) is False
+    assert harness._pod_status(pod)["conditions"] == [{"type": "Ready", "status": "False"}]
+
+
 def test_diagnose_pod_reports_the_scheduled_nodes_conditions_not_unavailable() -> None:
     """The regression this guards: `RELATED` must resolve the real node.
 

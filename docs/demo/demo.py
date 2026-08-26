@@ -604,7 +604,7 @@ def _pod_status(pod: PodSummary) -> dict[str, Any]:
     for index, name in enumerate(_container_names(pod)):
         ready = index < ready_count
         state: dict[str, Any] = {"running": {"startedAt": pod.created}} if ready else {}
-        if waiting is not None:
+        if waiting is not None and not ready:
             state = {"waiting": {"reason": waiting}}
         statuses.append(
             {
@@ -779,7 +779,15 @@ def _pod_is_ready(pod: PodSummary) -> bool:
     answered with, and the `status.conditions` of the manifest a describe
     renders. Spelled twice, the two could disagree inside a single frame.
     """
-    return pod.phase == "Running" and pod.ready.partition("/")[0] != "0"
+    ready, separator, total = pod.ready.partition("/")
+    return (
+        pod.phase == "Running"
+        and separator == "/"
+        and ready.isdigit()
+        and total.isdigit()
+        and int(total) > 0
+        and ready == total
+    )
 
 
 def _pod_list_row(pod: PodSummary) -> PodListSummary:
