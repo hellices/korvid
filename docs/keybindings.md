@@ -13,7 +13,8 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | `~` | Expand or collapse the top-bar legend |
 | `/` | Filter a table or search the log pane |
 | `Enter` / `Esc` | Drill in / return one level |
-| `0` / `1`–`9` | Change namespace scope |
+| `0` | Toggle all namespaces |
+| `1`–`9` | Jump to a configured favorite namespace |
 | `d` | Describe the selected resource |
 | `g` | Open operational relationships |
 | `l` / `L` | Open selected or merged pod logs |
@@ -26,9 +27,12 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | Context | Keys |
 |---|---|
 | Pods | `l` logs · `s` shell · `Shift-F` port-forward |
-| Workloads | `r` restart · `S` scale |
+| Deployments / StatefulSets | `r` restart · `S` scale |
+| DaemonSets | `r` restart |
+| ReplicaSets | `S` scale |
 | Nodes | `c` cordon · `u` uncordon · `Shift-D` drain |
-| Helm | `i` install · `u` upgrade · `r` rollback |
+| Helm releases | `i` install · `u` upgrade · `h` revisions |
+| Helm revisions | `r` rollback |
 
 ## Remap an app action
 

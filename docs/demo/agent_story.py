@@ -1,7 +1,7 @@
 """Deterministic `LLMProvider` for the documentation Agent capture.
 
 Not shipped with the package — a development harness driven by
-``docs/demo/agent.tape`` (VHS). See ``docs/demo/README.md``.
+`docs/demo/agent.tape` (VHS). See `docs/demo/README.md`.
 
 The capture must show korvid's own agent loop, so nothing here fabricates
 panel events: the provider only decides *what the model would say*, and the

@@ -3136,6 +3136,15 @@ def test_agent_provenance_explains_the_panel_headers_label_and_estimated_counter
         )
 
 
+def test_agent_story_module_docstring_uses_markdown_code_spans() -> None:
+    source = AGENT_STORY.read_text(encoding="utf-8")
+    module_docstring = source.split('"""', maxsplit=2)[1]
+
+    assert "``" not in module_docstring
+    assert "`docs/demo/agent.tape`" in module_docstring
+    assert "`docs/demo/README.md`" in module_docstring
+
+
 def test_agent_page_capture_states_the_grounded_walkthrough_beside_the_turn_flow() -> None:
     """`docs/agent.md` must describe the frame it ships, and only that frame.
 

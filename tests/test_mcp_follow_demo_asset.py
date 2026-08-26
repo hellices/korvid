@@ -27,6 +27,10 @@ MAX_BYTES = 8 * 1024 * 1024
 #: digest pins the frames a human reviewed for leaked paths, branches,
 #: hostnames, model names and token spend.
 REVIEWED_SHA256 = "fc6a7022aa8068152e803fb6ab21533488e4a0aee09f9f91fddb69049b5a36a6"
+#: The reviewed MP4 bytes from which the GIF above was generated. Pinning both
+#: sides prevents a same-duration, same-size replacement clip from silently
+#: changing the landing story while the README keeps the old reviewed frames.
+REVIEWED_SOURCE_SHA256 = "67134ed7e6e33478087b6cb80d0c602c11fd31ab3fc82c1810563e631c1cd078"
 
 
 def _require_bytes(payload: bytes, cursor: int, size: int, block: str) -> None:
@@ -216,6 +220,15 @@ def test_shipped_gif_is_the_reviewed_artifact() -> None:
         f"docs/assets/mcp-follow-demo.gif is {digest}, not the reviewed "
         f"{REVIEWED_SHA256}; re-review its frames for external client session "
         "metadata before updating this pin"
+    )
+
+
+def test_source_clip_is_the_reviewed_gif_source() -> None:
+    digest = hashlib.sha256(SOURCE_CLIP.read_bytes()).hexdigest()
+
+    assert digest == REVIEWED_SOURCE_SHA256, (
+        f"{SOURCE_CLIP} is not the reviewed GIF source: got {digest}. "
+        "Re-review the MP4 and derived GIF together before updating both pins"
     )
 
 

@@ -47,6 +47,18 @@ def test_keybindings_is_a_compact_contextual_reference() -> None:
     assert source.count("```yaml") == 1
 
 
+def test_keybinding_summary_matches_configured_and_view_specific_actions() -> None:
+    source = _source("keybindings.md")
+
+    assert "| `0` | Toggle all namespaces |" in source
+    assert "| `1`\N{EN DASH}`9` | Jump to a configured favorite namespace |" in source
+    assert "| Deployments / StatefulSets | `r` restart · `S` scale |" in source
+    assert "| DaemonSets | `r` restart |" in source
+    assert "| ReplicaSets | `S` scale |" in source
+    assert "| Helm releases | `i` install · `u` upgrade · `h` revisions |" in source
+    assert "| Helm revisions | `r` rollback |" in source
+
+
 def test_keybindings_context_map_is_well_formed_svg() -> None:
     root = ET.parse(DOCS / "assets" / "keybindings-context-map.svg").getroot()
     assert root.tag.endswith("svg")
