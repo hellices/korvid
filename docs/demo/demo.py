@@ -469,10 +469,9 @@ async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str,
     if base is None:
         api_version = f"{meta.group}/{meta.version}" if meta.group else meta.version
         base = {"apiVersion": api_version, "kind": meta.kind, "metadata": {}}
-    # Deep, not shallow: the describe screen, `DemoReadOps.get_object` (an
-    # external MCP host's `tools/call`) and `extract_relationship_facts` all
-    # read these fixtures, so sharing `spec`/`status`/`data` would let one
-    # consumer's in-place edit rewrite every later frame and derived fact.
+    # Deep, not shallow: the describe screen and `DemoReadOps.get_object`
+    # both return these fixtures, so sharing nested branches would let one
+    # consumer's in-place edit rewrite every later frame and tool answer.
     manifest = copy.deepcopy(base)
     manifest["metadata"]["name"] = name
     if namespace:

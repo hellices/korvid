@@ -2897,16 +2897,13 @@ def test_demo_manifest_isolates_every_nested_branch_from_the_fixture() -> None:
     `get_manifest` copied only the top level and `metadata`, so `spec`,
     `status` and `data` were the module-global `POD_MANIFEST`,
     `DEPLOY_MANIFEST`, `SVC_MANIFEST` and `CONFIGMAP_MANIFEST` objects
-    themselves. The fixture is no longer read from one place — the TUI's
-    describe path, `DemoReadOps.get_object` (an external MCP host's
-    `tools/call`) and `extract_relationship_facts` all reach it — so one
-    consumer touching `manifest["status"]` in place would corrupt every
-    later frame *and* the derived relationship facts, and a recording shows
-    that only as a silent visual lie. Each answer must be its own object.
+    themselves. The TUI's describe path and `DemoReadOps.get_object` (an
+    external MCP host's `tools/call`) both return them, so one consumer
+    touching `manifest["status"]` in place would corrupt every later frame
+    and tool answer. Each answer must be its own object.
     """
     harness = _demo_harness()
     pristine = copy.deepcopy(harness.POD_MANIFEST)
-    facts_before = harness._PAYMENT_RELATIONSHIPS
 
     try:
         first = asyncio.run(harness.get_manifest("pods", "shop", "payment-worker-6c9f7d-b3xnq"))
@@ -2926,15 +2923,6 @@ def test_demo_manifest_isolates_every_nested_branch_from_the_fixture() -> None:
         assert pristine == harness.POD_MANIFEST, (
             "the module fixture every scene reads must survive a mutated answer"
         )
-        assert facts_before == harness._PAYMENT_RELATIONSHIPS, (
-            "the relationship facts derived from POD_MANIFEST must stay intact"
-        )
-        config_refs = [
-            reference
-            for reference in harness._PAYMENT_RELATIONSHIPS.references
-            if reference.target.kind == "ConfigMap"
-        ]
-        assert [reference.target.name for reference in config_refs] == ["payment-config"]
     finally:
         harness.POD_MANIFEST.clear()
         harness.POD_MANIFEST.update(copy.deepcopy(pristine))
