@@ -1027,6 +1027,27 @@ def test_ollama_negative_seed_falls_back(tmp_path: Path) -> None:
     assert cfg.agent_ollama_seed is None
 
 
+def test_ollama_num_predict_default_is_none(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_predict is None
+
+
+def test_ollama_num_predict_parsed(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: 192\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_predict == 192
+
+
+def test_ollama_num_predict_invalid_falls_back(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: -10\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_predict is None
+
+
 # ---------------------------------------------------------------------------
 # namespace scope (issue #108): legacy `namespaces:` is a migration warning;
 # `favorite_namespaces:` is a UI-only shortcut list bound to keys 1-9.

@@ -1891,6 +1891,55 @@ def test_missing_agent_extra_fails_actionably_when_enabled(
         )
 
 
+def test_ollama_num_predict_wired_to_options(monkeypatch: object) -> None:
+    """agent_ollama_num_predict is forwarded to OllamaOptions.num_predict."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.providers.ollama import OllamaProvider
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="ollama",
+        agent_base_url="http://localhost:11434",
+        agent_model="m",
+        agent_ollama_num_predict=192,
+    )
+    wiring = _build_agent_wiring(config, cast("Any", object()), {})
+    provider = wiring.provider_box[0]
+    assert isinstance(provider, OllamaProvider)
+    assert provider._options.num_predict == 192
+
+
+def test_ollama_num_predict_none_wired_to_options(monkeypatch: object) -> None:
+    """When agent_ollama_num_predict is None, OllamaOptions.num_predict is also None."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.providers.ollama import OllamaProvider
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="ollama",
+        agent_base_url="http://localhost:11434",
+        agent_model="m",
+    )
+    wiring = _build_agent_wiring(config, cast("Any", object()), {})
+    provider = wiring.provider_box[0]
+    assert isinstance(provider, OllamaProvider)
+    assert provider._options.num_predict is None
+
+
 def test_missing_first_party_module_is_not_treated_as_missing_extra(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

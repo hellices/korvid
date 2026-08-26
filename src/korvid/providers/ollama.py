@@ -45,6 +45,7 @@ class OllamaOptions:
     seed: int | None = None
     think: bool = False
     keep_alive: str | int | None = None
+    num_predict: int | None = None
 
 
 def normalize_base_url(base_url: str) -> str:
@@ -150,6 +151,8 @@ class OllamaProvider(LLMProvider):
         }
         if opts.seed is not None:
             request_options["seed"] = opts.seed
+        if opts.num_predict is not None:
+            request_options["num_predict"] = opts.num_predict
         payload: dict[str, Any] = {
             "model": self._model,
             # Already adapted by prepare_messages *before* the outbound

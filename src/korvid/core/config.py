@@ -199,6 +199,7 @@ class KorvidConfig:
     agent_ollama_seed: int | None = None
     agent_ollama_think: bool = False
     agent_ollama_keep_alive: str | int | None = None
+    agent_ollama_num_predict: int | None = None
     keybindings: dict[str, str] = field(default_factory=dict)
     log_buffer_lines: int = 5000
     log_wrap: bool = False
@@ -391,6 +392,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_ollama_seed=_parse_seed(ollama_raw.get("seed")),
         agent_ollama_think=ollama_raw.get("think") is True,
         agent_ollama_keep_alive=_parse_keep_alive(ollama_raw.get("keep_alive")),
+        agent_ollama_num_predict=_parse_positive_int(ollama_raw.get("num_predict")),
         keybindings=dict(raw.get("keybindings") or {}),
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
         log_wrap=logs_raw.get("wrap") is True,
