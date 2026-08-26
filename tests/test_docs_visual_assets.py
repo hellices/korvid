@@ -188,6 +188,7 @@ MCP_RECORDER_ENV = {
     "tape": "KORVID_MCP_TAPE",
     "digest": "KORVID_MCP_TAPE_SHA256",
     "test_mode": "KORVID_MCP_TEST_MODE",
+    "test_root": "KORVID_MCP_TEST_ROOT",
     "candidate": "KORVID_MCP_CANDIDATE",
     "final": "KORVID_MCP_FINAL",
     "ok": "KORVID_MCP_CLIENT_OK",
@@ -196,6 +197,25 @@ MCP_RECORDER_ENV = {
     "go": "KORVID_MCP_GO",
     "socket": "KORVID_MCP_TMUX_SOCKET",
 }
+#: Every override that is not the isolated mode's own switch. Outside that
+#: mode the wrapper records with the repository defaults published on the
+#: provenance page and with nothing else, so each of these is refused there.
+MCP_RECORDER_OVERRIDES = tuple(
+    variable for role, variable in MCP_RECORDER_ENV.items() if role != "test_mode"
+)
+#: The paths a run may delete — the candidate and the four handshake markers —
+#: plus the promotion target and the socket it may speak to. Every one of them
+#: is environment-controlled and acted on by an `EXIT` trap that fires on
+#: refusals too, so each must be confined to the isolated root before that
+#: trap is armed.
+MCP_RECORDER_CONFINED = ("candidate", "final", "ok", "failed", "ready", "go", "socket")
+#: The bytes of a file planted outside the isolated root. A refused run must
+#: leave them exactly there: no unlink, no truncation, no tmux command.
+MCP_OUTSIDE_ROOT_BYTES = b"a file this recording was never given"
+#: The wrapper's own name for the step that holds every one of those paths
+#: inside the declared root. Named here so a contract can require it to stand
+#: in front of the `EXIT` trap rather than behind it.
+MCP_RECORDER_CONFINEMENT = "confine_to_test_root"
 #: The bytes a previously approved clip is represented by in those contracts.
 #: A rejected run must leave them byte-identical.
 MCP_PUBLISHED_BYTES = b"previously approved clip"
@@ -4924,6 +4944,12 @@ class _RecorderRun(NamedTuple):
         socket_left: Whether the private tmux socket survived the run.
         shared_session_left: Whether a session of the same name on the user's
             *default* tmux server survived the run.
+        default_socket: The bytes of the stand-in for the user's own tmux
+            socket, which lives outside the isolated root and which no run may
+            unlink, or `None` once it is gone.
+        escaped: The bytes of the file an override pointed at outside the
+            isolated root, `None` once it is gone, and `None` when the run
+            pointed nothing outside.
     """
 
     status: int
@@ -4935,33 +4961,43 @@ class _RecorderRun(NamedTuple):
     vhs_ran: bool
     socket_left: bool
     shared_session_left: bool
+    default_socket: bytes | None
+    escaped: bytes | None
 
 
-def _write_fake_tmux(path: Path, *, log: Path, shared_session: Path) -> None:
+def _write_fake_tmux(path: Path, *, log: Path, shared_session: Path, default_socket: Path) -> None:
     """Write a tmux stand-in that models which server an invocation reaches.
 
     Every call is logged, so a contract can require the private `-S` socket
-    on all of them. Calls that *lack* `-S` are modelled as reaching the
-    user's shared default server: any kill verb among their arguments
-    removes `shared_session`, which stands for a developer's own
-    `korvid-mcp-demo` session. A recording that owns its socket can never
-    delete that file; one that trusts a session name will.
+    on all of them. Two shapes are modelled as reaching the user's shared
+    server: a call with no `-S` at all, and a call whose `-S` names
+    `default_socket` — the stand-in for the socket the invoking user's own
+    tmux is already listening on. `-S` is not by itself a guarantee, so a
+    wrapper that inherits a hostile socket path is as destructive as one
+    that omits the flag, and the stub has to say so or the socket contract
+    grades a spelling instead of a server.
+
+    Any kill verb among a reaching call's arguments removes
+    `shared_session`, which stands for a developer's own `korvid-mcp-demo`
+    session.
     """
     path.write_text(
         "\n".join(
             [
                 "#!/bin/sh",
                 f'echo "tmux $*" >> "{log}"',
+                "reaches_shared=0",
                 'case "$1" in',
-                "-S) ;;",
-                "*)",
+                f'-S) [ "$2" != "{default_socket}" ] || reaches_shared=1 ;;',
+                "*) reaches_shared=1 ;;",
+                "esac",
+                'if [ "$reaches_shared" -eq 1 ]; then',
                 '  for argument in "$@"; do',
                 '    case "$argument" in',
                 f'    kill-session|kill-server) rm -f "{shared_session}" ;;',
                 "    esac",
                 "  done",
-                "  ;;",
-                "esac",
+                "fi",
                 "exit 0",
             ]
         )
@@ -5030,6 +5066,11 @@ def _run_recorder(
     digest: str | None = None,
     use_shipped_pin: bool = False,
     test_mode: bool = True,
+    test_root: Path | None = None,
+    omit_test_root: bool = False,
+    seeded_marker: str | None = None,
+    escaping_role: str | None = None,
+    escape_style: str = "outside",
     unreadable_tape: bool = False,
     candidate_dir: str = "scenes",
     final_dir: str = "scenes",
@@ -5043,8 +5084,10 @@ def _run_recorder(
     Every path the wrapper touches is redirected into `workdir` through the
     documented overrides, so the contract exercises the real script — its
     real trap, its real promotion and its real cleanup — while the
-    checkout's own media and scratch stay untouched. `tmux` is a stub on
-    `PATH`, so no multiplexer is involved either.
+    checkout's own media and scratch stay untouched. `workdir` is also the
+    isolated root the run declares, because that isolation is what buys the
+    overrides in the first place. `tmux` is a stub on `PATH`, so no
+    multiplexer is involved either.
 
     The wrapper runs only the tape it was reviewed against, so a temporary
     tape needs a temporary pin. `KORVID_MCP_TAPE_SHA256` is exactly that
@@ -5056,7 +5099,7 @@ def _run_recorder(
 
     Args:
         workdir: The directory every path the wrapper touches is redirected
-            into.
+            into, and the isolated root the run declares.
         recorder: The wrapper to execute. Tests normally use the shipped
             wrapper; publication-root isolation uses a byte-identical copy.
         vhs_status: The exit status the fake VHS returns.
@@ -5077,6 +5120,21 @@ def _run_recorder(
         use_shipped_pin: Leave `KORVID_MCP_TAPE_SHA256` unset, so the run is
             graded against the constant the wrapper ships.
         test_mode: Whether to enable the wrapper's isolated contract-test mode.
+        test_root: The isolated root the run declares, when it differs from
+            `workdir` — a root that is somewhere else makes every redirected
+            path an escape.
+        omit_test_root: Leave `KORVID_MCP_TEST_ROOT` unset, so the run claims
+            isolation without naming the place it is isolated to.
+        seeded_marker: Pre-create one marker to prove an early refusal did not
+            arm cleanup before validating the isolated root.
+        escaping_role: The role whose override is pointed outside the isolated
+            root: one of `MCP_RECORDER_CONFINED`. The file it names is planted
+            with `MCP_OUTSIDE_ROOT_BYTES` beforehand, so a run that touches it
+            is visible as changed or missing bytes.
+        escape_style: How that role leaves the root. `outside` names a sibling
+            of `workdir` outright; `dot-dot` spells a path under `workdir` that
+            walks out with `..`; `symlink` names a path under `workdir` whose
+            own parent is a link to a directory outside it.
         unreadable_tape: Strip every permission from the tape once it is
             written and pinned, so the wrapper meets a file it cannot hash.
         candidate_dir: The `workdir`-relative directory the candidate is
@@ -5112,31 +5170,37 @@ def _run_recorder(
     markers = {
         role: workdir / f".korvid-mcp-demo-{role}" for role in ("ok", "failed", "ready", "go")
     }
-    tape = workdir / "fake.tape"
-    if tape_source is not None:
-        tape.write_bytes(tape_source.read_bytes())
-    else:
-        tape.write_text(tape_body.format(candidate=candidate, final=final), encoding="utf-8")
-    if digest is None:
-        if tape_source is not None:
-            digest = hashlib.sha256(tape.read_bytes()).hexdigest()
-        else:
-            pinned = tape_body if pinned_body is None else pinned_body
-            digest = hashlib.sha256(
-                pinned.format(candidate=candidate, final=final).encode("utf-8")
-            ).hexdigest()
-    if unreadable_tape:
-        tape.chmod(0o000)
+    if seeded_marker is not None:
+        markers[seeded_marker].write_bytes(MCP_OUTSIDE_ROOT_BYTES)
+    tape, digest = _prepare_tape(
+        workdir,
+        tape_body=tape_body,
+        pinned_body=pinned_body,
+        tape_source=tape_source,
+        digest=digest,
+        unreadable_tape=unreadable_tape,
+        candidate=candidate,
+        final=final,
+    )
 
     stub_dir = workdir / "stubs"
     stub_dir.mkdir()
     log = workdir / "invocations.log"
     socket = workdir / MCP_TMUX_SOCKET
-    # A developer's own session, on the tmux server they were already using.
-    # Nothing this recording does may reach it.
-    shared_session = workdir / "shared-default-server-session"
+    # A developer's own session, on the tmux server they were already using,
+    # reachable through the socket that server listens on. Both live outside
+    # the isolated root, because that is where the user's own work lives.
+    outside = workdir.parent
+    shared_session = outside / f"{workdir.name}-shared-default-server-session"
     shared_session.write_text("a developer's own korvid-mcp-demo session\n", encoding="utf-8")
-    _write_fake_tmux(stub_dir / "tmux", log=log, shared_session=shared_session)
+    default_socket = outside / f"{workdir.name}-default-server.tmux.sock"
+    default_socket.write_bytes(MCP_OUTSIDE_ROOT_BYTES)
+    _write_fake_tmux(
+        stub_dir / "tmux",
+        log=log,
+        shared_session=shared_session,
+        default_socket=default_socket,
+    )
     _write_fake_vhs(
         workdir / "fake-vhs",
         log=log,
@@ -5162,11 +5226,22 @@ def _run_recorder(
     else:
         environment[MCP_RECORDER_ENV["digest"]] = digest
     environment[MCP_RECORDER_ENV["test_mode"]] = "1" if test_mode else "0"
+    if omit_test_root:
+        environment.pop(MCP_RECORDER_ENV["test_root"], None)
+    else:
+        environment[MCP_RECORDER_ENV["test_root"]] = str(
+            workdir if test_root is None else test_root
+        )
     environment[MCP_RECORDER_ENV["candidate"]] = str(candidate)
     environment[MCP_RECORDER_ENV["final"]] = str(final)
     environment[MCP_RECORDER_ENV["socket"]] = str(socket)
     for role in ("ok", "failed", "ready", "go"):
         environment[MCP_RECORDER_ENV[role]] = str(markers[role])
+
+    escaped = _plant_escape(workdir, escaping_role, escape_style, default_socket)
+    if escaping_role is not None:
+        assert escaped is not None
+        environment[MCP_RECORDER_ENV[escaping_role]] = str(escaped)
 
     completed = subprocess.run(
         [str(recorder)],
@@ -5188,7 +5263,101 @@ def _run_recorder(
         and any(line.startswith("vhs ") for line in log.read_text(encoding="utf-8").splitlines()),
         socket_left=socket.exists(),
         shared_session_left=shared_session.exists(),
+        default_socket=default_socket.read_bytes() if default_socket.exists() else None,
+        escaped=escaped.read_bytes() if escaped is not None and escaped.exists() else None,
     )
+
+
+def _prepare_tape(
+    workdir: Path,
+    *,
+    tape_body: str,
+    pinned_body: str | None,
+    tape_source: Path | None,
+    digest: str | None,
+    unreadable_tape: bool,
+    candidate: Path,
+    final: Path,
+) -> tuple[Path, str]:
+    """Write the tape this run hands the wrapper, and the pin it is graded by.
+
+    A body is formatted with the run's own paths so the wrapper's two
+    literal name checks see what they expect; a source file is copied byte
+    for byte so the shipped tape can be driven under its shipped pin. The
+    pin defaults to the tape's own digest, or to `pinned_body`'s when a
+    contract wants a tape that no longer matches what was approved.
+
+    Args:
+        workdir: The isolated root the run declares.
+        tape_body: The tape's text, with `{candidate}` and `{final}` slots.
+        pinned_body: The text the pin is computed from, when it differs.
+        tape_source: A file to copy instead of formatting `tape_body`.
+        digest: An explicit pin, or `None` to derive one.
+        unreadable_tape: Whether to leave the tape unreadable afterwards.
+        candidate: The candidate path the tape renders to.
+        final: The published clip the tape must not name.
+
+    Returns:
+        The tape's path and the digest the wrapper will be given.
+    """
+    tape = workdir / "fake.tape"
+    if tape_source is not None:
+        tape.write_bytes(tape_source.read_bytes())
+    else:
+        tape.write_text(tape_body.format(candidate=candidate, final=final), encoding="utf-8")
+    if digest is None:
+        if tape_source is not None:
+            digest = hashlib.sha256(tape.read_bytes()).hexdigest()
+        else:
+            pinned = tape_body if pinned_body is None else pinned_body
+            digest = hashlib.sha256(
+                pinned.format(candidate=candidate, final=final).encode("utf-8")
+            ).hexdigest()
+    if unreadable_tape:
+        tape.chmod(0o000)
+    return tape, digest
+
+
+def _plant_escape(workdir: Path, role: str | None, style: str, default_socket: Path) -> Path | None:
+    """Plant the file an escaping override names, outside the isolated root.
+
+    The socket is the user's own tmux socket, because that is the file a
+    stray `KORVID_MCP_TMUX_SOCKET` reaches in practice; every other role is
+    a plain file with `MCP_OUTSIDE_ROOT_BYTES` in it. The three styles are
+    the three ways out of a root: naming a sibling outright, walking out of
+    a path that starts inside it, and stepping through a link whose target
+    is elsewhere.
+
+    Args:
+        workdir: The isolated root the run declares.
+        role: The role whose override escapes, or `None` for a run where
+            nothing does.
+        style: `outside`, `dot-dot`, `symlink` or `leaf-symlink`.
+        default_socket: The stand-in for the user's own tmux socket.
+
+    Returns:
+        The path the escaping override must be set to, or `None`.
+    """
+    if role is None:
+        return None
+    if role == "socket":
+        target = default_socket
+    else:
+        target = workdir.parent / f"{workdir.name}-outside-{role}"
+        target.write_bytes(MCP_OUTSIDE_ROOT_BYTES)
+    if style == "outside":
+        return target
+    if style == "dot-dot":
+        return workdir / "scenes" / ".." / ".." / target.name
+    if style == "symlink":
+        link = workdir / f"link-to-{role}"
+        link.symlink_to(workdir.parent, target_is_directory=True)
+        return link / target.name
+    if style == "leaf-symlink":
+        link = workdir / f"link-to-{role}"
+        link.symlink_to(target)
+        return link
+    raise AssertionError(f"unknown escape style {style!r}")
 
 
 def _tmux_invocations(run: _RecorderRun) -> list[str]:
@@ -5214,6 +5383,10 @@ def _assert_only_the_private_socket(run: _RecorderRun, socket: Path) -> None:
     assert run.shared_session_left, (
         "a session of the same name on the user's shared default server must survive; "
         f"the recording reached it: {run.tmux!r}"
+    )
+    assert run.default_socket == MCP_OUTSIDE_ROOT_BYTES, (
+        "the socket the user's own tmux listens on lives outside the isolated root; a "
+        f"recording may neither speak to it nor unlink it, yet it holds {run.default_socket!r}"
     )
     assert not run.socket_left, (
         "the private socket is a recording side effect like every other one; the wrapper "
@@ -5242,6 +5415,261 @@ def test_mcp_recorder_speaks_only_to_its_own_private_tmux_socket(tmp_path: Path)
     _assert_only_the_private_socket(run, workdir / MCP_TMUX_SOCKET)
     assert f"kill-session -t {MCP_TMUX_SESSION}" in run.tmux, (
         f"the teardown must still name the demo session: {run.tmux!r}"
+    )
+
+
+class _ProductionRun(NamedTuple):
+    """What a run with no isolation and one stray override left behind.
+
+    Attributes:
+        status: The wrapper's own exit status.
+        output: Its combined stdout and stderr.
+        decoy: The bytes of the file that override named, or `None` once the
+            run has unlinked it.
+        vhs_ran: Whether the fake VHS on `PATH` was invoked at all.
+        tmux: Every `tmux` invocation the stub recorded.
+    """
+
+    status: int
+    output: str
+    decoy: bytes | None
+    vhs_ran: bool
+    tmux: str
+
+
+def _run_production_recorder(workdir: Path, variable: str) -> _ProductionRun:
+    """Run the shipped wrapper as a contributor does, with one variable set.
+
+    A contributor's environment carries no `KORVID_MCP_*` variable at all,
+    so this helper strips every one of them and then sets exactly the one
+    under test, pointed at a file planted for the occasion. `vhs` and
+    `tmux` are stubs at the front of `PATH` — the wrapper resolves both
+    through `PATH`, so no override is needed to keep a real recorder and a
+    real multiplexer out of this, and the stub `vhs` fails rather than
+    records if the refusal this contract asks for is ever missing.
+
+    Args:
+        workdir: A scratch directory for the stubs, the log and the decoy.
+        variable: The single `KORVID_MCP_*` variable to set.
+
+    Returns:
+        What that run left behind.
+    """
+    _require_posix_recorder()
+    workdir.mkdir(parents=True)
+    decoy = workdir / "a-file-this-run-was-pointed-at"
+    decoy.write_bytes(MCP_OUTSIDE_ROOT_BYTES)
+    log = workdir / "invocations.log"
+    stub_dir = workdir / "stubs"
+    stub_dir.mkdir()
+    shared_session = workdir / "shared-default-server-session"
+    shared_session.write_text("a developer's own korvid-mcp-demo session\n", encoding="utf-8")
+    default_socket = workdir / "default-server.tmux.sock"
+    default_socket.write_bytes(MCP_OUTSIDE_ROOT_BYTES)
+    _write_fake_tmux(
+        stub_dir / "tmux",
+        log=log,
+        shared_session=shared_session,
+        default_socket=default_socket,
+    )
+    vhs = stub_dir / "vhs"
+    vhs.write_text(f'#!/bin/sh\necho "vhs $*" >> "{log}"\nexit 3\n', encoding="utf-8")
+    vhs.chmod(0o755)
+
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("KORVID_MCP_")
+    }
+    environment["PATH"] = os.pathsep.join([str(stub_dir), os.environ.get("PATH", "")])
+    environment[variable] = str(decoy)
+    completed = subprocess.run(
+        [str(MCP_RECORDER)],
+        cwd=workdir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    recorded = log.read_text(encoding="utf-8") if log.exists() else ""
+    return _ProductionRun(
+        status=completed.returncode,
+        output=completed.stdout + completed.stderr,
+        decoy=decoy.read_bytes() if decoy.exists() else None,
+        vhs_ran=any(line.startswith("vhs ") for line in recorded.splitlines()),
+        tmux=recorded,
+    )
+
+
+@pytest.mark.parametrize("variable", MCP_RECORDER_OVERRIDES)
+def test_mcp_recorder_refuses_every_override_outside_isolated_test_mode(
+    tmp_path: Path, variable: str
+) -> None:
+    """Round-17: the overrides are a test seam, and they must read as one.
+
+    Every path in this wrapper — the candidate it deletes, the four
+    markers it deletes, the clip it promotes to and the socket it speaks
+    to — was taken from the environment and acted on, and the `EXIT` trap
+    that acts on them fires on refusals too. So a variable inherited from
+    a previous shell, a typo in a copied command line or a stale export
+    was enough to make the *published recipe* unlink a file nobody named
+    or address a tmux server nobody chose.
+
+    Outside the isolated contract mode there is nothing here to configure:
+    the wrapper records with the repository-relative defaults the
+    provenance page publishes, and any other value is a refusal that names
+    the variable and the two things an isolated run has to declare. The
+    refusal lands before the trap is armed, so the file the variable
+    pointed at keeps its bytes.
+    """
+    published = SCENES / Path(MCP_FINAL_CLIP).name
+    before = hashlib.sha256(published.read_bytes()).hexdigest()
+
+    run = _run_production_recorder(tmp_path / variable.lower(), variable)
+
+    assert run.status != 0, f"{variable} outside isolated mode must refuse the run: {run.output!r}"
+    assert run.decoy == MCP_OUTSIDE_ROOT_BYTES, (
+        f"the refusal must land before anything can touch what {variable} named; that file "
+        f"now holds {run.decoy!r}"
+    )
+    assert not run.vhs_ran, f"{variable} may not reach VHS: {run.output!r}"
+    assert not run.tmux, f"{variable} may not reach any tmux server: {run.tmux!r}"
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+    assert variable in run.output, (
+        f"the refusal must name the variable it refused; it said {run.output!r}"
+    )
+    for required in (MCP_RECORDER_ENV["test_mode"], MCP_RECORDER_ENV["test_root"]):
+        assert required in run.output, (
+            f"the refusal must name {required}, or a contract author reads it as a bug "
+            f"rather than as the two declarations an isolated run owes: {run.output!r}"
+        )
+    assert hashlib.sha256(published.read_bytes()).hexdigest() == before, (
+        "no contract may rewrite the checkout's own published clip"
+    )
+
+
+def test_mcp_recorder_requires_an_isolated_root_before_it_takes_any_override(
+    tmp_path: Path,
+) -> None:
+    """`KORVID_MCP_TEST_MODE=1` is a claim; the root is what makes it checkable.
+
+    A mode flag on its own says only that a caller *asserts* the run is a
+    contract test. The wrapper still needs somewhere to hold it to, or the
+    trap it is about to arm can be pointed anywhere by the same
+    environment that set the flag. So isolation is two declarations, not
+    one: the mode, and the directory the whole run is confined to.
+    """
+    workdir = tmp_path / "no-root-declared"
+    run = _run_recorder(workdir, omit_test_root=True)
+
+    assert run.status != 0, (
+        f"a run claiming isolation without naming its root must refuse: {run.output!r}"
+    )
+    assert not run.vhs_ran, "the refusal must land before VHS is invoked"
+    assert not run.tmux, f"and before any tmux server is addressed: {run.tmux!r}"
+    assert run.published == MCP_PUBLISHED_BYTES
+    assert MCP_RECORDER_ENV["test_root"] in run.output, (
+        f"the refusal must name the declaration that is missing: {run.output!r}"
+    )
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+@pytest.mark.parametrize("role", MCP_RECORDER_CONFINED)
+@pytest.mark.parametrize("style", ["outside", "dot-dot", "symlink"])
+def test_mcp_recorder_touches_nothing_outside_its_isolated_root(
+    tmp_path: Path, role: str, style: str
+) -> None:
+    """Round-17: an isolated run is isolated by its paths, not by its name.
+
+    `cleanup` runs from an `EXIT` trap on every path this wrapper takes,
+    including the refusals reached before VHS exists, and it unlinks the
+    candidate, the four markers and the socket it was handed. A contract
+    override that names something else — a sibling of the root, a path
+    that walks out of it with `..`, a path through a link that lands
+    elsewhere — therefore had a file of the caller's deleted as its first
+    observable act.
+
+    Each spelling is refused here, and the file it named is graded
+    afterwards: same bytes, still present. Nothing about the failure
+    depends on the wrapper *knowing* what that file was.
+    """
+    workdir = tmp_path / f"{role}-{style}"
+    run = _run_recorder(workdir, escaping_role=role, escape_style=style)
+
+    assert run.status != 0, (
+        f"{MCP_RECORDER_ENV[role]} spelled {style} leaves the isolated root; the wrapper "
+        f"exited {run.status}: {run.output!r}"
+    )
+    assert run.escaped == MCP_OUTSIDE_ROOT_BYTES, (
+        f"the file {MCP_RECORDER_ENV[role]} named sits outside the isolated root, so this "
+        f"run may not touch it; it now holds {run.escaped!r}"
+    )
+    assert not run.vhs_ran, "a run that cannot be confined must be refused before VHS"
+    assert not run.tmux, f"and before any tmux server is addressed: {run.tmux!r}"
+    assert run.shared_session_left, "no session on the user's own server may be reached"
+    assert run.published == MCP_PUBLISHED_BYTES, (
+        f"the approved clip must be byte-identical; it holds {run.published!r}"
+    )
+    assert MCP_RECORDER_ENV[role] in run.output, (
+        f"the refusal must name the override it refused: {run.output!r}"
+    )
+    assert MCP_RECORDER_ENV["test_root"] in run.output, (
+        f"and the root it was measured against: {run.output!r}"
+    )
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+def test_mcp_recorder_refuses_a_leaf_symlink_to_an_external_tmux_socket(
+    tmp_path: Path,
+) -> None:
+    run = _run_recorder(
+        tmp_path / "socket-leaf-symlink",
+        escaping_role="socket",
+        escape_style="leaf-symlink",
+    )
+
+    assert run.status != 0
+    assert not run.vhs_ran
+    assert run.tmux == ""
+    assert run.shared_session_left
+    assert run.default_socket == MCP_OUTSIDE_ROOT_BYTES
+    assert "symbolic link" in run.output
+    assert MCP_RECORDER_REJECTION in run.output
+
+
+def test_mcp_recorder_never_reaches_a_tmux_server_outside_its_isolated_root(
+    tmp_path: Path,
+) -> None:
+    """The socket names a *server*, so an unchecked one is a session lost.
+
+    `end_session` is `tmux -S "$socket" kill-session -t korvid-mcp-demo`,
+    run from the `EXIT` trap on every path. `-S` makes that safe only
+    while the socket belongs to this recording: pointed at the socket the
+    invoking user's own tmux is listening on, the flag simply addresses
+    their server accurately and kills the session they were using. The
+    contract is therefore about the target, not the flag — the wrapper
+    must not speak to a socket outside the root it declared, and a refusal
+    that has not yet checked one may not speak at all.
+    """
+    workdir = tmp_path / "someone-elses-server"
+    run = _run_recorder(workdir, escaping_role="socket")
+
+    assert run.status != 0, (
+        f"a socket outside the isolated root must refuse the run: {run.output!r}"
+    )
+    assert run.tmux == "", (
+        "an unconfined socket may not be contacted, not even to probe it: the stub "
+        f"recorded {run.tmux!r}"
+    )
+    assert run.escaped == MCP_OUTSIDE_ROOT_BYTES, (
+        f"the user's own socket must survive byte-identical; it holds {run.escaped!r}"
+    )
+    assert run.shared_session_left, (
+        "the developer's own korvid-mcp-demo session must survive a refusal that never "
+        "even resolved which server it was talking to"
+    )
+    assert not run.vhs_ran, "the refusal must land before VHS is invoked"
+    assert MCP_RECORDER_ENV["socket"] in run.output, (
+        f"the refusal must name the socket override: {run.output!r}"
     )
 
 
@@ -5515,6 +5943,47 @@ def test_mcp_recorder_pins_the_reviewed_tape_by_its_raw_sha256() -> None:
     )
 
 
+def test_mcp_follow_tape_is_checked_out_byte_identically_everywhere() -> None:
+    """A pin over bytes Git is allowed to rewrite is a pin that expires.
+
+    `reviewed_tape_sha256` covers every byte of `docs/demo/mcp-follow.tape`,
+    newlines included. Git normalises text files on checkout, so on a
+    clone with `core.autocrlf=true` — the Windows default — those newlines
+    arrive as CRLF, the tape hashes to something else and the wrapper
+    refuses a tape nobody edited. The reviewer who then meets that refusal
+    has one obvious way out, which is to recompute the pin: the exact move
+    this boundary exists to prevent, arrived at through a line ending.
+
+    `.gitattributes` settles it at the source. The attribute is checked
+    through `git check-attr`, not by reading the file, because what matters
+    is that the pattern actually reaches this path.
+    """
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "docs/demo/mcp-follow.tape text eol=lf" in attributes, (
+        "the reviewed tape's line endings are part of its digest; .gitattributes must "
+        "force LF for it as it already does for the checksum-pinned JavaScript"
+    )
+
+    checked = subprocess.run(
+        ["git", "check-attr", "text", "eol", "--", "docs/demo/mcp-follow.tape"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert checked.returncode == 0, f"git could not report the tape's attributes: {checked.stderr}"
+    assert "docs/demo/mcp-follow.tape: text: set" in checked.stdout, checked.stdout
+    assert "docs/demo/mcp-follow.tape: eol: lf" in checked.stdout, (
+        f"the pattern must reach the tape itself, not merely sit in the file: {checked.stdout}"
+    )
+
+    assert b"\r" not in MCP_TAPE.read_bytes(), (
+        "the reviewed bytes are LF-only; a CRLF working tree would hash to something the "
+        "shipped pin refuses"
+    )
+
+
 def test_mcp_recorder_hashes_portably_and_compares_the_whole_digest() -> None:
     """A pin is only as good as the digest it is compared against.
 
@@ -5691,6 +6160,104 @@ def test_mcp_recorder_binds_promotion_to_one_physical_directory() -> None:
     )
 
 
+def test_mcp_capture_provenance_publishes_the_isolated_override_rule() -> None:
+    """The overrides are a documented seam, so their price must be documented.
+
+    A reader who meets `KORVID_MCP_CANDIDATE` on this page and nowhere
+    else will reach for it, and the whole point of the round-17 refusal is
+    that reaching for it outside an isolated contract test is a mistake
+    the wrapper declines to carry out. Both the page and the plan
+    therefore have to publish the two declarations an isolated run owes —
+    the mode and the root — and the rule the root buys: everything a run
+    may delete, and the tmux socket it may speak to, lives inside it.
+    """
+    sources = {
+        "docs/demo/visual-storytelling.md": INSTRUCTIONS.read_text(encoding="utf-8"),
+        "docs/superpowers/plans/2026-08-26-landing-video-experience.md": LANDING_VIDEO_PLAN.read_text(
+            encoding="utf-8"
+        ),
+    }
+
+    for label, text in sources.items():
+        for variable in (MCP_RECORDER_ENV["test_mode"], MCP_RECORDER_ENV["test_root"]):
+            assert variable in text, (
+                f"{label} must publish {variable}; a page that offers the overrides without "
+                "the declarations they cost sends a reader into a refusal"
+            )
+        lowered = " ".join(text.split()).lower()
+        assert re.search(r"outside[^.]{0,80}(checkout|repository)", lowered), (
+            f"{label} must say where an isolated root may sit: outside the checkout"
+        )
+        assert re.search(r"(inside|within)[^.]{0,120}root", lowered), (
+            f"{label} must state the confinement rule the root buys"
+        )
+        assert re.search(r"socket[^.]{0,200}root|root[^.]{0,200}socket", lowered), (
+            f"{label} must say that the tmux socket is confined too; it is the one target "
+            "whose damage is someone else's session rather than someone else's file"
+        )
+
+
+def test_mcp_recorder_arms_its_trap_only_once_every_target_is_settled() -> None:
+    """Read as text: the checks stand in front of the trap, not behind it.
+
+    `cleanup` unlinks five environment-controlled paths and speaks to an
+    environment-controlled tmux socket, and an `EXIT` trap runs it on every
+    path — including the refusals that fire before VHS exists. That order
+    is the whole bug the confinement fixes: a check that runs *after* the
+    trap is armed has already let a refusal act on whatever it was going
+    to refuse. So every confinement call must appear above the `trap`
+    line, and nothing may call `cleanup`, `clean_scratch` or
+    `end_session` above it either — defining those functions is not
+    running them, but a call is a call.
+    """
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    commands = [
+        line for line in script.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    ]
+    # A bare `clean_scratch` inside `cleanup`'s own body is a definition being
+    # written, not a path being deleted, so the two are told apart by nesting:
+    # only a call at the script's top level runs before the trap is armed.
+    depths = []
+    depth = 0
+    for line in commands:
+        stripped = line.strip()
+        if stripped == "}":
+            depth -= 1
+        depths.append(depth)
+        if stripped.endswith("() {"):
+            depth += 1
+    armed = next(
+        (index for index, line in enumerate(commands) if re.match(r"^trap .* EXIT", line)),
+        None,
+    )
+    assert armed is not None, "cleanup must still run on every exit path"
+
+    confinements = [
+        index for index, line in enumerate(commands) if MCP_RECORDER_CONFINEMENT in line.strip()
+    ]
+    assert confinements, (
+        f"the wrapper must confine its targets through a `{MCP_RECORDER_CONFINEMENT}` step a "
+        "reader can find, or the next path added here will quietly skip the check"
+    )
+    called = [index for index in confinements if not commands[index].strip().endswith("() {")]
+    assert called, f"`{MCP_RECORDER_CONFINEMENT}` must be called, not merely defined"
+    assert max(called) < armed, (
+        "every target must be settled before the trap that acts on them is armed; the "
+        f"wrapper still checks at {called} and arms at {armed}"
+    )
+
+    for helper in ("cleanup", "clean_scratch", "end_session"):
+        premature = [
+            index
+            for index, line in enumerate(commands)
+            if index < armed and line.strip() == helper and depths[index] == 0
+        ]
+        assert not premature, (
+            f"{helper} is called before the trap is armed, so an unchecked path is acted on "
+            f"by the very refusal that was meant to reject it: line {premature}"
+        )
+
+
 def test_mcp_recorder_is_a_strict_fail_closed_shell_script() -> None:
     """The boundary is only as good as the shell it is written in."""
     assert os.access(MCP_RECORDER, os.X_OK), (
@@ -5841,8 +6408,10 @@ def _run_hostile_tape(
     environment[MCP_RECORDER_ENV["tape"]] = str(tape)
     environment[MCP_RECORDER_ENV["digest"]] = hashlib.sha256(pinned.encode("utf-8")).hexdigest()
     environment[MCP_RECORDER_ENV["test_mode"]] = "1"
+    environment[MCP_RECORDER_ENV["test_root"]] = str(workdir)
     environment[MCP_RECORDER_ENV["candidate"]] = str(candidate)
     environment[MCP_RECORDER_ENV["final"]] = str(final)
+    environment[MCP_RECORDER_ENV["socket"]] = str(workdir / MCP_TMUX_SOCKET)
     for role in ("ok", "failed", "ready", "go"):
         environment[MCP_RECORDER_ENV[role]] = str(workdir / f".korvid-mcp-demo-{role}")
     completed = subprocess.run(
@@ -5975,6 +6544,12 @@ def test_mcp_recorder_refuses_a_digest_override_outside_test_mode(tmp_path: Path
     assert run.status != 0
     assert not run.vhs_ran, "an environment digest may not bypass the reviewed production pin"
     assert run.published == MCP_PUBLISHED_BYTES
+    assert MCP_RECORDER_ENV["digest"] in run.output, (
+        f"the refusal must name the pin override it refused: {run.output!r}"
+    )
+    assert MCP_RECORDER_ENV["test_mode"] in run.output, (
+        f"and the mode that would have accepted it: {run.output!r}"
+    )
     assert MCP_RECORDER_REJECTION in run.output
 
 
@@ -6008,10 +6583,16 @@ def test_mcp_recorder_detects_a_candidate_alias_through_a_symlinked_parent(
     assert "candidate and published clip must be different files" in run.output
 
 
-@pytest.mark.parametrize("media_dir", ["docs/assets/scenes", "docs/assets"])
-def test_mcp_recorder_test_mode_cannot_publish_inside_the_repository(
-    tmp_path: Path, media_dir: str
-) -> None:
+def test_mcp_recorder_test_root_cannot_be_the_wrapper_checkout(tmp_path: Path) -> None:
+    """Isolation is measured against a checkout, so a checkout cannot be it.
+
+    The wrapper resolves its own repository root from `BASH_SOURCE`, and
+    the isolated root a contract declares has to sit outside that — in
+    both directions, since a root that *contains* the checkout confines
+    nothing about it. Here the copy of the wrapper is its own repository
+    and the run declares that same directory, so every publication path
+    below it is inside a checkout and the run is refused before VHS.
+    """
     root = tmp_path / "copied-repository"
     recorder = root / "docs/demo/record-mcp-follow.sh"
     recorder.parent.mkdir(parents=True)
@@ -6022,13 +6603,74 @@ def test_mcp_recorder_test_mode_cannot_publish_inside_the_repository(
     run = _run_recorder(
         root,
         recorder=recorder,
-        candidate_dir=media_dir,
-        final_dir=media_dir,
     )
 
     assert run.status != 0
     assert not run.vhs_ran, "test-mode pin overrides may never reach the publication directory"
     assert run.published == MCP_PUBLISHED_BYTES
+    assert MCP_RECORDER_ENV["test_root"] in run.output, (
+        f"the refusal must name the root it graded: {run.output!r}"
+    )
+    assert MCP_RECORDER_REJECTION in run.output
+
+
+def test_mcp_recorder_resolves_its_checkout_before_validating_test_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "physical-repository"
+    recorder = root / "docs/demo/record-mcp-follow.sh"
+    recorder.parent.mkdir(parents=True)
+    recorder.write_bytes(MCP_RECORDER.read_bytes())
+    recorder.chmod(0o755)
+    alias = tmp_path / "repository-link"
+    alias.symlink_to(root, target_is_directory=True)
+    workdir = root / "isolated"
+
+    run = _run_recorder(
+        workdir,
+        recorder=alias / "docs/demo/record-mcp-follow.sh",
+        test_root=workdir,
+        seeded_marker="ok",
+    )
+
+    assert run.status != 0
+    assert not run.vhs_ran
+    assert run.tmux == ""
+    assert "ok" in run.scratch_left
+    assert "must sit outside this checkout" in run.output
+    assert MCP_RECORDER_REJECTION in run.output
+
+
+def test_mcp_recorder_isolated_paths_cannot_point_into_the_checkout(tmp_path: Path) -> None:
+    """The other half: a root elsewhere buys no licence over a checkout.
+
+    The isolated root here is a directory of its own, outside the copied
+    wrapper's repository and perfectly valid — and every path the run
+    declares still points into that repository. Confinement is what
+    settles it: a publication path that is not inside the declared root is
+    refused, whatever the root itself was allowed to be.
+    """
+    root = tmp_path / "copied-repository"
+    recorder = root / "docs/demo/record-mcp-follow.sh"
+    recorder.parent.mkdir(parents=True)
+    recorder.write_bytes(MCP_RECORDER.read_bytes())
+    recorder.chmod(0o755)
+    (root / "docs/assets/scenes").mkdir(parents=True)
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+
+    run = _run_recorder(
+        root,
+        recorder=recorder,
+        test_root=isolated,
+    )
+
+    assert run.status != 0
+    assert not run.vhs_ran, "test-mode pin overrides may never reach the publication directory"
+    assert run.published == MCP_PUBLISHED_BYTES
+    assert MCP_RECORDER_ENV["candidate"] in run.output or MCP_RECORDER_ENV["final"] in run.output, (
+        f"the refusal must name the publication path it refused: {run.output!r}"
+    )
     assert MCP_RECORDER_REJECTION in run.output
 
 
@@ -6169,13 +6811,14 @@ def test_mcp_recorder_records_the_shipped_tape_under_its_shipped_pin(tmp_path: P
     with `KORVID_MCP_TAPE_SHA256` unset, so the run is graded against
     `reviewed_tape_sha256` exactly as a contributor's would be — through
     the real digest computation, the real byte guard and the real
-    same-directory check. Only VHS is a stand-in, so no media is recorded.
+    same-directory check. Only VHS is a stand-in, so no media is recorded,
+    and only the paths are isolated, which is what the pin is deliberately
+    independent of.
     """
     run = _run_recorder(
         tmp_path / "shipped-tape",
         tape_source=MCP_TAPE,
         use_shipped_pin=True,
-        test_mode=False,
     )
 
     assert run.status == 0, (

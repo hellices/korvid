@@ -929,7 +929,20 @@ class ToolExecutor(RecordedExecution):
         )
         return await handler(arguments)
 
-    async def _dispatch_ui(self, tool: ToolDef, args: dict[str, Any]) -> str:
+    async def _dispatch_ui(self, tool: ToolDef, args: dict[str, Any]) -> ToolOutcome:
+        """Dispatch a `ui_only` tool, classifying the bridge's own verdict.
+
+        `UIBridge` methods never raise on failure; the class contract
+        (see `UIBridge`) has every one return an `ERROR: ...` string
+        instead, e.g. `agent_navigate` when an approval dialog is already
+        open. That string is the *established* boundary for this
+        interface — unlike a cluster manifest, which must never be
+        content-sniffed for `ERROR:` (`ToolOutcome.error` docstring), a
+        `UIBridge` reply carries no document a false match could
+        misclassify. Reporting it as plain text left every consumer of
+        `outcome.error` (provenance, redaction policy) unable to tell a
+        denied navigation from a successful one.
+        """
         if self._ui is None:
             raise ValueError("UI control unavailable in this session")
         adapter = _UI_ARG_ADAPTERS.get(tool.dispatch)
@@ -937,7 +950,8 @@ class ToolExecutor(RecordedExecution):
             raise ValueError(
                 f"tool {tool.name!r}: no argument adapter for UI dispatch {tool.dispatch!r}"
             )
-        return await adapter(self._ui, args)
+        text = await adapter(self._ui, args)
+        return ToolOutcome(text=text, error=text.startswith(ERROR_PREFIX))
 
     async def _dispatch_write(self, tool: ToolDef, args: dict[str, Any]) -> str:
         if self._ui is None:

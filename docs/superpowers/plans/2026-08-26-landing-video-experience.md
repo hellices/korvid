@@ -949,22 +949,32 @@ private socket (`tmux -S .korvid-mcp-demo.tmux.sock`, removed with it) from an
 `EXIT` trap — never on the user's default server, where that name may belong to
 someone else's session —
 exits non-zero and leaves any previously approved clip byte-identical. Its
-paths default to those repository-relative values; the
-`KORVID_MCP_VHS_BIN`/`KORVID_MCP_TAPE`/
-`KORVID_MCP_CANDIDATE`/
+paths default to those repository-relative values, and outside the contracts
+they are the only values it will use: the
+`KORVID_MCP_VHS_BIN`/`KORVID_MCP_TAPE`/`KORVID_MCP_TAPE_SHA256`/
+`KORVID_MCP_TEST_ROOT`/`KORVID_MCP_CANDIDATE`/
 `KORVID_MCP_FINAL`/`KORVID_MCP_CLIENT_OK`/`KORVID_MCP_CLIENT_FAILED`/
 `KORVID_MCP_READY`/`KORVID_MCP_GO`/`KORVID_MCP_TMUX_SOCKET` overrides exist so
 the contracts can drive
-the boundary against a fake VHS in a temporary directory. Because the single
+the boundary against a fake VHS in a temporary directory, and each one names a
+path the `EXIT` teardown unlinks or the tmux server it kills a session on, so a
+run that sets any of them without declaring itself a contract test is refused
+and never acted on. Declaring one costs `KORVID_MCP_TEST_MODE=1` plus a
+`KORVID_MCP_TEST_ROOT` directory outside the wrapper's own repository root —
+compared in both directions, so neither a root inside the checkout nor one
+containing it is allowed — after which every one of those paths and the socket
+must resolve inside that root, lexically (absolute, no `..`) and physically
+(deepest existing ancestor resolved with `cd -P`, which catches a symlink out
+of the root). The whole check stands in front of the `EXIT` trap, so nothing
+the wrapper would not accept is something it has already deleted. Because the
+single
 `mv` is only atomic inside one directory, the candidate and the published clip
 must resolve to the same physical parent: the wrapper checks that before it
 starts VHS, so every override — the contracts' included — has to preserve the
 invariant. They must resolve to different files, and cleanup skips candidate
 removal if an alias is detected so a rejection cannot delete the approved
-final. `KORVID_MCP_TAPE_SHA256` is narrower: the wrapper accepts it only
-with `KORVID_MCP_TEST_MODE=1`, and that mode refuses a final path whose physical
-parent is inside the copied wrapper's own repository root. Contract digests can
-therefore exercise the boundary but cannot publish repository files.
+final. Contract digests can
+therefore exercise the boundary but have no way to publish repository files.
 
 Run:
 

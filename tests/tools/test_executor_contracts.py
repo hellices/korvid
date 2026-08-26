@@ -9,6 +9,7 @@ import pytest
 from korvid.k8s.errors import ApiStatusError
 from korvid.tools.executor import RecordedExecution, ToolOutcome, as_recorded
 from korvid.tools.registry import TOOLS_BY_NAME, ToolDef
+from korvid.tools.structured import ERROR_PREFIX
 from tests.tools.executor_fakes import (
     FakeBridge,
     FakeEventKube,
@@ -116,6 +117,32 @@ async def test_execute_recorded_reports_nothing_for_a_text_tool() -> None:
 
     assert outcome.redactions == ()
     assert isinstance(outcome.text, str)
+
+
+async def test_ui_only_bridge_failure_text_is_reported_as_an_error() -> None:
+    """A `UIBridge` method may fail without raising: the class contract
+    (executor.py: "implementations must not raise") has every method return
+    an `ERROR: ...` string on failure instead, e.g. `agent_navigate` when an
+    approval dialog is already open. `execute_recorded` wrapped that plain
+    string with the default `error=False`, so a real bridge failure looked
+    identical to a clean navigation to the redaction/provenance policy and
+    to any other `outcome.error` consumer."""
+
+    class DenyingBridge(FakeBridge):
+        async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+            return f"{ERROR_PREFIX} an approval dialog is open — the user is deciding"
+
+    outcome = await make_ui_executor(DenyingBridge()).execute_recorded("navigate", {"view": "pods"})
+
+    assert outcome.error is True
+    assert outcome.text.startswith(ERROR_PREFIX)
+
+
+async def test_ui_only_bridge_success_text_is_not_an_error() -> None:
+    outcome = await make_ui_executor(FakeBridge()).execute_recorded("navigate", {"view": "pods"})
+
+    assert outcome.error is False
+    assert outcome.text == "switched to pods"
 
 
 # --- The recorded-execution contract is an ABC (round 6) -------------------

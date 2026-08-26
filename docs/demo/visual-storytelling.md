@@ -276,11 +276,29 @@ review the new bytes, then recompute the pin** — here, in
 the same digest. Recomputing it to make a refusal go away is the one move this
 boundary exists to prevent.
 
-The pin is not a normal environment override. The wrapper accepts
-`KORVID_MCP_TAPE_SHA256` only with `KORVID_MCP_TEST_MODE=1`, which exists only
-for the Bash contract tests. In that mode the final path's physical parent must
-sit outside this checkout's physical repository root, so a test digest cannot
-publish repository files even through a symlinked path.
+Neither the pin nor any other `KORVID_MCP_*` value is a normal environment
+override. Each one names something a run destroys — the candidate and the four
+handshake files it unlinks, the clip it promotes to, the tmux socket it kills a
+session on — and the teardown that touches all of them runs from an `EXIT`
+trap, on refusal paths as much as on the success path. A stale export or a
+mistyped copy of a command line would otherwise be carried out rather than
+questioned. So outside the Bash contract tests there is nothing here to
+configure: a run that sets any of them is refused and never carried out, and a
+run that sets none records with the repository-relative defaults published
+above.
+
+A contract test declares two things instead: `KORVID_MCP_TEST_MODE=1`, and a
+`KORVID_MCP_TEST_ROOT` of its own, which must be a directory outside this
+checkout — the wrapper compares it against its own repository root in both
+directions, so a root inside the checkout and a root containing it are both
+turned away. Every path that run may delete, the clip it may publish and the
+tmux socket it may speak to then have to resolve inside that root, checked both
+as spellings (absolute, no `..`, rooted at the declared prefix) and physically
+(the deepest existing ancestor resolved with `cd -P`, so a symlink out of the
+root is caught too). All of that happens before the `EXIT` trap is armed, so a
+value the wrapper will not accept is one it also never acts on:
+`KORVID_MCP_TAPE_SHA256` is read only in that same mode, and a test digest
+therefore has no way to publish repository files.
 
 Two literal checks stand beside the pin, and neither parses a directive. The
 published clip's own basename must be **absent** from the tape's bytes —
