@@ -234,14 +234,24 @@ terminal: it catches the failure, publishes `.korvid-mcp-demo-client-failed`,
 prints one fixed line — no traceback, no error text, no tool result — and
 holds the pane open for a bounded 30 s, past the visible window, so the
 composition survives intact to the teardown. `.korvid-mcp-demo-client-ok` is
-published only after all four calls and the closing card have been printed,
-before the closing hold, so it certifies a story that finished rather than a
-process that survived. Neither marker is ever inherited: the client clears
+published only after all four calls and the closing card have been printed and
+the MCP session and its HTTP transport have both closed, before the closing
+hold, so it certifies a story that finished rather than a process that
+survived. That publish belongs to the entry point, not to the story: written
+inside the story it would have certified a run whose own teardown had not
+happened yet, and anything that teardown raised — a reset peer, a
+half-closed stream — then arrived with a success already on disk. Since the
+failure marker is best-effort, a checkout that could not write it left exactly
+one marker behind, the success, and this wrapper promotes on that. Neither
+marker is ever inherited: the client clears
 both at the start of a run, before it connects, so only what this run
 published can grade it. A client killed before it publishes anything — a
 `SIGKILL`, a tape that timed out — therefore leaves no marker at all, which
 is a rejection; the tape's own `rm -f` and the wrapper's cleanup remain as
-further layers rather than the only ones.
+further layers rather than the only ones. The closing hold itself sits outside
+that failure channel: it is local pacing for the frames, and a story already
+certified as complete may not be re-graded by whatever happens while its pane
+idles.
 
 Reading those two files from the tape would settle nothing. VHS renders the
 timeline it was given and exits 0 whatever the shell it typed into did, so a
@@ -287,8 +297,10 @@ VHS starts if they differ: any override of `KORVID_MCP_CANDIDATE` or
 `KORVID_MCP_FINAL` has to preserve that invariant. Promotion happens only
 when VHS returned 0, the failure file is **absent**, the success file is
 **present**, and the candidate exists.
-Failure outranks success: a client that raised inside its own closing hold,
-after publishing success, is still a failed run. On every other path the
+Failure outranks success, as defence in depth: the client publishes its
+success only once everything but that local closing hold has succeeded, so the
+two markers should never appear together — and a run that somehow produced
+both is a failed one. On every other path the
 wrapper prints one line on stderr, removes the candidate and all four
 handshake files, tears down the recording's own tmux session by name **on its
 private socket** and removes the socket, and

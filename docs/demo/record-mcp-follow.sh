@@ -225,8 +225,10 @@ status=0
 [ "$status" -eq 0 ] || fail "vhs exited ${status}"
 
 # The verdict the client pane published, in the order that keeps it honest:
-# a failure outranks a success, because a client that raised inside its own
-# closing hold — after publishing success — is still a failed run.
+# a failure outranks a success. The client publishes its success only once
+# the story, its session and its transport have all closed cleanly, so the
+# two markers should never appear together — and a run that somehow produced
+# both is a failed one.
 [ ! -e "$failed_marker" ] || fail "the client pane reported a failed run"
 [ -e "$ok_marker" ] || fail "the client pane did not report a completed run"
 [ -s "$candidate" ] || fail "vhs produced no candidate recording"

@@ -20,7 +20,11 @@ observes this pane, so a run that raised would still yield an apparently
 finished asset — with a traceback in the frames and the TUI reflowed to full
 width once the pane closed. :func:`run` therefore turns any failure into a
 repository-local status file, :data:`FAILED_FILE`, published best-effort
-beside the strict :data:`OK_FILE`. The tape only records and leaves whatever
+beside the strict :data:`OK_FILE`. :func:`run` owns both: the story in
+:func:`main` prints and returns, and the success marker is written only once
+that coroutine has returned — which is to say once its session and its HTTP
+transport have closed without raising — so no failure can arrive after a
+success has already been published. The tape only records and leaves whatever
 markers exist in place; it can decide nothing, because VHS exits 0 whatever
 the shell it typed into did. The verdict belongs to
 ``docs/demo/record-mcp-follow.sh``, the wrapper that runs VHS: it promotes
@@ -45,14 +49,19 @@ from mcp.client.streamable_http import streamable_http_client
 #: machine is contacted, and no credential takes part.
 URL = "http://127.0.0.1:7878/mcp"
 
-#: Published once all four calls and the closing card have been printed —
-#: the one thing that distinguishes a complete story from a pane that
-#: connected, printed two beats and died. VHS cannot tell those apart.
+#: Published once all four calls and the closing card have been printed and
+#: the session and its transport have closed without raising — the one thing
+#: that distinguishes a complete story from a pane that connected, printed
+#: two beats and died. VHS cannot tell those apart. :func:`run` publishes it,
+#: after :func:`main` has returned: written from inside the story it would
+#: certify a run whose own teardown had not happened yet.
 OK_FILE = Path(".korvid-mcp-demo-client-ok")
 
 #: Published instead when the run fails. `docs/demo/record-mcp-follow.sh`
 #: rejects the candidate on this file even if the success file is also
-#: present: a failure raised inside the closing hold is still a failed run.
+#: present, as defence in depth — though the client no longer publishes a
+#: failure after a success: :data:`OK_FILE` is written only once everything
+#: except the local closing hold has succeeded.
 #: Publishing it is best-effort: the same read-only checkout or permission
 #: error that can stop :func:`_clear_markers` from removing a stale marker
 #: can just as easily stop this write, and :func:`run` must not let that
@@ -75,7 +84,12 @@ TAIL_LINES = 5
 
 #: How long the closing card stays up. The capture stops before it
 #: elapses: a client that exited first would close its pane and reflow the
-#: TUI to full width inside the last captured frames.
+#: TUI to full width inside the last captured frames. :func:`run` owns it,
+#: after the success marker is published: the hold is local pacing for the
+#: frames — nothing outside this process waits on it or observes it — so it
+#: is a plain `asyncio.sleep`, and it stands outside the failure channel
+#: because a story already certified as complete may not be re-graded by
+#: whatever happens while its pane idles.
 CLOSING_HOLD = 6.0
 
 #: How long a failed run holds its pane open. The same reflow argument that
@@ -270,9 +284,11 @@ def _clear_markers() -> None:
 async def main() -> None:
     """The story itself: four read-only calls, printed at reading speed.
 
-    Publishes :data:`OK_FILE` once the closing card is printed and before
-    the closing hold, so the marker certifies a story that finished rather
-    than a process that survived. Failures propagate to :func:`run`.
+    Prints its four beats and the closing card, closes the `ClientSession`
+    and the Streamable HTTP transport it opened, and returns. It publishes
+    no marker and takes no closing hold: the verdict is :func:`run`'s, and
+    only :func:`run` can see whether this coroutine's own teardown — every
+    `__aexit__` above — completed. Failures propagate there.
     """
     print("external MCP client — MCP SDK over Streamable HTTP")
     print(f"connecting to {URL}")
@@ -309,8 +325,6 @@ async def main() -> None:
 
         print("\nread-only investigation complete —")
         print("korvid followed every answer onto the screen.")
-        _publish(OK_FILE)
-        await asyncio.sleep(CLOSING_HOLD)
 
 
 async def run() -> None:
@@ -323,6 +337,20 @@ async def run() -> None:
     publishing :data:`FAILED_FILE` rejects the candidate whatever else is
     lying about beside it, and keeps the traceback out of the frames.
 
+    :data:`OK_FILE` is published here, not in :func:`main`, and only once
+    `main` has *returned*: awaiting it to completion is what proves the
+    `ClientSession` and the Streamable HTTP transport both closed without
+    raising. Published from inside `main` it certified a run several
+    `__aexit__`s before that run had finished, so anything the teardown
+    raised arrived in this failure channel with a success already on disk —
+    and because publishing :data:`FAILED_FILE` is best-effort, a checkout
+    that could not take that second write left the wrapper a lone
+    :data:`OK_FILE` and it promoted a failed run. Clearing the markers at
+    the start of this same `try` is what makes the ordering total: when the
+    failure channel runs, no successful publish has happened yet, so the
+    only success that can exist on disk is one this run put there after
+    everything succeeded.
+
     Publishing :data:`FAILED_FILE` is itself best-effort: the same
     read-only checkout or permission error that broke `_clear_markers` (or
     anything else `main` raised) can just as easily stop this write, and a
@@ -332,9 +360,19 @@ async def run() -> None:
     prevent. So an `OSError` from publishing the failure marker is caught
     and ignored; the wrapper rejects the candidate regardless, because it
     promotes only when :data:`OK_FILE` is present, and a run that reaches
-    this block never published one. `_publish(OK_FILE)` inside `main` is not
-    given the same leniency: if it raises, that `OSError` propagates here
-    like any other failure and is handled the same way.
+    this block never published one. `_publish(OK_FILE)` is not given the
+    same leniency: it stands inside the `try` above, so if it raises, the
+    run is failed like any other.
+
+    The closing hold stands *after* the failure channel, not in it: a
+    published :data:`OK_FILE` is final, and an ordinary `Exception` from
+    the hold must not be able to publish :data:`FAILED_FILE` beside a
+    success it cannot retract, or print the fixed failure line under a
+    story that finished. The hold is a plain `asyncio.sleep` — pacing for
+    the frames rather than part of the story — and it is local: nothing
+    outside this process observes it, and the capture stops before it
+    elapses. A cancellation still interrupts it, exactly as it interrupts
+    every other await here.
 
     Raises:
         SystemExit: with status 1 if the story failed, so a direct run still
@@ -349,17 +387,20 @@ async def run() -> None:
 
     `BaseException` is deliberately not caught: an interrupt or a cancelled
     run must stay interrupting. Neither can forge a success, because
-    :data:`OK_FILE` is published only after the closing card is printed.
+    :data:`OK_FILE` is published only after the whole story, its teardown
+    included, has succeeded.
     """
     try:
         _clear_markers()
         await main()
+        _publish(OK_FILE)
     except Exception:
         with contextlib.suppress(OSError):
             _publish(FAILED_FILE)
         print(_line("\nclient run failed — this recording will be rejected."))
         await asyncio.sleep(FAILURE_HOLD)
         raise SystemExit(1) from None
+    await asyncio.sleep(CLOSING_HOLD)
 
 
 if __name__ == "__main__":

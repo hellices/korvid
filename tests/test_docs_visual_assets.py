@@ -3719,13 +3719,36 @@ def _drive_mcp_client(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     holds: list[_ClientHold],
+    *,
+    closing: list[tuple[bool, bool]] | None = None,
+    teardown_failure: Exception | None = None,
 ) -> None:
-    """Point the client at `session` and record every hold it takes."""
+    """Point the client at `session` and record every hold it takes.
+
+    Args:
+        module: The client module under test.
+        session: The `ClientSession` stand-in the story is told against.
+        monkeypatch: The fixture the substitutions are installed through.
+        capsys: The capture the pane's output is drained from at each hold.
+        holds: Collects one `_ClientHold` per hold the client takes.
+        closing: When given, collects `(ok, failed)` at the moment the
+            Streamable HTTP transport closes — the last teardown `main`
+            unwinds, and the window in which a marker published inside
+            `main` would already be on disk.
+        teardown_failure: When given, raised from that same close, standing
+            for anything the real transport can raise on the way out (a
+            reset peer, a half-closed HTTP stream) *after* the story itself
+            has been told in full.
+    """
 
     @contextlib.asynccontextmanager
     async def _fake_transport(url: str) -> AsyncIterator[tuple[object, object]]:
         assert url == module.URL
         yield (object(), object())
+        if closing is not None:
+            closing.append((module.OK_FILE.exists(), module.FAILED_FILE.exists()))
+        if teardown_failure is not None:
+            raise teardown_failure
 
     async def _fake_sleep(seconds: float) -> None:
         captured = capsys.readouterr()
@@ -3743,10 +3766,48 @@ def _drive_mcp_client(
     monkeypatch.setattr(module.asyncio, "sleep", _fake_sleep)
 
 
+def test_mcp_client_main_tells_the_story_and_publishes_no_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`main` prints; it neither grades the run nor owns the closing hold.
+
+    Publishing `OK_FILE` from inside `main` put the success marker on disk
+    while the Streamable HTTP transport and the `ClientSession` were still
+    open, and the closing hold ran there too. Anything those two raised on
+    the way out then reached `run`'s failure channel *after* a success had
+    already been published — and when `FAILED_FILE` could not be written,
+    the wrapper saw a lone `OK_FILE` and promoted a failed run. So `main`
+    now owns nothing but the story: four calls, four answer beats, the
+    closing card, and a clean exit from everything it opened.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    session = _FakeSession(_mcp_client_answers())
+    holds: list[_ClientHold] = []
+    _drive_mcp_client(module, session, monkeypatch, capsys, holds)
+
+    asyncio.run(module.main())
+
+    assert session.calls == list(MCP_CLIENT_CALLS), "the whole story must have run"
+    assert len(holds) == len(MCP_CLIENT_CALLS), (
+        f"main owns the four answer beats and no other hold; recorded {len(holds)}"
+    )
+    assert all(seconds != module.CLOSING_HOLD for seconds, *_rest in holds), (
+        f"the closing hold belongs to run, after the success is published: {holds}"
+    )
+    assert not module.OK_FILE.exists(), (
+        "main may not publish the success marker; a marker written inside the "
+        "transport certifies a run whose teardown has not happened yet"
+    )
+    assert not module.FAILED_FILE.exists(), "main publishes no verdict at all"
+    printed = "".join(chunk for *_rest, chunk in holds) + capsys.readouterr().out
+    assert "investigation complete" in printed, "main must still print the closing card itself"
+
+
 def test_mcp_client_publishes_success_only_after_the_whole_story_is_printed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The success file is the tape's evidence that the story actually ran.
+    """The success file is the wrapper's evidence that the story actually ran.
 
     VHS records a fixed window and stops; it cannot tell a complete run from
     a client that connected, printed two beats and died. The success file is
@@ -3760,7 +3821,7 @@ def test_mcp_client_publishes_success_only_after_the_whole_story_is_printed(
     holds: list[_ClientHold] = []
     _drive_mcp_client(module, session, monkeypatch, capsys, holds)
 
-    asyncio.run(module.main())
+    asyncio.run(module.run())
 
     assert session.calls == list(MCP_CLIENT_CALLS), "the whole story must have run"
     assert len(holds) == len(MCP_CLIENT_CALLS) + 1, (
@@ -3778,6 +3839,147 @@ def test_mcp_client_publishes_success_only_after_the_whole_story_is_printed(
     assert not failed, "a completed run must not publish the failure file"
     assert "investigation complete" in printed, (
         "the success file must be published after the closing summary is printed"
+    )
+
+
+def test_mcp_client_publishes_success_only_after_the_transport_has_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The success marker certifies a *finished* run, teardown included.
+
+    `main` used to publish `OK_FILE` while the Streamable HTTP transport and
+    the `ClientSession` were still open, so the marker asserted a completed
+    run several `__aexit__`s before the run had actually completed. `run`
+    publishes it now, after `main` has returned — which is only possible
+    once every async context manager `main` opened has exited successfully.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    session = _FakeSession(_mcp_client_answers())
+    holds: list[_ClientHold] = []
+    closing: list[tuple[bool, bool]] = []
+    _drive_mcp_client(module, session, monkeypatch, capsys, holds, closing=closing)
+
+    asyncio.run(module.run())
+
+    assert session.calls == list(MCP_CLIENT_CALLS), "the whole story must have run"
+    assert closing == [(False, False)], (
+        f"no marker may exist while the story's transport is still closing; observed {closing}"
+    )
+    assert module.OK_FILE.exists(), "a run whose teardown succeeded must publish its success"
+    assert not module.FAILED_FILE.exists(), "a completed run leaves no failure behind"
+    seconds, ok, failed, printed = holds[-1]
+    assert seconds == module.CLOSING_HOLD, f"the last hold must be the closing hold: {seconds}"
+    assert ok, "the closing hold is held on a published success"
+    assert not failed, "a completed run publishes no failure"
+    assert "investigation complete" in printed, "the closing card is printed before the marker"
+
+
+def test_mcp_client_run_publishes_no_success_when_the_story_fails_on_the_way_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The lone-`OK_FILE` race: a failed teardown may not leave a success behind.
+
+    With `OK_FILE` published inside `main` — inside the Streamable HTTP
+    transport and the `ClientSession`, before the closing hold — a transport
+    or session that raised while closing (a reset peer, a half-closed HTTP
+    stream) reached `run`'s failure channel with a success marker already on
+    disk. Publishing `FAILED_FILE` is best-effort since round-14, so when
+    that second write cannot happen the run ends holding exactly one marker:
+    the success. `docs/demo/record-mcp-follow.sh` promotes on failure-absent
+    *and* success-present, so it would have published a recording of a run
+    that failed. Nothing may publish `OK_FILE` until the whole run,
+    teardown included, has succeeded.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    session = _FakeSession(_mcp_client_answers())
+    holds: list[_ClientHold] = []
+    closing: list[tuple[bool, bool]] = []
+    _drive_mcp_client(
+        module,
+        session,
+        monkeypatch,
+        capsys,
+        holds,
+        closing=closing,
+        teardown_failure=ConnectionResetError(104, "Connection reset by peer"),
+    )
+
+    real_publish = module._publish
+
+    def _refusing_failure_publish(status: Path) -> None:
+        if status.name == module.FAILED_FILE.name:
+            raise PermissionError(13, "Permission denied")
+        real_publish(status)
+
+    monkeypatch.setattr(module, "_publish", _refusing_failure_publish)
+
+    with pytest.raises(SystemExit) as excinfo:
+        asyncio.run(module.run())
+
+    assert excinfo.value.code == 1, "a failed teardown must still exit with the failure status"
+    assert session.calls == list(MCP_CLIENT_CALLS), "the story itself was told in full"
+    assert not module.OK_FILE.exists(), (
+        "a run that failed on the way out may never leave a lone success behind; the "
+        "wrapper would promote it"
+    )
+    assert not module.FAILED_FILE.exists(), (
+        "the failure marker could not be written here; the wrapper must reject on the "
+        "missing success instead"
+    )
+    assert closing == [(False, False)], f"no marker may exist during the teardown: {closing}"
+    assert all(seconds != module.CLOSING_HOLD for seconds, *_rest in holds), (
+        f"a run that never published success may not take the closing hold: {holds}"
+    )
+    seconds, ok, failed, printed = holds[-1]
+    assert seconds == module.FAILURE_HOLD, f"the hold must be the bounded failure hold: {seconds}"
+    assert not ok, "the held pane may not carry a success marker"
+    assert not failed, "the failure marker could not be written; it must not appear to exist"
+    assert printed.rstrip().splitlines()[-1] == module._line(
+        "client run failed — this recording will be rejected."
+    ), "the fixed failure line must be the last thing this run publishes"
+    for leak in ("Traceback", "ConnectionResetError", "Connection reset"):
+        assert leak not in printed, f"the pane must publish no {leak!r}"
+
+
+def test_mcp_client_run_holds_the_closing_card_outside_the_failure_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Once success is published, nothing may relabel the run as a failure.
+
+    The closing hold is pacing for the frames, not part of the story's
+    verdict: by the time it runs, all four calls, the closing card and every
+    teardown have already succeeded and `OK_FILE` says so. If it were still
+    inside the failure channel, an ordinary `Exception` raised there would
+    publish `FAILED_FILE` *beside* the success it cannot retract and print
+    the fixed failure line under a story that finished. It sits outside
+    instead, so a published success is final.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    session = _FakeSession(_mcp_client_answers())
+    holds: list[_ClientHold] = []
+    _drive_mcp_client(module, session, monkeypatch, capsys, holds)
+    slept = module.asyncio.sleep
+
+    async def _failing_hold(seconds: float) -> None:
+        await slept(seconds)
+        if seconds == module.CLOSING_HOLD:
+            raise RuntimeError("the pane's own hold broke")
+
+    monkeypatch.setattr(module.asyncio, "sleep", _failing_hold)
+
+    with pytest.raises(RuntimeError, match=r"the pane's own hold broke"):
+        asyncio.run(module.run())
+
+    assert module.OK_FILE.exists(), "the story succeeded; its success marker stands"
+    assert not module.FAILED_FILE.exists(), (
+        "a hold that broke after the run succeeded may not be graded as a failed story"
+    )
+    printed = "".join(chunk for *_rest, chunk in holds) + capsys.readouterr().out
+    assert "this recording will be rejected" not in printed, (
+        "the failure line belongs to the failure channel; the closing hold is not in it"
     )
 
 
@@ -4019,11 +4221,13 @@ def test_mcp_client_run_treats_a_failed_success_publish_as_a_failure(
 
     `_publish(FAILED_FILE)` tolerating its own `OSError` (round-14, comment
     3862657672) must not loosen `_publish(OK_FILE)`: a story that finishes
-    but cannot write its own success marker is still an `OSError` raised out
-    of `main`, and `run` must still catch it, publish the failure marker (a
-    write this scenario does not block), print only the fixed failure line,
-    hold for `FAILURE_HOLD`, and exit non-zero — never a bare `OSError`
-    escaping into the recorded pane.
+    but cannot write its own success marker is still an `OSError`, and it is
+    raised inside `run`'s own try — the publish moved there so the marker
+    cannot certify a run whose transport has not closed yet. `run` must
+    still catch it, publish the failure marker (a write this scenario does
+    not block), print only the fixed failure line, hold for `FAILURE_HOLD`
+    and never for the closing hold, and exit non-zero — never a bare
+    `OSError` escaping into the recorded pane.
     """
     module = _mcp_client_module()
     monkeypatch.chdir(tmp_path)
@@ -4050,6 +4254,9 @@ def test_mcp_client_run_treats_a_failed_success_publish_as_a_failure(
         "the failure marker is writable in this scenario and must be published"
     )
 
+    assert all(seconds != module.CLOSING_HOLD for seconds, *_rest in holds), (
+        f"a run that never published success may not take the closing hold: {holds}"
+    )
     seconds, ok, failed, printed = holds[-1]
     assert seconds == module.FAILURE_HOLD, f"the hold must be the bounded failure hold: {seconds}"
     assert not ok
@@ -4057,6 +4264,52 @@ def test_mcp_client_run_treats_a_failed_success_publish_as_a_failure(
     assert printed.rstrip().splitlines()[-1] == module._line(
         "client run failed — this recording will be rejected."
     ), "the fixed failure line must be the last thing this run publishes"
+    for leak in ("Traceback", "PermissionError", "Permission denied"):
+        assert leak not in printed, f"the pane must publish no {leak!r}"
+
+
+def test_mcp_client_run_publishes_neither_marker_when_no_marker_can_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A checkout that blocks both writes still ends bounded, and still rejects.
+
+    The success publish and the best-effort failure publish are the same
+    `_publish` call against the same directory, so the read-only checkout
+    that blocks one blocks both. The story runs to its closing card, the
+    success cannot be written, the failure cannot be written either — and
+    the run must still print only the fixed failure line, take the full
+    `FAILURE_HOLD`, and raise `SystemExit(1)`. With no `OK_FILE` on disk
+    `docs/demo/record-mcp-follow.sh` rejects the candidate, which is the
+    whole reason the success publish may never run early.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    session = _FakeSession(_mcp_client_answers())
+    holds: list[_ClientHold] = []
+    _drive_mcp_client(module, session, monkeypatch, capsys, holds)
+
+    def _refusing_publish(status: Path) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(module, "_publish", _refusing_publish)
+
+    with pytest.raises(SystemExit) as excinfo:
+        asyncio.run(module.run())
+
+    assert excinfo.value.code == 1, "the run must still exit with the documented failure status"
+    assert session.calls == list(MCP_CLIENT_CALLS), "the story itself ran; only the writes failed"
+    assert not module.OK_FILE.exists(), "no success may appear to exist"
+    assert not module.FAILED_FILE.exists(), "no failure could be written either"
+    assert all(seconds != module.CLOSING_HOLD for seconds, *_rest in holds), (
+        f"a run with no published success may not take the closing hold: {holds}"
+    )
+    seconds, ok, failed, printed = holds[-1]
+    assert seconds == module.FAILURE_HOLD, f"the hold must be the bounded failure hold: {seconds}"
+    assert not ok
+    assert not failed
+    assert printed.rstrip().splitlines()[-1] == module._line(
+        "client run failed — this recording will be rejected."
+    ), "only the fixed failure line may close the recorded pane"
     for leak in ("Traceback", "PermissionError", "Permission denied"):
         assert leak not in printed, f"the pane must publish no {leak!r}"
 
@@ -5524,6 +5777,14 @@ def test_mcp_capture_provenance_publishes_the_client_status_handshake() -> None:
     assert re.search(r"closing card[^.]{0,120}closing hold", lowered), (
         "the page must state when success is published: after the closing card, before "
         "the closing hold"
+    )
+    assert re.search(r"closing card[^.]{0,120}transport[^.]{0,120}closing hold", lowered), (
+        "the page must state that the success marker waits for the session and its "
+        "transport to close, not only for the closing card to be printed"
+    )
+    assert re.search(r"entry point[^.]{0,200}teardown", lowered), (
+        "the page must say why the publish moved out of the story: written inside it, "
+        "the marker certified a run whose own teardown had not happened yet"
     )
     assert re.search(r"clears both[^.]{0,160}start", lowered), (
         "the page must state that the client owns these markers — it clears both at the "
