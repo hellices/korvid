@@ -7,14 +7,20 @@
 # read-only tools. Nothing is staged: every view the left pane opens is
 # korvid's follow bridge mirroring the answer the right pane just got.
 #
-#   vhs docs/demo/mcp-follow.tape
+#   docs/demo/record-mcp-follow.sh
+#
+# Never `vhs` on this file directly. VHS renders the timeline below and exits
+# 0 whatever the shell it typed into did, so nothing this tape can do decides
+# whether the result is published. It renders to a candidate instead, and the
+# wrapper above promotes that candidate onto the published clip only after
+# the client pane certified its own run.
 #
 # Reproducible from this repository alone: loopback only, no credential,
 # no MCP endpoint file, no cluster. The tmux status line is turned off
 # before anything is captured, so no hostname, user or date reaches a
 # frame; the shell that composes the panes is never captured either.
 
-Output docs/assets/scenes/mcp-follow-demo.mp4
+Output docs/assets/scenes/.mcp-follow-demo.candidate.mp4
 
 Set Shell bash
 Set FontSize 14
@@ -119,15 +125,14 @@ Sleep 500ms
 # on any exception (no traceback, no error text, and the pane held open
 # past this capture so it cannot close and reflow the TUI mid-frame).
 #
-# The recording is accepted only when failure is absent *and* success is
-# present, and the failure file outranks the success file: a client that
-# raised inside its own closing hold, after publishing success, is still a
-# failed run. Anything else — a failure, or a run that never reached its
-# fourth answer — tears the session down, removes every recording side
-# effect and exits non-zero, so a truncated story cannot be published as a
-# complete one. This runs after Hide and after the detach above: before
-# Hide it would type a shell command into the captured frames, and before
-# the detach it would type it into the attached TUI.
-Type "if [ ! -f .korvid-mcp-demo-client-failed ] && [ -f .korvid-mcp-demo-client-ok ]; then tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; else echo 'mcp-follow.tape: the client pane did not report a completed run; rejecting this recording'; tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; exit 1; fi"
+# Both files are deliberately left in place here. Reading them from this
+# tape would decide nothing: VHS has already rendered its Output and will
+# exit 0 regardless, so the verdict belongs to docs/demo/record-mcp-follow.sh,
+# which grades the markers after VHS returns, promotes the candidate only on
+# a completed run, and removes every scratch file either way. The session is
+# still torn down from here, after Hide and after the detach: before Hide it
+# would type a shell command into the captured frames, and before the detach
+# it would type it into the attached TUI.
+Type "tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
 Enter
 Sleep 1s

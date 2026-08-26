@@ -779,8 +779,14 @@ so the logs remain visible under the Helm beat and the closing card. No
 external client metadata takes part: the right pane is this repository's own
 client.
 
+The tape is never run through `vhs` directly: VHS exits 0 whatever the
+recording did, so the tape renders to
+`docs/assets/scenes/.mcp-follow-demo.candidate.mp4` and
+`docs/demo/record-mcp-follow.sh` promotes that candidate onto the published
+clip only when the client pane certified its own run.
+
 ```sh
-vhs docs/demo/mcp-follow.tape
+docs/demo/record-mcp-follow.sh
 ffmpeg -y -ss 00:00:08.5 -i docs/assets/scenes/mcp-follow-demo.mp4 \
   -frames:v 1 -vf setsar=1 docs/assets/scenes/mcp-poster.png
 ```

@@ -584,6 +584,7 @@ git commit -m "docs: record grounded agent story"
 **Files:**
 - Create: `docs/demo/mcp_client.py`
 - Create: `docs/demo/mcp-follow.tape`
+- Create: `docs/demo/record-mcp-follow.sh`
 - Modify: `docs/demo/demo.py`
 - Modify: `tests/test_docs_visual_assets.py`
 - Regenerate: `docs/assets/scenes/mcp-follow-demo.mp4`
@@ -777,14 +778,20 @@ Create `docs/demo/mcp-follow.tape`:
 # read-only tools. Nothing is staged: every view the left pane opens is
 # korvid's follow bridge mirroring the answer the right pane just got.
 #
-#   vhs docs/demo/mcp-follow.tape
+#   docs/demo/record-mcp-follow.sh
+#
+# Never `vhs` on this file directly. VHS renders the timeline below and exits
+# 0 whatever the shell it typed into did, so nothing this tape can do decides
+# whether the result is published. It renders to a candidate instead, and the
+# wrapper above promotes that candidate onto the published clip only after
+# the client pane certified its own run.
 #
 # Reproducible from this repository alone: loopback only, no credential,
 # no MCP endpoint file, no cluster. The tmux status line is turned off
 # before anything is captured, so no hostname, user or date reaches a
 # frame; the shell that composes the panes is never captured either.
 
-Output docs/assets/scenes/mcp-follow-demo.mp4
+Output docs/assets/scenes/.mcp-follow-demo.candidate.mp4
 
 Set Shell bash
 Set FontSize 14
@@ -889,16 +896,15 @@ Sleep 500ms
 # on any exception (no traceback, no error text, and the pane held open
 # past this capture so it cannot close and reflow the TUI mid-frame).
 #
-# The recording is accepted only when failure is absent *and* success is
-# present, and the failure file outranks the success file: a client that
-# raised inside its own closing hold, after publishing success, is still a
-# failed run. Anything else — a failure, or a run that never reached its
-# fourth answer — tears the session down, removes every recording side
-# effect and exits non-zero, so a truncated story cannot be published as a
-# complete one. This runs after Hide and after the detach above: before
-# Hide it would type a shell command into the captured frames, and before
-# the detach it would type it into the attached TUI.
-Type "if [ ! -f .korvid-mcp-demo-client-failed ] && [ -f .korvid-mcp-demo-client-ok ]; then tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; else echo 'mcp-follow.tape: the client pane did not report a completed run; rejecting this recording'; tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; exit 1; fi"
+# Both files are deliberately left in place here. Reading them from this
+# tape would decide nothing: VHS has already rendered its Output and will
+# exit 0 regardless, so the verdict belongs to docs/demo/record-mcp-follow.sh,
+# which grades the markers after VHS returns, promotes the candidate only on
+# a completed run, and removes every scratch file either way. The session is
+# still torn down from here, after Hide and after the detach: before Hide it
+# would type a shell command into the captured frames, and before the detach
+# it would type it into the attached TUI.
+Type "tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
 Enter
 Sleep 1s
 ```
@@ -908,14 +914,32 @@ SDK client. The gate file prevents the client from completing during the
 hidden cold-start allowance, and it is dropped only once the scene publishes
 `.korvid-mcp-demo-ready` — from its Textual mount, over a server it has
 already bound — so the visible timeline can never open on a connection error.
+The tape renders to `docs/assets/scenes/.mcp-follow-demo.candidate.mp4` and
+leaves the client's status markers in place: VHS exits 0 whatever the
+recording did, so publication is decided outside it, by the wrapper in Step 6.
 Do not fall back to the checked-in third-party-client GIF.
 
-- [ ] **Step 6: Record and inspect the MCP media**
+- [ ] **Step 6: Record through the promotion wrapper and inspect the media**
+
+Create `docs/demo/record-mcp-follow.sh` (executable, `set -euo pipefail`): it
+runs VHS on the tape, checks that the tape declares exactly one `Output` and
+that it is the candidate, and promotes the candidate onto
+`docs/assets/scenes/mcp-follow-demo.mp4` with a single `mv` only when VHS
+returned 0, `.korvid-mcp-demo-client-failed` is absent,
+`.korvid-mcp-demo-client-ok` is present and the candidate exists. Every other
+path prints one line on stderr, removes the candidate and all four handshake
+files, kills the `korvid-mcp-demo` tmux session by name from an `EXIT` trap,
+exits non-zero and leaves any previously approved clip byte-identical. Its
+paths default to those repository-relative values; the
+`KORVID_MCP_VHS_BIN`/`KORVID_MCP_TAPE`/`KORVID_MCP_CANDIDATE`/
+`KORVID_MCP_FINAL`/`KORVID_MCP_CLIENT_OK`/`KORVID_MCP_CLIENT_FAILED`/
+`KORVID_MCP_READY`/`KORVID_MCP_GO` overrides exist so the contracts can drive
+the boundary against a fake VHS in a temporary directory.
 
 Run:
 
 ```bash
-vhs docs/demo/mcp-follow.tape
+docs/demo/record-mcp-follow.sh
 ffmpeg -y -ss 00:00:08 -i docs/assets/scenes/mcp-follow-demo.mp4 \
   -frames:v 1 docs/assets/scenes/mcp-poster.png
 ffprobe -v error \
@@ -943,6 +967,7 @@ Expected: PASS.
 
 ```bash
 git add docs/demo/mcp_client.py docs/demo/mcp-follow.tape docs/demo/demo.py \
+  docs/demo/record-mcp-follow.sh \
   docs/assets/scenes/mcp-follow-demo.mp4 docs/assets/scenes/mcp-poster.png \
   tests/test_docs_visual_assets.py
 git commit -m "docs: record complete mcp follow story"
@@ -1098,9 +1123,11 @@ git commit -m "docs: explain the complete landing demos"
 
 ## Post-merge review report
 
-Two credible findings raised by Copilot after `79583ef` merged `origin/main`
-into `docs/visual-storytelling`. Both were fixed test-first on top of that
-merge; no media was regenerated, because no successful visible frame changed.
+Three findings addressed after `79583ef` merged `origin/main` into
+`docs/visual-storytelling`: two raised by Copilot, and one — finding 3 — found
+while verifying the second one's fix. All were fixed test-first on top of that
+merge; no media was regenerated, because no successful visible frame changed
+and the published clip stayed byte-identical.
 
 ### 1. The observability diagram claimed a citation both consumers do not get
 
@@ -1146,12 +1173,9 @@ interpreter reports without a traceback. `BaseException` is deliberately not
 caught. Normal visible output and timing are untouched.
 
 `docs/demo/mcp-follow.tape` removes both status files before it launches the
-panes, and after `Hide` — and after the detach, so no keystroke reaches the
-attached TUI — accepts the recording only when the failure file is **absent**
-and the success file is **present**. Failure outranks success, so a client
-that raised inside its own closing hold is still a failed run. Every other
-combination prints the reason, kills the session, removes all four recording
-side effects and exits non-zero.
+panes and now leaves them in place afterwards: the acceptance rule those
+markers feed moved out of the tape entirely in finding 3 below, because a
+tape cannot enforce it.
 
 Contracts added in `tests/test_docs_visual_assets.py`:
 
@@ -1181,3 +1205,74 @@ Contracts added in `tests/test_docs_visual_assets.py`:
 `docs/demo/visual-storytelling.md` and this plan's Step 3 prose and Step 5 tape
 snippet are resynced; the existing snippet-equality contract covers the tape
 verbatim.
+
+### 3. The tape's `exit 1` rejected nothing VHS had already published
+
+*Found while verifying finding 2 on top of `ad6c142`.*
+
+Finding 2 moved the client's verdict into two repository-local markers and had
+the tape grade them after `Hide`. The grading branch was real, but the
+consequence was not: VHS renders the timeline its tape describes and exits 0
+whatever the shell it typed into did. `Output` named
+`docs/assets/scenes/mcp-follow-demo.mp4` directly, so by the time the check
+ran, the reviewed clip had already been overwritten with the truncated take,
+and the `exit 1` only made the failure look handled. `vhs
+docs/demo/mcp-follow.tape` — the published recipe — had no way to leave the
+approved asset alone.
+
+The boundary is now external and outside VHS's reach:
+
+- `docs/demo/mcp-follow.tape` renders to
+  `docs/assets/scenes/.mcp-follow-demo.candidate.mp4` (git-ignored), no longer
+  names the published clip anywhere, and no longer claims its own exit status
+  decides publication. Its teardown detaches and kills the session, and leaves
+  both status markers for the wrapper. The readiness abort still exits, since
+  that happens before anything is captured, but it is no longer the authority.
+- `docs/demo/record-mcp-follow.sh` (new, executable, `set -euo pipefail`) is
+  the recipe. It rejects a tape that does not declare exactly one `Output`
+  equal to the candidate — a second `Output` would put the clip back under
+  VHS's pen — clears stale scratch, runs VHS, and promotes the candidate onto
+  the published clip with a single `mv` only when VHS returned 0, the failure
+  marker is absent, the success marker is present and the candidate exists.
+  Every other path prints one line on stderr, removes the candidate and all
+  four handshake files from an `EXIT` trap, kills only the `korvid-mcp-demo`
+  session by name, exits non-zero and leaves a previously approved clip
+  byte-identical. Its defaults are the repository-relative paths the
+  provenance page publishes; the `KORVID_MCP_*` overrides exist so the
+  contracts can drive the boundary against a fake VHS in a temporary
+  directory.
+
+Contracts added in `tests/test_docs_visual_assets.py`, all driving the shipped
+script through **real bash** with a fake VHS executable:
+
+- `test_mcp_recorder_promotes_only_a_completed_run` — the candidate becomes
+  the published clip, the candidate is moved rather than copied, every scratch
+  marker is gone, and only the named session is killed.
+- `test_mcp_recorder_publishes_nothing_on_a_failed_recording` — four cases
+  (failure marker, missing success marker, VHS exiting non-zero, no candidate
+  despite success): non-zero status, the approved clip byte-identical, the
+  candidate and scratch removed, and the reason on stderr.
+- `test_mcp_recorder_creates_no_clip_where_none_was_approved` — a rejected
+  first run leaves no published file at all.
+- `test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip` — the
+  tape is read before VHS is invoked, so a hostile second `Output` never runs.
+- `test_mcp_recorder_owns_the_canonical_path_and_the_tape_never_writes_it`,
+  `test_mcp_recorder_is_a_strict_fail_closed_shell_script`,
+  `test_mcp_recorder_defaults_are_repository_relative_and_quoted` — one
+  `Output` and it is the candidate, the canonical name only in the wrapper's
+  promotion target, strict mode, an `EXIT` trap, literal removals with no
+  glob, and quoted expansions.
+- `test_mcp_follow_tape_leaves_the_verdict_to_the_wrapper` and
+  `test_mcp_candidate_recording_is_scratch_and_never_committable` — the tape
+  claims no verdict and touches no marker after the capture; the candidate is
+  git-ignored and untracked.
+- `test_mcp_recording_recipe_is_the_wrapper_and_never_a_bare_vhs_run` — no
+  page, plan or tape header may offer a bare `vhs` run on the tape as the
+  recipe, and each must publish the wrapper, the candidate and the promotion
+  rule.
+
+`docs/demo/visual-storytelling.md`, the 2026-08-22 plan's regeneration
+command, this plan's Step 5 snippet, Step 6, Step 8 and `.gitignore` are
+resynced. No media was regenerated:
+`docs/assets/scenes/mcp-follow-demo.mp4` is byte-identical to the clip
+reviewed at `ad6c142`.

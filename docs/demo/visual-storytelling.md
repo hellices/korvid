@@ -161,11 +161,12 @@ endpoint file. The client speaks only to `127.0.0.1:7878`, no credential is
 used, the demo server writes no MCP endpoint file, and the tape turns the
 tmux status line off before the first captured frame — that line is the only
 surface that would print a hostname, a user or today's date into a landing
-asset. The shell that composes the panes is never captured, and the four
-repository-local files it uses — the handshake pair
-(`.korvid-mcp-demo-ready` and `.korvid-mcp-demo-go`) and the client's status
-pair (`.korvid-mcp-demo-client-ok` and `.korvid-mcp-demo-client-failed`) —
-are created and removed inside the checkout.
+asset. The shell that composes the panes is never captured, and the five
+repository-local files a recording makes — the handshake pair
+(`.korvid-mcp-demo-ready` and `.korvid-mcp-demo-go`), the client's status
+pair (`.korvid-mcp-demo-client-ok` and `.korvid-mcp-demo-client-failed`)
+and the candidate render described below — are all
+created and removed inside the checkout.
 
 The client is never released on a timer. `--scene mcp` publishes
 `.korvid-mcp-demo-ready` from its real Textual mount, and only after its
@@ -214,13 +215,28 @@ published only after all four calls and the closing card have been printed,
 before the closing hold, so it certifies a story that finished rather than a
 process that survived.
 
-After `Hide`, the tape detaches and reads those two files: it accepts the
-recording only when the failure file is **absent** and the success file is
-**present**. Failure outranks success — a client that raised inside its own
-closing hold, after publishing success, is still a failed run. On anything
-else the tape prints the reason, kills the session, removes all four files
-and exits non-zero, so a failed or truncated run leaves an obviously failed
-recording rather than a complete-looking wrong one.
+Reading those two files from the tape would settle nothing. VHS renders the
+timeline it was given and exits 0 whatever the shell it typed into did, so a
+tape's own exit status is not a publication gate: whatever `Output` names has
+already been written by the time any check inside the tape can run. The tape
+therefore renders to a candidate —
+`docs/assets/scenes/.mcp-follow-demo.candidate.mp4`, git-ignored like every
+other recording side effect — and never to the published clip. The verdict
+belongs to `docs/demo/record-mcp-follow.sh`, the one command that regenerates
+this capture.
+
+That wrapper runs VHS and then grades the run from outside it. It promotes
+the candidate onto `docs/assets/scenes/mcp-follow-demo.mp4` — one `mv`, in
+the directory the clip already lives in, so a reader sees either the previous
+asset or the whole new one — and only when VHS returned 0, the failure file
+is **absent**, the success file is **present**, and the candidate exists.
+Failure outranks success: a client that raised inside its own closing hold,
+after publishing success, is still a failed run. On every other path the
+wrapper prints one line on stderr, removes the candidate and all four
+handshake files, tears down the recording's own tmux session by name and
+exits non-zero, leaving any previously approved clip byte-identical. A failed
+take publishes nothing at all, instead of replacing a reviewed asset with a
+truncated story.
 
 The captured timeline runs the story once, at reading speed. Each call is
 announced, answered, and then held for a fixed beat while the mirrored view
@@ -256,10 +272,11 @@ documentation-only harness; it is simply never asked to refuse.
 The poster is cut from the log beat, where the external client's first three
 calls sit beside korvid's own log pane, its `agent logs →
 shop/payment-worker-…` follow toast and its `⇄MCP on :7878 ·follow` status
-line.
+line. It is cut from the promoted clip, after the wrapper has published it,
+so a recording that was never promoted leaves the poster untouched too.
 
 ```sh
-vhs docs/demo/mcp-follow.tape
+docs/demo/record-mcp-follow.sh
 ffmpeg -y -ss 00:00:08.5 -i docs/assets/scenes/mcp-follow-demo.mp4 \
   -frames:v 1 -vf setsar=1 docs/assets/scenes/mcp-poster.png
 ```

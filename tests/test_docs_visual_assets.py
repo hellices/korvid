@@ -17,6 +17,7 @@ import zlib
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from pathlib import Path
 from types import ModuleType
+from typing import NamedTuple
 
 import pytest
 
@@ -118,12 +119,41 @@ MCP_TMUX_SESSION = "korvid-mcp-demo"
 #: mid-story would otherwise still produce a complete-looking asset.
 MCP_CLIENT_OK_FILE = ".korvid-mcp-demo-client-ok"
 MCP_CLIENT_FAILED_FILE = ".korvid-mcp-demo-client-failed"
-#: The line the tape prints when it refuses a recording on those files. It is
-#: also the needle that picks the status check out of the tape, so a test can
-#: hand the shipped command to bash instead of matching substrings.
-MCP_STATUS_REJECT_MESSAGE = (
-    "mcp-follow.tape: the client pane did not report a completed run; rejecting this recording"
-)
+#: The external promotion boundary. A tape's own `exit 1` cannot reject a
+#: recording: VHS renders the timeline it was given and exits 0 whatever the
+#: shell it typed into did, so the canonical clip was already overwritten by
+#: the time any in-tape check ran. The verdict therefore lives outside VHS —
+#: the tape writes a candidate, and this wrapper promotes it only on a run
+#: the client pane certified.
+MCP_RECORDER = DEMO_DIR / "record-mcp-follow.sh"
+MCP_RECORDER_COMMAND = "docs/demo/record-mcp-follow.sh"
+#: The only file the tape may write. Hidden, beside the published clip, and
+#: never committed.
+MCP_CANDIDATE_CLIP = "docs/assets/scenes/.mcp-follow-demo.candidate.mp4"
+#: The published clip. In the whole recording chain this name may appear only
+#: as the wrapper's promotion target.
+MCP_FINAL_CLIP = "docs/assets/scenes/mcp-follow-demo.mp4"
+#: The line the wrapper prints when it publishes nothing.
+MCP_RECORDER_REJECTION = "record-mcp-follow.sh: rejecting this recording"
+#: The environment overrides the wrapper honours, so a contract can drive the
+#: whole boundary against a fake VHS in a temporary directory without touching
+#: the checkout, its scratch files or its published media.
+MCP_RECORDER_ENV = {
+    "vhs": "KORVID_MCP_VHS_BIN",
+    "tape": "KORVID_MCP_TAPE",
+    "candidate": "KORVID_MCP_CANDIDATE",
+    "final": "KORVID_MCP_FINAL",
+    "ok": "KORVID_MCP_CLIENT_OK",
+    "failed": "KORVID_MCP_CLIENT_FAILED",
+    "ready": "KORVID_MCP_READY",
+    "go": "KORVID_MCP_GO",
+}
+#: The bytes a previously approved clip is represented by in those contracts.
+#: A rejected run must leave them byte-identical.
+MCP_PUBLISHED_BYTES = b"previously approved clip"
+#: The bytes a fake VHS renders into the candidate, so a promotion is visible
+#: as a byte change rather than as a timestamp.
+MCP_CANDIDATE_BYTES = b"freshly recorded candidate"
 #: The bound the tape's typed readiness loop enforces: a wall-clock deadline
 #: on bash's own `SECONDS` builtin, reset with `SECONDS=0` and checked with
 #: `[ $SECONDS -lt 60 ]`. Counting `sleep 0.1` iterations instead assumes
@@ -1098,7 +1128,7 @@ def test_storytelling_capture_instructions_name_every_generated_asset() -> None:
     assert "synthetic" in instructions.lower()
     assert "vhs docs/demo/agent.tape" in instructions
     assert "vhs docs/demo/relationships.tape" in instructions
-    assert "vhs docs/demo/mcp-follow.tape" in instructions
+    assert MCP_RECORDER_COMMAND in instructions
     assert "docs/assets/mcp-follow-demo.gif" in instructions
 
 
@@ -1594,9 +1624,9 @@ def test_mcp_follow_tape_records_no_host_identity_and_leaves_no_scratch_file() -
         "the gate file must live in the checkout being recorded, not in a "
         "shared world-writable directory"
     )
-    assert tape.count(f"rm -f {MCP_GATE_FILE}") >= 2, (
-        f"{MCP_GATE_FILE} must be removed before the run starts and again after "
-        "it ends, so an interrupted recording leaves nothing behind"
+    assert tape.count(f"rm -f {MCP_GATE_FILE}") >= 1, (
+        f"{MCP_GATE_FILE} must be cleared before the run starts, so a signal left by an "
+        "interrupted recording cannot release this one's client"
     )
     assert "kill-session" in tape, "the tape must tear its own tmux session down"
 
@@ -1830,7 +1860,9 @@ def test_landing_video_plan_ships_the_recorded_mcp_tape_not_a_timer_gate() -> No
     Replaying its `Step 5` verbatim would otherwise recreate a gate file in
     the shared world-writable `/tmp`, a client released by a fixed sleep, and
     a `Ctrl+B :run-shell` trigger typed *into the attached session* — the
-    keystroke path the capture's own provenance promises never happens.
+    keystroke path the capture's own provenance promises never happens. It
+    would also recreate a tape that renders straight onto the published
+    clip, which is the one thing no failed recording may be able to do.
     """
     plan = LANDING_VIDEO_PLAN.read_text(encoding="utf-8")
     marker = "Create `docs/demo/mcp-follow.tape`:"
@@ -1845,6 +1877,9 @@ def test_landing_video_plan_ships_the_recorded_mcp_tape_not_a_timer_gate() -> No
     )
     assert MCP_READY_FILE in plan, (
         "the plan must describe the readiness signal the release now waits for"
+    )
+    assert MCP_RECORDER_COMMAND in plan, (
+        "the plan's own regeneration step must run the wrapper that owns the published clip"
     )
 
 
@@ -2134,13 +2169,18 @@ def test_mcp_provenance_states_the_allowance_covers_the_bounded_wait() -> None:
 def test_mcp_follow_tape_cleans_both_of_its_handshake_files() -> None:
     """Two scratch files now, both born of recording and neither committed."""
     tape = MCP_TAPE.read_text(encoding="utf-8")
+    script = MCP_RECORDER.read_text(encoding="utf-8")
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
     for scratch in (MCP_GATE_FILE, MCP_READY_FILE):
-        removals = [line for line in tape.splitlines() if "rm -f" in line and scratch in line]
-        assert len(removals) >= 2, (
-            f"{scratch} must be removed before the run starts and again after it "
-            f"ends, so an interrupted recording leaves nothing behind; found {removals}"
+        cleared = [line for line in tape.splitlines() if "rm -f" in line and scratch in line]
+        assert cleared, (
+            f"{scratch} must be cleared before the run starts, so an interrupted "
+            f"recording cannot hand its signals to the next one; found {cleared}"
+        )
+        assert scratch in script, (
+            f"{scratch} outlives an aborted tape, so {MCP_RECORDER_COMMAND} must remove it "
+            "on every exit path"
         )
         assert re.search(rf"^{re.escape(scratch)}$", gitignore, re.MULTILINE), (
             f"{scratch} is a recording side effect; it must never be committable"
@@ -2224,7 +2264,7 @@ def test_mcp_capture_instructions_publish_the_whole_reproducible_recording() -> 
     instructions = INSTRUCTIONS.read_text(encoding="utf-8")
     mcp = instructions[instructions.index("## MCP follow") :]
     for fragment in (
-        "vhs docs/demo/mcp-follow.tape",
+        MCP_RECORDER_COMMAND,
         "docs/demo/mcp_client.py",
         "--scene mcp",
         "docs/assets/scenes/mcp-poster.png",
@@ -2237,6 +2277,65 @@ def test_mcp_capture_instructions_publish_the_whole_reproducible_recording() -> 
         assert reason in lowered, (
             f"the instructions must say why the capture is safe to publish; {reason!r} is missing"
         )
+
+
+def test_mcp_recording_recipe_is_the_wrapper_and_never_a_bare_vhs_run() -> None:
+    """A published recipe that runs VHS directly re-opens the whole hole.
+
+    `vhs docs/demo/mcp-follow.tape` renders whatever the tape produced and
+    exits 0. Before the boundary moved out of the tape that command
+    overwrote the approved clip on its way to reporting a failure it could
+    not enforce; it now leaves an unpromoted candidate and no verdict at
+    all. Either way it is not the recipe, so no page, plan or tape header
+    may offer it as one.
+
+    Every place that documents how the clip is made must name the wrapper,
+    the candidate the tape renders to, and the rule that decides promotion.
+    """
+    sources = {
+        "docs/demo/visual-storytelling.md": INSTRUCTIONS.read_text(encoding="utf-8"),
+        "docs/demo/mcp-follow.tape": MCP_TAPE.read_text(encoding="utf-8"),
+        "docs/superpowers/plans/2026-08-22-visual-storytelling.md": VISUAL_STORYTELLING_PLAN.read_text(
+            encoding="utf-8"
+        ),
+        "docs/superpowers/plans/2026-08-26-landing-video-experience.md": LANDING_VIDEO_PLAN.read_text(
+            encoding="utf-8"
+        ),
+        MCP_RECORDER_COMMAND: MCP_RECORDER.read_text(encoding="utf-8"),
+    }
+
+    for label, text in sources.items():
+        assert "vhs docs/demo/mcp-follow.tape" not in text, (
+            f"{label} still offers a bare VHS run as the recipe; VHS cannot fail a "
+            f"recording, so the published command must be {MCP_RECORDER_COMMAND}"
+        )
+
+    for label in (
+        "docs/demo/visual-storytelling.md",
+        "docs/superpowers/plans/2026-08-22-visual-storytelling.md",
+        "docs/superpowers/plans/2026-08-26-landing-video-experience.md",
+    ):
+        text = sources[label]
+        assert MCP_RECORDER_COMMAND in text, f"{label} must publish {MCP_RECORDER_COMMAND}"
+        assert MCP_CANDIDATE_CLIP in text, (
+            f"{label} must publish the candidate the tape renders to, or the promotion "
+            "step reads as an unexplained extra file"
+        )
+
+    mcp = sources["docs/demo/visual-storytelling.md"]
+    mcp = mcp[mcp.index("## MCP follow") :]
+    lowered = " ".join(mcp.split()).lower()
+    assert "exit status" in lowered, (
+        "the page must explain why the wrapper exists: a tape's own exit status decides "
+        "nothing about what VHS already rendered"
+    )
+    assert re.search(r"promot\w+", lowered), (
+        "the page must name the promotion step that turns the candidate into the published clip"
+    )
+    assert re.search(r"byte-identical|unchanged|untouched", lowered), (
+        "the page must state what a failed run leaves behind: the previously approved "
+        "clip, exactly as it was"
+    )
 
 
 def test_mcp_capture_instructions_disclose_the_documentation_only_describe_dismissal() -> None:
@@ -3152,6 +3251,7 @@ def test_mcp_client_status_files_are_repo_local_and_never_committable() -> None:
     module = _mcp_client_module()
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     tape = MCP_TAPE.read_text(encoding="utf-8")
+    script = MCP_RECORDER.read_text(encoding="utf-8")
 
     for path, name in (
         (module.OK_FILE, MCP_CLIENT_OK_FILE),
@@ -3164,120 +3264,406 @@ def test_mcp_client_status_files_are_repo_local_and_never_committable() -> None:
         assert re.search(rf"^{re.escape(name)}$", gitignore, re.MULTILINE), (
             f"{name} is a recording side effect; it must never be committable"
         )
-        removals = [line for line in tape.splitlines() if "rm -f" in line and name in line]
-        assert len(removals) >= 2, (
-            f"{name} must be removed before the run starts and again after it ends, so a "
-            f"stale marker from an interrupted recording cannot certify the next one; "
-            f"found {removals}"
+        cleared = [line for line in tape.splitlines() if "rm -f" in line and name in line]
+        assert cleared, (
+            f"{name} must be cleared before the panes start, so a stale marker from an "
+            f"interrupted recording cannot certify the next one; found {cleared}"
+        )
+        assert name in script, (
+            f"{name} outlives the tape now: {MCP_RECORDER_COMMAND} is what grades it and "
+            "what removes it afterwards"
         )
 
 
-def _run_mcp_status_check(workdir: Path, *, ok: bool, failed: bool) -> tuple[int, str, str]:
-    """Run the tape's post-capture status check against a stubbed `tmux`.
+class _RecorderRun(NamedTuple):
+    """What a wrapper run left behind, collected once it had exited.
 
-    Returns the exit status, everything the stub recorded, and everything
-    the command printed. The handshake files are seeded as an interrupted
-    or finished run would leave them, so the branch is decided by real bash
-    rather than by a substring sharing a line.
+    Attributes:
+        status: The wrapper's own exit status.
+        output: Its combined stdout and stderr.
+        published: The bytes at the canonical path, or `None` if none exist.
+        candidate_left: Whether the candidate recording survived the run.
+        scratch_left: The scratch markers still present, by role.
+        tmux: Every `tmux` invocation the stub recorded.
     """
+
+    status: int
+    output: str
+    published: bytes | None
+    candidate_left: bool
+    scratch_left: tuple[str, ...]
+    tmux: str
+
+
+def _write_fake_vhs(
+    path: Path,
+    *,
+    log: Path,
+    candidate: Path,
+    markers: dict[str, Path],
+    status: int,
+    writes_candidate: bool,
+    publishes_ok: bool,
+    publishes_failed: bool,
+) -> None:
+    """Write a VHS stand-in that leaves exactly the side effects asked for.
+
+    A real run leaves four things behind: the rendered file at the tape's
+    `Output` path, the handshake pair the composition used, and whichever
+    verdict marker the client pane published. The stub reproduces that set
+    so the wrapper is graded on the same evidence it will see in a
+    recording, without ttyd, ffmpeg, tmux or korvid taking part.
+    """
+    body = [
+        "#!/bin/sh",
+        f'echo "vhs $*" >> "{log}"',
+        f'touch "{markers["ready"]}" "{markers["go"]}"',
+    ]
+    if writes_candidate:
+        rendered = MCP_CANDIDATE_BYTES.decode()
+        body.append(f"printf '%s' '{rendered}' > \"{candidate}\"")
+    if publishes_ok:
+        body.append(f'touch "{markers["ok"]}"')
+    if publishes_failed:
+        body.append(f'touch "{markers["failed"]}"')
+    body.append(f"exit {status}")
+    path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _run_recorder(
+    workdir: Path,
+    *,
+    vhs_status: int = 0,
+    writes_candidate: bool = True,
+    publishes_ok: bool = True,
+    publishes_failed: bool = False,
+    published: bytes | None = MCP_PUBLISHED_BYTES,
+) -> _RecorderRun:
+    """Run the shipped wrapper against a fake VHS inside `workdir`.
+
+    Every path the wrapper touches is redirected into `workdir` through the
+    documented overrides, so the contract exercises the real script — its
+    real trap, its real promotion and its real cleanup — while the
+    checkout's own media and scratch stay untouched. `tmux` is a stub on
+    `PATH`, so no multiplexer is involved either.
+    """
+    scenes = workdir / "scenes"
+    scenes.mkdir(parents=True)
+    candidate = scenes / Path(MCP_CANDIDATE_CLIP).name
+    final = scenes / Path(MCP_FINAL_CLIP).name
+    if published is not None:
+        final.write_bytes(published)
+
+    markers = {
+        role: workdir / f".korvid-mcp-demo-{role}" for role in ("ok", "failed", "ready", "go")
+    }
+    tape = workdir / "fake.tape"
+    tape.write_text(f"Output {candidate}\nSleep 1s\n", encoding="utf-8")
+
     stub_dir = workdir / "stubs"
     stub_dir.mkdir()
-    invocations = workdir / "invocations.log"
-    stub = stub_dir / "tmux"
-    stub.write_text(f'#!/bin/sh\necho "tmux $*" >> "{invocations}"\n', encoding="utf-8")
-    stub.chmod(0o755)
-
-    for name in (MCP_GATE_FILE, MCP_READY_FILE):
-        (workdir / name).touch()
-    if ok:
-        (workdir / MCP_CLIENT_OK_FILE).touch()
-    if failed:
-        (workdir / MCP_CLIENT_FAILED_FILE).touch()
+    log = workdir / "invocations.log"
+    tmux = stub_dir / "tmux"
+    tmux.write_text(f'#!/bin/sh\necho "tmux $*" >> "{log}"\n', encoding="utf-8")
+    tmux.chmod(0o755)
+    _write_fake_vhs(
+        workdir / "fake-vhs",
+        log=log,
+        candidate=candidate,
+        markers=markers,
+        status=vhs_status,
+        writes_candidate=writes_candidate,
+        publishes_ok=publishes_ok,
+        publishes_failed=publishes_failed,
+    )
 
     environment = dict(os.environ)
     environment["PATH"] = f"{stub_dir}{os.pathsep}{environment.get('PATH', '')}"
+    environment[MCP_RECORDER_ENV["vhs"]] = str(workdir / "fake-vhs")
+    environment[MCP_RECORDER_ENV["tape"]] = str(tape)
+    environment[MCP_RECORDER_ENV["candidate"]] = str(candidate)
+    environment[MCP_RECORDER_ENV["final"]] = str(final)
+    for role in ("ok", "failed", "ready", "go"):
+        environment[MCP_RECORDER_ENV[role]] = str(markers[role])
+
     completed = subprocess.run(
-        ["bash", "-c", _mcp_typed_command(MCP_STATUS_REJECT_MESSAGE)],
+        [str(MCP_RECORDER)],
         cwd=workdir,
         env=environment,
         capture_output=True,
         text=True,
         check=False,
-        timeout=30,
+        timeout=60,
     )
-    recorded = invocations.read_text(encoding="utf-8") if invocations.exists() else ""
-    return completed.returncode, recorded, completed.stdout + completed.stderr
+    return _RecorderRun(
+        status=completed.returncode,
+        output=completed.stdout + completed.stderr,
+        published=final.read_bytes() if final.exists() else None,
+        candidate_left=candidate.exists(),
+        scratch_left=tuple(role for role, path in markers.items() if path.exists()),
+        tmux=log.read_text(encoding="utf-8") if log.exists() else "",
+    )
+
+
+def test_mcp_recorder_promotes_only_a_completed_run(tmp_path: Path) -> None:
+    """The success path: record to the candidate, then publish it.
+
+    This is the half that has to keep working after the boundary moved out
+    of the tape. VHS returns, the client pane's success marker is present
+    and its failure marker is absent, so the candidate becomes the
+    published clip in one rename and every scratch file the recording made
+    is gone by the time the wrapper exits.
+    """
+    run = _run_recorder(tmp_path / "accepted")
+
+    assert run.status == 0, (
+        f"a completed run must be published; the wrapper exited {run.status}: {run.output!r}"
+    )
+    assert run.published == MCP_CANDIDATE_BYTES, (
+        "the published clip must be the candidate this run rendered, promoted in place of "
+        f"the previous one; it holds {run.published!r}"
+    )
+    assert not run.candidate_left, (
+        "the candidate is scratch: promoting it must move it, not copy it"
+    )
+    assert run.scratch_left == (), (
+        f"the wrapper owns cleanup now; it left {run.scratch_left} behind"
+    )
+    assert f"kill-session -t {MCP_TMUX_SESSION}" in run.tmux, (
+        f"the wrapper must tear down its own named session; the stub recorded {run.tmux!r}"
+    )
+    assert "kill-server" not in run.tmux, (
+        f"only the demo session may be killed, never the user's whole server: {run.tmux!r}"
+    )
 
 
 @pytest.mark.parametrize(
-    ("ok", "failed", "accepted"),
+    ("case", "overrides"),
     [
-        (True, False, True),
-        (False, True, False),
-        (False, False, False),
-        (True, True, False),
+        ("client-published-failure", {"publishes_failed": True}),
+        ("client-never-reported-success", {"publishes_ok": False}),
+        ("vhs-itself-failed", {"vhs_status": 3}),
+        ("no-candidate-despite-success", {"writes_candidate": False}),
     ],
 )
-def test_mcp_follow_tape_accepts_only_a_completed_client_run(
-    tmp_path: Path, ok: bool, failed: bool, accepted: bool
+def test_mcp_recorder_publishes_nothing_on_a_failed_recording(
+    tmp_path: Path, case: str, overrides: dict[str, object]
 ) -> None:
-    """The recording is accepted on both status files, never on one of them.
+    """The half a tape could never enforce: a failed run publishes nothing.
 
-    A failure published after the success file — the client raising inside
-    its own closing hold — is still a failed run, so presence of the failure
-    file outranks success. An absent success file is a run that never
-    reached its fourth answer, which VHS cannot tell from a complete one.
-    Either way the session is torn down, every recording side effect is
-    removed, and the tape exits non-zero so the asset is not published.
+    An `exit 1` typed into a recorded pane cannot stop VHS — it renders its
+    timeline and returns 0 with the canonical clip already overwritten. So
+    each way a recording can fail is graded here on the artefact that
+    matters: the previously approved clip must survive byte-identical, the
+    candidate and every scratch marker must be gone, and the wrapper must
+    say why it published nothing on stderr.
     """
-    workdir = tmp_path / f"ok{int(ok)}-failed{int(failed)}"
-    workdir.mkdir()
+    run = _run_recorder(tmp_path / case, **overrides)  # type: ignore[arg-type]  # per-case override map
 
-    status, recorded, output = _run_mcp_status_check(workdir, ok=ok, failed=failed)
-
-    if accepted:
-        assert status == 0, f"a completed client run must be accepted; exited {status}: {output!r}"
-        assert MCP_STATUS_REJECT_MESSAGE not in output, (
-            f"an accepted recording must print no rejection: {output!r}"
-        )
-    else:
-        assert status != 0, (
-            f"ok={ok} failed={failed} is not a completed run and must fail the recording; "
-            f"exited {status}"
-        )
-        assert MCP_STATUS_REJECT_MESSAGE in output, (
-            f"a rejected recording must say why it was rejected: {output!r}"
-        )
-
-    assert f"kill-session -t {MCP_TMUX_SESSION}" in recorded, (
-        f"both branches must tear the session down; the stub recorded {recorded!r}"
+    assert run.status != 0, f"{case} must fail the recording; the wrapper exited {run.status}"
+    assert run.published == MCP_PUBLISHED_BYTES, (
+        f"{case} must leave the approved clip byte-identical; it now holds {run.published!r}"
     )
-    for name in (MCP_GATE_FILE, MCP_READY_FILE, MCP_CLIENT_OK_FILE, MCP_CLIENT_FAILED_FILE):
-        assert not (workdir / name).exists(), (
-            f"both branches must clean {name}; a stale marker would certify the next recording"
+    assert not run.candidate_left, f"{case} must remove the candidate it rejected"
+    assert run.scratch_left == (), f"{case} left scratch behind: {run.scratch_left}"
+    assert MCP_RECORDER_REJECTION in run.output, (
+        f"{case} must print why nothing was published: {run.output!r}"
+    )
+
+
+def test_mcp_recorder_creates_no_clip_where_none_was_approved(tmp_path: Path) -> None:
+    """A rejected first recording must not leave a half-story at the canonical path."""
+    run = _run_recorder(tmp_path / "first-run", publishes_ok=False, published=None)
+
+    assert run.status != 0, "a run without the client's success marker must fail"
+    assert run.published is None, (
+        "nothing was ever approved here; a rejected run must not create the published "
+        f"clip, yet it holds {run.published!r}"
+    )
+    assert not run.candidate_left, "the rejected candidate must be removed"
+
+
+def test_mcp_recorder_owns_the_canonical_path_and_the_tape_never_writes_it() -> None:
+    """One writer for the published clip, and it is not VHS.
+
+    The tape's `Output` is the only thing VHS obeys, so as long as it names
+    the canonical clip, any failure — a client that died on its second
+    call, a scene that never bound — has already overwritten the approved
+    asset by the time anything can complain. The tape therefore renders to
+    a candidate, and the canonical name appears exactly once in the chain:
+    as the target the wrapper promotes to.
+    """
+    tape = MCP_TAPE.read_text(encoding="utf-8")
+    outputs = [line.strip() for line in tape.splitlines() if line.strip().startswith("Output ")]
+
+    assert outputs == [f"Output {MCP_CANDIDATE_CLIP}"], (
+        f"the tape must render to the candidate and to nothing else; it declares {outputs}"
+    )
+    assert MCP_FINAL_CLIP not in tape, (
+        "the published clip's path may not appear in the tape at all: VHS would write it "
+        "before any check could run"
+    )
+
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    promotions = [line.strip() for line in script.splitlines() if MCP_FINAL_CLIP in line]
+    assert promotions, f"the wrapper must own {MCP_FINAL_CLIP}"
+    assert all(line.startswith("final=") or line.lstrip().startswith("#") for line in promotions), (
+        "the canonical path belongs in the wrapper's promotion target alone, so a reader "
+        f"can see every writer of it at once; found {promotions}"
+    )
+    assert re.search(r"^\s*mv .*\"\$candidate\" \"\$final\"", script, re.MULTILINE), (
+        "promotion must be a single rename of the candidate onto the published clip, so a "
+        "reader never observes a half-written asset"
+    )
+
+
+def test_mcp_recorder_is_a_strict_fail_closed_shell_script() -> None:
+    """The boundary is only as good as the shell it is written in."""
+    assert os.access(MCP_RECORDER, os.X_OK), (
+        f"{MCP_RECORDER_COMMAND} is the published recipe; it must be executable"
+    )
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    lines = script.splitlines()
+    commands = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
+
+    assert lines[0] == "#!/usr/bin/env bash", f"the wrapper must be bash; it starts {lines[0]!r}"
+    assert "set -euo pipefail" in script, (
+        "an unset variable or an unchecked command in a promotion boundary is a published "
+        "clip nobody reviewed"
+    )
+    assert re.search(r"^trap .* EXIT", script, re.MULTILINE), (
+        "cleanup must run on every exit path, including the ones the script does not take itself"
+    )
+    assert 'kill-session -t "$session"' in script, (
+        "teardown must name the demo session; killing a server or matching a pattern would "
+        "reach sessions the recording never created"
+    )
+    for destructive in ("rm -rf", "kill-server", "rm -r "):
+        offenders = [line.strip() for line in commands if destructive in line]
+        assert not offenders, f"{destructive!r} has no place in this wrapper: {offenders}"
+
+    removals = [line.strip() for line in commands if "rm -f" in line]
+    assert removals, "the wrapper must clear its own scratch"
+    assert all("*" not in line and "?" not in line for line in removals), (
+        f"every removal must name the files it removes literally, never a glob: {removals}"
+    )
+
+
+def test_mcp_recorder_defaults_are_repository_relative_and_quoted() -> None:
+    """Overrides exist for the contracts above; the defaults are the recipe.
+
+    A contributor runs the wrapper with no environment at all, so each
+    default has to be the repository-relative path the provenance page
+    publishes. And every expansion of a path has to be quoted, because a
+    checkout is allowed to live behind a directory with a space in its
+    name — an unquoted one would split into two arguments and either miss
+    the file or delete a neighbour.
+    """
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    defaults = {
+        MCP_RECORDER_ENV["vhs"]: "vhs",
+        MCP_RECORDER_ENV["tape"]: "docs/demo/mcp-follow.tape",
+        MCP_RECORDER_ENV["candidate"]: MCP_CANDIDATE_CLIP,
+        MCP_RECORDER_ENV["final"]: MCP_FINAL_CLIP,
+        MCP_RECORDER_ENV["ok"]: MCP_CLIENT_OK_FILE,
+        MCP_RECORDER_ENV["failed"]: MCP_CLIENT_FAILED_FILE,
+        MCP_RECORDER_ENV["ready"]: MCP_READY_FILE,
+        MCP_RECORDER_ENV["go"]: MCP_GATE_FILE,
+    }
+    for variable, default in defaults.items():
+        assert f"${{{variable}:-{default}}}" in script, (
+            f"{variable} must default to {default!r}, the path the published recipe uses"
+        )
+
+    for name in ("vhs_bin", "tape", "candidate", "final", "ok_marker", "failed_marker"):
+        occurrences = re.findall(rf".?\${name}\b.?", script)
+        assert occurrences, f"the wrapper must expand ${name}"
+        assert all(found.startswith('"') and found.endswith('"') for found in occurrences), (
+            f"every expansion of ${name} must be quoted; found {occurrences}"
         )
 
 
-def test_mcp_follow_tape_checks_the_client_status_after_it_stops_recording() -> None:
-    """The check belongs in the teardown, after the capture and the detach.
+def test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip(tmp_path: Path) -> None:
+    """The boundary checks the tape it is about to run, not just the run.
 
-    Run before `Hide` it would type a shell command into the captured
-    frames; run before the detach it would type it into the attached TUI.
+    Editing `Output` back to the canonical path — or adding a second
+    `Output` beside the candidate, which VHS honours — would put the
+    published clip back under VHS's pen. The wrapper reads the tape first
+    and publishes nothing if it does not render to exactly the candidate.
+    """
+    workdir = tmp_path / "hostile-tape"
+    workdir.mkdir()
+    scenes = workdir / "scenes"
+    scenes.mkdir()
+    candidate = scenes / Path(MCP_CANDIDATE_CLIP).name
+    final = scenes / Path(MCP_FINAL_CLIP).name
+    final.write_bytes(MCP_PUBLISHED_BYTES)
+    tape = workdir / "hostile.tape"
+    tape.write_text(f"Output {candidate}\nOutput {final}\n", encoding="utf-8")
+    vhs = workdir / "fake-vhs"
+    vhs.write_text(
+        f"""#!/bin/sh\nprintf '%s' 'rendered anyway' > "{final}"\nexit 0\n""",
+        encoding="utf-8",
+    )
+    vhs.chmod(0o755)
+
+    environment = dict(os.environ)
+    environment[MCP_RECORDER_ENV["vhs"]] = str(vhs)
+    environment[MCP_RECORDER_ENV["tape"]] = str(tape)
+    environment[MCP_RECORDER_ENV["candidate"]] = str(candidate)
+    environment[MCP_RECORDER_ENV["final"]] = str(final)
+    for role in ("ok", "failed", "ready", "go"):
+        environment[MCP_RECORDER_ENV[role]] = str(workdir / f".korvid-mcp-demo-{role}")
+    completed = subprocess.run(
+        [str(MCP_RECORDER)],
+        cwd=workdir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert completed.returncode != 0, "a tape that renders the published clip must not be run"
+    assert final.read_bytes() == MCP_PUBLISHED_BYTES, (
+        "the wrapper must check the tape before it hands it to VHS; the approved clip was "
+        "overwritten"
+    )
+    assert MCP_RECORDER_REJECTION in completed.stdout + completed.stderr, (
+        f"the refusal must say why: {completed.stdout + completed.stderr!r}"
+    )
+
+
+def test_mcp_follow_tape_leaves_the_verdict_to_the_wrapper() -> None:
+    """The tape may compose and tear down; it may not decide publication.
+
+    Its teardown used to end in an `if ... else ... exit 1` that read the
+    client's markers. Nothing consumed that status: VHS had already
+    rendered the canonical clip and exited 0, so the check announced a
+    rejection it could not carry out. The markers now survive the tape and
+    the wrapper grades them.
     """
     lines = [line.rstrip() for line in MCP_TAPE.read_text(encoding="utf-8").splitlines()]
-    status = next(index for index, line in enumerate(lines) if MCP_STATUS_REJECT_MESSAGE in line)
-    hides = [index for index, line in enumerate(lines) if line.strip() == "Hide"]
-    detaches = [index for index, line in enumerate(lines) if line.strip() == 'Type "d"']
+    last_hide = max(index for index, line in enumerate(lines) if line.strip() == "Hide")
+    teardown = lines[last_hide:]
+    typed = [line for line in teardown if line.startswith('Type "')]
 
-    assert hides, "the tape must still hide its teardown"
-    assert hides[-1] < status, "the status check must run after the capture is hidden"
-    assert detaches, "the tape must still detach before its teardown"
-    assert detaches[-1] < status, (
-        "the tape must detach before it types the status check, so no keystroke of it "
-        "reaches the attached TUI"
+    assert not any("rejecting this recording" in line for line in lines), (
+        "the tape can neither reject nor publish a recording; that claim belongs to "
+        f"{MCP_RECORDER_COMMAND}"
     )
-    assert all(line.strip() != "Show" for line in lines[status:]), (
-        "nothing may be captured after the status check"
+    for marker in (MCP_CLIENT_OK_FILE, MCP_CLIENT_FAILED_FILE):
+        assert all(marker not in line for line in typed), (
+            f"{marker} must survive the tape untouched — it is the evidence the wrapper "
+            f"grades: {typed}"
+        )
+    assert any(f"kill-session -t {MCP_TMUX_SESSION}" in line for line in typed), (
+        f"the tape must still tear its own session down: {typed}"
+    )
+    assert all("exit 1" not in line for line in teardown), (
+        "an exit status after the capture changes nothing VHS does; the tape may not "
+        f"pretend otherwise: {teardown}"
     )
 
     start = next(index for index, line in enumerate(lines) if "new-session" in line)
@@ -3287,9 +3673,32 @@ def test_mcp_follow_tape_checks_the_client_status_after_it_stops_recording() -> 
         if "rm -f" in line and MCP_CLIENT_OK_FILE in line and MCP_CLIENT_FAILED_FILE in line
     ]
     assert any(index < start for index in cleared), (
-        "both status files must be removed before the panes are launched, so a marker "
-        "left by an earlier run cannot decide this one"
+        "both status files must still be removed before the panes are launched, so a "
+        "marker left by an earlier run cannot decide this one"
     )
+
+
+def test_mcp_candidate_recording_is_scratch_and_never_committable() -> None:
+    """The candidate is a recording side effect, like every other one here."""
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert re.search(rf"^{re.escape(MCP_CANDIDATE_CLIP)}$", gitignore, re.MULTILINE), (
+        f"{MCP_CANDIDATE_CLIP} is written by every recording attempt, successful or not; "
+        "it must never be committable"
+    )
+    assert not (ROOT / MCP_CANDIDATE_CLIP).exists(), (
+        "a candidate in the checkout is an interrupted recording; the wrapper removes it "
+        "on every exit path"
+    )
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", MCP_CANDIDATE_CLIP],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert tracked.returncode != 0, "the candidate recording must not be tracked"
 
 
 def test_mcp_capture_provenance_publishes_the_client_status_handshake() -> None:
