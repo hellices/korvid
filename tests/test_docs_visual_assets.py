@@ -132,6 +132,9 @@ MCP_HIDDEN_ALLOWANCE_MARGIN_SECONDS = 5.0
 #: the pod table, the failing pod's diagnosis, its logs, then the release
 #: that owns it.
 MCP_CLIENT_CALLS = ("list_resources", "diagnose_pod", "get_logs", "helm_list_releases")
+#: The three calls whose answer is read through `_tail` rather than
+#: `_sections` (`diagnose_pod` is the odd one out).
+MCP_CLIENT_TAIL_CALLS = ("list_resources", "get_logs", "helm_list_releases")
 #: Rows both panes must carry legible content across. The poster is cut
 #: mid-story, so the client's calls and korvid's mirrored view are on screen
 #: together; a blanked or half-drawn pane would prove nothing.
@@ -1247,6 +1250,52 @@ def test_mcp_client_sections_fails_closed_when_no_named_header_is_found() -> Non
     assert secret_error not in str(excinfo.value), (
         "the failure must name the missing sections, not echo the tool output "
         "it failed to find them in"
+    )
+
+
+def test_mcp_client_tail_keeps_the_last_n_lines_in_order() -> None:
+    """The happy path is unchanged: the last `TAIL_LINES` lines, in order."""
+    module = _mcp_client_module()
+    answer = "\n".join(f"line-{index}" for index in range(module.TAIL_LINES + 3))
+
+    tail = module._tail(answer, "get_logs")
+
+    assert tail == [f"line-{index}" for index in range(3, module.TAIL_LINES + 3)]
+
+
+@pytest.mark.parametrize("answer", ["", "   ", "\n\n\t \n"])
+def test_mcp_client_tail_fails_closed_on_empty_or_whitespace_text(answer: str) -> None:
+    """A blank answer must abort the capture, not hold on a silent beat.
+
+    `_tail` used to return `[]` for an empty or whitespace-only answer, and
+    the caller (`_answered`) then printed nothing and slept for the full
+    hold anyway — a blank evidence beat that looks like normal pacing in
+    the recorded pane. `_tail` must instead raise, naming only the call
+    that produced the blank answer; it must never echo the (unbounded,
+    possibly sensitive) answer text — not even the raw `repr` of the blank
+    text itself.
+    """
+    module = _mcp_client_module()
+
+    with pytest.raises(RuntimeError, match=r"helm_list_releases") as excinfo:
+        module._tail(answer, "helm_list_releases")
+
+    message = str(excinfo.value)
+    assert repr(answer) not in message, (
+        "the failure must name the call, not echo the answer text it refused"
+    )
+
+
+def test_mcp_client_tail_is_called_with_its_call_name_for_every_tail_based_answer() -> None:
+    """Every tail-printed answer must be traceable back to the call that made it."""
+    client = MCP_CLIENT.read_text(encoding="utf-8")
+    for name in MCP_CLIENT_TAIL_CALLS:
+        assert re.search(rf'_tail\(\s*_text\(\s*\w+,\s*"{name}"\s*\),\s*"{name}"\s*\)', client), (
+            f'the {name} answer must be read through `_tail(_text(..., "{name}"), "{name}")`'
+        )
+    assert client.count("await _answered(_tail(") == len(MCP_CLIENT_TAIL_CALLS), (
+        "every `_tail` call must be one of the three story answers, each naming its call — "
+        "an extra or bare invocation would tail an answer without a traceable failure name"
     )
 
 

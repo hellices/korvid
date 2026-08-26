@@ -85,8 +85,26 @@ def _asking(name: str, **arguments: str | int) -> None:
     print(_line(f"     {shown}"))
 
 
-def _tail(text: str) -> list[str]:
-    """The last :data:`TAIL_LINES` lines of an answer."""
+def _tail(text: str, call: str) -> list[str]:
+    """The last :data:`TAIL_LINES` lines of an answer.
+
+    Args:
+        text: The answer's text, already checked for `is_error` by `_text`.
+        call: The tool name that produced `text`, for the failure message.
+
+    Returns:
+        The answer's last :data:`TAIL_LINES` lines, in order.
+
+    Raises:
+        RuntimeError: if `text` holds no line to print — empty, or only
+            whitespace. The caller (`_answered`) would otherwise print
+            nothing and hold for the full beat anyway, publishing a blank
+            evidence beat that looks like normal pacing. The message
+            names `call` only; it never echoes `text`, which is unbounded
+            and may hold sensitive cluster text.
+    """
+    if not text.strip():
+        raise RuntimeError(f"MCP tool call answered with nothing to show: {call}")
     return text.splitlines()[-TAIL_LINES:]
 
 
@@ -137,7 +155,7 @@ async def main() -> None:
 
         _asking("list_resources", kind="pods", namespace=NAMESPACE)
         listed = await session.call_tool("list_resources", {"kind": "pods", "namespace": NAMESPACE})
-        await _answered(_tail(_text(listed, "list_resources")), 2.2)
+        await _answered(_tail(_text(listed, "list_resources"), "list_resources"), 2.2)
 
         _asking("diagnose_pod", pod=POD, namespace=NAMESPACE)
         diagnosed = await session.call_tool("diagnose_pod", {"pod": POD, "namespace": NAMESPACE})
@@ -153,11 +171,11 @@ async def main() -> None:
             "tail_lines": 12,
         }
         logged = await session.call_tool("get_logs", log_arguments)
-        await _answered(_tail(_text(logged, "get_logs")), 3.6)
+        await _answered(_tail(_text(logged, "get_logs"), "get_logs"), 3.6)
 
         _asking("helm_list_releases", namespace=NAMESPACE)
         released = await session.call_tool("helm_list_releases", {"namespace": NAMESPACE})
-        await _answered(_tail(_text(released, "helm_list_releases")), 2.4)
+        await _answered(_tail(_text(released, "helm_list_releases"), "helm_list_releases"), 2.4)
 
         print("\nread-only investigation complete —")
         print("korvid followed every answer onto the screen.")
