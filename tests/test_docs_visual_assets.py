@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import importlib.util
 import math
 import os
@@ -1296,6 +1297,115 @@ def test_mcp_client_sections_fails_closed_when_no_named_header_is_found() -> Non
     assert secret_error not in str(excinfo.value), (
         "the failure must name the missing sections, not echo the tool output "
         "it failed to find them in"
+    )
+
+
+def test_mcp_client_sections_matches_a_header_exactly_not_by_prefix() -> None:
+    """Round-9 (comment 3859789128): `startswith` swallowed sibling headers.
+
+    `_sections` decided a header line by `line.startswith(name)`, so asking
+    for `CONTAINERS` also opened `CONTAINERS SUMMARY` — and every indented
+    line under it — turning a bounded verdict beat into whatever the next
+    section happens to hold. A header is the whole line (the shipped
+    `ToolExecutor` emits `CURRENT HEALTH` and `CONTAINERS` verbatim), so the
+    comparison must be equality, tolerating only a trailing colon.
+    """
+    module = _mcp_client_module()
+    answer = "\n".join(
+        [
+            "CURRENT HEALTH:",
+            "  status: CrashLoopBackOff",
+            "CONTAINERS",
+            "  app: restarting",
+            "CONTAINERS SUMMARY",
+            "  ...a sibling section this beat never asked for...",
+        ]
+    )
+
+    kept = module._sections(answer, "CURRENT HEALTH", "CONTAINERS")
+
+    assert kept == [
+        "CURRENT HEALTH:",
+        "  status: CrashLoopBackOff",
+        "CONTAINERS",
+        "  app: restarting",
+    ], "a trailing colon still matches; a longer header is a different section"
+    assert "CONTAINERS SUMMARY" not in kept
+    assert not any("sibling section" in line for line in kept), (
+        "no line of an unrequested sibling header may reach the pane"
+    )
+
+
+def test_mcp_client_sections_requests_the_headers_the_executor_emits() -> None:
+    """Exact matching is only safe if the asked names are the shipped titles.
+
+    `ToolExecutor._diagnose_pod` builds its report from literal section
+    titles. Tightening `_sections` to equality would silently blank the
+    capture's verdict beat if the client asked for anything but those exact
+    strings, so the two are pinned together here.
+    """
+    executor = (
+        Path(__file__).parent.parent / "src" / "korvid" / "tools" / "executor.py"
+    ).read_text(encoding="utf-8")
+
+    for name in ("CURRENT HEALTH", "CONTAINERS"):
+        assert f'("{name}", ' in executor, (
+            f"docs/demo/mcp_client.py asks for the exact header {name!r}; "
+            "the shipped diagnose report must still emit it as a whole title"
+        )
+
+
+def test_mcp_client_sections_does_not_repeat_a_duplicated_name() -> None:
+    """A repeated name must not print the same section twice.
+
+    The pane is a handful of lines tall. Collecting one section per entry in
+    `names` meant a duplicated (or aliased) request doubled its lines and
+    pushed the rest of the beat out of frame, so names are deduplicated
+    while keeping the order they were asked in.
+    """
+    module = _mcp_client_module()
+    answer = "\n".join(
+        [
+            "CURRENT HEALTH",
+            "  status: CrashLoopBackOff",
+            "CONTAINERS",
+            "  app: restarting",
+        ]
+    )
+
+    kept = module._sections(answer, "CONTAINERS", "CURRENT HEALTH", "CONTAINERS")
+
+    assert kept == [
+        "CONTAINERS",
+        "  app: restarting",
+        "CURRENT HEALTH",
+        "  status: CrashLoopBackOff",
+    ], "each section appears once, in the order it was first asked for"
+
+
+def test_mcp_client_sections_is_bounded_like_the_tail_is() -> None:
+    """Round-9 (comment 3859789128): `_sections` had no line bound at all.
+
+    `_tail` clips to `TAIL_LINES` precisely because a result that overflows
+    the pane scrolls the story out of frame. `_sections` returned every
+    indented line it matched, and `CONTAINERS` grows with the container
+    count, so a wider fixture would silently overflow exactly the beat the
+    clip exists to show. The bound must be a constant tied to the pane.
+    """
+    module = _mcp_client_module()
+    assert module.SECTION_MAX_LINES == module.TAIL_LINES * 2, (
+        "the section bound must stay derived from the pane-height constant"
+    )
+    body = [f"  container-{index}: restarting" for index in range(module.SECTION_MAX_LINES + 4)]
+    answer = "\n".join(["CONTAINERS", *body])
+
+    kept = module._sections(answer, "CONTAINERS")
+
+    assert len(kept) == module.SECTION_MAX_LINES, (
+        f"the pane holds {module.SECTION_MAX_LINES} lines; got {len(kept)}"
+    )
+    assert kept == ["CONTAINERS", *body[: module.SECTION_MAX_LINES - 1]], (
+        "the bound truncates the tail of the section, keeping its header and order"
     )
 
 
@@ -2779,3 +2889,92 @@ def test_demo_manifest_union_does_not_widen_either_scenes_discovery() -> None:
     assert asyncio.run(harness.get_manifest("configmaps", "shop", "payment-config"))["kind"] == (
         "ConfigMap"
     )
+
+
+def test_demo_manifest_isolates_every_nested_branch_from_the_fixture() -> None:
+    """Round-9 (comment 3859789137): a shallow copy shared `spec`/`status`.
+
+    `get_manifest` copied only the top level and `metadata`, so `spec`,
+    `status` and `data` were the module-global `POD_MANIFEST`,
+    `DEPLOY_MANIFEST`, `SVC_MANIFEST` and `CONFIGMAP_MANIFEST` objects
+    themselves. The fixture is no longer read from one place — the TUI's
+    describe path, `DemoReadOps.get_object` (an external MCP host's
+    `tools/call`) and `extract_relationship_facts` all reach it — so one
+    consumer touching `manifest["status"]` in place would corrupt every
+    later frame *and* the derived relationship facts, and a recording shows
+    that only as a silent visual lie. Each answer must be its own object.
+    """
+    harness = _demo_harness()
+    pristine = copy.deepcopy(harness.POD_MANIFEST)
+    facts_before = harness._PAYMENT_RELATIONSHIPS
+
+    try:
+        first = asyncio.run(harness.get_manifest("pods", "shop", "payment-worker-6c9f7d-b3xnq"))
+        first["status"]["phase"] = "Succeeded"
+        first["status"]["containerStatuses"][0]["restartCount"] = 0
+        first["spec"]["containers"][0]["image"] = "tampered:0"
+        first["spec"]["volumes"][0]["configMap"]["name"] = "tampered-config"
+
+        second = asyncio.run(harness.get_manifest("pods", "shop", "payment-worker-6c9f7d-b3xnq"))
+
+        assert second["status"]["phase"] == "Running", (
+            "a later describe must not see an earlier consumer's in-place edit"
+        )
+        assert second["status"]["containerStatuses"][0]["restartCount"] == 17
+        assert second["spec"]["containers"][0]["image"].endswith("payment-worker:2.4.1")
+        assert second["spec"]["volumes"][0]["configMap"]["name"] == "payment-config"
+        assert pristine == harness.POD_MANIFEST, (
+            "the module fixture every scene reads must survive a mutated answer"
+        )
+        assert facts_before == harness._PAYMENT_RELATIONSHIPS, (
+            "the relationship facts derived from POD_MANIFEST must stay intact"
+        )
+        config_refs = [
+            reference
+            for reference in harness._PAYMENT_RELATIONSHIPS.references
+            if reference.target.kind == "ConfigMap"
+        ]
+        assert [reference.target.name for reference in config_refs] == ["payment-config"]
+    finally:
+        harness.POD_MANIFEST.clear()
+        harness.POD_MANIFEST.update(copy.deepcopy(pristine))
+
+
+def test_demo_manifest_isolates_the_generic_helm_answer_too() -> None:
+    """The alias union's synthesised manifests must be isolated as well.
+
+    `helmreleases` has no fixture, so `get_manifest` builds a bare manifest
+    for it. That path shares nothing today, but the deep copy is what keeps
+    the guarantee uniform: a consumer that edits a Helm answer's metadata
+    must not be able to reach the next one.
+    """
+    harness = _demo_harness()
+
+    first = asyncio.run(harness.get_manifest("helm", "shop", "shop"))
+    first["metadata"]["labels"] = {"tampered": "yes"}
+
+    second = asyncio.run(harness.get_manifest("helmreleases", "shop", "shop"))
+
+    assert second["kind"] == "HelmRelease"
+    assert second["apiVersion"] == "v1"
+    assert second["metadata"] == {"name": "shop", "namespace": "shop"}, (
+        "the synthesised Helm manifest must not carry an earlier answer's edit"
+    )
+
+
+def test_demo_manifest_configmap_data_is_not_shared_between_answers() -> None:
+    """`data` is the ConfigMap's whole payload; it must be copied too."""
+    harness = _demo_harness()
+    pristine = copy.deepcopy(harness.CONFIGMAP_MANIFEST)
+
+    try:
+        first = asyncio.run(harness.get_manifest("configmaps", "shop", "payment-config"))
+        first["data"]["gateway"] = "tampered.example.com"
+
+        second = asyncio.run(harness.get_manifest("configmaps", "shop", "payment-config"))
+
+        assert second["data"] == {"gateway": "pay.example.com"}
+        assert pristine == harness.CONFIGMAP_MANIFEST
+    finally:
+        harness.CONFIGMAP_MANIFEST.clear()
+        harness.CONFIGMAP_MANIFEST.update(copy.deepcopy(pristine))

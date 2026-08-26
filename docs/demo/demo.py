@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import importlib.util
 import random
 import sys
@@ -468,12 +469,14 @@ async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str,
     if base is None:
         api_version = f"{meta.group}/{meta.version}" if meta.group else meta.version
         base = {"apiVersion": api_version, "kind": meta.kind, "metadata": {}}
-    manifest = dict(base)
-    metadata = dict(base["metadata"])
-    metadata["name"] = name
+    # Deep, not shallow: the describe screen, `DemoReadOps.get_object` (an
+    # external MCP host's `tools/call`) and `extract_relationship_facts` all
+    # read these fixtures, so sharing `spec`/`status`/`data` would let one
+    # consumer's in-place edit rewrite every later frame and derived fact.
+    manifest = copy.deepcopy(base)
+    manifest["metadata"]["name"] = name
     if namespace:
-        metadata["namespace"] = namespace
-    manifest["metadata"] = metadata
+        manifest["metadata"]["namespace"] = namespace
     return manifest
 
 

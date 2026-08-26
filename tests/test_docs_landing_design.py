@@ -2796,3 +2796,41 @@ def test_visual_storytelling_design_matches_the_shipped_media_and_provenance() -
     assert "no capture may contain a real cluster" in lowered, (
         "the design must keep the privacy rule that no capture shows real cluster data"
     )
+
+
+def test_each_scene_panel_owns_exactly_one_video_and_nothing_adds_more() -> None:
+    """Round-9 (comment 3859789134): the switcher's single-player contract.
+
+    The review read `select()`'s asymmetry — every `<video>` in a deselected
+    panel is paused, but only `querySelector("video")` is promoted and
+    started in the selected one — as a latent bug for a panel holding two
+    players. It is only a bug if such a panel can exist, and it cannot: each
+    scene panel ships exactly one `<video>`, and the controller never
+    creates, clones, moves or inserts one, so `querySelector` and
+    `querySelectorAll` address the same element by construction.
+
+    Pinning that here is what makes the asymmetry safe to leave alone. A
+    second player in a panel — or a script that injects one — fails this
+    test instead of silently shipping an unpromoted, sourceless frame.
+    """
+    panels = re.findall(
+        r'<article[^>]*class="[^"]*scene-panel[^"]*"[^>]*>.*?</article>',
+        _scene_switcher(),
+        re.DOTALL,
+    )
+    assert len(panels) == 3, f"the switcher must keep its three scene panels; found {len(panels)}"
+    for panel in panels:
+        identifier = re.search(r'id="([^"]+)"', panel)
+        assert identifier is not None
+        assert panel.count("<video") == 1, (
+            f"{identifier.group(1)} must own exactly one <video>; the controller promotes "
+            "the selected panel's player with querySelector, so a second one would stay "
+            f"sourceless. Found {panel.count('<video')}"
+        )
+
+    script = STORYTELLING_JS.read_text(encoding="utf-8")
+    for mutator in ("createElement", "cloneNode", "insertBefore", "appendChild", "innerHTML"):
+        assert mutator not in script, (
+            f"the scene controller must not use {mutator!r}: the one-video-per-panel "
+            "contract holds because the static page is the only thing that creates players"
+        )

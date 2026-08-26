@@ -77,7 +77,7 @@ VISUAL_MARKERS = {
     "resource-relationships.md": ("relationship-graph.png", "Resolution", "Coverage"),
     "helm-operators.md": ('class="docs-storyboard"', "Install", "Rollback"),
     "observability.md": ("```mermaid", "Prometheus", "Loki"),
-    "agent.md": ("agent-poster.png", "deterministic AgentPanel walkthrough"),
+    "agent.md": ("agent-poster.png", "deterministic synthetic-cluster walkthrough"),
     "mcp.md": ("```mermaid", "External MCP client", "tool-specific"),
     "airgap.md": ("```mermaid", "Internal"),
     "performance.md": ("Supported envelope", "Known limits", "Raw artifacts"),
@@ -289,8 +289,8 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 
 ```yaml
 keybindings:
-  delete_resource: ctrl+x
-  sort_by_age: g
+  delete_resource: ctrl+k
+  sort_by_age: z
 ```
 
 Unknown, duplicate, or shadowing remaps warn and are skipped. Keys handled by drill-down, closing, and dialogs are not remappable. The approval dialogs' confirm keys are **not remappable**: every write still requires the fixed fresh keystroke.
@@ -448,7 +448,9 @@ Add:
 
 ```python
 agent = _source("agent.md")
-assert "not live provider execution or grounded tool calls" in agent
+assert "deterministic synthetic-cluster walkthrough" in agent
+assert "`AgentRuntime`" in agent
+assert "`EvidenceLedger`" in agent
 assert "fresh user keystroke" in agent
 
 mcp = _source("mcp.md")
@@ -475,7 +477,7 @@ Keep the current Agent storyboard and poster. Use:
 - `## What leaves the machine` — provider payload inspection and masking boundary.
 - `## Connect a provider` — one minimal configuration table covering built-in providers, linking Provider Plugins for adapters.
 - `## Stop, correct, or follow` — interrupt/replacement and follow behavior.
-- `## What the recording demonstrates` — deterministic AgentPanel walkthrough, not live provider execution or grounded tool calls.
+- `## What the recording demonstrates` — a deterministic synthetic-cluster walkthrough whose turn is real: the prompt is submitted through the real `AgentPanel`, the shipped `AgentRuntime` dispatches `diagnose_pod` then `get_logs` through the real `ToolExecutor`, and the real `EvidenceLedger` mints `[E1]`/`[E2]` and validates the answer's markers against them. State the limitation precisely — a deterministic offline provider answers, and every byte read comes from a synthetic fixture, so the clip is not evidence about a live provider, live-model answer quality, or a live cluster.
 
 Remove the long provider-by-provider shell-command catalog, tuning guide, eval harness procedure, and conversational journey inventory from this introductory page.
 

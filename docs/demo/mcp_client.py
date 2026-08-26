@@ -47,6 +47,14 @@ CLOSING_HOLD = 6.0
 #: clipped instead — the left pane is where a result is read in full.
 LINE_WIDTH = 61
 
+#: Lines of a structured answer :func:`_sections` prints. `diagnose_pod`'s
+#: `CONTAINERS` section grows with the container count, so a named section
+#: is no more bounded by nature than a raw tail is: without a cap, a wider
+#: fixture would scroll the verdict beat — and korvid's mirrored view of it
+#: — out of the captured frames. Two tails' worth, because this beat shows
+#: two sections rather than one answer's end.
+SECTION_MAX_LINES = TAIL_LINES * 2
+
 
 def _text(result: Any, call: str) -> str:
     """The text blocks of one `tools/call` answer, joined.
@@ -116,6 +124,12 @@ def _sections(text: str, *names: str) -> list[str]:
     last lines are log excerpts — naming the sections keeps this beat on
     the verdict instead of on whichever lines happen to fall last.
 
+    A header must match a requested name *whole* (a trailing colon aside):
+    `CONTAINERS` names one section, and a sibling `CONTAINERS SUMMARY`
+    would otherwise open on the same request and carry its whole body into
+    the pane. Repeated names are collected once, and the result is clipped
+    to :data:`SECTION_MAX_LINES` for the same reason `_tail` clips.
+
     Raises:
         RuntimeError: if none of ``names`` matched a header in ``text`` —
             drifted headers or an error answer would otherwise fall
@@ -124,16 +138,16 @@ def _sections(text: str, *names: str) -> list[str]:
             which is unbounded and may hold sensitive tool output.
     """
     kept: list[str] = []
-    for name in names:
+    for name in dict.fromkeys(names):
         keeping = False
         for line in text.splitlines():
             if line[:1].strip():
-                keeping = line.startswith(name)
+                keeping = line.rstrip(":") == name
             if keeping:
                 kept.append(line)
     if not kept:
         raise RuntimeError(f"diagnose_pod answer is missing every requested section: {names!r}")
-    return kept
+    return kept[:SECTION_MAX_LINES]
 
 
 async def _answered(lines: list[str], hold: float) -> None:

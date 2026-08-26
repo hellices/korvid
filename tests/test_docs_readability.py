@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -1146,3 +1147,156 @@ def test_tui_states_the_multi_pod_log_stream_cap() -> None:
     assert "`[pod/container]`" in flat
     assert "bounded ring buffer of 5000" in flat
     assert "reconnect automatically" in flat
+
+
+READABILITY_PLAN = "superpowers/plans/2026-08-25-documentation-readability.md"
+
+
+def _plan() -> str:
+    """The readability plan, which is written as an executable recipe."""
+    return _source(READABILITY_PLAN)
+
+
+def _fenced_block_after(text: str, anchor: str, language: str) -> str:
+    """The first ```language fence that follows `anchor` in `text`.
+
+    Args:
+        text: Markdown to search.
+        anchor: A literal substring the fence must follow.
+        language: The fence's info string (`python`, `yaml`, `markdown`).
+
+    Returns:
+        The fence body, without its delimiters.
+    """
+    start = text.index(anchor)
+    fence = text.index(f"```{language}\n", start) + len(f"```{language}\n")
+    return text[fence : text.index("\n```", fence)]
+
+
+def _plan_visual_markers() -> dict[str, tuple[str, ...]]:
+    """The `VISUAL_MARKERS` table the plan tells a contributor to write."""
+    block = _fenced_block_after(_plan(), "with these exact contracts:", "python")
+    literal = block[block.index("VISUAL_MARKERS = ") + len("VISUAL_MARKERS = ") :]
+    return dict(ast.literal_eval(literal[: literal.index("\n}\n") + 2]))
+
+
+def test_readability_plan_visual_markers_match_the_shipped_contract() -> None:
+    """Round-9: the plan's marker table still named a caption nothing ships.
+
+    `docs/superpowers/plans/2026-08-25-documentation-readability.md` embeds
+    `tests/test_docs_readability.py` verbatim as the recipe's first step, so
+    replaying it overwrites the live contract. Its `agent.md` row still
+    demanded the pre-recapture "deterministic AgentPanel walkthrough"
+    caption; `docs/agent.md` ships "deterministic synthetic-cluster
+    walkthrough", so a replay would fail the suite it claims to create — or,
+    worse, be "fixed" by reverting the page.
+    """
+    planned = _plan_visual_markers()
+
+    assert planned == VISUAL_MARKERS, (
+        "the plan's embedded VISUAL_MARKERS must be the shipped contract; "
+        f"plan-only rows: {sorted(set(planned.items()) - set(VISUAL_MARKERS.items()))}"
+    )
+    for page, markers in planned.items():
+        source = _source(page)
+        for marker in markers:
+            assert marker in source, f"the plan asks for {marker!r}, which {page} does not ship"
+    assert "deterministic AgentPanel walkthrough" not in _plan(), (
+        "no plan snippet may revive the pre-recapture AgentPanel-only caption"
+    )
+
+
+def _planned_remap() -> dict[str, str]:
+    """The remap recipe the plan tells a contributor to publish."""
+    block = _fenced_block_after(_plan(), "## Remap an app action", "yaml")
+    return dict(re.findall(r"^\s{2}([a-z_]+):\s*(\S+)", block, flags=re.MULTILINE))
+
+
+def test_readability_plan_remap_recipe_uses_the_conflict_free_keys() -> None:
+    """Round-9: the plan's keybindings recipe still shipped taken keys.
+
+    Round-1 finding 3 replaced `docs/keybindings.md`'s example because
+    `ctrl+x` is `interrupt_agent`'s default and `g` is `relationships`' —
+    the planner warns and skips both. The plan's `Step 3` markdown block is
+    the page's source of truth for a replay, and it still carried the
+    rejected pair, so following the plan restores an example korvid refuses.
+    """
+    planned = _planned_remap()
+
+    assert planned == _documented_remap(), (
+        "the plan's remap recipe must be the one keybindings.md ships; "
+        f"plan says {planned}, page says {_documented_remap()}"
+    )
+    assert planned == {"delete_resource": "ctrl+k", "sort_by_age": "z"}, (
+        "both keys must stay the tested conflict-free pair"
+    )
+    assert set(planned.values()).isdisjoint({"ctrl+x", "g"}), (
+        "`ctrl+x` (interrupt_agent) and `g` (relationships) are already owned by "
+        "defaults; a remap onto either is warned about and skipped"
+    )
+
+
+def test_readability_plan_agent_assertions_match_the_shipped_pages() -> None:
+    """Round-9: the plan's Task 4 assertions denied the capture's grounding.
+
+    Task 4 Step 1 embeds literal `assert "..." in agent` / `in mcp` lines. A
+    contributor pastes them into `tests/test_docs_readability.py` and edits
+    the pages until they pass, so every literal has to be a claim the
+    shipped page actually makes. `"not live provider execution or grounded
+    tool calls"` is not: `docs/demo/agent_story.py` drives the real
+    `AgentRuntime` over the real `ToolExecutor` and the real
+    `EvidenceLedger` mints `[E1]`/`[E2]`, so replaying that assertion would
+    reintroduce a false disclaimer about korvid's own recording.
+    """
+    plan = _plan()
+    block = _fenced_block_after(
+        plan, "- [ ] **Step 1: Add failing truthfulness assertions**", "python"
+    )
+
+    literals = re.findall(r'assert "([^"]+)" in (agent|mcp)\b', block)
+    assert literals, "Task 4 Step 1 must keep its embedded truthfulness assertions"
+    for needle, page in literals:
+        source = _source(f"{page}.md")
+        assert needle in source, (
+            f"the plan asserts {needle!r} of {page}.md, which does not say it; "
+            "replaying this step would rewrite the page around a false claim"
+        )
+
+    lowered = plan.lower()
+    assert "grounded tool calls" not in lowered, (
+        "the capture does run grounded tool calls through the shipped runtime"
+    )
+    assert "not grounded" not in lowered, "no plan wording may deny the capture's grounding"
+
+
+def test_readability_plan_recording_outline_states_the_real_agent_path() -> None:
+    """Round-9: the plan's `## What the recording demonstrates` bullet.
+
+    The bullet is the outline a contributor rewrites `docs/agent.md` from.
+    It must name the real code paths the clip exercises and keep the three
+    limitations that actually apply — no live provider, no live-model
+    quality claim, no live cluster — instead of the retired claim that the
+    walkthrough had no grounded tool calls.
+    """
+    bullet = next(
+        line
+        for line in _plan().splitlines()
+        if line.startswith("- `## What the recording demonstrates`")
+    )
+
+    for real_path in ("AgentPanel", "AgentRuntime", "ToolExecutor", "EvidenceLedger"):
+        assert real_path in bullet, f"the outline must name {real_path} as a real code path"
+    for marker in ("[E1]", "[E2]"):
+        assert marker in bullet, f"the ledger mints {marker}; the outline must name it"
+    assert "deterministic synthetic-cluster walkthrough" in bullet, (
+        "the outline must carry the caption the page and the poster ship"
+    )
+    lowered = bullet.lower()
+    assert re.search(r"(offline|deterministic) provider", lowered), (
+        "the provider behind the capture is deterministic and offline"
+    )
+    assert re.search(r"live(-| )model|live provider", lowered), (
+        "the live-provider limitation must survive"
+    )
+    assert "live cluster" in lowered, "the live-cluster limitation must survive"
+    assert "quality" in lowered, "the answer-quality limitation must survive"
