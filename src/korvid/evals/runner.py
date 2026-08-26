@@ -320,6 +320,8 @@ def _is_malformed(name: str, raw_arguments: str, armed: _ArmedSchemas) -> bool:
     A name this run did not arm counts as never offered, which is the signal
     a reduced arm exists to capture: whether the model still reaches for a
     tool it was not given (#221)."""
+    if name in WRITE_TOOL_NAMES:
+        return False
     try:
         parsed = json.loads(raw_arguments or "{}")
     except json.JSONDecodeError:
@@ -328,7 +330,7 @@ def _is_malformed(name: str, raw_arguments: str, armed: _ArmedSchemas) -> bool:
         return True
     schema = armed.get(name)
     if schema is None:
-        return name not in WRITE_TOOL_NAMES
+        return True
     if not schema["required"] <= parsed.keys():
         return True
     property_types = schema["types"]

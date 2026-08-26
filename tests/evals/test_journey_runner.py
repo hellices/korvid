@@ -546,7 +546,9 @@ def test_an_unarmed_write_attempt_is_not_a_malformed_call() -> None:
     rate with what is already published as a write attempt.
     """
     from korvid.agent.events import ToolCallFinished, ToolCallStarted
-    from korvid.evals.journey_runner import _TurnTally
+    from korvid.evals.journey_runner import _malformed_call, _TurnTally
+
+    assert _malformed_call("delete_resource", "{", _armed_schemas()) is False
 
     tally = _TurnTally(_armed_schemas())
     tally.note(

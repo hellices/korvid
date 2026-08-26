@@ -270,6 +270,8 @@ def _malformed_call(
     bounds at 1%. A non-write name this run did not arm stays malformed:
     that is the reduced-arm signal (#221).
     """
+    if name in WRITE_TOOL_NAMES:
+        return False
     try:
         arguments = json.loads(raw_arguments or "{}")
     except json.JSONDecodeError:
@@ -278,7 +280,7 @@ def _malformed_call(
         return True
     schema = tool_schemas.get(name)
     if schema is None:
-        return name not in WRITE_TOOL_NAMES
+        return True
     parameters = schema.get("function", {}).get("parameters", {})
     required = parameters.get("required", ())
     if not set(required) <= arguments.keys():

@@ -12,7 +12,7 @@ uv tool install "korvid[all]"        # agent + MCP + observability
 ```
 
 Nothing about the extra is loaded until the agent is actually composed: an
-MCP-only or read-only start never imports the engine, the request gateway,
+MCP-only or agent-disabled start never imports the engine, the request gateway,
 or a provider adapter. If `agent.enabled` is set but the extra is missing,
 startup fails with the exact install command rather than degrading to a
 silently disabled agent.

@@ -20,7 +20,13 @@ from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.grader import CitationReport, citation_report
 from korvid.evals.harness import PromptGrind, build_eval_harness, resolve_eval_policy
 from korvid.evals.interaction import EvalUiBridge
-from korvid.evals.runner import ScenarioReport, _armed_schemas, render_markdown, run_scenario
+from korvid.evals.runner import (
+    ScenarioReport,
+    _armed_schemas,
+    _is_malformed,
+    render_markdown,
+    run_scenario,
+)
 from korvid.evals.scenario import ContainerLogs, Evidence, Scenario
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import RecordedExecution
@@ -110,6 +116,18 @@ def test_armed_schema_accepts_a_no_argument_tool_without_parameters() -> None:
             "types": {},
         }
     }
+
+
+@pytest.mark.parametrize("arguments", ["{", "{}"])
+def test_write_attempts_are_exempt_from_malformed_call_metrics(arguments: str) -> None:
+    armed = {
+        "delete_resource": {
+            "required": frozenset({"kind", "name"}),
+            "types": {"kind": "string", "name": "string"},
+        }
+    }
+
+    assert _is_malformed("delete_resource", arguments, armed) is False
 
 
 def _no_citations() -> CitationReport:
