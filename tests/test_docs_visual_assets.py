@@ -3955,6 +3955,112 @@ def test_mcp_client_run_fails_closed_when_a_stale_marker_cannot_be_cleared(
         assert leak not in published, f"the recorded pane must publish no {leak!r}"
 
 
+def test_mcp_client_run_publishes_the_failure_best_effort_when_it_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-14 (comment 3862657672): the failure channel must not itself fail.
+
+    The same read-only environment that can block `_clear_markers` from
+    removing a stale marker can just as easily block `_publish(FAILED_FILE)`
+    from creating a new one. Unwrapped, that second `OSError` would escape
+    the `except Exception:` block while it is still handling the first one:
+    the interpreter prints a chained traceback into the recorded pane, and
+    the fixed failure line, the full `FAILURE_HOLD` and the `SystemExit`
+    after it never run at all — leaving the pane open with no bounded
+    verdict, exactly the reflow failure `run` exists to prevent. Publishing
+    the failure marker is therefore best-effort: this run's own inability to
+    write it does not exempt it from the fixed failure line, the hold and a
+    clean `SystemExit(1)`. The wrapper still rejects the candidate
+    regardless, because it promotes only when `OK_FILE` is present — and a
+    run that never reached `main` never published one.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    session = _FakeSession(_mcp_client_answers())
+    holds: list[_ClientHold] = []
+    _drive_mcp_client(module, session, monkeypatch, capsys, holds)
+
+    def _boom_clear_markers() -> None:
+        raise PermissionError(13, "Permission denied")
+
+    def _refusing_publish(status: Path) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(module, "_clear_markers", _boom_clear_markers)
+    monkeypatch.setattr(module, "_publish", _refusing_publish)
+
+    with pytest.raises(SystemExit) as excinfo:
+        asyncio.run(module.run())
+
+    assert excinfo.value.code == 1, "the run must still exit with the documented failure status"
+    assert session.calls == [], "the story may not start once clearing markers has failed"
+    assert not module.OK_FILE.exists(), "a run that never reached main may not publish success"
+    assert not module.FAILED_FILE.exists(), (
+        "the failure marker could not be written in this scenario; the wrapper must "
+        "reject on the missing OK_FILE instead"
+    )
+
+    assert len(holds) == 1, "the run must still take exactly the one bounded failure hold"
+    seconds, ok, failed, printed = holds[0]
+    assert seconds == module.FAILURE_HOLD, f"the hold must be the bounded failure hold: {seconds}"
+    assert not ok, "the held pane may not carry a success marker"
+    assert not failed, "the failure marker could not be written; it must not appear to exist"
+    assert printed.strip() == module._line(
+        "client run failed — this recording will be rejected."
+    ), "only the fixed failure line may reach the recorded pane"
+    for leak in ("Traceback", "PermissionError", "Permission denied"):
+        assert leak not in printed, f"the pane must publish no {leak!r}"
+
+
+def test_mcp_client_run_treats_a_failed_success_publish_as_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The success marker stays strict even though the failure one is now best-effort.
+
+    `_publish(FAILED_FILE)` tolerating its own `OSError` (round-14, comment
+    3862657672) must not loosen `_publish(OK_FILE)`: a story that finishes
+    but cannot write its own success marker is still an `OSError` raised out
+    of `main`, and `run` must still catch it, publish the failure marker (a
+    write this scenario does not block), print only the fixed failure line,
+    hold for `FAILURE_HOLD`, and exit non-zero — never a bare `OSError`
+    escaping into the recorded pane.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    session = _FakeSession(_mcp_client_answers())
+    holds: list[_ClientHold] = []
+    _drive_mcp_client(module, session, monkeypatch, capsys, holds)
+
+    real_publish = module._publish
+
+    def _refusing_ok_publish(status: Path) -> None:
+        if status.name == module.OK_FILE.name:
+            raise PermissionError(13, "Permission denied")
+        real_publish(status)
+
+    monkeypatch.setattr(module, "_publish", _refusing_ok_publish)
+
+    with pytest.raises(SystemExit) as excinfo:
+        asyncio.run(module.run())
+
+    assert excinfo.value.code == 1, "a failed success publish must still exit non-zero"
+    assert session.calls == list(MCP_CLIENT_CALLS), "the whole story must have run to completion"
+    assert not module.OK_FILE.exists(), "success could not be written; it must not appear to exist"
+    assert module.FAILED_FILE.exists(), (
+        "the failure marker is writable in this scenario and must be published"
+    )
+
+    seconds, ok, failed, printed = holds[-1]
+    assert seconds == module.FAILURE_HOLD, f"the hold must be the bounded failure hold: {seconds}"
+    assert not ok
+    assert failed
+    assert printed.rstrip().splitlines()[-1] == module._line(
+        "client run failed — this recording will be rejected."
+    ), "the fixed failure line must be the last thing this run publishes"
+    for leak in ("Traceback", "PermissionError", "Permission denied"):
+        assert leak not in printed, f"the pane must publish no {leak!r}"
+
+
 def test_mcp_client_status_files_are_repo_local_and_never_committable() -> None:
     """Two more recording side effects, held to the handshake files' rules.
 

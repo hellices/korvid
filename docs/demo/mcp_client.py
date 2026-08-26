@@ -18,20 +18,23 @@ work at all, so the run aborts on it rather than publishing it.
 Aborting is not enough on its own. VHS records for a fixed window and never
 observes this pane, so a run that raised would still yield an apparently
 finished asset — with a traceback in the frames and the TUI reflowed to full
-width once the pane closed. :func:`run` therefore turns any failure into two
-repository-local status files, :data:`OK_FILE` and :data:`FAILED_FILE`. The
-tape only records and leaves both markers in place; it can decide nothing,
-because VHS exits 0 whatever the shell it typed into did. The verdict belongs
-to ``docs/demo/record-mcp-follow.sh``, the wrapper that runs VHS: it grades
-the two markers afterwards and promotes the candidate render onto the
-published clip only when failure is absent and success is present, rejecting
-the candidate — and leaving the previously approved clip untouched — on
-every other outcome.
+width once the pane closed. :func:`run` therefore turns any failure into a
+repository-local status file, :data:`FAILED_FILE`, published best-effort
+beside the strict :data:`OK_FILE`. The tape only records and leaves whatever
+markers exist in place; it can decide nothing, because VHS exits 0 whatever
+the shell it typed into did. The verdict belongs to
+``docs/demo/record-mcp-follow.sh``, the wrapper that runs VHS: it promotes
+the candidate render onto the published clip only when the failure marker is
+absent and the success marker is present, rejecting the candidate — and
+leaving the previously approved clip untouched — on every other outcome,
+including a read-only checkout that stopped this run from writing either
+marker at all: no :data:`OK_FILE` is enough on its own to reject it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -50,10 +53,16 @@ OK_FILE = Path(".korvid-mcp-demo-client-ok")
 #: Published instead when the run fails. `docs/demo/record-mcp-follow.sh`
 #: rejects the candidate on this file even if the success file is also
 #: present: a failure raised inside the closing hold is still a failed run.
-#: Both files live in the checkout being recorded, like the two handshake
-#: files, and are removed on both sides of a run — :func:`run` clears them
-#: before the story starts, so only what this run publishes can grade it,
-#: and the wrapper removes them again once it has graded them.
+#: Publishing it is best-effort: the same read-only checkout or permission
+#: error that can stop :func:`_clear_markers` from removing a stale marker
+#: can just as easily stop this write, and :func:`run` must not let that
+#: second failure escape as a traceback. When it cannot be written, the
+#: wrapper still rejects the candidate — it promotes only when :data:`OK_FILE`
+#: is present, and a run that failed never published one. Both files live in
+#: the checkout being recorded, like the two handshake files, and are
+#: removed on both sides of a run — :func:`run` clears them before the story
+#: starts, so only what this run publishes can grade it, and the wrapper
+#: removes them again once it has graded them.
 FAILED_FILE = Path(".korvid-mcp-demo-client-failed")
 
 NAMESPACE = "shop"
@@ -314,6 +323,19 @@ async def run() -> None:
     publishing :data:`FAILED_FILE` rejects the candidate whatever else is
     lying about beside it, and keeps the traceback out of the frames.
 
+    Publishing :data:`FAILED_FILE` is itself best-effort: the same
+    read-only checkout or permission error that broke `_clear_markers` (or
+    anything else `main` raised) can just as easily stop this write, and a
+    second `OSError` escaping this block would print a chained traceback
+    into the recorded pane and skip the fixed failure line, the hold and
+    the `SystemExit` below — the very failure this function exists to
+    prevent. So an `OSError` from publishing the failure marker is caught
+    and ignored; the wrapper rejects the candidate regardless, because it
+    promotes only when :data:`OK_FILE` is present, and a run that reaches
+    this block never published one. `_publish(OK_FILE)` inside `main` is not
+    given the same leniency: if it raises, that `OSError` propagates here
+    like any other failure and is handled the same way.
+
     Raises:
         SystemExit: with status 1 if the story failed, so a direct run still
             reports the failure — and reports it as the one exception the
@@ -321,9 +343,9 @@ async def run() -> None:
             would print a traceback into a pane that is being recorded, and
             printing the exception would publish an unbounded string that
             may hold sensitive cluster text. Neither reaches a frame: the
-            verdict travels in :data:`FAILED_FILE` instead, and the pane is
-            held open past the capture so it cannot close and reflow the
-            TUI inside the last frames.
+            verdict travels in :data:`FAILED_FILE` instead when it can be
+            written, and the pane is held open past the capture so it
+            cannot close and reflow the TUI inside the last frames.
 
     `BaseException` is deliberately not caught: an interrupt or a cancelled
     run must stay interrupting. Neither can forge a success, because
@@ -333,7 +355,8 @@ async def run() -> None:
         _clear_markers()
         await main()
     except Exception:
-        _publish(FAILED_FILE)
+        with contextlib.suppress(OSError):
+            _publish(FAILED_FILE)
         print(_line("\nclient run failed — this recording will be rejected."))
         await asyncio.sleep(FAILURE_HOLD)
         raise SystemExit(1) from None
