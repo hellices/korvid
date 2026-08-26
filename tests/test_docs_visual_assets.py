@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import math
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -147,16 +149,32 @@ MCP_FINAL_CLIP = "docs/assets/scenes/mcp-follow-demo.mp4"
 #: The line the wrapper prints when it publishes nothing.
 MCP_RECORDER_REJECTION = "record-mcp-follow.sh: rejecting this recording"
 #: The other reviewed clips that live in the published clip's own directory.
-#: A tape's second `Output` may name any of them, and none of their basenames
-#: is what the byte guard looks for, so the preflight's contract is wider than
-#: the MCP clip: an `Output` VHS would obey may not reach *any* approved asset.
+#: A tape edit may aim VHS at any of them, and none of their basenames is what
+#: the byte guard looks for, so the pin's contract is wider than the MCP clip:
+#: an edited tape may not reach *any* approved asset.
 MCP_SIBLING_CLIPS = ("agent-demo.mp4", "relationship-demo.mp4")
+#: The shell variable the wrapper pins the reviewed tape's bytes in. Everything
+#: about the tape — its single `Output`, its `Type` lines, its prose — is one
+#: SHA-256 away from the wrapper, so no directive of VHS's grammar has to be
+#: re-implemented here to know that the tape being run is the tape reviewed.
+MCP_TAPE_PIN_VARIABLE = "reviewed_tape_sha256"
+#: The digest that pin must carry: the raw SHA-256 of the shipped tape's bytes.
+MCP_TAPE_DIGEST = hashlib.sha256(MCP_TAPE.read_bytes()).hexdigest()
+#: The two hashing tools the wrapper accepts, in the order it tries them.
+#: `sha256sum` is coreutils and ships on Linux; `shasum -a 256` is the perl
+#: script macOS ships instead. Both print the raw digest as their first field.
+MCP_HASH_TOOLS = ("sha256sum", "shasum")
+#: Every other external command the wrapper runs, so a contract can rebuild a
+#: `PATH` that has all of them and neither hashing tool. `bash` is on the list
+#: because the wrapper's own `#!/usr/bin/env bash` resolves it through `PATH`.
+MCP_RECORDER_TOOLS = ("bash", "basename", "dirname", "grep", "mkdir", "mv", "rm", "touch")
 #: The environment overrides the wrapper honours, so a contract can drive the
 #: whole boundary against a fake VHS in a temporary directory without touching
 #: the checkout, its scratch files or its published media.
 MCP_RECORDER_ENV = {
     "vhs": "KORVID_MCP_VHS_BIN",
     "tape": "KORVID_MCP_TAPE",
+    "digest": "KORVID_MCP_TAPE_SHA256",
     "candidate": "KORVID_MCP_CANDIDATE",
     "final": "KORVID_MCP_FINAL",
     "ok": "KORVID_MCP_CLIENT_OK",
@@ -3883,9 +3901,15 @@ def _run_recorder(
     publishes_failed: bool = False,
     published: bytes | None = MCP_PUBLISHED_BYTES,
     tape_body: str = "Output {candidate}\nSleep 1s\n",
+    pinned_body: str | None = None,
+    tape_source: Path | None = None,
+    digest: str | None = None,
+    use_shipped_pin: bool = False,
+    unreadable_tape: bool = False,
     candidate_dir: str = "scenes",
     final_dir: str = "scenes",
     scenes_alias: str | None = None,
+    path_entries: Sequence[Path] | None = None,
 ) -> _RecorderRun:
     """Run the shipped wrapper against a fake VHS inside `workdir`.
 
@@ -3894,6 +3918,14 @@ def _run_recorder(
     real trap, its real promotion and its real cleanup — while the
     checkout's own media and scratch stay untouched. `tmux` is a stub on
     `PATH`, so no multiplexer is involved either.
+
+    The wrapper runs only the tape it was reviewed against, so a temporary
+    tape needs a temporary pin. `KORVID_MCP_TAPE_SHA256` is exactly that
+    override, and it defaults here to the digest of the tape this helper
+    just wrote: a fake tape a contract generated on purpose is a reviewed
+    tape as far as that run is concerned. `pinned_body` is the opposite
+    case — the reviewed bytes, pinned, while `tape_body` is what the
+    wrapper is actually handed, which is how a mutation is expressed.
 
     Args:
         workdir: The directory every path the wrapper touches is redirected
@@ -3906,8 +3938,17 @@ def _run_recorder(
         published: The bytes to seed the canonical path with, or `None` for a
             checkout where nothing was ever approved.
         tape_body: The tape the wrapper is handed, with `{candidate}` and
-            `{final}` filled in — the whitespace of its `Output` directives is
-            what the preflight is graded on.
+            `{final}` filled in.
+        pinned_body: The tape the pin is computed from, when it differs from
+            the one handed over — a reviewed tape whose bytes were then
+            edited.
+        tape_source: A file whose bytes are copied verbatim as the tape,
+            instead of rendering `tape_body`.
+        digest: An explicit pin, overriding both bodies above.
+        use_shipped_pin: Leave `KORVID_MCP_TAPE_SHA256` unset, so the run is
+            graded against the constant the wrapper ships.
+        unreadable_tape: Strip every permission from the tape once it is
+            written and pinned, so the wrapper meets a file it cannot hash.
         candidate_dir: The `workdir`-relative directory the candidate is
             rendered into. The wrapper creates it, exactly as it does in a
             checkout, so a directory that does not exist yet is a valid case.
@@ -3916,6 +3957,8 @@ def _run_recorder(
         scenes_alias: A symbolic link to create beside `scenes`, pointing at
             it, so a directory can be named by two spellings that resolve to
             one physical place.
+        path_entries: The whole `PATH` the wrapper runs with, replacing the
+            inherited one, so a contract can take a hashing tool away.
     """
     scenes = workdir / "scenes"
     scenes.mkdir(parents=True)
@@ -3931,7 +3974,20 @@ def _run_recorder(
         role: workdir / f".korvid-mcp-demo-{role}" for role in ("ok", "failed", "ready", "go")
     }
     tape = workdir / "fake.tape"
-    tape.write_text(tape_body.format(candidate=candidate, final=final), encoding="utf-8")
+    if tape_source is not None:
+        tape.write_bytes(tape_source.read_bytes())
+    else:
+        tape.write_text(tape_body.format(candidate=candidate, final=final), encoding="utf-8")
+    if digest is None:
+        if tape_source is not None:
+            digest = hashlib.sha256(tape.read_bytes()).hexdigest()
+        else:
+            pinned = tape_body if pinned_body is None else pinned_body
+            digest = hashlib.sha256(
+                pinned.format(candidate=candidate, final=final).encode("utf-8")
+            ).hexdigest()
+    if unreadable_tape:
+        tape.chmod(0o000)
 
     stub_dir = workdir / "stubs"
     stub_dir.mkdir()
@@ -3951,9 +4007,17 @@ def _run_recorder(
     )
 
     environment = dict(os.environ)
-    environment["PATH"] = f"{stub_dir}{os.pathsep}{environment.get('PATH', '')}"
+    inherited = environment.get("PATH", "") if path_entries is None else ""
+    entries = [str(stub_dir), *(str(entry) for entry in path_entries or ())]
+    if inherited:
+        entries.append(inherited)
+    environment["PATH"] = os.pathsep.join(entries)
     environment[MCP_RECORDER_ENV["vhs"]] = str(workdir / "fake-vhs")
     environment[MCP_RECORDER_ENV["tape"]] = str(tape)
+    if use_shipped_pin:
+        environment.pop(MCP_RECORDER_ENV["digest"], None)
+    else:
+        environment[MCP_RECORDER_ENV["digest"]] = digest
     environment[MCP_RECORDER_ENV["candidate"]] = str(candidate)
     environment[MCP_RECORDER_ENV["final"]] = str(final)
     for role in ("ok", "failed", "ready", "go"):
@@ -4097,16 +4161,134 @@ def test_mcp_recorder_owns_the_canonical_path_and_the_tape_never_writes_it() -> 
     )
 
 
-def test_mcp_recorder_derives_its_canonical_needle_and_says_it_is_strict() -> None:
+def test_mcp_recorder_pins_the_reviewed_tape_by_its_raw_sha256() -> None:
+    """The wrapper runs one tape: the one whose bytes were reviewed.
+
+    Every earlier attempt to grade a tape read it — first by line, then by
+    whitespace-separated field — and each reader was a second guess at
+    VHS's grammar that had to keep winning against VHS's own. A digest
+    ends that race: the pin covers every byte of the tape, so a directive
+    nobody reviewed cannot be spelled in any way that survives, and the
+    wrapper never has to know what `Hide`, `Type` or a trailing `#` mean.
+
+    The constant is checked against the shipped tape here, because a pin
+    that drifts from the file it names guards nothing.
+    """
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    pinned = re.search(rf"^{MCP_TAPE_PIN_VARIABLE}=([0-9a-f]{{64}})$", script, re.MULTILINE)
+
+    assert pinned is not None, (
+        f"the wrapper must carry the reviewed tape's digest as `{MCP_TAPE_PIN_VARIABLE}="
+        "<64 lowercase hex digits>`, on a line a reader can find and a review can compare"
+    )
+    assert pinned.group(1) == MCP_TAPE_DIGEST, (
+        f"the pin must be the raw SHA-256 of {MCP_TAPE.name}; the wrapper carries "
+        f"{pinned.group(1)} and the shipped tape hashes to {MCP_TAPE_DIGEST}. Recompute the "
+        "pin only after reviewing the tape's new bytes"
+    )
+    assert re.search(
+        rf"^expected_digest=\$\{{{MCP_RECORDER_ENV['digest']}:-\${MCP_TAPE_PIN_VARIABLE}\}}$",
+        script,
+        re.MULTILINE,
+    ), (
+        f"{MCP_RECORDER_ENV['digest']} must exist for the contracts alone and must default "
+        "to the reviewed pin, so a checkout with no environment records the reviewed tape"
+    )
+
+
+def test_mcp_recorder_hashes_portably_and_compares_the_whole_digest() -> None:
+    """A pin is only as good as the digest it is compared against.
+
+    `sha256sum` is coreutils and absent from a stock macOS; `shasum -a 256`
+    is the perl script macOS ships and absent from a slim container. The
+    wrapper has to try both and refuse outright when neither is there —
+    "no way to check" is not "checked". The comparison is a whole-string
+    equality, never a prefix or a pattern, and it stands in front of VHS.
+    """
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    commands = [
+        line for line in script.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+    assert "sha256sum -- " in script, "the wrapper must try coreutils' sha256sum first"
+    assert "shasum -a 256 -- " in script, (
+        "the wrapper must fall back to `shasum -a 256`, the tool macOS ships instead"
+    )
+    for tool in MCP_HASH_TOOLS:
+        assert f"command -v {tool} " in script, (
+            f"{tool} must be probed with `command -v` rather than assumed present"
+        )
+    compared = next(
+        (
+            index
+            for index, line in enumerate(commands)
+            if '"$actual_digest"' in line and '"$expected_digest"' in line
+        ),
+        None,
+    )
+    assert compared is not None, (
+        "the computed digest must be compared to the pin as two whole quoted strings; a "
+        "prefix or a glob would accept a tape that merely starts the same way"
+    )
+    rendered = next(
+        (index for index, line in enumerate(commands) if '"$vhs_bin" "$tape"' in line),
+        None,
+    )
+    assert rendered is not None, "the wrapper must invoke VHS"
+    assert compared < rendered, (
+        "the pin is a preflight: an unreviewed tape must be refused before VHS renders "
+        "anything, not graded after it has already written a file"
+    )
+
+
+def test_mcp_recorder_no_longer_re_implements_vhs_s_grammar() -> None:
+    """The parser is gone, and the claims that justified it must go with it.
+
+    A hand-rolled `Output` scanner had to be equivalent to VHS's lexer to
+    be worth anything, and it lost that race twice — once to indentation,
+    once to `Hide Output <clip>` on one line. The digest makes the whole
+    question moot, so no reader may find a scanner here to extend, and no
+    comment may promise that this wrapper understands a tape it was not
+    pinned to.
+    """
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    commands = [
+        line for line in script.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    ]
+    commentary = "\n".join(
+        line for line in script.splitlines() if line.lstrip().startswith("#")
+    ).lower()
+
+    for parser in ("awk", "NF", "sed "):
+        offenders = [line.strip() for line in commands if parser in line]
+        assert not offenders, (
+            f"{parser!r} is a second reader of VHS's grammar; the digest replaced it: {offenders}"
+        )
+    for claim in ("lexer", "whitespace-separated", "token"):
+        assert claim not in commentary, (
+            f"the wrapper no longer reasons about VHS's grammar, so it may not claim {claim!r}; "
+            "a reader who believes it will trust this script with a tape nobody reviewed"
+        )
+    assert "sha-256" in commentary or "sha256" in commentary, (
+        "the comments must name the mechanism that replaced the parser"
+    )
+    assert "review" in commentary, (
+        "the pin's whole meaning is that the bytes were reviewed; the script must say so, or "
+        "the next reader recomputes it to make a failure go away"
+    )
+
+
+def test_mcp_recorder_still_refuses_the_canonical_name_as_defence_in_depth() -> None:
     """The byte guard must read the promotion target, not a second copy of it.
 
-    Two independent checks stand in front of VHS: the `Output` shape check,
-    which reads the tape the way VHS splits a directive, and a guard that
-    refuses the published clip's basename anywhere in the tape's bytes. The
-    second one is the fail-closed net, so its needle has to be derived from
-    the very path the wrapper promotes to — a hard-coded second spelling
-    would go stale the day the clip is renamed and quietly guard nothing.
-    Being byte-level, it also rejects the name in a comment, which VHS would
+    The digest is the boundary; this guard is what stands behind it. It
+    refuses the published clip's basename anywhere in the tape's bytes, so
+    a pin recomputed without thought — the one mistake the digest cannot
+    catch, since it is the reviewer's own — still cannot hand VHS a tape
+    that names the reviewed clip. Its needle has to be derived from the
+    very path the wrapper promotes to; a hard-coded second spelling would
+    go stale the day the clip is renamed and quietly guard nothing. Being
+    byte-level, it also rejects the name in a comment, which VHS would
     ignore; that is a deliberate trade the script has to state, because the
     next reader will otherwise file it as a bug and loosen it.
     """
@@ -4130,46 +4312,6 @@ def test_mcp_recorder_derives_its_canonical_needle_and_says_it_is_strict() -> No
     assert "comment" in commentary, (
         "the false positive this guard accepts is the canonical name in a comment; the "
         "script must name it rather than leave it to be discovered"
-    )
-
-
-def test_mcp_recorder_counts_every_output_token_not_only_a_line_s_first_field() -> None:
-    """The shape check must read fields, and it must say what that costs.
-
-    A reader who finds `$1 == "Output"` here will assume VHS reads lines.
-    It does not: its lexer emits whitespace-separated tokens, so a second
-    `Output` can hide behind any directive that takes no argument. The
-    source has to show the scan — every field of every non-comment line —
-    and it has to name the two edges of that decision, because both look
-    like bugs to someone who does not know why they are there: a full-line
-    comment is skipped (VHS ignores it, and the shipped tape says the word
-    `Output` in its own prose), while an `Output` inside a `Type` string is
-    refused even though VHS would type it as text.
-    """
-    script = MCP_RECORDER.read_text(encoding="utf-8")
-    commentary = "\n".join(
-        line for line in script.splitlines() if line.lstrip().startswith("#")
-    ).lower()
-
-    assert '$1 == "Output"' not in script, (
-        "judging a line by its first field is the bypass itself: `Hide Output <clip>` is "
-        "two directives VHS obeys and one line whose first field is `Hide`"
-    )
-    assert re.search(r"for \(i = 1; i <= NF; i\+\+\)", script), (
-        "every whitespace-separated field must be visited, since that is the unit VHS's "
-        "lexer works in"
-    )
-    assert re.search(r'\$i (?:==|!=) "Output"', script), (
-        "each field must be compared to the token `Output` itself, not to a prefix or a "
-        "pattern that a path could satisfy"
-    )
-    assert "type" in commentary, (
-        "refusing `Output` inside a `Type` string is stricter than VHS; a reader who is "
-        "not told will file it as a bug"
-    )
-    assert "comment" in commentary, (
-        "skipping full-line comments is the other half of that decision, and the shipped "
-        "tape depends on it"
     )
 
 
@@ -4314,7 +4456,9 @@ class _HostileTapeRun(NamedTuple):
     vhs_ran: bool
 
 
-def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
+def _run_hostile_tape(
+    workdir: Path, tape_body: str, *, pinned_body: str | None = None
+) -> _HostileTapeRun:
     """Hand the wrapper `tape_body` behind a VHS that would overwrite the clip.
 
     The stand-in overwrites every approved clip in the scene directory the
@@ -4332,6 +4476,10 @@ def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
             `{agent_demo_relative}` and `{relationship_demo}` are the
             reviewed clips beside it, and `{unreviewed}` is a path in the
             working directory no asset lives at.
+        pinned_body: The tape whose digest is pinned, when it differs from
+            the one handed over. `None` pins `tape_body` itself, which is how
+            a contract asks for a tape the pin cannot catch — the case that
+            grades the byte guard standing behind it.
     """
     workdir.mkdir(parents=True)
     scenes = workdir / "scenes"
@@ -4342,21 +4490,21 @@ def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
     siblings = {name: scenes / name for name in MCP_SIBLING_CLIPS}
     for name, path in siblings.items():
         path.write_bytes(f"previously approved {name}".encode())
+    substitutions = {
+        "candidate": candidate,
+        "final": final,
+        "final_relative": f"scenes/{final.name}",
+        "final_dotted": f"./scenes/{final.name}",
+        "final_updir": f"../{workdir.name}/scenes/{final.name}",
+        "agent_demo": siblings["agent-demo.mp4"],
+        "agent_demo_relative": "scenes/agent-demo.mp4",
+        "relationship_demo": siblings["relationship-demo.mp4"],
+        "unreviewed": workdir / "somewhere-else.mp4",
+    }
     tape = workdir / "hostile.tape"
-    tape.write_text(
-        tape_body.format(
-            candidate=candidate,
-            final=final,
-            final_relative=f"scenes/{final.name}",
-            final_dotted=f"./scenes/{final.name}",
-            final_updir=f"../{workdir.name}/scenes/{final.name}",
-            agent_demo=siblings["agent-demo.mp4"],
-            agent_demo_relative="scenes/agent-demo.mp4",
-            relationship_demo=siblings["relationship-demo.mp4"],
-            unreviewed=workdir / "somewhere-else.mp4",
-        ),
-        encoding="utf-8",
-    )
+    rendered_tape = tape_body.format(**substitutions)
+    tape.write_text(rendered_tape, encoding="utf-8")
+    pinned = rendered_tape if pinned_body is None else pinned_body.format(**substitutions)
     log = workdir / "invocations.log"
     vhs = workdir / "fake-vhs"
     clobbered = "\n".join(
@@ -4371,6 +4519,7 @@ def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
     environment = dict(os.environ)
     environment[MCP_RECORDER_ENV["vhs"]] = str(vhs)
     environment[MCP_RECORDER_ENV["tape"]] = str(tape)
+    environment[MCP_RECORDER_ENV["digest"]] = hashlib.sha256(pinned.encode("utf-8")).hexdigest()
     environment[MCP_RECORDER_ENV["candidate"]] = str(candidate)
     environment[MCP_RECORDER_ENV["final"]] = str(final)
     for role in ("ok", "failed", "ready", "go"):
@@ -4393,61 +4542,199 @@ def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
     )
 
 
+#: The reviewed tape a mutation contract starts from: one `Output` naming the
+#: candidate, and one directive after it. Its digest is what the wrapper is
+#: pinned to, so every case below is that tape with its bytes edited.
+MCP_REVIEWED_BODY = "Output {candidate}\nSleep 1s\n"
+
+
 @pytest.mark.parametrize(
     ("case", "tape_body"),
     [
-        ("a-second-output-on-its-own-line", "Output {candidate}\nOutput {final}\n"),
-        ("a-second-output-indented-with-spaces", "Output {candidate}\n  Output {final}\n"),
-        ("a-second-output-indented-with-a-tab", "Output {candidate}\n\tOutput {final}\n"),
-        ("a-second-output-separated-by-a-tab", "Output {candidate}\nOutput\t{final}\n"),
+        ("a-second-space-before-the-path", "Output  {candidate}\nSleep 1s\n"),
+        ("a-tab-instead-of-a-space", "Output\t{candidate}\nSleep 1s\n"),
+        ("the-directive-indented", "  Output {candidate}\nSleep 1s\n"),
+        ("trailing-whitespace", "Output {candidate} \nSleep 1s\n"),
+        ("a-quoted-path", 'Output "{candidate}"\nSleep 1s\n'),
+        ("a-trailing-semicolon", "Output {candidate};\nSleep 1s\n"),
+        ("a-comment-appended", "Output {candidate}\nSleep 1s\n# reviewed by nobody\n"),
+        ("a-trailing-comment-on-the-directive", "Output {candidate} # fine\nSleep 1s\n"),
+        ("the-final-newline-removed", "Output {candidate}\nSleep 1s"),
+        ("one-argument-changed", "Output {candidate}\nSleep 2s\n"),
+        ("the-path-repointed-at-a-reviewed-clip", "Output {agent_demo}\nSleep 1s\n"),
         (
-            "a-second-output-indented-and-tab-separated",
-            "Output {candidate}\n \tOutput\t{final}\n",
+            "a-second-output-on-its-own-line",
+            "Output {candidate}\nOutput {agent_demo}\nSleep 1s\n",
         ),
-        ("the-candidate-declared-twice", "Output {candidate}\nOutput {candidate}\n"),
-        ("a-path-followed-by-a-second-field", "Output {candidate} {final}\n"),
-        ("a-path-followed-by-a-stray-word", "Output {candidate} extra\n"),
-        ("an-output-with-no-path-at-all", "Output {candidate}\nOutput\n"),
-        ("the-published-clip-alone", "Output {final}\n"),
-        ("the-published-clip-indented", "  Output {final}\n"),
-        ("the-published-clip-tab-separated", "Output\t{final}\n"),
-        ("no-output-at-all", "Sleep 1s\n"),
-        ("an-output-sharing-a-line-with-hide", "Output {candidate}\nHide Output {final}\n"),
-        ("an-output-sharing-a-line-with-show", "Output {candidate}\nShow Output {final}\n"),
-        ("an-output-sharing-a-line-with-sleep", "Output {candidate}\nSleep 1s Output {final}\n"),
-        ("an-output-sharing-a-line-with-enter", "Output {candidate}\nEnter Output {final}\n"),
         (
-            "an-output-sharing-a-line-by-a-relative-path",
+            "a-second-output-sharing-a-line-with-hide",
+            "Output {candidate}\nHide Output {agent_demo}\nSleep 1s\n",
+        ),
+        (
+            "a-second-output-sharing-a-line-with-show",
+            "Output {candidate}\nShow Output {relationship_demo}\nSleep 1s\n",
+        ),
+        (
+            "a-second-output-sharing-a-line-with-sleep",
+            "Output {candidate}\nSleep 1s Output {agent_demo_relative}\nSleep 1s\n",
+        ),
+        (
+            "a-second-output-sharing-a-line-with-enter",
+            "Output {candidate}\nEnter Output {unreviewed}\nSleep 1s\n",
+        ),
+        (
+            "a-second-output-sharing-the-candidate-s-own-line",
+            "Output {candidate} Output {agent_demo}\nSleep 1s\n",
+        ),
+        ("an-output-inside-a-type-string", 'Output {candidate}\nType "Output {agent_demo}"\n'),
+    ],
+)
+def test_mcp_recorder_refuses_every_edit_of_the_reviewed_tape(
+    tmp_path: Path, case: str, tape_body: str
+) -> None:
+    """The wrapper records the reviewed bytes, or it records nothing.
+
+    Every earlier preflight tried to tell a safe tape from a hostile one by
+    reading it, and each reader was a fresh guess at VHS's grammar: first
+    `^Output ` at column zero, which indentation walked past; then a
+    field scan, which `Hide Output <clip>` walked past. The tape's real
+    reader is VHS, so any second reader here has to win every future lexer
+    change to be worth anything.
+
+    The pin ends that argument by covering the whole file. Each case below
+    is the reviewed tape with its bytes edited — a space, a tab, a quote, a
+    semicolon, a comment, a missing final newline, a repointed path, a
+    second `Output` in any of the shapes VHS obeys — and each is refused
+    against the reviewed digest before VHS is invoked, with every approved
+    clip in the directory still byte-identical. None of that requires the
+    wrapper to know what the edit *means*.
+    """
+    run = _run_hostile_tape(tmp_path / case, tape_body, pinned_body=MCP_REVIEWED_BODY)
+
+    assert run.status != 0, f"{case} is not the reviewed tape; the wrapper exited {run.status}"
+    assert not run.vhs_ran, (
+        f"{case} must be refused before VHS is invoked, not after it has already rendered"
+    )
+    assert run.published == MCP_PUBLISHED_BYTES, (
+        f"{case} must leave the approved clip byte-identical; it now holds {run.published!r}"
+    )
+    for name in MCP_SIBLING_CLIPS:
+        assert run.reviewed[name] == f"previously approved {name}".encode(), (
+            f"{case} must leave every approved clip in the directory alone; {name} holds "
+            f"{run.reviewed[name]!r}"
+        )
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+def test_mcp_recorder_refuses_a_tape_whose_pin_is_simply_wrong(tmp_path: Path) -> None:
+    """A digest that is not the tape's digest is a refusal, not a warning.
+
+    The comparison is the boundary, so it has to be exact in both
+    directions: the reviewed tape under a stale pin fails just as an edited
+    tape under the reviewed pin does. Nothing about the tape's content
+    rescues it — this one declares the candidate, names the published clip
+    nowhere, and is still refused.
+    """
+    run = _run_recorder(tmp_path / "wrong-pin", digest="0" * 64)
+
+    assert run.status != 0, f"a mismatched pin must refuse the run; exited {run.status}"
+    assert not run.vhs_ran, "the pin is a preflight; VHS may not be invoked on a failed one"
+    assert run.published == MCP_PUBLISHED_BYTES, (
+        f"the approved clip must be byte-identical; it holds {run.published!r}"
+    )
+    assert not run.candidate_left, "the refusal must clear the run's own scratch"
+    assert run.scratch_left == (), f"the refusal left scratch behind: {run.scratch_left}"
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+def test_mcp_recorder_refuses_a_tape_whose_bytes_it_cannot_read(tmp_path: Path) -> None:
+    """A tape that cannot be hashed is a tape nobody reviewed.
+
+    An unreadable file has no digest, and "no digest" must never read as
+    "the right digest". The wrapper refuses before VHS, so an approved clip
+    survives a permission problem exactly as it survives a hostile edit.
+    """
+    workdir = tmp_path / "unreadable"
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file, so this host cannot make a tape unreadable")
+
+    run = _run_recorder(workdir, unreadable_tape=True)
+
+    assert run.status != 0, f"an unreadable tape must refuse the run; exited {run.status}"
+    assert not run.vhs_ran, "a tape that could not be hashed may not be handed to VHS"
+    assert run.published == MCP_PUBLISHED_BYTES, (
+        f"the approved clip must be byte-identical; it holds {run.published!r}"
+    )
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+def test_mcp_recorder_refuses_to_record_with_no_way_to_hash(tmp_path: Path) -> None:
+    """ "No hashing tool" must fail closed, never fall through to recording.
+
+    `sha256sum` is coreutils and `shasum` is the perl script macOS ships;
+    a slim container can lack both. The tempting shape is to skip the pin
+    when neither is found, which turns the one check that grades the tape
+    into a check that grades the environment. The wrapper refuses instead,
+    with every other command it needs still on `PATH`, so the failure is
+    unmistakably about hashing.
+    """
+    tools = {name: shutil.which(name) for name in MCP_RECORDER_TOOLS}
+    missing = sorted(name for name, found in tools.items() if found is None)
+    if missing:
+        pytest.skip(f"this host cannot rebuild the wrapper's PATH; missing {missing}")
+
+    toolbox = tmp_path / "toolbox"
+    toolbox.mkdir()
+    for name, found in tools.items():
+        assert found is not None
+        (toolbox / name).symlink_to(found)
+
+    run = _run_recorder(tmp_path / "no-hash-tool", path_entries=[toolbox])
+
+    assert not any((toolbox / tool).exists() for tool in MCP_HASH_TOOLS), (
+        "this contract is only meaningful while neither hashing tool is reachable"
+    )
+    assert run.status != 0, f"a run that cannot hash the tape must be refused; exited {run.status}"
+    assert not run.vhs_ran, "an unpinned run may not reach VHS"
+    assert run.published == MCP_PUBLISHED_BYTES, (
+        f"the approved clip must be byte-identical; it holds {run.published!r}"
+    )
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+@pytest.mark.parametrize(
+    ("case", "tape_body"),
+    [
+        ("the-published-clip-alone", "Output {final}\n"),
+        ("a-second-output-naming-the-published-clip", "Output {candidate}\nOutput {final}\n"),
+        (
+            "a-second-output-behind-hide-by-a-relative-path",
             "Output {candidate}\nHide Output {final_relative}\n",
         ),
         (
-            "an-output-sharing-a-line-by-a-dot-slash-path",
+            "a-second-output-behind-sleep-through-dot-slash",
             "Output {candidate}\nSleep 1s Output {final_dotted}\n",
         ),
         (
-            "an-output-sharing-a-line-through-a-parent-directory",
+            "a-second-output-behind-enter-through-a-parent-directory",
             "Output {candidate}\nEnter Output {final_updir}\n",
         ),
         ("the-canonical-name-in-a-comment", "Output {candidate}\n# never {final}\n"),
     ],
 )
-def test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip(
+def test_mcp_recorder_refuses_the_canonical_name_even_under_a_matching_pin(
     tmp_path: Path, case: str, tape_body: str
 ) -> None:
-    """The boundary checks the tape it is about to run, not just the run.
+    """The guard behind the pin, graded on the one case the pin cannot see.
 
-    Editing `Output` back to the canonical path — or adding a second
-    `Output` beside the candidate, which VHS honours — would put the
-    published clip back under VHS's pen. Line shape is not enough to see
-    that: VHS's grammar is whitespace-separated tokens, not lines, so
-    `Hide Output <clip>`, `Sleep 1s Output <clip>` and `Enter Output <clip>`
-    are each two directives VHS obeys on one line, and a line-based reader
-    that only looks at a line's first field sees `Hide`, `Sleep` or `Enter`
-    and lets them through. So the published clip's own basename may not
-    appear anywhere in the tape's bytes — under any spelling of its path,
-    absolute, repository-relative, `./` or through `../`, and in a comment
-    too. Refusing means the approved clip is still byte-identical and VHS
-    was never invoked at all.
+    A digest catches every edit made without recomputing it. It cannot
+    catch the reviewer's own mistake — bytes reviewed carelessly and then
+    pinned — because at that point the pin agrees with the file. Each tape
+    below is handed over under a pin that matches it exactly, so the digest
+    passes and only the byte guard is left: the published clip's basename
+    may not appear anywhere in the tape, under any spelling of the path,
+    comments included. VHS cannot write a file it is not given the name of,
+    so this holds whatever its grammar does.
     """
     run = _run_hostile_tape(tmp_path / case, tape_body)
 
@@ -4461,171 +4748,89 @@ def test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip(
     assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
 
 
-@pytest.mark.parametrize(
-    ("case", "tape_body"),
-    [
-        (
-            "a-second-output-behind-hide-naming-the-agent-clip",
-            "Output {candidate}\nHide Output {agent_demo}\n",
-        ),
-        (
-            "a-second-output-behind-show-naming-the-relationship-clip",
-            "Output {candidate}\nShow Output {relationship_demo}\n",
-        ),
-        (
-            "a-second-output-behind-sleep-naming-the-agent-clip-relatively",
-            "Output {candidate}\nSleep 1s Output {agent_demo_relative}\n",
-        ),
-        (
-            "a-second-output-behind-enter-naming-an-unreviewed-path",
-            "Output {candidate}\nEnter Output {unreviewed}\n",
-        ),
-        (
-            "a-second-output-sharing-the-candidate-s-own-line",
-            "Output {candidate} Output {agent_demo}\n",
-        ),
-        (
-            "a-second-output-behind-hide-with-no-path-at-all",
-            "Output {candidate}\nHide Output\n",
-        ),
-        (
-            "the-candidate-declared-behind-hide-and-again-behind-show",
-            "Hide Output {candidate}\nShow Output {candidate}\n",
-        ),
-    ],
-)
-def test_mcp_recorder_refuses_a_second_output_that_names_another_asset(
-    tmp_path: Path, case: str, tape_body: str
+def test_mcp_recorder_requires_the_tape_to_name_the_candidate_it_promotes(
+    tmp_path: Path,
 ) -> None:
-    """The byte guard knows one name; the shape check must know the grammar.
+    """The pinned tape and the promoted file have to be the same file.
 
-    Refusing the published clip's basename anywhere in the tape's bytes
-    stops a second `Output` aimed at *this* clip, whatever VHS's lexer
-    does. It says nothing about a second `Output` aimed at
-    `agent-demo.mp4`, at `relationship-demo.mp4` or at any other path — no
-    approved clip's name is in that needle, and a shape check that judges a
-    line by its first field sees `Hide`, `Show`, `Sleep` or `Enter` and
-    waves it through. VHS obeys both directives on that line, so a run that
-    this wrapper later rejects has already overwritten a reviewed asset it
-    does not even own.
-
-    So every whitespace-separated field of every non-comment line is read,
-    every `Output` token is counted, and exactly one standalone
-    `Output <candidate>` is the only tape that reaches VHS. Refusing means
-    VHS was never invoked and every approved clip in that directory — the
-    MCP capture and both of its neighbours — is byte-identical.
+    The digest says which tape runs; it says nothing about where the
+    wrapper then looks for a candidate, and `KORVID_MCP_CANDIDATE` is set
+    independently of the tape. A pinned tape that renders somewhere else
+    would leave the wrapper grading a file this run never wrote. One
+    literal check settles it, with no directive parsed: the candidate's own
+    name has to appear in the tape's bytes.
     """
-    run = _run_hostile_tape(tmp_path / case, tape_body)
+    run = _run_hostile_tape(tmp_path / "renders-elsewhere", "Output {unreviewed}\nSleep 1s\n")
 
-    assert run.status != 0, f"{case} must not be recorded; the wrapper exited {run.status}"
-    assert not run.vhs_ran, (
-        f"{case} is a second directive VHS obeys; it must be refused before VHS is invoked"
-    )
+    assert run.status != 0, f"a tape that renders elsewhere must be refused; exited {run.status}"
+    assert not run.vhs_ran, "the mismatch must be caught before VHS renders anything"
     assert run.published == MCP_PUBLISHED_BYTES, (
-        f"{case} must leave the MCP clip byte-identical; it now holds {run.published!r}"
+        f"the approved clip must be byte-identical; it holds {run.published!r}"
     )
-    for name in MCP_SIBLING_CLIPS:
-        assert run.reviewed[name] == f"previously approved {name}".encode(), (
-            f"{case} aims VHS at an approved clip this recording does not own; {name} "
-            f"must be byte-identical, yet it holds {run.reviewed[name]!r}"
-        )
     assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
 
 
-@pytest.mark.parametrize(
-    ("case", "tape_body"),
-    [
-        ("plain", "Output {candidate}\nSleep 1s\n"),
-        ("indented-with-spaces", "  Output {candidate}\nSleep 1s\n"),
-        ("indented-with-a-tab", "\tOutput {candidate}\nSleep 1s\n"),
-        ("separated-by-a-tab", "Output\t{candidate}\nSleep 1s\n"),
-        ("separated-by-several-spaces", "Output   {candidate}\nSleep 1s\n"),
-        ("trailing-whitespace", "Output {candidate}  \nSleep 1s\n"),
-    ],
-)
-def test_mcp_recorder_reads_the_candidate_in_every_whitespace_form_vhs_accepts(
-    tmp_path: Path, case: str, tape_body: str
-) -> None:
-    """The candidate's own directive must survive every whitespace form.
+def test_mcp_recorder_records_the_shipped_tape_under_its_shipped_pin(tmp_path: Path) -> None:
+    """The whole preflight, on the real tape, against the constant it ships.
 
-    The wrapper is deliberately stricter than VHS about one string — the
-    published clip's basename, which it refuses anywhere in the tape — but
-    it may not be stricter about the directive it is meant to accept. A
-    check that only recognised one spelling would reject a tape VHS renders
-    perfectly well, and would tempt the next edit back towards a laxer
-    match. The wrapper normalises whitespace instead: every form below
-    declares exactly one `Output`, it names the candidate, it names the
-    published clip nowhere, and the run is published.
+    Every other contract here supplies its own pin, which proves the
+    comparison works but not that the pin in the checkout is the right one.
+    This one hands the wrapper `docs/demo/mcp-follow.tape` byte for byte,
+    with `KORVID_MCP_TAPE_SHA256` unset, so the run is graded against
+    `reviewed_tape_sha256` exactly as a contributor's would be — through
+    the real digest computation, the real byte guard and the real
+    same-directory check. Only VHS is a stand-in, so no media is recorded.
     """
-    run = _run_recorder(tmp_path / case, tape_body=tape_body)
+    run = _run_recorder(tmp_path / "shipped-tape", tape_source=MCP_TAPE, use_shipped_pin=True)
 
     assert run.status == 0, (
-        f"{case} is a directive VHS obeys; the wrapper exited {run.status}: {run.output!r}"
-    )
-    assert run.published == MCP_CANDIDATE_BYTES, (
-        f"{case} must promote the candidate this run rendered; it holds {run.published!r}"
-    )
-
-
-def test_mcp_recorder_accepts_the_shipped_tape_with_all_of_its_prose(tmp_path: Path) -> None:
-    """The strictness has to stop at the tape that is actually shipped.
-
-    A scan that reads every field is only useful if the reviewed tape still
-    passes it, and `docs/demo/mcp-follow.tape` is not a bare list of
-    directives: it opens with a page of commentary, one line of which
-    explains that "VHS has already rendered its Output", and it types real
-    shell commands through `Type`. This drives the shipped tape itself —
-    every comment, every `Type`, every `Sleep` — through the real wrapper,
-    with only its `Output` argument repointed at the temporary candidate.
-    If the preflight ever stops distinguishing a full-line comment from a
-    directive, this is where it is caught, instead of the next time someone
-    tries to regenerate the clip.
-    """
-    shipped = MCP_TAPE.read_text(encoding="utf-8")
-    body = shipped.replace(f"Output {MCP_CANDIDATE_CLIP}", "Output {candidate}")
-
-    assert body != shipped, (
-        f"the shipped tape must declare `Output {MCP_CANDIDATE_CLIP}`, or this contract "
-        "is grading a tape it did not repoint"
-    )
-    assert "Output" in body.replace("Output {candidate}", ""), (
-        "this contract exists because the shipped tape says `Output` outside its "
-        "directive; if it stops doing so, drop it rather than let it pass vacuously"
-    )
-
-    run = _run_recorder(tmp_path / "shipped-tape", tape_body=body)
-
-    assert run.status == 0, (
-        f"the reviewed tape must still record; the wrapper exited {run.status}: {run.output!r}"
+        "the shipped tape must pass the preflight its own checkout pins it to; the wrapper "
+        f"exited {run.status}: {run.output!r}"
     )
     assert run.published == MCP_CANDIDATE_BYTES, (
         f"the shipped tape must promote its candidate; the clip holds {run.published!r}"
     )
+    assert not run.candidate_left, "promotion must move the candidate, not copy it"
+    assert run.scratch_left == (), f"the run left scratch behind: {run.scratch_left}"
 
 
-def test_mcp_recorder_requires_the_candidate_s_output_to_stand_alone(tmp_path: Path) -> None:
-    """A single `Output` sharing its line is refused, and that is deliberate.
+def test_mcp_capture_provenance_publishes_the_reviewed_tape_s_digest() -> None:
+    """A pin nobody can see is a pin nobody will recompute deliberately.
 
-    `Hide Output <candidate>` renders the candidate and nothing else, so
-    VHS would treat it as a perfectly good tape. The wrapper still refuses
-    it: the whole reason the shape check reads tokens is that it cannot
-    know what the other directives on that line do, and the only way to
-    count `Output`s without re-implementing VHS's parser is to require the
-    one it accepts to be a directive on its own — first field, one
-    argument, the candidate. That costs a tape author a newline; it buys a
-    rule with no line in it left to hide behind. The refusal happens before
-    VHS runs, so nothing is rendered either way.
+    The wrapper refuses any tape but the reviewed one, so editing the tape
+    is now a two-step act: review the new bytes, then move the pin. That is
+    only an honest rule if the pin is published where the recipe is, so a
+    contributor meets it before the refusal rather than after. The page and
+    the plan therefore carry the same digest the script does, and this
+    contract fails the moment any of the three drifts.
     """
-    run = _run_recorder(tmp_path / "output-behind-hide", tape_body="Hide Output {candidate}\n")
+    sources = {
+        "docs/demo/visual-storytelling.md": INSTRUCTIONS.read_text(encoding="utf-8"),
+        "docs/superpowers/plans/2026-08-26-landing-video-experience.md": LANDING_VIDEO_PLAN.read_text(
+            encoding="utf-8"
+        ),
+    }
 
-    assert run.status != 0, (
-        f"an `Output` sharing its line must be refused; the wrapper exited {run.status}"
+    for label, text in sources.items():
+        assert MCP_TAPE_DIGEST in text, (
+            f"{label} must publish the reviewed tape's digest ({MCP_TAPE_DIGEST}); it is the "
+            "value a tape edit has to move, and a reader who cannot see it will read the "
+            "wrapper's refusal as a bug"
+        )
+        lowered = " ".join(text.split()).lower()
+        assert re.search(r"sha-?256", lowered), f"{label} must name the digest it publishes"
+
+    page = sources["docs/demo/visual-storytelling.md"]
+    mcp = " ".join(page[page.index("## MCP follow") :].split()).lower()
+    assert re.search(r"review\w*[^.]{0,200}recomput\w+|recomput\w+[^.]{0,200}review\w*", mcp), (
+        "the page must state the rule the pin creates: a tape edit is reviewed first and "
+        "pinned afterwards, never the other way round"
     )
-    assert not run.vhs_ran, "the refusal must land before VHS is invoked"
-    assert run.published == MCP_PUBLISHED_BYTES, (
-        f"a refused tape leaves the approved clip alone; it holds {run.published!r}"
-    )
-    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+    for gone in ("whitespace-separated", "lexer"):
+        assert gone not in mcp, (
+            f"the page may no longer claim the wrapper reads VHS's grammar ({gone!r}); it "
+            "compares a digest and parses nothing"
+        )
 
 
 def test_mcp_recorder_refuses_to_promote_across_directories(tmp_path: Path) -> None:

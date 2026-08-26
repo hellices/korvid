@@ -20,6 +20,13 @@
 # scratch, tears down the recording's own tmux session and exits non-zero,
 # leaving a previously approved clip byte-identical.
 #
+# Which tape may run is settled the same way, and just as bluntly: by its
+# bytes. `reviewed_tape_sha256` below is the SHA-256 of the reviewed
+# docs/demo/mcp-follow.tape, and a tape that does not hash to it is refused
+# before VHS starts. So this wrapper never asks what a directive would do —
+# an edit is an unreviewed tape whatever it spells, and recording one means
+# reviewing its bytes and moving the pin, in that order.
+#
 # Usage, from anywhere in the checkout:
 #
 #   docs/demo/record-mcp-follow.sh
@@ -38,6 +45,20 @@ cd -- "$root"
 
 vhs_bin=${KORVID_MCP_VHS_BIN:-vhs}
 tape=${KORVID_MCP_TAPE:-docs/demo/mcp-follow.tape}
+# The raw SHA-256 of docs/demo/mcp-follow.tape as it was reviewed. This is the
+# whole preflight: the wrapper runs that file and no other, so what any
+# directive of VHS's grammar means is VHS's business and never this script's.
+#
+# Moving this value is therefore an act with a stated meaning — the new bytes
+# were read and approved — and it is the only way to record an edited tape.
+# Recompute it *after* that review, never to make a refusal go away:
+#
+#   sha256sum docs/demo/mcp-follow.tape     # or: shasum -a 256 <same>
+#
+# docs/demo/visual-storytelling.md and the 2026-08-26 plan publish the same
+# digest, and a contract compares all three against the shipped tape.
+reviewed_tape_sha256=771a88d89e0e8fdb242d5e264b556ca868d67ac26ef0c42e1776d85d2f2c2596
+expected_digest=${KORVID_MCP_TAPE_SHA256:-$reviewed_tape_sha256}
 candidate=${KORVID_MCP_CANDIDATE:-docs/assets/scenes/.mcp-follow-demo.candidate.mp4}
 final=${KORVID_MCP_FINAL:-docs/assets/scenes/mcp-follow-demo.mp4}
 ok_marker=${KORVID_MCP_CLIENT_OK:-.korvid-mcp-demo-client-ok}
@@ -76,28 +97,55 @@ fail() {
 
 [ -f "$tape" ] || fail "no tape to record"
 
-# Read the tape before handing it to VHS. VHS honours every `Output` it is
-# given, so a second one — or an edit of the first back to the published
-# path — would put the clip back under VHS's pen, where a failed take
-# overwrites it before anything here can object.
-#
-# Two checks stand here, and the first one parses nothing. VHS's grammar is
-# whitespace-separated tokens, not lines: `Hide` takes no argument, so
-# `Hide Output <clip>` is two directives VHS obeys on one line, and so are
-# `Sleep 1s Output <clip>` and `Enter Output <clip>`. Any line-shaped reader
-# looks at that line's first field, sees `Hide`, and waves it through. Rather
-# than grow a second VHS parser here to chase that — the losing half of the
-# race, since the tape's real reader is VHS — the wrapper refuses the
-# published clip's own basename anywhere in the tape's bytes. Whatever the
-# grammar, VHS cannot write that file without naming it, and the name is
-# derived from the very path this script promotes to, so it can never drift
-# from it. Every spelling is covered at once: absolute, repository-relative,
-# `./` and through `../`.
+# Hash the tape before handing it to VHS. Linux ships coreutils' sha256sum;
+# macOS ships shasum, a perl script, instead. Both print the digest as their
+# first field, so either answers the only question asked here. A host with
+# neither cannot check anything, and "unable to check" must never read as
+# "checked": that case is a refusal like any other, and so is a tape whose
+# bytes cannot be read at all.
+tape_sha256() {
+  local target=$1
+  local line
+  if command -v sha256sum >/dev/null 2>&1; then
+    line=$(sha256sum -- "$target") || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    line=$(shasum -a 256 -- "$target") || return 1
+  else
+    return 2
+  fi
+  printf '%s' "${line%% *}"
+}
+
+digest_status=0
+actual_digest=$(tape_sha256 "$tape") || digest_status=$?
+case "$digest_status" in
+0) ;;
+2) fail "neither sha256sum nor shasum is available to check the tape's bytes" ;;
+*) fail "the tape's bytes could not be hashed" ;;
+esac
+
+# The comparison, and with it the reason VHS is trusted with this tape at all.
+# Nothing here reads a directive: the reviewed bytes were approved as a whole,
+# so an edit is refused whatever it spells and wherever it sits — a space, a
+# tab, a quote, a comment, a repointed path, a second directive on a line
+# already carrying one. What that edit would have done to VHS is exactly the
+# question this wrapper no longer has to answer.
+[ "$actual_digest" = "$expected_digest" ] ||
+  fail "the tape is not the reviewed recording script; review its bytes, then move the pin"
+
+# Defence in depth behind the digest, for the one mistake a digest cannot
+# catch: a pin moved onto bytes nobody read carefully. VHS honours every
+# `Output` it is given, so a tape naming the published clip would put that
+# clip back under VHS's pen, where a failed take overwrites it before anything
+# here can object. The needle is derived from the very path this script
+# promotes to, so it can never drift from it, and it is looked for literally,
+# in the tape's bytes: every spelling falls at once — absolute,
+# repository-relative, `./` and through `../`.
 #
 # This is deliberately stricter than VHS. The canonical name inside a comment
-# is a tape VHS would render and this wrapper rejects; that false positive is
-# the price of a guard no lexer change can outflank, and it costs a tape
-# author one word. The shipped tape passes because the candidate is
+# is a tape VHS would render and this wrapper rejects; that false positive
+# costs a tape author one word and buys a rule with nothing to reason about.
+# The shipped tape passes because the candidate is
 # `.mcp-follow-demo.candidate.mp4`, which does not contain the published
 # basename. Any failure to scan is a refusal too — an unreadable tape is a
 # tape nobody reviewed.
@@ -111,58 +159,20 @@ case "$scan" in
 *) fail "the tape could not be read for the published clip's name" ;;
 esac
 
-# The second check is the tape's normal shape, read the way VHS reads it.
-# VHS has no line in its grammar: its lexer emits whitespace-separated tokens
-# and its parser gives each directive the arguments that directive takes, so
-# `Hide`, which takes none, ends where the next token begins. `Hide Output
-# <clip>`, `Sleep 1s Output <clip>` and `Enter Output <clip>` are each two
-# directives VHS obeys, and a check that judged a line by its first field
-# would see `Hide`, `Sleep` or `Enter` and wave them through. The byte guard
-# above catches only the ones aimed at this clip; a second `Output` aimed at
-# `agent-demo.mp4` carries none of the names it looks for.
-#
-# So every whitespace-separated field of every non-comment line is visited
-# and every field that is exactly `Output` is counted. There must be one, and
-# it must be a directive of its own: the first field of its line, carrying
-# exactly one argument, and that argument must be the candidate. Requiring it
-# to stand alone is the point — the wrapper cannot know what else a shared
-# line does without becoming VHS's parser, so it declines to reason about it.
-# One argument is part of the same rule: the candidate is a repository-relative
-# path with no whitespace in it, so a trailing second field is not a longer
-# path, it is a directive nobody reviewed.
-#
-# awk splits on runs of blanks and ignores leading ones, which is exactly VHS's
-# own normalisation: `  Output <clip>`, a tab-indented `Output` and
-# `Output<TAB><clip>` are all directives it obeys, and all of them are read
-# here. Two edges of this scan are deliberate, and neither is a bug. A
-# full-line comment is skipped, because VHS ignores it and the shipped tape
-# says the word `Output` in its own prose. An `Output` inside a `Type` string
-# or after a trailing `#` is *not* skipped: VHS would type or ignore it, this
-# wrapper refuses it, and a tape author spends one word rewording.
-verdict=$(
-  awk -v want="$candidate" '
-    substr($1, 1, 1) == "#" { next }
-    {
-      for (i = 1; i <= NF; i++) {
-        if ($i != "Output") continue
-        seen += 1
-        if (i != 1 || NF != 2) shape = 1
-        else if ($2 != want) elsewhere = 1
-      }
-    }
-    END {
-      if (seen != 1) print "count"
-      else if (shape) print "shape"
-      else if (elsewhere) print "elsewhere"
-      else print "ok"
-    }
-  ' <"$tape"
-)
-case "$verdict" in
-ok) ;;
-count) fail "the tape must declare exactly one Output" ;;
-shape) fail "the tape's Output must be a directive of its own naming exactly one path" ;;
-*) fail "the tape must render to the candidate, never to another asset" ;;
+# The mirror image of that guard, and the one thing the digest genuinely does
+# not settle: which file this run then grades. `KORVID_MCP_CANDIDATE` is set
+# independently of the tape, so a pinned tape and a mismatched override would
+# leave the wrapper promoting a file this recording never wrote. The
+# candidate's own name has to appear in the tape's bytes. Like the guard
+# above, this looks for a literal string and parses nothing.
+candidate_name=$(basename -- "$candidate")
+[ -n "$candidate_name" ] || fail "the candidate has no name to look for"
+scan=0
+grep -qF -- "$candidate_name" "$tape" || scan=$?
+case "$scan" in
+0) ;;
+1) fail "the tape does not name the candidate this run would promote" ;;
+*) fail "the tape could not be read for the candidate's name" ;;
 esac
 
 # A stale marker from an interrupted run would certify this one.

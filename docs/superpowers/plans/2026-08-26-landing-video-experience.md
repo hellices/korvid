@@ -922,10 +922,12 @@ Do not fall back to the checked-in third-party-client GIF.
 - [ ] **Step 6: Record through the promotion wrapper and inspect the media**
 
 Create `docs/demo/record-mcp-follow.sh` (executable, `set -euo pipefail`): it
-runs VHS on the tape, checks that the tape declares exactly one standalone
-`Output` — counted across every whitespace-separated field of every
-non-comment line, since VHS reads tokens rather than lines — and that it names
-the candidate, and promotes the candidate onto
+pins the reviewed tape by its raw SHA-256
+(`771a88d89e0e8fdb242d5e264b556ca868d67ac26ef0c42e1776d85d2f2c2596`, computed
+with `sha256sum` or `shasum -a 256`) and refuses any tape that does not hash to
+it, requires the published clip's basename to be absent from the tape's bytes
+and the candidate's basename to be present, runs VHS, and promotes the
+candidate onto
 `docs/assets/scenes/mcp-follow-demo.mp4` with a single `mv` only when VHS
 returned 0, `.korvid-mcp-demo-client-failed` is absent,
 `.korvid-mcp-demo-client-ok` is present and the candidate exists. Every other
@@ -933,7 +935,8 @@ path prints one line on stderr, removes the candidate and all four handshake
 files, kills the `korvid-mcp-demo` tmux session by name from an `EXIT` trap,
 exits non-zero and leaves any previously approved clip byte-identical. Its
 paths default to those repository-relative values; the
-`KORVID_MCP_VHS_BIN`/`KORVID_MCP_TAPE`/`KORVID_MCP_CANDIDATE`/
+`KORVID_MCP_VHS_BIN`/`KORVID_MCP_TAPE`/`KORVID_MCP_TAPE_SHA256`/
+`KORVID_MCP_CANDIDATE`/
 `KORVID_MCP_FINAL`/`KORVID_MCP_CLIENT_OK`/`KORVID_MCP_CLIENT_FAILED`/
 `KORVID_MCP_READY`/`KORVID_MCP_GO` overrides exist so the contracts can drive
 the boundary against a fake VHS in a temporary directory. Because the single
@@ -1236,9 +1239,9 @@ The boundary is now external and outside VHS's reach:
   both status markers for the wrapper. The readiness abort still exits, since
   that happens before anything is captured, but it is no longer the authority.
 - `docs/demo/record-mcp-follow.sh` (new, executable, `set -euo pipefail`) is
-  the recipe. It rejects a tape that does not declare exactly one `Output`
-  equal to the candidate — a second `Output` would put the clip back under
-  VHS's pen — clears stale scratch, runs VHS, and promotes the candidate onto
+  the recipe. It refuses a tape that would put the published clip back under
+  VHS's pen — see finding 9 for the check that ships — clears stale scratch,
+  runs VHS, and promotes the candidate onto
   the published clip with a single `mv` only when VHS returned 0, the failure
   marker is absent, the success marker is present and the candidate exists.
   Every other path prints one line on stderr, removes the candidate and all
@@ -1264,6 +1267,9 @@ script through **real bash** with a fake VHS executable:
   first run leaves no published file at all.
 - `test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip` — the
   tape is read before VHS is invoked, so a hostile second `Output` never runs.
+  (Superseded by the byte pin in finding 9; those cases now live in
+  `test_mcp_recorder_refuses_every_edit_of_the_reviewed_tape` and
+  `test_mcp_recorder_refuses_the_canonical_name_even_under_a_matching_pin`.)
 - `test_mcp_recorder_owns_the_canonical_path_and_the_tape_never_writes_it`,
   `test_mcp_recorder_is_a_strict_fail_closed_shell_script`,
   `test_mcp_recorder_defaults_are_repository_relative_and_quoted` — one
@@ -1300,28 +1306,14 @@ second, indented `Output docs/assets/scenes/mcp-follow-demo.mp4` below it put
 the published clip straight back under VHS's pen: exactly the bypass the
 preflight exists to stop, reachable by pressing space.
 
-The tape is now parsed the way VHS splits it. `awk` ignores leading blanks and
-splits on runs of them, so `$1 == "Output"` finds every directive whatever its
-indentation or separator; the wrapper requires exactly one such directive,
-exactly one argument on it (the candidate is a repository-relative path with
-no whitespace, so a second field is a directive nobody reviewed, not a longer
-path), and that argument to equal the candidate. Each outcome keeps its own
-reason on stderr. The real tape still passes, and the check is exactly as
-permissive as VHS about the whitespace of a directive it accepts: a tape VHS
-renders and whose `Output` names the candidate is a tape the wrapper runs.
-(Finding 6 adds a second, deliberately stricter check beside it.)
-
-Thirteen bypasses now run the shipped script under real bash against a fake
-VHS that would overwrite the published clip the moment it were invoked —
-a second `Output` plain, space-indented, tab-indented, tab-separated and
-both at once; the candidate declared twice; a path followed by a second
-field or a stray word; an `Output` with no path; the published clip alone,
-indented and tab-separated; and no `Output` at all. Each asserts the same
-three things: non-zero exit, an invocation log that was never created, and
-the pre-existing approved clip byte-identical. Six accepted whitespace forms
-of a single candidate `Output` assert the other half — indented with spaces
-or a tab, separated by a tab or several spaces, with trailing whitespace —
-each promoted to the published clip.
+The tape was then read the way VHS splits a directive — `awk` ignoring leading
+blanks and splitting on runs of them — with exactly one such directive
+required, one argument on it, and that argument the candidate. That check no
+longer ships: finding 9 replaced it with a digest over the tape's whole bytes,
+which refuses this bypass and every other spelling of it without re-reading
+VHS's grammar at all. What survives from this round is the lesson, not the
+mechanism: a preflight that recognises *one* spelling of a directive is a
+preflight that can be walked past by pressing space.
 
 ### 5. `docs/demo/mcp_client.py` still credited the tape with the verdict
 
@@ -1379,15 +1371,16 @@ never drift from the asset — and refuses the tape if `grep -qF` finds that
 basename anywhere in its bytes, with a scan that neither found nor cleanly
 absent is a refusal too. Whatever grammar VHS grows, it cannot write that file
 without naming it, so every spelling falls at once: absolute,
-repository-relative, `./` and through `../`. The `Output` shape check stays
-beside it for the tape's normal shape and its specific reasons.
+repository-relative, `./` and through `../`. That guard still ships; the shape
+check beside it did not survive finding 9, which replaced the parser with a
+digest over the tape's whole bytes.
 
 This is deliberately stricter than VHS, and the script says so where it lives:
 the canonical name inside a comment is a tape VHS renders and this wrapper
-rejects. That false positive is the price of a guard no lexer change can
-outflank, and it costs a tape author one word. The shipped tape passes
-untouched — the candidate is `.mcp-follow-demo.candidate.mp4`, which does not
-contain the published basename anywhere in it.
+rejects. That false positive is the price of a guard nothing about VHS's
+grammar can outflank, and it costs a tape author one word. The shipped tape
+passes untouched — the candidate is `.mcp-follow-demo.candidate.mp4`, which
+does not contain the published basename anywhere in it.
 
 Nine more bypasses drive the shipped script under real bash against a fake VHS
 that would overwrite the published clip the moment it were invoked: an
@@ -1395,11 +1388,10 @@ that would overwrite the published clip the moment it were invoked: an
 `Enter`; the same trick spelling the clip repository-relative, through `./`
 and through `../`; and the canonical name in a comment, which documents the
 strictness rather than hiding it. Each asserts a non-zero exit, an invocation
-log that was never created, and the approved clip byte-identical. The six
-accepted whitespace forms still promote, a source contract pins the needle to
-`basename -- "$final"` and requires the wrapper's comments to state the trade,
-and the tape contract now forbids the canonical basename in the tape under any
-spelling.
+log that was never created, and the approved clip byte-identical. A source
+contract pins the needle to `basename -- "$final"` and requires the wrapper's
+comments to state the trade, and the tape contract now forbids the canonical
+basename in the tape under any spelling.
 
 Verified with `tests/test_docs_visual_assets.py` and
 `tests/test_docs_readability.py`, `ruff check`, `ruff format --check`, and
@@ -1423,39 +1415,24 @@ begins — and rewrites a reviewed clip this recording does not even own before
 the wrapper can grade anything. `Show`, `Enter` and a completed `Sleep 1s`
 close the same way, and `relationship-demo.mp4` sits in the same directory.
 
-The shape check now works in VHS's own unit. Every whitespace-separated field
-of every line is visited, every field that is exactly the token `Output` is
-counted, and exactly one may survive: the first field of its line, carrying
-exactly one argument, and that argument the candidate. Requiring the survivor
-to stand alone is the substance of it — the wrapper cannot know what else a
-shared line does without becoming VHS's parser, so it refuses to reason about
-one at all. `Hide Output <candidate>` is a tape VHS renders correctly and this
-wrapper still declines; that costs a tape author a newline.
-
-Two edges of the scan are deliberate and both are written down where they
-live. A full-line comment is skipped, because VHS ignores it and because the
-shipped tape says "VHS has already rendered its Output" in its own prose — a
-scan without that exemption refuses the reviewed tape (verified: two `Output`
-tokens, line 23 field 1 and line 129 field 11). An `Output` inside a `Type`
-string or after a trailing `#` is *not* skipped: VHS would type it as text or
-ignore it, this wrapper refuses it, and rewording costs one word. Both edges
-are now pinned by a source contract that also forbids `$1 == "Output"` from
-coming back.
+The shape check was widened again, to visit every whitespace-separated field
+of every line rather than only the first. That third reader is what finding 9
+finally retired: two rounds in a row had shown that each new spelling of a
+directive needs a new rule here, and that the wrapper was competing with VHS's
+own parser to describe VHS's own grammar. The pin over the tape's bytes refuses
+this bypass — and the ones nobody has thought of — without any of it.
 
 Seven more bypasses drive the shipped script under real bash against a fake
 VHS that overwrites *every* approved clip in the scene directory the moment it
 is invoked — a second `Output` behind `Hide` naming `agent-demo.mp4`, behind
 `Show` naming `relationship-demo.mp4`, behind `Sleep 1s` naming the agent clip
 relatively, behind `Enter` naming an unreviewed path, sharing the candidate's
-own line, behind `Hide` with no path at all, and the candidate itself declared
-behind `Hide` and again behind `Show`. Each asserts a non-zero exit, an
-invocation log that was never created, and all three reviewed clips
-byte-identical — the MCP capture and both neighbours, since the old check's
-blind spot was precisely the assets whose names the byte guard does not carry.
-A further contract runs the **shipped tape itself** — every comment, every
-`Type`, every `Sleep`, with only its `Output` argument repointed at a
-temporary candidate — through the real wrapper and requires it to record, so
-the strictness cannot quietly grow past the tape it exists to protect.
+own line, and the rest. Each asserts a non-zero exit, an invocation log that
+was never created, and all three reviewed clips byte-identical — the MCP
+capture and both neighbours, since the old check's blind spot was precisely
+the assets whose names the byte guard does not carry. Those cases survive
+finding 9 as byte-pin cases: the digest refuses them, and the assertions about
+the reviewed clips are unchanged.
 
 ### 8. `mv` is only a rename while both paths share a directory
 
@@ -1494,6 +1471,91 @@ all state the same invariant: the overrides exist, and every one of them has
 to keep the candidate in the published clip's own directory.
 
 Verified with `tests/test_docs_visual_assets.py` (154 tests),
+`tests/test_docs_readability.py`, `tests/test_mcp_follow_demo_asset.py`,
+`ruff check`, `ruff format --check`, `mkdocs build --strict`, and `bash -n` on
+the wrapper. `uv.lock` is untouched and no media was regenerated:
+`docs/assets/scenes/mcp-follow-demo.mp4`, `agent-demo.mp4` and
+`relationship-demo.mp4` are byte-identical.
+
+### 9. The tape preflight was a parser competing with VHS, so it was replaced by a byte pin
+
+*Review of `f77c966`, `docs/demo/record-mcp-follow.sh`.*
+
+Findings 4, 6 and 7 are one finding told three times. Each round the wrapper
+was taught a little more of VHS's grammar — column-zero `Output `, then
+whitespace normalisation, then every field of every line — and each round a
+spelling nobody had thought of walked past the version before it. The shape of
+that bug never changed: the tape's real reader is VHS, so a second reader here
+has to stay equivalent to VHS's lexer forever, across releases nobody in this
+repository controls, to be worth anything. It also had to grow exemptions to
+keep passing the reviewed tape (a full-line comment, because the tape says the
+word `Output` in its own prose) and to stay strict elsewhere (an `Output`
+inside a `Type` string, refused although VHS would type it as text) — two
+rules whose only justification was the parser's own limits.
+
+The wrapper now pins the reviewed tape by its raw SHA-256 and runs that file
+and no other:
+
+- `reviewed_tape_sha256` carries
+  `771a88d89e0e8fdb242d5e264b556ca868d67ac26ef0c42e1776d85d2f2c2596`, the
+  digest of the shipped `docs/demo/mcp-follow.tape`. `KORVID_MCP_TAPE_SHA256`
+  overrides it for the contracts alone and defaults to it, so a checkout with
+  no environment records the reviewed tape.
+- The digest is computed portably before VHS starts: `sha256sum` where
+  coreutils is present, `shasum -a 256` where macOS ships perl instead, and a
+  refusal where neither exists — "unable to check" is not "checked". A tape
+  whose bytes cannot be read is a refusal too.
+- The comparison is a whole-string equality. A mismatch prints one reason on
+  stderr and exits non-zero with every reviewed asset untouched, exactly like
+  every other rejection here.
+
+Because the pin covers every byte, the wrapper no longer reasons about
+directives at all, and no longer claims to. The `awk` scan and the
+lexer-equivalence prose around it are gone from the script, the provenance
+page and this plan. Two literal checks stand beside the pin, and neither
+parses: the published clip's basename must be **absent** from the tape's bytes
+(finding 6's guard, kept as defence in depth against the one mistake a digest
+cannot catch — a pin moved onto bytes nobody read carefully), and the
+candidate's basename must be **present**, because `KORVID_MCP_CANDIDATE` is
+set independently of the tape and the wrapper may not grade a file this run
+never wrote. The same-directory invariant from finding 8 and wrapper-only
+promotion are unchanged.
+
+The rule this creates is stated wherever the recipe is: **editing the tape is
+review first, pin second.** Recomputing the digest to make a refusal go away
+is the one move the boundary exists to prevent, so the script's comments, the
+provenance page and this plan all say so and all publish the same value.
+
+Contracts in `tests/test_docs_visual_assets.py`, driving the shipped script
+through **real bash** with a fake VHS:
+
+- Eighteen edits of a reviewed tape, each pinned to the *unedited* digest — an
+  extra space, a tab for a space, indentation, trailing whitespace, a quoted
+  path, a trailing semicolon, an appended comment, a trailing comment, the
+  final newline removed, one argument changed, the path repointed at
+  `agent-demo.mp4`, a second `Output` on its own line and behind `Hide`,
+  `Show`, `Sleep 1s` and `Enter`, one sharing the candidate's own line, and one
+  inside a `Type` string. Each asserts a non-zero exit, an invocation log that
+  was never created, and all three reviewed clips byte-identical.
+- A reviewed tape under a wrong pin; a tape whose bytes cannot be read; and a
+  run whose `PATH` holds every other command the wrapper needs and neither
+  hashing tool — all refused before VHS, with the approved clip byte-identical.
+- Six tapes that name the published clip under a pin that *matches them*, so
+  the digest passes and only the byte guard is left, plus one pinned tape that
+  renders somewhere the wrapper does not look.
+- The **shipped tape itself**, byte for byte, with `KORVID_MCP_TAPE_SHA256`
+  unset: the real digest computation against the real constant, the real byte
+  guard and the real same-directory check, promoting through a stand-in VHS so
+  no media is recorded.
+- Source contracts: the pin equals the shipped tape's SHA-256 and is spelled as
+  64 lowercase hex digits on its own line; both hashing tools are probed with
+  `command -v`; the comparison is two whole quoted strings ahead of the VHS
+  invocation; and no `awk`, `NF` or `sed` remains, with `lexer`,
+  `whitespace-separated` and `token` gone from the comments.
+- The provenance page and this plan publish the same digest, name SHA-256, and
+  state the review-then-pin order.
+
+Verified with `tests/test_docs_visual_assets.py`,
 `tests/test_docs_readability.py`, `tests/test_mcp_follow_demo_asset.py`,
 `ruff check`, `ruff format --check`, `mkdocs build --strict`, and `bash -n` on
 the wrapper. `uv.lock` is untouched and no media was regenerated:

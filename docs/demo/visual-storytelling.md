@@ -243,23 +243,28 @@ other recording side effect — and never to the published clip. The verdict
 belongs to `docs/demo/record-mcp-follow.sh`, the one command that regenerates
 this capture.
 
-Before it starts VHS, that wrapper reads the tape it is about to run. VHS's
-grammar has no line in it: its lexer emits whitespace-separated tokens and
-gives each directive the arguments that directive takes, so `Hide Output
-<clip>` is two directives it obeys on one line. The wrapper therefore counts
-every field that is exactly `Output`, on every line that is not a whole
-comment, and requires exactly one — standing alone as the first field of its
-line, carrying exactly one argument, and that argument being the candidate. A
-second `Output` hidden behind `Hide`, `Show`, `Sleep` or `Enter` is refused
-even when it names a clip this capture does not own, such as
-`agent-demo.mp4`. Beside that, the wrapper requires the published clip's own
-basename to be absent from the tape's bytes — anywhere, under any spelling of
-the path, comments included. A tape that names it is never handed to VHS at
-all. VHS cannot write a file it is not given the name of, so this holds
-whatever its grammar does. Both rules are stricter than VHS on purpose: the
-byte rule is why `docs/demo/mcp-follow.tape` never names the published clip,
-not in a directive and not in a comment, and the token rule is why an
-`Output` may not share a line — or sit inside a `Type` string.
+Before it starts VHS, that wrapper settles which tape it is about to run, by
+its bytes. `docs/demo/record-mcp-follow.sh` carries the reviewed tape's raw
+SHA-256 — `771a88d89e0e8fdb242d5e264b556ca868d67ac26ef0c42e1776d85d2f2c2596`,
+computed with `sha256sum` or, where that is absent, `shasum -a 256` — and
+refuses any tape that does not hash to it. The pin covers the whole file, so
+nothing here has to know what a VHS directive means: an edit is an unreviewed
+tape whatever it spells and wherever it sits, and no unreviewed tape reaches
+VHS. **Editing the tape is therefore two steps, in this order:
+review the new bytes, then recompute the pin** — here, in
+`docs/demo/record-mcp-follow.sh`, and in the 2026-08-26 plan, which publish
+the same digest. Recomputing it to make a refusal go away is the one move this
+boundary exists to prevent.
+
+Two literal checks stand beside the pin, and neither parses a directive. The
+published clip's own basename must be **absent** from the tape's bytes —
+anywhere, under any spelling of the path, comments included — so a pin moved
+onto bytes nobody read carefully still cannot hand VHS the reviewed clip's
+name; VHS cannot write a file it is not given the name of. And the candidate's
+basename must be **present**, because `KORVID_MCP_CANDIDATE` is set
+independently of the tape and the wrapper may not grade a file this run never
+wrote. The byte rule is why `docs/demo/mcp-follow.tape` never names the
+published clip, not in a directive and not in a comment.
 
 That wrapper runs VHS and then grades the run from outside it. It promotes
 the candidate onto `docs/assets/scenes/mcp-follow-demo.mp4` with one `mv` —
