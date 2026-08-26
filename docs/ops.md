@@ -141,10 +141,14 @@ written — a full disk, an unwritable state directory — the action is
 **blocked before the mutation happens**. No mutation reaches the cluster
 without a matching audit record.
 
-That scope is exactly writes. Ordinary reads — a describe, a log tail, the
-watch stream behind every table — write no audit entry, are not gated on one,
-and are unaffected by a failed append: `audit.jsonl` records what korvid
-changed, not everything it looked at.
+That mutation guarantee is not the whole audit surface. Ordinary cluster
+reads — a describe, a log tail, the watch stream behind every table — write
+no audit entry and are not gated on one. Sensitive non-mutating disclosures
+are different: Secret reveal and copy are fail-closed audited, so an append
+failure keeps the value hidden. Other operational activity, including
+port-forward lifecycle events and file downloads, can also add records under
+its own policy. `audit.jsonl` records safety-relevant operations, not only
+mutations and not every read.
 
 ## Representative operations
 

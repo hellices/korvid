@@ -834,16 +834,8 @@ def test_mcp_separates_document_redaction_from_credential_pattern_masking() -> N
     )
 
 
-def test_ops_fail_closed_audit_invariant_is_scoped_to_mutations() -> None:
-    """Round-4 review, finding 3: the audit record gates writes, not reads.
-
-    `core/audit.py` is appended from the write path only — a describe, a
-    log tail or a watch update writes no audit entry and is not blocked by
-    a full disk. "Nothing reaches the cluster without a matching audit
-    record" reads as a claim over every request. The invariant that must
-    survive is the one the code makes: no *mutation* reaches the cluster
-    without its record, and a failed append blocks before the mutation.
-    """
+def test_ops_audit_section_distinguishes_mutations_disclosures_and_reads() -> None:
+    """Audit gates mutations and sensitive disclosure, not ordinary reads."""
     section = _section("ops.md", "What happens when audit fails")
     lowered = " ".join(section.split()).lower()
 
@@ -858,6 +850,17 @@ def test_ops_fail_closed_audit_invariant_is_scoped_to_mutations() -> None:
     )
     assert re.search(r"read\w*.{0,120}(no|not|never).{0,40}audit", lowered), (
         "ordinary reads write no audit entry; say so rather than implying they do"
+    )
+    assert re.search(r"secret.{0,80}(reveal|copy).{0,80}fail-closed", lowered), (
+        "Secret reveal/copy is a non-mutating but fail-closed-audited disclosure"
+    )
+    assert re.search(r"append failure.{0,80}(hidden|not shown|not copied)", lowered), (
+        "a failed Secret disclosure audit must keep the value unavailable"
+    )
+    assert "port-forward" in lowered, "port-forward lifecycle events can be audited"
+    assert "file downloads" in lowered, "file downloads can be audited"
+    assert "not only mutations and not every read" in lowered, (
+        "the summary must avoid both over-broad and over-narrow audit claims"
     )
     assert "fail-closed" in lowered, "the fail-closed name must survive"
 
