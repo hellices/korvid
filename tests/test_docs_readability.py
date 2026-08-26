@@ -1061,9 +1061,11 @@ def test_tui_states_the_multi_pod_log_stream_cap() -> None:
     assert re.search(rf"`L`[^.]*first {_MAX_MULTI_STREAM_PODS}", flat), (
         "tui.md must state the cap `L` actually applies"
     )
-    assert re.search(r"notif", flat, re.I), (
-        "the notification that names the cap and the match count must be mentioned"
-    )
+    assert re.search(
+        rf"`L`[^.]*first {_MAX_MULTI_STREAM_PODS}[^.]*notif",
+        flat,
+        re.I,
+    ), "the notification that names the cap and the match count must be mentioned"
     # The facts that were already right must survive the correction.
     assert "`[pod/container]`" in flat
     assert "bounded ring buffer of 5000" in flat
