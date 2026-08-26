@@ -195,14 +195,17 @@ rather than a plausible guess.
 An **advisory** preview never blocks approval: when the SSAR check, the
 ownership banner, or the impact section fails, times out, or is
 unsupported, the dialog simply opens without it — still gated, still
-audited. The **Helm dry-run is the exception**, because its verdict is
-not advisory: when helm's own render fails, the real command would fail
-the same way, so korvid shows helm's error and stops before the
-confirmation dialog rather than letting you approve a doomed command
-(see [Helm and operators](helm-operators.md)). An *unsupported* preview
-is still not a verdict — old helm rejecting the preview-only
-`--hide-secret` flag opens the (gated, audited) dialog marked **preview
-unavailable**.
+audited. A failed Helm **rollback** or **uninstall** dry-run preview is
+advisory too: `_rollback_preview`/`_uninstall_preview` catch the failure
+and return no preview, so the dialog still opens without a preview —
+still gated, still audited. The **Helm install/upgrade render is the
+exception**, because its verdict is not advisory: when helm's own render
+fails for an install or upgrade, the real command would fail the same
+way, so korvid shows helm's error and stops before the confirmation
+dialog rather than letting you approve a doomed command (see [Helm and
+operators](helm-operators.md)). An *unsupported* preview is still not a
+verdict — old helm rejecting the preview-only `--hide-secret` flag opens
+the (gated, audited) dialog marked **preview unavailable**.
 
 ## Sessions that outlive the screen
 

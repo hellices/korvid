@@ -472,6 +472,50 @@ def test_ops_preview_fallthrough_excludes_a_real_helm_render_failure() -> None:
     assert "audited" in lowered, "the fall-through path must stay described as still audited"
 
 
+def test_ops_helm_render_exception_is_scoped_to_install_and_upgrade() -> None:
+    """Round 2 follow-up: `HelmController._change_preview` is the only Helm
+    preview whose render failure stops the flow before confirmation
+    (install/upgrade — issue #139). `_rollback_preview` and
+    `_uninstall_preview` both wrap their render in a bare `except Exception:
+    return None`, so a broken `helm diff rollback` or `helm uninstall
+    --dry-run` falls through to the (still gated, still audited) dialog
+    exactly like an unsupported preview — it is advisory, not a verdict. The
+    prior wording ("The Helm dry-run is the exception") swept every Helm
+    write into the blocking claim, telling operators a broken rollback or
+    uninstall preview would also stop them before approval, which the code
+    does not do.
+    """
+    section = _ops_section("Operation-specific evidence")
+    lowered = section.lower()
+
+    assert "the helm dry-run is the exception" not in lowered, (
+        "the blocking exception must be scoped to install/upgrade, not every helm dry-run"
+    )
+
+    blocking = re.search(r"([^.]*install[^.]*upgrade[^.]*\.)", lowered)
+    assert blocking, "the blocking sentence must name install and upgrade explicitly"
+    blocking_sentence = blocking.group(1)
+    assert re.search(
+        r"(stops|blocks|stopping|halts).{0,60}before the confirmation", blocking_sentence
+    ), (
+        "the install/upgrade sentence must say the render failure stops the flow "
+        "before the confirmation dialog"
+    )
+    assert "rollback" not in blocking_sentence, (
+        "rollback must not be swept into the install/upgrade blocking claim"
+    )
+    assert "uninstall" not in blocking_sentence, (
+        "uninstall must not be swept into the install/upgrade blocking claim"
+    )
+
+    assert re.search(r"rollback.{0,120}(falls? through|advisory|without a preview)", lowered), (
+        "a failed rollback preview must be described as falling through/advisory, not blocking"
+    )
+    assert re.search(r"uninstall.{0,120}(falls? through|advisory|without a preview)", lowered), (
+        "a failed uninstall preview must be described as falling through/advisory, not blocking"
+    )
+
+
 def test_ops_debug_shell_lifecycles_are_not_conflated() -> None:
     """Video round 2, finding 2 (comment 3859012123).
 
