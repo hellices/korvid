@@ -177,16 +177,19 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
 
 ## Watch MCP follow
 
-**One prompt. Korvid follows.** GitHub Copilot CLI uses real read-only MCP calls
-while the TUI moves from the unhealthy pod list to its logs, then finishes in
-the Helm release browser.
+**One client. Korvid follows.** A clean local MCP SDK client makes four real
+read-only calls — `list_resources`, `diagnose_pod`, `get_logs`, and
+`helm_list_releases` — over Streamable HTTP, and korvid's follow bridge
+mirrors each answer: the unhealthy pod list, the failing pod's describe pane,
+its logs, and the Helm release that owns it.
 
 <details open>
-<summary>Show or hide the up-to-15-second MCP follow animation</summary>
+<summary>Show or hide the 14-second MCP follow animation</summary>
 
-![korvid MCP follow — one prompt drives pods, logs, and Helm](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/mcp-follow-demo.gif)
+![korvid MCP follow — one client drives pods, logs, and Helm](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/mcp-follow-demo.gif)
 
-*Recorded against a disposable local cluster.*
+*Recorded from this repository against its synthetic in-memory cluster, so
+the frames carry no external client session metadata.*
 
 </details>
 

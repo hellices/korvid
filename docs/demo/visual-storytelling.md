@@ -245,16 +245,31 @@ The shipped clip answers `ffprobe -show_entries
 stream=width,height,sample_aspect_ratio,display_aspect_ratio` with
 `1280`, `710`, `1:1` and `128:71`, and runs between 12 and 15 seconds.
 
-`docs/assets/mcp-follow-demo.gif` is an older, unrelated capture whose
-right-hand pane is a third-party MCP client, carrying that session's own
-directory, branch, token spend and model name. No official-site page embeds
-or uses the unredacted GIF as visitor-facing evidence. Because the GIF remains
-a checked-in source asset under `docs/assets`, MkDocs still serves it at
-`assets/mcp-follow-demo.gif`. Sanitizing or re-recording that pre-existing
-README/source asset is a separate follow-up. The landing page uses only the
-locally recorded MP4/poster above, which is derived from no part of it.
+`docs/assets/mcp-follow-demo.gif` is the README's animated copy of that same
+capture, derived from the MP4 above and from nothing else:
+
+```sh
+ffmpeg -y -i docs/assets/scenes/mcp-follow-demo.mp4 \
+  -lavfi "fps=12.5,split[a][b];[a]palettegen=max_colors=256:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" \
+  -loop 0 docs/assets/mcp-follow-demo.gif
+```
+
+Nothing in that chain rescales, crops, or composites: the GIF stores the
+clip's own `1280`×`710` frames, quantised to a 256-colour palette and
+resampled to 12.5 fps, and runs the full 13.76 s story at the same reading
+pace. The README GIF therefore contains no external client session metadata.
+It inherits this section's provenance exactly — this repository's own MCP SDK
+client, the synthetic fixture, no assistant name, no model, no token count,
+no working directory, no branch and no hostname. The GIF that shipped here
+before was a different recording whose right-hand pane was someone else's
+client session; it was replaced, not sanitized. No official-site page embeds
+it. Because the GIF is a checked-in asset under `docs/assets`, MkDocs still
+serves it at `assets/mcp-follow-demo.gif`. The landing page uses only the
+locally recorded MP4/poster above.
 
 `tests/test_docs_visual_assets.py` decodes the poster and fails if either pane
 loses its legible evidence. It also reads the MP4's own `tkhd`/`avc1`/`pasp`
 boxes and fails if the stored, displayed and declared geometry ever disagree
-again.
+again. `tests/test_mcp_follow_demo_asset.py` decodes the GIF's own frame
+delays and pins the reviewed bytes by SHA-256, so regenerating it is a
+deliberate act that re-opens the frame review rather than a silent swap.

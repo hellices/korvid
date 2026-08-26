@@ -1050,13 +1050,13 @@ def test_storytelling_motion_assets_are_local_mp4_files_with_a_size_budget() -> 
 def test_storytelling_motion_assets_store_square_pixels() -> None:
     """A published clip must display at exactly the box it stores.
 
-    `docs/assets/mcp-follow-demo.gif` is 1280x711 with a 63:64 sample aspect
-    ratio. Making the height even for `yuv420p` scales it to 710 and, unless
-    the chain says otherwise, `scale` preserves the *display* aspect by
-    rewriting the SAR to 2485:2528 — an encode that stores 1280x710 but that
-    every browser lays out at 1258x710. The landing page reserves a box from
-    the stored geometry, so the clip would then pillarbox inside its own
-    reservation. Forcing square pixels is what makes the reservation true.
+    The two-pane MCP capture is recorded at 1280x711. Making the height even
+    for `yuv420p` scales it to 710 and, unless the chain says otherwise,
+    `scale` preserves the *display* aspect by rewriting the SAR to 2485:2528
+    — an encode that stores 1280x710 but that every browser lays out at
+    1258x710. The landing page reserves a box from the stored geometry, so
+    the clip would then pillarbox inside its own reservation. Forcing square
+    pixels is what makes the reservation true.
     """
     for name, expected in MP4_GEOMETRY.items():
         stored, displayed, pixel_aspect = _mp4_geometry(SCENES / name)
@@ -1089,16 +1089,17 @@ def test_storytelling_capture_instructions_name_every_generated_asset() -> None:
     assert "docs/assets/mcp-follow-demo.gif" in instructions
 
 
-def test_mcp_capture_instructions_distinguish_public_landing_media_from_the_served_source_gif() -> (
-    None
-):
-    """The raw reviewed GIF is a source asset, not the landing page's evidence.
+def test_mcp_capture_instructions_derive_the_readme_gif_from_the_approved_clip() -> None:
+    """Round-8 review: the README GIF must be this repository's own capture.
 
-    MkDocs still publishes `docs/assets/**` as static assets, so keeping the
-    checked-in GIF for README/source provenance is not the same claim as a
-    visitor-facing page embedding it. The instructions must say that
-    distinction plainly, and the landing sources must keep using only the
-    locally recorded MP4/poster pair.
+    The GIF that used to ship here was an unrelated recording whose
+    right-hand pane was a third-party MCP client, carrying that session's
+    working directory, branch, token spend and model name — and README.md
+    embeds it by raw URL, so it was public evidence, not a dormant source
+    asset. It is replaced by a palette-quantised copy of
+    `docs/assets/scenes/mcp-follow-demo.mp4`, and the derivation has to be
+    written down exactly, the way every other generated asset here is, so a
+    later reader can reproduce it instead of trusting the checked-in bytes.
     """
     mcp = INSTRUCTIONS.read_text(encoding="utf-8").split("## MCP follow", 1)[1]
     normalized_mcp = " ".join(mcp.split())
@@ -1123,25 +1124,70 @@ def test_mcp_capture_instructions_distinguish_public_landing_media_from_the_serv
     )
     assert _without_markdown_code(probe).count("mcp-follow-demo.gif") == 1
 
+    for stale in (
+        "older, unrelated capture",
+        "third-party MCP client",
+        "separate follow-up",
+        "unredacted",
+    ):
+        assert stale not in normalized_mcp, (
+            f"the GIF is now derived from the approved clip; {stale!r} describes the "
+            "asset it replaced"
+        )
+
     assert (
-        "No official-site page embeds or uses the unredacted GIF as visitor-facing "
-        "evidence." in normalized_mcp
+        "`docs/assets/mcp-follow-demo.gif` is the README's animated copy of that same "
+        "capture, derived from the MP4 above and from nothing else:" in normalized_mcp
     )
+    for fragment in (
+        "ffmpeg -y -i docs/assets/scenes/mcp-follow-demo.mp4",
+        "palettegen=max_colors=256:stats_mode=diff",
+        "paletteuse=dither=none:diff_mode=rectangle",
+        "-loop 0 docs/assets/mcp-follow-demo.gif",
+    ):
+        assert fragment in mcp, f"the GIF derivation command must state {fragment!r}"
+    assert (
+        "The README GIF therefore contains no external client session metadata." in normalized_mcp
+    )
+    assert "No official-site page embeds it." in normalized_mcp
     assert "MkDocs still serves it at `assets/mcp-follow-demo.gif`." in normalized_mcp
-    assert (
-        "Sanitizing or re-recording that pre-existing README/source asset is a separate follow-up."
-    ) in normalized_mcp
-    assert (
-        "The landing page uses only the locally recorded MP4/poster above, which is "
-        "derived from no part of it." in normalized_mcp
-    )
+    assert "The landing page uses only the locally recorded MP4/poster above." in normalized_mcp
     assert not embeds, (
-        "no official-site page should embed the raw MCP GIF as visitor-facing evidence; "
+        "no official-site page should embed the MCP GIF as visitor-facing evidence; "
         f"found references in {embeds}"
     )
     assert "mcp-follow-demo.gif" not in landing
     assert 'src="assets/scenes/mcp-follow-demo.mp4"' in landing
     assert "assets/scenes/mcp-poster.png" in landing
+
+
+def test_readme_gif_inherits_the_clips_geometry_and_documented_frame_rate() -> None:
+    """The documented recipe and the checked-in GIF must agree.
+
+    Nothing in the derivation rescales, so the GIF stores exactly the box the
+    clip stores; and the `fps` the command names is the rate the README
+    animation actually plays at. If either drifts, the instructions describe
+    an asset that is no longer the one shipped.
+    """
+    gif = (DOCS / "assets" / "mcp-follow-demo.gif").read_bytes()
+    assert gif[:6] in {b"GIF87a", b"GIF89a"}
+    gif_size = (
+        int.from_bytes(gif[6:8], "little"),
+        int.from_bytes(gif[8:10], "little"),
+    )
+    clip_size = _mp4_geometry(SCENES / "mcp-follow-demo.mp4")[0]
+    assert gif_size == clip_size, (
+        f"the README GIF stores {gif_size} but its documented source stores "
+        f"{clip_size}; the derivation must not rescale the capture"
+    )
+
+    mcp = INSTRUCTIONS.read_text(encoding="utf-8").split("## MCP follow", 1)[1]
+    rate = re.search(r"-lavfi \"fps=([0-9.]+),split", mcp)
+    assert rate is not None, "the GIF derivation must name the frame rate it samples at"
+    assert 12.0 <= float(rate.group(1)) <= 15.0, (
+        f"the README animation samples at {rate.group(1)} fps; the reviewed range for "
+        "a readable follow story is 12-15 fps"
+    )
 
 
 def test_mcp_client_calls_the_follow_story_tools_in_order() -> None:

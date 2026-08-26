@@ -167,11 +167,16 @@ resize). A proposal never mutates anything by itself:
   invalidates pending proposals.
 
 Local callers are untrusted: read access alone does not grant proposal
-access. Each server run generates a high-entropy capability token, published
-only in the owner-readable (`0600`) endpoint registry file, that callers
-must echo as the `capability` argument on every proposal call. MCP
-`clientInfo` is caller-supplied metadata, never treated as authenticated
-identity.
+access. Each server run generates a high-entropy capability token that
+callers must echo as the `capability` argument on every proposal call, and
+publishes it only in the endpoint registry file. korvid creates that file
+with an atomic POSIX owner-only (`0600`) open, never a chmod after the
+fact. On Windows that mode argument does not map onto NTFS ACLs, so the
+token's confidentiality there rests on the enclosing directory's inherited
+permissions rather than on the mode korvid requested — the same platform
+limit [`docs/threat-model.md`](threat-model.md) records for private
+exports. MCP `clientInfo` is caller-supplied metadata, never treated as
+authenticated identity.
 
 ## Representative tools
 
