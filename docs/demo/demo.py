@@ -1206,8 +1206,10 @@ async def run_mcp_demo(
         app.on_mcp_ready = lambda: signal_mcp_ready(ready_file)
         await app.run_async()
     finally:
-        clear_mcp_ready(ready_file)
-        await controller.stop()
+        try:
+            clear_mcp_ready(ready_file)
+        finally:
+            await controller.stop()
 
 
 def build_demo_app(scene: str, controller: MCPControllerBase | None) -> DemoKorvidApp:

@@ -950,7 +950,7 @@ private socket (`tmux -S .korvid-mcp-demo.tmux.sock`, removed with it) from an
 someone else's session —
 exits non-zero and leaves any previously approved clip byte-identical. Its
 paths default to those repository-relative values; the
-`KORVID_MCP_VHS_BIN`/`KORVID_MCP_TAPE`/`KORVID_MCP_TAPE_SHA256`/
+`KORVID_MCP_VHS_BIN`/`KORVID_MCP_TAPE`/
 `KORVID_MCP_CANDIDATE`/
 `KORVID_MCP_FINAL`/`KORVID_MCP_CLIENT_OK`/`KORVID_MCP_CLIENT_FAILED`/
 `KORVID_MCP_READY`/`KORVID_MCP_GO`/`KORVID_MCP_TMUX_SOCKET` overrides exist so
@@ -959,7 +959,10 @@ the boundary against a fake VHS in a temporary directory. Because the single
 `mv` is only atomic inside one directory, the candidate and the published clip
 must resolve to the same physical parent: the wrapper checks that before it
 starts VHS, so every override — the contracts' included — has to preserve the
-invariant.
+invariant. `KORVID_MCP_TAPE_SHA256` is narrower: the wrapper accepts it only
+with `KORVID_MCP_TEST_MODE=1`, and that mode refuses a final path whose physical
+parent is inside the copied wrapper's own repository root. Contract digests can
+therefore exercise the boundary but cannot publish repository files.
 
 Run:
 
@@ -1514,9 +1517,10 @@ and no other:
 
 - `reviewed_tape_sha256` carries
   `60334eb07ab42901a4885584174b9f1bfe4089f1ebdb685f64c8e136cbe2a743`, the
-  digest of the shipped `docs/demo/mcp-follow.tape`. `KORVID_MCP_TAPE_SHA256`
-  overrides it for the contracts alone and defaults to it, so a checkout with
-  no environment records the reviewed tape.
+  digest of the shipped `docs/demo/mcp-follow.tape` and is always the production
+  expectation. `KORVID_MCP_TAPE_SHA256` is reachable only with
+  `KORVID_MCP_TEST_MODE=1`; a checkout with no environment records the reviewed
+  tape against the fixed value.
 - The digest is computed portably before VHS starts: `sha256sum` where
   coreutils is present, `shasum -a 256` where macOS ships perl instead, and a
   refusal where neither exists — "unable to check" is not "checked". A tape
@@ -1556,6 +1560,8 @@ through **real bash** with a fake VHS:
 - A reviewed tape under a wrong pin; a tape whose bytes cannot be read; and a
   run whose `PATH` holds every other command the wrapper needs and neither
   hashing tool — all refused before VHS, with the approved clip byte-identical.
+- A matching digest override without explicit test mode, and test mode aimed
+  inside the wrapper's own repository root — both refused before VHS.
 - Six tapes that name the published clip under a pin that *matches them*, so
   the digest passes and only the byte guard is left, plus one pinned tape that
   renders somewhere the wrapper does not look.

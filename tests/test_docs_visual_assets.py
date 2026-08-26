@@ -187,6 +187,7 @@ MCP_RECORDER_ENV = {
     "vhs": "KORVID_MCP_VHS_BIN",
     "tape": "KORVID_MCP_TAPE",
     "digest": "KORVID_MCP_TAPE_SHA256",
+    "test_mode": "KORVID_MCP_TEST_MODE",
     "candidate": "KORVID_MCP_CANDIDATE",
     "final": "KORVID_MCP_FINAL",
     "ok": "KORVID_MCP_CLIENT_OK",
@@ -2044,6 +2045,36 @@ def test_mcp_scene_stops_a_controller_whose_start_raised(tmp_path: Path) -> None
     ], f"a raising start must still be stopped during cleanup; got {log}"
     assert app.on_mcp_ready is None, "the mount hook must never be armed after a raising start"
     assert not ready.exists(), "a failed start must leave no readiness file behind"
+
+
+def test_mcp_scene_stops_the_controller_when_ready_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _demo_harness()
+    ready = tmp_path / MCP_READY_FILE
+    log: list[str] = []
+    controller = _RecordingController(log, ready)
+    app = _MountRecordingApp(log, ready)
+    clear_calls = 0
+    clear_mcp_ready = harness.clear_mcp_ready
+
+    def fail_second_clear(path: Path) -> None:
+        nonlocal clear_calls
+        clear_calls += 1
+        if clear_calls == 2:
+            raise OSError("read-only readiness marker")
+        clear_mcp_ready(path)
+
+    monkeypatch.setattr(harness, "clear_mcp_ready", fail_second_clear)
+
+    with pytest.raises(OSError, match="read-only readiness marker"):
+        asyncio.run(harness.run_mcp_demo(app, controller, ready_file=ready))
+
+    assert clear_calls == 2
+    assert controller.running is False
+    assert log[-1] == "stop ready=True", (
+        f"controller.stop must run even when the marker remains; got {log}"
+    )
 
 
 def test_demo_ui_bridge_proxy_composes_not_ready_from_the_shared_error_prefix() -> None:
@@ -4894,6 +4925,7 @@ def _require_posix_recorder() -> None:
 def _run_recorder(
     workdir: Path,
     *,
+    recorder: Path = MCP_RECORDER,
     vhs_status: int = 0,
     writes_candidate: bool = True,
     publishes_ok: bool = True,
@@ -4904,6 +4936,7 @@ def _run_recorder(
     tape_source: Path | None = None,
     digest: str | None = None,
     use_shipped_pin: bool = False,
+    test_mode: bool = True,
     unreadable_tape: bool = False,
     candidate_dir: str = "scenes",
     final_dir: str = "scenes",
@@ -4929,6 +4962,8 @@ def _run_recorder(
     Args:
         workdir: The directory every path the wrapper touches is redirected
             into.
+        recorder: The wrapper to execute. Tests normally use the shipped
+            wrapper; publication-root isolation uses a byte-identical copy.
         vhs_status: The exit status the fake VHS returns.
         writes_candidate: Whether the fake VHS renders the candidate.
         publishes_ok: Whether the fake VHS leaves the client's success marker.
@@ -4946,6 +4981,7 @@ def _run_recorder(
         digest: An explicit pin, overriding both bodies above.
         use_shipped_pin: Leave `KORVID_MCP_TAPE_SHA256` unset, so the run is
             graded against the constant the wrapper ships.
+        test_mode: Whether to enable the wrapper's isolated contract-test mode.
         unreadable_tape: Strip every permission from the tape once it is
             written and pinned, so the wrapper meets a file it cannot hash.
         candidate_dir: The `workdir`-relative directory the candidate is
@@ -5023,6 +5059,7 @@ def _run_recorder(
         environment.pop(MCP_RECORDER_ENV["digest"], None)
     else:
         environment[MCP_RECORDER_ENV["digest"]] = digest
+    environment[MCP_RECORDER_ENV["test_mode"]] = "1" if test_mode else "0"
     environment[MCP_RECORDER_ENV["candidate"]] = str(candidate)
     environment[MCP_RECORDER_ENV["final"]] = str(final)
     environment[MCP_RECORDER_ENV["socket"]] = str(socket)
@@ -5030,7 +5067,7 @@ def _run_recorder(
         environment[MCP_RECORDER_ENV[role]] = str(markers[role])
 
     completed = subprocess.run(
-        [str(MCP_RECORDER)],
+        [str(recorder)],
         cwd=workdir,
         env=environment,
         capture_output=True,
@@ -5367,12 +5404,12 @@ def test_mcp_recorder_pins_the_reviewed_tape_by_its_raw_sha256() -> None:
         "pin only after reviewing the tape's new bytes"
     )
     assert re.search(
-        rf"^expected_digest=\$\{{{MCP_RECORDER_ENV['digest']}:-\${MCP_TAPE_PIN_VARIABLE}\}}$",
+        rf"^expected_digest=\${MCP_TAPE_PIN_VARIABLE}$",
         script,
         re.MULTILINE,
     ), (
-        f"{MCP_RECORDER_ENV['digest']} must exist for the contracts alone and must default "
-        "to the reviewed pin, so a checkout with no environment records the reviewed tape"
+        "the production expectation must be the reviewed pin itself; a test override is "
+        "handled only after the isolated-mode gate"
     )
 
 
@@ -5701,6 +5738,7 @@ def _run_hostile_tape(
     environment[MCP_RECORDER_ENV["vhs"]] = str(vhs)
     environment[MCP_RECORDER_ENV["tape"]] = str(tape)
     environment[MCP_RECORDER_ENV["digest"]] = hashlib.sha256(pinned.encode("utf-8")).hexdigest()
+    environment[MCP_RECORDER_ENV["test_mode"]] = "1"
     environment[MCP_RECORDER_ENV["candidate"]] = str(candidate)
     environment[MCP_RECORDER_ENV["final"]] = str(final)
     for role in ("ok", "failed", "ready", "go"):
@@ -5805,6 +5843,7 @@ def test_mcp_recorder_refuses_every_edit_of_the_reviewed_tape(
             f"{run.reviewed[name]!r}"
         )
     assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+    assert "the tape is not the reviewed recording script" in run.output
 
 
 def test_mcp_recorder_refuses_a_tape_whose_pin_is_simply_wrong(tmp_path: Path) -> None:
@@ -5826,6 +5865,39 @@ def test_mcp_recorder_refuses_a_tape_whose_pin_is_simply_wrong(tmp_path: Path) -
     assert not run.candidate_left, "the refusal must clear the run's own scratch"
     assert run.scratch_left == (), f"the refusal left scratch behind: {run.scratch_left}"
     assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+def test_mcp_recorder_refuses_a_digest_override_outside_test_mode(tmp_path: Path) -> None:
+    run = _run_recorder(tmp_path / "digest-override", test_mode=False)
+
+    assert run.status != 0
+    assert not run.vhs_ran, "an environment digest may not bypass the reviewed production pin"
+    assert run.published == MCP_PUBLISHED_BYTES
+    assert MCP_RECORDER_REJECTION in run.output
+
+
+@pytest.mark.parametrize("media_dir", ["docs/assets/scenes", "docs/assets"])
+def test_mcp_recorder_test_mode_cannot_publish_inside_the_repository(
+    tmp_path: Path, media_dir: str
+) -> None:
+    root = tmp_path / "copied-repository"
+    recorder = root / "docs/demo/record-mcp-follow.sh"
+    recorder.parent.mkdir(parents=True)
+    recorder.write_bytes(MCP_RECORDER.read_bytes())
+    recorder.chmod(0o755)
+    (root / "docs/assets/scenes").mkdir(parents=True)
+
+    run = _run_recorder(
+        root,
+        recorder=recorder,
+        candidate_dir=media_dir,
+        final_dir=media_dir,
+    )
+
+    assert run.status != 0
+    assert not run.vhs_ran, "test-mode pin overrides may never reach the publication directory"
+    assert run.published == MCP_PUBLISHED_BYTES
+    assert MCP_RECORDER_REJECTION in run.output
 
 
 def test_mcp_recorder_refuses_a_tape_whose_bytes_it_cannot_read(tmp_path: Path) -> None:
@@ -5930,6 +6002,7 @@ def test_mcp_recorder_refuses_the_canonical_name_even_under_a_matching_pin(
         f"{case} must leave the approved clip byte-identical; it now holds {run.published!r}"
     )
     assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+    assert "the tape names the published clip" in run.output
 
 
 def test_mcp_recorder_requires_the_tape_to_name_the_candidate_it_promotes(
@@ -5952,6 +6025,7 @@ def test_mcp_recorder_requires_the_tape_to_name_the_candidate_it_promotes(
         f"the approved clip must be byte-identical; it holds {run.published!r}"
     )
     assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+    assert "the tape does not name the candidate" in run.output
 
 
 def test_mcp_recorder_records_the_shipped_tape_under_its_shipped_pin(tmp_path: Path) -> None:
@@ -5965,7 +6039,12 @@ def test_mcp_recorder_records_the_shipped_tape_under_its_shipped_pin(tmp_path: P
     the real digest computation, the real byte guard and the real
     same-directory check. Only VHS is a stand-in, so no media is recorded.
     """
-    run = _run_recorder(tmp_path / "shipped-tape", tape_source=MCP_TAPE, use_shipped_pin=True)
+    run = _run_recorder(
+        tmp_path / "shipped-tape",
+        tape_source=MCP_TAPE,
+        use_shipped_pin=True,
+        test_mode=False,
+    )
 
     assert run.status == 0, (
         "the shipped tape must pass the preflight its own checkout pins it to; the wrapper "

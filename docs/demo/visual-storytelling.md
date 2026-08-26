@@ -276,6 +276,12 @@ review the new bytes, then recompute the pin** — here, in
 the same digest. Recomputing it to make a refusal go away is the one move this
 boundary exists to prevent.
 
+The pin is not a normal environment override. The wrapper accepts
+`KORVID_MCP_TAPE_SHA256` only with `KORVID_MCP_TEST_MODE=1`, which exists only
+for the Bash contract tests. In that mode the final path's physical parent must
+sit outside this checkout's physical repository root, so a test digest cannot
+publish repository files even through a symlinked path.
+
 Two literal checks stand beside the pin, and neither parses a directive. The
 published clip's own basename must be **absent** from the tape's bytes —
 anywhere, under any spelling of the path, comments included — so a pin moved

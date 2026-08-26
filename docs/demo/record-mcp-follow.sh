@@ -32,13 +32,11 @@
 #
 #   docs/demo/record-mcp-follow.sh
 #
-# The environment overrides below exist for the contracts in
-# tests/test_docs_visual_assets.py, which drive this boundary against a fake
-# VHS inside a temporary directory. Their defaults are the repository-relative
-# paths published in docs/demo/visual-storytelling.md ("MCP follow"), and any
-# override has to keep the candidate in the published clip's own directory:
-# promotion is a rename, which is atomic only there. The wrapper checks that
-# below rather than trusting it.
+# The environment overrides below let tests drive this boundary against a fake
+# VHS in a temporary directory. The digest override is accepted only with
+# KORVID_MCP_TEST_MODE=1, and that mode may not target anything inside this
+# checkout. Candidate and final overrides must still resolve to one physical
+# directory because promotion is an atomic rename.
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -59,7 +57,8 @@ tape=${KORVID_MCP_TAPE:-docs/demo/mcp-follow.tape}
 # docs/demo/visual-storytelling.md and the 2026-08-26 plan publish the same
 # digest, and a contract compares all three against the shipped tape.
 reviewed_tape_sha256=60334eb07ab42901a4885584174b9f1bfe4089f1ebdb685f64c8e136cbe2a743
-expected_digest=${KORVID_MCP_TAPE_SHA256:-$reviewed_tape_sha256}
+expected_digest=$reviewed_tape_sha256
+test_mode=${KORVID_MCP_TEST_MODE:-0}
 candidate=${KORVID_MCP_CANDIDATE:-docs/assets/scenes/.mcp-follow-demo.candidate.mp4}
 final=${KORVID_MCP_FINAL:-docs/assets/scenes/mcp-follow-demo.mp4}
 ok_marker=${KORVID_MCP_CLIENT_OK:-.korvid-mcp-demo-client-ok}
@@ -111,6 +110,16 @@ fail() {
   printf 'record-mcp-follow.sh: %s is unchanged\n' "$final" >&2
   exit 1
 }
+
+case "$test_mode" in
+0 | 1) ;;
+*) fail "KORVID_MCP_TEST_MODE must be 0 or 1" ;;
+esac
+if [ "${KORVID_MCP_TAPE_SHA256+x}" = x ]; then
+  [ "$test_mode" = 1 ] ||
+    fail "KORVID_MCP_TAPE_SHA256 is available only to isolated contract tests"
+  expected_digest=$KORVID_MCP_TAPE_SHA256
+fi
 
 [ -f "$tape" ] || fail "no tape to record"
 
@@ -219,6 +228,13 @@ final_parent=$(cd -P -- "$(dirname -- "$final")" >/dev/null 2>&1 && pwd -P) || f
 [ -n "$final_parent" ] || fail "the published clip's directory does not exist"
 [ "$candidate_parent" = "$final_parent" ] ||
   fail "the candidate must be rendered in the published clip's own directory"
+if [ "$test_mode" = 1 ]; then
+  repository_root=$(cd -P -- "$root" >/dev/null 2>&1 && pwd -P) || repository_root=""
+  [ -n "$repository_root" ] || fail "the repository root could not be resolved"
+  case "$final_parent/" in
+  "$repository_root/"*) fail "contract-test overrides may not publish inside the repository" ;;
+  esac
+fi
 
 status=0
 "$vhs_bin" "$tape" || status=$?
