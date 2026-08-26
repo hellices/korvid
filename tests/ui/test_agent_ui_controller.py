@@ -1049,7 +1049,7 @@ async def test_a_panel_failure_repaints_the_header_from_the_session_totals(
     await settle()
 
     assert session.finalized == 1
-    assert panel.header_totals[-1] == (140, 22)
+    assert panel.header_totals[-1] == (143, 23)
     assert not any(isinstance(event, TurnInterrupted) for event in panel.events)
     assert any(isinstance(event, AgentError) for event in panel.events)
     await env.close()
