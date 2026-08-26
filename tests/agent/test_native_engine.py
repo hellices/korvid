@@ -33,9 +33,10 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.interaction import Navigate
+from korvid.agent.interaction import Navigate, OpenLogs
 from korvid.agent.native_engine import NativeAgentEngine
 from korvid.agent.request_gateway import PreparedGatewayRequest, RequestGateway
+from korvid.agent.tool_harness import DIRECT_OPEN_ACKNOWLEDGEMENT
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.tools.executor import ToolResultBlocked
 
@@ -297,6 +298,82 @@ async def test_a_screen_tool_goes_to_the_bridge_and_not_to_the_cluster() -> None
     assert bridge.actions == [Navigate(view="pods", namespace="prod")]
     assert execution.calls == []
     assert isinstance(events[-1], TurnComplete)
+
+
+# -- terminal direct-open operations (issue #316, Task 2) --------------------
+
+
+async def test_a_successful_direct_open_ends_the_turn_after_one_provider_round() -> None:
+    """A default (`continue_analysis` omitted) `open_logs` never asks the
+    provider a second time: the harness's fixed acknowledgement closes the
+    turn itself."""
+    bridge = RecordingBridge()
+    harness = build_harness(
+        [[tool_call("c1", "open_logs", LOGS_ARGS), DONE]],
+        policy=make_policy(tool_names=("open_logs",)),
+        bridge=bridge,
+    )
+
+    events = await harness.run()
+
+    # One provider call.
+    assert len(harness.provider.calls) == 1
+    # One bridge action.
+    assert bridge.actions == [OpenLogs(pod="api-0", namespace="prod", container=None)]
+    # One trusted TextDelta, carrying the fixed acknowledgement only.
+    deltas = [event for event in events if isinstance(event, TextDelta)]
+    assert deltas == [TextDelta(text=DIRECT_OPEN_ACKNOWLEDGEMENT)]
+    # Terminal accounting: the turn completes, with no dangling tool call.
+    assert isinstance(events[-1], TurnComplete)
+    assert not harness.conversation.has_unmatched_tool_calls
+    # Protocol-complete history: the final assistant message is the
+    # acknowledgement, stored right after the paired tool result.
+    assert harness.conversation.messages[-2]["role"] == "tool"
+    assert harness.conversation.messages[-1] == {
+        "role": "assistant",
+        "content": DIRECT_OPEN_ACKNOWLEDGEMENT,
+    }
+
+
+async def test_continue_analysis_true_still_consumes_the_scripted_second_round() -> None:
+    """Explicit continuation is the normal path: the model gets to analyze."""
+    args = '{"pod":"api-0","namespace":"prod","continue_analysis":true}'
+    harness = build_harness(
+        [[tool_call("c1", "open_logs", args), DONE], text_turn("looked at the logs")],
+        policy=make_policy(tool_names=("open_logs",)),
+    )
+
+    events = await harness.run()
+
+    assert len(harness.provider.calls) == 2
+    assert isinstance(events[-1], TurnComplete)
+    assert harness.conversation.messages[-1] == {
+        "role": "assistant",
+        "content": "looked at the logs",
+    }
+
+
+async def test_a_failed_direct_open_still_consumes_the_scripted_second_round() -> None:
+    """A failed UI action is never terminal: the model must see the failure
+    and get to recover or explain it."""
+    bridge = RecordingBridge(ok=False, message="could not open the log pane")
+    harness = build_harness(
+        [
+            [tool_call("c1", "open_logs", LOGS_ARGS), DONE],
+            text_turn("the log pane could not open"),
+        ],
+        policy=make_policy(tool_names=("open_logs",)),
+        bridge=bridge,
+    )
+
+    events = await harness.run()
+
+    assert len(harness.provider.calls) == 2
+    assert isinstance(events[-1], TurnComplete)
+    assert harness.conversation.messages[-1] == {
+        "role": "assistant",
+        "content": "the log pane could not open",
+    }
 
 
 async def test_every_request_re_sanitizes_the_results_it_carries() -> None:

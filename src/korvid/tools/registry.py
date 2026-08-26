@@ -976,6 +976,14 @@ TOOL_DEFS: list[ToolDef] = [
                             "type": "string",
                             "description": "Container name. Omit to show all containers.",
                         },
+                        "continue_analysis": {
+                            "type": "boolean",
+                            "description": (
+                                "Set true only when the user explicitly asked you to keep "
+                                "analyzing after opening the pane. Defaults to false: a "
+                                "direct show/open request ends here, without another turn."
+                            ),
+                        },
                     },
                     "required": ["pod", "namespace"],
                 },
@@ -1004,6 +1012,14 @@ TOOL_DEFS: list[ToolDef] = [
                         "namespace": {
                             "type": "string",
                             "description": "Namespace (required for namespaced resources).",
+                        },
+                        "continue_analysis": {
+                            "type": "boolean",
+                            "description": (
+                                "Set true only when the user explicitly asked you to keep "
+                                "analyzing after opening the pane. Defaults to false: a "
+                                "direct show/open request ends here, without another turn."
+                            ),
                         },
                     },
                     "required": ["kind", "name"],

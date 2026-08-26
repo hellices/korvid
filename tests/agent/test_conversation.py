@@ -325,6 +325,30 @@ def test_tool_calls_and_results_stay_paired() -> None:
     assert assistant["tool_calls"][0]["function"]["name"] == "get_logs"
 
 
+def test_a_local_terminal_message_after_a_tool_call_costs_nothing() -> None:
+    """Pins the accounting the Task 2 direct-open fast path depends on.
+
+    `NativeAgentEngine`'s terminal short-circuit opens a second iteration to
+    store its fixed acknowledgement *without* asking the provider again: it
+    never streams text, never reports usage, and never marks the iteration
+    transmitted. That local-only iteration must settle at zero cost and
+    must not flip the turn to `estimated`.
+    """
+    convo = ConversationState(max_history_chars=LOOSE_BUDGET)
+    convo.start_turn("open the logs")
+    convo.start_iteration()
+    convo.record_stream_text("")
+    convo.commit_usage(10, 2)
+    convo.append_assistant("", [{"id": "c1", "name": "open_logs", "arguments": "{}"}])
+    convo.append_tool_result("c1", "opened")
+
+    convo.start_iteration()
+    convo.append_assistant("Opened on screen for you to review.")
+    turn_in, turn_out, estimated = convo.complete_turn()
+
+    assert (turn_in, turn_out, estimated) == (10, 2, False)
+
+
 def test_completing_a_turn_with_a_dangling_tool_call_is_rejected() -> None:
     convo = ConversationState(max_history_chars=LOOSE_BUDGET)
     convo.start_turn("logs?")

@@ -60,6 +60,25 @@ from korvid.tools.registry import ToolDef, tool_def, tool_schema_names
 #: it reports itself, so it never mints evidence (issue #192).
 _EVIDENCE_EFFECTS: frozenset[str] = frozenset({"cluster_read", "external_read"})
 
+#: Dispatch targets for the "direct-open" screen tools that can end a turn
+#: without a second provider round (issue #316, Task 2; design doc
+#: `2026-08-27-low-model-fast-operations-design.md`). Keyed on the
+#: registry's validated dispatch, exactly like `_ui_action`, so this can
+#: never drift onto a tool the registry did not mean.
+_DIRECT_OPEN_DISPATCH_TARGETS: frozenset[str] = frozenset(
+    {"agent_open_logs", "agent_open_describe"}
+)
+
+#: The fixed, trusted completion message for a successful direct-open call
+#: that did not request continued analysis. This is a constant and *only*
+#: a constant: it must never interpolate the model's own tool arguments or
+#: the bridge's (screen-controlled) result text, because either one could
+#: carry a secret or injected content across the outbound boundary. A
+#: model-controlled or cluster-controlled string is exactly what the
+#: masking and sanitization pipeline exists to check before it reaches the
+#: provider — a fast path must not create a way around that.
+DIRECT_OPEN_ACKNOWLEDGEMENT: str = "Opened on screen for you to review."
+
 
 @dataclass(frozen=True, slots=True)
 class ToolExecution:
@@ -73,12 +92,18 @@ class ToolExecution:
             trail, error verdict, and read identity).
         evidence_ref: The reference minted for a successful read (`E<n>`),
             or None for a UI action, a write, an error, or a rejected call.
+        terminal_message: The fixed acknowledgement that lets the engine
+            close the turn without another provider round, or None to
+            continue the turn normally. Only ever set for a successful
+            direct-open call that did not request continued analysis
+            (issue #316, Task 2).
     """
 
     call_id: str
     name: str
     outcome: ToolOutcome
     evidence_ref: str | None
+    terminal_message: str | None = None
 
 
 class ToolHarness:
@@ -302,7 +327,11 @@ class ToolHarness:
         result = await self._bridge.apply(action)
         outcome = self._sanitize_ui_result(definition, result)
         return ToolExecution(
-            call_id=call_id, name=definition.name, outcome=outcome, evidence_ref=None
+            call_id=call_id,
+            name=definition.name,
+            outcome=outcome,
+            evidence_ref=None,
+            terminal_message=_terminal_message(definition, arguments, result),
         )
 
     def _sanitize_ui_result(
@@ -403,6 +432,27 @@ def _armed_surface(
         policy.max_tool_calls_per_iteration,
         policy.max_result_chars,
     )
+
+
+def _terminal_message(
+    definition: ToolDef, arguments: dict[str, Any], result: UiActionResult
+) -> str | None:
+    """The fixed acknowledgement that ends a turn early, or None to continue.
+
+    Only a successful direct-open call (`open_logs`/`open_describe`, keyed
+    on dispatch target exactly like `_ui_action`) that did not ask to
+    continue is terminal: a failed or rejected UI action always continues
+    normally so the model can recover or explain it, and every other
+    UI-drive tool is unaffected. The returned string is always the same
+    module constant — never anything built from `arguments` or `result`.
+    """
+    if definition.dispatch not in _DIRECT_OPEN_DISPATCH_TARGETS:
+        return None
+    if not result.ok:
+        return None
+    if arguments.get("continue_analysis") is True:
+        return None
+    return DIRECT_OPEN_ACKNOWLEDGEMENT
 
 
 def _ui_action(definition: ToolDef, arguments: dict[str, Any]) -> UiAction:

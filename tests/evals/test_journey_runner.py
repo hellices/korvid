@@ -96,7 +96,12 @@ async def test_run_journey_persists_history_and_honors_user_correction() -> None
         [
             _call(
                 "open_describe",
-                {"kind": "pods", "name": "payments-1", "namespace": "shop"},
+                {
+                    "kind": "pods",
+                    "name": "payments-1",
+                    "namespace": "shop",
+                    "continue_analysis": True,
+                },
                 "c3",
             ),
             {"type": "done"},
@@ -163,7 +168,12 @@ async def test_live_boundary_rejection_fails_an_otherwise_successful_turn() -> N
         [
             _call(
                 "open_describe",
-                {"kind": "pods", "name": "payments-1", "namespace": "shop"},
+                {
+                    "kind": "pods",
+                    "name": "payments-1",
+                    "namespace": "shop",
+                    "continue_analysis": True,
+                },
                 "c3",
             ),
             {"type": "done"},
@@ -352,7 +362,12 @@ async def test_discarded_parallel_calls_count_toward_budget_and_stale_targets() 
         [
             _call(
                 "open_describe",
-                {"kind": "pods", "name": "payments-1", "namespace": "shop"},
+                {
+                    "kind": "pods",
+                    "name": "payments-1",
+                    "namespace": "shop",
+                    "continue_analysis": True,
+                },
                 "c4",
             ),
             {"type": "done"},
@@ -404,7 +419,12 @@ async def test_wrong_namespace_call_fails_even_if_later_call_is_on_target() -> N
         [
             _call(
                 "open_describe",
-                {"kind": "pods", "name": "payments-1", "namespace": "shop"},
+                {
+                    "kind": "pods",
+                    "name": "payments-1",
+                    "namespace": "shop",
+                    "continue_analysis": True,
+                },
                 "c4",
             ),
             {"type": "done"},
@@ -446,7 +466,12 @@ def _triage_script() -> list[list[dict[str, Any]]]:
         [
             _call(
                 "open_describe",
-                {"kind": "pods", "name": "payments-1", "namespace": "shop"},
+                {
+                    "kind": "pods",
+                    "name": "payments-1",
+                    "namespace": "shop",
+                    "continue_analysis": True,
+                },
                 "c3",
             ),
             {"type": "done"},

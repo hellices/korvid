@@ -105,6 +105,10 @@ class _Round:
     #: earn the one-tool-at-a-time notice: a malformed call is answered.
     excess: int = 0
     done: bool = False
+    #: A trusted acknowledgement a dispatched call set (issue #316, Task 2).
+    #: When set, the turn ends right after dispatch, with no further
+    #: provider round: see `ToolHarness._run_ui` for what may set this.
+    terminal_message: str | None = None
 
     @property
     def text(self) -> str:
@@ -338,6 +342,25 @@ class NativeAgentEngine(AgentEngine):
             return
         async for event in self._dispatch(round_):
             yield event
+        async for event in self._after_dispatch(round_):
+            yield event
+
+    async def _after_dispatch(self, round_: _Round) -> AsyncGenerator[AgentEvent, None]:
+        """Decide how the round ends, now that every call has an answer.
+
+        Split out of `_round` so each ending — interrupted, a direct-open
+        acknowledgement (issue #316, Task 2), or no usable call — is one
+        clearly named branch rather than more of one already-long method.
+        """
+        if self._interrupted:
+            return
+        if round_.terminal_message is not None:
+            # A direct-open call's fixed acknowledgement ends the turn here:
+            # no further provider round is needed or wanted.
+            round_.done = True
+            for event in self._finish_terminal(round_.terminal_message):
+                yield event
+            return
         if not round_.calls:
             # Every call in this response was unusable. Another round would
             # replay the same failure with the same history, so stop here
@@ -490,6 +513,10 @@ class NativeAgentEngine(AgentEngine):
                 raise
             except Exception as exc:  # executor, bridge or harness bug
                 execution = self._contain(call, exc)
+            if execution.terminal_message is not None:
+                # Recorded once we know dispatch went through; checked by
+                # the caller only after every call in the round is answered.
+                round_.terminal_message = execution.terminal_message
             text = execution.outcome.text
             if round_.excess and index == last:
                 text = self._tools.cap_text(
@@ -574,6 +601,20 @@ class NativeAgentEngine(AgentEngine):
             uncited=uncited,
             duplicated=duplicated,
         )
+
+    def _finish_terminal(self, message: str) -> list[AgentEvent]:
+        """Close a turn a direct-open call ended, with no further round.
+
+        The fixed acknowledgement becomes the turn's own final assistant
+        message: a fresh iteration is opened and settled purely locally
+        (no stream, no usage, nothing marked transmitted), so it costs
+        nothing and never counts as a provider round — only the dispatched
+        tool call and its result do. The turn then completes exactly as it
+        would have if the model itself had answered with this text.
+        """
+        self._conversation.start_iteration()
+        self._conversation.append_assistant(message)
+        return [TextDelta(text=message), self._complete(message)]
 
     def _stop(self, message: str) -> list[AgentEvent]:
         """End a turn early: one visible reason, then terminal accounting."""
