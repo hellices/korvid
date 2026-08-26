@@ -535,10 +535,7 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
     (
         "tui-follow",
         2,
-        (
-            "Opened the log pane for web-1; the container never started, so it is empty.",
-            "Here is the log view for web-1 - no output, the image never pulled.",
-        ),
+        ("Opened on screen for you to review.",),
         (
             # Narrates a log it cannot have read.
             "The log shows the application failing to connect to its database.",
@@ -695,9 +692,9 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
         "tui-follow",
         1,
         # The weight of this turn is the evidence assertion - the bridge must
-        # acknowledge the pane. The text only has to name the pod and not
-        # claim the screen is unreachable.
-        ("The web-1 details are on screen now.",),
+        # acknowledge the pane. A terminal UI operation uses Korvid's fixed
+        # acknowledgement rather than repeating model-controlled arguments.
+        ("Opened on screen for you to review.",),
         ("I cannot open that pane for you.",),
     ),
 )
