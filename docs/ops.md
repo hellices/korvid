@@ -64,9 +64,9 @@ big a tool result may be. It has **no** effect on the safety perimeter:
   every tier, and only a user keystroke in that dialog executes it; korvid
   never confirms, replays, or speculatively executes a write on the model's
   behalf;
-- a write reaches the executor with the preconditions the read carried
-  (UID and resourceVersion), so an object recreated under the same name
-  between read and approval is refused rather than mutated;
+- a direct agent write establishes the target's UID before approval and passes
+  it as an execution precondition, so an object recreated under the same name
+  between lookup and approval is refused rather than mutated;
 - the audit entry is still fail-closed — a write whose audit record cannot
   be written does not run;
 - read-only mode and protected contexts are enforced in code, above the

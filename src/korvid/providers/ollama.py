@@ -97,13 +97,14 @@ class OllamaProvider(LLMProvider):
         """Only what the configured request options directly prove.
 
         `num_ctx` is the exact context window this adapter will request
-        (issue #189); Ollama's native API dispatches one tool call per
-        turn, so `supports_parallel_tools` is always known-false. Neither
-        tool support, reasoning, nor tier is inferred from the model tag.
+        (issue #189); Ollama's native API can return multiple tool calls in
+        one assistant message, so `supports_parallel_tools` is known-true.
+        Neither tool support, reasoning, nor tier is inferred from the model
+        tag.
         """
         return ModelCapabilities(
             context_window_tokens=self._options.num_ctx,
-            supports_parallel_tools=False,
+            supports_parallel_tools=True,
             provenance={
                 "context_window_tokens": CapabilitySource.PROVIDER,
                 "supports_parallel_tools": CapabilitySource.PROVIDER,

@@ -286,9 +286,9 @@ def test_descriptor_is_ollama_and_the_model_tag() -> None:
     assert provider.descriptor == ModelDescriptor("ollama", "qwen3:8b")
 
 
-def test_capabilities_report_configured_context_window_and_no_parallel_tools() -> None:
+def test_capabilities_report_context_window_and_multiple_tool_calls() -> None:
     """Ollama reports only what it directly knows: the configured `num_ctx`
-    and that it cannot dispatch multiple tool calls per turn (issue #189).
+    and that its native response can carry multiple tool calls (issue #189).
     It must never infer tier or reasoning from the model tag."""
     provider = OllamaProvider(
         base_url="http://localhost:11434",
@@ -299,7 +299,7 @@ def test_capabilities_report_configured_context_window_and_no_parallel_tools() -
 
     assert provider.descriptor == ModelDescriptor("ollama", "qwen3:8b")
     assert provider.capabilities.context_window_tokens == 16_384
-    assert provider.capabilities.supports_parallel_tools is False
+    assert provider.capabilities.supports_parallel_tools is True
     assert provider.capabilities.provenance["context_window_tokens"] is CapabilitySource.PROVIDER
     assert provider.capabilities.provenance["supports_parallel_tools"] is CapabilitySource.PROVIDER
     assert provider.capabilities.supports_tools is None
