@@ -181,6 +181,31 @@ def test_no_pack_invents_a_resource_name_of_its_own() -> None:
         assert "namespace shop" not in pack
 
 
+def test_the_low_tier_dispatches_tools_immediately_without_narrating_a_plan() -> None:
+    """Operation-first: the model must call the next tool, not narrate what it will do.
+
+    For fast-path requests (display only) the LOW pack must name
+    `continue_analysis`, instruct the model to dispatch the tool
+    immediately, and forbid plan narration and generic advice.
+    The final answer must be limited to root cause, evidence, and the
+    next operation — no preamble, no filler text.
+    """
+    text = _low_text()
+    # must name the continue_analysis argument
+    assert "continue_analysis" in text
+    # must require immediate dispatch rather than describing what it will do
+    assert re.search(r"dispatch|call .* immediately|immediate", text, re.IGNORECASE)
+    # must forbid narrating a plan
+    assert re.search(r"do not narrate|never narrate|without narrat", text, re.IGNORECASE)
+    # must forbid generic advice
+    assert re.search(
+        r"no generic advice|without generic advice|never give generic", text, re.IGNORECASE
+    )
+    # final answer limited to root cause, evidence, next operation
+    assert re.search(r"root cause.*evidence|evidence.*root cause", text, re.IGNORECASE)
+    assert "next operation" in text.casefold()
+
+
 def test_the_safety_contract_is_unchanged_by_the_low_rules() -> None:
     """Behavioural grinding never widens what a tier is permitted to do."""
     assert "Only a user keystroke can approve a write" in SAFETY_CONTRACT
