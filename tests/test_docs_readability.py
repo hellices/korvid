@@ -488,7 +488,7 @@ def test_ops_helm_render_exception_is_scoped_to_install_and_upgrade() -> None:
     section = _ops_section("Operation-specific evidence")
     lowered = section.lower()
 
-    assert "the helm dry-run is the exception" not in lowered, (
+    assert "the helm dry-run is the exception" not in lowered.replace("*", ""), (
         "the blocking exception must be scoped to install/upgrade, not every helm dry-run"
     )
 
