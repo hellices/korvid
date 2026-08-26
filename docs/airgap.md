@@ -136,11 +136,14 @@ Kubernetes credentials are separate operator-supplied dependencies.
 - **Node shell image (nodes)**: `s` on a node is a *separate* config key.
   It creates a privileged `node-debugger-…` pod from `node_shell.image`,
   which falls back to korvid's built-in public default when unset, so it
-  must be pointed at the internal registry in its own right. It is
-  node-level troubleshooting — reaching a node's host filesystem and
-  runtime — not a rescue path: the debugger is a pod scheduled onto that
-  node and waited for, so it only runs while the node still schedules
-  workloads, and with an unmirrored image it fails on the pull.
+  must be pointed at the internal registry in its own right. `kubectl debug
+  node/…` pins that pod to the node with `nodeName` and a toleration for
+  every taint, so a cordon or scheduling pressure elsewhere is not what
+  bounds it — the node's kubelet still has to be healthy enough to start a
+  pod and pull the (mirrored) image. It is node-level troubleshooting on a
+  node whose kubelet, network, and container runtime are still working,
+  not a rescue path for one where they aren't: an unreachable kubelet can't
+  start the pod at all, and an unmirrored image fails on the pull.
 - **Workload images**: standard registry mirroring; korvid never pulls
   images itself.
 

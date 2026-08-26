@@ -293,16 +293,22 @@ def test_helm_preview_masking_keeps_the_old_helm_compatibility_caveat() -> None:
 
 
 def test_helm_opening_approves_the_exact_mutation_not_an_exact_command() -> None:
-    """Round-11 (comment 3861023951): OLM writes execute no command at all.
+    """Round-11 (comment 3861023951), refined: the opening's dialog inventory.
 
     The opening claims one shared safety pipeline for *both* halves of the
-    page, but the two halves mutate differently: a Helm write runs a `helm`
-    command line through the fixed-argv wrapper, while an operator install
-    creates a Subscription (and `I` on an InstallPlan approves a pending
-    plan) straight through the Kubernetes API. Promising that "nothing
-    executes until you approve the exact command" describes only the first
-    kind, so a reader of the OLM half is told to expect a command that is
-    never built. The shared claim has to be the mutation itself.
+    page, but the writes on it mutate four different ways, each with a
+    different approval dialog: a Helm write runs a `helm` command line
+    through the fixed-argv wrapper; an operator install shows the full
+    Subscription manifest before OLM creates it; `I` on a pending
+    InstallPlan shows the exact `spec.approved=true` change plus the CSVs
+    it unblocks — not the whole InstallPlan object, which the earlier
+    wording implied by lumping it in with "the API object itself"; and an
+    operator uninstall shows a delete plan (what is removed, what OLM
+    garbage-collects, what is kept). Promising that "nothing executes
+    until you approve the exact command" describes only the first kind, so
+    a reader of the OLM half is told to expect a command that is never
+    built. The shared claim has to name the mutation, concisely, and let
+    each write's own section carry its dialog's specifics.
     """
     source = _source("helm-operators.md")
     flat = " ".join(source.split())
@@ -318,8 +324,23 @@ def test_helm_opening_approves_the_exact_mutation_not_an_exact_command() -> None
     assert re.search(r"helm command line", opening, re.I), (
         "the opening must still say what a Helm approval shows: the command line"
     )
-    assert re.search(r"Subscription|InstallPlan", opening), (
-        "the opening must name the OLM half's approved object, or 'mutation' stays abstract"
+    assert re.search(r"full Subscription manifest", opening), (
+        "the opening must say an operator install's dialog shows the full manifest"
+    )
+    assert re.search(r"spec\.approved=true", opening), (
+        "the opening must name the InstallPlan approval's actual mutation: the "
+        "spec.approved flip, not the whole object"
+    )
+    assert re.search(r"CSVs? it unblocks", opening, re.I), (
+        "a manual InstallPlan approval's dialog shows the CSVs it unblocks alongside "
+        "the spec.approved=true change"
+    )
+    assert re.search(r"not the whole (InstallPlan )?object|not the whole object", opening, re.I), (
+        "the opening must not conflate the InstallPlan approval with a full-object dialog "
+        "the way 'the API object itself... or the InstallPlan being approved' once did"
+    )
+    assert re.search(r"delete plan", opening, re.I), (
+        "the opening must name what an operator uninstall's dialog shows: a delete plan"
     )
     assert "ops.md#one-write-path-three-drivers" in opening, (
         "the opening must keep pointing at the one shared write path"
@@ -332,6 +353,12 @@ def test_helm_opening_approves_the_exact_mutation_not_an_exact_command() -> None
     )
     assert "standard approval dialog" in source, (
         "the OLM write must still be approved in the same dialog as every other write"
+    )
+    shared_paragraph = source.split("\n\n", 2)[1]
+    assert len(shared_paragraph) < 900, (
+        "the shared opening paragraph must stay concise even after naming four dialog "
+        f"shapes; push further detail into each write's own section instead "
+        f"({len(shared_paragraph)} chars)"
     )
 
 
@@ -1200,23 +1227,30 @@ def _airgap_node_shell_bullet() -> str:
 
 
 def test_airgap_does_not_sell_the_node_shell_as_an_unreachable_node_rescue() -> None:
-    """Round-11 (comment 3861023907): the node shell needs a working node.
+    """Round-11 (comment 3861023907), refined: the true bound is the kubelet.
 
     `s` on a node does not open a side channel to the host — it creates a
-    `node-debugger-…` pod *scheduled onto that node* and waits for it to
-    become Ready (`ShellController._wait_and_attach_node_shell` runs
-    `kubectl wait` before it attaches). A node that is genuinely
-    unreachable cannot schedule it, pull its image, or run it, so calling
-    the node shell the tool an operator reaches for "when a node is already
-    unreachable" sends them to a flow that cannot recover that node. The
-    air-gap consequence is the image key, and it survives without the
-    claim: the bullet must state the mirroring duty and the precondition.
+    `node-debugger-…` pod and waits for it to become Ready
+    (`ShellController._wait_and_attach_node_shell` runs `kubectl wait`
+    before it attaches). But `kubectl debug node/…` pins that pod straight
+    to the node with `nodeName` and a toleration for every taint, so a
+    cordon or scheduler pressure elsewhere does not stop it — "the node
+    still schedules workloads" is not the actual precondition and must not
+    be claimed as one. What genuinely bounds it is the node's kubelet:
+    it still has to be healthy enough to start a pod at all and pull the
+    (mirrored) `node_shell.image`. A node whose kubelet, network, or
+    container runtime cannot do that is exactly the node this cannot
+    rescue, so calling the node shell the tool an operator reaches for
+    "when a node is already unreachable" sends them to a flow that cannot
+    recover that node. The air-gap consequence is the image key, and it
+    survives without the claim: the bullet must state the mirroring duty
+    and the kubelet precondition, not a scheduling one.
     """
     bullet = _airgap_node_shell_bullet()
     lowered = bullet.lower()
 
-    assert not re.search(r"unreachable|already down|not ?ready|unresponsive", lowered), (
-        f"the node shell cannot recover a node that cannot run its debugger pod: {bullet}"
+    assert not re.search(r"reaches? for.{0,40}unreachable|already unreachable", lowered), (
+        f"the bullet must not sell this as the tool for a node already unreachable: {bullet}"
     )
     assert "`node_shell.image`" in bullet, "the bullet must still name the key it is about"
     assert re.search(r"internal registry", lowered), (
@@ -1225,13 +1259,36 @@ def test_airgap_does_not_sell_the_node_shell_as_an_unreachable_node_rescue() -> 
     assert re.search(r"built-in public default", lowered), (
         "the reason it must be mirrored is the public fallback when the key is unset"
     )
-    assert re.search(r"schedul", lowered), (
-        "the bullet must say the debugger is a pod scheduled onto the node, which is "
-        "what bounds when the node shell works at all"
+    assert not re.search(r"only runs while the node|still schedules workloads", lowered), (
+        f"scheduler/cordon availability was the old (wrong) bound; it must be gone: {bullet}"
+    )
+    assert re.search(r"nodename", lowered), (
+        "the bullet must say kubectl pins the pod with nodeName, which is why cordoning "
+        "or scheduler pressure is not what bounds it"
+    )
+    assert re.search(r"toleration", lowered), (
+        "the bullet must say kubectl adds a toleration for every taint, which is why "
+        "cordoning is not what bounds it"
+    )
+    assert re.search(r"cordon|scheduler pressure|scheduling pressure", lowered), (
+        f"the bullet must name what does not bound it (cordon/scheduler pressure): {bullet}"
+    )
+    assert re.search(
+        r"not what bounds|does not stop it|is not the (actual )?precondition", lowered
+    ), (
+        "the bullet must explicitly deny that scheduling availability/cordon is the bound, "
+        f"not merely omit the old claim: {bullet}"
+    )
+    assert re.search(r"kubelet", lowered), (
+        "the bullet must name the kubelet as the thing that must still be healthy enough "
+        "to start the pod and pull the image"
+    )
+    assert re.search(r"pull the.{0,20}image|pull.{0,20}mirrored", lowered), (
+        "the precondition includes pulling the (mirrored) image, not just starting the pod"
     )
     assert re.search(r"node-level troubleshooting", lowered), (
-        "the honest use is node-level troubleshooting on a node that still schedules "
-        "and runs pods; say that instead of promising a rescue"
+        "the honest use is node-level troubleshooting on a node whose kubelet, network, "
+        "and runtime still work; say that instead of promising a rescue"
     )
 
 

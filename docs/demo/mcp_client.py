@@ -242,13 +242,17 @@ def _publish(status: Path) -> None:
 def _clear_markers() -> None:
     """Drop both markers, including ones an interrupted run left behind.
 
-    This run may only be graded on evidence this run produced. Relying on
-    an outside pre-clean meant a stale :data:`OK_FILE` in the checkout
-    survived a client killed before it published anything (SIGKILL, a tape
-    timeout), and `docs/demo/record-mcp-follow.sh` then read "failure
-    absent, success present" and promoted a broken candidate. Owning the
-    markers here is the same defence `docs/demo/demo.py` gives its
-    readiness file; the tape's own `rm -f` stays as a second layer.
+    This run may only be graded on evidence this run produced, so the
+    client owns that guarantee itself rather than trusting it to whatever
+    invoked it. Both `docs/demo/record-mcp-follow.sh` (before it starts
+    VHS) and the tape itself (`rm -f` at the top of its recorded commands)
+    already pre-clean these markers, so under the shipped recording flow
+    this is defence in depth, not the only thing standing between a stale
+    :data:`OK_FILE` and a promoted candidate. It is load-bearing the moment
+    that assumption doesn't hold: this module invoked directly (this file
+    run outside the wrapper, as the tests here do), or an external
+    pre-clean skipped or removed by a future edit. Owning the markers here
+    is the same defence `docs/demo/demo.py` gives its readiness file.
     """
     OK_FILE.unlink(missing_ok=True)
     FAILED_FILE.unlink(missing_ok=True)

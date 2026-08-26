@@ -3616,13 +3616,17 @@ def test_mcp_client_run_clears_stale_markers_before_the_story_runs(
     """Round-11 (comment 3861056637): only this run's markers may be graded.
 
     The module documented markers "removed on both sides of a run" but
-    cleared neither itself, leaving the whole guarantee to the tape. A
-    checkout holding an `OK_FILE` from an earlier run — and a client killed
-    (SIGKILL, tape timeout) before it published anything — therefore looked
-    to `record-mcp-follow.sh` like "failure absent, success present", and a
-    broken candidate was promoted. `run()` owns its markers now, exactly as
-    `run_mcp_demo` owns `MCP_READY_FILE` through `clear_mcp_ready`; the
-    tape's `rm -f` stays as defence in depth.
+    cleared neither itself, leaving the whole guarantee to whatever invoked
+    it. `docs/demo/record-mcp-follow.sh` already pre-cleans both markers
+    before it starts VHS, and the tape's own `rm -f` pre-cleans them again,
+    so under the shipped recording flow a stale marker from an interrupted
+    run is already gone before this client's own story starts — this test
+    does not exercise a hole in that flow. What it pins down is client-local
+    ownership as defence in depth: this module invoked directly (as this
+    test does, with no wrapper or tape involved) or an external pre-clean
+    skipped or removed by a future edit must not be able to leave a stale
+    `OK_FILE` around to be graded. `run()` owns its markers now, exactly as
+    `run_mcp_demo` owns `MCP_READY_FILE` through `clear_mcp_ready`.
     """
     module = _mcp_client_module()
     monkeypatch.chdir(tmp_path)
@@ -3650,10 +3654,13 @@ def test_mcp_client_run_clears_a_stale_success_before_a_failing_story(
 ) -> None:
     """A failing run must not inherit an earlier run's success marker.
 
-    This is the case the wrapper cannot survive: `OK_FILE` left behind plus
-    a `FAILED_FILE` this run publishes is still a rejection, but `OK_FILE`
-    left behind *and cleared by nobody* is what promoted a broken render.
-    After a failed story only the failure may exist.
+    The shipped wrapper's own grading order already survives this case —
+    `record-mcp-follow.sh` checks its failure marker first, so a stale
+    `OK_FILE` next to the `FAILED_FILE` this run publishes is still a
+    rejection. The invariant this test pins is client-local instead: after
+    a failed story only the failure marker may exist, which is what keeps
+    the module correct when there is no wrapper's ordering to fall back on
+    (this module invoked directly, or an external pre-clean bypassed).
     """
     module = _mcp_client_module()
     monkeypatch.chdir(tmp_path)

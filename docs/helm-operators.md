@@ -4,10 +4,13 @@ Package-manager views: the Helm release browser (install / upgrade /
 rollback / uninstall) and the OLM operator catalog. All writes here run the
 same [safety pipeline](ops.md#one-write-path-three-drivers) as every other
 mutation — nothing executes until you approve the exact mutation, and every
-run is audit-logged like any other write. What the dialog shows is whatever
-the write actually is: the helm command line for a release, and the API
-object itself for an operator (the full Subscription manifest, or the
-InstallPlan being approved), which OLM applies with no command involved.
+run is audit-logged like any other write. What the dialog shows differs by
+write, because each one *is* a different mutation: the helm command line
+for a Helm release; the full Subscription manifest for an operator install;
+the exact `spec.approved=true` change plus the CSVs it unblocks — not the
+whole object — for a manual InstallPlan approval; and a delete plan for an
+operator uninstall. The OLM writes go straight through the Kubernetes API,
+with no command involved.
 
 `:helm` lists the Helm releases installed in the current namespace (`0`
 widens to all namespaces) — no helm binary required. korvid reads the
