@@ -78,6 +78,13 @@ def _sections(text: str, *names: str) -> list[str]:
     it. `diagnose_pod` answers with far more than a pane can hold, and its
     last lines are log excerpts — naming the sections keeps this beat on
     the verdict instead of on whichever lines happen to fall last.
+
+    Raises:
+        RuntimeError: if none of ``names`` matched a header in ``text`` —
+            drifted headers or an error answer would otherwise fall
+            through as an empty, silently-skipped beat. The message names
+            the sections that were asked for; it never echoes ``text``,
+            which is unbounded and may hold sensitive tool output.
     """
     kept: list[str] = []
     for name in names:
@@ -87,6 +94,8 @@ def _sections(text: str, *names: str) -> list[str]:
                 keeping = line.startswith(name)
             if keeping:
                 kept.append(line)
+    if not kept:
+        raise RuntimeError(f"diagnose_pod answer is missing every requested section: {names!r}")
     return kept
 
 

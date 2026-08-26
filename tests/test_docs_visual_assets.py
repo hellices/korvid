@@ -505,6 +505,25 @@ def _demo_harness() -> ModuleType:
     return module
 
 
+def _mcp_client_module() -> ModuleType:
+    """Import the checked-in MCP follow-capture client as a module.
+
+    Like the demo harness, it lives outside the package on purpose (it is
+    never shipped), so it has to be loaded by path rather than imported by
+    name.
+    """
+    module = sys.modules.get("korvid_docs_mcp_client")
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location("korvid_docs_mcp_client", MCP_CLIENT)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["korvid_docs_mcp_client"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class _DemoLister:
     """The `Lister` shape `RelationshipSnapshotLoader` consumes."""
 
@@ -1174,6 +1193,58 @@ def test_mcp_client_publishes_nothing_but_korvids_own_work() -> None:
     assert "TAIL_LINES" in client, (
         "tool results are unbounded text; the pane must print a fixed tail of "
         "each one so a long result cannot scroll the story off screen"
+    )
+
+
+def test_mcp_client_sections_keeps_only_the_named_headers_in_order() -> None:
+    """`_sections` collects each named header and its indented body, in order.
+
+    `diagnose_pod` answers with far more than the pane can hold; the
+    `CURRENT HEALTH` / `CONTAINERS` beat must survive intact and in the
+    order asked, regardless of what other sections surround it.
+    """
+    module = _mcp_client_module()
+    answer = "\n".join(
+        [
+            "CURRENT HEALTH",
+            "  status: CrashLoopBackOff",
+            "CONTAINERS",
+            "  app: restarting",
+            "RECENT LOGS",
+            "  ...500 lines the pane must never see...",
+        ]
+    )
+
+    kept = module._sections(answer, "CURRENT HEALTH", "CONTAINERS")
+
+    assert kept == [
+        "CURRENT HEALTH",
+        "  status: CrashLoopBackOff",
+        "CONTAINERS",
+        "  app: restarting",
+    ]
+
+
+def test_mcp_client_sections_fails_closed_when_no_named_header_is_found() -> None:
+    """A capture must fail loudly, not silently sleep past a missing beat.
+
+    If `diagnose_pod`'s headers drift or the tool call errors, none of the
+    requested section names match anything in the answer, and `_sections`
+    used to return `[]`. The caller then printed nothing and held for
+    3.2s anyway, publishing a clip whose central verdict beat is blank
+    but looks like normal pacing. `_sections` must instead raise, naming
+    the sections it was asked for — never echoing the (unbounded, possibly
+    sensitive) tool text it failed to find them in.
+    """
+    module = _mcp_client_module()
+    secret_error = "Traceback: leaked-token=abc123 at /home/whoever/.kube/config"
+
+    with pytest.raises(RuntimeError, match=r"CURRENT HEALTH.*CONTAINERS") as excinfo:
+        module._sections(secret_error, "CURRENT HEALTH", "CONTAINERS")
+
+    assert secret_error not in str(excinfo.value), (
+        "the failure must name the missing sections, not echo the tool output "
+        "it failed to find them in"
     )
 
 
