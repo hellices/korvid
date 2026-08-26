@@ -300,7 +300,9 @@ whole new one and never a half-written file. That is why the tape renders the
 candidate beside the published clip rather than into a scratch directory, and
 why the wrapper resolves both parents physically and refuses the run before
 VHS starts if they differ: any override of `KORVID_MCP_CANDIDATE` or
-`KORVID_MCP_FINAL` has to preserve that invariant. Promotion happens only
+`KORVID_MCP_FINAL` has to preserve that invariant. The two paths must also name
+different files; cleanup never unlinks a candidate that aliases the approved
+final. Promotion happens only
 when VHS returned 0, the failure file is **absent**, the success file is
 **present**, and the candidate exists.
 Failure outranks success, as defence in depth: the client publishes its

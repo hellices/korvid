@@ -959,7 +959,9 @@ the boundary against a fake VHS in a temporary directory. Because the single
 `mv` is only atomic inside one directory, the candidate and the published clip
 must resolve to the same physical parent: the wrapper checks that before it
 starts VHS, so every override — the contracts' included — has to preserve the
-invariant. `KORVID_MCP_TAPE_SHA256` is narrower: the wrapper accepts it only
+invariant. They must resolve to different files, and cleanup skips candidate
+removal if an alias is detected so a rejection cannot delete the approved
+final. `KORVID_MCP_TAPE_SHA256` is narrower: the wrapper accepts it only
 with `KORVID_MCP_TEST_MODE=1`, and that mode refuses a final path whose physical
 parent is inside the copied wrapper's own repository root. Contract digests can
 therefore exercise the boundary but cannot publish repository files.

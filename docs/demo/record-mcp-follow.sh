@@ -78,11 +78,32 @@ session=korvid-mcp-demo
 # VHS types shell into a pane), and a contract compares the two.
 socket=${KORVID_MCP_TMUX_SOCKET:-.korvid-mcp-demo.tmux.sock}
 
+# Cleanup must know whether the candidate is another spelling of the approved
+# final before the EXIT trap can run. Direct equality covers missing parents;
+# physical parent comparison also catches a directory reached through a symlink.
+candidate_aliases_final=0
+if [ "$candidate" = "$final" ]; then
+  candidate_aliases_final=1
+else
+  alias_candidate_parent=$(cd -P -- "$(dirname -- "$candidate")" >/dev/null 2>&1 && pwd -P) ||
+    alias_candidate_parent=""
+  alias_final_parent=$(cd -P -- "$(dirname -- "$final")" >/dev/null 2>&1 && pwd -P) ||
+    alias_final_parent=""
+  if [ -n "$alias_candidate_parent" ] &&
+    [ "$alias_candidate_parent" = "$alias_final_parent" ] &&
+    [ "$(basename -- "$candidate")" = "$(basename -- "$final")" ]; then
+    candidate_aliases_final=1
+  fi
+fi
+
 # Scratch, never artefacts: the candidate is an unreviewed render, and the
 # four markers are one run's signals, which must never decide the next one.
 # Each is named literally — a glob here could reach a file no recording made.
 clean_scratch() {
-  rm -f -- "$candidate" "$ok_marker" "$failed_marker" "$ready_marker" "$go_marker"
+  if [ "$candidate_aliases_final" -eq 0 ]; then
+    rm -f -- "$candidate"
+  fi
+  rm -f -- "$ok_marker" "$failed_marker" "$ready_marker" "$go_marker"
 }
 
 # Only this recording's own server, and only through its own socket. Every
@@ -110,6 +131,9 @@ fail() {
   printf 'record-mcp-follow.sh: %s is unchanged\n' "$final" >&2
   exit 1
 }
+
+[ "$candidate_aliases_final" -eq 0 ] ||
+  fail "the candidate and published clip must be different files"
 
 case "$test_mode" in
 0 | 1) ;;

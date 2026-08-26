@@ -4940,6 +4940,8 @@ def _run_recorder(
     unreadable_tape: bool = False,
     candidate_dir: str = "scenes",
     final_dir: str = "scenes",
+    candidate_is_final: bool = False,
+    candidate_uses_final_name: bool = False,
     scenes_alias: str | None = None,
     path_entries: Sequence[Path] | None = None,
 ) -> _RecorderRun:
@@ -4989,6 +4991,10 @@ def _run_recorder(
             checkout, so a directory that does not exist yet is a valid case.
         final_dir: The `workdir`-relative directory the published clip lives
             in. Only `published` creates it: the wrapper may not.
+        candidate_is_final: Point the candidate override at the approved final
+            path to exercise alias rejection.
+        candidate_uses_final_name: Give a separately spelled candidate the
+            final basename, allowing a symlinked parent to alias the final.
         scenes_alias: A symbolic link to create beside `scenes`, pointing at
             it, so a directory can be named by two spellings that resolve to
             one physical place.
@@ -5001,8 +5007,11 @@ def _run_recorder(
     scenes.mkdir(parents=True)
     if scenes_alias is not None:
         (workdir / scenes_alias).symlink_to(scenes, target_is_directory=True)
-    candidate = workdir / candidate_dir / Path(MCP_CANDIDATE_CLIP).name
     final = workdir / final_dir / Path(MCP_FINAL_CLIP).name
+    candidate_name = (
+        Path(MCP_FINAL_CLIP).name if candidate_uses_final_name else Path(MCP_CANDIDATE_CLIP).name
+    )
+    candidate = final if candidate_is_final else workdir / candidate_dir / candidate_name
     if published is not None:
         final.parent.mkdir(parents=True, exist_ok=True)
         final.write_bytes(published)
@@ -5874,6 +5883,36 @@ def test_mcp_recorder_refuses_a_digest_override_outside_test_mode(tmp_path: Path
     assert not run.vhs_ran, "an environment digest may not bypass the reviewed production pin"
     assert run.published == MCP_PUBLISHED_BYTES
     assert MCP_RECORDER_REJECTION in run.output
+
+
+def test_mcp_recorder_never_cleans_the_approved_clip_as_candidate_scratch(
+    tmp_path: Path,
+) -> None:
+    run = _run_recorder(tmp_path / "candidate-is-final", candidate_is_final=True)
+
+    assert run.status != 0
+    assert not run.vhs_ran
+    assert run.published == MCP_PUBLISHED_BYTES
+    assert MCP_RECORDER_REJECTION in run.output
+    assert "candidate and published clip must be different files" in run.output
+
+
+def test_mcp_recorder_detects_a_candidate_alias_through_a_symlinked_parent(
+    tmp_path: Path,
+) -> None:
+    run = _run_recorder(
+        tmp_path / "candidate-aliases-final",
+        candidate_dir="scenes-alias",
+        final_dir="scenes",
+        candidate_uses_final_name=True,
+        scenes_alias="scenes-alias",
+    )
+
+    assert run.status != 0
+    assert not run.vhs_ran
+    assert run.published == MCP_PUBLISHED_BYTES
+    assert MCP_RECORDER_REJECTION in run.output
+    assert "candidate and published clip must be different files" in run.output
 
 
 @pytest.mark.parametrize("media_dir", ["docs/assets/scenes", "docs/assets"])
