@@ -88,6 +88,19 @@ The capture's selected row is whatever the demo table happens to have
 highlighted; the answer is grounded in the two tool reads above, not in that
 selection, and no surface may present the row as its evidence.
 
+The panel header in these frames reads `⚡ korvid-demo · ~↑… ↓… tok`, and both
+halves are korvid's own rendering rather than anything an external provider
+said. `korvid-demo` is the synthetic label `docs/demo/demo.py` passes as
+`agent_model_name` for this scene — no provider is named, because none takes
+part. The counters are korvid's own estimate of the characters it sent and
+received, which is exactly what the leading `~` marks: `DemoAgentProvider`
+reports no usage, so the runtime fills the totals in itself. Neither figure is
+billing or token-spend metadata, and no surface may read them as cost or as
+evidence about a live provider. That is why the landing-video design's privacy
+criterion bans real provider identity and spend metadata rather than banning
+korvid's own chrome, which cannot be covered without misrepresenting the
+product.
+
 The describe pane filling the left of the frame is `agent.follow`: the
 shipped `AgentUiController` mirrors each successful read through the same
 `UIBridge` mapping MCP follow uses, so the pane is a reflection of

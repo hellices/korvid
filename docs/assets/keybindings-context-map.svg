@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 820" role="img" aria-labelledby="keymap-title keymap-desc">
   <title id="keymap-title">Korvid keys change with operational context</title>
-  <desc id="keymap-desc">Global navigation leads to table inspection, which branches to logs and to guarded write actions. The help overlay always shows the effective keys.</desc>
+  <desc id="keymap-desc">Global navigation leads to table inspection, which branches to logs and to guarded write actions. The same slash key filters a table and searches an open log pane, so it is drawn in both rather than as a global key. The help overlay always shows the effective keys.</desc>
   <!--
     Loaded through an <img> tag (see docs/keybindings.md), which renders this
     as a standalone document. Host-page CSS variables do not cascade in, so
@@ -45,7 +45,10 @@
   <line class="keymap-arrow" x1="212" y1="364" x2="212" y2="400" marker-end="url(#keymap-arrowhead)" />
   <path class="keymap-arrow" d="M400,288 H432 V672 H408" marker-end="url(#keymap-arrowhead)" />
 
-  <!-- GLOBAL context -->
+  <!-- GLOBAL context: only keys that mean the same thing in every view.
+       `/` is not one of them — `KorvidApp.action_open_filter` asks the view
+       first (describe search, log search, otherwise the table's filter
+       bar), so its chip is drawn in the contexts that answer it. -->
   <g>
     <rect class="keymap-box" x="24" y="24" width="376" height="144" rx="10" />
     <text class="keymap-heading" x="48" y="70">GLOBAL</text>
@@ -54,9 +57,7 @@
     <rect class="keymap-chip" x="102" y="92" width="44" height="44" rx="6" />
     <text class="keymap-chip-text" x="124" y="115" text-anchor="middle">?</text>
     <rect class="keymap-chip" x="156" y="92" width="44" height="44" rx="6" />
-    <text class="keymap-chip-text" x="178" y="115" text-anchor="middle">/</text>
-    <rect class="keymap-chip" x="210" y="92" width="44" height="44" rx="6" />
-    <text class="keymap-chip-text" x="232" y="115" text-anchor="middle">0</text>
+    <text class="keymap-chip-text" x="178" y="115" text-anchor="middle">0</text>
   </g>
 
   <!-- TABLE context -->
@@ -71,6 +72,8 @@
     <text class="keymap-chip-text" x="226" y="307" text-anchor="middle">g</text>
     <rect class="keymap-chip" x="258" y="284" width="44" height="44" rx="6" />
     <text class="keymap-chip-text" x="280" y="307" text-anchor="middle">l</text>
+    <rect class="keymap-chip" x="312" y="284" width="44" height="44" rx="6" />
+    <text class="keymap-chip-text" x="334" y="307" text-anchor="middle">/</text>
   </g>
 
   <!-- LOGS context -->

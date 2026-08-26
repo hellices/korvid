@@ -368,7 +368,11 @@ EXTRA: dict[str, list[Summary]] = {
             name="payment-config",
             namespace="shop",
             kind="ConfigMap",
-            created="",
+            # Relative like every other row: this ConfigMap is listed by
+            # `list_objects` and by `list_relationship_objects`, so an empty
+            # timestamp would render korvid's "-" placeholder in one AGE cell
+            # while its neighbours show real ages.
+            created=_ago(hours=12),
             uid="cm-payment",
         )
     ],
@@ -768,7 +772,7 @@ class _UIBridgeProxy(UIBridge):
     interleave.
     """
 
-    _NOT_READY = "ERROR: UI not ready"
+    _NOT_READY = f"{ERROR_PREFIX} UI not ready"
 
     def __init__(self) -> None:
         self.target: UIBridge | None = None
@@ -910,6 +914,14 @@ async def run_mcp_demo(
     quietly publishing readiness — the tape's bounded wait then expires and
     the recording fails loudly rather than capturing a connection error.
 
+    That return value is not the only way `start()` ends: a cancellation
+    during the bind, or a failure creating the server task, propagates as an
+    exception with part of the server possibly already holding the port. So
+    the start happens *inside* the cleanup block — whichever way it ends, the
+    readiness file is cleared and the controller is stopped, instead of
+    leaving port 7878 occupied until the process exits and failing the next
+    take for a reason that has nothing to do with that take.
+
     `controller.running` alone is not a safe gate: it means "the server task
     is alive", and a task can stay alive for a moment after a start timeout
     the controller failed to reap within its own deadline, while `start()`
@@ -927,8 +939,8 @@ async def run_mcp_demo(
         RuntimeError: The MCP server did not bind.
     """
     clear_mcp_ready(ready_file)
-    status = await controller.start()
     try:
+        status = await controller.start()
         if status.startswith(ERROR_PREFIX) or not controller.running:
             raise RuntimeError(f"the mcp scene needs a bound MCP server; start reported: {status}")
         app.on_mcp_ready = lambda: signal_mcp_ready(ready_file)

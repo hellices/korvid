@@ -387,6 +387,53 @@ def test_keybindings_context_map_is_stacked_for_a_legible_mobile_render() -> Non
     )
 
 
+def _keymap_contexts() -> dict[str, list[tuple[float, float, str]]]:
+    """Each context box's chips, keyed by the box's heading.
+
+    Returns:
+        A mapping from context heading (`GLOBAL`, `TABLE`, ...) to that
+        group's chip labels, each paired with the x extent of the chip
+        rectangle drawn for it. The map is read group by group rather than
+        as one flat set of `<text>` nodes, because *which* box a key sits
+        in is the whole claim the picture makes: a key drawn under GLOBAL
+        says it works everywhere.
+    """
+    svg = "{http://www.w3.org/2000/svg}"
+    root = ET.parse(DOCS / "assets" / "keybindings-context-map.svg").getroot()
+    contexts: dict[str, list[tuple[float, float, str]]] = {}
+    for group in root.iter(f"{svg}g"):
+        heading = next(
+            (
+                (node.text or "").strip()
+                for node in group.iter(f"{svg}text")
+                if "keymap-heading" in (node.get("class") or "")
+            ),
+            None,
+        )
+        if heading is None:
+            continue
+        rects = [
+            rect
+            for rect in group.iter(f"{svg}rect")
+            if "keymap-chip" in (rect.get("class") or "").split()
+        ]
+        labels = [
+            (node.text or "").strip()
+            for node in group.iter(f"{svg}text")
+            if "keymap-chip-text" in (node.get("class") or "")
+        ]
+        assert len(rects) == len(labels), f"{heading} draws {len(rects)} chips for {len(labels)}"
+        contexts[heading] = [
+            (
+                float(rect.get("x") or 0),
+                float(rect.get("x") or 0) + float(rect.get("width") or 0),
+                label,
+            )
+            for rect, label in zip(rects, labels, strict=True)
+        ]
+    return contexts
+
+
 def test_keybindings_context_map_keeps_its_accessible_name_and_every_label() -> None:
     source = _keymap_source()
     root = ET.parse(DOCS / "assets" / "keybindings-context-map.svg").getroot()
@@ -399,6 +446,82 @@ def test_keybindings_context_map_keeps_its_accessible_name_and_every_label() -> 
         assert key in texts, f"keymap lost the {key!r} key chip"
     assert '<title id="keymap-title">' in source
     assert '<desc id="keymap-desc">' in source
+
+
+def test_keybindings_context_map_draws_slash_in_the_contexts_that_answer_it() -> None:
+    """Round-9 review: `/` was drawn in GLOBAL, which is not what it does.
+
+    `KorvidApp` binds `slash` to `open_filter`, and that action asks the
+    *view*: an open describe or log pane takes it as a search, otherwise it
+    opens the table's filter bar. The map's boxes are its claim about
+    scope, so a `/` chip under GLOBAL tells a reader the key means one
+    thing everywhere — which is precisely the confusion the contextual
+    map exists to remove. It belongs in the two boxes that answer it.
+    """
+    contexts = _keymap_contexts()
+    assert set(contexts) == {"GLOBAL", "TABLE", "LOGS", "WRITE"}
+    keys = {name: [label for _, _, label in chips] for name, chips in contexts.items()}
+
+    assert keys["GLOBAL"] == [":", "?", "0"], (
+        f"GLOBAL may only hold keys that act in every view; found {keys['GLOBAL']}"
+    )
+    assert "/" in keys["TABLE"], "the table's filter is what `/` opens when no pane is up"
+    assert "/" in keys["LOGS"], "the log pane's inline search must keep its `/`"
+    assert keys["TABLE"] == ["Enter", "d", "g", "l", "/"]
+    assert keys["LOGS"] == ["/", "f", "w", "p"]
+    assert keys["WRITE"] == ["r", "S", "Ctrl-D"]
+
+    desc = ET.parse(DOCS / "assets" / "keybindings-context-map.svg").getroot()
+    described_node = desc.find("{http://www.w3.org/2000/svg}desc")
+    assert described_node is not None
+    assert described_node.text
+    described = " ".join(described_node.text.split()).lower()
+    reason = (
+        "the accessible description is all a screen-reader visitor gets; it must carry the "
+        "same contextual claim the boxes make"
+    )
+    assert "filter" in described, reason
+    assert "search" in described, reason
+
+
+def test_keybindings_context_map_chips_stay_inside_their_box_and_never_overlap() -> None:
+    """A chip added past the box edge is invisible, not merely misaligned.
+
+    The picture is a fixed-size SVG scaled into the content column, so a
+    chip that runs past its context box or lands on its neighbour is a
+    silent rendering defect no assertion on labels alone would catch.
+    """
+    svg = "{http://www.w3.org/2000/svg}"
+    root = ET.parse(DOCS / "assets" / "keybindings-context-map.svg").getroot()
+    boxes = {}
+    for group in root.iter(f"{svg}g"):
+        heading = next(
+            (
+                (node.text or "").strip()
+                for node in group.iter(f"{svg}text")
+                if "keymap-heading" in (node.get("class") or "")
+            ),
+            None,
+        )
+        box = next(
+            (
+                rect
+                for rect in group.iter(f"{svg}rect")
+                if "keymap-box" in (rect.get("class") or "").split()
+            ),
+            None,
+        )
+        if heading is not None and box is not None:
+            left = float(box.get("x") or 0)
+            boxes[heading] = (left, left + float(box.get("width") or 0))
+
+    for name, chips in _keymap_contexts().items():
+        left, right = boxes[name]
+        previous_end = left
+        for start, end, label in chips:
+            assert start >= previous_end, f"{name}'s {label!r} chip overlaps the one before it"
+            assert end <= right, f"{name}'s {label!r} chip runs past the box edge at {right}"
+            previous_end = end
 
 
 def test_keybindings_page_declares_the_maps_intrinsic_geometry() -> None:

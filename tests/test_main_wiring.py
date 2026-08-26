@@ -21,6 +21,7 @@ from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import LLMProvider
 from korvid.agent.setup import AgentSettings
 from korvid.tools.executor import UIBridge
+from korvid.tools.structured import ERROR_PREFIX
 from tests.fixtures.provider_plugin.site_helpers import (
     FIXTURES_DIR,
     build_dist_info,
@@ -156,6 +157,29 @@ async def test_proxy_without_target_returns_error() -> None:
     assert (await proxy.agent_open_describe("pods", "p")).startswith("ERROR:")
     assert (await proxy.agent_drill_down("web")).startswith("ERROR:")
     assert (await proxy.agent_request_write("delete", "pods", "web-1")).startswith("ERROR:")
+
+
+async def test_proxy_not_ready_line_is_composed_from_the_shared_error_prefix() -> None:
+    """The degraded answer must stay an error line by construction.
+
+    Every consumer of a UI tool result — the agent loop and any external
+    MCP host — decides "this failed" by testing
+    `korvid.tools.structured.ERROR_PREFIX`. Spelling the prefix out again
+    here would let a change to that constant silently demote this answer
+    to an ordinary text result, so the host would read "UI not ready" as
+    the outcome of the operation it asked for.
+    """
+    from korvid.__main__ import _UIBridgeProxy
+
+    assert f"{ERROR_PREFIX} UI not ready" == _UIBridgeProxy._NOT_READY
+
+    source = (Path(korvid.__file__).parent / "__main__.py").read_text(encoding="utf-8")
+    assert '_NOT_READY = f"{ERROR_PREFIX} UI not ready"' in source, (
+        "the proxy must compose its not-ready line from the shared constant"
+    )
+    assert '"ERROR: UI not ready"' not in source, (
+        "a hardcoded prefix drifts silently from korvid.tools.structured.ERROR_PREFIX"
+    )
 
 
 async def test_proxy_forwards_to_target() -> None:

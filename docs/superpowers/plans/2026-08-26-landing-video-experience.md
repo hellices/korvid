@@ -19,7 +19,7 @@
 - Agent tool results and citation identifiers must come from the real runtime, executor, and evidence ledger.
 - MCP capture duration is 12–15 seconds and uses real read-only Streamable HTTP MCP requests plus real follow navigation.
 - MCP logs remain visible for at least two seconds before the Helm releases view.
-- No real cluster identifier, credential, user path, branch, model name, token count, or unrelated client chrome may appear.
+- No real cluster identifier, credential, user path, branch, external provider identity, billing or token-spend metadata, or unrelated client chrome may appear. Korvid's own panel header stays: the synthetic `korvid-demo` label and the estimated `tok` counters are product rendering, not live-provider or cost evidence.
 - Visitor-facing media remains local MP4 with local PNG posters, 1280-pixel width, and square pixels.
 - Existing media URLs remain stable.
 - Use `uv run --frozen` for every Python command; never re-lock or modify `uv.lock`.

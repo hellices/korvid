@@ -85,6 +85,21 @@ Landing and Agent-guide copy describe this as a deterministic synthetic-cluster
 walkthrough. They must not present it as proof of live-model quality or a live
 cluster investigation.
 
+### On-screen chrome and privacy
+
+The Agent frame is korvid's own terminal, so korvid's own chrome stays in it.
+The panel header reads `⚡ korvid-demo · ~↑… ↓… tok`: `korvid-demo` is the
+synthetic label the capture harness passes as `agent_model_name`, and the
+counters are korvid's local character estimate, which is what the leading `~`
+marks — the deterministic provider reports no usage for korvid to display.
+Neither identifies an external provider nor states a bill, and covering a
+product's own header would misrepresent the product.
+
+What must not appear anywhere in the frame is evidence about someone real: a
+real or external provider identity, billing or token-spend metadata, a
+credential, a user path or branch, a real cluster or context name, or
+unrelated client chrome.
+
 ## MCP story
 
 ### Visitor-visible sequence
@@ -107,9 +122,11 @@ transitions must not be synthesized, reordered, or globally accelerated.
 ### Framing and privacy
 
 The external client region includes only the prompt, relevant tool activity,
-and final summary. Model names, token counts, repository paths, branches,
-startup inventories, credentials, and unrelated editor chrome remain outside
-the frame rather than being covered after capture.
+and final summary. That region's model name, token spend, repository paths,
+branches, startup inventories, credentials, and unrelated editor chrome stay
+outside the frame rather than being covered after capture: they identify a
+real external provider, a real bill, and a real working tree. Korvid's own
+region keeps its product chrome under the Agent story's rule above.
 
 The synthetic logs contain no credential-like values or real identifiers. The
 clip includes no mutation or approval dialog.
@@ -155,7 +172,9 @@ The work is complete when:
 5. the MCP clip visibly holds the log view before reaching Helm releases and
    the final summary;
 6. both clips remain truthful about their evidence and execution boundaries;
-7. no real cluster, credential, user path, branch, model name, or token count is
-   present;
+7. no real cluster, credential, user path, branch, external provider identity,
+   or billing and token-spend metadata is present — the Agent clip's synthetic
+   `korvid-demo` label and korvid's own estimated `tok` counters are product
+   rendering, not live-provider or cost evidence;
 8. focused tests and local browser playback pass without running the full
    quality gate.

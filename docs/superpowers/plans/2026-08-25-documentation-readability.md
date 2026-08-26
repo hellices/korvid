@@ -205,12 +205,17 @@ Create an SVG with `viewBox="0 0 1200 520"`, `role="img"`, `aria-labelledby="key
 ```xml
 <title id="keymap-title">Korvid keys change with operational context</title>
 <desc id="keymap-desc">Global navigation leads to table inspection, logs, and guarded write actions. The help overlay always shows the effective keys.</desc>
-<text>GLOBAL</text><text>:</text><text>?</text><text>/</text><text>0</text>
-<text>TABLE</text><text>Enter</text><text>d</text><text>g</text><text>l</text>
+<text>GLOBAL</text><text>:</text><text>?</text><text>0</text>
+<text>TABLE</text><text>Enter</text><text>d</text><text>g</text><text>l</text><text>/</text>
 <text>LOGS</text><text>/</text><text>f</text><text>w</text><text>p</text>
 <text>WRITE</text><text>r</text><text>S</text><text>Ctrl-D</text>
 <text>Fresh approval keystroke</text>
 ```
+
+`/` is contextual, not global: `KorvidApp.action_open_filter` asks the view
+first, so the chip is drawn in TABLE (filter bar) and LOGS (inline search)
+rather than in GLOBAL. The shipped map's `desc` says so too, so a
+screen-reader visitor gets the same correction the picture does.
 
 Use the existing charcoal, amber, ink, and border colors already declared as CSS variables; do not embed fonts, scripts, raster data, or external URLs.
 

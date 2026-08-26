@@ -15,6 +15,7 @@ import sys
 import tomllib
 import zlib
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import NamedTuple
@@ -25,6 +26,8 @@ from korvid.agent.events import AgentEvent, TextDelta, ToolCallStarted, TurnComp
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.relationships import GraphResource, SummaryLike
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.models import format_age
+from korvid.tools.structured import ERROR_PREFIX
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader, graph_source_metas
 
 ROOT = Path(__file__).parent.parent
@@ -40,6 +43,14 @@ MCP_PAGE = DOCS / "mcp.md"
 DEMO_HARNESS = DEMO_DIR / "demo.py"
 VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
 LANDING_VIDEO_PLAN = DOCS / "superpowers" / "plans" / "2026-08-26-landing-video-experience.md"
+LANDING_VIDEO_DESIGN = (
+    DOCS / "superpowers" / "specs" / "2026-08-26-landing-video-experience-design.md"
+)
+AGENT_STORY = DEMO_DIR / "agent_story.py"
+AGENT_PANEL = ROOT / "src" / "korvid" / "ui" / "widgets" / "agent_panel.py"
+#: The synthetic label the harness hands `KorvidApp` for the Agent scene, and
+#: therefore the label the shipped frame renders in the panel header.
+DEMO_MODEL_LABEL = "korvid-demo"
 _MARKDOWN_FENCE = re.compile(
     r"^(?P<fence>`{3,}|~{3,}).*?^(?P=fence)",
     re.DOTALL | re.MULTILINE,
@@ -1799,6 +1810,126 @@ def test_mcp_scene_fails_closed_when_start_errors_despite_a_zombie_running_task(
     ], f"cleanup must still stop a controller left running after a failed start; got {log}"
 
 
+class _ExplodingStartController(MCPControllerBase):
+    """A controller whose `start()` raises instead of returning a status line.
+
+    `MCPController.start` reports the failures it catches itself by
+    returning an `ERROR:` line, but that is not the only way it ends. A
+    cancellation while binding, or a failure creating the server task,
+    leaves the exception in place — and by then part of the server may
+    already hold the port. If `start()` is called outside the cleanup
+    block, that partially started server survives until the process exits
+    and the next take fails to bind.
+    """
+
+    def __init__(self, log: list[str], ready: Path) -> None:
+        self._log = log
+        self._ready = ready
+
+    @property
+    def running(self) -> bool:
+        return False
+
+    def status(self) -> str:
+        return "MCP off"
+
+    async def start(self) -> str:
+        self._log.append(f"bind ready={self._ready.exists()}")
+        raise RuntimeError("cancelled while binding the MCP server")
+
+    async def stop(self) -> str:
+        self._log.append(f"stop ready={self._ready.exists()}")
+        return "MCP off"
+
+    async def shutdown(self) -> asyncio.Task[None] | None:
+        return None
+
+
+def test_mcp_scene_stops_a_controller_whose_start_raised(tmp_path: Path) -> None:
+    """A raising `start()` must still reach the cleanup that stops the server.
+
+    `start()` announces the failures it catches by returning an `ERROR:`
+    line, so the readiness gate reads that line. It is not the only exit:
+    cancellation during the bind, or a failure creating the internal task,
+    propagates as an exception. Started outside the `try`, that exception
+    skips the cleanup entirely — nothing calls `stop()`, a half-started
+    server can keep port 7878 for the life of the process, and the next
+    take of the recording fails to bind for a reason that has nothing to do
+    with the take.
+    """
+    harness = _demo_harness()
+    ready = tmp_path / MCP_READY_FILE
+    ready.write_text("stale run", encoding="utf-8")
+    log: list[str] = []
+    controller = _ExplodingStartController(log, ready)
+    app = _MountRecordingApp(log, ready)
+
+    with pytest.raises(RuntimeError, match="binding the MCP server"):
+        asyncio.run(harness.run_mcp_demo(app, controller, ready_file=ready))
+
+    assert log == [
+        "bind ready=False",
+        "stop ready=False",
+    ], f"a raising start must still be stopped during cleanup; got {log}"
+    assert app.on_mcp_ready is None, "the mount hook must never be armed after a raising start"
+    assert not ready.exists(), "a failed start must leave no readiness file behind"
+
+
+def test_demo_ui_bridge_proxy_composes_not_ready_from_the_shared_error_prefix() -> None:
+    """The harness's degraded answer must be the product's error contract.
+
+    `run_mcp_demo` already judges the controller's status with the imported
+    `ERROR_PREFIX`, so the same module stating the same contract as a
+    literal is drift waiting to happen: if the product's prefix changed,
+    this return value alone would stop being an error line and the external
+    MCP host would read "UI not ready" as an ordinary text answer.
+    """
+    harness = _demo_harness()
+    proxy = harness._UIBridgeProxy()
+
+    assert f"{ERROR_PREFIX} UI not ready" == proxy._NOT_READY
+    assert asyncio.run(proxy.agent_navigate("pods")).startswith(ERROR_PREFIX)
+
+    source = DEMO_HARNESS.read_text(encoding="utf-8")
+    assert '_NOT_READY = f"{ERROR_PREFIX} UI not ready"' in source, (
+        "the harness must compose its not-ready line from the imported constant"
+    )
+    assert '"ERROR: UI not ready"' not in source, (
+        "a hardcoded prefix drifts silently from korvid.tools.structured.ERROR_PREFIX"
+    )
+
+
+def test_every_demo_fixture_row_carries_a_relative_creation_timestamp() -> None:
+    """Each row the capture can show must render an AGE, and a relative one.
+
+    The fixture's ages are relative on purpose: a capture made today and
+    one made a year later must render identically, and no frame may carry
+    a calendar date. An empty `created` breaks both halves of that — the
+    row renders korvid's "-" placeholder while every neighbour renders a
+    real age, so the one blank cell reads as missing data in the frame and
+    in any external host's `list_resources` answer.
+    """
+    harness = _demo_harness()
+    rows = [*harness.PODS, *(row for group in harness.EXTRA.values() for row in group)]
+    assert len(rows) > 10, "the fixture should still hold every scene's rows"
+
+    for row in rows:
+        created = getattr(row, "created", "")
+        assert created, f"{row.kind} {row.namespace}/{row.name} ships without a creation timestamp"
+        moment = datetime.fromisoformat(created)
+        assert moment.tzinfo is not None, f"{row.name}'s timestamp must carry its UTC offset"
+        assert format_age(created) != "-", (
+            f"{row.kind} {row.namespace}/{row.name} renders an empty AGE column"
+        )
+
+    configmap = harness.EXTRA["configmaps"][0]
+    age = datetime.now(UTC) - datetime.fromisoformat(configmap.created)
+    assert timedelta(hours=11) < age < timedelta(hours=13), (
+        f"the ConfigMap must sit at the documented ~12h offset; it is {age} old"
+    )
+    assert format_age(configmap.created) == "12h"
+
+
 async def test_mcp_scene_signals_readiness_from_the_real_textual_mount() -> None:
     """Reading the hook proves its shape; mounting the app proves it fires.
 
@@ -2552,6 +2683,108 @@ def test_agent_capture_provenance_states_what_the_grounded_turn_proves() -> None
     assert "deterministic synthetic-cluster walkthrough" in lowered, (
         "the provenance page must give the embedding surfaces the label they use"
     )
+
+
+def test_landing_video_privacy_rule_bans_provider_and_spend_evidence_not_korvids_own_chrome() -> (
+    None
+):
+    """Round-9 review: criterion 7 banned what the shipped Agent frame renders.
+
+    The Agent scene is korvid's own UI, and its panel header always carries
+    the model label the app was given plus `↑… ↓… tok`. The harness gives
+    it the synthetic label `korvid-demo`, and korvid estimates the counters
+    itself because the offline demo provider reports no usage — so a
+    criterion that forbade *any* model name or token count could only be
+    satisfied by not shipping the Agent capture at all.
+
+    The rule the privacy criterion is actually for is real external
+    identity and spend: whose provider, whose bill, whose checkout, whose
+    cluster. This pins the scoped rule in the design and in the plan that
+    tracks it, so the next edit cannot quietly widen it back into a
+    contradiction.
+    """
+    design = LANDING_VIDEO_DESIGN.read_text(encoding="utf-8")
+    criteria = design.split("## Acceptance criteria", 1)[1]
+    plan = LANDING_VIDEO_PLAN.read_text(encoding="utf-8")
+
+    for label, text in (("the design's criteria", criteria), ("the landing-video plan", plan)):
+        flat = " ".join(text.split()).lower()
+        for banned in ("model name, or token count", "model name, token count"):
+            assert banned not in flat, (
+                f"{label} still bans what korvid's own panel renders ({banned!r}); the "
+                "shipped Agent frame cannot satisfy it"
+            )
+        for required in ("provider identity", "token-spend", "credential", "real cluster"):
+            assert required in flat, f"{label} must still forbid {required!r}"
+        assert DEMO_MODEL_LABEL in flat, (
+            f"{label} must name the synthetic demo label it allows, so the allowance is "
+            "documented rather than assumed"
+        )
+        assert "product rendering" in flat, (
+            f"{label} must say the label and counters are product rendering, not evidence"
+        )
+        assert re.search(r"not (?:live-provider|an external provider|cost)", flat), (
+            f"{label} must say what the allowed chrome is *not*: live-provider or cost evidence"
+        )
+
+    boundary = design.split("### Execution boundary", 1)[1].split("\n## ", 1)[0]
+    lowered_boundary = " ".join(boundary.split()).lower()
+    chrome_reason = "the Agent story's own boundary must state which chrome the frame keeps"
+    assert DEMO_MODEL_LABEL in lowered_boundary, chrome_reason
+    assert "tok" in lowered_boundary, chrome_reason
+
+    mcp_story = design.split("## MCP story", 1)[1]
+    mcp_framing = mcp_story.split("### Framing and privacy", 1)[1].split("\n## ", 1)[0]
+    lowered_framing = " ".join(mcp_framing.split()).lower()
+    assert "region" in lowered_framing, (
+        "the client-side ban must be scoped to the external client region; the frame also "
+        "contains korvid's own panel"
+    )
+
+
+def test_agent_provenance_explains_the_panel_headers_label_and_estimated_counters() -> None:
+    """The frame's header must be sourced, not left to look like provider data.
+
+    `⚡ korvid-demo · ~↑… ↓… tok` is the one part of the Agent frame that
+    could be mistaken for evidence about an external provider or a bill.
+    Both halves are korvid's: the label is the harness's synthetic
+    `agent_model_name`, and the counters are korvid's own character
+    estimate, which is what the leading `~` marks — `DemoAgentProvider`
+    emits no usage event at all. The page has to say so, and the two
+    structural facts behind the sentence are asserted here so the prose
+    cannot outlive them.
+    """
+    harness = DEMO_HARNESS.read_text(encoding="utf-8")
+    story = AGENT_STORY.read_text(encoding="utf-8")
+    panel = AGENT_PANEL.read_text(encoding="utf-8")
+
+    assert f'agent_model_name="{DEMO_MODEL_LABEL}" if scene == "agent" else None' in harness, (
+        "the documented label must be the one the harness actually passes"
+    )
+    assert '"usage"' not in story, (
+        "the provenance says korvid estimates the counters; a demo provider that reported "
+        "usage would make that sentence false"
+    )
+    header_reason = "the provenance describes the shipped header format; the panel must render it"
+    assert "tok" in panel, header_reason
+    assert 'prefix = "~" if estimated else ""' in panel, header_reason
+
+    section = INSTRUCTIONS.read_text(encoding="utf-8").split("## Embedded agent", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    lowered = " ".join(section.split()).lower()
+
+    assert DEMO_MODEL_LABEL in lowered, "the section must name the label the header renders"
+    assert "agent_model_name" in lowered, "and where that label comes from"
+    assert "tok" in lowered, "the section must account for the token counters on screen"
+    assert "estimate" in lowered, "and say korvid computes them itself"
+    assert re.search(r"no (?:usage|provider usage)", lowered), (
+        "the section must say the demo provider reports no usage, which is why the counters "
+        "are estimated"
+    )
+    for denial in ("billing", "spend"):
+        assert denial in lowered, (
+            f"the section must refuse the cost reading explicitly; {denial!r} is missing"
+        )
 
 
 def test_agent_page_capture_states_the_grounded_walkthrough_beside_the_turn_flow() -> None:
