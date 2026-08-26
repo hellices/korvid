@@ -278,7 +278,7 @@ class EvalUiBridge(AgentUiBridge):
             return False, f"ERROR: pod {action.namespace}/{action.pod} not found", self._context
         if (
             resolved is not None
-            and action.container is not None
+            and action.container
             and action.container not in self._manifest_containers(resolved)
         ):
             return (

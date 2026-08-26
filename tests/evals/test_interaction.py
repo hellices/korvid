@@ -373,6 +373,24 @@ async def test_bridge_refuses_a_log_container_missing_from_the_pod() -> None:
     assert result.ok is False
 
 
+async def test_bridge_treats_an_empty_log_container_as_omitted() -> None:
+    bridge = EvalUiBridge(load_interaction(_minimal(), "fixture.yaml: interaction"))
+    bridge.bind_objects(
+        (
+            {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"namespace": "jobs", "name": "worker-1", "uid": "pod-1"},
+                "spec": {"containers": [{"name": "main"}]},
+            },
+        )
+    )
+
+    result = await bridge.apply(OpenLogs(pod="worker-1", namespace="jobs", container=""))
+
+    assert result.ok is True
+
+
 async def test_bridge_drill_uses_the_production_filter_semantics() -> None:
     source = _FULL | {
         "focused_pane": _FULL["focused_pane"] | {"kind": "deployments", "filter": "/api/"},
