@@ -12,7 +12,8 @@ publishes whatever the terminal showed, so the client never echoes the
 server's endpoint file, its own process, its working directory, the name of
 any assistant, a token count, or an unbounded tool result: it prints a fixed
 excerpt of each answer and holds long enough for the mirrored view to be
-read.
+read. An answer the SDK flags as an error is not an excerpt of korvid's
+work at all, so the run aborts on it rather than publishing it.
 """
 
 from __future__ import annotations
@@ -47,8 +48,26 @@ CLOSING_HOLD = 6.0
 LINE_WIDTH = 61
 
 
-def _text(result: Any) -> str:
-    """The text blocks of one `tools/call` answer, joined."""
+def _text(result: Any, call: str) -> str:
+    """The text blocks of one `tools/call` answer, joined.
+
+    Args:
+        result: The SDK's `CallToolResult` for `call`.
+        call: The tool name that was called, for the failure message.
+
+    Returns:
+        The answer's text blocks joined by newlines.
+
+    Raises:
+        RuntimeError: if the SDK flagged the answer as an error. A failed
+            `tools/call` still carries `content` — the server's error text
+            — so joining it would publish a failure as though it were
+            korvid's answer and let the run reach its closing card. The
+            message names `call` only; it never echoes the result, which
+            is unbounded and may hold sensitive cluster text.
+    """
+    if getattr(result, "is_error", False):
+        raise RuntimeError(f"MCP tool call failed: {call}")
     return "\n".join(
         str(getattr(item, "text", "")) for item in result.content if getattr(item, "text", "")
     )
@@ -118,11 +137,13 @@ async def main() -> None:
 
         _asking("list_resources", kind="pods", namespace=NAMESPACE)
         listed = await session.call_tool("list_resources", {"kind": "pods", "namespace": NAMESPACE})
-        await _answered(_tail(_text(listed)), 2.2)
+        await _answered(_tail(_text(listed, "list_resources")), 2.2)
 
         _asking("diagnose_pod", pod=POD, namespace=NAMESPACE)
         diagnosed = await session.call_tool("diagnose_pod", {"pod": POD, "namespace": NAMESPACE})
-        await _answered(_sections(_text(diagnosed), "CURRENT HEALTH", "CONTAINERS"), 3.2)
+        await _answered(
+            _sections(_text(diagnosed, "diagnose_pod"), "CURRENT HEALTH", "CONTAINERS"), 3.2
+        )
 
         _asking("get_logs", pod=POD, container="app", tail_lines=12)
         log_arguments: dict[str, Any] = {
@@ -132,11 +153,11 @@ async def main() -> None:
             "tail_lines": 12,
         }
         logged = await session.call_tool("get_logs", log_arguments)
-        await _answered(_tail(_text(logged)), 3.6)
+        await _answered(_tail(_text(logged, "get_logs")), 3.6)
 
         _asking("helm_list_releases", namespace=NAMESPACE)
         released = await session.call_tool("helm_list_releases", {"namespace": NAMESPACE})
-        await _answered(_tail(_text(released)), 2.4)
+        await _answered(_tail(_text(released, "helm_list_releases")), 2.4)
 
         print("\nread-only investigation complete —")
         print("korvid followed every answer onto the screen.")

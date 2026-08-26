@@ -630,3 +630,50 @@ def test_observability_token_validation_is_per_call_not_backend_disabling() -> N
     assert "tls verification cannot be disabled" in lowered, (
         "the TLS invariant must survive this edit"
     )
+
+
+def test_ops_approval_claim_matches_what_the_confirm_dialog_can_check() -> None:
+    """Round-3 review: the approval sentence must not outrun the code.
+
+    `ui/widgets/confirm_screen.py` compares each key event's `time` with
+    the moment the dialog was constructed and discards anything older —
+    input buffered while a pre-check ran can never answer a prompt the
+    user has not seen yet. That is the whole mechanism. The dialog cannot
+    tell a key repeat delivered *after* construction from a deliberate
+    press, and nothing in korvid inspects whether an event came from a
+    human or from OS-level input automation. Promising that approval is
+    "never satisfied by a stale answer, a held key, or an automated
+    replay" claimed all three checks; the page must instead state the
+    timestamp/buffer rule it actually implements, keep the fresh-keystroke
+    intent and the typed gates, and say plainly that no agent or MCP path
+    has an approval API.
+    """
+    section = " ".join(
+        _source("ops.md").split("\n## What approval proves\n", 1)[1].split("\n## ", 1)[0].split()
+    )
+    lowered = section.lower()
+
+    for absolute in ("stale answer", "held key", "automated replay"):
+        assert absolute not in lowered, (
+            f"{absolute!r} claims a classification ConfirmScreen never makes; "
+            "the page may only claim the construction-time comparison"
+        )
+
+    assert "fresh user keystroke" in lowered, "the fresh-approval intent must survive the rewrite"
+    assert "timestamp" in lowered, "the page must name the mechanism: an event-timestamp comparison"
+    assert re.search(r"buffered.{0,120}(discard|dropp|ignor)", lowered), (
+        "the page must say input buffered before the dialog existed is discarded"
+    )
+    assert re.search(r"(after|once).{0,80}dialog.{0,80}(construct|open|exist)", lowered) or (
+        re.search(r"dialog.{0,60}(was|is) (constructed|built|created)", lowered)
+    ), "approval must be described as a confirm key delivered after dialog construction"
+    assert re.search(r"(agent|mcp).{0,160}(no|never).{0,60}approval api", lowered) or re.search(
+        r"(no|neither).{0,80}approval api", lowered
+    ), "the page must keep saying no agent or MCP path can answer the dialog"
+    assert re.search(r"(key repeat|repeat|repeated key)", lowered), (
+        "the page must disclaim post-construction key-repeat classification"
+    )
+    assert re.search(r"(os-level|operating-system|input automation)", lowered), (
+        "the page must disclaim OS-level input automation detection"
+    )
+    assert "typed" in lowered, "the typed resource/context gates must stay described"

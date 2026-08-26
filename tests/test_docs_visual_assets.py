@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import math
 import os
@@ -11,7 +12,7 @@ import struct
 import subprocess
 import sys
 import zlib
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from pathlib import Path
 from types import ModuleType
 
@@ -2456,4 +2457,152 @@ def test_relationship_demo_graph_is_complete_with_both_directions_populated() ->
     assert expected <= observed, (
         "the capture must keep its promised ConfigMap dependency and Service "
         f"dependent; missing: {expected - observed}"
+    )
+
+
+class _FakeBlock:
+    """One text content block of a fake `tools/call` answer."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _FakeCallToolResult:
+    """The shape of the MCP SDK's `CallToolResult` this pane reads."""
+
+    def __init__(self, text: str, *, is_error: bool = False) -> None:
+        self.content = [_FakeBlock(text)]
+        self.is_error = is_error
+
+
+class _FakeSession:
+    """A `ClientSession` stand-in that answers the follow story's calls."""
+
+    def __init__(self, answers: dict[str, _FakeCallToolResult]) -> None:
+        self._answers = answers
+        self.calls: list[str] = []
+
+    async def __aenter__(self) -> _FakeSession:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+    async def initialize(self) -> None:
+        return None
+
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> _FakeCallToolResult:
+        self.calls.append(name)
+        return self._answers[name]
+
+
+def test_mcp_client_text_reads_a_successful_answer() -> None:
+    """The happy path is unchanged: text blocks joined, blanks dropped."""
+    module = _mcp_client_module()
+    result = _FakeCallToolResult("CURRENT HEALTH\n  status: CrashLoopBackOff")
+
+    assert module._text(result, "diagnose_pod") == "CURRENT HEALTH\n  status: CrashLoopBackOff"
+
+
+def test_mcp_client_text_fails_closed_when_the_sdk_flags_an_error() -> None:
+    """An `is_error` answer must abort the capture, not be printed as evidence.
+
+    The MCP SDK signals a failed `tools/call` with `CallToolResult.is_error`
+    and still fills `content` — with the server's error text. Joining that
+    content published a failure as though it were korvid's answer, and for
+    `list_resources`, `get_logs` and `helm_list_releases` (which print a
+    plain tail) the clip would have ended on "investigation complete"
+    regardless. The client must raise instead, naming the call it made and
+    never echoing the result content, which is unbounded and may hold
+    sensitive cluster text.
+    """
+    module = _mcp_client_module()
+    sentinel = "leaked-token=abc123 from /home/whoever/.kube/config"
+    result = _FakeCallToolResult(sentinel, is_error=True)
+
+    with pytest.raises(RuntimeError, match=r"helm_list_releases") as excinfo:
+        module._text(result, "helm_list_releases")
+
+    assert sentinel not in str(excinfo.value), (
+        "the failure must name the call, not echo the tool result it refused"
+    )
+
+
+def test_mcp_client_checks_the_error_flag_on_every_follow_story_answer() -> None:
+    """All four calls fail closed, not just the one with a section parser."""
+    client = MCP_CLIENT.read_text(encoding="utf-8")
+    for name in MCP_CLIENT_CALLS:
+        assert re.search(rf'_text\(\s*\w+,\s*"{name}"\s*\)', client), (
+            f"the {name} answer must be read through the error-checking helper"
+        )
+    assert not re.search(r"_text\(\s*\w+\s*\)", client), (
+        "no answer may be read without naming the call that produced it"
+    )
+
+
+def test_mcp_client_never_closes_the_story_on_a_failed_call(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failed first call ends the run before the closing card is printed."""
+    module = _mcp_client_module()
+    session = _FakeSession(
+        {"list_resources": _FakeCallToolResult("boom: forbidden", is_error=True)}
+    )
+
+    @contextlib.asynccontextmanager
+    async def _fake_transport(url: str) -> AsyncIterator[tuple[object, object]]:
+        assert url == module.URL
+        yield (object(), object())
+
+    monkeypatch.setattr(module, "streamable_http_client", _fake_transport)
+    monkeypatch.setattr(module, "ClientSession", lambda _read, _write: session)
+
+    with pytest.raises(RuntimeError, match=r"list_resources"):
+        asyncio.run(module.main())
+
+    printed = capsys.readouterr().out
+    assert "investigation complete" not in printed, (
+        "a failed call must never be followed by the success card"
+    )
+    assert "boom: forbidden" not in printed, "the failed result must not be published"
+    assert session.calls == ["list_resources"], "the story must stop at the failed call"
+
+
+def test_demo_manifest_covers_the_mcp_scenes_helm_releases() -> None:
+    """Round-3 review: `get_manifest` resolved relationship aliases only.
+
+    The `mcp` scene discovers through `MCP_ALIASES`, which is what makes
+    the Helm browser reachable when an external host calls
+    `helm_list_releases`. Describing a release then went through
+    `DemoReadOps.get_object` into `get_manifest`, which only knew
+    `RELATIONSHIP_ALIASES` and raised `KeyError` for `helmreleases` — a
+    hard failure mid-capture. The lookup must span both scenes' aliases
+    without reviving the unsafe unknown-kind fallback that used to answer
+    a Pod manifest for anything it did not recognise.
+    """
+    harness = _demo_harness()
+    for alias in ("helmreleases", "helmrelease", "helm"):
+        manifest = asyncio.run(harness.get_manifest(alias, "shop", "shop"))
+        assert manifest["kind"] == "HelmRelease"
+        assert manifest["apiVersion"] == "v1"
+        assert manifest["metadata"] == {"name": "shop", "namespace": "shop"}
+
+    with pytest.raises(KeyError, match="unknown demo kind"):
+        asyncio.run(harness.get_manifest("widgets", "shop", "whatever"))
+
+
+def test_demo_manifest_union_does_not_widen_either_scenes_discovery() -> None:
+    """Manifests span both scenes; discovery surfaces stay as they were."""
+    harness = _demo_harness()
+    for alias in ("helmreleases", "helmrelease", "helm"):
+        assert alias not in harness.RELATIONSHIP_ALIASES, (
+            "the relationship scene must not gain a Helm view from the manifest union"
+        )
+    for alias in ("configmaps", "configmap", "cm"):
+        assert alias not in harness.MCP_ALIASES, (
+            "the mcp scene must not gain the relationship scene's ConfigMap view"
+        )
+    assert harness.RELATIONSHIP_ALIASES["configmaps"].kind == "ConfigMap"
+    assert asyncio.run(harness.get_manifest("configmaps", "shop", "payment-config"))["kind"] == (
+        "ConfigMap"
     )

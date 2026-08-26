@@ -449,9 +449,19 @@ _MANIFESTS: dict[str, dict[str, Any]] = {
     "configmaps": CONFIGMAP_MANIFEST,
 }
 
+#: Every kind any scene can ask to describe. Discovery is per scene — the
+#: relationship scene browses `RELATIONSHIP_ALIASES`, the `mcp` scene
+#: `MCP_ALIASES` — but one `get_manifest` answers both, so resolving only
+#: the relationship set raised `KeyError: unknown demo kind: helmreleases`
+#: the moment the follow story described a release. The relationship
+#: entries win the (identical, base-`ALIASES`) overlaps, keeping that
+#: scene's fixture untouched. Unknown kinds still raise: describing them
+#: as Pods is what this lookup exists to prevent.
+MANIFEST_ALIASES: dict[str, ResourceMeta] = {**MCP_ALIASES, **RELATIONSHIP_ALIASES}
+
 
 async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
-    meta = RELATIONSHIP_ALIASES.get(kind)
+    meta = MANIFEST_ALIASES.get(kind)
     if meta is None:
         raise KeyError(f"unknown demo kind: {kind}")
     base = _MANIFESTS.get(meta.plural)
