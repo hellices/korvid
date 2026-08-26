@@ -325,6 +325,10 @@ def _release(
     )
 
 
+def _node(name: str, days: int) -> GenericSummary:
+    return GenericSummary(name=name, namespace="", kind="Node", created=_ago(days=days))
+
+
 #: The `shop` namespace's releases: the umbrella chart behind the web,
 #: cart, payment, checkout and indexer workloads, and the database chart
 #: behind `inventory-db-0`.
@@ -376,6 +380,12 @@ EXTRA: dict[str, list[GenericSummary]] = {
             created=_ago(hours=12),
             uid="cm-payment",
         )
+    ],
+    # Internal diagnose enrichment resolves each scheduled pod's node.
+    "nodes": [
+        _node("node-1", 400),
+        _node("node-2", 410),
+        _node("node-3", 420),
     ],
     HELM_RELEASES_META.plural: list(HELM_RELEASES),
 }

@@ -2095,6 +2095,65 @@ def test_every_demo_fixture_row_carries_a_relative_creation_timestamp() -> None:
     assert format_age(configmap.created) == "12h"
 
 
+def test_every_scheduled_pod_node_has_a_fixture_node_row() -> None:
+    """`diagnose_pod`'s RELATED section resolves `spec.nodeName` by name.
+
+    `"-"` is the fixture's own placeholder for an unscheduled pod (see
+    `_pod_spec`), the only value `_diagnose_related` is allowed to skip;
+    every other `node=` a `PodSummary` carries must resolve to a real
+    fixture Node row, or the pod's own RELATED evidence answers
+    `unavailable` instead of the node's health.
+    """
+    harness = _demo_harness()
+    node_rows = {row.name: row for row in harness.EXTRA["nodes"]}
+    assert len(node_rows) >= 3, "the fixture should still name every node the pods reference"
+
+    scheduled_names = {pod.node for pod in harness.PODS if pod.node and pod.node != "-"}
+    assert scheduled_names, "the fixture should still schedule at least one pod onto a node"
+
+    for name in scheduled_names:
+        assert name in node_rows, f"pod fixture references node {name!r} with no Node row"
+        row = node_rows[name]
+        assert row.kind == "Node", f"{name}'s fixture row must describe a Node, not {row.kind!r}"
+        assert row.namespace == "", (
+            f"{name} is cluster-scoped and must carry an empty namespace, not {row.namespace!r}"
+        )
+
+
+def test_diagnose_pod_reports_the_scheduled_nodes_conditions_not_unavailable() -> None:
+    """The regression this guards: `RELATED` must resolve the real node.
+
+    `_diagnose_related` asks `get_object(Node, None, pod.spec.nodeName)` for
+    every scheduled pod. Before the fixture carried any `EXTRA["nodes"]`
+    rows, that lookup always raised `unknown demo object`, so every
+    diagnosis's RELATED section reported the node `unavailable` instead of
+    its conditions — a synthetic failure no real cluster would produce for
+    a node that plainly exists (`kubectl get pod` printed its name).
+    """
+    harness = _demo_harness()
+    executor = ToolExecutor(harness.DemoReadOps(), harness.MCP_ALIASES)
+    answer = asyncio.run(
+        executor.execute(
+            "diagnose_pod",
+            {"namespace": DEMO_ROOT.namespace, "pod": DEMO_ROOT.name},
+        )
+    )
+    assert not answer.startswith(ERROR_PREFIX), f"the real diagnosis must succeed: {answer!r}"
+    assert "node node-2: no conditions reported" in answer, (
+        f"the scheduled node must resolve to a healthy, condition-free row: {answer!r}"
+    )
+    assert "node node-2: unavailable" not in answer, (
+        f"the node lookup must not fall back to unavailable: {answer!r}"
+    )
+
+
+def test_get_manifest_still_refuses_an_unknown_node() -> None:
+    """Adding fixture Node rows must not make every node name answerable."""
+    harness = _demo_harness()
+    with pytest.raises(KeyError, match="unknown demo object"):
+        asyncio.run(harness.get_manifest("nodes", None, "node-does-not-exist"))
+
+
 async def test_mcp_scene_signals_readiness_from_the_real_textual_mount() -> None:
     """Reading the hook proves its shape; mounting the app proves it fires.
 
@@ -3211,7 +3270,9 @@ def test_every_relationship_kind_describes_a_matching_manifest() -> None:
         if meta.namespaced:
             assert manifest["metadata"]["namespace"] == row.namespace
         described += 1
-    assert described == 4, f"pods, deployments, services and configmaps have rows; got {described}"
+    assert described == 5, (
+        f"pods, deployments, services, configmaps and nodes have rows; got {described}"
+    )
 
 
 def test_payment_relationship_facts_come_from_the_described_pod_manifest() -> None:
