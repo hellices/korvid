@@ -52,9 +52,9 @@ Every other `agent:` key keeps its meaning: `provider`, `base_url`, `model`,
 
 The low tier's static prompt — the safety contract, the common role, the
 tier pack, and the armed-capability clauses, fully armed (writes and both
-screen tools) — is exactly **4,283** characters of the **6,000-character**
+screen tools) — is exactly **4,832** characters of the **6,000-character**
 budget `PromptHarness` enforces for it (25% of the tier's 24,000-character
-history budget), leaving **1,717 characters** of headroom for
+history budget), leaving **1,168 characters** of headroom for
 `agent.rules` and any provider/exact-model overlay. This budget is new:
 the retired `agent.prompts.append` mechanism enforced no such share of the
 history budget, so a rule set (or `system`/`append` text migrated

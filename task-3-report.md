@@ -111,3 +111,34 @@ One pre-existing failure exists at HEAD:
 `test_the_fully_armed_low_tier_static_prompt_matches_the_migration_note_figures`
 — the expected char count (4 283) does not match the actual (4 832). This was
 already failing before Task 3 cleanup and is out of scope here.
+
+## Prompt Budget Contract Synchronization
+
+**Date:** 2026-08-27
+**Commit branch:** refactor-agent-module-solid-principles (agent-interaction-harness worktree HEAD 79d7b65)
+
+### RED evidence (before fix)
+```
+FAILED tests/agent/test_prompt_harness.py::test_the_fully_armed_low_tier_static_prompt_matches_the_migration_note_figures
+assert 4832 == 4283
+```
+
+### Root cause
+Task 3 added 549 static prompt characters to the LOW tier prompt, raising measured size from 4,283 to 4,832. The pinned test assertion and docs/release-notes/unreleased.md still referenced the old figures.
+
+### Changes made
+| File | Old figures | New figures |
+|---|---|---|
+| `tests/agent/test_prompt_harness.py` | 4,283 / 1,717 | 4,832 / 1,168 |
+| `docs/release-notes/unreleased.md` | 4,283 / 1,717 | 4,832 / 1,168 |
+
+Budget (6,000) and LOW prompt unchanged.
+
+### GREEN evidence
+```
+258 passed in 1.51s
+tests/agent/test_prompt_harness.py + tests/test_docs_agent_contracts.py
+```
+
+### Concerns
+None. The 6,000-character budget still has 1,168 characters of headroom. No logic was changed — only contract figures synchronized with actual measured output.
