@@ -109,8 +109,12 @@ MCP_READY_FILE = ".korvid-mcp-demo-ready"
 #: fail-closed contract below is precisely that `attach-session` never runs
 #: without the readiness signal.
 MCP_TMUX_SESSION = "korvid-mcp-demo"
-#: The bound the tape's typed readiness loop enforces: 600 iterations of
-#: `sleep 0.1`, so 60 seconds at the outside.
+#: The bound the tape's typed readiness loop enforces: a wall-clock deadline
+#: on bash's own `SECONDS` builtin, reset with `SECONDS=0` and checked with
+#: `[ $SECONDS -lt 60 ]`. Counting `sleep 0.1` iterations instead assumes
+#: each one costs exactly 0.1s, but fork+exec of `sleep` is not free — 600
+#: iterations measured ~69s of real time here, already past the tape's own
+#: 65s hidden allowance. `SECONDS` is immune to that overhead.
 MCP_READY_WAIT_SECONDS = 60.0
 #: VHS's `Sleep` runs on VHS's own clock. It does *not* observe the shell it
 #: typed into finishing, so it advances while the readiness loop is still
@@ -1642,14 +1646,26 @@ def test_mcp_follow_tape_hidden_allowance_outlasts_its_bounded_readiness_wait() 
     composing shell, the release command and an unattached prompt would all
     land in the captured frames.
 
-    The fix is an ordering between two numbers that live in different files'
-    worth of reasoning but in one tape: the loop is bounded at
-    600 x 0.1 s = 60 s, so the hidden allowance is 65 s. Releasing early is
-    harmless in the other direction — the client pane is blocked on the
-    separate gate file, so no part of the story can run inside the hidden
-    block.
+    The bound itself must be wall-clock, not an iteration count. Counting
+    `sleep 0.1` iterations up to a fixed total (`waited -lt 600`) assumes each
+    iteration costs exactly its `sleep` argument, but fork+exec of `sleep`
+    itself is not free: 600 iterations measured ~69 s of real time, already
+    past this tape's own 65 s hidden allowance. The loop instead resets
+    bash's own `SECONDS` builtin (`SECONDS=0`) and checks `$SECONDS` directly,
+    so the deadline is ~60 s of real time regardless of how much the loop's
+    own bookkeeping costs. The fix is then an ordering between two numbers
+    that live in different files' worth of reasoning but in one tape: the
+    loop is bounded at a 60 s wall-clock deadline, so the hidden allowance is
+    65 s — at least 5 s of margin. Releasing early is harmless in the other
+    direction — the client pane is blocked on the separate gate file, so no
+    part of the story can run inside the hidden block.
     """
-    lines = MCP_TAPE.read_text(encoding="utf-8").splitlines()
+    tape_text = MCP_TAPE.read_text(encoding="utf-8")
+    assert "600" not in tape_text, (
+        "no comment or command may still bound the readiness wait by counting "
+        "600 iterations of sleep 0.1; the bound is wall-clock now"
+    )
+    lines = tape_text.splitlines()
 
     wait_indices = [
         index
@@ -1659,14 +1675,24 @@ def test_mcp_follow_tape_hidden_allowance_outlasts_its_bounded_readiness_wait() 
     assert wait_indices, f"the tape must wait for {MCP_READY_FILE} inside its hidden block"
     wait_line = lines[wait_indices[0]]
 
-    bound = re.search(r"-lt (\d+)", wait_line)
-    assert bound, f"the readiness wait must state its iteration bound: {wait_line!r}"
-    step = re.search(r"sleep ([0-9.]+)", wait_line)
-    assert step, f"the readiness wait must state its step: {wait_line!r}"
-    wait_seconds = int(bound.group(1)) * float(step.group(1))
+    assert not re.search(r"waited=|waited\+", wait_line), (
+        f"the wait must no longer count iterations into a hand-rolled counter: {wait_line!r}"
+    )
+
+    assert re.search(r"\bSECONDS=0\b", wait_line), (
+        f"the readiness wait must reset bash's own SECONDS builtin before looping, "
+        f"so the deadline is wall-clock time rather than an iteration count: {wait_line!r}"
+    )
+    assert re.search(r"SECONDS=0.*while ", wait_line), (
+        f"SECONDS must be reset before the loop starts, not after: {wait_line!r}"
+    )
+
+    deadline = re.search(r"\$SECONDS -lt (\d+)", wait_line)
+    assert deadline, f"the readiness wait must bound itself on bash's own $SECONDS: {wait_line!r}"
+    wait_seconds = float(deadline.group(1))
     assert wait_seconds == pytest.approx(MCP_READY_WAIT_SECONDS), (
-        f"the readiness loop must stay bounded at {MCP_READY_WAIT_SECONDS} s; "
-        f"{wait_line!r} bounds it at {wait_seconds} s"
+        f"the readiness loop must stay bounded at a {MCP_READY_WAIT_SECONDS} s wall-clock "
+        f"deadline; {wait_line!r} bounds it at {wait_seconds} s"
     )
 
     allowances = [
@@ -1705,6 +1731,12 @@ def test_mcp_provenance_states_the_allowance_covers_the_bounded_wait() -> None:
     and the only thing that makes it safe is that it is longer than the bound
     the loop enforces. A contributor who trusted the old wording would size
     the allowance to a typical start and reintroduce the race.
+
+    The page must also describe the bound itself as wall-clock, on bash's own
+    `SECONDS` builtin, rather than as a count of `sleep 0.1` iterations —
+    that iteration count measured ~69 s of real fork/exec overhead against
+    this tape's 65 s hidden allowance, which is exactly the race this
+    provenance exists to rule out.
     """
     instructions = INSTRUCTIONS.read_text(encoding="utf-8")
     mcp = instructions[instructions.index("## MCP follow") :]
@@ -1721,6 +1753,14 @@ def test_mcp_provenance_states_the_allowance_covers_the_bounded_wait() -> None:
     )
     assert re.search(r"without attach|not attach|never attach", lowered), (
         "the page must state the fail-closed half: no readiness signal, no attach"
+    )
+    assert "wall-clock" in lowered, (
+        "the page must describe the readiness bound as wall-clock, not an iteration count"
+    )
+    assert "seconds" in lowered, "the page must name bash's SECONDS builtin by name"
+    assert "600" not in mcp, (
+        "the page may not still describe the bound as 600 iterations of sleep 0.1; "
+        "that arithmetic is what the wall-clock SECONDS bound replaces"
     )
 
 

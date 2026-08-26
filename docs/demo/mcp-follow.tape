@@ -58,16 +58,23 @@ Enter
 # sleep; the reason the allowance is hidden at all is written down once, in
 # docs/demo/visual-storytelling.md. `--scene mcp` publishes
 # .korvid-mcp-demo-ready from its Textual mount, and only after the MCP
-# server reported itself bound. The loop is bounded at 600 x 0.1s = 60s, so
-# a server that never binds fails the recording instead of hanging it.
+# server reported itself bound. The loop is bounded at a wall-clock 60s
+# deadline via bash's own `SECONDS` builtin — reset with `SECONDS=0`, then
+# looped while `$SECONDS` stays under 60 — so a server that never binds fails
+# the recording instead of hanging it. Counting `sleep 0.1` iterations up to a
+# fixed total instead assumes each one costs exactly 0.1s, but fork+exec of
+# `sleep` itself is not free: measured wall time for that approach ran past
+# this tape's 65s hidden allowance. `SECONDS` is wall-clock and immune to
+# that overhead, so the deadline stays ~60s regardless of it.
 #
 # The Sleep below is VHS's own clock, and VHS never learns that the loop it
 # typed has returned. So the allowance must outlast the loop's whole 60s
-# bound rather than a typical start: at 65s the composition stays hidden even
-# in the worst case. Readiness arriving early costs nothing — the client pane
-# is still held by the separate .korvid-mcp-demo-go gate, dropped only below,
-# so no part of the story can run inside the hidden block.
-Type "waited=0; while [ ! -f .korvid-mcp-demo-ready ] && [ $waited -lt 600 ]; do sleep 0.1; waited=$((waited+1)); done"
+# wall-clock deadline rather than a typical start: at 65s the composition
+# stays hidden even in the worst case, keeping >= 5s of margin. Readiness
+# arriving early costs nothing — the client pane is still held by the
+# separate .korvid-mcp-demo-go gate, dropped only below, so no part of the
+# story can run inside the hidden block.
+Type "SECONDS=0; while [ ! -f .korvid-mcp-demo-ready ] && [ $SECONDS -lt 60 ]; do sleep 0.1; done"
 Enter
 Sleep 65s
 

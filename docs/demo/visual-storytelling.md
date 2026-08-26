@@ -163,8 +163,16 @@ The client is never released on a timer. `--scene mcp` publishes
 `.korvid-mcp-demo-ready` from its real Textual mount, and only after its
 `KorvidMCPServer` reported itself bound — the first moment an external call
 can be both answered and mirrored on screen. The tape types a wait for that
-file into the hidden shell and bounds it at 60 s, so a server that never
-binds fails the recording instead of hanging it.
+file into the hidden shell and bounds it at a wall-clock 60 s deadline, so a
+server that never binds fails the recording instead of hanging it. The bound
+is wall-clock, not an iteration count: it resets bash's own `SECONDS`
+builtin (`SECONDS=0`) and loops while `$SECONDS` stays under 60, rather than
+counting `sleep 0.1` iterations up to some fixed total. Counting iterations
+instead assumes each one costs exactly its `sleep` argument, but forking and
+executing `sleep` itself is not free, and a large enough iteration count
+measured real time well past this tape's 65 s hidden allowance. `SECONDS` is
+immune to that overhead, so the deadline stays ~60 s regardless of how much
+the loop's own bookkeeping costs.
 
 VHS advances on its own clock: `Type` hands the loop to the shell and
 returns, and the `Sleep` that follows never observes the loop returning. The
