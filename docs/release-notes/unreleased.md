@@ -59,10 +59,11 @@ history budget), leaving **1,717 characters** of headroom for
 the retired `agent.prompts.append` mechanism enforced no such share of the
 history budget, so a rule set (or `system`/`append` text migrated
 verbatim into `agent.rules`) that the old profile-based agent accepted
-without complaint can now be too large. Startup raises
-`StaticPromptTooLargeError` instead of silently crowding out the
-conversation — shorten the rule set (or move guidance the tool descriptions
-and safety contract already cover) if korvid refuses to start with it.
+without complaint can now be too large. Agent composition raises
+`StaticPromptTooLargeError` instead of silently crowding out the conversation;
+initial application startup catches that error, warns, and starts with the
+agent disabled. Shorten the rule set (or move guidance the tool descriptions
+and safety contract already cover) before reconnecting the agent.
 
 ### Provider plugin API 1 → API 2
 
