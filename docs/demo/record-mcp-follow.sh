@@ -78,17 +78,48 @@ fail() {
 # path — would put the clip back under VHS's pen, where a failed take
 # overwrites it before anything here can object.
 #
-# The tape is parsed the way VHS reads it, not line-anchored: VHS skips the
-# whitespace in front of a directive and accepts a tab between the directive
-# and its argument, so `  Output <clip>`, a tab-indented `Output` and
-# `Output<TAB><clip>` are all directives it obeys — and a `grep '^Output '`
-# sees none of them while a plain candidate line above satisfies it. awk
-# splits on runs of blanks and ignores leading ones, which is exactly that
-# normalisation: every directive whose first field is `Output` is counted,
-# there must be one, it must carry exactly one argument, and that argument
-# must be the candidate. One argument is the whole rule — the candidate is a
-# repository-relative path with no whitespace in it, so a trailing second
-# field is not a longer path, it is a directive nobody reviewed.
+# Two checks stand here, and the first one parses nothing. VHS's grammar is
+# whitespace-separated tokens, not lines: `Hide` takes no argument, so
+# `Hide Output <clip>` is two directives VHS obeys on one line, and so are
+# `Sleep 1s Output <clip>` and `Enter Output <clip>`. Any line-shaped reader
+# looks at that line's first field, sees `Hide`, and waves it through. Rather
+# than grow a second VHS parser here to chase that — the losing half of the
+# race, since the tape's real reader is VHS — the wrapper refuses the
+# published clip's own basename anywhere in the tape's bytes. Whatever the
+# grammar, VHS cannot write that file without naming it, and the name is
+# derived from the very path this script promotes to, so it can never drift
+# from it. Every spelling is covered at once: absolute, repository-relative,
+# `./` and through `../`.
+#
+# This is deliberately stricter than VHS. The canonical name inside a comment
+# is a tape VHS would render and this wrapper rejects; that false positive is
+# the price of a guard no lexer change can outflank, and it costs a tape
+# author one word. The shipped tape passes because the candidate is
+# `.mcp-follow-demo.candidate.mp4`, which does not contain the published
+# basename. Any failure to scan is a refusal too — an unreadable tape is a
+# tape nobody reviewed.
+final_name=$(basename -- "$final")
+[ -n "$final_name" ] || fail "the published clip has no name to guard"
+scan=0
+grep -qF -- "$final_name" "$tape" || scan=$?
+case "$scan" in
+0) fail "the tape names the published clip; it may only name the candidate" ;;
+1) ;;
+*) fail "the tape could not be read for the published clip's name" ;;
+esac
+
+# The second check is the tape's normal shape, parsed the way VHS splits a
+# directive rather than line-anchored: VHS skips the whitespace in front of a
+# directive and accepts a tab between the directive and its argument, so
+# `  Output <clip>`, a tab-indented `Output` and `Output<TAB><clip>` are all
+# directives it obeys — and a `grep '^Output '` sees none of them while a
+# plain candidate line above satisfies it. awk splits on runs of blanks and
+# ignores leading ones, which is exactly that normalisation: every directive
+# whose first field is `Output` is counted, there must be one, it must carry
+# exactly one argument, and that argument must be the candidate. One argument
+# is the whole rule — the candidate is a repository-relative path with no
+# whitespace in it, so a trailing second field is not a longer path, it is a
+# directive nobody reviewed.
 verdict=$(
   awk -v want="$candidate" '
     $1 == "Output" {

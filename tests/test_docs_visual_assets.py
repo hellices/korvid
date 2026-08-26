@@ -3544,6 +3544,11 @@ def test_mcp_recorder_owns_the_canonical_path_and_the_tape_never_writes_it() -> 
         "the published clip's path may not appear in the tape at all: VHS would write it "
         "before any check could run"
     )
+    assert Path(MCP_FINAL_CLIP).name not in tape, (
+        "the wrapper refuses any tape whose bytes contain the published clip's basename, "
+        "under any spelling of the path and in comments too, so the shipped tape may not "
+        "name it even in passing"
+    )
 
     script = MCP_RECORDER.read_text(encoding="utf-8")
     promotions = [line.strip() for line in script.splitlines() if MCP_FINAL_CLIP in line]
@@ -3555,6 +3560,42 @@ def test_mcp_recorder_owns_the_canonical_path_and_the_tape_never_writes_it() -> 
     assert re.search(r"^\s*mv .*\"\$candidate\" \"\$final\"", script, re.MULTILINE), (
         "promotion must be a single rename of the candidate onto the published clip, so a "
         "reader never observes a half-written asset"
+    )
+
+
+def test_mcp_recorder_derives_its_canonical_needle_and_says_it_is_strict() -> None:
+    """The byte guard must read the promotion target, not a second copy of it.
+
+    Two independent checks stand in front of VHS: the `Output` shape check,
+    which reads the tape the way VHS splits a directive, and a guard that
+    refuses the published clip's basename anywhere in the tape's bytes. The
+    second one is the fail-closed net, so its needle has to be derived from
+    the very path the wrapper promotes to — a hard-coded second spelling
+    would go stale the day the clip is renamed and quietly guard nothing.
+    Being byte-level, it also rejects the name in a comment, which VHS would
+    ignore; that is a deliberate trade the script has to state, because the
+    next reader will otherwise file it as a bug and loosen it.
+    """
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    commentary = "\n".join(
+        line for line in script.splitlines() if line.lstrip().startswith("#")
+    ).lower()
+
+    assert re.search(r'^\s*final_name=\$\(basename -- "\$final"\)', script, re.MULTILINE), (
+        'the guard\'s needle must be `basename -- "$final"`, so it always names the path '
+        "this wrapper promotes to"
+    )
+    assert re.search(r'grep -qF -- "\$final_name" "\$tape"', script), (
+        "the guard must look for that basename literally, anywhere in the tape's bytes — "
+        "any parse of the tape is a parse VHS may not share"
+    )
+    assert "stricter than vhs" in commentary, (
+        "the wrapper rejects tapes VHS would render, comments included; a reader who is "
+        "not told that is a reader who will loosen it"
+    )
+    assert "comment" in commentary, (
+        "the false positive this guard accepts is the canonical name in a comment; the "
+        "script must name it rather than leave it to be discovered"
     )
 
 
@@ -3650,7 +3691,10 @@ def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
 
     Args:
         workdir: The directory every redirected path lives in.
-        tape_body: The tape text, with `{candidate}` and `{final}` filled in.
+        tape_body: The tape text. `{candidate}` and `{final}` are absolute
+            paths; `{final_relative}`, `{final_dotted}` and `{final_updir}`
+            are the same published clip spelled relative to the working
+            directory, through `./` and through `../`.
     """
     workdir.mkdir(parents=True)
     scenes = workdir / "scenes"
@@ -3659,7 +3703,16 @@ def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
     final = scenes / Path(MCP_FINAL_CLIP).name
     final.write_bytes(MCP_PUBLISHED_BYTES)
     tape = workdir / "hostile.tape"
-    tape.write_text(tape_body.format(candidate=candidate, final=final), encoding="utf-8")
+    tape.write_text(
+        tape_body.format(
+            candidate=candidate,
+            final=final,
+            final_relative=f"scenes/{final.name}",
+            final_dotted=f"./scenes/{final.name}",
+            final_updir=f"../{workdir.name}/scenes/{final.name}",
+        ),
+        encoding="utf-8",
+    )
     log = workdir / "invocations.log"
     vhs = workdir / "fake-vhs"
     vhs.write_text(
@@ -3711,6 +3764,23 @@ def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
         ("the-published-clip-indented", "  Output {final}\n"),
         ("the-published-clip-tab-separated", "Output\t{final}\n"),
         ("no-output-at-all", "Sleep 1s\n"),
+        ("an-output-sharing-a-line-with-hide", "Output {candidate}\nHide Output {final}\n"),
+        ("an-output-sharing-a-line-with-show", "Output {candidate}\nShow Output {final}\n"),
+        ("an-output-sharing-a-line-with-sleep", "Output {candidate}\nSleep 1s Output {final}\n"),
+        ("an-output-sharing-a-line-with-enter", "Output {candidate}\nEnter Output {final}\n"),
+        (
+            "an-output-sharing-a-line-by-a-relative-path",
+            "Output {candidate}\nHide Output {final_relative}\n",
+        ),
+        (
+            "an-output-sharing-a-line-by-a-dot-slash-path",
+            "Output {candidate}\nSleep 1s Output {final_dotted}\n",
+        ),
+        (
+            "an-output-sharing-a-line-through-a-parent-directory",
+            "Output {candidate}\nEnter Output {final_updir}\n",
+        ),
+        ("the-canonical-name-in-a-comment", "Output {candidate}\n# never {final}\n"),
     ],
 )
 def test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip(
@@ -3720,14 +3790,16 @@ def test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip(
 
     Editing `Output` back to the canonical path — or adding a second
     `Output` beside the candidate, which VHS honours — would put the
-    published clip back under VHS's pen. The preflight therefore has to read
-    the tape the way VHS does: VHS skips the whitespace in front of a
-    directive and accepts a tab between the directive and its argument, so
-    `  Output <clip>`, `\\tOutput <clip>` and `Output\\t<clip>` are all
-    directives it obeys while a line-anchored `grep '^Output '` sees none of
-    them. Each tape here declares an `Output` the wrapper must refuse, and
-    refusing means the approved clip is still byte-identical and VHS was
-    never invoked at all.
+    published clip back under VHS's pen. Line shape is not enough to see
+    that: VHS's grammar is whitespace-separated tokens, not lines, so
+    `Hide Output <clip>`, `Sleep 1s Output <clip>` and `Enter Output <clip>`
+    are each two directives VHS obeys on one line, and a line-based reader
+    that only looks at a line's first field sees `Hide`, `Sleep` or `Enter`
+    and lets them through. So the published clip's own basename may not
+    appear anywhere in the tape's bytes — under any spelling of its path,
+    absolute, repository-relative, `./` or through `../`, and in a comment
+    too. Refusing means the approved clip is still byte-identical and VHS
+    was never invoked at all.
     """
     run = _run_hostile_tape(tmp_path / case, tape_body)
 
@@ -3755,13 +3827,16 @@ def test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip(
 def test_mcp_recorder_reads_the_candidate_in_every_whitespace_form_vhs_accepts(
     tmp_path: Path, case: str, tape_body: str
 ) -> None:
-    """The preflight must not be stricter than VHS either.
+    """The candidate's own directive must survive every whitespace form.
 
-    A check that only recognised one spelling of the directive would reject
-    a tape VHS renders perfectly well — and, worse, would tempt the next
-    edit back towards a laxer match. The wrapper normalises whitespace
-    instead: every form below declares exactly one `Output`, it names the
-    candidate, and the run is published.
+    The wrapper is deliberately stricter than VHS about one string — the
+    published clip's basename, which it refuses anywhere in the tape — but
+    it may not be stricter about the directive it is meant to accept. A
+    check that only recognised one spelling would reject a tape VHS renders
+    perfectly well, and would tempt the next edit back towards a laxer
+    match. The wrapper normalises whitespace instead: every form below
+    declares exactly one `Output`, it names the candidate, it names the
+    published clip nowhere, and the run is published.
     """
     run = _run_recorder(tmp_path / case, tape_body=tape_body)
 

@@ -1299,8 +1299,10 @@ indentation or separator; the wrapper requires exactly one such directive,
 exactly one argument on it (the candidate is a repository-relative path with
 no whitespace, so a second field is a directive nobody reviewed, not a longer
 path), and that argument to equal the candidate. Each outcome keeps its own
-reason on stderr. The real tape still passes, and the check is no stricter
-than VHS: a tape VHS renders is a tape the wrapper runs.
+reason on stderr. The real tape still passes, and the check is exactly as
+permissive as VHS about the whitespace of a directive it accepts: a tape VHS
+renders and whose `Output` names the candidate is a tape the wrapper runs.
+(Finding 6 adds a second, deliberately stricter check beside it.)
 
 Thirteen bypasses now run the shipped script under real bash against a fake
 VHS that would overwrite the published clip the moment it were invoked —
@@ -1344,3 +1346,55 @@ Verified with `tests/test_docs_visual_assets.py` (117 tests) and
 `mkdocs build --strict`, and `bash -n` on the wrapper. `uv.lock` is untouched
 and no media was regenerated: `docs/assets/scenes/mcp-follow-demo.mp4` is
 byte-identical.
+
+### 6. VHS reads tokens, not lines, so one line could hold two directives
+
+*Review of `f021bfe`, `docs/demo/record-mcp-follow.sh`.*
+
+Finding 4 taught the preflight VHS's whitespace rules but kept a line-shaped
+reader: `awk` normalises the blanks around a directive and then judges a line
+by its first field. VHS's grammar has no line in it. Its lexer emits
+whitespace-separated tokens and its parser takes each directive with the
+arguments that directive needs, so `Hide`, which takes none, ends where the
+next token begins. `Hide Output docs/assets/scenes/mcp-follow-demo.mp4` is
+therefore two directives VHS obeys — and to `$1 == "Output"` it is a line
+whose first field is `Hide`. `Show`, `Enter` and a completed `Sleep 1s` close
+the same way. A tape declaring the candidate on its first line and hiding a
+second `Output` behind any of those words passed the preflight and handed the
+published clip straight back to VHS.
+
+The answer is not a third attempt at VHS's parser: the tape's real reader is
+VHS, and any parser here is a guess that has to win every future lexer change
+to be worth anything. So a second check now stands in front of the first, and
+it parses nothing. The wrapper derives the published clip's basename with
+`basename -- "$final"` — from the very path it promotes to, so the needle can
+never drift from the asset — and refuses the tape if `grep -qF` finds that
+basename anywhere in its bytes, with a scan that neither found nor cleanly
+absent is a refusal too. Whatever grammar VHS grows, it cannot write that file
+without naming it, so every spelling falls at once: absolute,
+repository-relative, `./` and through `../`. The `Output` shape check stays
+beside it for the tape's normal shape and its specific reasons.
+
+This is deliberately stricter than VHS, and the script says so where it lives:
+the canonical name inside a comment is a tape VHS renders and this wrapper
+rejects. That false positive is the price of a guard no lexer change can
+outflank, and it costs a tape author one word. The shipped tape passes
+untouched — the candidate is `.mcp-follow-demo.candidate.mp4`, which does not
+contain the published basename anywhere in it.
+
+Nine more bypasses drive the shipped script under real bash against a fake VHS
+that would overwrite the published clip the moment it were invoked: an
+`Output` sharing its line with `Hide`, with `Show`, with `Sleep 1s` and with
+`Enter`; the same trick spelling the clip repository-relative, through `./`
+and through `../`; and the canonical name in a comment, which documents the
+strictness rather than hiding it. Each asserts a non-zero exit, an invocation
+log that was never created, and the approved clip byte-identical. The six
+accepted whitespace forms still promote, a source contract pins the needle to
+`basename -- "$final"` and requires the wrapper's comments to state the trade,
+and the tape contract now forbids the canonical basename in the tape under any
+spelling.
+
+Verified with `tests/test_docs_visual_assets.py` and
+`tests/test_docs_readability.py`, `ruff check`, `ruff format --check`, and
+`bash -n` on the wrapper. `uv.lock` is untouched and no media was regenerated:
+`docs/assets/scenes/mcp-follow-demo.mp4` is byte-identical.

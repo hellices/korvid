@@ -225,6 +225,15 @@ other recording side effect — and never to the published clip. The verdict
 belongs to `docs/demo/record-mcp-follow.sh`, the one command that regenerates
 this capture.
 
+Before it starts VHS, that wrapper reads the tape it is about to run: it
+requires exactly one `Output`, naming the candidate, and it requires the
+published clip's own basename to be absent from the tape's bytes — anywhere,
+under any spelling of the path, comments included. A tape that names it is
+never handed to VHS at all. VHS cannot write a file it is not given the name
+of, so this holds whatever its grammar does. That second rule is stricter than
+VHS on purpose, and it is why `docs/demo/mcp-follow.tape` never names the
+published clip — not in a directive, and not in a comment either.
+
 That wrapper runs VHS and then grades the run from outside it. It promotes
 the candidate onto `docs/assets/scenes/mcp-follow-demo.mp4` — one `mv`, in
 the directory the clip already lives in, so a reader sees either the previous
