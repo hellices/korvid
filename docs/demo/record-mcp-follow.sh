@@ -17,8 +17,9 @@
 # marker is absent and the success marker is present. Every other path — VHS
 # itself failing, a failure marker, a missing success marker, a missing
 # candidate — prints one reason on stderr, removes the candidate and the run's
-# scratch, tears down the recording's own tmux session and exits non-zero,
-# leaving a previously approved clip byte-identical.
+# scratch, tears down the recording's own tmux server — a private socket in the
+# checkout, never the user's shared one — and exits non-zero, leaving a
+# previously approved clip byte-identical.
 #
 # Which tape may run is settled the same way, and just as bluntly: by its
 # bytes. `reviewed_tape_sha256` below is the SHA-256 of the reviewed
@@ -57,7 +58,7 @@ tape=${KORVID_MCP_TAPE:-docs/demo/mcp-follow.tape}
 #
 # docs/demo/visual-storytelling.md and the 2026-08-26 plan publish the same
 # digest, and a contract compares all three against the shipped tape.
-reviewed_tape_sha256=771a88d89e0e8fdb242d5e264b556ca868d67ac26ef0c42e1776d85d2f2c2596
+reviewed_tape_sha256=60334eb07ab42901a4885584174b9f1bfe4089f1ebdb685f64c8e136cbe2a743
 expected_digest=${KORVID_MCP_TAPE_SHA256:-$reviewed_tape_sha256}
 candidate=${KORVID_MCP_CANDIDATE:-docs/assets/scenes/.mcp-follow-demo.candidate.mp4}
 final=${KORVID_MCP_FINAL:-docs/assets/scenes/mcp-follow-demo.mp4}
@@ -66,6 +67,17 @@ failed_marker=${KORVID_MCP_CLIENT_FAILED:-.korvid-mcp-demo-client-failed}
 ready_marker=${KORVID_MCP_READY:-.korvid-mcp-demo-ready}
 go_marker=${KORVID_MCP_GO:-.korvid-mcp-demo-go}
 session=korvid-mcp-demo
+# The tmux server this recording composes on, and the reason the fixed
+# session name above is safe. tmux's default socket belongs to the invoking
+# user and carries every session they are already running, so `korvid-mcp-demo`
+# there is a name this script merely hopes nobody else took — and the teardown
+# below, which the EXIT trap runs on *every* path including the refusals that
+# happen before VHS creates anything, would then kill a developer's own work.
+# A socket inside the checkout is a server this recording creates, owns and
+# removes: the name cannot collide, because nothing else speaks to this socket.
+# The tape composes on the same literal path (it cannot read this environment —
+# VHS types shell into a pane), and a contract compares the two.
+socket=${KORVID_MCP_TMUX_SOCKET:-.korvid-mcp-demo.tmux.sock}
 
 # Scratch, never artefacts: the candidate is an unreviewed render, and the
 # four markers are one run's signals, which must never decide the next one.
@@ -74,11 +86,16 @@ clean_scratch() {
   rm -f -- "$candidate" "$ok_marker" "$failed_marker" "$ready_marker" "$go_marker"
 }
 
-# Only the session this recording composes, and only by name.
+# Only this recording's own server, and only through its own socket. Every
+# tmux command here carries `-S`, so a refusal that runs before any server
+# exists can address nothing but an empty path, and the shared default server
+# is never even asked a question. The socket file itself is a recording side
+# effect like the markers above, so it goes too.
 end_session() {
   if command -v tmux >/dev/null 2>&1; then
-    tmux kill-session -t "$session" >/dev/null 2>&1 || true
+    tmux -S "$socket" kill-session -t "$session" >/dev/null 2>&1 || true
   fi
+  rm -f -- "$socket"
 }
 
 cleanup() {

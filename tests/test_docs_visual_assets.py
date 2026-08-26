@@ -29,6 +29,7 @@ from korvid.core.mcp import MCPControllerBase
 from korvid.core.relationships import GraphResource, SummaryLike
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import format_age
+from korvid.tools.executor import ToolExecutor
 from korvid.tools.structured import ERROR_PREFIX
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader, graph_source_metas
 
@@ -126,6 +127,17 @@ MCP_READY_FILE = ".korvid-mcp-demo-ready"
 #: fail-closed contract below is precisely that `attach-session` never runs
 #: without the readiness signal.
 MCP_TMUX_SESSION = "korvid-mcp-demo"
+#: The private tmux socket every recording command speaks to. tmux's default
+#: socket is shared by everything the invoking user runs, so a fixed session
+#: name on it is a claim on a name a developer may already be using — and a
+#: `kill-session` on it is their work destroyed. A socket inside the checkout
+#: is a server this recording creates, owns and tears down, which is what
+#: makes the fixed name safe.
+MCP_TMUX_SOCKET = ".korvid-mcp-demo.tmux.sock"
+#: `tmux` as a *command word*, so a socket path (`.korvid-mcp-demo.tmux.sock`)
+#: or an environment variable (`KORVID_MCP_TMUX_SOCKET`) is not mistaken for
+#: an invocation the contracts below have to grade.
+_TMUX_COMMAND = re.compile(r"(?<![\w./-])tmux(?![\w.-])")
 #: The two repository-local status files the client pane publishes, and the
 #: only channel that carries its verdict back to the tape. VHS records for a
 #: fixed window no matter what the pane does, so a client that raised
@@ -181,6 +193,7 @@ MCP_RECORDER_ENV = {
     "failed": "KORVID_MCP_CLIENT_FAILED",
     "ready": "KORVID_MCP_READY",
     "go": "KORVID_MCP_GO",
+    "socket": "KORVID_MCP_TMUX_SOCKET",
 }
 #: The bytes a previously approved clip is represented by in those contracts.
 #: A rejected run must leave them byte-identical.
@@ -212,6 +225,12 @@ MCP_CLIENT_CALLS = ("list_resources", "diagnose_pod", "get_logs", "helm_list_rel
 #: The three calls whose answer is read through `_tail` rather than
 #: `_sections` (`diagnose_pod` is the odd one out).
 MCP_CLIENT_TAIL_CALLS = ("list_resources", "get_logs", "helm_list_releases")
+#: The container and the log bound the recorded `get_logs` call carries.
+#: Written literally so a contract can read them without importing the MCP
+#: SDK at collection time, and checked against the client's own bytes where
+#: they are used.
+MCP_CLIENT_CONTAINER = "app"
+MCP_RECORDED_LOG_TAIL = 12
 #: Rows both panes must carry legible content across. The poster is cut
 #: mid-story, so the client's calls and korvid's mirrored view are on screen
 #: together; a blanked or half-drawn pane would prove nothing.
@@ -3500,6 +3519,161 @@ def test_demo_manifest_configmap_data_is_not_shared_between_answers() -> None:
         harness.CONFIGMAP_MANIFEST.update(copy.deepcopy(pristine))
 
 
+#: A bound no fixture can reach, used to read the whole synthetic log stream
+#: through the same bounded path the tools use.
+_UNBOUNDED_TAIL = 10_000
+#: How long a live read may take to produce its first line before the
+#: contract calls it hung. `follow=True` never ends, so a buffering
+#: regression would block forever rather than fail.
+_LIVE_FIRST_LINE_TIMEOUT = 5.0
+
+
+def _demo_log_texts(*, follow: bool = False, tail_lines: int = _UNBOUNDED_TAIL) -> list[str]:
+    """Drain `DemoReadOps.stream_logs` for one container, as text."""
+    reads = _demo_harness().DemoReadOps()
+
+    async def drain() -> list[str]:
+        return [
+            line.text
+            async for line in reads.stream_logs(
+                DEMO_ROOT.namespace,
+                DEMO_ROOT.name,
+                MCP_CLIENT_CONTAINER,
+                follow=follow,
+                tail_lines=tail_lines,
+            )
+        ]
+
+    return asyncio.run(drain())
+
+
+def _demo_fixture_log_texts() -> list[str]:
+    """The synthetic stream itself, read past `DemoReadOps` entirely."""
+    harness = _demo_harness()
+
+    async def drain() -> list[str]:
+        return [
+            line.text
+            async for line in harness.stream_logs(
+                DEMO_ROOT.namespace, DEMO_ROOT.name, MCP_CLIENT_CONTAINER, follow=False
+            )
+        ]
+
+    return asyncio.run(drain())
+
+
+@pytest.mark.parametrize("tail_lines", [5, 12])
+def test_demo_read_ops_bounds_a_non_following_log_read_to_its_tail(tail_lines: int) -> None:
+    """Round-13 (comment 3862106869): `tail_lines` was dropped on the floor.
+
+    `DemoReadOps` is the read surface the *shipped* tools run against in
+    the capture, and both log paths — `get_logs` and `diagnose_pod`'s
+    excerpt — ask for a bounded, non-following read. Discarding the bound
+    made the answer's size a property of the fixture rather than of the
+    call, which is precisely the claim the MCP clip makes about korvid:
+    that a tool read comes back bounded. The last `tail_lines` lines are
+    what a tail is, so order matters as much as the count.
+    """
+    whole = _demo_fixture_log_texts()
+    assert len(whole) > tail_lines, (
+        f"this contract is only meaningful while the fixture out-runs the bound; it "
+        f"emitted {len(whole)} lines"
+    )
+
+    tail = _demo_log_texts(tail_lines=tail_lines)
+
+    assert tail == whole[-tail_lines:], (
+        f"a non-following read of {tail_lines} lines must be the fixture's last "
+        f"{tail_lines}, in order; got {tail}"
+    )
+
+
+def test_demo_read_ops_returns_the_whole_stream_when_the_tail_exceeds_it() -> None:
+    """A bound wider than the fixture clips nothing and reorders nothing."""
+    whole = _demo_fixture_log_texts()
+
+    read = _demo_log_texts(tail_lines=len(whole) + 7)
+
+    assert read == whole, f"a bound past the fixture must hand back every line in order: {read}"
+
+
+def test_demo_read_ops_keeps_a_following_log_read_live_rather_than_buffered() -> None:
+    """The TUI's own path must not be turned into a collect-then-emit read.
+
+    `follow=True` is the endless stream the log pane consumes: collecting
+    it into a tail buffer would never yield a line at all. So the bound
+    applies to the finite, non-following read the tools make, and a
+    following read still hands its first line straight through.
+    """
+    whole = _demo_fixture_log_texts()
+    reads = _demo_harness().DemoReadOps()
+
+    async def first_live_line() -> str:
+        stream = reads.stream_logs(
+            DEMO_ROOT.namespace,
+            DEMO_ROOT.name,
+            MCP_CLIENT_CONTAINER,
+            follow=True,
+            tail_lines=5,
+        )
+        iterator = stream.__aiter__()
+        try:
+            line = await asyncio.wait_for(iterator.__anext__(), timeout=_LIVE_FIRST_LINE_TIMEOUT)
+        finally:
+            aclose = getattr(iterator, "aclose", None)
+            if aclose is not None:
+                await aclose()
+        return str(line.text)
+
+    assert asyncio.run(first_live_line()) == whole[0], (
+        "a following read must emit as it goes, starting at the stream's first line"
+    )
+
+
+def test_demo_get_logs_answers_within_the_bound_the_recorded_client_asks_for() -> None:
+    """The shipped tool, over the demo read surface, at the clip's own bound.
+
+    `docs/demo/mcp_client.py` calls `get_logs` with `tail_lines=12` and the
+    pane prints the last five of them, so the recorded beat is only honest
+    while the tool itself answers with at most twelve lines. This drives
+    the real `ToolExecutor` rather than the fixture, which is the whole
+    reason the harness exists.
+    """
+    harness = _demo_harness()
+    executor = ToolExecutor(harness.DemoReadOps(), harness.MCP_ALIASES)
+    tail_lines = MCP_RECORDED_LOG_TAIL
+    client = MCP_CLIENT.read_text(encoding="utf-8")
+    assert f'"tail_lines": {tail_lines},' in client, (
+        f"the recorded client no longer asks for {tail_lines} lines; this contract must "
+        "follow the call it grades"
+    )
+    assert f'"container": "{MCP_CLIENT_CONTAINER}",' in client, (
+        f"the recorded client no longer reads the {MCP_CLIENT_CONTAINER!r} container"
+    )
+
+    answer = asyncio.run(
+        executor.execute(
+            "get_logs",
+            {
+                "namespace": DEMO_ROOT.namespace,
+                "pod": DEMO_ROOT.name,
+                "container": MCP_CLIENT_CONTAINER,
+                "tail_lines": tail_lines,
+            },
+        )
+    )
+
+    assert not answer.startswith(ERROR_PREFIX), f"the recorded read must succeed: {answer!r}"
+    lines = answer.splitlines()
+    assert len(lines) == tail_lines, (
+        f"the tool must answer the bound it was given, not the fixture's length; it "
+        f"returned {len(lines)} lines"
+    )
+    assert lines == _demo_fixture_log_texts()[-tail_lines:], (
+        "and those lines must be the stream's last ones, in order"
+    )
+
+
 #: One `await asyncio.sleep(...)` the client took, as
 #: `(seconds, ok-marker exists, failure-marker exists, output since the
 #: previous hold)`. Recording the markers *and* the output at each beat is
@@ -3845,6 +4019,9 @@ class _RecorderRun(NamedTuple):
         scratch_left: The scratch markers still present, by role.
         tmux: Every `tmux` invocation the stub recorded.
         vhs_ran: Whether the fake VHS was invoked at all.
+        socket_left: Whether the private tmux socket survived the run.
+        shared_session_left: Whether a session of the same name on the user's
+            *default* tmux server survived the run.
     """
 
     status: int
@@ -3854,6 +4031,42 @@ class _RecorderRun(NamedTuple):
     scratch_left: tuple[str, ...]
     tmux: str
     vhs_ran: bool
+    socket_left: bool
+    shared_session_left: bool
+
+
+def _write_fake_tmux(path: Path, *, log: Path, shared_session: Path) -> None:
+    """Write a tmux stand-in that models which server an invocation reaches.
+
+    Every call is logged, so a contract can require the private `-S` socket
+    on all of them. Calls that *lack* `-S` are modelled as reaching the
+    user's shared default server: any kill verb among their arguments
+    removes `shared_session`, which stands for a developer's own
+    `korvid-mcp-demo` session. A recording that owns its socket can never
+    delete that file; one that trusts a session name will.
+    """
+    path.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f'echo "tmux $*" >> "{log}"',
+                'case "$1" in',
+                "-S) ;;",
+                "*)",
+                '  for argument in "$@"; do',
+                '    case "$argument" in',
+                f'    kill-session|kill-server) rm -f "{shared_session}" ;;',
+                "    esac",
+                "  done",
+                "  ;;",
+                "esac",
+                "exit 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
 
 
 def _write_fake_vhs(
@@ -3862,6 +4075,7 @@ def _write_fake_vhs(
     log: Path,
     candidate: Path,
     markers: dict[str, Path],
+    socket: Path,
     status: int,
     writes_candidate: bool,
     publishes_ok: bool,
@@ -3869,16 +4083,18 @@ def _write_fake_vhs(
 ) -> None:
     """Write a VHS stand-in that leaves exactly the side effects asked for.
 
-    A real run leaves four things behind: the rendered file at the tape's
-    `Output` path, the handshake pair the composition used, and whichever
-    verdict marker the client pane published. The stub reproduces that set
-    so the wrapper is graded on the same evidence it will see in a
-    recording, without ttyd, ffmpeg, tmux or korvid taking part.
+    A real run leaves five things behind: the rendered file at the tape's
+    `Output` path, the handshake pair the composition used, whichever
+    verdict marker the client pane published, and the socket file the
+    tape's own tmux server binds. The stub reproduces that set so the
+    wrapper is graded on the same evidence it will see in a recording,
+    without ttyd, ffmpeg, tmux or korvid taking part.
     """
     body = [
         "#!/bin/sh",
         f'echo "vhs $*" >> "{log}"',
         f'touch "{markers["ready"]}" "{markers["go"]}"',
+        f'touch "{socket}"',
     ]
     if writes_candidate:
         rendered = MCP_CANDIDATE_BYTES.decode()
@@ -3992,14 +4208,18 @@ def _run_recorder(
     stub_dir = workdir / "stubs"
     stub_dir.mkdir()
     log = workdir / "invocations.log"
-    tmux = stub_dir / "tmux"
-    tmux.write_text(f'#!/bin/sh\necho "tmux $*" >> "{log}"\n', encoding="utf-8")
-    tmux.chmod(0o755)
+    socket = workdir / MCP_TMUX_SOCKET
+    # A developer's own session, on the tmux server they were already using.
+    # Nothing this recording does may reach it.
+    shared_session = workdir / "shared-default-server-session"
+    shared_session.write_text("a developer's own korvid-mcp-demo session\n", encoding="utf-8")
+    _write_fake_tmux(stub_dir / "tmux", log=log, shared_session=shared_session)
     _write_fake_vhs(
         workdir / "fake-vhs",
         log=log,
         candidate=candidate,
         markers=markers,
+        socket=socket,
         status=vhs_status,
         writes_candidate=writes_candidate,
         publishes_ok=publishes_ok,
@@ -4020,6 +4240,7 @@ def _run_recorder(
         environment[MCP_RECORDER_ENV["digest"]] = digest
     environment[MCP_RECORDER_ENV["candidate"]] = str(candidate)
     environment[MCP_RECORDER_ENV["final"]] = str(final)
+    environment[MCP_RECORDER_ENV["socket"]] = str(socket)
     for role in ("ok", "failed", "ready", "go"):
         environment[MCP_RECORDER_ENV[role]] = str(markers[role])
 
@@ -4041,7 +4262,181 @@ def _run_recorder(
         tmux=log.read_text(encoding="utf-8") if log.exists() else "",
         vhs_ran=log.exists()
         and any(line.startswith("vhs ") for line in log.read_text(encoding="utf-8").splitlines()),
+        socket_left=socket.exists(),
+        shared_session_left=shared_session.exists(),
     )
+
+
+def _tmux_invocations(run: _RecorderRun) -> list[str]:
+    """Every `tmux` command line the stub recorded, argv text only."""
+    return [
+        line[len("tmux ") :]
+        for line in run.tmux.splitlines()
+        if line.startswith("tmux ") or line == "tmux"
+    ]
+
+
+def _assert_only_the_private_socket(run: _RecorderRun, socket: Path) -> None:
+    """Every tmux call this run made spoke to its own socket, and only it."""
+    invocations = _tmux_invocations(run)
+    for invocation in invocations:
+        assert invocation.startswith(f"-S {socket} "), (
+            "every tmux command the recording issues must name its private socket first; "
+            f"this one did not: tmux {invocation}"
+        )
+    assert "kill-server" not in run.tmux, (
+        f"only the demo session may be killed, never a whole server: {run.tmux!r}"
+    )
+    assert run.shared_session_left, (
+        "a session of the same name on the user's shared default server must survive; "
+        f"the recording reached it: {run.tmux!r}"
+    )
+    assert not run.socket_left, (
+        "the private socket is a recording side effect like every other one; the wrapper "
+        "must remove it on the way out"
+    )
+
+
+def test_mcp_recorder_speaks_only_to_its_own_private_tmux_socket(tmp_path: Path) -> None:
+    """Round-13 (comment 3861985988): a fixed name on a shared server.
+
+    The recording composed `korvid-mcp-demo` on tmux's *default* socket —
+    the one shared by everything the invoking user runs — and claimed
+    ownership of it from the name alone. `end_session` then killed that
+    name from an `EXIT` trap on every path, including the ones that refuse
+    before VHS has created anything, so running the published command while
+    a developer happened to have a session of that name destroyed their
+    work. A private socket inside the checkout makes the fixed name safe:
+    the server is created, owned and torn down by this recording, and
+    nothing on the shared one is addressable at all.
+    """
+    workdir = tmp_path / "private-socket"
+    run = _run_recorder(workdir)
+
+    assert run.status == 0, f"the success path must still publish: {run.output!r}"
+    assert _tmux_invocations(run), "the wrapper must still tear its own session down"
+    _assert_only_the_private_socket(run, workdir / MCP_TMUX_SOCKET)
+    assert f"kill-session -t {MCP_TMUX_SESSION}" in run.tmux, (
+        f"the teardown must still name the demo session: {run.tmux!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "overrides"),
+    [
+        ("wrong-pin", {"digest": "0" * 64}),
+        ("vhs-itself-failed", {"vhs_status": 3}),
+        ("client-published-failure", {"publishes_failed": True}),
+    ],
+)
+def test_mcp_recorder_refusals_never_reach_the_shared_tmux_server(
+    tmp_path: Path, case: str, overrides: dict[str, object]
+) -> None:
+    """The trap fires on refusals too — including before VHS ever runs.
+
+    A pin that does not match is a refusal reached long before any tmux
+    server exists, and the `EXIT` trap still runs the teardown. On the
+    shared socket that teardown is a guess about who owns a name; on the
+    private socket it can only ever find this recording's own server, or
+    nothing at all.
+    """
+    workdir = tmp_path / case
+    run = _run_recorder(workdir, **overrides)  # type: ignore[arg-type]  # per-case override map
+
+    assert run.status != 0, f"{case} must refuse the recording"
+    _assert_only_the_private_socket(run, workdir / MCP_TMUX_SOCKET)
+
+
+def test_mcp_recorder_and_tape_bind_the_same_private_socket() -> None:
+    """One socket, spelled once in the wrapper and once in the tape.
+
+    The tape cannot read the wrapper's environment: VHS types literal
+    shell into a pane, so the socket is a literal there. The wrapper's
+    default has to be that same literal, or the server the tape composes
+    and the server the wrapper tears down are two different servers.
+    """
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    tape = MCP_TAPE.read_text(encoding="utf-8")
+
+    assert f"${{{MCP_RECORDER_ENV['socket']}:-{MCP_TMUX_SOCKET}}}" in script, (
+        f"the wrapper must default its socket to {MCP_TMUX_SOCKET!r}"
+    )
+    assert MCP_TMUX_SOCKET in tape, "the tape must compose its panes on that same socket"
+
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert re.search(rf"^{re.escape(MCP_TMUX_SOCKET)}$", gitignore, re.MULTILINE), (
+        "the socket is a recording side effect like the handshake files; it must never "
+        "be committable"
+    )
+    assert not (ROOT / MCP_TMUX_SOCKET).exists(), (
+        "a socket in the checkout is an interrupted recording; the wrapper removes it on "
+        "every exit path"
+    )
+
+
+def test_mcp_recorder_issues_no_tmux_command_without_its_socket() -> None:
+    """Read as text, not as a run: no line may address the default server."""
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    commands = [
+        line
+        for line in script.splitlines()
+        if line.strip() and not line.lstrip().startswith("#") and _TMUX_COMMAND.search(line)
+    ]
+
+    assert commands, "the wrapper still tears down the session it composed"
+    for line in commands:
+        stripped = line.strip()
+        if "command -v tmux" in stripped:
+            continue
+        assert 'tmux -S "$socket"' in stripped, (
+            f"every tmux invocation must carry the private socket: {stripped!r}"
+        )
+    probeless = "\n".join(commands).replace("command -v tmux", "")
+    assert not re.search(r"(?<![\w./-])tmux(?! -S \")", probeless), (
+        "a bare `tmux` in this wrapper is a command aimed at whatever server the user "
+        "happens to be running"
+    )
+
+
+def test_mcp_follow_tape_composes_every_pane_on_the_private_socket() -> None:
+    """The same rule inside the tape, where the socket is typed literally.
+
+    The composition, the status line, the split, the pane selection, the
+    attach, the fail-closed teardown and the final teardown are all tmux
+    commands typed into a recorded shell. One of them left on the default
+    socket would put the whole session back on the user's own server —
+    and the `Ctrl+B` detach the capture ends on works the same either way,
+    because the prefix belongs to the attached client, not to the socket.
+    """
+    typed = [
+        line[len('Type "') : -1]
+        for line in MCP_TAPE.read_text(encoding="utf-8").splitlines()
+        if line.startswith('Type "')
+    ]
+    invocations = [
+        command[match.start() :] for command in typed for match in _TMUX_COMMAND.finditer(command)
+    ]
+
+    assert invocations, "the tape still composes its panes with tmux"
+    for invocation in invocations:
+        assert invocation.startswith(f"tmux -S {MCP_TMUX_SOCKET} "), (
+            f"this tmux command reaches the user's default server: {invocation!r}"
+        )
+    for verb in ("new-session", "split-window", "select-pane", "attach-session", "kill-session"):
+        assert any(
+            invocation.startswith(f"tmux -S {MCP_TMUX_SOCKET} ") and verb in invocation
+            for invocation in invocations
+        ), f"the tape's {verb} must run on the private socket"
+    assert all("kill-server" not in command for command in typed), (
+        "the tape kills its session, never a server"
+    )
+
+    detach = [
+        line
+        for line in MCP_TAPE.read_text(encoding="utf-8").splitlines()
+        if line.strip() == "Ctrl+B"
+    ]
+    assert detach, "the capture must still detach with the tmux prefix before teardown"
 
 
 def test_mcp_recorder_promotes_only_a_completed_run(tmp_path: Path) -> None:

@@ -790,6 +790,16 @@ Create `docs/demo/mcp-follow.tape`:
 # no MCP endpoint file, no cluster. The tmux status line is turned off
 # before anything is captured, so no hostname, user or date reaches a
 # frame; the shell that composes the panes is never captured either.
+#
+# Every tmux command below carries `-S .korvid-mcp-demo.tmux.sock`: a private
+# server, bound to a socket inside the checkout, created and removed by this
+# recording. tmux's default socket belongs to whoever runs this, and a fixed
+# session name there is a name this tape merely hopes is free — composing on
+# it would collide with a developer's own `korvid-mcp-demo` session, and the
+# teardowns below would kill it. Nothing on the shared server is addressable
+# from here. The socket never reaches a frame (no captured command types it:
+# the composition is hidden, and the visible window shows the attached panes),
+# so it changes nothing about the recorded story.
 
 Output docs/assets/scenes/.mcp-follow-demo.candidate.mp4
 
@@ -802,7 +812,7 @@ Set Padding 0
 # --- composition, never captured -------------------------------------
 Hide
 
-Type "rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
+Type "rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; tmux -S .korvid-mcp-demo.tmux.sock kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo.tmux.sock; true"
 Enter
 Sleep 1s
 
@@ -818,11 +828,11 @@ Sleep 1s
 # `korvid.mcp.server` import nor the client's MCP SDK import resolves. The
 # flag changes nothing that reaches a frame: the same code runs and prints
 # the same output.
-Type "tmux -f /dev/null new-session -d -s korvid-mcp-demo -x 139 -y 42 'uv run --frozen --extra mcp python docs/demo/demo.py --scene mcp'"
+Type "tmux -S .korvid-mcp-demo.tmux.sock -f /dev/null new-session -d -s korvid-mcp-demo -x 139 -y 42 'uv run --frozen --extra mcp python docs/demo/demo.py --scene mcp'"
 Enter
 Sleep 1s
 
-Type "tmux set -t korvid-mcp-demo status off"
+Type "tmux -S .korvid-mcp-demo.tmux.sock set -t korvid-mcp-demo status off"
 Enter
 Sleep 500ms
 
@@ -830,11 +840,11 @@ Sleep 500ms
 # korvid's first start is slow and variable, and a client that raced it
 # would open the story on a connection error. The gate below is dropped only
 # after the scene publishes .korvid-mcp-demo-ready.
-Type "tmux split-window -h -t korvid-mcp-demo -p 45 'while [ ! -f .korvid-mcp-demo-go ]; do sleep 0.1; done; uv run --frozen --extra mcp python docs/demo/mcp_client.py'"
+Type "tmux -S .korvid-mcp-demo.tmux.sock split-window -h -t korvid-mcp-demo -p 45 'while [ ! -f .korvid-mcp-demo-go ]; do sleep 0.1; done; uv run --frozen --extra mcp python docs/demo/mcp_client.py'"
 Enter
 Sleep 1s
 
-Type "tmux select-pane -t korvid-mcp-demo:0.0"
+Type "tmux -S .korvid-mcp-demo.tmux.sock select-pane -t korvid-mcp-demo:0.0"
 Enter
 
 # korvid's own startup: mount, first watch, and the MCP server's bind. The
@@ -870,7 +880,7 @@ Sleep 65s
 # attaching. `[ -f ready ] && ( ... ) & clear; tmux attach-session` does not
 # express that — bash's `&` terminates the whole and_or list, so the attach
 # is a separate, unconditional command.
-Type "if [ -f .korvid-mcp-demo-ready ]; then ( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux attach-session -t korvid-mcp-demo; else echo 'mcp-follow.tape: .korvid-mcp-demo-ready never appeared; failing without attach'; tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; exit 1; fi"
+Type "if [ -f .korvid-mcp-demo-ready ]; then ( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux -S .korvid-mcp-demo.tmux.sock attach-session -t korvid-mcp-demo; else echo 'mcp-follow.tape: .korvid-mcp-demo-ready never appeared; failing without attach'; tmux -S .korvid-mcp-demo.tmux.sock kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed .korvid-mcp-demo.tmux.sock; exit 1; fi"
 Enter
 Sleep 400ms
 
@@ -903,8 +913,10 @@ Sleep 500ms
 # a completed run, and removes every scratch file either way. The session is
 # still torn down from here, after Hide and after the detach: before Hide it
 # would type a shell command into the captured frames, and before the detach
-# it would type it into the attached TUI.
-Type "tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
+# it would type it into the attached TUI. The detach itself is unchanged by
+# the private socket — `Ctrl+B d` is the prefix the attached client answers,
+# not a server address.
+Type "tmux -S .korvid-mcp-demo.tmux.sock kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo.tmux.sock; true"
 Enter
 Sleep 1s
 ```
@@ -923,7 +935,7 @@ Do not fall back to the checked-in third-party-client GIF.
 
 Create `docs/demo/record-mcp-follow.sh` (executable, `set -euo pipefail`): it
 pins the reviewed tape by its raw SHA-256
-(`771a88d89e0e8fdb242d5e264b556ca868d67ac26ef0c42e1776d85d2f2c2596`, computed
+(`60334eb07ab42901a4885584174b9f1bfe4089f1ebdb685f64c8e136cbe2a743`, computed
 with `sha256sum` or `shasum -a 256`) and refuses any tape that does not hash to
 it, requires the published clip's basename to be absent from the tape's bytes
 and the candidate's basename to be present, runs VHS, and promotes the
@@ -932,13 +944,17 @@ candidate onto
 returned 0, `.korvid-mcp-demo-client-failed` is absent,
 `.korvid-mcp-demo-client-ok` is present and the candidate exists. Every other
 path prints one line on stderr, removes the candidate and all four handshake
-files, kills the `korvid-mcp-demo` tmux session by name from an `EXIT` trap,
+files, kills the `korvid-mcp-demo` tmux session by name on the recording's own
+private socket (`tmux -S .korvid-mcp-demo.tmux.sock`, removed with it) from an
+`EXIT` trap — never on the user's default server, where that name may belong to
+someone else's session —
 exits non-zero and leaves any previously approved clip byte-identical. Its
 paths default to those repository-relative values; the
 `KORVID_MCP_VHS_BIN`/`KORVID_MCP_TAPE`/`KORVID_MCP_TAPE_SHA256`/
 `KORVID_MCP_CANDIDATE`/
 `KORVID_MCP_FINAL`/`KORVID_MCP_CLIENT_OK`/`KORVID_MCP_CLIENT_FAILED`/
-`KORVID_MCP_READY`/`KORVID_MCP_GO` overrides exist so the contracts can drive
+`KORVID_MCP_READY`/`KORVID_MCP_GO`/`KORVID_MCP_TMUX_SOCKET` overrides exist so
+the contracts can drive
 the boundary against a fake VHS in a temporary directory. Because the single
 `mv` is only atomic inside one directory, the candidate and the published clip
 must resolve to the same physical parent: the wrapper checks that before it
@@ -1497,7 +1513,7 @@ The wrapper now pins the reviewed tape by its raw SHA-256 and runs that file
 and no other:
 
 - `reviewed_tape_sha256` carries
-  `771a88d89e0e8fdb242d5e264b556ca868d67ac26ef0c42e1776d85d2f2c2596`, the
+  `60334eb07ab42901a4885584174b9f1bfe4089f1ebdb685f64c8e136cbe2a743`, the
   digest of the shipped `docs/demo/mcp-follow.tape`. `KORVID_MCP_TAPE_SHA256`
   overrides it for the contracts alone and defaults to it, so a checkout with
   no environment records the reviewed tape.

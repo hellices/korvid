@@ -19,6 +19,16 @@
 # no MCP endpoint file, no cluster. The tmux status line is turned off
 # before anything is captured, so no hostname, user or date reaches a
 # frame; the shell that composes the panes is never captured either.
+#
+# Every tmux command below carries `-S .korvid-mcp-demo.tmux.sock`: a private
+# server, bound to a socket inside the checkout, created and removed by this
+# recording. tmux's default socket belongs to whoever runs this, and a fixed
+# session name there is a name this tape merely hopes is free — composing on
+# it would collide with a developer's own `korvid-mcp-demo` session, and the
+# teardowns below would kill it. Nothing on the shared server is addressable
+# from here. The socket never reaches a frame (no captured command types it:
+# the composition is hidden, and the visible window shows the attached panes),
+# so it changes nothing about the recorded story.
 
 Output docs/assets/scenes/.mcp-follow-demo.candidate.mp4
 
@@ -31,7 +41,7 @@ Set Padding 0
 # --- composition, never captured -------------------------------------
 Hide
 
-Type "rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
+Type "rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; tmux -S .korvid-mcp-demo.tmux.sock kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo.tmux.sock; true"
 Enter
 Sleep 1s
 
@@ -47,11 +57,11 @@ Sleep 1s
 # `korvid.mcp.server` import nor the client's MCP SDK import resolves. The
 # flag changes nothing that reaches a frame: the same code runs and prints
 # the same output.
-Type "tmux -f /dev/null new-session -d -s korvid-mcp-demo -x 139 -y 42 'uv run --frozen --extra mcp python docs/demo/demo.py --scene mcp'"
+Type "tmux -S .korvid-mcp-demo.tmux.sock -f /dev/null new-session -d -s korvid-mcp-demo -x 139 -y 42 'uv run --frozen --extra mcp python docs/demo/demo.py --scene mcp'"
 Enter
 Sleep 1s
 
-Type "tmux set -t korvid-mcp-demo status off"
+Type "tmux -S .korvid-mcp-demo.tmux.sock set -t korvid-mcp-demo status off"
 Enter
 Sleep 500ms
 
@@ -59,11 +69,11 @@ Sleep 500ms
 # korvid's first start is slow and variable, and a client that raced it
 # would open the story on a connection error. The gate below is dropped only
 # after the scene publishes .korvid-mcp-demo-ready.
-Type "tmux split-window -h -t korvid-mcp-demo -p 45 'while [ ! -f .korvid-mcp-demo-go ]; do sleep 0.1; done; uv run --frozen --extra mcp python docs/demo/mcp_client.py'"
+Type "tmux -S .korvid-mcp-demo.tmux.sock split-window -h -t korvid-mcp-demo -p 45 'while [ ! -f .korvid-mcp-demo-go ]; do sleep 0.1; done; uv run --frozen --extra mcp python docs/demo/mcp_client.py'"
 Enter
 Sleep 1s
 
-Type "tmux select-pane -t korvid-mcp-demo:0.0"
+Type "tmux -S .korvid-mcp-demo.tmux.sock select-pane -t korvid-mcp-demo:0.0"
 Enter
 
 # korvid's own startup: mount, first watch, and the MCP server's bind. The
@@ -99,7 +109,7 @@ Sleep 65s
 # attaching. `[ -f ready ] && ( ... ) & clear; tmux attach-session` does not
 # express that — bash's `&` terminates the whole and_or list, so the attach
 # is a separate, unconditional command.
-Type "if [ -f .korvid-mcp-demo-ready ]; then ( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux attach-session -t korvid-mcp-demo; else echo 'mcp-follow.tape: .korvid-mcp-demo-ready never appeared; failing without attach'; tmux kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed; exit 1; fi"
+Type "if [ -f .korvid-mcp-demo-ready ]; then ( sleep 0.7; touch .korvid-mcp-demo-go ) & clear; tmux -S .korvid-mcp-demo.tmux.sock attach-session -t korvid-mcp-demo; else echo 'mcp-follow.tape: .korvid-mcp-demo-ready never appeared; failing without attach'; tmux -S .korvid-mcp-demo.tmux.sock kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo-go .korvid-mcp-demo-ready .korvid-mcp-demo-client-ok .korvid-mcp-demo-client-failed .korvid-mcp-demo.tmux.sock; exit 1; fi"
 Enter
 Sleep 400ms
 
@@ -132,7 +142,9 @@ Sleep 500ms
 # a completed run, and removes every scratch file either way. The session is
 # still torn down from here, after Hide and after the detach: before Hide it
 # would type a shell command into the captured frames, and before the detach
-# it would type it into the attached TUI.
-Type "tmux kill-session -t korvid-mcp-demo 2>/dev/null; true"
+# it would type it into the attached TUI. The detach itself is unchanged by
+# the private socket — `Ctrl+B d` is the prefix the attached client answers,
+# not a server address.
+Type "tmux -S .korvid-mcp-demo.tmux.sock kill-session -t korvid-mcp-demo 2>/dev/null; rm -f .korvid-mcp-demo.tmux.sock; true"
 Enter
 Sleep 1s

@@ -154,6 +154,16 @@ def test_keybindings_doc_directs_to_help_overlay_not_static_inventory() -> None:
     )
 
 
+def _app_bindings() -> list[Binding]:
+    """`KorvidApp.BINDINGS`, normalised to `Binding` objects."""
+    return [raw if isinstance(raw, Binding) else Binding(*raw) for raw in KorvidApp.BINDINGS]
+
+
+def _default_keys(action: str) -> tuple[str, ...]:
+    """Every key the shipped app binds to `action`, spelled as it binds it."""
+    return tuple(binding.key for binding in _app_bindings() if binding.action == action)
+
+
 def test_documented_remap_example_survives_the_real_keybinding_planner() -> None:
     """The `keybindings:` snippet in docs/keybindings.md must be a remap the
     shipped app actually accepts. `ctrl+x` (interrupt_agent) and `g`
@@ -164,7 +174,7 @@ def test_documented_remap_example_survives_the_real_keybinding_planner() -> None
     documented = dict(re.findall(r"^\s{2}([a-z_]+):\s*(\S+)", block, flags=re.MULTILINE))
     assert documented, "docs/keybindings.md must keep a worked remap example"
 
-    bindings = [raw if isinstance(raw, Binding) else Binding(*raw) for raw in KorvidApp.BINDINGS]
+    bindings = _app_bindings()
     plan = plan_keybindings(
         dict(documented),
         KorvidApp._binding_actions(),
@@ -177,10 +187,24 @@ def test_documented_remap_example_survives_the_real_keybinding_planner() -> None
 
 async def test_documented_remap_example_rebinds_the_running_app() -> None:
     """End-to-end proof for the same snippet: the freed defaults go inert
-    and the documented keys drive the documented actions."""
+    and the documented keys drive the documented actions.
+
+    Round-13 review (comment 3862106877): the freed default used to be the
+    literal `"A"`. If `sort_by_age`'s product default moved, `"A"` would
+    become a key bound to nothing, `assert not _sorted_by_age()` would hold
+    for the wrong reason and the "the default really is inert" half of this
+    contract would quietly stop testing anything. Both halves are derived
+    from the shipped `BINDINGS` now.
+    """
     doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
     block = doc.split("```yaml", 1)[1].split("```", 1)[0]
     documented = dict(re.findall(r"^\s{2}([a-z_]+):\s*(\S+)", block, flags=re.MULTILINE))
+    defaults = _default_keys("sort_by_age")
+    assert defaults, "sort_by_age must still ship a default binding for the remap to free"
+    assert documented["sort_by_age"] not in defaults, (
+        f"the documented remap {documented['sort_by_age']!r} is one of sort_by_age's own "
+        f"defaults {defaults}; freeing it would prove nothing"
+    )
     pods = [_pod("bb"), _pod("aa")]
     app = make_app(pods, config=_config(documented))
     async with app.run_test() as pilot:
@@ -194,9 +218,10 @@ async def test_documented_remap_example_rebinds_the_running_app() -> None:
                 "AGE" in str(c.label) and "▼" in str(c.label) for c in table.columns.values()
             )
 
-        await pilot.press("A")  # freed default must be inert now
-        await pilot.pause()
-        assert not _sorted_by_age()
+        for freed in defaults:
+            await pilot.press(freed)  # every freed default must be inert now
+            await pilot.pause()
+            assert not _sorted_by_age(), f"the freed default {freed!r} still sorted by age"
         await pilot.press(documented["sort_by_age"])
         await until(pilot, _sorted_by_age, label="documented key sorts by age")
 

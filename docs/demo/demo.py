@@ -13,6 +13,7 @@ import copy
 import importlib.util
 import random
 import sys
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -571,6 +572,30 @@ def _pod_list_row(pod: PodSummary) -> PodListSummary:
     )
 
 
+async def _tail_stream(source: AsyncIterator[LogLine], tail_lines: int) -> AsyncIterator[LogLine]:
+    """The last `tail_lines` lines of a finite log stream, in order.
+
+    The shipped log tools (`get_logs`, and `diagnose_pod`'s excerpt) ask
+    this read surface for a bounded, non-following read, and the MCP clip's
+    whole claim is that korvid answers such a call *bounded*. Dropping the
+    argument made the answer's size a property of the fixture instead, so
+    the bound is applied here, over the same synthetic stream.
+
+    Args:
+        source: The finite stream to bound.
+        tail_lines: How many trailing lines to keep. Zero or less keeps
+            none, matching what the API server does with `tailLines=0`.
+
+    Yields:
+        The stream's last `tail_lines` lines, oldest first.
+    """
+    kept: deque[LogLine] = deque(maxlen=max(tail_lines, 0))
+    async for line in source:
+        kept.append(line)
+    for line in kept:
+        yield line
+
+
 class DemoReadOps(ReadOps):
     """The synthetic fixture behind korvid's real agent read surface.
 
@@ -627,14 +652,19 @@ class DemoReadOps(ReadOps):
         follow: bool = True,
         tail_lines: int = 200,
     ) -> AsyncIterator[LogLine]:
-        del tail_lines
-        return stream_logs(
+        source = stream_logs(
             namespace,
             pod,
             container,
             previous=previous,
             follow=follow,
         )
+        if follow:
+            # The endless stream the log pane consumes. Collecting it into
+            # a tail buffer would never yield a line at all, so the bound
+            # belongs to the finite read below.
+            return source
+        return _tail_stream(source, tail_lines)
 
 
 def load_agent_story() -> ModuleType:

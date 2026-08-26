@@ -151,7 +151,16 @@ ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/relationship-demo.mp4 \
 alone. `docs/demo/mcp-follow.tape` composes two panes with tmux over a fixed
 `139`×`42` grid — the terminal's own grid at the tape's geometry, so attaching
 resizes nothing — and splits it with `-p 45`, giving the client 45% of the
-width and korvid the remaining 55%. Both panes are launched with
+width and korvid the remaining 55%. Every tmux command in the capture carries
+`-S .korvid-mcp-demo.tmux.sock`, a private server bound to a socket inside the
+checkout. tmux's default socket belongs to whoever runs the recorder, and it
+already carries that developer's own sessions; a fixed session name there is a
+name the recording merely hopes is free, and the teardowns below would kill a
+collision rather than step around it. On its own socket the name is the
+recording's to claim, and nothing on the shared server is addressable from the
+capture at all. The socket reaches no frame — the composition runs hidden, and
+the visible window shows only the attached panes — so it changes nothing about
+the recorded story. Both panes are launched with
 `uv run --frozen --extra mcp`: korvid's MCP stack is an optional extra rather
 than a dependency group, so `uv run --frozen` on its own leaves a clean
 checkout without the scene's lazily imported `korvid.mcp.server` or the
@@ -177,7 +186,8 @@ surface that would print a hostname, a user or today's date into a landing
 asset. The shell that composes the panes is never captured, and the five
 repository-local files a recording makes — the handshake pair
 (`.korvid-mcp-demo-ready` and `.korvid-mcp-demo-go`), the client's status
-pair (`.korvid-mcp-demo-client-ok` and `.korvid-mcp-demo-client-failed`)
+pair (`.korvid-mcp-demo-client-ok` and `.korvid-mcp-demo-client-failed`),
+the private tmux socket (`.korvid-mcp-demo.tmux.sock`)
 and the candidate render described below — are all
 created and removed inside the checkout.
 
@@ -245,7 +255,7 @@ this capture.
 
 Before it starts VHS, that wrapper settles which tape it is about to run, by
 its bytes. `docs/demo/record-mcp-follow.sh` carries the reviewed tape's raw
-SHA-256 — `771a88d89e0e8fdb242d5e264b556ca868d67ac26ef0c42e1776d85d2f2c2596`,
+SHA-256 — `60334eb07ab42901a4885584174b9f1bfe4089f1ebdb685f64c8e136cbe2a743`,
 computed with `sha256sum` or, where that is absent, `shasum -a 256` — and
 refuses any tape that does not hash to it. The pin covers the whole file, so
 nothing here has to know what a VHS directive means: an edit is an unreviewed
@@ -280,10 +290,14 @@ when VHS returned 0, the failure file is **absent**, the success file is
 Failure outranks success: a client that raised inside its own closing hold,
 after publishing success, is still a failed run. On every other path the
 wrapper prints one line on stderr, removes the candidate and all four
-handshake files, tears down the recording's own tmux session by name and
+handshake files, tears down the recording's own tmux session by name **on its
+private socket** and removes the socket, and
 exits non-zero, leaving any previously approved clip byte-identical. A failed
 take publishes nothing at all, instead of replacing a reviewed asset with a
-truncated story.
+truncated story. The refusal paths that never reach VHS — a tape whose bytes
+do not match the reviewed pin, most of all — are held to the same rule: they
+probe and clear the private socket and never speak to the default server, so
+a wrapper that refuses to record cannot disturb a session it did not create.
 
 The captured timeline runs the story once, at reading speed. Each call is
 announced, answered, and then held for a fixed beat while the mirrored view

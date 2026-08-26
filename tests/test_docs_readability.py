@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -552,6 +553,100 @@ def test_keybindings_context_map_draws_slash_in_the_contexts_that_answer_it() ->
     )
     assert "filter" in described, reason
     assert "search" in described, reason
+
+
+def _keymap_alt() -> str:
+    """The `alt` text `docs/keybindings.md` embeds the context map with."""
+    tag = re.search(r"<img[^>]*keybindings-context-map\.svg[^>]*>", _source("keybindings.md"))
+    assert tag is not None, "keybindings.md must still embed the context map"
+    alt = re.search(r'alt="([^"]+)"', tag.group(0))
+    assert alt is not None, "the embedded context map must carry alt text"
+    return alt.group(1)
+
+
+def _alt_segments(alt: str, headings: Sequence[str]) -> dict[str, str]:
+    """The `alt` text sliced at its context headings, in the map's own order."""
+    offsets = []
+    for heading in headings:
+        assert heading in alt, f"the alt text must name the {heading!r} context"
+        offsets.append((alt.index(heading), heading))
+    assert offsets == sorted(offsets), (
+        f"the alt text must walk the contexts in the picture's own order {list(headings)}"
+    )
+    bounds = [*[offset for offset, _ in offsets], len(alt)]
+    return {
+        heading: alt[bounds[index] : bounds[index + 1]]
+        for index, (_, heading) in enumerate(offsets)
+    }
+
+
+def _mentions_key(segment: str, key: str) -> bool:
+    """Whether `segment` names `key` as a key rather than inside a word.
+
+    A single letter is a key only when it stands alone: `d` in "drill" is
+    prose, and a `:` glued to the previous word is punctuation. Screen
+    readers make the same distinction audibly, so the contract does too.
+    """
+    return re.search(rf"(?<![\w-]){re.escape(key)}(?![\w-])", segment) is not None
+
+
+def test_keybindings_context_map_alt_carries_the_relationships_it_draws() -> None:
+    """Round-13 accessibility review: the alt text was a caption, not the map.
+
+    `alt="Context map connecting Korvid's global, table, log, and
+    guarded-write keys"` named the four boxes and stopped there. A reader
+    who cannot see the picture got no key, no scope and no arrow — none of
+    the information the sighted reader takes from it — while the SVG's own
+    `title`/`desc` are unreachable through an `<img>` tag, which renders
+    it as an opaque image. The alt must therefore carry the equivalent
+    text itself: which keys sit in which context, where the table branches
+    to, and that a write still needs its own fresh approval keystroke.
+    """
+    alt = _keymap_alt()
+    contexts = _keymap_contexts()
+    segments = _alt_segments(alt, list(contexts))
+
+    for heading, chips in contexts.items():
+        segment = segments[heading]
+        for _, _, key in chips:
+            assert _mentions_key(segment, key), (
+                f"the alt text drops {key!r} from its {heading} context; a reader who "
+                f"cannot see the map would never learn it: {segment!r}"
+            )
+        for other, other_chips in contexts.items():
+            if other == heading:
+                continue
+            exclusive = {key for _, _, key in other_chips} - {key for _, _, key in chips}
+            for key in exclusive:
+                assert not _mentions_key(segment, key), (
+                    f"{key!r} belongs to {other}, not {heading}; the alt text must keep the "
+                    f"scope the boxes draw: {segment!r}"
+                )
+
+    flat = " ".join(alt.split())
+    assert re.search(r"GLOBAL[^.]*lead[s]? to[^.]*TABLE", flat), (
+        "the first arrow — global navigation reaching table inspection — must be stated"
+    )
+    assert re.search(r"TABLE branches[^.]*LOGS", flat), (
+        f"the table's downward branch — to LOGS — must be stated: {flat!r}"
+    )
+    assert re.search(r"TABLE branches[^.]*WRITE", flat), (
+        f"the table's sideways branch — to guarded WRITE — must be stated: {flat!r}"
+    )
+    assert re.search(r"guarded WRITE", flat), "the write context must stay marked as guarded"
+    assert re.search(r"fresh approval keystroke", flat), (
+        "the map's own note — a write still requires a fresh approval keystroke — is a "
+        "safety claim, not decoration; the alt text must carry it"
+    )
+    assert len(flat.split()) <= 80, (
+        f"alt text is announced in one breath; {len(flat.split())} words is a paragraph"
+    )
+
+    root = ET.parse(DOCS / "assets" / "keybindings-context-map.svg").getroot()
+    assert root.find("{http://www.w3.org/2000/svg}title") is not None, (
+        "the SVG keeps its own title for anyone who opens it directly"
+    )
+    assert root.find("{http://www.w3.org/2000/svg}desc") is not None
 
 
 def test_keybindings_context_map_chips_stay_inside_their_box_and_never_overlap() -> None:

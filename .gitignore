@@ -28,6 +28,14 @@ htmlcov/
 .korvid-mcp-demo-client-ok
 .korvid-mcp-demo-client-failed
 
+# The private tmux server the mcp-follow capture composes on. tmux's default
+# socket carries every session the invoking user is already running, so a
+# fixed session name there is a name the recording only hopes is free — and
+# its teardown would then kill a developer's own work. Bound and removed by
+# docs/demo/mcp-follow.tape and docs/demo/record-mcp-follow.sh, never
+# committed.
+.korvid-mcp-demo.tmux.sock
+
 # The unreviewed render docs/demo/mcp-follow.tape writes on every attempt,
 # successful or not. VHS exits 0 whatever the recording did, so the tape may
 # never write the published clip directly; docs/demo/record-mcp-follow.sh
