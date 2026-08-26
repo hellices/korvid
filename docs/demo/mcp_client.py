@@ -32,7 +32,8 @@ the candidate render onto the published clip only when the failure marker is
 absent and the success marker is present, rejecting the candidate — and
 leaving the previously approved clip untouched — on every other outcome,
 including a read-only checkout that stopped this run from writing either
-marker at all: no :data:`OK_FILE` is enough on its own to reject it.
+marker at all. Under the shipped wrapper, which removes stale markers before
+starting VHS, no :data:`OK_FILE` is enough on its own to reject the candidate.
 """
 
 from __future__ import annotations
@@ -62,12 +63,10 @@ OK_FILE = Path(".korvid-mcp-demo-client-ok")
 #: present, as defence in depth — though the client no longer publishes a
 #: failure after a success: :data:`OK_FILE` is written only once everything
 #: except the local closing hold has succeeded.
-#: Publishing it is best-effort: the same read-only checkout or permission
-#: error that can stop :func:`_clear_markers` from removing a stale marker
-#: can just as easily stop this write, and :func:`run` must not let that
-#: second failure escape as a traceback. When it cannot be written, the
-#: wrapper still rejects the candidate — it promotes only when :data:`OK_FILE`
-#: is present, and a run that failed never published one. Both files live in
+#: Publishing it is best-effort: a read-only checkout or permission error can
+#: stop this write, and :func:`run` must not let that second failure escape as
+#: a traceback. When the shipped wrapper's authoritative pre-clean succeeded,
+#: it still sees no success marker from this run and rejects. Both files live in
 #: the checkout being recorded, like the two handshake files, and are
 #: removed on both sides of a run — :func:`run` clears them before the story
 #: starts, so only what this run publishes can grade it, and the wrapper
@@ -330,12 +329,12 @@ async def main() -> None:
 async def run() -> None:
     """Run :func:`main` behind the status handshake the recorder grades.
 
-    Clears both markers first, so only what this run publishes can grade
-    it. The clearing happens *inside* the failure channel on purpose: a
-    marker that cannot be removed (a read-only checkout, a permission
-    error) leaves a stale success on disk, so the run must not start —
-    publishing :data:`FAILED_FILE` rejects the candidate whatever else is
-    lying about beside it, and keeps the traceback out of the frames.
+    Clears both markers first, so only what this run publishes can grade it
+    when the client is invoked directly. The shipped wrapper performs the
+    authoritative pre-clean before VHS; this local clear is defence in depth.
+    If it fails, the run does not start, and a best-effort
+    :data:`FAILED_FILE` plus the fixed failure hold keeps the ordinary failure
+    path bounded without claiming it can repair an unremovable stale marker.
 
     :data:`OK_FILE` is published here, not in :func:`main`, and only once
     `main` has *returned*: awaiting it to completion is what proves the
@@ -345,11 +344,11 @@ async def run() -> None:
     raised arrived in this failure channel with a success already on disk —
     and because publishing :data:`FAILED_FILE` is best-effort, a checkout
     that could not take that second write left the wrapper a lone
-    :data:`OK_FILE` and it promoted a failed run. Clearing the markers at
-    the start of this same `try` is what makes the ordering total: when the
-    failure channel runs, no successful publish has happened yet, so the
-    only success that can exist on disk is one this run put there after
-    everything succeeded.
+    :data:`OK_FILE` and it promoted a failed run. Publishing success only
+    after `main` returns makes the ordering total for this run's own markers:
+    the failure channel is entered before this run can publish success.
+    Removal of inherited markers remains the wrapper's authoritative
+    precondition.
 
     Publishing :data:`FAILED_FILE` is itself best-effort: the same
     read-only checkout or permission error that broke `_clear_markers` (or
@@ -358,11 +357,10 @@ async def run() -> None:
     into the recorded pane and skip the fixed failure line, the hold and
     the `SystemExit` below — the very failure this function exists to
     prevent. So an `OSError` from publishing the failure marker is caught
-    and ignored; the wrapper rejects the candidate regardless, because it
-    promotes only when :data:`OK_FILE` is present, and a run that reaches
-    this block never published one. `_publish(OK_FILE)` is not given the
-    same leniency: it stands inside the `try` above, so if it raises, the
-    run is failed like any other.
+    and ignored. After the wrapper's pre-clean, it rejects the candidate
+    because this run never published :data:`OK_FILE`. `_publish(OK_FILE)` is
+    not given the same leniency: it stands inside the `try` above, so if it
+    raises, the run is failed like any other.
 
     The closing hold stands *after* the failure channel, not in it: a
     published :data:`OK_FILE` is final, and an ordinary `Exception` from
