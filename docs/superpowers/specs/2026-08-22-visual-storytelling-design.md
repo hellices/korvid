@@ -327,6 +327,9 @@ Asset rules:
   of a visible switcher; no other media may start on its own;
 - lazy-load media below the first viewport;
 - pause inactive or off-screen scene media;
+- treat unreported visibility as not visible: where `IntersectionObserver`
+  is unavailable nothing autoplays at all, and the poster plus the native
+  controls carry the media instead;
 - avoid animated GIF for newly produced long recordings;
 - preserve the existing no-runtime-third-party-request policy; and
 - checksum executable JavaScript assets in the existing documentation asset
@@ -349,7 +352,9 @@ JavaScript.
   state.
 - Focus indicators use the existing amber-on-charcoal visual system.
 - `prefers-reduced-motion` disables decorative transitions and prevents
-  programmatic autoplay.
+  programmatic autoplay, continuously rather than only at the moment a video
+  would start: turning the preference on mid-visit pauses every video the
+  controller manages, and turning it back off never resumes one on its own.
 - Poster frames and text remain present if media playback fails.
 - If the enhancement script fails to load, all scenes remain visible and all
   guide links continue to work.

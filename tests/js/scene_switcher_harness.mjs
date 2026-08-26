@@ -22,6 +22,38 @@ const CONTROLLER = new URL(
   import.meta.url,
 );
 
+const MOTION_QUERY = "(prefers-reduced-motion: reduce)";
+
+/** The `MediaQueryList` half of `matchMedia`, including the `change` registry
+ *  a controller has to subscribe to in order to notice a visitor turning
+ *  `prefers-reduced-motion` on mid-visit.
+ *
+ *  One instance is shared by every `matchMedia()` call in a run on purpose: a
+ *  stub that handed back a fresh object per call could never deliver a
+ *  preference change to anybody, which is precisely the failure this fake
+ *  exists to catch. `changeEvents: false` models the older browsers whose
+ *  `MediaQueryList` has no `addEventListener` at all. */
+class MediaQueryListFake {
+  constructor(matches, { changeEvents = true } = {}) {
+    this.media = MOTION_QUERY;
+    this.matches = matches;
+    this.listeners = [];
+    if (changeEvents) {
+      this.addEventListener = (type, handler) => {
+        if (type === "change") this.listeners.push(handler);
+      };
+    }
+  }
+
+  /** Flip the preference the way an OS setting would, and notify listeners. */
+  set(matches) {
+    this.matches = matches;
+    for (const handler of this.listeners) {
+      handler({ type: "change", media: MOTION_QUERY, matches });
+    }
+  }
+}
+
 class HTMLElement {
   constructor(tag, attributes = {}) {
     this.tagName = tag.toUpperCase();
@@ -226,15 +258,30 @@ function buildDocument(switchers, strays = []) {
   };
 }
 
-function run(document, { intersectionObserver = true, reducedMotion = false } = {}) {
+function run(
+  document,
+  {
+    intersectionObserver = true,
+    reducedMotion = false,
+    matchMedia = true,
+    motionChangeEvents = true,
+  } = {},
+) {
   const errors = [];
   const observers = [];
+  const queries = [];
+  const media = new MediaQueryListFake(reducedMotion, { changeEvents: motionChangeEvents });
   const sandbox = {
     document,
     HTMLElement,
     console: { error: (...args) => errors.push(args.map(String).join(" ")) },
-    matchMedia: () => ({ matches: reducedMotion }),
   };
+  if (matchMedia) {
+    sandbox.matchMedia = (query) => {
+      queries.push(query);
+      return media;
+    };
+  }
   if (intersectionObserver) {
     sandbox.IntersectionObserver = class {
       constructor(callback) {
@@ -249,7 +296,7 @@ function run(document, { intersectionObserver = true, reducedMotion = false } = 
   }
   const context = createContext(sandbox);
   runInContext(readFileSync(CONTROLLER, "utf8"), context, { filename: "visual-storytelling.js" });
-  return { errors, observers };
+  return { errors, observers, media, queries };
 }
 
 const scenarios = {
@@ -409,6 +456,181 @@ const scenarios = {
     );
   },
 
+  "turning on reduced motion mid-visit pauses every managed video at once"() {
+    const built = buildSwitcher("a");
+    const hero = buildHero();
+    const document = buildDocument([built.switcher], [hero.figure]);
+    const { errors, observers, media, queries } = run(document);
+
+    assert.deepEqual(errors, []);
+    assert.deepEqual(
+      queries,
+      [MOTION_QUERY],
+      "the controller must build exactly one shared MediaQueryList for the page, " +
+        "not a throwaway one per play attempt",
+    );
+    assert.ok(
+      media.listeners.length > 0,
+      "the controller must subscribe to `change` so a mid-visit preference flip is noticed",
+    );
+
+    observers[0].callback([{ isIntersecting: true }]);
+    observers[1].callback([{ isIntersecting: true }]);
+    built.tabs[1].dispatch("click", {});
+    assert.equal(built.videos[1].played, 1, "the selected scene is playing before the flip");
+    assert.equal(hero.video.played, 1, "the hero is playing before the flip");
+
+    const pausesBefore = [...built.videos, hero.video].map((video) => video.paused);
+    media.set(true);
+    for (const [index, video] of [...built.videos, hero.video].entries()) {
+      assert.ok(
+        video.paused > pausesBefore[index],
+        "every video the controller manages must be paused the moment the visitor " +
+          `asks for reduced motion (video ${index})`,
+      );
+    }
+
+    const playedAfterFlip = [...built.videos, hero.video].map((video) => video.played);
+    media.set(false);
+    assert.deepEqual(
+      [...built.videos, hero.video].map((video) => video.played),
+      playedAfterFlip,
+      "turning the preference back off must never resume playback by itself; only " +
+        "an ordinary visibility or selection event may start motion again",
+    );
+
+    observers[0].callback([{ isIntersecting: true }]);
+    assert.equal(
+      built.videos[1].played,
+      playedAfterFlip[1] + 1,
+      "a later ordinary visibility event may restart the selected scene once the " +
+        "preference is off again — the controller simply never resumes on its own",
+    );
+  },
+
+  "a reduced-motion flip is still honored where the switcher was already quiet"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { media, observers } = run(document, { reducedMotion: true });
+
+    observers[0].callback([{ isIntersecting: true }]);
+    assert.equal(built.videos[0].played, 0, "reduced motion suppresses the initial start");
+
+    media.set(false);
+    assert.equal(
+      built.videos[0].played,
+      0,
+      "relaxing the preference must not start anything on its own either",
+    );
+
+    built.tabs[1].dispatch("click", {});
+    assert.equal(
+      built.videos[1].played,
+      1,
+      "a visitor-driven selection after the preference is relaxed may start motion",
+    );
+    const pausedBeforeFlip = built.videos[1].paused;
+
+    media.set(true);
+    assert.ok(
+      built.videos[1].paused > pausedBeforeFlip,
+      "flipping the preference back on pauses the scene that was just started",
+    );
+  },
+
+  "a browser whose MediaQueryList has no addEventListener still works"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors, observers } = run(document, { motionChangeEvents: false });
+
+    assert.deepEqual(errors, [], "a legacy MediaQueryList must not break the enhancement");
+    assert.equal(built.switcher.getAttribute("data-enhanced"), "true");
+    observers[0].callback([{ isIntersecting: true }]);
+    assert.equal(
+      built.videos[0].played,
+      1,
+      "without change events the preference is still read at play time",
+    );
+  },
+
+  "a browser without matchMedia still gets a working switcher"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors, observers } = run(document, { matchMedia: false });
+
+    assert.deepEqual(errors, [], "a missing matchMedia must not break the enhancement");
+    assert.equal(built.switcher.getAttribute("data-enhanced"), "true");
+    observers[0].callback([{ isIntersecting: true }]);
+    assert.equal(built.videos[0].played, 1, "no matchMedia means no stated preference to obey");
+  },
+
+  "modified arrow and Home/End keys keep their browser behavior"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors } = run(document);
+
+    /* `Alt+ArrowLeft` is browser history back, `Ctrl/Cmd+Home` and
+       `Ctrl/Cmd+End` jump to the top/bottom of the document, and
+       `Shift+Arrow` extends a selection. A tab strip that swallows any of
+       them takes a navigation command away from the visitor. */
+    for (const [key, modifier] of [
+      ["ArrowLeft", "altKey"],
+      ["ArrowRight", "altKey"],
+      ["Home", "ctrlKey"],
+      ["End", "metaKey"],
+      ["ArrowRight", "shiftKey"],
+      ["Home", "shiftKey"],
+    ]) {
+      let prevented = false;
+      built.tabs[0].dispatch("keydown", {
+        key,
+        [modifier]: true,
+        preventDefault() {
+          prevented = true;
+        },
+      });
+      assert.equal(prevented, false, `${modifier}+${key} must keep its default browser behavior`);
+      assert.deepEqual(
+        built.panels.map((panel) => panel.hidden),
+        [false, true, true],
+        `${modifier}+${key} must not move the scene selection`,
+      );
+    }
+
+    assert.deepEqual(errors, []);
+
+    let unmodifiedPrevented = false;
+    built.tabs[0].dispatch("keydown", {
+      key: "ArrowRight",
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      preventDefault() {
+        unmodifiedPrevented = true;
+      },
+    });
+    assert.equal(unmodifiedPrevented, true, "an unmodified ArrowRight is still tab navigation");
+    assert.deepEqual(
+      built.panels.map((panel) => panel.hidden),
+      [true, false, true],
+      "unmodified arrow navigation must keep working",
+    );
+
+    built.tabs[1].dispatch("keydown", { key: "End", preventDefault() {} });
+    assert.deepEqual(
+      built.panels.map((panel) => panel.hidden),
+      [true, true, false],
+      "unmodified End still jumps to the last scene",
+    );
+    built.tabs[2].dispatch("keydown", { key: "Home", preventDefault() {} });
+    assert.deepEqual(
+      built.panels.map((panel) => panel.hidden),
+      [false, true, true],
+      "unmodified Home still jumps to the first scene",
+    );
+  },
+
   "a switcher whose tab controls no panel is left in the no-JavaScript state"() {
     const broken = buildSwitcher("a", { brokenTab: "mcp" });
     const healthy = buildSwitcher("b");
@@ -492,7 +714,7 @@ const scenarios = {
     assert.equal(built.stray.hidden, false, "a panel outside the switcher is never touched");
   },
 
-  "a browser without IntersectionObserver still gets a working switcher"() {
+  "a browser without IntersectionObserver gets a working switcher that never autoplays"() {
     const built = buildSwitcher("a");
     const document = buildDocument([built.switcher]);
     const { errors } = run(document, { intersectionObserver: false });
@@ -504,6 +726,55 @@ const scenarios = {
       built.panels.map((panel) => panel.hidden),
       [true, true, false],
       "tab switching must not depend on IntersectionObserver support",
+    );
+    /* Playback is a visible-only contract. Without `IntersectionObserver`
+       the switcher's visibility is simply unknown, and unknown must not mean
+       "assume on screen and play": that is how a browser with no observer
+       ends up decoding video the visitor has never scrolled to. The scene is
+       still fully usable by hand. */
+    assert.ok(
+      built.videos.every((video) => video.played === 0),
+      "unknown visibility must never autoplay",
+    );
+    assert.equal(
+      built.videos[2].getAttribute("src"),
+      "mcp.mp4",
+      "selection still promotes the deferred source so the manual play has bytes",
+    );
+    assert.equal(
+      built.videos[2].getAttribute("poster"),
+      "mcp.png",
+      "selection still promotes the deferred poster",
+    );
+    assert.equal(
+      built.videos[2].getAttribute("controls"),
+      "",
+      "native controls stay available so the visitor can start the scene by hand",
+    );
+    assert.equal(built.videos[2].hidden, false, "the selected panel's video is visible");
+  },
+
+  "a hero without IntersectionObserver stays paused and stays playable by hand"() {
+    const hero = buildHero();
+    const document = buildDocument([], [hero.figure]);
+    const { errors, observers } = run(document, { intersectionObserver: false });
+
+    assert.deepEqual(errors, []);
+    assert.deepEqual(observers, [], "there is no observer to register without support for one");
+    assert.equal(
+      hero.video.played,
+      0,
+      "a hero whose visibility cannot be known must not start by itself",
+    );
+    assert.equal(
+      hero.video.getAttribute("controls"),
+      "",
+      "the hero stays playable by hand where autoplay is withheld",
+    );
+    assert.equal(
+      hero.video.getAttribute("poster"),
+      "assets/scenes/cockpit-poster.png",
+      "the poster still stands in for the withheld motion",
     );
   },
 
@@ -548,10 +819,15 @@ const scenarios = {
     assert.deepEqual(legacy.errors, []);
     assert.equal(
       unobserved.video.played,
-      1,
-      "without IntersectionObserver the hero plays immediately rather than never",
+      0,
+      "without IntersectionObserver the hero's visibility is unknown, and unknown " +
+        "must not autoplay",
     );
-    assert.equal(unobserved.video.currentTime, 0, "that immediate start is also from the beginning");
+    assert.equal(
+      unobserved.video.getAttribute("controls"),
+      "",
+      "the hero the controller declines to start must still be startable by hand",
+    );
   },
 };
 

@@ -898,3 +898,49 @@ def test_observability_bounds_table_publishes_the_enforced_concurrency_cap() -> 
         assert kept in section, f"the existing bounds must survive: {kept!r}"
     assert "credential-shaped" in lowered, "the credential-shaped masking pass must survive"
     assert "`mask_labels`" in section, "the mask_labels pass must survive"
+
+
+def test_airgap_names_both_the_pod_debug_and_node_shell_image_keys() -> None:
+    """Round-6 review: two separate keys pull two separate images.
+
+    `kubectl debug` on a *pod* attaches an ephemeral container built from
+    `debug.default_image` (or one of `debug.images`), while `s` on a *node*
+    creates the privileged `node-debugger-…` pod from `node_shell.image`.
+    They are parsed from different config sections
+    (`korvid.core.config`: `debug_default_image`/`debug_images` vs
+    `node_shell_image`), so an air-gap checklist that lists only the
+    `debug.*` keys leaves the node shell pulling korvid's built-in default
+    from the public internet — the one image an operator reaches for when
+    a node is already unreachable.
+    """
+    from korvid.core.config import KorvidConfig
+
+    fields = set(KorvidConfig.__dataclass_fields__)
+    assert {"debug_default_image", "debug_images", "node_shell_image"} <= fields, (
+        "this test pins documentation against the real config keys; update both together"
+    )
+
+    source = _source("airgap.md")
+    internalize = _section("airgap.md", "Internalize the remaining dependencies")
+    lowered = " ".join(internalize.split()).lower()
+
+    for key in ("`debug.default_image`", "`debug.images`", "`node_shell.image`"):
+        assert key in internalize, f"the air-gap setup must name {key}"
+
+    assert re.search(r"ephemeral", lowered), (
+        "the pod path must be named for what it is: an ephemeral debug container"
+    )
+    assert re.search(r"node[ -]?shell.{0,200}`node_shell\.image`", internalize, re.S | re.I), (
+        "the node shell's own image key must be attached to the node shell, not "
+        "left to be inferred from the `debug.*` keys beside it"
+    )
+    assert re.search(
+        r"`node_shell\.image`.{0,240}(internal|mirror|registry)", internalize, re.S | re.I
+    ), "the node shell image must also be pointed at the internal registry"
+
+    checklist = _section("airgap.md", "Readiness checklist (detect, don't assume)")
+    assert "node_shell" in checklist, (
+        "the detection checklist must inspect the node-shell image too, or an "
+        "operator who runs it still cannot see the second image source"
+    )
+    assert "korvid never pulls" in source, "the existing ownership boundary must survive"

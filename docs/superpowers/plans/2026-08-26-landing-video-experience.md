@@ -72,8 +72,9 @@
 - [ ] **Step 1: Extend the JavaScript harness with failing autoplay contracts**
 
 Change `HTMLElement.play()` to return a controllable promise, add `currentTime`,
-add a `matchMedia` stub, and make the intersection observer callback drive both
-entering and leaving the viewport:
+add a shared `matchMedia`/`MediaQueryList` stub that can deliver a mid-visit
+`change`, and make the intersection observer callback drive both entering and
+leaving the viewport:
 
 ```javascript
 class HTMLElement {
@@ -91,17 +92,55 @@ class HTMLElement {
   }
 }
 
-function run(document, { intersectionObserver = true, reducedMotion = false } = {}) {
+// One MediaQueryList per run, shared by every matchMedia() call: a stub that
+// returned a fresh object per call could never deliver a `change` to the
+// controller, hiding the very bug the fake exists to catch.
+class MediaQueryListFake {
+  constructor(matches, { changeEvents = true } = {}) {
+    this.media = MOTION_QUERY;
+    this.matches = matches;
+    this.listeners = [];
+    if (changeEvents) {
+      this.addEventListener = (type, handler) => {
+        if (type === "change") this.listeners.push(handler);
+      };
+    }
+  }
+
+  set(matches) {
+    this.matches = matches;
+    for (const handler of this.listeners) {
+      handler({ type: "change", media: MOTION_QUERY, matches });
+    }
+  }
+}
+
+function run(
+  document,
+  {
+    intersectionObserver = true,
+    reducedMotion = false,
+    matchMedia = true,
+    motionChangeEvents = true,
+  } = {},
+) {
   const errors = [];
   const observers = [];
+  const queries = [];
+  const media = new MediaQueryListFake(reducedMotion, { changeEvents: motionChangeEvents });
   const sandbox = {
     document,
     HTMLElement,
     console: { error: (...args) => errors.push(args.map(String).join(" ")) },
-    matchMedia: () => ({ matches: reducedMotion }),
   };
+  if (matchMedia) {
+    sandbox.matchMedia = (query) => {
+      queries.push(query);
+      return media;
+    };
+  }
   // Keep the existing IntersectionObserver fake and vm execution.
-  return { errors, observers };
+  return { errors, observers, media, queries };
 }
 ```
 
@@ -123,9 +162,13 @@ assert.ok(first.videos.every((video) => video.paused > 0));
 ```
 
 Add separate reduced-motion and rejected-promise scenarios. The
-reduced-motion case must remain at `played === 0`; the rejected-promise case
-must retain `controls`, must not remove `poster`, and must not roll back the
-switcher.
+reduced-motion case must remain at `played === 0`; a `media.set(true)` flip
+mid-visit must pause every managed video and `media.set(false)` must resume
+none of them; a run without `IntersectionObserver` must leave both the
+selected scene and the hero paused (unknown visibility is not visibility);
+a modified `Alt`/`Ctrl`/`Cmd`/`Shift` chord must not be prevented or switch
+scenes; and the rejected-promise case must retain `controls`, must not
+remove `poster`, and must not roll back the switcher.
 
 - [ ] **Step 2: Run the harness to verify RED**
 

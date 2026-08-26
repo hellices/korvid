@@ -896,7 +896,7 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
     assert hashlib.sha256(script).hexdigest() == (
-        "3f7d623e8565280388e1126cc7acdf3b4786a504aa9d5a588299b12917c6e390"
+        "e88e62da5271b0cc33dca4a6cb2dead3641d7050941e5606b7fc074093d378e5"
     )
     assert b"\r" not in script
 
@@ -1134,10 +1134,42 @@ final newline:
   };
 
   /* `prefers-reduced-motion: reduce` must suppress every programmatic
-     autoplay; native controls stay usable either way. Feature-detected so a
-     browser without `matchMedia` degrades to allowing motion. */
-  const motionAllowed = () =>
-    typeof matchMedia !== "function" || !matchMedia("(prefers-reduced-motion: reduce)").matches;
+     autoplay, and must keep suppressing it when a visitor turns the
+     preference on *during* a visit. One `MediaQueryList` is built for the
+     whole page and consulted live, instead of a throwaway query per play
+     attempt, so a single `change` subscription can reach everything already
+     running. Feature-detected: a browser without `matchMedia` states no
+     preference at all, and keeps its motion. */
+  const reducedMotion =
+    typeof matchMedia === "function" ? matchMedia("(prefers-reduced-motion: reduce)") : null;
+
+  const motionAllowed = () => !(reducedMotion && reducedMotion.matches);
+
+  /* Every video this controller may start by itself. Registering them is
+     what lets a mid-visit preference change reach media that is already
+     playing; re-querying the document from the change handler would instead
+     reach videos the controller has no business touching. */
+  const managedVideos = new Set();
+
+  const manageVideos = (root) => {
+    for (const video of root.querySelectorAll("video")) managedVideos.add(video);
+  };
+
+  const pauseManagedVideos = () => {
+    for (const video of managedVideos) video.pause();
+  };
+
+  /* Turning `reduce` on stops all of it at once. Turning it back off
+     deliberately resumes nothing: relaxing a preference is not a request for
+     motion, so playback returns only through an ordinary visibility or
+     selection event — or the native controls, which never go away. Older
+     browsers whose `MediaQueryList` predates `addEventListener` simply keep
+     the read-at-play-time behaviour. */
+  if (reducedMotion && typeof reducedMotion.addEventListener === "function") {
+    reducedMotion.addEventListener("change", () => {
+      if (reducedMotion.matches) pauseManagedVideos();
+    });
+  }
 
   /* Below-fold scene video bytes are deferred behind `data-src` until the
      scene is actually selected, mirroring `promotePoster` above. Idempotent:
@@ -1206,10 +1238,13 @@ final newline:
        partially rewritten. */
     const panels = new Map(tabs.map((tab) => [tab, panelFor(switcher, tab)]));
 
-    /* Unknown until `IntersectionObserver` reports in; a browser without it
-       is assumed always visible so playback still works, just without the
-       off-screen pause. */
-    let switcherVisible = typeof IntersectionObserver !== "function";
+    /* Playback is a visible-only contract, so visibility that has not been
+       reported is not visibility: a switcher stays quiet until an
+       `IntersectionObserver` says it is on screen, and a browser without one
+       never autoplays at all. Tabs, posters, deferred sources and the native
+       controls all keep working there — only the automatic start is
+       withheld. */
+    let switcherVisible = false;
 
     const select = (nextTab, focus) => {
       for (const tab of tabs) {
@@ -1241,12 +1276,21 @@ final newline:
     select(tabs.find((tab) => tab.getAttribute("aria-selected") === "true") ?? tabs[0], false);
 
     /* The stylesheet reveals the tab strip on this hook, so it is set only
-       once the switcher demonstrably works. */
+       once the switcher demonstrably works. Its media joins the managed set
+       in the same breath: from here on the controller may start these
+       videos, so a reduced-motion change has to be able to stop them. */
     switcher.dataset.enhanced = "true";
+    manageVideos(switcher);
 
     for (const tab of tabs) {
       tab.addEventListener("click", () => select(tab, false));
       tab.addEventListener("keydown", (event) => {
+        /* A modified chord is a browser or OS command, not tab navigation:
+           `Alt+ArrowLeft`/`Alt+ArrowRight` are history back/forward,
+           `Ctrl/Cmd+Home`/`Ctrl/Cmd+End` jump to the ends of the document,
+           `Shift+Arrow` extends a selection. Bail out before anything is
+           recognised or prevented, or the command is already lost. */
+        if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
         const index = tabs.indexOf(tab);
         const keys = new Map([
           ["ArrowLeft", (index - 1 + tabs.length) % tabs.length],
@@ -1299,10 +1343,12 @@ final newline:
      enhancement above and its no-JavaScript rollback contract: there is no
      tab strip to roll back, only a single always-visible-in-markup video. */
   for (const hero of document.querySelectorAll("[data-autoplay-video]")) {
-    if (typeof IntersectionObserver !== "function") {
-      startFromBeginning(hero);
-      continue;
-    }
+    managedVideos.add(hero);
+    /* Same visible-only contract as the switcher: with no
+       `IntersectionObserver` the hero's visibility is unknown, and unknown
+       must not autoplay. The poster stands in and the native controls still
+       start it by hand. */
+    if (typeof IntersectionObserver !== "function") continue;
     const heroObserver = new IntersectionObserver((entries) => {
       for (const entry of entries) {
         if (entry.isIntersecting) {

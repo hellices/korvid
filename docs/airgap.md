@@ -129,9 +129,16 @@ Kubernetes credentials are separate operator-supplied dependencies.
 - **OLM catalogs**: mirror the catalog and its bundle/operand images with
   `oc-mirror` or `opm`, and configure the cluster's `CatalogSource` and
   registry mirrors (`ImageContentSourcePolicy` / containerd mirror config).
-- **Debug and node-shell images**: `kubectl debug` pulls whatever image is
-  configured — point `debug.default_image` / `debug.images` in korvid's
-  config at your internal registry (see [ops.md](ops.md)).
+- **Debug images (pods)**: `d` on a pod attaches an *ephemeral debug
+  container* built from `debug.default_image`, or from one of the named
+  `debug.images` offered in the picker — point both at your internal
+  registry (see [ops.md](ops.md)).
+- **Node shell image (nodes)**: `s` on a node is a *separate* config key.
+  It creates a privileged `node-debugger-…` pod from `node_shell.image`,
+  which falls back to korvid's built-in public default when unset, so it
+  must be pointed at the internal registry in its own right — the node
+  shell is exactly what an operator reaches for when a node is already
+  unreachable.
 - **Workload images**: standard registry mirroring; korvid never pulls
   images itself.
 
@@ -162,8 +169,9 @@ else
   echo "kubectl failed — cannot verify images"
 fi
 
-# 4. Debug images configured to the internal registry:
-grep -A3 '^debug:' ~/.config/korvid/config.yaml
+# 4. Both image keys configured to the internal registry — the pod debug
+#    images and the node shell image are separate settings:
+grep -A3 -e '^debug:' -e '^node_shell:' ~/.config/korvid/config.yaml
 
 # 5. OLM catalog sources (if OLM is installed) point at the mirror:
 kubectl get catalogsources -A -o jsonpath='{range .items[*]}{.spec.image}{"\n"}{end}'

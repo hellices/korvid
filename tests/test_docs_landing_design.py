@@ -1052,7 +1052,7 @@ def test_controller_pauses_off_screen_switcher_media_via_intersection_observer()
     script = STORYTELLING_JS.read_text(encoding="utf-8")
     assert re.search(r'typeof IntersectionObserver === "function"', script), (
         "IntersectionObserver support must be feature-detected so unsupported "
-        "browsers still get a working, if never-paused-by-scroll, switcher"
+        "browsers still get a working — if never-autoplaying — switcher"
     )
     start = script.index("new IntersectionObserver(")
     end = script.index("observer.observe(switcher);", start) + len("observer.observe(switcher);")
@@ -1165,6 +1165,118 @@ def test_controller_rolls_one_broken_switcher_back_and_keeps_going() -> None:
     )
 
 
+def test_controller_obeys_a_reduced_motion_preference_turned_on_mid_visit() -> None:
+    """Round-6 review: the preference was only ever read *before* a play call.
+
+    `matchMedia("(prefers-reduced-motion: reduce)").matches` was evaluated
+    inside `startFromBeginning`, so a visitor who turned the preference on
+    while a hero or scene was already playing kept watching it — the
+    controller had no way to hear about the change and nothing to pause. One
+    shared `MediaQueryList` is built for the page, every video the controller
+    may start is registered, and a `change` subscription pauses all of them
+    the moment `matches` becomes true. Relaxing the preference must not
+    resume anything: motion may only come back through an ordinary
+    visibility or selection event, or the native controls.
+    """
+    script = _strip_js_comments(STORYTELLING_JS.read_text(encoding="utf-8"))
+
+    assert script.count('matchMedia("(prefers-reduced-motion: reduce)")') == 1, (
+        "one MediaQueryList must be shared by the whole page; a throwaway query "
+        "per play attempt can never deliver a change event to anybody"
+    )
+    assert re.search(r'typeof matchMedia === "function"', script), (
+        "a browser without matchMedia states no preference and must keep its motion"
+    )
+    assert re.search(r'typeof \w+\.addEventListener === "function"', script), (
+        "a MediaQueryList without addEventListener must not break the controller"
+    )
+
+    assert "managedVideos" in script, "the controller must track what it may start"
+    assert re.search(r"managedVideos\.add\(", script), "hero and scene videos must be registered"
+    assert re.search(r"for \(const video of managedVideos\) video\.pause\(\);", script), (
+        "the registry exists so every managed video can be paused at once"
+    )
+
+    subscription = script.index('addEventListener("change"')
+    handler = script[subscription : script.index("});", subscription) + 3]
+    assert re.search(r"\.matches", handler), "the handler must branch on the new preference value"
+    assert re.search(r"pause\w*\(", handler), (
+        "turning the preference on must pause what is already playing"
+    )
+    assert not re.search(r"\bplay\(|startFromBeginning", handler), (
+        "the controller must never start playback from a preference change; turning "
+        "`reduce` back off is not a request for motion"
+    )
+
+
+def test_controller_withholds_autoplay_where_visibility_is_unknown() -> None:
+    """Round-6 review: no `IntersectionObserver` meant "assume on screen".
+
+    Playback is a visible-only contract. The switcher initialised
+    `switcherVisible` to `true` where `IntersectionObserver` was missing and
+    the hero started immediately in the same case, so exactly the browsers
+    that cannot report visibility were the ones that autoplayed unconditionally
+    — decoding video a visitor may never scroll to, and never pausing it.
+    Unknown visibility must withhold autoplay instead; the poster, the native
+    controls, and the whole tab strip still work.
+    """
+    script = _strip_js_comments(STORYTELLING_JS.read_text(encoding="utf-8"))
+    switcher_loop = script.index('document.querySelectorAll("[data-scene-switcher]")')
+    enhance_block = script[script.index("const enhance") : switcher_loop]
+
+    assert "let switcherVisible = false;" in enhance_block, (
+        "a switcher whose visibility has not been reported yet is not visible"
+    )
+    assert 'typeof IntersectionObserver !== "function"' not in enhance_block, (
+        "the absence of an observer must not be turned into an assumption of "
+        "visibility; the only supported branch is 'observe when we can'"
+    )
+    assert "if (switcherVisible) startFromBeginning(selectedVideo);" in enhance_block, (
+        "selection may still start a scene, but only in a switcher known to be visible"
+    )
+
+    hero_block = script[script.index('document.querySelectorAll("[data-autoplay-video]")') :]
+    observer_at = hero_block.index("new IntersectionObserver(")
+    starts = [match.start() for match in re.finditer(r"startFromBeginning\(", hero_block)]
+    assert starts, "the hero must still start when it is reported visible"
+    assert all(at > observer_at for at in starts), (
+        "the hero may only be started from an intersection callback: without an "
+        "observer its visibility is unknown, and unknown must not autoplay"
+    )
+
+
+def test_controller_leaves_modified_navigation_keys_to_the_browser() -> None:
+    """Round-6 review: `Alt+ArrowLeft` was swallowed as tab navigation.
+
+    The keydown handler matched on `event.key` alone, so a tab strip that
+    happened to have focus consumed browser and OS commands built on the very
+    same keys — `Alt+ArrowLeft`/`Alt+ArrowRight` (history back/forward),
+    `Ctrl/Cmd+Home`/`Ctrl/Cmd+End` (jump to the ends of the document),
+    `Shift+Arrow` (extend a selection) — calling `preventDefault` on them and
+    switching scenes instead. The guard has to run before `preventDefault`,
+    or the command is already lost by the time the key is recognised.
+    """
+    script = _strip_js_comments(STORYTELLING_JS.read_text(encoding="utf-8"))
+    handler_at = script.index('addEventListener("keydown"')
+    before_prevent = script[handler_at : script.index("preventDefault", handler_at)]
+
+    for modifier in ("altKey", "ctrlKey", "metaKey", "shiftKey"):
+        assert f"event.{modifier}" in before_prevent, (
+            f"a {modifier} chord is a browser or OS command; the handler must check "
+            "it before it prevents anything"
+        )
+    assert re.search(r"if \([^)]*altKey[^)]*\)\s*return;", before_prevent), (
+        "a modified key must leave the handler untouched, not fall through to selection"
+    )
+    assert "event.preventDefault();" in script, (
+        "unmodified arrow/Home/End navigation must still be claimed by the tab strip"
+    )
+    guard_at = before_prevent.index("altKey")
+    assert guard_at < before_prevent.index("keys.get("), (
+        "the modifier guard must precede key recognition and selection entirely"
+    )
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> None:
     """Run the shipped controller, unmodified, against a stub DOM.
@@ -1176,12 +1288,16 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
     initializes, that posters are promoted on selection, that tab and
     off-screen pauses still happen, that a visible switcher starts and
     restarts the selected scene, that `prefers-reduced-motion` suppresses that
-    autoplay, and that a browser-blocked `play()` promise never rolls the
+    autoplay — including a preference turned on mid-visit, which must pause
+    every managed video at once and never resume one when it is turned back
+    off — that a modified `Alt`/`Ctrl`/`Cmd`/`Shift` chord keeps its browser
+    behaviour, and that a browser-blocked `play()` promise never rolls the
     switcher back. The standalone `[data-autoplay-video]` hero has no tab strip
     and therefore no rollback of its own, so it is covered separately: it must
     start from zero on entry, pause on exit, restart on return, stay still
-    under reduced motion, and play immediately where `IntersectionObserver`
-    does not exist. `tests/js/scene_switcher_harness.mjs` implements only the
+    under reduced motion, and stay paused where `IntersectionObserver` does not
+    exist — unknown visibility is not visibility.
+    `tests/js/scene_switcher_harness.mjs` implements only the
     DOM surface the controller touches, so this needs no JavaScript dependency.
     """
     result = subprocess.run(
@@ -1197,11 +1313,17 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
         "healthy switchers enhance",
         "starts the selected scene and restarts",
         "prefers-reduced-motion suppresses autoplay",
+        "turning on reduced motion mid-visit pauses every managed video",
+        "a reduced-motion flip is still honored",
+        "MediaQueryList has no addEventListener",
+        "without matchMedia",
         "rejected play() promise is swallowed",
         "prototype-named keys are ignored",
+        "modified arrow and Home/End keys keep their browser behavior",
         "left in the no-JavaScript state",
         "outside its own switcher is rejected",
-        "without IntersectionObserver",
+        "without IntersectionObserver gets a working switcher that never autoplays",
+        "a hero without IntersectionObserver stays paused",
         "a standalone hero plays only while on screen",
     ):
         assert scenario in result.stdout, f"the DOM harness must cover {scenario!r}"
