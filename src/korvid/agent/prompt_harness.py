@@ -1,4 +1,4 @@
-"""Compose deterministic, versioned agent prompts (issue #316 task 6).
+"""Compose deterministic, versioned agent prompts (prompt harness design).
 
 `PromptHarness` binds a `ResolvedAgentPolicy`, a workspace
 `InteractionContext` and `ClusterFacts` snapshot, and a

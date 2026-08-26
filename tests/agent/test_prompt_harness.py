@@ -1,4 +1,4 @@
-"""Tests for the deterministic agent prompt harness (issue #316 task 6).
+"""Tests for the deterministic agent prompt harness (prompt harness design).
 
 The harness binds a `ResolvedAgentPolicy` and an
 `InteractionContext`/`ClusterFacts` snapshot into one
@@ -814,7 +814,7 @@ def test_newlines_in_context_fields_stay_inside_one_json_string() -> None:
 def test_secret_like_values_in_context_fields_still_pass_through_outbound_masking() -> None:
     """`PromptHarness` bounds and encodes; `OutboundPolicy` is still the sole masking authority.
 
-    The composed strings are plain text (issue #316 task 6 decision), so
+    The composed strings are plain text (prompt harness design decision), so
     nothing here calls `OutboundPolicy` itself - that happens later, when
     `AgentSession`/`RequestGateway` build the actual provider request.
     This proves that later pass still finds and masks a
