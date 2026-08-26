@@ -129,9 +129,9 @@ Kubernetes credentials are separate operator-supplied dependencies.
 - **OLM catalogs**: mirror the catalog and its bundle/operand images with
   `oc-mirror` or `opm`, and configure the cluster's `CatalogSource` and
   registry mirrors (`ImageContentSourcePolicy` / containerd mirror config).
-- **Debug images (pods)**: `d` on a pod attaches an *ephemeral debug
-  container* built from `debug.default_image`, or from one of the named
-  `debug.images` offered in the picker — point both at your internal
+- **Debug images (pods)**: `s` on a shell-less pod offers an *ephemeral
+  debug container* built from `debug.default_image`, or from one of the
+  named `debug.images` offered in the picker — point both at your internal
   registry (see [ops.md](ops.md)).
 - **Node shell image (nodes)**: `s` on a node is a *separate* config key.
   It creates a privileged `node-debugger-…` pod from `node_shell.image`,

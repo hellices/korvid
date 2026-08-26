@@ -930,6 +930,9 @@ def test_airgap_names_both_the_pod_debug_and_node_shell_image_keys() -> None:
     assert re.search(r"ephemeral", lowered), (
         "the pod path must be named for what it is: an ephemeral debug container"
     )
+    assert re.search(r"`s` on a shell-less pod.{0,100}ephemeral", internalize, re.S | re.I), (
+        "the pod debug image applies to the shell-less fallback reached through `s`"
+    )
     assert re.search(r"node[ -]?shell.{0,200}`node_shell\.image`", internalize, re.S | re.I), (
         "the node shell's own image key must be attached to the node shell, not "
         "left to be inferred from the `debug.*` keys beside it"
