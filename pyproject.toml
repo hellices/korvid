@@ -162,7 +162,14 @@ extend-exclude = [
 
 [tool.typos.default.extend-words]
 aks = "aks"  # Azure Kubernetes Service — not a typo of "ask"
+decid = "decid"  # regex stem matching decide/decides/decided
+delet = "delet"  # regex stem matching delete/deletes/deleted
+dropp = "dropp"  # regex stem matching drop/dropped/dropping
+ignor = "ignor"  # regex stem matching ignore/ignores/ignored
 paeth = "paeth"  # Alan W. Paeth, who defined PNG filter type 4 — not "path"
+promot = "promot"  # regex stem matching promote/promotes/promoted
+recomput = "recomput"  # regex stem matching recompute/recomputing/recomputed
+rotat = "rotat"  # regex stem matching rotate/rotates/rotated
 trak = "trak"  # the ISO/IEC 14496-12 track box FourCC — renaming it breaks MP4 parsing
 
 [tool.deptry]

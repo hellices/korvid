@@ -183,7 +183,7 @@ endpoint file. The client speaks only to `127.0.0.1:7878`, no credential is
 used, the demo server writes no MCP endpoint file, and the tape turns the
 tmux status line off before the first captured frame — that line is the only
 surface that would print a hostname, a user or today's date into a landing
-asset. The shell that composes the panes is never captured, and the five
+asset. The shell that composes the panes is never captured, and the six
 repository-local files a recording makes — the handshake pair
 (`.korvid-mcp-demo-ready` and `.korvid-mcp-demo-go`), the client's status
 pair (`.korvid-mcp-demo-client-ok` and `.korvid-mcp-demo-client-failed`),

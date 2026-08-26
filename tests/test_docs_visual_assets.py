@@ -4108,6 +4108,11 @@ def _write_fake_vhs(
     path.chmod(0o755)
 
 
+def _require_posix_recorder() -> None:
+    if sys.platform == "win32":
+        pytest.skip("the recorder contract executes a POSIX Bash wrapper")
+
+
 def _run_recorder(
     workdir: Path,
     *,
@@ -4176,6 +4181,8 @@ def _run_recorder(
         path_entries: The whole `PATH` the wrapper runs with, replacing the
             inherited one, so a contract can take a hashing tool away.
     """
+    _require_posix_recorder()
+
     scenes = workdir / "scenes"
     scenes.mkdir(parents=True)
     if scenes_alias is not None:
@@ -5050,7 +5057,10 @@ def test_mcp_recorder_refuses_a_tape_whose_bytes_it_cannot_read(tmp_path: Path) 
     survives a permission problem exactly as it survives a hostile edit.
     """
     workdir = tmp_path / "unreadable"
-    if os.geteuid() == 0:
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        pytest.skip("this platform does not expose POSIX effective-user IDs")
+    if geteuid() == 0:
         pytest.skip("root reads a mode-000 file, so this host cannot make a tape unreadable")
 
     run = _run_recorder(workdir, unreadable_tape=True)
