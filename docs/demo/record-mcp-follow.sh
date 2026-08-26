@@ -77,11 +77,39 @@ fail() {
 # given, so a second one — or an edit of the first back to the published
 # path — would put the clip back under VHS's pen, where a failed take
 # overwrites it before anything here can object.
-outputs=$(grep -c -e '^Output ' -- "$tape" || true)
-[ "$outputs" = "1" ] || fail "the tape must declare exactly one Output"
-expected_output=$(printf 'Output %s' "$candidate")
-grep -qxF -e "$expected_output" -- "$tape" ||
-  fail "the tape must render to the candidate, never to the published clip"
+#
+# The tape is parsed the way VHS reads it, not line-anchored: VHS skips the
+# whitespace in front of a directive and accepts a tab between the directive
+# and its argument, so `  Output <clip>`, a tab-indented `Output` and
+# `Output<TAB><clip>` are all directives it obeys — and a `grep '^Output '`
+# sees none of them while a plain candidate line above satisfies it. awk
+# splits on runs of blanks and ignores leading ones, which is exactly that
+# normalisation: every directive whose first field is `Output` is counted,
+# there must be one, it must carry exactly one argument, and that argument
+# must be the candidate. One argument is the whole rule — the candidate is a
+# repository-relative path with no whitespace in it, so a trailing second
+# field is not a longer path, it is a directive nobody reviewed.
+verdict=$(
+  awk -v want="$candidate" '
+    $1 == "Output" {
+      seen += 1
+      if (NF != 2) fields = 1
+      else if ($2 != want) elsewhere = 1
+    }
+    END {
+      if (seen != 1) print "count"
+      else if (fields) print "fields"
+      else if (elsewhere) print "elsewhere"
+      else print "ok"
+    }
+  ' <"$tape"
+)
+case "$verdict" in
+ok) ;;
+count) fail "the tape must declare exactly one Output" ;;
+fields) fail "the tape's Output must name exactly one path" ;;
+*) fail "the tape must render to the candidate, never to the published clip" ;;
+esac
 
 # A stale marker from an interrupted run would certify this one.
 clean_scratch

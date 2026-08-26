@@ -19,9 +19,14 @@ Aborting is not enough on its own. VHS records for a fixed window and never
 observes this pane, so a run that raised would still yield an apparently
 finished asset — with a traceback in the frames and the TUI reflowed to full
 width once the pane closed. :func:`run` therefore turns any failure into two
-repository-local status files, :data:`OK_FILE` and :data:`FAILED_FILE`, that
-``docs/demo/mcp-follow.tape`` reads once it has stopped recording; the tape
-publishes the capture only when success is present and failure is absent.
+repository-local status files, :data:`OK_FILE` and :data:`FAILED_FILE`. The
+tape only records and leaves both markers in place; it can decide nothing,
+because VHS exits 0 whatever the shell it typed into did. The verdict belongs
+to ``docs/demo/record-mcp-follow.sh``, the wrapper that runs VHS: it grades
+the two markers afterwards and promotes the candidate render onto the
+published clip only when failure is absent and success is present, rejecting
+the candidate — and leaving the previously approved clip untouched — on
+every other outcome.
 """
 
 from __future__ import annotations
@@ -42,11 +47,11 @@ URL = "http://127.0.0.1:7878/mcp"
 #: connected, printed two beats and died. VHS cannot tell those apart.
 OK_FILE = Path(".korvid-mcp-demo-client-ok")
 
-#: Published instead when the run fails. The tape rejects on this file even
-#: if the success file is also present: a failure raised inside the closing
-#: hold is still a failed run. Both files live in the checkout being
-#: recorded, like the two handshake files, and are removed on both sides of
-#: a run.
+#: Published instead when the run fails. `docs/demo/record-mcp-follow.sh`
+#: rejects the candidate on this file even if the success file is also
+#: present: a failure raised inside the closing hold is still a failed run.
+#: Both files live in the checkout being recorded, like the two handshake
+#: files, and are removed on both sides of a run.
 FAILED_FILE = Path(".korvid-mcp-demo-client-failed")
 
 NAMESPACE = "shop"
@@ -188,13 +193,13 @@ async def _answered(lines: list[str], hold: float) -> None:
 
 
 def _publish(status: Path) -> None:
-    """Publish one status file for the tape to read after it stops recording.
+    """Publish one status file for the recorder to grade once VHS has returned.
 
-    The marker is empty, so creating it is a single `open(O_CREAT)`: the
-    tape either sees the file or does not, and there is no content it could
-    observe half-written. Nothing is stored *in* it — a status file that
-    carried the reason would be one more unbounded, unreviewed string
-    living in the checkout.
+    The marker is empty, so creating it is a single `open(O_CREAT)`:
+    `docs/demo/record-mcp-follow.sh` either sees the file or does not, and
+    there is no content it could observe half-written. Nothing is stored *in*
+    it — a status file that carried the reason would be one more unbounded,
+    unreviewed string living in the checkout.
 
     Args:
         status: :data:`OK_FILE` or :data:`FAILED_FILE`.
@@ -249,7 +254,7 @@ async def main() -> None:
 
 
 async def run() -> None:
-    """Run :func:`main` behind the status handshake the tape reads.
+    """Run :func:`main` behind the status handshake the recorder grades.
 
     Raises:
         SystemExit: with status 1 if the story failed, so a direct run still

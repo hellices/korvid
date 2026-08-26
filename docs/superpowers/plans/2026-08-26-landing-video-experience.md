@@ -1123,11 +1123,12 @@ git commit -m "docs: explain the complete landing demos"
 
 ## Post-merge review report
 
-Three findings addressed after `79583ef` merged `origin/main` into
-`docs/visual-storytelling`: two raised by Copilot, and one — finding 3 — found
-while verifying the second one's fix. All were fixed test-first on top of that
-merge; no media was regenerated, because no successful visible frame changed
-and the published clip stayed byte-identical.
+Five findings addressed after `79583ef` merged `origin/main` into
+`docs/visual-storytelling`: two raised by Copilot on the merge itself, one —
+finding 3 — found while verifying the second one's fix, and two more raised
+against the promotion boundary that fix introduced. All were fixed test-first
+on top of that merge; no media was regenerated, because no successful visible
+frame changed and the published clip stayed byte-identical.
 
 ### 1. The observability diagram claimed a citation both consumers do not get
 
@@ -1276,3 +1277,70 @@ command, this plan's Step 5 snippet, Step 6, Step 8 and `.gitignore` are
 resynced. No media was regenerated:
 `docs/assets/scenes/mcp-follow-demo.mp4` is byte-identical to the clip
 reviewed at `ad6c142`.
+
+### 4. The `Output` preflight read one spelling of a directive VHS reads five ways
+
+*Review of `561c752`, `docs/demo/record-mcp-follow.sh`.*
+
+The promotion boundary refused a hostile tape with two line-anchored greps:
+`grep -c '^Output '` for the count and `grep -qxF "Output <candidate>"` for
+the path. VHS does not read a tape that way. Its lexer skips the whitespace in
+front of a directive and accepts a tab between the directive and its argument,
+so `  Output <clip>`, `<TAB>Output <clip>` and `Output<TAB><clip>` are all
+directives it obeys — and none of them starts with `Output ` at column zero. A
+tape whose first line was the candidate therefore satisfied both greps while a
+second, indented `Output docs/assets/scenes/mcp-follow-demo.mp4` below it put
+the published clip straight back under VHS's pen: exactly the bypass the
+preflight exists to stop, reachable by pressing space.
+
+The tape is now parsed the way VHS splits it. `awk` ignores leading blanks and
+splits on runs of them, so `$1 == "Output"` finds every directive whatever its
+indentation or separator; the wrapper requires exactly one such directive,
+exactly one argument on it (the candidate is a repository-relative path with
+no whitespace, so a second field is a directive nobody reviewed, not a longer
+path), and that argument to equal the candidate. Each outcome keeps its own
+reason on stderr. The real tape still passes, and the check is no stricter
+than VHS: a tape VHS renders is a tape the wrapper runs.
+
+Thirteen bypasses now run the shipped script under real bash against a fake
+VHS that would overwrite the published clip the moment it were invoked —
+a second `Output` plain, space-indented, tab-indented, tab-separated and
+both at once; the candidate declared twice; a path followed by a second
+field or a stray word; an `Output` with no path; the published clip alone,
+indented and tab-separated; and no `Output` at all. Each asserts the same
+three things: non-zero exit, an invocation log that was never created, and
+the pre-existing approved clip byte-identical. Six accepted whitespace forms
+of a single candidate `Output` assert the other half — indented with spaces
+or a tab, separated by a tab or several spaces, with trailing whitespace —
+each promoted to the published clip.
+
+### 5. `docs/demo/mcp_client.py` still credited the tape with the verdict
+
+*Review of `561c752`, `docs/demo/mcp_client.py`.*
+
+Finding 3 moved publication out of the tape but left the client's prose
+behind. Its module docstring still said the markers were what
+`docs/demo/mcp-follow.tape` "reads once it has stopped recording" and that
+"the tape publishes the capture only when success is present and failure is
+absent"; `FAILED_FILE` said "the tape rejects on this file"; `_publish` and
+`run` described a handshake the tape read. Every one of those sends a reader
+to a file with no authority over the asset — the same misunderstanding that
+made a tape-side `exit 1` look like a rejection.
+
+The client now states the boundary it actually publishes into: the tape only
+records and leaves both markers in place, and
+`docs/demo/record-mcp-follow.sh` grades them after VHS returns, promoting the
+candidate onto the published clip only when failure is absent and success is
+present and rejecting it otherwise.
+`test_mcp_client_status_files_are_repo_local_and_never_committable` — the
+joint that already kept the marker names synchronized across the client, the
+tape, the wrapper and `.gitignore` — now reads the client source too: it
+requires the wrapper to be named there and rejects any sentence that makes
+the tape the reader, publisher, rejecter or grader of these files. Against
+the client as it stood at `561c752` it fails six times over.
+
+Verified with `tests/test_docs_visual_assets.py` (117 tests) and
+`tests/test_docs_readability.py`, `ruff check`, `ruff format --check`,
+`mkdocs build --strict`, and `bash -n` on the wrapper. `uv.lock` is untouched
+and no media was regenerated: `docs/assets/scenes/mcp-follow-demo.mp4` is
+byte-identical.

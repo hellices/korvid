@@ -3247,11 +3247,21 @@ def test_mcp_client_entry_point_holds_a_failed_pane_and_publishes_no_success(
 
 
 def test_mcp_client_status_files_are_repo_local_and_never_committable() -> None:
-    """Two more recording side effects, held to the handshake files' rules."""
+    """Two more recording side effects, held to the handshake files' rules.
+
+    The client's own prose is part of this joint. Its markers used to be
+    read by the tape, and the tape's `exit 1` used to claim it published or
+    rejected the capture — a claim VHS never honoured. Now that the verdict
+    lives in the wrapper, a comment here that still names the tape as the
+    reader or the publisher would send the next contributor to a file with
+    no authority over the asset, so the client source is graded alongside
+    the tape and the wrapper.
+    """
     module = _mcp_client_module()
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     tape = MCP_TAPE.read_text(encoding="utf-8")
     script = MCP_RECORDER.read_text(encoding="utf-8")
+    client = MCP_CLIENT.read_text(encoding="utf-8")
 
     for path, name in (
         (module.OK_FILE, MCP_CLIENT_OK_FILE),
@@ -3273,6 +3283,21 @@ def test_mcp_client_status_files_are_repo_local_and_never_committable() -> None:
             f"{name} outlives the tape now: {MCP_RECORDER_COMMAND} is what grades it and "
             "what removes it afterwards"
         )
+
+    assert MCP_RECORDER_COMMAND in client, (
+        "the client publishes these markers for one reader; it must name "
+        f"{MCP_RECORDER_COMMAND} as the thing that grades them"
+    )
+    prose = " ".join(client.split())
+    stale = re.findall(
+        r"\btape\b[\s`'\u2019]*(?:\w+\s+){0,3}?"
+        r"(?:publish\w*|reject\w*|promot\w*|grad\w*|read\w*|sees\b|decid\w*)",
+        prose,
+    )
+    assert not stale, (
+        "the tape neither reads these markers nor decides publication — it records and "
+        f"leaves them in place; the client still claims otherwise: {stale}"
+    )
 
 
 class _RecorderRun(NamedTuple):
@@ -3339,6 +3364,7 @@ def _run_recorder(
     publishes_ok: bool = True,
     publishes_failed: bool = False,
     published: bytes | None = MCP_PUBLISHED_BYTES,
+    tape_body: str = "Output {candidate}\nSleep 1s\n",
 ) -> _RecorderRun:
     """Run the shipped wrapper against a fake VHS inside `workdir`.
 
@@ -3347,6 +3373,20 @@ def _run_recorder(
     real trap, its real promotion and its real cleanup — while the
     checkout's own media and scratch stay untouched. `tmux` is a stub on
     `PATH`, so no multiplexer is involved either.
+
+    Args:
+        workdir: The directory every path the wrapper touches is redirected
+            into.
+        vhs_status: The exit status the fake VHS returns.
+        writes_candidate: Whether the fake VHS renders the candidate.
+        publishes_ok: Whether the fake VHS leaves the client's success marker.
+        publishes_failed: Whether the fake VHS leaves the client's failure
+            marker.
+        published: The bytes to seed the canonical path with, or `None` for a
+            checkout where nothing was ever approved.
+        tape_body: The tape the wrapper is handed, with `{candidate}` and
+            `{final}` filled in — the whitespace of its `Output` directives is
+            what the preflight is graded on.
     """
     scenes = workdir / "scenes"
     scenes.mkdir(parents=True)
@@ -3359,7 +3399,7 @@ def _run_recorder(
         role: workdir / f".korvid-mcp-demo-{role}" for role in ("ok", "failed", "ready", "go")
     }
     tape = workdir / "fake.tape"
-    tape.write_text(f"Output {candidate}\nSleep 1s\n", encoding="utf-8")
+    tape.write_text(tape_body.format(candidate=candidate, final=final), encoding="utf-8")
 
     stub_dir = workdir / "stubs"
     stub_dir.mkdir()
@@ -3584,26 +3624,46 @@ def test_mcp_recorder_defaults_are_repository_relative_and_quoted() -> None:
         )
 
 
-def test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip(tmp_path: Path) -> None:
-    """The boundary checks the tape it is about to run, not just the run.
+class _HostileTapeRun(NamedTuple):
+    """What a preflight refusal left behind.
 
-    Editing `Output` back to the canonical path — or adding a second
-    `Output` beside the candidate, which VHS honours — would put the
-    published clip back under VHS's pen. The wrapper reads the tape first
-    and publishes nothing if it does not render to exactly the candidate.
+    Attributes:
+        status: The wrapper's own exit status.
+        output: Its combined stdout and stderr.
+        published: The bytes at the canonical path once the wrapper exited.
+        vhs_ran: Whether the fake VHS was invoked at all.
     """
-    workdir = tmp_path / "hostile-tape"
-    workdir.mkdir()
+
+    status: int
+    output: str
+    published: bytes
+    vhs_ran: bool
+
+
+def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
+    """Hand the wrapper `tape_body` behind a VHS that would overwrite the clip.
+
+    The stand-in writes the canonical path the moment it runs, so a tape the
+    preflight lets through is visible twice over: as changed bytes at the
+    published clip and as an invocation log the wrapper should never have
+    created.
+
+    Args:
+        workdir: The directory every redirected path lives in.
+        tape_body: The tape text, with `{candidate}` and `{final}` filled in.
+    """
+    workdir.mkdir(parents=True)
     scenes = workdir / "scenes"
     scenes.mkdir()
     candidate = scenes / Path(MCP_CANDIDATE_CLIP).name
     final = scenes / Path(MCP_FINAL_CLIP).name
     final.write_bytes(MCP_PUBLISHED_BYTES)
     tape = workdir / "hostile.tape"
-    tape.write_text(f"Output {candidate}\nOutput {final}\n", encoding="utf-8")
+    tape.write_text(tape_body.format(candidate=candidate, final=final), encoding="utf-8")
+    log = workdir / "invocations.log"
     vhs = workdir / "fake-vhs"
     vhs.write_text(
-        f"""#!/bin/sh\nprintf '%s' 'rendered anyway' > "{final}"\nexit 0\n""",
+        f"""#!/bin/sh\necho "vhs $*" >> "{log}"\nprintf '%s' 'rendered anyway' > "{final}"\nexit 0\n""",
         encoding="utf-8",
     )
     vhs.chmod(0o755)
@@ -3624,14 +3684,92 @@ def test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip(tmp_pat
         check=False,
         timeout=60,
     )
-
-    assert completed.returncode != 0, "a tape that renders the published clip must not be run"
-    assert final.read_bytes() == MCP_PUBLISHED_BYTES, (
-        "the wrapper must check the tape before it hands it to VHS; the approved clip was "
-        "overwritten"
+    return _HostileTapeRun(
+        status=completed.returncode,
+        output=completed.stdout + completed.stderr,
+        published=final.read_bytes(),
+        vhs_ran=log.exists(),
     )
-    assert MCP_RECORDER_REJECTION in completed.stdout + completed.stderr, (
-        f"the refusal must say why: {completed.stdout + completed.stderr!r}"
+
+
+@pytest.mark.parametrize(
+    ("case", "tape_body"),
+    [
+        ("a-second-output-on-its-own-line", "Output {candidate}\nOutput {final}\n"),
+        ("a-second-output-indented-with-spaces", "Output {candidate}\n  Output {final}\n"),
+        ("a-second-output-indented-with-a-tab", "Output {candidate}\n\tOutput {final}\n"),
+        ("a-second-output-separated-by-a-tab", "Output {candidate}\nOutput\t{final}\n"),
+        (
+            "a-second-output-indented-and-tab-separated",
+            "Output {candidate}\n \tOutput\t{final}\n",
+        ),
+        ("the-candidate-declared-twice", "Output {candidate}\nOutput {candidate}\n"),
+        ("a-path-followed-by-a-second-field", "Output {candidate} {final}\n"),
+        ("a-path-followed-by-a-stray-word", "Output {candidate} extra\n"),
+        ("an-output-with-no-path-at-all", "Output {candidate}\nOutput\n"),
+        ("the-published-clip-alone", "Output {final}\n"),
+        ("the-published-clip-indented", "  Output {final}\n"),
+        ("the-published-clip-tab-separated", "Output\t{final}\n"),
+        ("no-output-at-all", "Sleep 1s\n"),
+    ],
+)
+def test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip(
+    tmp_path: Path, case: str, tape_body: str
+) -> None:
+    """The boundary checks the tape it is about to run, not just the run.
+
+    Editing `Output` back to the canonical path — or adding a second
+    `Output` beside the candidate, which VHS honours — would put the
+    published clip back under VHS's pen. The preflight therefore has to read
+    the tape the way VHS does: VHS skips the whitespace in front of a
+    directive and accepts a tab between the directive and its argument, so
+    `  Output <clip>`, `\\tOutput <clip>` and `Output\\t<clip>` are all
+    directives it obeys while a line-anchored `grep '^Output '` sees none of
+    them. Each tape here declares an `Output` the wrapper must refuse, and
+    refusing means the approved clip is still byte-identical and VHS was
+    never invoked at all.
+    """
+    run = _run_hostile_tape(tmp_path / case, tape_body)
+
+    assert run.status != 0, f"{case} must not be recorded; the wrapper exited {run.status}"
+    assert not run.vhs_ran, (
+        f"{case} must be refused before VHS is invoked, not after it has already rendered"
+    )
+    assert run.published == MCP_PUBLISHED_BYTES, (
+        f"{case} must leave the approved clip byte-identical; it now holds {run.published!r}"
+    )
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+@pytest.mark.parametrize(
+    ("case", "tape_body"),
+    [
+        ("plain", "Output {candidate}\nSleep 1s\n"),
+        ("indented-with-spaces", "  Output {candidate}\nSleep 1s\n"),
+        ("indented-with-a-tab", "\tOutput {candidate}\nSleep 1s\n"),
+        ("separated-by-a-tab", "Output\t{candidate}\nSleep 1s\n"),
+        ("separated-by-several-spaces", "Output   {candidate}\nSleep 1s\n"),
+        ("trailing-whitespace", "Output {candidate}  \nSleep 1s\n"),
+    ],
+)
+def test_mcp_recorder_reads_the_candidate_in_every_whitespace_form_vhs_accepts(
+    tmp_path: Path, case: str, tape_body: str
+) -> None:
+    """The preflight must not be stricter than VHS either.
+
+    A check that only recognised one spelling of the directive would reject
+    a tape VHS renders perfectly well — and, worse, would tempt the next
+    edit back towards a laxer match. The wrapper normalises whitespace
+    instead: every form below declares exactly one `Output`, it names the
+    candidate, and the run is published.
+    """
+    run = _run_recorder(tmp_path / case, tape_body=tape_body)
+
+    assert run.status == 0, (
+        f"{case} is a directive VHS obeys; the wrapper exited {run.status}: {run.output!r}"
+    )
+    assert run.published == MCP_CANDIDATE_BYTES, (
+        f"{case} must promote the candidate this run rendered; it holds {run.published!r}"
     )
 
 
