@@ -922,8 +922,10 @@ Do not fall back to the checked-in third-party-client GIF.
 - [ ] **Step 6: Record through the promotion wrapper and inspect the media**
 
 Create `docs/demo/record-mcp-follow.sh` (executable, `set -euo pipefail`): it
-runs VHS on the tape, checks that the tape declares exactly one `Output` and
-that it is the candidate, and promotes the candidate onto
+runs VHS on the tape, checks that the tape declares exactly one standalone
+`Output` — counted across every whitespace-separated field of every
+non-comment line, since VHS reads tokens rather than lines — and that it names
+the candidate, and promotes the candidate onto
 `docs/assets/scenes/mcp-follow-demo.mp4` with a single `mv` only when VHS
 returned 0, `.korvid-mcp-demo-client-failed` is absent,
 `.korvid-mcp-demo-client-ok` is present and the candidate exists. Every other
@@ -934,7 +936,11 @@ paths default to those repository-relative values; the
 `KORVID_MCP_VHS_BIN`/`KORVID_MCP_TAPE`/`KORVID_MCP_CANDIDATE`/
 `KORVID_MCP_FINAL`/`KORVID_MCP_CLIENT_OK`/`KORVID_MCP_CLIENT_FAILED`/
 `KORVID_MCP_READY`/`KORVID_MCP_GO` overrides exist so the contracts can drive
-the boundary against a fake VHS in a temporary directory.
+the boundary against a fake VHS in a temporary directory. Because the single
+`mv` is only atomic inside one directory, the candidate and the published clip
+must resolve to the same physical parent: the wrapper checks that before it
+starts VHS, so every override — the contracts' included — has to preserve the
+invariant.
 
 Run:
 
@@ -1241,7 +1247,8 @@ The boundary is now external and outside VHS's reach:
   byte-identical. Its defaults are the repository-relative paths the
   provenance page publishes; the `KORVID_MCP_*` overrides exist so the
   contracts can drive the boundary against a fake VHS in a temporary
-  directory.
+  directory, and every one of them must keep the candidate in the published
+  clip's own directory, since that is what makes the `mv` a rename.
 
 Contracts added in `tests/test_docs_visual_assets.py`, all driving the shipped
 script through **real bash** with a fake VHS executable:
@@ -1398,3 +1405,97 @@ Verified with `tests/test_docs_visual_assets.py` and
 `tests/test_docs_readability.py`, `ruff check`, `ruff format --check`, and
 `bash -n` on the wrapper. `uv.lock` is untouched and no media was regenerated:
 `docs/assets/scenes/mcp-follow-demo.mp4` is byte-identical.
+
+### 7. The byte guard knew one name; a second `Output` could name any other
+
+*Review of `1f9111f`, `docs/demo/record-mcp-follow.sh`.*
+
+Finding 6 put a parse-free byte guard in front of the shape check, and that
+guard does hold: whatever VHS's lexer does, it cannot write
+`mcp-follow-demo.mp4` without the tape naming it, and the needle is derived
+from the promotion target itself. But it is a guard about *one* name, and the
+shape check beside it still judged a line by its first field. `Output
+<candidate>` followed by `Hide Output docs/assets/scenes/agent-demo.mp4`
+therefore passed both: the published MCP clip's basename appears nowhere in
+it, and `$1 == "Output"` counts one directive on a file that declares two.
+VHS obeys both — `Hide` takes no argument, so it ends where the next token
+begins — and rewrites a reviewed clip this recording does not even own before
+the wrapper can grade anything. `Show`, `Enter` and a completed `Sleep 1s`
+close the same way, and `relationship-demo.mp4` sits in the same directory.
+
+The shape check now works in VHS's own unit. Every whitespace-separated field
+of every line is visited, every field that is exactly the token `Output` is
+counted, and exactly one may survive: the first field of its line, carrying
+exactly one argument, and that argument the candidate. Requiring the survivor
+to stand alone is the substance of it — the wrapper cannot know what else a
+shared line does without becoming VHS's parser, so it refuses to reason about
+one at all. `Hide Output <candidate>` is a tape VHS renders correctly and this
+wrapper still declines; that costs a tape author a newline.
+
+Two edges of the scan are deliberate and both are written down where they
+live. A full-line comment is skipped, because VHS ignores it and because the
+shipped tape says "VHS has already rendered its Output" in its own prose — a
+scan without that exemption refuses the reviewed tape (verified: two `Output`
+tokens, line 23 field 1 and line 129 field 11). An `Output` inside a `Type`
+string or after a trailing `#` is *not* skipped: VHS would type it as text or
+ignore it, this wrapper refuses it, and rewording costs one word. Both edges
+are now pinned by a source contract that also forbids `$1 == "Output"` from
+coming back.
+
+Seven more bypasses drive the shipped script under real bash against a fake
+VHS that overwrites *every* approved clip in the scene directory the moment it
+is invoked — a second `Output` behind `Hide` naming `agent-demo.mp4`, behind
+`Show` naming `relationship-demo.mp4`, behind `Sleep 1s` naming the agent clip
+relatively, behind `Enter` naming an unreviewed path, sharing the candidate's
+own line, behind `Hide` with no path at all, and the candidate itself declared
+behind `Hide` and again behind `Show`. Each asserts a non-zero exit, an
+invocation log that was never created, and all three reviewed clips
+byte-identical — the MCP capture and both neighbours, since the old check's
+blind spot was precisely the assets whose names the byte guard does not carry.
+A further contract runs the **shipped tape itself** — every comment, every
+`Type`, every `Sleep`, with only its `Output` argument repointed at a
+temporary candidate — through the real wrapper and requires it to record, so
+the strictness cannot quietly grow past the tape it exists to protect.
+
+### 8. `mv` is only a rename while both paths share a directory
+
+*Review of `1f9111f`, `docs/demo/record-mcp-follow.sh`.*
+
+The promotion comment claimed a reader "either sees the previous asset or the
+whole new one, never a half-written file", and grounded that in the `mv` being
+"in the directory the clip already lives in". The atomicity is real, but the
+precondition was assumed rather than checked: `KORVID_MCP_CANDIDATE` and
+`KORVID_MCP_FINAL` are independent overrides, so two of them can put the
+candidate and the published clip on different filesystems, where `mv` is not
+`rename(2)` at all but copy-then-unlink — and the torn asset the whole
+boundary exists to prevent becomes observable at the canonical path.
+
+The wrapper now resolves both parents physically — `cd -P` then `pwd -P` — and
+requires them to be the same directory. Physically, because a checkout reached
+through a symlink spells one directory two ways and a string comparison would
+reject a promotion that is a plain rename. The candidate's parent is created
+first, exactly as before; the published clip's parent is only resolved, never
+created, or the wrapper could invent the destination it is about to compare
+against. And the check stands in front of VHS rather than in front of the
+`mv`: a recording that cannot be promoted atomically is a recording nobody
+should pay to make, so the refusal costs no render, leaves the approved clip
+untouched and clears the run's own scratch wherever it was put.
+
+Three contracts drive it under real bash. A candidate placed in a sibling
+directory is refused with the fake VHS never invoked, the approved clip
+byte-identical and no scratch left; a published clip whose directory does not
+exist is refused the same way, proving the wrapper does not create the
+destination it compares against; and a candidate named through a symlink to
+the scene directory is promoted, proving the comparison is physical rather
+than textual. A source contract pins the two `pwd -P` resolutions, the
+comparison itself and its position ahead of the VHS invocation. The script's
+header, the promotion comment, the provenance page and the plan's own step now
+all state the same invariant: the overrides exist, and every one of them has
+to keep the candidate in the published clip's own directory.
+
+Verified with `tests/test_docs_visual_assets.py` (154 tests),
+`tests/test_docs_readability.py`, `tests/test_mcp_follow_demo_asset.py`,
+`ruff check`, `ruff format --check`, `mkdocs build --strict`, and `bash -n` on
+the wrapper. `uv.lock` is untouched and no media was regenerated:
+`docs/assets/scenes/mcp-follow-demo.mp4`, `agent-demo.mp4` and
+`relationship-demo.mp4` are byte-identical.

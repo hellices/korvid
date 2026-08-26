@@ -27,7 +27,10 @@
 # The environment overrides below exist for the contracts in
 # tests/test_docs_visual_assets.py, which drive this boundary against a fake
 # VHS inside a temporary directory. Their defaults are the repository-relative
-# paths published in docs/demo/visual-storytelling.md ("MCP follow").
+# paths published in docs/demo/visual-storytelling.md ("MCP follow"), and any
+# override has to keep the candidate in the published clip's own directory:
+# promotion is a rename, which is atomic only there. The wrapper checks that
+# below rather than trusting it.
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -108,28 +111,48 @@ case "$scan" in
 *) fail "the tape could not be read for the published clip's name" ;;
 esac
 
-# The second check is the tape's normal shape, parsed the way VHS splits a
-# directive rather than line-anchored: VHS skips the whitespace in front of a
-# directive and accepts a tab between the directive and its argument, so
-# `  Output <clip>`, a tab-indented `Output` and `Output<TAB><clip>` are all
-# directives it obeys — and a `grep '^Output '` sees none of them while a
-# plain candidate line above satisfies it. awk splits on runs of blanks and
-# ignores leading ones, which is exactly that normalisation: every directive
-# whose first field is `Output` is counted, there must be one, it must carry
-# exactly one argument, and that argument must be the candidate. One argument
-# is the whole rule — the candidate is a repository-relative path with no
-# whitespace in it, so a trailing second field is not a longer path, it is a
-# directive nobody reviewed.
+# The second check is the tape's normal shape, read the way VHS reads it.
+# VHS has no line in its grammar: its lexer emits whitespace-separated tokens
+# and its parser gives each directive the arguments that directive takes, so
+# `Hide`, which takes none, ends where the next token begins. `Hide Output
+# <clip>`, `Sleep 1s Output <clip>` and `Enter Output <clip>` are each two
+# directives VHS obeys, and a check that judged a line by its first field
+# would see `Hide`, `Sleep` or `Enter` and wave them through. The byte guard
+# above catches only the ones aimed at this clip; a second `Output` aimed at
+# `agent-demo.mp4` carries none of the names it looks for.
+#
+# So every whitespace-separated field of every non-comment line is visited
+# and every field that is exactly `Output` is counted. There must be one, and
+# it must be a directive of its own: the first field of its line, carrying
+# exactly one argument, and that argument must be the candidate. Requiring it
+# to stand alone is the point — the wrapper cannot know what else a shared
+# line does without becoming VHS's parser, so it declines to reason about it.
+# One argument is part of the same rule: the candidate is a repository-relative
+# path with no whitespace in it, so a trailing second field is not a longer
+# path, it is a directive nobody reviewed.
+#
+# awk splits on runs of blanks and ignores leading ones, which is exactly VHS's
+# own normalisation: `  Output <clip>`, a tab-indented `Output` and
+# `Output<TAB><clip>` are all directives it obeys, and all of them are read
+# here. Two edges of this scan are deliberate, and neither is a bug. A
+# full-line comment is skipped, because VHS ignores it and the shipped tape
+# says the word `Output` in its own prose. An `Output` inside a `Type` string
+# or after a trailing `#` is *not* skipped: VHS would type or ignore it, this
+# wrapper refuses it, and a tape author spends one word rewording.
 verdict=$(
   awk -v want="$candidate" '
-    $1 == "Output" {
-      seen += 1
-      if (NF != 2) fields = 1
-      else if ($2 != want) elsewhere = 1
+    substr($1, 1, 1) == "#" { next }
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i != "Output") continue
+        seen += 1
+        if (i != 1 || NF != 2) shape = 1
+        else if ($2 != want) elsewhere = 1
+      }
     }
     END {
       if (seen != 1) print "count"
-      else if (fields) print "fields"
+      else if (shape) print "shape"
       else if (elsewhere) print "elsewhere"
       else print "ok"
     }
@@ -138,13 +161,37 @@ verdict=$(
 case "$verdict" in
 ok) ;;
 count) fail "the tape must declare exactly one Output" ;;
-fields) fail "the tape's Output must name exactly one path" ;;
-*) fail "the tape must render to the candidate, never to the published clip" ;;
+shape) fail "the tape's Output must be a directive of its own naming exactly one path" ;;
+*) fail "the tape must render to the candidate, never to another asset" ;;
 esac
 
 # A stale marker from an interrupted run would certify this one.
 clean_scratch
 mkdir -p -- "$(dirname -- "$candidate")"
+
+# Promotion is a single `mv`, and `mv` is `rename(2)` only while both paths
+# share a directory — and therefore a filesystem. Across two of them it
+# degrades to copy-then-unlink, which is exactly the half-written asset this
+# boundary exists to prevent. The defaults above put the candidate beside the
+# published clip, but `KORVID_MCP_CANDIDATE` and `KORVID_MCP_FINAL` are set
+# independently: any override has to preserve that, and this is where it is
+# checked rather than assumed.
+#
+# Both parents are resolved physically — `cd -P` then `pwd -P` — so one
+# directory reached through a symlink is still one directory, and no string
+# comparison of two spellings decides it. The candidate's parent is created
+# first, exactly as a checkout expects; the published clip's parent is only
+# resolved, never created, or the wrapper could invent the destination it is
+# about to compare against. And the check stands in front of VHS, not in
+# front of the `mv`: a recording that cannot be promoted atomically is a
+# recording nobody should pay to make.
+candidate_parent=$(cd -P -- "$(dirname -- "$candidate")" >/dev/null 2>&1 && pwd -P) ||
+  candidate_parent=""
+[ -n "$candidate_parent" ] || fail "the candidate's directory could not be resolved"
+final_parent=$(cd -P -- "$(dirname -- "$final")" >/dev/null 2>&1 && pwd -P) || final_parent=""
+[ -n "$final_parent" ] || fail "the published clip's directory does not exist"
+[ "$candidate_parent" = "$final_parent" ] ||
+  fail "the candidate must be rendered in the published clip's own directory"
 
 status=0
 "$vhs_bin" "$tape" || status=$?
@@ -157,7 +204,8 @@ status=0
 [ -e "$ok_marker" ] || fail "the client pane did not report a completed run"
 [ -s "$candidate" ] || fail "vhs produced no candidate recording"
 
-# One rename, in the directory the clip already lives in: a reader either
-# sees the previous asset or the whole new one, never a half-written file.
+# One rename, in the directory the clip already lives in — checked above, not
+# assumed: a reader either sees the previous asset or the whole new one, never
+# a half-written file.
 mv -f -- "$candidate" "$final"
 printf 'record-mcp-follow.sh: published %s\n' "$final"

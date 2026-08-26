@@ -146,6 +146,11 @@ MCP_CANDIDATE_CLIP = "docs/assets/scenes/.mcp-follow-demo.candidate.mp4"
 MCP_FINAL_CLIP = "docs/assets/scenes/mcp-follow-demo.mp4"
 #: The line the wrapper prints when it publishes nothing.
 MCP_RECORDER_REJECTION = "record-mcp-follow.sh: rejecting this recording"
+#: The other reviewed clips that live in the published clip's own directory.
+#: A tape's second `Output` may name any of them, and none of their basenames
+#: is what the byte guard looks for, so the preflight's contract is wider than
+#: the MCP clip: an `Output` VHS would obey may not reach *any* approved asset.
+MCP_SIBLING_CLIPS = ("agent-demo.mp4", "relationship-demo.mp4")
 #: The environment overrides the wrapper honours, so a contract can drive the
 #: whole boundary against a fake VHS in a temporary directory without touching
 #: the checkout, its scratch files or its published media.
@@ -2598,6 +2603,40 @@ def test_mcp_recording_recipe_is_the_wrapper_and_never_a_bare_vhs_run() -> None:
     )
 
 
+def test_mcp_provenance_publishes_the_token_scan_and_the_same_directory_rule() -> None:
+    """The recipe's two preconditions belong on the page that publishes it.
+
+    A reader who regenerates this clip has to know what the wrapper will
+    refuse before it starts VHS, because both rules constrain how a tape
+    and an override may be written. The first is the token scan: VHS reads
+    whitespace-separated tokens, so `Output` is counted wherever it appears
+    and the one that survives has to be a directive on its own line naming
+    the candidate. The second is the same-directory rule: promotion is a
+    rename, which is only atomic inside one directory, so the candidate is
+    rendered beside the published clip and any override has to keep them
+    there.
+    """
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    mcp = instructions[instructions.index("## MCP follow") :]
+    lowered = " ".join(mcp.split()).lower()
+
+    assert re.search(r"token|field", lowered), (
+        "the page must say the tape is read as tokens, not as lines; that is the whole "
+        "reason a second `Output` cannot hide behind `Hide`"
+    )
+    assert re.search(r"rename", lowered), (
+        "the page claims promotion is atomic; it must name the rename that makes it so"
+    )
+    assert re.search(r"same directory|one directory", lowered), (
+        "a rename is atomic only inside one directory; the page must state the "
+        "precondition it depends on"
+    )
+    assert re.search(r"override", lowered), (
+        "the overrides are the one way that invariant can be broken, so the page must "
+        "state that they have to preserve it"
+    )
+
+
 def test_mcp_capture_instructions_disclose_the_documentation_only_describe_dismissal() -> None:
     """The one piece of choreography in the capture must be named, not hidden.
 
@@ -3787,6 +3826,7 @@ class _RecorderRun(NamedTuple):
         candidate_left: Whether the candidate recording survived the run.
         scratch_left: The scratch markers still present, by role.
         tmux: Every `tmux` invocation the stub recorded.
+        vhs_ran: Whether the fake VHS was invoked at all.
     """
 
     status: int
@@ -3795,6 +3835,7 @@ class _RecorderRun(NamedTuple):
     candidate_left: bool
     scratch_left: tuple[str, ...]
     tmux: str
+    vhs_ran: bool
 
 
 def _write_fake_vhs(
@@ -3842,6 +3883,9 @@ def _run_recorder(
     publishes_failed: bool = False,
     published: bytes | None = MCP_PUBLISHED_BYTES,
     tape_body: str = "Output {candidate}\nSleep 1s\n",
+    candidate_dir: str = "scenes",
+    final_dir: str = "scenes",
+    scenes_alias: str | None = None,
 ) -> _RecorderRun:
     """Run the shipped wrapper against a fake VHS inside `workdir`.
 
@@ -3864,12 +3908,23 @@ def _run_recorder(
         tape_body: The tape the wrapper is handed, with `{candidate}` and
             `{final}` filled in — the whitespace of its `Output` directives is
             what the preflight is graded on.
+        candidate_dir: The `workdir`-relative directory the candidate is
+            rendered into. The wrapper creates it, exactly as it does in a
+            checkout, so a directory that does not exist yet is a valid case.
+        final_dir: The `workdir`-relative directory the published clip lives
+            in. Only `published` creates it: the wrapper may not.
+        scenes_alias: A symbolic link to create beside `scenes`, pointing at
+            it, so a directory can be named by two spellings that resolve to
+            one physical place.
     """
     scenes = workdir / "scenes"
     scenes.mkdir(parents=True)
-    candidate = scenes / Path(MCP_CANDIDATE_CLIP).name
-    final = scenes / Path(MCP_FINAL_CLIP).name
+    if scenes_alias is not None:
+        (workdir / scenes_alias).symlink_to(scenes, target_is_directory=True)
+    candidate = workdir / candidate_dir / Path(MCP_CANDIDATE_CLIP).name
+    final = workdir / final_dir / Path(MCP_FINAL_CLIP).name
     if published is not None:
+        final.parent.mkdir(parents=True, exist_ok=True)
         final.write_bytes(published)
 
     markers = {
@@ -3920,6 +3975,8 @@ def _run_recorder(
         candidate_left=candidate.exists(),
         scratch_left=tuple(role for role, path in markers.items() if path.exists()),
         tmux=log.read_text(encoding="utf-8") if log.exists() else "",
+        vhs_ran=log.exists()
+        and any(line.startswith("vhs ") for line in log.read_text(encoding="utf-8").splitlines()),
     )
 
 
@@ -4076,6 +4133,103 @@ def test_mcp_recorder_derives_its_canonical_needle_and_says_it_is_strict() -> No
     )
 
 
+def test_mcp_recorder_counts_every_output_token_not_only_a_line_s_first_field() -> None:
+    """The shape check must read fields, and it must say what that costs.
+
+    A reader who finds `$1 == "Output"` here will assume VHS reads lines.
+    It does not: its lexer emits whitespace-separated tokens, so a second
+    `Output` can hide behind any directive that takes no argument. The
+    source has to show the scan — every field of every non-comment line —
+    and it has to name the two edges of that decision, because both look
+    like bugs to someone who does not know why they are there: a full-line
+    comment is skipped (VHS ignores it, and the shipped tape says the word
+    `Output` in its own prose), while an `Output` inside a `Type` string is
+    refused even though VHS would type it as text.
+    """
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    commentary = "\n".join(
+        line for line in script.splitlines() if line.lstrip().startswith("#")
+    ).lower()
+
+    assert '$1 == "Output"' not in script, (
+        "judging a line by its first field is the bypass itself: `Hide Output <clip>` is "
+        "two directives VHS obeys and one line whose first field is `Hide`"
+    )
+    assert re.search(r"for \(i = 1; i <= NF; i\+\+\)", script), (
+        "every whitespace-separated field must be visited, since that is the unit VHS's "
+        "lexer works in"
+    )
+    assert re.search(r'\$i (?:==|!=) "Output"', script), (
+        "each field must be compared to the token `Output` itself, not to a prefix or a "
+        "pattern that a path could satisfy"
+    )
+    assert "type" in commentary, (
+        "refusing `Output` inside a `Type` string is stricter than VHS; a reader who is "
+        "not told will file it as a bug"
+    )
+    assert "comment" in commentary, (
+        "skipping full-line comments is the other half of that decision, and the shipped "
+        "tape depends on it"
+    )
+
+
+def test_mcp_recorder_binds_promotion_to_one_physical_directory() -> None:
+    """The atomicity claim has a precondition; the script must enforce it.
+
+    `mv` is `rename(2)` only inside one directory. `KORVID_MCP_CANDIDATE`
+    and `KORVID_MCP_FINAL` are independent, so two overrides can put them
+    on different filesystems, where `mv` becomes copy-then-unlink and a
+    reader can observe a half-written clip. The wrapper resolves both
+    parents physically — `cd -P` then `pwd -P`, so a symlinked spelling of
+    one directory still counts as one — and refuses before VHS renders
+    anything, since a recording that cannot be promoted atomically should
+    never be made.
+    """
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    commands = [
+        line for line in script.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    ]
+    commentary = "\n".join(
+        line for line in script.splitlines() if line.lstrip().startswith("#")
+    ).lower()
+
+    assert script.count("pwd -P") >= 2, (
+        "both parents must be resolved physically, or a symlinked spelling of one "
+        "directory reads as two"
+    )
+    assert re.search(r'cd -P -- "\$\(dirname -- "\$candidate"\)"', script), (
+        "the candidate's own parent is what the rename leaves from"
+    )
+    assert re.search(r'cd -P -- "\$\(dirname -- "\$final"\)"', script), (
+        "the published clip's parent is what the rename arrives in, and it may only be "
+        "resolved, never created"
+    )
+    compared = next(
+        (
+            index
+            for index, line in enumerate(commands)
+            if re.search(r"\$\w+_parent.*\$\w+_parent", line)
+        ),
+        None,
+    )
+    assert compared is not None, (
+        "the two resolved parents must be compared; nothing else makes the overrides agree"
+    )
+    rendered = next(
+        (index for index, line in enumerate(commands) if '"$vhs_bin" "$tape"' in line),
+        None,
+    )
+    assert rendered is not None, "the wrapper must invoke VHS"
+    assert compared < rendered, (
+        "the comparison belongs in front of VHS: a render that cannot be promoted "
+        "atomically is a render nobody should pay for"
+    )
+    assert re.search(r"override|korvid_mcp", commentary), (
+        "the overrides are what can break the invariant; the script must say they have to "
+        "preserve it"
+    )
+
+
 def test_mcp_recorder_is_a_strict_fail_closed_shell_script() -> None:
     """The boundary is only as good as the shell it is written in."""
     assert os.access(MCP_RECORDER, os.X_OK), (
@@ -4149,29 +4303,35 @@ class _HostileTapeRun(NamedTuple):
         status: The wrapper's own exit status.
         output: Its combined stdout and stderr.
         published: The bytes at the canonical path once the wrapper exited.
+        reviewed: The bytes of every other approved clip beside it, by name.
         vhs_ran: Whether the fake VHS was invoked at all.
     """
 
     status: int
     output: str
     published: bytes
+    reviewed: dict[str, bytes]
     vhs_ran: bool
 
 
 def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
     """Hand the wrapper `tape_body` behind a VHS that would overwrite the clip.
 
-    The stand-in writes the canonical path the moment it runs, so a tape the
-    preflight lets through is visible twice over: as changed bytes at the
-    published clip and as an invocation log the wrapper should never have
-    created.
+    The stand-in overwrites every approved clip in the scene directory the
+    moment it runs — the published MCP capture and the two reviewed clips
+    beside it — so a tape the preflight lets through is visible twice over:
+    as changed bytes at an asset nobody re-recorded and as an invocation log
+    the wrapper should never have created.
 
     Args:
         workdir: The directory every redirected path lives in.
         tape_body: The tape text. `{candidate}` and `{final}` are absolute
             paths; `{final_relative}`, `{final_dotted}` and `{final_updir}`
             are the same published clip spelled relative to the working
-            directory, through `./` and through `../`.
+            directory, through `./` and through `../`. `{agent_demo}`,
+            `{agent_demo_relative}` and `{relationship_demo}` are the
+            reviewed clips beside it, and `{unreviewed}` is a path in the
+            working directory no asset lives at.
     """
     workdir.mkdir(parents=True)
     scenes = workdir / "scenes"
@@ -4179,6 +4339,9 @@ def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
     candidate = scenes / Path(MCP_CANDIDATE_CLIP).name
     final = scenes / Path(MCP_FINAL_CLIP).name
     final.write_bytes(MCP_PUBLISHED_BYTES)
+    siblings = {name: scenes / name for name in MCP_SIBLING_CLIPS}
+    for name, path in siblings.items():
+        path.write_bytes(f"previously approved {name}".encode())
     tape = workdir / "hostile.tape"
     tape.write_text(
         tape_body.format(
@@ -4187,13 +4350,20 @@ def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
             final_relative=f"scenes/{final.name}",
             final_dotted=f"./scenes/{final.name}",
             final_updir=f"../{workdir.name}/scenes/{final.name}",
+            agent_demo=siblings["agent-demo.mp4"],
+            agent_demo_relative="scenes/agent-demo.mp4",
+            relationship_demo=siblings["relationship-demo.mp4"],
+            unreviewed=workdir / "somewhere-else.mp4",
         ),
         encoding="utf-8",
     )
     log = workdir / "invocations.log"
     vhs = workdir / "fake-vhs"
+    clobbered = "\n".join(
+        f"""printf '%s' 'rendered anyway' > "{path}\"""" for path in (final, *siblings.values())
+    )
     vhs.write_text(
-        f"""#!/bin/sh\necho "vhs $*" >> "{log}"\nprintf '%s' 'rendered anyway' > "{final}"\nexit 0\n""",
+        f"""#!/bin/sh\necho "vhs $*" >> "{log}"\n{clobbered}\nexit 0\n""",
         encoding="utf-8",
     )
     vhs.chmod(0o755)
@@ -4218,6 +4388,7 @@ def _run_hostile_tape(workdir: Path, tape_body: str) -> _HostileTapeRun:
         status=completed.returncode,
         output=completed.stdout + completed.stderr,
         published=final.read_bytes(),
+        reviewed={name: path.read_bytes() for name, path in siblings.items()},
         vhs_ran=log.exists(),
     )
 
@@ -4293,6 +4464,77 @@ def test_mcp_recorder_refuses_a_tape_that_would_write_the_published_clip(
 @pytest.mark.parametrize(
     ("case", "tape_body"),
     [
+        (
+            "a-second-output-behind-hide-naming-the-agent-clip",
+            "Output {candidate}\nHide Output {agent_demo}\n",
+        ),
+        (
+            "a-second-output-behind-show-naming-the-relationship-clip",
+            "Output {candidate}\nShow Output {relationship_demo}\n",
+        ),
+        (
+            "a-second-output-behind-sleep-naming-the-agent-clip-relatively",
+            "Output {candidate}\nSleep 1s Output {agent_demo_relative}\n",
+        ),
+        (
+            "a-second-output-behind-enter-naming-an-unreviewed-path",
+            "Output {candidate}\nEnter Output {unreviewed}\n",
+        ),
+        (
+            "a-second-output-sharing-the-candidate-s-own-line",
+            "Output {candidate} Output {agent_demo}\n",
+        ),
+        (
+            "a-second-output-behind-hide-with-no-path-at-all",
+            "Output {candidate}\nHide Output\n",
+        ),
+        (
+            "the-candidate-declared-behind-hide-and-again-behind-show",
+            "Hide Output {candidate}\nShow Output {candidate}\n",
+        ),
+    ],
+)
+def test_mcp_recorder_refuses_a_second_output_that_names_another_asset(
+    tmp_path: Path, case: str, tape_body: str
+) -> None:
+    """The byte guard knows one name; the shape check must know the grammar.
+
+    Refusing the published clip's basename anywhere in the tape's bytes
+    stops a second `Output` aimed at *this* clip, whatever VHS's lexer
+    does. It says nothing about a second `Output` aimed at
+    `agent-demo.mp4`, at `relationship-demo.mp4` or at any other path — no
+    approved clip's name is in that needle, and a shape check that judges a
+    line by its first field sees `Hide`, `Show`, `Sleep` or `Enter` and
+    waves it through. VHS obeys both directives on that line, so a run that
+    this wrapper later rejects has already overwritten a reviewed asset it
+    does not even own.
+
+    So every whitespace-separated field of every non-comment line is read,
+    every `Output` token is counted, and exactly one standalone
+    `Output <candidate>` is the only tape that reaches VHS. Refusing means
+    VHS was never invoked and every approved clip in that directory — the
+    MCP capture and both of its neighbours — is byte-identical.
+    """
+    run = _run_hostile_tape(tmp_path / case, tape_body)
+
+    assert run.status != 0, f"{case} must not be recorded; the wrapper exited {run.status}"
+    assert not run.vhs_ran, (
+        f"{case} is a second directive VHS obeys; it must be refused before VHS is invoked"
+    )
+    assert run.published == MCP_PUBLISHED_BYTES, (
+        f"{case} must leave the MCP clip byte-identical; it now holds {run.published!r}"
+    )
+    for name in MCP_SIBLING_CLIPS:
+        assert run.reviewed[name] == f"previously approved {name}".encode(), (
+            f"{case} aims VHS at an approved clip this recording does not own; {name} "
+            f"must be byte-identical, yet it holds {run.reviewed[name]!r}"
+        )
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+@pytest.mark.parametrize(
+    ("case", "tape_body"),
+    [
         ("plain", "Output {candidate}\nSleep 1s\n"),
         ("indented-with-spaces", "  Output {candidate}\nSleep 1s\n"),
         ("indented-with-a-tab", "\tOutput {candidate}\nSleep 1s\n"),
@@ -4323,6 +4565,148 @@ def test_mcp_recorder_reads_the_candidate_in_every_whitespace_form_vhs_accepts(
     assert run.published == MCP_CANDIDATE_BYTES, (
         f"{case} must promote the candidate this run rendered; it holds {run.published!r}"
     )
+
+
+def test_mcp_recorder_accepts_the_shipped_tape_with_all_of_its_prose(tmp_path: Path) -> None:
+    """The strictness has to stop at the tape that is actually shipped.
+
+    A scan that reads every field is only useful if the reviewed tape still
+    passes it, and `docs/demo/mcp-follow.tape` is not a bare list of
+    directives: it opens with a page of commentary, one line of which
+    explains that "VHS has already rendered its Output", and it types real
+    shell commands through `Type`. This drives the shipped tape itself —
+    every comment, every `Type`, every `Sleep` — through the real wrapper,
+    with only its `Output` argument repointed at the temporary candidate.
+    If the preflight ever stops distinguishing a full-line comment from a
+    directive, this is where it is caught, instead of the next time someone
+    tries to regenerate the clip.
+    """
+    shipped = MCP_TAPE.read_text(encoding="utf-8")
+    body = shipped.replace(f"Output {MCP_CANDIDATE_CLIP}", "Output {candidate}")
+
+    assert body != shipped, (
+        f"the shipped tape must declare `Output {MCP_CANDIDATE_CLIP}`, or this contract "
+        "is grading a tape it did not repoint"
+    )
+    assert "Output" in body.replace("Output {candidate}", ""), (
+        "this contract exists because the shipped tape says `Output` outside its "
+        "directive; if it stops doing so, drop it rather than let it pass vacuously"
+    )
+
+    run = _run_recorder(tmp_path / "shipped-tape", tape_body=body)
+
+    assert run.status == 0, (
+        f"the reviewed tape must still record; the wrapper exited {run.status}: {run.output!r}"
+    )
+    assert run.published == MCP_CANDIDATE_BYTES, (
+        f"the shipped tape must promote its candidate; the clip holds {run.published!r}"
+    )
+
+
+def test_mcp_recorder_requires_the_candidate_s_output_to_stand_alone(tmp_path: Path) -> None:
+    """A single `Output` sharing its line is refused, and that is deliberate.
+
+    `Hide Output <candidate>` renders the candidate and nothing else, so
+    VHS would treat it as a perfectly good tape. The wrapper still refuses
+    it: the whole reason the shape check reads tokens is that it cannot
+    know what the other directives on that line do, and the only way to
+    count `Output`s without re-implementing VHS's parser is to require the
+    one it accepts to be a directive on its own — first field, one
+    argument, the candidate. That costs a tape author a newline; it buys a
+    rule with no line in it left to hide behind. The refusal happens before
+    VHS runs, so nothing is rendered either way.
+    """
+    run = _run_recorder(tmp_path / "output-behind-hide", tape_body="Hide Output {candidate}\n")
+
+    assert run.status != 0, (
+        f"an `Output` sharing its line must be refused; the wrapper exited {run.status}"
+    )
+    assert not run.vhs_ran, "the refusal must land before VHS is invoked"
+    assert run.published == MCP_PUBLISHED_BYTES, (
+        f"a refused tape leaves the approved clip alone; it holds {run.published!r}"
+    )
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+def test_mcp_recorder_refuses_to_promote_across_directories(tmp_path: Path) -> None:
+    """Promotion is a rename, and a rename only holds inside one directory.
+
+    `mv` is atomic because it is `rename(2)` — but only while both paths
+    share a directory, and therefore a filesystem. Across two of them `mv`
+    degrades to copy-then-unlink, and the published clip is observable
+    half-written: exactly the torn asset this whole boundary exists to
+    prevent. `KORVID_MCP_CANDIDATE` and `KORVID_MCP_FINAL` are set
+    independently, so nothing but a check makes them agree.
+
+    The check therefore runs before VHS, not before the `mv`: a recording
+    that cannot be promoted atomically is one that should never have been
+    made. Refusing costs nothing — no render, the approved clip untouched,
+    and the run's own scratch cleared behind it.
+    """
+    run = _run_recorder(tmp_path / "another-directory", candidate_dir="scratch")
+
+    assert run.status != 0, (
+        f"a candidate outside the clip's directory must be refused; exited {run.status}"
+    )
+    assert not run.vhs_ran, (
+        "a promotion that could not be atomic must be refused before VHS renders anything"
+    )
+    assert run.published == MCP_PUBLISHED_BYTES, (
+        f"the approved clip must be untouched; it holds {run.published!r}"
+    )
+    assert not run.candidate_left, "the run's own scratch must be cleared, wherever it was put"
+    assert run.scratch_left == (), f"the refusal left scratch behind: {run.scratch_left}"
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+def test_mcp_recorder_requires_the_published_clip_s_directory_to_exist(tmp_path: Path) -> None:
+    """The wrapper creates the candidate's directory, never the clip's.
+
+    Rendering needs somewhere to write, so the candidate's parent is
+    created exactly as a checkout expects. The published clip's parent is
+    different: it is a reviewed directory that already exists in every
+    checkout, and creating it would mean the same-directory check could be
+    satisfied by the wrapper itself — it would happily invent the
+    destination it was about to compare against.
+    """
+    run = _run_recorder(tmp_path / "no-such-directory", final_dir="not-made-yet", published=None)
+
+    assert run.status != 0, (
+        f"a published clip with no directory must be refused; exited {run.status}"
+    )
+    assert not run.vhs_ran, "the refusal must land before VHS is invoked"
+    assert run.published is None, "the wrapper may not create the directory it promotes into"
+    assert run.scratch_left == (), f"the refusal left scratch behind: {run.scratch_left}"
+    assert MCP_RECORDER_REJECTION in run.output, f"the refusal must say why: {run.output!r}"
+
+
+def test_mcp_recorder_promotes_through_a_second_spelling_of_one_directory(
+    tmp_path: Path,
+) -> None:
+    """Same directory means the same *physical* directory, not the same text.
+
+    A checkout reached through a symlink — a worktree behind `/var` on
+    macOS, a home directory behind an automounter — spells one directory
+    two ways. Comparing the strings would reject a promotion that is a
+    plain rename, so the wrapper compares what `cd -P` and `pwd -P`
+    resolve to instead. Here the candidate is named through a link to the
+    scene directory the published clip lives in: one physical directory,
+    one rename, one published clip.
+    """
+    run = _run_recorder(
+        tmp_path / "through-a-link",
+        candidate_dir="scenes-by-another-name",
+        scenes_alias="scenes-by-another-name",
+    )
+
+    assert run.status == 0, (
+        f"one physical directory named twice is still one rename; exited {run.status}: "
+        f"{run.output!r}"
+    )
+    assert run.published == MCP_CANDIDATE_BYTES, (
+        f"the candidate must be promoted; the clip holds {run.published!r}"
+    )
+    assert not run.candidate_left, "promotion must move the candidate, not copy it"
 
 
 def test_mcp_follow_tape_leaves_the_verdict_to_the_wrapper() -> None:

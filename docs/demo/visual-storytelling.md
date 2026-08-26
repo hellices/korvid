@@ -243,20 +243,35 @@ other recording side effect — and never to the published clip. The verdict
 belongs to `docs/demo/record-mcp-follow.sh`, the one command that regenerates
 this capture.
 
-Before it starts VHS, that wrapper reads the tape it is about to run: it
-requires exactly one `Output`, naming the candidate, and it requires the
-published clip's own basename to be absent from the tape's bytes — anywhere,
-under any spelling of the path, comments included. A tape that names it is
-never handed to VHS at all. VHS cannot write a file it is not given the name
-of, so this holds whatever its grammar does. That second rule is stricter than
-VHS on purpose, and it is why `docs/demo/mcp-follow.tape` never names the
-published clip — not in a directive, and not in a comment either.
+Before it starts VHS, that wrapper reads the tape it is about to run. VHS's
+grammar has no line in it: its lexer emits whitespace-separated tokens and
+gives each directive the arguments that directive takes, so `Hide Output
+<clip>` is two directives it obeys on one line. The wrapper therefore counts
+every field that is exactly `Output`, on every line that is not a whole
+comment, and requires exactly one — standing alone as the first field of its
+line, carrying exactly one argument, and that argument being the candidate. A
+second `Output` hidden behind `Hide`, `Show`, `Sleep` or `Enter` is refused
+even when it names a clip this capture does not own, such as
+`agent-demo.mp4`. Beside that, the wrapper requires the published clip's own
+basename to be absent from the tape's bytes — anywhere, under any spelling of
+the path, comments included. A tape that names it is never handed to VHS at
+all. VHS cannot write a file it is not given the name of, so this holds
+whatever its grammar does. Both rules are stricter than VHS on purpose: the
+byte rule is why `docs/demo/mcp-follow.tape` never names the published clip,
+not in a directive and not in a comment, and the token rule is why an
+`Output` may not share a line — or sit inside a `Type` string.
 
 That wrapper runs VHS and then grades the run from outside it. It promotes
-the candidate onto `docs/assets/scenes/mcp-follow-demo.mp4` — one `mv`, in
-the directory the clip already lives in, so a reader sees either the previous
-asset or the whole new one — and only when VHS returned 0, the failure file
-is **absent**, the success file is **present**, and the candidate exists.
+the candidate onto `docs/assets/scenes/mcp-follow-demo.mp4` with one `mv` —
+a **rename**, which the filesystem makes atomic only while both paths sit in
+the **same directory**, so a reader sees either the previous asset or the
+whole new one and never a half-written file. That is why the tape renders the
+candidate beside the published clip rather than into a scratch directory, and
+why the wrapper resolves both parents physically and refuses the run before
+VHS starts if they differ: any override of `KORVID_MCP_CANDIDATE` or
+`KORVID_MCP_FINAL` has to preserve that invariant. Promotion happens only
+when VHS returned 0, the failure file is **absent**, the success file is
+**present**, and the candidate exists.
 Failure outranks success: a client that raised inside its own closing hold,
 after publishing success, is still a failed run. On every other path the
 wrapper prints one line on stderr, removes the candidate and all four
