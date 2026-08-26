@@ -2748,9 +2748,10 @@ def test_agent_provenance_explains_the_panel_headers_label_and_estimated_counter
     `⚡ korvid-demo · ~↑… ↓… tok` is the one part of the Agent frame that
     could be mistaken for evidence about an external provider or a bill.
     Both halves are korvid's: the label is the harness's synthetic
-    `agent_model_name`, and the counters are korvid's own character
-    estimate, which is what the leading `~` marks — `DemoAgentProvider`
-    emits no usage event at all. The page has to say so, and the two
+    `agent_model_name`, and the counters are korvid's own token estimate
+    derived from character length, which is what the leading `~` marks —
+    `DemoAgentProvider` emits no usage event at all. The page has to say so,
+    and the two
     structural facts behind the sentence are asserted here so the prose
     cannot outlive them.
     """
@@ -2776,7 +2777,8 @@ def test_agent_provenance_explains_the_panel_headers_label_and_estimated_counter
     assert DEMO_MODEL_LABEL in lowered, "the section must name the label the header renders"
     assert "agent_model_name" in lowered, "and where that label comes from"
     assert "tok" in lowered, "the section must account for the token counters on screen"
-    assert "estimate" in lowered, "and say korvid computes them itself"
+    assert "token estimate" in lowered, "and say korvid computes estimated tokens itself"
+    assert "character length" in lowered, "the estimate's character-length basis must be explicit"
     assert re.search(r"no (?:usage|provider usage)", lowered), (
         "the section must say the demo provider reports no usage, which is why the counters "
         "are estimated"

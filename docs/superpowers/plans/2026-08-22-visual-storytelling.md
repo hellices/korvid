@@ -486,7 +486,7 @@ existing `payment-worker-6c9f7d-b3xnq` call. Add this entry to `EXTRA`:
         name="payment-config",
         namespace="shop",
         kind="ConfigMap",
-        created="",
+        created=_ago(hours=12),
         uid="cm-payment",
     )
 ],

@@ -92,8 +92,8 @@ The panel header in these frames reads `⚡ korvid-demo · ~↑… ↓… tok`, 
 halves are korvid's own rendering rather than anything an external provider
 said. `korvid-demo` is the synthetic label `docs/demo/demo.py` passes as
 `agent_model_name` for this scene — no provider is named, because none takes
-part. The counters are korvid's own estimate of the characters it sent and
-received, which is exactly what the leading `~` marks: `DemoAgentProvider`
+part. The counters are korvid's own token estimate derived from character
+length, which is exactly what the leading `~` marks: `DemoAgentProvider`
 reports no usage, so the runtime fills the totals in itself. Neither figure is
 billing or token-spend metadata, and no surface may read them as cost or as
 evidence about a live provider. That is why the landing-video design's privacy

@@ -90,8 +90,9 @@ cluster investigation.
 The Agent frame is korvid's own terminal, so korvid's own chrome stays in it.
 The panel header reads `⚡ korvid-demo · ~↑… ↓… tok`: `korvid-demo` is the
 synthetic label the capture harness passes as `agent_model_name`, and the
-counters are korvid's local character estimate, which is what the leading `~`
-marks — the deterministic provider reports no usage for korvid to display.
+counters are korvid's local token estimate derived from character length,
+which is what the leading `~` marks — the deterministic provider reports no
+usage for korvid to display.
 Neither identifies an external provider nor states a bill, and covering a
 product's own header would misrepresent the product.
 
