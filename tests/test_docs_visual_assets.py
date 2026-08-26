@@ -1334,6 +1334,70 @@ def test_mcp_scene_publishes_no_readiness_when_the_server_never_binds(
     assert "mount ready=False" not in log, "the TUI must not run without its server"
 
 
+class _ZombieTaskController(MCPControllerBase):
+    """Mirrors the real controller's brief post-timeout window.
+
+    `MCPController.running` means "the server task is alive", not "the
+    server is bound". After a start timeout that `start()` failed to reap
+    within its own deadline, the task can still be running for a moment
+    even though `start()` has already returned its `ERROR:` line. A
+    readiness gate that only checks `controller.running` — and ignores the
+    status `start()` returned — would arm the mount hook and publish
+    readiness over a server that never bound.
+    """
+
+    def __init__(self, log: list[str], ready: Path) -> None:
+        self._log = log
+        self._ready = ready
+
+    @property
+    def running(self) -> bool:
+        return True
+
+    def status(self) -> str:
+        return "ERROR: MCP failed to start (port in use?)"
+
+    async def start(self) -> str:
+        self._log.append(f"bind ready={self._ready.exists()}")
+        return "ERROR: MCP failed to start (port in use?)"
+
+    async def stop(self) -> str:
+        self._log.append(f"stop ready={self._ready.exists()}")
+        return "MCP off"
+
+    async def shutdown(self) -> asyncio.Task[None] | None:
+        return None
+
+
+def test_mcp_scene_fails_closed_when_start_errors_despite_a_zombie_running_task(
+    tmp_path: Path,
+) -> None:
+    """A start-time error must fail the recording even if `running` is True.
+
+    The real controller can leave its task alive for a moment after a start
+    timeout it did not manage to reap in time, so `running` alone cannot be
+    trusted as the readiness gate. `run_mcp_demo` must also reject a status
+    that begins with the `ERROR:` line `start()` uses to report a bind
+    failure, arm nothing, and still stop the controller during cleanup.
+    """
+    harness = _demo_harness()
+    ready = tmp_path / MCP_READY_FILE
+    log: list[str] = []
+    controller = _ZombieTaskController(log, ready)
+    app = _MountRecordingApp(log, ready)
+
+    with pytest.raises(RuntimeError, match="MCP"):
+        asyncio.run(harness.run_mcp_demo(app, controller, ready_file=ready))
+
+    assert app.on_mcp_ready is None, "the mount hook must never be armed on a failed start"
+    assert "mount ready=False" not in log, "the TUI must not run without a bound server"
+    assert not ready.exists(), "a failed start must never publish readiness"
+    assert log == [
+        "bind ready=False",
+        "stop ready=False",
+    ], f"cleanup must still stop a controller left running after a failed start; got {log}"
+
+
 async def test_mcp_scene_signals_readiness_from_the_real_textual_mount() -> None:
     """Reading the hook proves its shape; mounting the app proves it fires.
 

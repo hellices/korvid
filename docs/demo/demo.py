@@ -36,6 +36,7 @@ from korvid.k8s.relationship_facts import (
 )
 from korvid.tools.executor import ToolExecutor, UIBridge
 from korvid.tools.registry import mcp_tool_schemas
+from korvid.tools.structured import ERROR_PREFIX
 from korvid.ui.app import AppUIBridge, EventsFetcher, KorvidApp
 from korvid.ui.widgets.describe_screen import DescribeScreen
 
@@ -897,6 +898,13 @@ async def run_mcp_demo(
     quietly publishing readiness — the tape's bounded wait then expires and
     the recording fails loudly rather than capturing a connection error.
 
+    `controller.running` alone is not a safe gate: it means "the server task
+    is alive", and a task can stay alive for a moment after a start timeout
+    the controller failed to reap within its own deadline, while `start()`
+    has already returned its `ERROR:` line. Readiness is armed only when the
+    returned status is *not* an error line *and* the controller reports
+    itself running — either signal alone can be wrong for a beat.
+
     Args:
         app: The mounted scene app; its `on_mcp_ready` hook is armed here.
         controller: The MCP controller serving the scene.
@@ -908,10 +916,10 @@ async def run_mcp_demo(
     """
     clear_mcp_ready(ready_file)
     status = await controller.start()
-    if not controller.running:
-        raise RuntimeError(f"the mcp scene needs a bound MCP server; start reported: {status}")
-    app.on_mcp_ready = lambda: signal_mcp_ready(ready_file)
     try:
+        if status.startswith(ERROR_PREFIX) or not controller.running:
+            raise RuntimeError(f"the mcp scene needs a bound MCP server; start reported: {status}")
+        app.on_mcp_ready = lambda: signal_mcp_ready(ready_file)
         await app.run_async()
     finally:
         clear_mcp_ready(ready_file)
