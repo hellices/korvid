@@ -151,6 +151,12 @@ class FakeSession(AgentSession):
             for index, event in enumerate(self.events):
                 if completes and index == last:
                     finished = True
+                if isinstance(event, TurnComplete):
+                    self._tokens = (
+                        self._tokens[0] + event.input_tokens,
+                        self._tokens[1] + event.output_tokens,
+                    )
+                    self._estimated = self._estimated or event.estimated
                 yield event
             if self._turn_error is not None:
                 raise self._turn_error
@@ -175,7 +181,13 @@ class FakeSession(AgentSession):
             raise RuntimeError("no interrupted turn to finalize")
         self._pending = False
         self.finalized += 1
-        return TurnInterrupted(input_tokens=3, output_tokens=1, estimated=True)
+        event = TurnInterrupted(input_tokens=3, output_tokens=1, estimated=True)
+        self._tokens = (
+            self._tokens[0] + event.input_tokens,
+            self._tokens[1] + event.output_tokens,
+        )
+        self._estimated = self._estimated or event.estimated
+        return event
 
     def retarget(self, policy: ResolvedAgentPolicy, cluster: ClusterFacts) -> None:
         self.retargets.append((policy, cluster))

@@ -7,8 +7,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TypeAlias
 
-from korvid.core.filters import parse_filter
-
 
 def _require_nonblank(value: str, field_name: str) -> None:
     if not value.strip():
@@ -42,6 +40,8 @@ def pane_filter_matches(
     phase: str | None = None,
 ) -> bool:
     """Apply the same resource filter semantics the live workspace uses."""
+    from korvid.core.filters import parse_filter
+
     return parse_filter(pattern).matches(name, labels, phase)
 
 

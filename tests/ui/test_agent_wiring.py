@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any, cast
 
 from textual.css.query import NoMatches
@@ -54,6 +55,11 @@ class StubSession(FakeSession):
 def make_app(
     session: AgentSession | None = None, model: str | None = "test-model", **kwargs: Any
 ) -> KorvidApp:
+    if isinstance(session, FakeSession) and model is not None:
+        session._policy = replace(
+            session.policy,
+            model=replace(session.policy.model, model=model),
+        )
     store = ResourceStore()
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
@@ -381,7 +387,7 @@ async def test_apply_agent_settings_enables_agent() -> None:
     from korvid.agent.setup import AgentSettings
     from korvid.ui.widgets.status_bar import StatusBar
 
-    session = StubSession([])
+    session = StubSession([], policy=fake_policy(model="llama3"))
     settings = AgentSettings(
         provider="ollama",
         auth_method="none",
@@ -429,11 +435,10 @@ async def test_model_command_swaps_model_and_saves() -> None:
             saved.append(settings)
 
     rebuilt: list[AgentSettings] = []
-    session = StubSession([])
 
     def rebuild(settings: AgentSettings) -> Any:
         rebuilt.append(settings)
-        return session
+        return StubSession([], policy=fake_policy(model=settings.model))
 
     app = make_app(session=None, model=None, agent_configurator=Cfg(), rebuild_agent=rebuild)
     settings = AgentSettings(
@@ -498,7 +503,7 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
         async def save(self, settings: AgentSettings) -> None:
             saved.append(settings)
 
-    session = StubSession([])
+    session = StubSession([], policy=fake_policy(model="llama3"))
     rebuilds: list[AgentSettings] = []
 
     def rebuild(settings: AgentSettings) -> Any:
@@ -547,9 +552,11 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
         async def save(self, settings: AgentSettings) -> None:
             raise RuntimeError("disk full")
 
-    session = StubSession([])
     app = make_app(
-        session=None, model=None, agent_configurator=Cfg(), rebuild_agent=lambda s: session
+        session=None,
+        model=None,
+        agent_configurator=Cfg(),
+        rebuild_agent=lambda s: StubSession([], policy=fake_policy(model=s.model)),
     )
     settings = AgentSettings(
         provider="ollama",
@@ -612,7 +619,7 @@ async def test_model_command_works_after_configured_startup() -> None:
         async def save(self, settings: AgentSettings) -> None:
             saved.append(settings)
 
-    session = StubSession([])
+    session = StubSession([], policy=fake_policy(model="llama3"))
     store = ResourceStore()
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
@@ -635,7 +642,7 @@ async def test_model_command_works_after_configured_startup() -> None:
         agent_session=session,
         agent_model_name="llama3",
         agent_configurator=Cfg(),
-        rebuild_agent=lambda s: session,
+        rebuild_agent=lambda s: StubSession([], policy=fake_policy(model=s.model)),
     )
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
@@ -681,7 +688,7 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
         async def save(self, settings: AgentSettings) -> None:
             saved.append(settings)
 
-    rebuilt = StubSession([])
+    rebuilt = StubSession([], policy=fake_policy(model="llama3"))
     store = ResourceStore()
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
@@ -726,7 +733,10 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
 async def test_a_degraded_startup_shows_a_usable_panel_after_recovery() -> None:
     """And the panel comes back as a working agent: header rendered, input
     enabled — never the never-configured setup wipe."""
-    rebuilt = StubSession([], policy=fake_policy(tier=ModelTier.LOW))
+    rebuilt = StubSession(
+        [],
+        policy=fake_policy(tier=ModelTier.LOW, model="text-only-model"),
+    )
     store = ResourceStore()
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
@@ -950,7 +960,7 @@ async def test_options_preserved_across_model_change() -> None:
 async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
     from korvid.ui.messages import UnknownCommand
 
-    old_session = StubSession([])
+    old_session = StubSession([], policy=fake_policy(model="llama3"))
 
     class Cfg2:
         async def begin_device_login(self) -> Any:

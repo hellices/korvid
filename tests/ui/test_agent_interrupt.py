@@ -23,6 +23,17 @@ from .agent_write_support import make_app as make_write_app
 from .waits import until
 
 
+def test_fake_session_interrupt_usage_matches_live_cumulative_totals() -> None:
+    session = FakeSession(tokens=(5, 6))
+    session._pending = True
+
+    event = session.finalize_interrupt()
+
+    assert (event.input_tokens, event.output_tokens, event.estimated) == (3, 1, True)
+    assert session.total_tokens == (8, 7)
+    assert session.usage_estimated is True
+
+
 class BlockingSession(FakeSession):
     """Streams a little text, then blocks until stopped."""
 

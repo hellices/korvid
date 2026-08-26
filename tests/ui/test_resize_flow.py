@@ -790,7 +790,7 @@ async def test_agent_resize_uses_explicit_namespace_for_impact(tmp_path: Path) -
         assert not audit_path.exists()
 
 
-async def test_agent_resize_keeps_local_notes_when_manifest_lookup_fails_open(
+async def test_agent_resize_blocks_when_manifest_lookup_fails(
     tmp_path: Path,
 ) -> None:
     async def failing_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
@@ -804,29 +804,19 @@ async def test_agent_resize_keeps_local_notes_when_manifest_lookup_fails_open(
         get_manifest=failing_manifest,
         relationship_calls=[],
     )
-    async with app.run_test() as pilot:
+    async with app.run_test():
         _expand_panel(app)
-        task = asyncio.create_task(
-            app._agent_ui.agent_request_write(
-                "resize",
-                "pods",
-                "web-1",
-                namespace="default",
-                resources={"app": {"requests": {"cpu": "200m"}}},
-            )
+        result = await app._agent_ui.agent_request_write(
+            "resize",
+            "pods",
+            "web-1",
+            namespace="default",
+            resources={"app": {"requests": {"cpu": "200m"}}},
         )
-        await until(
-            pilot,
-            lambda: (
-                isinstance(app.screen, ConfirmScreen) and bool(app.screen.query(".confirm-impact"))
-            ),
-            label="agent resize confirmation impact rendered",
-        )
-        text = str(app.screen.query_one(".confirm-impact", Static).render())
-        assert "restart requirements could not be determined" in text
+
+        assert result.startswith("ERROR: target identity unavailable")
+        assert not isinstance(app.screen, ConfirmScreen)
         assert recorder.calls == []
-        await pilot.press("n")
-        assert "denied" in await task
         assert not audit_path.exists()
 
 
