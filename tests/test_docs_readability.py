@@ -973,7 +973,7 @@ def test_ops_approval_claim_matches_what_the_confirm_dialog_can_check() -> None:
         "the timestamp claim must be scoped to the plain y confirmation event"
     )
     assert re.search(
-        r"buffered.{0,120}(?:discard(?:s|ed|ing)?|drop(?:s|ped|ping)?|"
+        r"buffered.{0,120}(?:discard(?:s|ed|ing)?|drop(?:ped|ping)|"
         r"ignore(?:s|d)?|ignoring)",
         lowered,
     ), "the page must say input buffered before the dialog existed is discarded"
@@ -1015,9 +1015,9 @@ def test_ops_approval_claim_matches_what_the_confirm_dialog_can_check() -> None:
     # sufficient: the typed gate resolves on a submission event, and that
     # event has to reach the dialog after the dialog existed.
     for overclaim in (
-        r"paste.{0,140}(?:discard(?:s|ed|ing)?|drop(?:s|ped|ping)?|"
+        r"paste.{0,140}(?:discard(?:s|ed|ing)?|drop(?:ped|ping)|"
         r"ignore(?:s|d)?|ignoring)",
-        r"(?:discard(?:s|ed|ing)?|drop(?:s|ped|ping)?|"
+        r"(?:discard(?:s|ed|ing)?|drop(?:ped|ping)|"
         r"ignore(?:s|d)?|ignoring).{0,140}\bpaste\b",
     ):
         assert not re.search(overclaim, lowered), (

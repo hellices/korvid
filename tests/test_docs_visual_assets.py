@@ -2632,7 +2632,7 @@ def test_mcp_recording_recipe_is_the_wrapper_and_never_a_bare_vhs_run() -> None:
         "the page must explain why the wrapper exists: a tape's own exit status decides "
         "nothing about what VHS already rendered"
     )
-    assert re.search(r"promo(?:te|tes|ted|ting)", lowered), (
+    assert re.search(r"promo(?:te|tes|ted|ting|tion|tional)", lowered), (
         "the page must name the promotion step that turns the candidate into the published clip"
     )
     assert re.search(r"byte-identical|unchanged|untouched", lowered), (
@@ -4359,7 +4359,7 @@ def test_mcp_client_status_files_are_repo_local_and_never_committable() -> None:
     prose = " ".join(client.split())
     stale = re.findall(
         r"\btape\b[\s`'\u2019]*(?:\w+\s+){0,3}?"
-        r"(?:publish\w*|reject\w*|promo(?:te|tes|ted|ting)|grad\w*|read\w*|"
+        r"(?:publish\w*|reject\w*|promo(?:te|tes|ted|ting|tion|tional)|grad\w*|read\w*|"
         r"sees\b|decide(?:s|d)?|deciding)",
         prose,
     )
@@ -5590,8 +5590,8 @@ def test_mcp_capture_provenance_publishes_the_reviewed_tape_s_digest() -> None:
     page = sources["docs/demo/visual-storytelling.md"]
     mcp = " ".join(page[page.index("## MCP follow") :].split()).lower()
     assert re.search(
-        r"review\w*[^.]{0,200}recompute(?:s|d|ing)?|"
-        r"recompute(?:s|d|ing)?[^.]{0,200}review\w*",
+        r"review\w*[^.]{0,200}(?:recompute(?:s|d)?|recomputing)|"
+        r"(?:recompute(?:s|d)?|recomputing)[^.]{0,200}review\w*",
         mcp,
     ), (
         "the page must state the rule the pin creates: a tape edit is reviewed first and "
