@@ -843,9 +843,10 @@ def test_ops_debug_shell_lifecycles_are_not_conflated() -> None:
         "Kubernetes cannot remove an ephemeral container entry from a pod spec; the "
         "page must say so rather than promise cleanup"
     )
-    assert re.search(r"(replaced|recreated).{0,40}(or|and).{0,20}delet", lowered), (
-        "the entry survives until the pod itself is replaced or deleted"
-    )
+    assert re.search(
+        r"(replaced|recreated).{0,40}(or|and).{0,20}(?:delete(?:s|d)?|deleting)",
+        lowered,
+    ), "the entry survives until the pod itself is replaced or deleted"
     assert "node-debugger" in lowered, (
         "only the node path creates a separate node-debugger pod; name it"
     )
@@ -917,7 +918,10 @@ def test_observability_token_validation_is_per_call_not_backend_disabling() -> N
     assert re.search(r"(control|non-ascii)", lowered), (
         "the validated header-value classes must stay named"
     )
-    assert re.search(r"(correct|rotat)\w*.{0,120}without restarting", lowered), (
+    assert re.search(
+        r"(?:correct\w*|rotate(?:s|d)?|rotating).{0,120}without restarting",
+        lowered,
+    ), (
         "correcting or rotating the token must be described as restoring subsequent "
         "calls without a restart"
     )
@@ -968,9 +972,11 @@ def test_ops_approval_claim_matches_what_the_confirm_dialog_can_check() -> None:
     assert re.search(r"(plain )?(<kbd>)?y(</kbd>)?.{0,80}confirm", lowered), (
         "the timestamp claim must be scoped to the plain y confirmation event"
     )
-    assert re.search(r"buffered.{0,120}(discard|dropp|ignor)", lowered), (
-        "the page must say input buffered before the dialog existed is discarded"
-    )
+    assert re.search(
+        r"buffered.{0,120}(?:discard(?:s|ed|ing)?|drop(?:s|ped|ping)?|"
+        r"ignore(?:s|d)?|ignoring)",
+        lowered,
+    ), "the page must say input buffered before the dialog existed is discarded"
     assert re.search(r"(cannot|never).{0,60}approve", lowered), (
         "the stale-input guarantee prevents approval; it does not classify every rejection key"
     )
@@ -1009,8 +1015,10 @@ def test_ops_approval_claim_matches_what_the_confirm_dialog_can_check() -> None:
     # sufficient: the typed gate resolves on a submission event, and that
     # event has to reach the dialog after the dialog existed.
     for overclaim in (
-        r"paste.{0,140}(discard|dropp|ignor)",
-        r"(discard|dropp|ignor)\w*.{0,140}\bpaste\b",
+        r"paste.{0,140}(?:discard(?:s|ed|ing)?|drop(?:s|ped|ping)?|"
+        r"ignore(?:s|d)?|ignoring)",
+        r"(?:discard(?:s|ed|ing)?|drop(?:s|ped|ping)?|"
+        r"ignore(?:s|d)?|ignoring).{0,140}\bpaste\b",
     ):
         assert not re.search(overclaim, lowered), (
             "korvid filters confirming key events, not pastes; the page may not say "
