@@ -58,6 +58,7 @@ from .engine_fakes import (
 )
 
 LOGS_ARGS = '{"pod":"api-0","namespace":"prod"}'
+GET_LOGS_ARGS = '{"pod":"api-1","namespace":"prod"}'
 DELETE_ARGS = '{"kind":"pod","name":"api-0","namespace":"prod"}'
 NAVIGATE_ARGS = '{"view":"pods","namespace":"prod"}'
 SECRET_LOG = "starting up with password: hunter2-in-the-logs"
@@ -374,6 +375,67 @@ async def test_a_failed_direct_open_still_consumes_the_scripted_second_round() -
         "role": "assistant",
         "content": "the log pane could not open",
     }
+
+
+async def test_a_parallel_round_pairing_a_terminal_open_with_a_read_still_continues() -> None:
+    """A high-tier, parallel-capable round can legally carry a terminal
+    direct-open call *and* a diagnostic read in the same response. The read
+    still needs a provider round to synthesize its answer, so the fixed
+    acknowledgement must not short-circuit the turn here — only a round
+    that kept nothing else may end this way."""
+    bridge = RecordingBridge()
+    execution = RecordingExecution({"get_logs": "log lines: pod healthy"})
+    harness = build_harness(
+        [
+            [
+                tool_call("c1", "open_logs", LOGS_ARGS),
+                tool_call("c2", "get_logs", GET_LOGS_ARGS),
+                DONE,
+            ],
+            text_turn("the logs show the pod is healthy"),
+        ],
+        policy=make_policy(tool_names=("open_logs", "get_logs")),
+        bridge=bridge,
+        execution=execution,
+    )
+
+    events = await harness.run()
+
+    # Both calls ran: the open reached the bridge, the read reached the
+    # executor. Neither is skipped just because the round also ends here.
+    assert bridge.actions == [OpenLogs(pod="api-0", namespace="prod", container=None)]
+    assert execution.names == ["get_logs"]
+    # A second provider round happened: the read's result had to be shown
+    # to the model, and the model's own synthesis is the final answer.
+    assert len(harness.provider.calls) == 2
+    assert isinstance(events[-1], TurnComplete)
+    assert harness.conversation.messages[-1] == {
+        "role": "assistant",
+        "content": "the logs show the pod is healthy",
+    }
+    # The fixed acknowledgement never appears: it is not what ended the turn.
+    deltas = [event for event in events if isinstance(event, TextDelta)]
+    assert DIRECT_OPEN_ACKNOWLEDGEMENT not in [delta.text for delta in deltas]
+
+
+async def test_a_lone_direct_open_in_a_parallel_capable_policy_is_still_terminal() -> None:
+    """The same parallel-capable, multi-tool policy must still end the turn
+    right after dispatch when the round keeps exactly one call — the rule
+    is about what the round actually kept, not what the policy allows."""
+    bridge = RecordingBridge()
+    harness = build_harness(
+        [[tool_call("c1", "open_logs", LOGS_ARGS), DONE]],
+        policy=make_policy(tool_names=("open_logs", "get_logs")),
+        bridge=bridge,
+    )
+
+    events = await harness.run()
+
+    assert len(harness.provider.calls) == 1
+    assert bridge.actions == [OpenLogs(pod="api-0", namespace="prod", container=None)]
+    deltas = [event for event in events if isinstance(event, TextDelta)]
+    assert deltas == [TextDelta(text=DIRECT_OPEN_ACKNOWLEDGEMENT)]
+    assert isinstance(events[-1], TurnComplete)
 
 
 async def test_every_request_re_sanitizes_the_results_it_carries() -> None:

@@ -106,8 +106,10 @@ class _Round:
     excess: int = 0
     done: bool = False
     #: A trusted acknowledgement a dispatched call set (issue #316, Task 2).
-    #: When set, the turn ends right after dispatch, with no further
-    #: provider round: see `ToolHarness._run_ui` for what may set this.
+    #: When set *and* this round kept exactly one call with nothing
+    #: discarded, the turn ends right after dispatch, with no further
+    #: provider round: see `ToolHarness._run_ui` for what may set this, and
+    #: `_honors_terminal` for the round shape that may actually honor it.
     terminal_message: str | None = None
 
     @property
@@ -354,7 +356,7 @@ class NativeAgentEngine(AgentEngine):
         """
         if self._interrupted:
             return
-        if round_.terminal_message is not None:
+        if round_.terminal_message is not None and _honors_terminal(round_):
             # A direct-open call's fixed acknowledgement ends the turn here:
             # no further provider round is needed or wanted.
             round_.done = True
@@ -644,6 +646,21 @@ class NativeAgentEngine(AgentEngine):
 def _stored_calls(calls: list[_Call]) -> list[dict[str, str]]:
     """The kept calls in the shape durable history stores them."""
     return [{"id": call.call_id, "name": call.name, "arguments": call.arguments} for call in calls]
+
+
+def _honors_terminal(round_: _Round) -> bool:
+    """Whether this round's terminal acknowledgement may end the turn.
+
+    A high-tier, parallel-capable round can legally pair a terminal
+    direct-open call with another call the model still needs answered —
+    a diagnostic read, say. Ending the turn on the acknowledgement then
+    would hide that other call's result from the model entirely, even
+    though it ran and was recorded. The minimal safe rule: only a round
+    that kept exactly one call, and discarded or capped none, loses
+    nothing by ending here — anything more shaped, and the turn must
+    continue so the model can see every answer.
+    """
+    return len(round_.calls) == 1 and not round_.discarded
 
 
 def _apply_call_cap(round_: _Round, policy: ResolvedAgentPolicy) -> None:
