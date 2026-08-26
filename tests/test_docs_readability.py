@@ -683,8 +683,11 @@ def test_ops_approval_claim_matches_what_the_confirm_dialog_can_check() -> None:
         "agent writes and MCP proposal review do open the shared dialog; tools only lack "
         "the ability to answer it"
     )
-    assert re.search(r"tools?.{0,100}(request|open).{0,100}dialog", lowered), (
-        "the page must distinguish opening the dialog from approving it"
+    assert re.search(r"agent.{0,80}tool.{0,80}(request|open).{0,80}dialog", lowered), (
+        "the page must distinguish an agent opening the dialog from approving it"
+    )
+    assert re.search(r"mcp.{0,100}(queue|proposal).{0,100}:proposals", lowered), (
+        "MCP tools only queue proposals; the user opens their dialog through :proposals"
     )
     assert re.search(r"no tool.{0,80}(answer|resolve|approve)", lowered), (
         "the invariant is that no tool can answer the dialog"
