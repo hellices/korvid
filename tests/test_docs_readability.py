@@ -661,8 +661,17 @@ def test_ops_approval_claim_matches_what_the_confirm_dialog_can_check() -> None:
 
     assert "fresh user keystroke" in lowered, "the fresh-approval intent must survive the rewrite"
     assert "timestamp" in lowered, "the page must name the mechanism: an event-timestamp comparison"
+    assert "every key event" not in lowered, (
+        "ConfirmScreen timestamps the plain y confirmation, not every decline or dismiss key"
+    )
+    assert re.search(r"(plain )?(<kbd>)?y(</kbd>)?.{0,80}confirm", lowered), (
+        "the timestamp claim must be scoped to the plain y confirmation event"
+    )
     assert re.search(r"buffered.{0,120}(discard|dropp|ignor)", lowered), (
         "the page must say input buffered before the dialog existed is discarded"
+    )
+    assert re.search(r"(cannot|never).{0,60}approve", lowered), (
+        "the stale-input guarantee prevents approval; it does not classify every rejection key"
     )
     assert re.search(r"(after|once).{0,80}dialog.{0,80}(construct|open|exist)", lowered) or (
         re.search(r"dialog.{0,60}(was|is) (constructed|built|created)", lowered)
