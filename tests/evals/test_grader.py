@@ -951,6 +951,31 @@ def test_evidence_that_names_the_screen_action_is_still_credited() -> None:
     assert result.evidence_fetched is True
 
 
+def test_read_record_cannot_satisfy_ui_action_evidence() -> None:
+    scenario = _scenario(
+        must_mention=(("oomkilled",),),
+        must_not_mention=(),
+        expected_evidence=(
+            (
+                Evidence(
+                    tool="open_describe",
+                    contains="opened describe",
+                    args={"kind": "pods", "name": "worker-1", "namespace": "jobs"},
+                ),
+            ),
+        ),
+    )
+    read = ToolRecord(
+        name="get_resource",
+        arguments={"kind": "pods", "name": "worker-1", "namespace": "jobs"},
+        result="opened describe for worker-1",
+    )
+
+    result = grade(scenario, "worker-1 was OOMKilled.", [read])
+
+    assert result.evidence_fetched is False
+
+
 def test_a_real_read_still_satisfies_evidence_after_a_colliding_screen_action() -> None:
     """The guard drops the action, not the read that actually happened."""
     read = ToolRecord(

@@ -41,10 +41,15 @@ from typing import Any
 
 from korvid.evals.fake_kube import builtin_aliases
 from korvid.evals.scenario import Evidence, Scenario
+from korvid.tools.registry import TOOLS_BY_NAME
 
 #: Same grammar korvid mints with: ASCII digits only, so a stray `[E1x]`
 #: is malformed syntax rather than a reference that fails to resolve.
 _CITATION = re.compile(r"\[E([1-9][0-9]*)\]")
+
+_UI_TOOL_NAMES = frozenset(
+    name for name, definition in TOOLS_BY_NAME.items() if definition.effect == "ui_only"
+)
 
 #: List markers, removed before splitting so an ordered list's `1.` is
 #: not read as the end of a sentence - which left `1` as its own uncited
@@ -482,7 +487,10 @@ def _satisfies(evidence: Evidence, record: ToolRecord) -> bool:
     # expected substring (e.g. the object name in a not-found message).
     if record.result.startswith("ERROR:"):
         return False
-    if record.screen_action and evidence.tool != record.name:
+    expected_ui_action = evidence.tool in _UI_TOOL_NAMES
+    if expected_ui_action and (not record.screen_action or evidence.tool != record.name):
+        return False
+    if not expected_ui_action and record.screen_action:
         return False
     return matches_target(evidence, record)
 

@@ -441,7 +441,6 @@ class WorkspaceController:
             if drill_op is not None:
                 drill_op()
             await self._navigate_locked(pane, view, self._default_scope_for(view, namespace))
-        self._surface.render_table(pane.kind, only=pane)
         self._surface.refresh_status()
 
     def _default_scope_for(self, view: str | None, namespace: str | None) -> str | None:
@@ -482,12 +481,16 @@ class WorkspaceController:
                 # (issue #157): killing it here would force that drill's own
                 # navigate to re-LIST into the empty flash.
                 await self._watch_manager.stop(*old)
+            await self._watch_manager.start(new_kind, new_scope)
+            # Commit state and rendered table without an await between them:
+            # synchronous snapshots must never pair a new kind/scope with the
+            # previous table's cursor identity.
             pane.kind = new_kind
             pane.scope = new_scope
             # The footer legend follows the focused pane's kind (issue #114).
             self._surface.refresh_bindings()
-            await self._watch_manager.start(new_kind, new_scope)
-            await self.sync_metrics_poller()
+        self._surface.render_table(pane.kind, only=pane)
+        await self.sync_metrics_poller()
 
     async def sync_metrics_poller(self) -> None:
         """Poll metrics only while a pods view is on screen, in its scope.
@@ -970,7 +973,6 @@ class WorkspaceController:
                     raise
         finally:
             await self.stop_watch_if_unused(child, prewarm_scope)
-        self._surface.render_table(pane.kind, only=pane)
         self._surface.refresh_status()
         return None
 
@@ -1020,7 +1022,6 @@ class WorkspaceController:
                 await self._navigate_locked(pane, popped.parent_kind, None)
         finally:
             await self.stop_watch_if_unused(peeked.parent_kind, prewarm_scope)
-        self._surface.render_table(pane.kind, only=pane)
         self._surface.refresh_status()
         return True
 

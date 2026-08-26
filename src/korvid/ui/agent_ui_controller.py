@@ -568,9 +568,6 @@ class AgentUiController:
         self._replacement: str | None = None
         self._turn_finalized = False
         self._shutting_down = False
-        #: One-shot notice injected into the agent's next screen context
-        #: after a switch, so a running conversation learns the cluster
-        #: changed under it.
         #: Identity of the object the last evidence open actually displayed.
         self._displayed_incarnation: str | None = None
         self._bridge = AgentToolUIBridge(self, dispatch)

@@ -19,6 +19,8 @@ import dataclasses
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from typing import Any
 
+import pytest
+
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.k8s.components import ComponentRef
@@ -468,6 +470,31 @@ async def test_navigate_serializes_under_nav_lock() -> None:
     b.ctl.nav_lock.release()
     await task
     assert b.state.current_kind == "deployments"
+
+
+async def test_navigate_commits_state_only_when_the_new_table_can_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    b = _make(kind="pods", scope="default")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def gated_start(kind: str, scope: str) -> None:
+        entered.set()
+        await release.wait()
+        b.watch.started.append((kind, scope))
+
+    monkeypatch.setattr(b.watch, "start", gated_start)
+    task = asyncio.create_task(b.ctl.navigate("deployments", None))
+    await entered.wait()
+
+    assert b.state.current_kind == "pods"
+    assert ("render", "deployments") not in b.surface.calls
+
+    release.set()
+    await task
+    assert b.state.current_kind == "deployments"
+    assert ("render", "deployments") in b.surface.calls
 
 
 async def test_navigate_bails_when_initiating_pane_closed() -> None:
