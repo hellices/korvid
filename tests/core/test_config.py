@@ -1393,6 +1393,21 @@ def test_model_tier_high_is_parsed(tmp_path: Path) -> None:
     assert load_config(path).agent_model_tier == "high"
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("Low", "low"), ("low ", "low"), (" HIGH ", "high")],
+)
+def test_model_tier_normalizes_case_and_whitespace(
+    tmp_path: Path, value: str, expected: str
+) -> None:
+    path = write_config(
+        tmp_path,
+        f"agent:\n  provider: ollama\n  model_tier: {value!r}\n",
+    )
+
+    assert load_config(path).agent_model_tier == expected
+
+
 def test_model_tier_unset_is_none(tmp_path: Path) -> None:
     """Omitting `model_tier` means automatic routing — distinguishable from
     an explicit choice."""
@@ -1407,7 +1422,7 @@ def test_model_tier_null_is_treated_as_unset(tmp_path: Path) -> None:
     assert load_config(path).agent_model_tier is None
 
 
-@pytest.mark.parametrize("bad_value", ["full", "small", "auto", "medium", "Low "])
+@pytest.mark.parametrize("bad_value", ["full", "small", "auto", "medium"])
 def test_model_tier_rejects_legacy_and_unknown_values(tmp_path: Path, bad_value: str) -> None:
     """Only `low`/`high` (or absent) are accepted — legacy `full`/`small`,
     `auto`, and typos must fail actionably instead of silently falling back

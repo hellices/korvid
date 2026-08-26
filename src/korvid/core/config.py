@@ -824,14 +824,17 @@ def _parse_model_tier(value: Any) -> str | None:
     """Coerce a present `agent.model_tier` value.
 
     `null` is the YAML idiom for "not set" and means automatic routing
-    (returns None), matching an absent key. Any other value must be exactly
-    `low` or `high` — legacy `full`/`small`, `auto`, and typos are hard
-    errors (unlike the old `agent.profile`, which silently fell back).
+    (returns None), matching an absent key. String case and surrounding
+    whitespace are normalized; any other value must mean `low` or `high` —
+    legacy `full`/`small`, `auto`, and typos are hard errors (unlike the old
+    `agent.profile`, which silently fell back).
     """
     if value is None:
         return None
-    if isinstance(value, str) and value in ("low", "high"):
-        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("low", "high"):
+            return normalized
     raise ConfigMigrationError(
         f"agent.model_tier must be absent, null, 'low', or 'high' (got {value!r})."
     )
