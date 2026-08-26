@@ -116,8 +116,17 @@ class AgentWorkspaceBridge(AgentUiBridge):
         pane_count = self._workspace.pane_count
 
         focused_pane = self._build_pane_context(focused_idx)
+        displayed = self._screens.displayed_pane_context()
         secondary_pane: PaneContext | None = None
-        if pane_count > 1:
+        if displayed is not None and displayed.owner is None:
+            focused_pane = displayed.context
+        elif displayed is not None and displayed.owner is self._workspace.panes[focused_idx]:
+            focused_pane = displayed.context
+            if pane_count > 1:
+                secondary_pane = self._build_pane_context(1 - focused_idx)
+        elif displayed is not None:
+            secondary_pane = displayed.context
+        elif pane_count > 1:
             other_idx = 1 - focused_idx
             secondary_pane = self._build_pane_context(other_idx)
 

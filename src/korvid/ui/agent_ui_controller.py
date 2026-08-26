@@ -50,7 +50,7 @@ from korvid.agent.events import (
     TurnInterrupted,
 )
 from korvid.agent.install_hint import isolated_install_hint
-from korvid.agent.interaction import ResourceIdentity
+from korvid.agent.interaction import PaneContext, ResourceIdentity
 from korvid.agent.navigation import EvidenceTarget, target_for
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
@@ -251,6 +251,18 @@ class AgentScreens(ABC):
         changing focus.  The *kind* hint names the resource kind rendered in
         that pane so the identity can carry it even when the row key does not.
         """
+
+    @abstractmethod
+    def displayed_pane_context(self) -> DisplayedPaneContext | None:
+        """The describe/log target currently shown above the resource table."""
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class DisplayedPaneContext:
+    """A rendered describe/log pane and the workspace pane that opened it."""
+
+    context: PaneContext
+    owner: object | None
 
 
 class WorkspaceOps(Protocol):

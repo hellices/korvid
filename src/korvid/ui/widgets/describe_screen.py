@@ -15,6 +15,27 @@ from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, Input, Static
 
+from korvid.agent.interaction import ResourceIdentity
+
+
+def _manifest_identity(manifest: dict[str, Any]) -> ResourceIdentity | None:
+    """Return the Kubernetes identity carried by a rendered manifest."""
+    kind = manifest.get("kind")
+    metadata = manifest.get("metadata")
+    if not isinstance(kind, str) or not kind.strip() or not isinstance(metadata, dict):
+        return None
+    name = metadata.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    namespace = metadata.get("namespace")
+    uid = metadata.get("uid")
+    return ResourceIdentity(
+        kind=kind,
+        namespace=namespace if isinstance(namespace, str) and namespace else None,
+        name=name,
+        uid=uid if isinstance(uid, str) and uid else None,
+    )
+
 
 def _format_age(event: dict[str, Any]) -> str:
     ts = event.get("lastTimestamp") or event.get("eventTime") or ""
@@ -249,6 +270,11 @@ class DescribeScreen(ModalScreen[None]):
         self._search = BodySearch()
         self._pattern = ""
 
+    @property
+    def resource_identity(self) -> ResourceIdentity | None:
+        """Identity of the resource rendered by this screen."""
+        return _manifest_identity(self._manifest)
+
     def compose(self) -> ComposeResult:
         yield Header()
         yield Input(placeholder="search…", id="describe-search")
@@ -378,6 +404,12 @@ class DescribePane(Vertical):
         self._pattern = ""
         self._yaml_text = ""
         self._events: list[dict[str, Any]] = []
+        self._resource_identity: ResourceIdentity | None = None
+
+    @property
+    def resource_identity(self) -> ResourceIdentity | None:
+        """Identity of the resource rendered by this pane."""
+        return self._resource_identity
 
     def compose(self) -> ComposeResult:
         yield Static("", id="describe-pane-title")
@@ -405,6 +437,7 @@ class DescribePane(Vertical):
         self._pattern = ""
         self._yaml_text = yaml_text
         self._events = list(events)
+        self._resource_identity = _manifest_identity(manifest)
         self._search.set_body(yaml_text, events_text)
         self.query_one("#describe-pane-search", Input).display = False
         footer = self.query_one("#describe-pane-footer", Static)

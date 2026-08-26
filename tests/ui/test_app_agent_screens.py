@@ -1,13 +1,16 @@
-"""Tests for `AppAgentScreens.selected_identity`."""
+"""Tests for `AppAgentScreens` workspace identity reads."""
 
 from __future__ import annotations
 
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from textual.css.query import NoMatches
 
+from korvid.agent.interaction import ResourceIdentity
 from korvid.ui.app import AppAgentScreens, KorvidApp
+from korvid.ui.widgets.describe_screen import DescribeScreen
 
 
 class _FakeApp:
@@ -40,3 +43,127 @@ def test_selected_identity_propagates_unrelated_errors() -> None:
 
     with pytest.raises(RuntimeError, match="boom"):
         screens.selected_identity("pane-0", "Pod")
+
+
+def _display_screens(**app_fields: Any) -> AppAgentScreens:
+    return AppAgentScreens(cast("KorvidApp", SimpleNamespace(**app_fields)))
+
+
+def test_displayed_pane_context_reads_the_open_describe_target() -> None:
+    screen = DescribeScreen(
+        "Pod prod/api-2",
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "namespace": "prod",
+                "name": "api-2",
+                "uid": "uid-2",
+            },
+        },
+        [],
+    )
+    screens = _display_screens(
+        screen=screen,
+        _describe_pane=SimpleNamespace(display=False, resource_identity=None),
+        _logs=SimpleNamespace(mode="", current_triples=[], owner=None),
+    )
+
+    displayed = screens.displayed_pane_context()
+
+    assert displayed is not None
+    pane = displayed.context
+    assert pane.kind == "Pod"
+    assert pane.scope == "prod"
+    assert pane.selected is not None
+    assert pane.selected.name == "api-2"
+    assert pane.selected.uid == "uid-2"
+
+
+def test_unidentified_modal_describe_never_exposes_hidden_logs() -> None:
+    screens = _display_screens(
+        screen=DescribeScreen("Unknown resource", {"metadata": {}}, []),
+        _describe_pane=SimpleNamespace(display=False, resource_identity=None),
+        _logs=SimpleNamespace(
+            mode="l",
+            current_triples=[("prod", "hidden-log-pod", "main")],
+            owner=None,
+        ),
+    )
+
+    displayed = screens.displayed_pane_context()
+
+    assert displayed is not None
+    assert displayed.owner is None
+    assert displayed.context.kind == "unknown"
+    assert displayed.context.selected is None
+
+
+def test_displayed_pane_context_reads_the_open_log_target() -> None:
+    screens = _display_screens(
+        screen=object(),
+        _describe_pane=SimpleNamespace(display=False, resource_identity=None),
+        _logs=SimpleNamespace(
+            mode="l",
+            current_triples=[("prod", "api-2", "main"), ("prod", "api-2", "sidecar")],
+            owner=None,
+        ),
+    )
+
+    displayed = screens.displayed_pane_context()
+
+    assert displayed is not None
+    pane = displayed.context
+    assert pane.kind == "pods"
+    assert pane.scope == "prod"
+    assert pane.selected is not None
+    assert pane.selected.name == "api-2"
+
+
+def test_displayed_pane_context_does_not_reuse_table_identity_for_multi_pod_logs() -> None:
+    screens = _display_screens(
+        screen=object(),
+        _describe_pane=SimpleNamespace(display=False, resource_identity=None),
+        _logs=SimpleNamespace(
+            mode="L",
+            current_triples=[
+                ("prod", "api-1", "main"),
+                ("prod", "api-2", "main"),
+            ],
+            owner=None,
+        ),
+    )
+
+    displayed = screens.displayed_pane_context()
+
+    assert displayed is not None
+    pane = displayed.context
+    assert pane.kind == "pods"
+    assert pane.scope == "prod"
+    assert pane.selected is None
+
+
+def test_open_logs_take_precedence_over_an_inline_describe_pane() -> None:
+    screens = _display_screens(
+        screen=object(),
+        _describe_pane=SimpleNamespace(
+            display=True,
+            resource_identity=ResourceIdentity(
+                kind="Pod",
+                namespace="prod",
+                name="old-describe",
+                uid="old",
+            ),
+        ),
+        _logs=SimpleNamespace(
+            mode="l",
+            current_triples=[("prod", "live-pod", "main")],
+            owner=None,
+        ),
+    )
+
+    displayed = screens.displayed_pane_context()
+
+    assert displayed is not None
+    assert displayed.context.selected is not None
+    assert displayed.context.selected.name == "live-pod"

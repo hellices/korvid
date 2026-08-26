@@ -40,7 +40,7 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, WorkerError, WorkerState
 
 from korvid.agent.events import AgentEvent
-from korvid.agent.interaction import ResourceIdentity
+from korvid.agent.interaction import PaneContext, ResourceIdentity
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -82,6 +82,7 @@ from korvid.ui.agent_ui_controller import (
     AgentScreens,
     AgentToolUIBridge,
     AgentUiController,
+    DisplayedPaneContext,
 )
 from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.command import command_help
@@ -2151,6 +2152,21 @@ class AppAgentPanel(AgentPanelPort):
         self._app._agent_panel.apply_event(event)
 
 
+def _displayed_resource_context(
+    identity: ResourceIdentity, *, owner: object | None
+) -> DisplayedPaneContext:
+    """Build display context for one resource shown by describe."""
+    return DisplayedPaneContext(
+        context=PaneContext(
+            kind=identity.kind,
+            scope=identity.namespace or ALL_NAMESPACES,
+            filter_pattern=None,
+            selected=identity,
+        ),
+        owner=owner,
+    )
+
+
 class AppAgentScreens(AgentScreens):
     """Nominal `AgentScreens` adapter over `KorvidApp`'s screen stack.
 
@@ -2162,6 +2178,7 @@ class AppAgentScreens(AgentScreens):
 
     def __init__(self, app: KorvidApp) -> None:
         self._app = app
+        self._describe_owner: object | None = None
 
     def approval_dialog_active(self) -> bool:
         return isinstance(
@@ -2208,6 +2225,7 @@ class AppAgentScreens(AgentScreens):
         *,
         footer_note: str | None,
     ) -> None:
+        self._describe_owner = self._app._pane
         self._app._describe_pane.show(title, manifest, events, footer_note=footer_note)
 
     def selected_identity(self, table_id: str, kind: str) -> ResourceIdentity | None:
@@ -2247,6 +2265,52 @@ class AppAgentScreens(AgentScreens):
             name=name,
             uid=uid,
         )
+
+    def displayed_pane_context(self) -> DisplayedPaneContext | None:
+        """Describe or log target currently shown instead of the table selection."""
+        if isinstance(self._app.screen, DescribeScreen):
+            identity = self._app.screen.resource_identity
+            if identity is not None:
+                return _displayed_resource_context(identity, owner=None)
+            return DisplayedPaneContext(
+                context=PaneContext(
+                    kind="unknown",
+                    scope=ALL_NAMESPACES,
+                    filter_pattern=None,
+                    selected=None,
+                ),
+                owner=None,
+            )
+
+        triples = self._app._logs.current_triples if self._app._logs.mode else []
+        if triples:
+            pods = {(namespace, pod) for namespace, pod, _container in triples}
+            namespaces = {namespace for namespace, _pod in pods}
+            scope = namespaces.pop() if len(namespaces) == 1 else ALL_NAMESPACES
+            selected: ResourceIdentity | None = None
+            if len(pods) == 1:
+                namespace, pod = pods.pop()
+                selected = ResourceIdentity(
+                    kind="pods",
+                    namespace=namespace,
+                    name=pod,
+                    uid=None,
+                )
+            return DisplayedPaneContext(
+                context=PaneContext(
+                    kind="pods",
+                    scope=scope,
+                    filter_pattern=None,
+                    selected=selected,
+                ),
+                owner=self._app._logs.owner,
+            )
+
+        if self._app._describe_pane.display:
+            identity = self._app._describe_pane.resource_identity
+            if identity is not None:
+                return _displayed_resource_context(identity, owner=self._describe_owner)
+        return None
 
 
 class AppProposalScreens(ProposalScreens):

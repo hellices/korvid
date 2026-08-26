@@ -13,12 +13,13 @@ from korvid.agent.interaction import (
     Navigate,
     OpenDescribe,
     OpenLogs,
+    PaneContext,
     ResourceIdentity,
     SetFilter,
 )
 from korvid.core.config import KorvidConfig
 from korvid.k8s.models import GenericSummary, PodSummary
-from korvid.ui.agent_ui_controller import AgentScreens
+from korvid.ui.agent_ui_controller import AgentScreens, DisplayedPaneContext
 from korvid.ui.agent_workspace_bridge import AgentWorkspaceBridge
 from korvid.ui.workspace_controller import ContextGuard
 from korvid.ui.workspace_state import WorkspaceState
@@ -74,6 +75,8 @@ class FakeScreensBridge(AgentScreens):
         self._top: object | None = None
         # table_id -> ResourceIdentity | None
         self._identity: dict[str, ResourceIdentity | None] = {}
+        self.displayed_pane: PaneContext | None = None
+        self.displayed_owner: object | None = None
 
     def approval_dialog_active(self) -> bool:
         return self.approval_open
@@ -105,6 +108,11 @@ class FakeScreensBridge(AgentScreens):
 
     def selected_identity(self, table_id: str, kind: str) -> ResourceIdentity | None:
         return self._identity.get(table_id)
+
+    def displayed_pane_context(self) -> DisplayedPaneContext | None:
+        if self.displayed_pane is None:
+            return None
+        return DisplayedPaneContext(self.displayed_pane, self.displayed_owner)
 
     def set_identity(self, table_id: str, identity: ResourceIdentity | None) -> None:
         self._identity[table_id] = identity
@@ -354,6 +362,102 @@ async def test_apply_open_describe_ok() -> None:
     result = await bridge.apply(OpenDescribe(kind="pods", name="api-1", namespace="default"))
     assert result.ok is True
     assert ctrl.describe_calls == [("pods", "api-1", "default")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action",
+    [
+        OpenLogs(pod="api-2", namespace="prod", container="main"),
+        OpenDescribe(kind="pods", name="api-2", namespace="prod"),
+    ],
+)
+async def test_display_actions_return_the_resource_actually_on_screen(
+    action: OpenLogs | OpenDescribe,
+) -> None:
+    screens = FakeScreensBridge()
+    screens.set_identity(
+        "resource-table",
+        ResourceIdentity(kind="pods", namespace="default", name="api-1", uid="old"),
+    )
+    screens.displayed_pane = PaneContext(
+        kind="pods",
+        scope="prod",
+        filter_pattern=None,
+        selected=ResourceIdentity(kind="pods", namespace="prod", name="api-2", uid="displayed"),
+    )
+    bridge, _, _ = _make_bridge(screens=screens)
+
+    result = await bridge.apply(action)
+
+    assert result.ok is True
+    assert result.context.focused_pane == screens.displayed_pane
+
+
+def test_snapshot_keeps_newly_focused_split_pane_when_logs_stay_open() -> None:
+    workspace = _make_two_pane_workspace()
+    screens = FakeScreensBridge()
+    screens.displayed_pane = PaneContext(
+        kind="pods",
+        scope="default",
+        filter_pattern=None,
+        selected=ResourceIdentity(kind="pods", namespace="default", name="api-1", uid="displayed"),
+    )
+    screens.displayed_owner = workspace.panes[0]
+    screens.set_identity(
+        workspace.panes[1].table_id,
+        ResourceIdentity(kind="deployments", namespace="prod", name="payments", uid="focused"),
+    )
+    workspace.focus_index(1)
+    bridge, _, _ = _make_bridge(workspace=workspace, screens=screens)
+
+    context = bridge.snapshot()
+
+    assert context.focused_pane.selected is not None
+    assert context.focused_pane.selected.name == "payments"
+    assert context.secondary_pane == screens.displayed_pane
+
+
+def test_snapshot_keeps_other_split_pane_when_display_owner_stays_focused() -> None:
+    workspace = _make_two_pane_workspace()
+    screens = FakeScreensBridge()
+    screens.displayed_pane = PaneContext(
+        kind="pods",
+        scope="default",
+        filter_pattern=None,
+        selected=ResourceIdentity(kind="pods", namespace="default", name="api-1", uid="displayed"),
+    )
+    screens.displayed_owner = workspace.panes[0]
+    screens.set_identity(
+        workspace.panes[1].table_id,
+        ResourceIdentity(kind="deployments", namespace="prod", name="payments", uid="secondary"),
+    )
+    bridge, _, _ = _make_bridge(workspace=workspace, screens=screens)
+
+    context = bridge.snapshot()
+
+    assert context.focused_pane == screens.displayed_pane
+    assert context.secondary_pane is not None
+    assert context.secondary_pane.selected is not None
+    assert context.secondary_pane.selected.name == "payments"
+
+
+def test_snapshot_hides_underlying_split_panes_behind_modal_describe() -> None:
+    workspace = _make_two_pane_workspace()
+    screens = FakeScreensBridge()
+    screens.displayed_pane = PaneContext(
+        kind="pods",
+        scope="default",
+        filter_pattern=None,
+        selected=ResourceIdentity(kind="pods", namespace="default", name="api-1", uid="displayed"),
+    )
+    screens.displayed_owner = None
+    bridge, _, _ = _make_bridge(workspace=workspace, screens=screens)
+
+    context = bridge.snapshot()
+
+    assert context.focused_pane == screens.displayed_pane
+    assert context.secondary_pane is None
 
 
 @pytest.mark.asyncio

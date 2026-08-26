@@ -53,6 +53,7 @@ from korvid.ui.agent_ui_controller import (
     AgentScreens,
     AgentToolUIBridge,
     AgentUiController,
+    DisplayedPaneContext,
 )
 from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
@@ -215,6 +216,9 @@ class FakeScreens(AgentScreens):
         self.panes.append((title, manifest, footer_note))
 
     def selected_identity(self, table_id: str, kind: str) -> ResourceIdentity | None:
+        return None
+
+    def displayed_pane_context(self) -> DisplayedPaneContext | None:
         return None
 
 
