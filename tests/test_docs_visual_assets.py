@@ -1462,6 +1462,135 @@ def test_mcp_client_sections_is_bounded_like_the_tail_is() -> None:
     )
 
 
+def test_mcp_client_sections_budgets_each_requested_section_separately() -> None:
+    """Round-11 (comment 3861056625): a long section erased the next one.
+
+    `_sections` concatenated every requested section and clipped the
+    *total* to `SECTION_MAX_LINES` at the very end, so a `CURRENT HEALTH`
+    that grew past the pane budget consumed all ten lines and `CONTAINERS`
+    reached no frame at all — while `kept` stayed non-empty, so nothing
+    raised and the wrapper promoted a clip whose verdict beat is half
+    printed. Each requested section must get its own share of the budget,
+    which is the same argument that put a bound on this helper at all.
+    """
+    module = _mcp_client_module()
+    budget = module.SECTION_MAX_LINES
+    health = [f"  probe-{index}: failing" for index in range(budget + 3)]
+    answer = "\n".join(["CURRENT HEALTH", *health, "CONTAINERS", "  app: restarting"])
+
+    kept = module._sections(answer, "CURRENT HEALTH", "CONTAINERS")
+
+    per_section = max(1, budget // 2)
+    assert kept[:per_section] == ["CURRENT HEALTH", *health[: per_section - 1]], (
+        "the first section keeps its header and is clipped to its own share"
+    )
+    assert kept[per_section:] == ["CONTAINERS", "  app: restarting"], (
+        "the second requested section must still reach the pane, header first"
+    )
+    assert len(kept) <= budget, f"the pane holds {budget} lines; got {len(kept)}"
+
+
+def test_mcp_client_sections_budget_counts_a_repeated_name_once() -> None:
+    """Deduplication must shape the budget too, not just the output.
+
+    A name asked twice is still one section on screen, so dividing the pane
+    budget by the raw `names` length would halve a single section's share
+    for no reason and clip a beat that fits.
+    """
+    module = _mcp_client_module()
+    budget = module.SECTION_MAX_LINES
+    body = [f"  container-{index}: restarting" for index in range(budget)]
+    answer = "\n".join(["CONTAINERS", *body])
+
+    kept = module._sections(answer, "CONTAINERS", "CONTAINERS")
+
+    assert kept == ["CONTAINERS", *body[: budget - 1]], (
+        "one unique name owns the whole budget, however often it was asked for"
+    )
+
+
+@pytest.mark.parametrize(
+    ("present", "missing"),
+    [("CURRENT HEALTH", "CONTAINERS"), ("CONTAINERS", "CURRENT HEALTH")],
+)
+def test_mcp_client_sections_fails_closed_when_any_requested_section_is_missing(
+    present: str, missing: str
+) -> None:
+    """Round-11 (comment 3861056625): one found section is not the beat.
+
+    The old guard only refused an answer in which *none* of the requested
+    headers appeared. A `diagnose_pod` report that dropped or renamed one
+    of them therefore published a half-evidence beat that reads as normal
+    pacing — exactly the failure the guard exists to stop. Every requested
+    section must be present, and the refusal must name the missing ones
+    without echoing the (unbounded, possibly sensitive) answer.
+    """
+    module = _mcp_client_module()
+    secret = "leaked-token=abc123 at /home/whoever/.kube/config"
+    answer = "\n".join([present, f"  status: {secret}"])
+
+    with pytest.raises(RuntimeError, match=re.escape(missing)) as excinfo:
+        module._sections(answer, "CURRENT HEALTH", "CONTAINERS")
+
+    message = str(excinfo.value)
+    assert secret not in message, (
+        "the failure must name the missing sections, not echo the tool output"
+    )
+    assert answer not in message, "no raw answer text may travel in the failure message"
+
+
+def test_mcp_client_sections_prints_the_real_diagnose_answer_whole() -> None:
+    """The budget must not clip the answer the capture actually records.
+
+    The per-section share is a guard against a wider fixture, not a new
+    edit of this clip: the shipped `diagnose_pod` report gives
+    `CURRENT HEALTH` one line and `CONTAINERS` one line per container
+    status, and the demo pod has a single container. Running the *real*
+    executor answer through `_sections` therefore has to yield both
+    sections complete — header and body — exactly as the published clip
+    shows them.
+    """
+    module = _mcp_client_module()
+    harness = _demo_harness()
+    story = harness.load_agent_story()
+    provider = story.DemoAgentProvider()
+    runtime = story.build_demo_agent_runtime(
+        harness.DemoReadOps(), harness.ALIASES, provider=provider
+    )
+
+    async def drain() -> None:
+        async for _event in runtime.run_turn(
+            "Why is the payment worker failing?",
+            "view=pods ns=shop selected=payment-worker-6c9f7d-b3xnq",
+        ):
+            pass
+
+    asyncio.run(drain())
+    diagnosis = "".join(
+        str(message.get("content") or "")
+        for message in provider.seen_messages[1]
+        if message.get("role") == "tool"
+    )
+    assert "CURRENT HEALTH" in diagnosis, (
+        f"this test is only meaningful over the real report: {diagnosis!r}"
+    )
+
+    kept = module._sections(diagnosis, "CURRENT HEALTH", "CONTAINERS")
+
+    lines = diagnosis.splitlines()
+    health = lines.index("CURRENT HEALTH")
+    containers = lines.index("CONTAINERS")
+    whole = [
+        *lines[health : health + 2],
+        *lines[containers : containers + 2],
+    ]
+    assert kept == whole, (
+        "the recorded beat is unchanged: both sections reach the pane in full, "
+        f"header first; got {kept}"
+    )
+    assert len(kept) <= module.SECTION_MAX_LINES
+
+
 def test_mcp_client_tail_keeps_the_last_n_lines_in_order() -> None:
     """The happy path is unchanged: the last `TAIL_LINES` lines, in order."""
     module = _mcp_client_module()
@@ -3481,6 +3610,112 @@ def test_mcp_client_entry_point_holds_a_failed_pane_and_publishes_no_success(
     )
 
 
+def test_mcp_client_run_clears_stale_markers_before_the_story_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-11 (comment 3861056637): only this run's markers may be graded.
+
+    The module documented markers "removed on both sides of a run" but
+    cleared neither itself, leaving the whole guarantee to the tape. A
+    checkout holding an `OK_FILE` from an earlier run — and a client killed
+    (SIGKILL, tape timeout) before it published anything — therefore looked
+    to `record-mcp-follow.sh` like "failure absent, success present", and a
+    broken candidate was promoted. `run()` owns its markers now, exactly as
+    `run_mcp_demo` owns `MCP_READY_FILE` through `clear_mcp_ready`; the
+    tape's `rm -f` stays as defence in depth.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    module.OK_FILE.touch()
+    module.FAILED_FILE.touch()
+    session = _FakeSession(_mcp_client_answers())
+    holds: list[_ClientHold] = []
+    _drive_mcp_client(module, session, monkeypatch, capsys, holds)
+
+    asyncio.run(module.run())
+
+    assert session.calls == list(MCP_CLIENT_CALLS), "the whole story must have run"
+    first_seconds, first_ok, first_failed, _printed = holds[0]
+    assert not first_ok, (
+        f"a stale success marker must be gone before the {first_seconds}s beat, or it "
+        "certifies a run that never published one"
+    )
+    assert not first_failed, "a stale failure marker must be gone before the story too"
+    assert module.OK_FILE.exists(), "this run's own success must still be published"
+    assert not module.FAILED_FILE.exists(), "a completed run leaves no failure behind"
+
+
+def test_mcp_client_run_clears_a_stale_success_before_a_failing_story(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failing run must not inherit an earlier run's success marker.
+
+    This is the case the wrapper cannot survive: `OK_FILE` left behind plus
+    a `FAILED_FILE` this run publishes is still a rejection, but `OK_FILE`
+    left behind *and cleared by nobody* is what promoted a broken render.
+    After a failed story only the failure may exist.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    module.OK_FILE.touch()
+    answers = _mcp_client_answers()
+    answers["get_logs"] = _FakeCallToolResult("boom: forbidden", is_error=True)
+    session = _FakeSession(answers)
+    holds: list[_ClientHold] = []
+    _drive_mcp_client(module, session, monkeypatch, capsys, holds)
+
+    with pytest.raises(SystemExit) as excinfo:
+        asyncio.run(module.run())
+
+    assert excinfo.value.code != 0, "a failed run must leave a non-zero status behind"
+    assert not module.OK_FILE.exists(), (
+        "the stale success must be gone; a failed run may never leave one behind"
+    )
+    assert module.FAILED_FILE.exists(), "the failure this run produced must be published"
+
+
+def test_mcp_client_run_fails_closed_when_a_stale_marker_cannot_be_cleared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A marker that cannot be removed must reject the run, not start it.
+
+    If the stale `OK_FILE` survives — a read-only checkout, a permission
+    error — then running the story anyway would let the wrapper read that
+    old success. The clearing therefore happens inside the run's own
+    failure channel: the failure marker is published (which rejects the
+    candidate whatever else is on disk), the story never starts, and the
+    pane still publishes no traceback into the frames it is recorded in.
+    """
+    module = _mcp_client_module()
+    monkeypatch.chdir(tmp_path)
+    module.OK_FILE.touch()
+    session = _FakeSession(_mcp_client_answers())
+    holds: list[_ClientHold] = []
+    _drive_mcp_client(module, session, monkeypatch, capsys, holds)
+
+    real_unlink = module.Path.unlink
+
+    def _refusing_unlink(self: Path, *, missing_ok: bool = False) -> None:
+        if self.name == module.OK_FILE.name:
+            raise PermissionError(13, "Permission denied")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(module.Path, "unlink", _refusing_unlink)
+
+    with pytest.raises(SystemExit) as excinfo:
+        asyncio.run(module.run())
+
+    assert excinfo.value.code != 0, "an unclearable marker must fail the run"
+    assert session.calls == [], "the story may not start on markers this run cannot own"
+    assert module.FAILED_FILE.exists(), (
+        "the failure marker is what rejects the candidate; it must be published even "
+        "though the stale success could not be removed"
+    )
+    published = "".join(chunk for *_rest, chunk in holds)
+    for leak in ("Traceback", "PermissionError", "Permission denied"):
+        assert leak not in published, f"the recorded pane must publish no {leak!r}"
+
+
 def test_mcp_client_status_files_are_repo_local_and_never_committable() -> None:
     """Two more recording side effects, held to the handshake files' rules.
 
@@ -4180,4 +4415,8 @@ def test_mcp_capture_provenance_publishes_the_client_status_handshake() -> None:
     assert re.search(r"closing card[^.]{0,120}closing hold", lowered), (
         "the page must state when success is published: after the closing card, before "
         "the closing hold"
+    )
+    assert re.search(r"clears both[^.]{0,160}start", lowered), (
+        "the page must state that the client owns these markers — it clears both at the "
+        "start of a run, so a marker an earlier run left cannot grade this one"
     )

@@ -292,6 +292,49 @@ def test_helm_preview_masking_keeps_the_old_helm_compatibility_caveat() -> None:
     )
 
 
+def test_helm_opening_approves_the_exact_mutation_not_an_exact_command() -> None:
+    """Round-11 (comment 3861023951): OLM writes execute no command at all.
+
+    The opening claims one shared safety pipeline for *both* halves of the
+    page, but the two halves mutate differently: a Helm write runs a `helm`
+    command line through the fixed-argv wrapper, while an operator install
+    creates a Subscription (and `I` on an InstallPlan approves a pending
+    plan) straight through the Kubernetes API. Promising that "nothing
+    executes until you approve the exact command" describes only the first
+    kind, so a reader of the OLM half is told to expect a command that is
+    never built. The shared claim has to be the mutation itself.
+    """
+    source = _source("helm-operators.md")
+    flat = " ".join(source.split())
+    opening = " ".join(source.split('<section class="docs-storyboard"', 1)[0].split())
+
+    assert "approve the exact command" not in flat, (
+        "an OLM Subscription/InstallPlan write approves an API object, not a command"
+    )
+    assert "approve the exact mutation" in opening, (
+        "the shared safety claim must name the mutation, which covers both the helm "
+        "command line and the OLM API writes"
+    )
+    assert re.search(r"helm command line", opening, re.I), (
+        "the opening must still say what a Helm approval shows: the command line"
+    )
+    assert re.search(r"Subscription|InstallPlan", opening), (
+        "the opening must name the OLM half's approved object, or 'mutation' stays abstract"
+    )
+    assert "ops.md#one-write-path-three-drivers" in opening, (
+        "the opening must keep pointing at the one shared write path"
+    )
+    assert re.search(r"audit-?logged", opening, re.I), (
+        "the fail-closed audit half of the shared guarantee must survive the rewording"
+    )
+    assert "full Subscription manifest" in source, (
+        "the OLM section's own approval-gate promise must survive unchanged"
+    )
+    assert "standard approval dialog" in source, (
+        "the OLM write must still be approved in the same dialog as every other write"
+    )
+
+
 def _representative_tool_rows() -> dict[str, str]:
     """The `Representative tools` table, mapping each family to its disclosure."""
     section = _source("mcp.md").split("## Representative tools", 1)[1].split("\n## ", 1)[0]
@@ -1110,8 +1153,8 @@ def test_airgap_names_both_the_pod_debug_and_node_shell_image_keys() -> None:
     (`korvid.core.config`: `debug_default_image`/`debug_images` vs
     `node_shell_image`), so an air-gap checklist that lists only the
     `debug.*` keys leaves the node shell pulling korvid's built-in default
-    from the public internet — the one image an operator reaches for when
-    a node is already unreachable.
+    from the public internet — on the one path whose whole point is to
+    reach the host of a node that is still scheduling pods.
     """
     from korvid.core.config import KorvidConfig
 
@@ -1147,6 +1190,49 @@ def test_airgap_names_both_the_pod_debug_and_node_shell_image_keys() -> None:
         "operator who runs it still cannot see the second image source"
     )
     assert "korvid never pulls" in source, "the existing ownership boundary must survive"
+
+
+def _airgap_node_shell_bullet() -> str:
+    """The `Node shell image (nodes)` bullet of the air-gap setup list."""
+    internalize = _section("airgap.md", "Internalize the remaining dependencies")
+    bullet = internalize.split("- **Node shell image (nodes)**", 1)[1].split("\n- ", 1)[0]
+    return " ".join(bullet.split())
+
+
+def test_airgap_does_not_sell_the_node_shell_as_an_unreachable_node_rescue() -> None:
+    """Round-11 (comment 3861023907): the node shell needs a working node.
+
+    `s` on a node does not open a side channel to the host — it creates a
+    `node-debugger-…` pod *scheduled onto that node* and waits for it to
+    become Ready (`ShellController._wait_and_attach_node_shell` runs
+    `kubectl wait` before it attaches). A node that is genuinely
+    unreachable cannot schedule it, pull its image, or run it, so calling
+    the node shell the tool an operator reaches for "when a node is already
+    unreachable" sends them to a flow that cannot recover that node. The
+    air-gap consequence is the image key, and it survives without the
+    claim: the bullet must state the mirroring duty and the precondition.
+    """
+    bullet = _airgap_node_shell_bullet()
+    lowered = bullet.lower()
+
+    assert not re.search(r"unreachable|already down|not ?ready|unresponsive", lowered), (
+        f"the node shell cannot recover a node that cannot run its debugger pod: {bullet}"
+    )
+    assert "`node_shell.image`" in bullet, "the bullet must still name the key it is about"
+    assert re.search(r"internal registry", lowered), (
+        "the air-gap consequence — mirror this image too — must survive the rewrite"
+    )
+    assert re.search(r"built-in public default", lowered), (
+        "the reason it must be mirrored is the public fallback when the key is unset"
+    )
+    assert re.search(r"schedul", lowered), (
+        "the bullet must say the debugger is a pod scheduled onto the node, which is "
+        "what bounds when the node shell works at all"
+    )
+    assert re.search(r"node-level troubleshooting", lowered), (
+        "the honest use is node-level troubleshooting on a node that still schedules "
+        "and runs pods; say that instead of promising a rescue"
+    )
 
 
 def test_tui_puts_the_status_row_where_the_poster_measured_it() -> None:

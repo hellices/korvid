@@ -226,7 +226,12 @@ holds the pane open for a bounded 30 s, past the visible window, so the
 composition survives intact to the teardown. `.korvid-mcp-demo-client-ok` is
 published only after all four calls and the closing card have been printed,
 before the closing hold, so it certifies a story that finished rather than a
-process that survived.
+process that survived. Neither marker is ever inherited: the client clears
+both at the start of a run, before it connects, so only what this run
+published can grade it. A client killed before it publishes anything — a
+`SIGKILL`, a tape that timed out — therefore leaves no marker at all, which
+is a rejection; the tape's own `rm -f` and the wrapper's cleanup remain as
+further layers rather than the only ones.
 
 Reading those two files from the tape would settle nothing. VHS renders the
 timeline it was given and exits 0 whatever the shell it typed into did, so a

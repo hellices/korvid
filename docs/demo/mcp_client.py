@@ -51,7 +51,9 @@ OK_FILE = Path(".korvid-mcp-demo-client-ok")
 #: rejects the candidate on this file even if the success file is also
 #: present: a failure raised inside the closing hold is still a failed run.
 #: Both files live in the checkout being recorded, like the two handshake
-#: files, and are removed on both sides of a run.
+#: files, and are removed on both sides of a run — :func:`run` clears them
+#: before the story starts, so only what this run publishes can grade it,
+#: and the wrapper removes them again once it has graded them.
 FAILED_FILE = Path(".korvid-mcp-demo-client-failed")
 
 NAMESPACE = "shop"
@@ -151,37 +153,67 @@ def _tail(text: str, call: str) -> list[str]:
     return text.splitlines()[-TAIL_LINES:]
 
 
+def _section_body(lines: list[str], name: str) -> list[str]:
+    """Every line of the section `name` opens: its header plus its body.
+
+    A header must match `name` *whole* (a trailing colon aside):
+    `CONTAINERS` names one section, and a sibling `CONTAINERS SUMMARY`
+    would otherwise open on the same request and carry its whole body into
+    the pane.
+
+    Args:
+        lines: The answer, already split into lines.
+        name: The exact section title to collect.
+
+    Returns:
+        The matched header lines and the indented lines under them, in the
+        order they appear; empty when `name` opens no section.
+    """
+    body: list[str] = []
+    keeping = False
+    for line in lines:
+        if line[:1].strip():
+            keeping = line.rstrip(":") == name
+        if keeping:
+            body.append(line)
+    return body
+
+
 def _sections(text: str, *names: str) -> list[str]:
     """The named sections of a structured answer, in the order asked.
 
-    A section is its unindented header line plus the indented lines under
-    it. `diagnose_pod` answers with far more than a pane can hold, and its
+    `diagnose_pod` answers with far more than a pane can hold, and its
     last lines are log excerpts — naming the sections keeps this beat on
     the verdict instead of on whichever lines happen to fall last.
 
-    A header must match a requested name *whole* (a trailing colon aside):
-    `CONTAINERS` names one section, and a sibling `CONTAINERS SUMMARY`
-    would otherwise open on the same request and carry its whole body into
-    the pane. Repeated names are collected once, and the result is clipped
-    to :data:`SECTION_MAX_LINES` for the same reason `_tail` clips.
+    Repeated names are collected once, and the pane's
+    :data:`SECTION_MAX_LINES` budget is divided evenly among the sections
+    actually asked for. Clipping each section to its own share is what
+    keeps this beat whole: a single `CURRENT HEALTH` grown past the budget
+    would otherwise consume the pane and leave `CONTAINERS` unprinted —
+    the exact failure this helper exists to prevent, one level up. The
+    total is clipped once more at the end, as a safety net.
 
     Raises:
-        RuntimeError: if none of ``names`` matched a header in ``text`` —
+        RuntimeError: if any of ``names`` opened no section in ``text`` —
             drifted headers or an error answer would otherwise fall
-            through as an empty, silently-skipped beat. The message names
-            the sections that were asked for; it never echoes ``text``,
-            which is unbounded and may hold sensitive tool output.
+            through as a half-printed, silently-skipped beat. The message
+            names the sections that were missing; it never echoes
+            ``text``, which is unbounded and may hold sensitive tool
+            output.
     """
+    wanted = list(dict.fromkeys(names))
+    lines = text.splitlines()
+    collected = {name: _section_body(lines, name) for name in wanted}
+    missing = tuple(name for name in wanted if not collected[name])
+    if missing or not wanted:
+        raise RuntimeError(
+            f"diagnose_pod answer is missing a requested section: {missing or names!r}"
+        )
+    per_section = max(1, SECTION_MAX_LINES // len(wanted))
     kept: list[str] = []
-    for name in dict.fromkeys(names):
-        keeping = False
-        for line in text.splitlines():
-            if line[:1].strip():
-                keeping = line.rstrip(":") == name
-            if keeping:
-                kept.append(line)
-    if not kept:
-        raise RuntimeError(f"diagnose_pod answer is missing every requested section: {names!r}")
+    for name in wanted:
+        kept.extend(collected[name][:per_section])
     return kept[:SECTION_MAX_LINES]
 
 
@@ -205,6 +237,21 @@ def _publish(status: Path) -> None:
         status: :data:`OK_FILE` or :data:`FAILED_FILE`.
     """
     status.touch()
+
+
+def _clear_markers() -> None:
+    """Drop both markers, including ones an interrupted run left behind.
+
+    This run may only be graded on evidence this run produced. Relying on
+    an outside pre-clean meant a stale :data:`OK_FILE` in the checkout
+    survived a client killed before it published anything (SIGKILL, a tape
+    timeout), and `docs/demo/record-mcp-follow.sh` then read "failure
+    absent, success present" and promoted a broken candidate. Owning the
+    markers here is the same defence `docs/demo/demo.py` gives its
+    readiness file; the tape's own `rm -f` stays as a second layer.
+    """
+    OK_FILE.unlink(missing_ok=True)
+    FAILED_FILE.unlink(missing_ok=True)
 
 
 async def main() -> None:
@@ -256,6 +303,13 @@ async def main() -> None:
 async def run() -> None:
     """Run :func:`main` behind the status handshake the recorder grades.
 
+    Clears both markers first, so only what this run publishes can grade
+    it. The clearing happens *inside* the failure channel on purpose: a
+    marker that cannot be removed (a read-only checkout, a permission
+    error) leaves a stale success on disk, so the run must not start —
+    publishing :data:`FAILED_FILE` rejects the candidate whatever else is
+    lying about beside it, and keeps the traceback out of the frames.
+
     Raises:
         SystemExit: with status 1 if the story failed, so a direct run still
             reports the failure — and reports it as the one exception the
@@ -272,6 +326,7 @@ async def run() -> None:
     :data:`OK_FILE` is published only after the closing card is printed.
     """
     try:
+        _clear_markers()
         await main()
     except Exception:
         _publish(FAILED_FILE)
