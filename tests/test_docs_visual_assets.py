@@ -1533,6 +1533,49 @@ def test_mcp_client_sections_budgets_each_requested_section_separately() -> None
     assert len(kept) <= budget, f"the pane holds {budget} lines; got {len(kept)}"
 
 
+def test_mcp_client_sections_do_not_spend_the_evidence_budget_on_blank_lines() -> None:
+    module = _mcp_client_module()
+    answer = "\n".join(
+        [
+            "CURRENT HEALTH",
+            "",
+            "   ",
+            "",
+            "  status: CrashLoopBackOff",
+            "CONTAINERS",
+            "",
+            "   ",
+            "",
+            "  app: restarting",
+        ]
+    )
+
+    kept = module._sections(answer, "CURRENT HEALTH", "CONTAINERS")
+
+    assert kept == [
+        "CURRENT HEALTH",
+        "  status: CrashLoopBackOff",
+        "CONTAINERS",
+        "  app: restarting",
+    ]
+
+
+def test_mcp_client_sections_fail_closed_when_a_header_has_only_blank_lines() -> None:
+    module = _mcp_client_module()
+    answer = "\n".join(
+        [
+            "CURRENT HEALTH",
+            "",
+            "   ",
+            "CONTAINERS",
+            "  app: restarting",
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="CURRENT HEALTH"):
+        module._sections(answer, "CURRENT HEALTH", "CONTAINERS")
+
+
 def test_mcp_client_sections_budget_counts_a_repeated_name_once() -> None:
     """Deduplication must shape the budget too, not just the output.
 
@@ -2149,6 +2192,20 @@ def test_every_scheduled_pod_node_has_a_fixture_node_row() -> None:
         assert row.namespace == "", (
             f"{name} is cluster-scoped and must carry an empty namespace, not {row.namespace!r}"
         )
+
+
+def test_cluster_scoped_demo_rows_ignore_a_requested_namespace() -> None:
+    harness = _demo_harness()
+    node_meta = harness.MANIFEST_ALIASES["nodes"]
+
+    listed = asyncio.run(harness.DemoReadOps().list_objects(node_meta, DEMO_ROOT.namespace))
+    related = asyncio.run(harness.list_relationship_objects(node_meta, DEMO_ROOT.namespace))
+    manifest = asyncio.run(harness.get_manifest("nodes", DEMO_ROOT.namespace, "node-2"))
+
+    assert {row.name for row in listed} == {"node-1", "node-2", "node-3"}
+    assert {row.name for row in related} == {"node-1", "node-2", "node-3"}
+    assert manifest["metadata"]["name"] == "node-2"
+    assert "namespace" not in manifest["metadata"]
 
 
 def test_diagnose_pod_reports_the_scheduled_nodes_conditions_not_unavailable() -> None:

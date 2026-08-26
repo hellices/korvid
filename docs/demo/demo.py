@@ -506,12 +506,16 @@ def _fixture_rows(plural: str) -> list[FixtureRow]:
     return rows
 
 
-def _fixture_row(plural: str, namespace: str | None, name: str) -> FixtureRow:
+def _matches_namespace(meta: ResourceMeta, row: FixtureRow, namespace: str | None) -> bool:
+    return namespace is None or not meta.namespaced or row.namespace == namespace
+
+
+def _fixture_row(meta: ResourceMeta, namespace: str | None, name: str) -> FixtureRow:
     """The fixture row `namespace/name` names.
 
     Args:
-        plural: The resolved kind's plural, as `list_objects` keys it.
-        namespace: The requested namespace, or None to match on name alone.
+        meta: The resolved kind metadata.
+        namespace: The requested namespace. Cluster-scoped kinds ignore it.
         name: The requested object name.
 
     Returns:
@@ -521,10 +525,10 @@ def _fixture_row(plural: str, namespace: str | None, name: str) -> FixtureRow:
         KeyError: if no row matches. Answering anyway is what let
             `get_object` succeed for objects `list_objects` never lists.
     """
-    for row in _fixture_rows(plural):
-        if row.name == name and (namespace is None or row.namespace == namespace):
+    for row in _fixture_rows(meta.plural):
+        if row.name == name and _matches_namespace(meta, row, namespace):
             return row
-    identity = f"{plural}/{_clipped(namespace or '-')}/{_clipped(name)}"
+    identity = f"{meta.plural}/{_clipped(namespace or '-')}/{_clipped(name)}"
     raise KeyError(f"unknown demo object: {identity}")
 
 
@@ -688,7 +692,7 @@ async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str,
     meta = MANIFEST_ALIASES.get(kind)
     if meta is None:
         raise KeyError(f"unknown demo kind: {_clipped(kind)}")
-    row = _fixture_row(meta.plural, namespace, name)
+    row = _fixture_row(meta, namespace, name)
     base = _MANIFESTS.get(meta.plural)
     manifest = (
         # Deep, not shallow: the describe screen and `DemoReadOps.get_object`
@@ -699,7 +703,7 @@ async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str,
         else _synthesised_manifest(meta, row)
     )
     manifest["metadata"]["name"] = name
-    if namespace:
+    if meta.namespaced and namespace:
         manifest["metadata"]["namespace"] = namespace
     return manifest
 
@@ -847,7 +851,7 @@ class DemoReadOps(ReadOps):
             if meta.plural == "pods"
             else list(EXTRA.get(meta.plural, []))
         )
-        return [row for row in rows if namespace is None or row.namespace == namespace]
+        return [row for row in rows if _matches_namespace(meta, row, namespace)]
 
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
@@ -1006,9 +1010,7 @@ async def list_relationship_objects(
     namespace: str | None,
 ) -> list[Any]:
     rows: list[Any] = list(PODS) if meta.plural == "pods" else list(EXTRA.get(meta.plural, []))
-    if namespace is None:
-        return rows
-    return [row for row in rows if row.namespace == namespace]
+    return [row for row in rows if _matches_namespace(meta, row, namespace)]
 
 
 def _parse_scene() -> str:

@@ -209,7 +209,7 @@ def _section_body(lines: list[str], name: str) -> list[str]:
     for line in lines:
         if line[:1].strip():
             keeping = line.rstrip(":") == name
-        if keeping:
+        if keeping and line.strip():
             body.append(line)
     return body
 
@@ -240,7 +240,7 @@ def _sections(text: str, *names: str) -> list[str]:
     wanted = list(dict.fromkeys(names))
     lines = text.splitlines()
     collected = {name: _section_body(lines, name) for name in wanted}
-    missing = tuple(name for name in wanted if not collected[name])
+    missing = tuple(name for name in wanted if len(collected[name]) < 2)
     if missing or not wanted:
         raise RuntimeError(
             f"diagnose_pod answer is missing a requested section: {missing or names!r}"
