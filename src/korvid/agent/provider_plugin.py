@@ -10,7 +10,12 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from korvid.agent.credentials import CredentialSource
-from korvid.agent.model_policy import CapabilitySource, ModelCapabilities, ModelDescriptor
+from korvid.agent.model_policy import (
+    CapabilitySource,
+    ModelCapabilities,
+    ModelDescriptor,
+    ModelTier,
+)
 from korvid.agent.provider import LLMProvider
 
 PROVIDER_PLUGIN_API_VERSION: Final[int] = 2
@@ -84,16 +89,23 @@ def _validate_plugin_descriptor(descriptor: object, provider_id: str | None) -> 
         raise ProviderPluginContractError(
             "provider plugin descriptor must be a ModelDescriptor instance"
         )
-    if provider_id is not None and descriptor.provider != provider_id:
+    provider = _validate_descriptor_field(descriptor.provider, "provider")
+    model = _validate_descriptor_field(descriptor.model, "model")
+    if provider_id is not None and provider != provider_id:
         raise ProviderPluginContractError(
             "provider plugin descriptor's provider id does not match its registered name"
         )
-    if not descriptor.model or len(descriptor.model) > _MAX_MODEL_ID_LENGTH:
+    return ModelDescriptor(provider, model)
+
+
+def _validate_descriptor_field(value: object, name: str) -> str:
+    """Return one bounded, non-blank plugin descriptor field."""
+    if not isinstance(value, str) or not value.strip() or len(value) > _MAX_MODEL_ID_LENGTH:
         raise ProviderPluginContractError(
-            f"provider plugin descriptor model id must be non-empty and at most "
+            f"provider plugin descriptor {name} must be a non-blank string of at most "
             f"{_MAX_MODEL_ID_LENGTH} characters"
         )
-    return ModelDescriptor(descriptor.provider, descriptor.model)
+    return value
 
 
 def _validate_plugin_capabilities(capabilities: object) -> ModelCapabilities:
@@ -106,6 +118,31 @@ def _validate_plugin_capabilities(capabilities: object) -> ModelCapabilities:
     if not isinstance(capabilities, ModelCapabilities):
         raise ProviderPluginContractError(
             "provider plugin capabilities must be a ModelCapabilities instance"
+        )
+    context_window_tokens = capabilities.context_window_tokens
+    if context_window_tokens is not None and (
+        isinstance(context_window_tokens, bool)
+        or not isinstance(context_window_tokens, int)
+        or context_window_tokens <= 0
+    ):
+        raise ProviderPluginContractError(
+            "provider plugin capabilities context_window_tokens must be a positive integer or None"
+        )
+    for name in ("supports_tools", "supports_parallel_tools", "supports_reasoning"):
+        value = getattr(capabilities, name)
+        if value is not None and not isinstance(value, bool):
+            raise ProviderPluginContractError(
+                f"provider plugin capabilities {name} must be a boolean or None"
+            )
+    if capabilities.recommended_tier is not None and not isinstance(
+        capabilities.recommended_tier, ModelTier
+    ):
+        raise ProviderPluginContractError(
+            "provider plugin capabilities recommended_tier must be a ModelTier or None"
+        )
+    if not isinstance(capabilities.provenance, Mapping):
+        raise ProviderPluginContractError(
+            "provider plugin capabilities provenance must be a mapping"
         )
     for fact, source in capabilities.provenance.items():
         if fact not in _KNOWN_CAPABILITY_FACTS:

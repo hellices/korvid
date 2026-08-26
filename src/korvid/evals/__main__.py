@@ -49,6 +49,7 @@ from korvid.evals.runner import (
 )
 from korvid.evals.scenario import Scenario, bundled_scenarios_dir, load_scenarios
 from korvid.evals.serving import ProbeResult, ollama_root, serving_metadata
+from korvid.providers.ollama import OllamaProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
 from korvid.providers.static_creds import StaticHeaderSource
 from korvid.tools.executor import ToolExecutor
@@ -56,6 +57,9 @@ from korvid.tools.executor import ToolExecutor
 
 def provider_factory_from_env(env: Mapping[str, str]) -> Callable[[], Any]:
     """Build a live-provider factory from `KORVID_EVAL_*` variables."""
+    provider_id = env.get("KORVID_EVAL_PROVIDER", "openai-compat").strip()
+    if provider_id not in {"ollama", "openai-compat"}:
+        raise SystemExit("KORVID_EVAL_PROVIDER must be 'ollama' or 'openai-compat'.")
     base_url = env.get("KORVID_EVAL_BASE_URL", "").strip()
     model = env.get("KORVID_EVAL_MODEL", "").strip()
     if not base_url or not model:
@@ -72,8 +76,15 @@ def provider_factory_from_env(env: Mapping[str, str]) -> Callable[[], Any]:
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise SystemExit("KORVID_EVAL_TIMEOUT_SECONDS must be a positive number.")
 
-    def factory() -> OpenAICompatProvider:
+    def factory() -> OllamaProvider | OpenAICompatProvider:
         credentials = StaticHeaderSource(api_key) if api_key else None
+        if provider_id == "ollama":
+            return OllamaProvider(
+                base_url,
+                model,
+                credentials=credentials,
+                timeout_seconds=timeout_seconds,
+            )
         return OpenAICompatProvider(
             base_url,
             model,

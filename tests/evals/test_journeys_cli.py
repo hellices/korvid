@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 
 import pytest
 
+from korvid.evals.__main__ import provider_factory_from_env
 from korvid.evals.grader import GradeResult
 from korvid.evals.harness import resolve_eval_policy
 from korvid.evals.interaction import interaction_payload
@@ -18,7 +19,15 @@ from korvid.evals.journey_runner import (
     JourneyTurnResult,
 )
 from korvid.evals.journey_runner import render_markdown as render_journey_markdown
-from korvid.evals.journeys_cli import _parse_args, _run, exit_code, journey_run_payload
+from korvid.evals.journeys_cli import (
+    _parse_args,
+    _run,
+    exit_code,
+    journey_run_payload,
+)
+from korvid.evals.journeys_cli import (
+    _resolve_policy as _resolve_journey_policy,
+)
 from korvid.evals.scripted import ScriptedProvider
 from tests.evals.fixtures import EVAL_INTERACTION, eval_interaction
 
@@ -36,6 +45,21 @@ def test_journey_cli_defaults_to_bundled_pack_and_three_reps() -> None:
 
 def test_journey_cli_accepts_an_explicit_model_tier() -> None:
     assert _parse_args(["--model-tier", "high"]).model_tier == "high"
+
+
+def test_journey_automatic_routing_uses_the_ollama_catalog_identity() -> None:
+    factory = provider_factory_from_env(
+        {
+            "KORVID_EVAL_PROVIDER": "ollama",
+            "KORVID_EVAL_BASE_URL": "http://localhost:11434/v1",
+            "KORVID_EVAL_MODEL": "qwen3:8b",
+        }
+    )
+
+    policy = _resolve_journey_policy(factory, None)
+
+    assert policy.route_source.value == "catalog"
+    assert policy.catalog_version is not None
 
 
 @pytest.mark.parametrize("value", ["full", "small"])

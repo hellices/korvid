@@ -165,6 +165,7 @@ evidence on screen.
 Task pack:
 
 ```sh
+export KORVID_EVAL_PROVIDER=ollama
 export KORVID_EVAL_BASE_URL=http://127.0.0.1:11435/v1
 export KORVID_EVAL_MODEL=qwen3:8b
 export KORVID_EVAL_TIMEOUT_SECONDS=300

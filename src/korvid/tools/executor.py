@@ -246,7 +246,9 @@ def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
     tighter `limit` (issue #71) so a full turn of results fits its tier's
     history budget."""
     if len(result) > limit:
-        return result[:limit] + _TRUNCATION_SUFFIX
+        if limit <= len(_TRUNCATION_SUFFIX):
+            return result[:limit]
+        return result[: limit - len(_TRUNCATION_SUFFIX)] + _TRUNCATION_SUFFIX
     return result
 
 

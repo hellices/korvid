@@ -7,7 +7,12 @@ from typing import Any
 import pytest
 
 from korvid.agent.credentials import CredentialSource
-from korvid.agent.model_policy import CapabilitySource, ModelCapabilities, ModelDescriptor
+from korvid.agent.model_policy import (
+    CapabilitySource,
+    ModelCapabilities,
+    ModelDescriptor,
+    ModelTier,
+)
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
@@ -225,6 +230,80 @@ def test_validated_plugin_provider_rejects_oversized_model_id() -> None:
 
     with pytest.raises(ProviderPluginContractError, match="model"):
         ValidatedPluginProvider(_HugeModelProvider([{"type": "done"}]))
+
+
+@pytest.mark.parametrize("field", ["provider", "model"])
+@pytest.mark.parametrize("value", [42, " ", "m" * 257])
+def test_validated_plugin_provider_rejects_invalid_descriptor_fields(
+    field: str, value: object
+) -> None:
+    class _InvalidDescriptorProvider(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            values: dict[str, object] = {
+                "provider": "test",
+                "model": "scripted-provider",
+            }
+            values[field] = value
+            return ModelDescriptor(**values)  # type: ignore[arg-type]  # malformed plugin object
+
+    with pytest.raises(ProviderPluginContractError, match=field):
+        ValidatedPluginProvider(_InvalidDescriptorProvider([{"type": "done"}]))
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, "4096"])
+def test_validated_plugin_provider_rejects_invalid_context_window(value: object) -> None:
+    class _InvalidCapabilitiesProvider(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities(
+                context_window_tokens=value  # type: ignore[arg-type]  # malformed plugin object
+            )
+
+    with pytest.raises(ProviderPluginContractError, match="context_window_tokens"):
+        ValidatedPluginProvider(_InvalidCapabilitiesProvider([{"type": "done"}]))
+
+
+@pytest.mark.parametrize(
+    "field", ["supports_tools", "supports_parallel_tools", "supports_reasoning"]
+)
+@pytest.mark.parametrize("value", ["false", 0, 1])
+def test_validated_plugin_provider_rejects_invalid_boolean_capabilities(
+    field: str, value: object
+) -> None:
+    class _InvalidCapabilitiesProvider(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities(
+                **{field: value}  # type: ignore[arg-type]  # malformed plugin object
+            )
+
+    with pytest.raises(ProviderPluginContractError, match=field):
+        ValidatedPluginProvider(_InvalidCapabilitiesProvider([{"type": "done"}]))
+
+
+def test_validated_plugin_provider_rejects_invalid_recommended_tier() -> None:
+    class _InvalidCapabilitiesProvider(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities(
+                recommended_tier="low"  # type: ignore[arg-type]  # malformed plugin object
+            )
+
+    with pytest.raises(ProviderPluginContractError, match="recommended_tier"):
+        ValidatedPluginProvider(_InvalidCapabilitiesProvider([{"type": "done"}]))
+
+
+def test_validated_plugin_provider_accepts_valid_capability_values() -> None:
+    capabilities = ModelCapabilities(
+        context_window_tokens=4096,
+        supports_tools=True,
+        supports_parallel_tools=False,
+        supports_reasoning=None,
+        recommended_tier=ModelTier.LOW,
+    )
+
+    assert _validate_plugin_capabilities(capabilities) == capabilities
 
 
 def test_validated_plugin_provider_rejects_unknown_provenance_fact() -> None:

@@ -484,6 +484,15 @@ async def test_unknown_tool_fails_before_any_port() -> None:
     assert bridge.actions == []
 
 
+async def test_unknown_tool_error_obeys_the_policy_result_limit() -> None:
+    harness = _harness(_policy(["get_resource"], max_tool_calls=None, max_result_chars=64))
+
+    result = await harness.execute("c1", "not_a_tool_" + "x" * 1_000, {})
+
+    assert result.outcome.error is True
+    assert len(result.outcome.text) <= 64
+
+
 # --- per-iteration budget ---------------------------------------------------
 
 

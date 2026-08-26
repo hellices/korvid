@@ -603,10 +603,12 @@ mismatches, quota exhaustion), service selector mismatches, stuck rollouts,
 node-pressure evictions, Job backoff exhaustion, and three healthy negative
 controls.
 
-Run it against any OpenAI-compatible endpoint (this talks to a live model, so
-it never runs in CI — CI only smoke-tests the harness with a scripted provider):
+Run it against an OpenAI-compatible endpoint or Ollama's native API (this talks
+to a live model, so it never runs in CI — CI only smoke-tests the harness with
+a scripted provider):
 
 ```sh
+export KORVID_EVAL_PROVIDER=ollama
 export KORVID_EVAL_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
 export KORVID_EVAL_MODEL=qwen3:14b
 # export KORVID_EVAL_API_KEY=...                        # if the endpoint needs one
@@ -633,6 +635,9 @@ Custom scenario packs can be pointed at with `--scenarios DIR`.
 `--model-tier low|high` measures one capability tier; omitting it runs the
 shipped model catalog's own routing, exactly as the TUI does, so before and
 after numbers for a model come from the same pack and the same route.
+`KORVID_EVAL_PROVIDER` defaults to `openai-compat`; set it to `ollama` when
+using Ollama so automatic routing carries the same provider identity as the
+TUI.
 
 ### Conversational journeys
 
@@ -642,6 +647,7 @@ two is still what turn three starts from — measuring broad discovery,
 corrections, evidence pivots, stopping behavior, and UI intent:
 
 ```sh
+export KORVID_EVAL_PROVIDER=ollama
 export KORVID_EVAL_BASE_URL=http://localhost:11434/v1
 export KORVID_EVAL_MODEL=qwen3:8b
 export KORVID_EVAL_TIMEOUT_SECONDS=300

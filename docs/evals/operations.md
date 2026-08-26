@@ -192,12 +192,12 @@ uv run python -m tests.evals.operation_campaign --scripted --reps 1
 Live provider (grinding mode; never a merge gate):
 
 ```bash
-KORVID_EVAL_BASE_URL=... KORVID_EVAL_MODEL=... \
+KORVID_EVAL_PROVIDER=ollama KORVID_EVAL_BASE_URL=... KORVID_EVAL_MODEL=... \
   uv run python -m tests.evals.operation_campaign --reps 3 --seeds 101,102
 ```
 
 Artifacts record the fixture schema version, template id, generation
-seed, korvid revision, profile, prompt/tool fingerprint, repetitions, the
+seed, korvid revision, model tier, prompt/tool fingerprint, repetitions, the
 summarized journals, and the audit records each run produced. The JSON
 metadata also records `run_id`, the artifact base directory, and the
 run-specific artifact directory. Assertion artifacts omit authoritative

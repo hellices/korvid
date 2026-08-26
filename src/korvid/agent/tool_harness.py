@@ -325,10 +325,16 @@ class ToolHarness:
 
     def _error(self, call_id: str, name: str, message: str) -> ToolExecution:
         """A bounded deterministic error outcome that touches no port."""
+        text = f"ERROR: {message}"
+        bounded = (
+            cap_result(text)
+            if self._max_result_chars is None
+            else cap_result(text, limit=self._max_result_chars)
+        )
         return ToolExecution(
             call_id=call_id,
             name=name,
-            outcome=ToolOutcome(text=cap_result(f"ERROR: {message}"), error=True),
+            outcome=ToolOutcome(text=bounded, error=True),
             evidence_ref=None,
         )
 

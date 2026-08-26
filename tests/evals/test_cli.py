@@ -35,6 +35,7 @@ from korvid.evals.harness import PromptGrind, resolve_eval_policy
 from korvid.evals.runner import RunMetrics, ScenarioReport
 from korvid.evals.scripted import ScriptedProvider
 from korvid.evals.serving import ProbeResult, serving_metadata
+from korvid.providers.ollama import OllamaProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
 from tests.evals.fixtures import EVAL_INTERACTION
 
@@ -75,6 +76,46 @@ def test_provider_factory_builds_a_fresh_openai_compat_provider() -> None:
     assert first is not second  # fresh provider per run
 
 
+def test_provider_factory_builds_ollama_with_its_catalog_identity() -> None:
+    provider = provider_factory_from_env(
+        {
+            "KORVID_EVAL_PROVIDER": "ollama",
+            "KORVID_EVAL_BASE_URL": "http://localhost:11434/v1",
+            "KORVID_EVAL_MODEL": "qwen3:8b",
+        }
+    )()
+
+    assert isinstance(provider, OllamaProvider)
+    assert provider.descriptor.provider == "ollama"
+
+
+def test_provider_factory_rejects_unknown_provider_identity() -> None:
+    with pytest.raises(SystemExit, match="KORVID_EVAL_PROVIDER"):
+        provider_factory_from_env(
+            {
+                "KORVID_EVAL_PROVIDER": "not-a-provider",
+                "KORVID_EVAL_BASE_URL": "http://localhost:11434/v1",
+                "KORVID_EVAL_MODEL": "qwen3:8b",
+            }
+        )
+
+
+def test_automatic_eval_routing_uses_the_ollama_catalog_identity() -> None:
+    factory = provider_factory_from_env(
+        {
+            "KORVID_EVAL_PROVIDER": "ollama",
+            "KORVID_EVAL_BASE_URL": "http://localhost:11434/v1",
+            "KORVID_EVAL_MODEL": "qwen3:8b",
+        }
+    )
+    args = _parse_args([])
+
+    policy = _resolve_policy(factory, args)
+
+    assert policy.route_source.value == "catalog"
+    assert policy.catalog_version is not None
+
+
 def test_provider_factory_applies_eval_timeout() -> None:
     provider = provider_factory_from_env(
         {
@@ -83,6 +124,19 @@ def test_provider_factory_applies_eval_timeout() -> None:
             "KORVID_EVAL_TIMEOUT_SECONDS": "900",
         }
     )()
+    assert provider._get_client().timeout.read == 900.0
+
+
+def test_provider_factory_applies_eval_timeout_to_ollama() -> None:
+    provider = provider_factory_from_env(
+        {
+            "KORVID_EVAL_PROVIDER": "ollama",
+            "KORVID_EVAL_BASE_URL": "http://localhost:11434/v1",
+            "KORVID_EVAL_MODEL": "qwen3:8b",
+            "KORVID_EVAL_TIMEOUT_SECONDS": "900",
+        }
+    )()
+
     assert provider._get_client().timeout.read == 900.0
 
 

@@ -22,7 +22,7 @@ believing its wording was still in effect.
 | `agent.profile: full` | `agent.model_tier: high` — or omit the key |
 | `agent.prompts.append` | `agent.rules` (a list of short house rules) |
 | `agent.prompts.system` / `system_file` | *(none)* — grind the tier pack in the eval harness |
-| `agent.prompts.tool_descriptions` | *(none)* — deployment overrides removed: the low tier ships its own shipped, versioned, bounded wording by exact tool name; the high tier and the MCP server still use the registry's wording |
+| `agent.prompts.tool_descriptions` | *(none)* — deployment overrides removed: the low tier ships its own versioned, bounded wording by exact tool name; the high tier and the MCP server still use the registry's wording |
 
 ```yaml
 # before

@@ -70,6 +70,7 @@ class OllamaProvider(LLMProvider):
         *,
         options: OllamaOptions | None = None,
         ca_bundle: str | None = None,
+        timeout_seconds: float = 300.0,
     ) -> None:
         self._base_url = normalize_base_url(base_url)
         self._model = model
@@ -77,6 +78,7 @@ class OllamaProvider(LLMProvider):
         self._client = client  # injected or lazily created on first call
         self._owns_client = client is None
         self._ca_bundle = ca_bundle
+        self._timeout_seconds = timeout_seconds
         self._options = options or OllamaOptions()
         # Monotonic counter for generated tool-call ids: ids must stay
         # unique across completions within one agent conversation.
@@ -113,7 +115,13 @@ class OllamaProvider(LLMProvider):
             # A generous read timeout: a cold start (model load after
             # keep_alive expiry) can take well over a minute to the first
             # token on large local models.
-            self._client = make_client(self._ca_bundle, timeout=httpx.Timeout(300.0, connect=10.0))
+            self._client = make_client(
+                self._ca_bundle,
+                timeout=httpx.Timeout(
+                    self._timeout_seconds,
+                    connect=min(10.0, self._timeout_seconds),
+                ),
+            )
         return self._client
 
     async def aclose(self) -> None:
