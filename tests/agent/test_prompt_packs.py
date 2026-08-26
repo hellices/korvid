@@ -189,21 +189,25 @@ def test_the_low_tier_dispatches_tools_immediately_without_narrating_a_plan() ->
     immediately, and forbid plan narration and generic advice.
     The final answer must be limited to root cause, evidence, and the
     next operation — no preamble, no filler text.
+
+    Each assertion targets `LOW_KORVID_OPERATOR_PACK` directly so that a
+    regression introduced by an edit to the safety contract or common role
+    does not mask a missing LOW-specific clause.
     """
-    text = _low_text()
+    pack = LOW_KORVID_OPERATOR_PACK
     # must name the continue_analysis argument
-    assert "continue_analysis" in text
+    assert "continue_analysis" in pack
     # must require immediate dispatch rather than describing what it will do
-    assert re.search(r"dispatch|call .* immediately|immediate", text, re.IGNORECASE)
+    assert re.search(r"dispatch|call .* immediately|immediate", pack, re.IGNORECASE)
     # must forbid narrating a plan
-    assert re.search(r"do not narrate|never narrate|without narrat", text, re.IGNORECASE)
+    assert re.search(r"do not narrate|never narrate|without narrat", pack, re.IGNORECASE)
     # must forbid generic advice
     assert re.search(
-        r"no generic advice|without generic advice|never give generic", text, re.IGNORECASE
+        r"no generic advice|without generic advice|never give generic", pack, re.IGNORECASE
     )
     # final answer limited to root cause, evidence, next operation
-    assert re.search(r"root cause.*evidence|evidence.*root cause", text, re.IGNORECASE)
-    assert "next operation" in text.casefold()
+    assert re.search(r"root cause.*evidence|evidence.*root cause", pack, re.IGNORECASE)
+    assert "next operation" in pack.casefold()
 
 
 def test_the_safety_contract_is_unchanged_by_the_low_rules() -> None:

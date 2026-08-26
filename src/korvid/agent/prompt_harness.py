@@ -1,7 +1,7 @@
 """Compose deterministic, versioned agent prompts (issue #316 task 6).
 
-`PromptHarness` binds a `ResolvedAgentPolicy` (task 3), a workspace
-`InteractionContext` and `ClusterFacts` snapshot (task 1), and a
+`PromptHarness` binds a `ResolvedAgentPolicy`, a workspace
+`InteractionContext` and `ClusterFacts` snapshot, and a
 turn-scoped handoff note into one `ComposedPrompt`, in the exact layer
 order the design doc pins (§7):
 

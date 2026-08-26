@@ -1,7 +1,7 @@
 """Tests for the deterministic agent prompt harness (issue #316 task 6).
 
-The harness binds a `ResolvedAgentPolicy` (task 3) and an
-`InteractionContext`/`ClusterFacts` snapshot (task 1) into one
+The harness binds a `ResolvedAgentPolicy` and an
+`InteractionContext`/`ClusterFacts` snapshot into one
 `ComposedPrompt`, in the exact layer order the design doc pins (§7):
 immutable safety contract, common role, tier pack, provider overlay,
 exact-model overlay, additive user rules, armed capability clauses, then

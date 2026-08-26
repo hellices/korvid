@@ -1,4 +1,4 @@
-"""Model capability types and routing logic (Task 3).
+"""Model capability types and routing logic.
 
 Resolves an immutable `ResolvedAgentPolicy` from a model descriptor,
 provider-reported capabilities, an optional user tier override, and the
