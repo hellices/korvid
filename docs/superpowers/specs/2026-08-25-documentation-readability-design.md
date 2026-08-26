@@ -172,8 +172,14 @@ Answer: *How does a prompt become a grounded answer or an approved proposal?*
 - Show prompt, bounded tool/evidence use, citations, and optional write proposal
   as an evidence flow.
 - Preserve provider payload boundaries and mandatory approval for writes.
-- Keep the disclosure that existing Agent media is a deterministic AgentPanel
-  walkthrough, not live provider execution or grounded tool calls.
+- Keep the disclosure that existing Agent media is a deterministic
+  synthetic-cluster walkthrough. The prompt goes through the real
+  `AgentPanel`, the shipped `AgentRuntime` dispatches its reads through the
+  real `ToolExecutor`, and the real `EvidenceLedger` grounds `[E1]`/`[E2]`
+  — those are real code paths. What the clip is *not* evidence of: a live
+  provider, live-model answer quality, or a live cluster, since it is driven
+  by a deterministic offline provider and every byte read comes from a
+  synthetic fixture.
 - Remove tuning, evaluation, and configuration exposition that is not required
   for the first successful use.
 

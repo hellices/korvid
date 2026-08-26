@@ -426,3 +426,163 @@ def test_redesign_does_not_add_a_script_bundle() -> None:
         line.removeprefix("  - ").strip() for line in block.splitlines() if line.startswith("  - ")
     ]
     assert scripts == ["assets/javascripts/visual-storytelling.js"]
+
+
+def _ops_section(heading: str) -> str:
+    """The flattened body of one `## ` section of `ops.md`."""
+    body = _source("ops.md").split(f"\n## {heading}\n", 1)[1].split("\n## ", 1)[0]
+    return " ".join(body.split())
+
+
+def test_ops_preview_fallthrough_excludes_a_real_helm_render_failure() -> None:
+    """Video round 2, finding 1 (comment 3859012099).
+
+    `HelmController._preview` turns a `HelmError` from `HelmCLI._dry_run`
+    into `_HelmRenderFailure`, which stops the flow *before* the
+    confirmation dialog — the mutation would hit the same render error
+    (issue #139). Only advisory or unsupported previews fall through: a
+    failed or timed-out SSAR check warns, and old helm rejecting the
+    preview-only `--hide-secret` flag opens the dialog marked "preview
+    unavailable". An absolute "none of these previews ever blocks
+    approval" tells operators a doomed Helm command still reaches an
+    approval dialog.
+    """
+    section = _ops_section("Operation-specific evidence")
+    lowered = section.lower()
+
+    assert "none of these previews ever blocks approval" not in lowered, (
+        "a real helm render failure does block approval; the absolute claim is false"
+    )
+    assert "advisory" in lowered, (
+        "the page must name the advisory class of preview that falls through"
+    )
+    assert re.search(r"ssar check.{0,120}(warns|falls through)", lowered), (
+        "a failed or timed-out SSAR check must still be shown as warn-and-fall-through"
+    )
+    assert "helm" in lowered, "the exception must be attributed to the helm dry-run"
+    assert re.search(r"(stops|blocks|stopping|halts).{0,60}before the confirmation", lowered), (
+        "a helm render error the mutation would share must be described as stopping "
+        "the flow before the confirmation dialog"
+    )
+    assert "preview unavailable" in lowered, (
+        "an unsupported preview (old helm, no --hide-secret) is not a verdict: the "
+        "dialog opens marked 'preview unavailable'"
+    )
+    assert "gated" in lowered, "the fall-through path must stay described as still gated"
+    assert "audited" in lowered, "the fall-through path must stay described as still audited"
+
+
+def test_ops_debug_shell_lifecycles_are_not_conflated() -> None:
+    """Video round 2, finding 2 (comment 3859012123).
+
+    `ui/debug.py` injects an ephemeral container into the *existing* pod —
+    Kubernetes has no API to remove that spec entry again, which is why the
+    module warns that each retry "permanently adds another ephemeral
+    container entry to the pod spec". Only `ui/shell.py`'s node path creates
+    a separate `node-debugger-…` pod, whose uid is captured so cleanup can
+    delete precisely that pod. Saying both "clean up their pod by UID" gives
+    operators the wrong lifecycle expectation for the pod path.
+    """
+    section = _ops_section("Sessions that outlive the screen")
+    lowered = section.lower()
+
+    assert "clean up their pod by uid" not in lowered, (
+        "the ephemeral-container path cleans up nothing; only the node debugger pod "
+        "is deleted by uid"
+    )
+    assert "ephemeral" in lowered, "the pod path must stay named as an ephemeral container"
+    assert re.search(r"(existing|same) pod", lowered), (
+        "the ephemeral container is injected into the pod that is already running"
+    )
+    assert re.search(r"(cannot|can't|no api to) remove", lowered), (
+        "Kubernetes cannot remove an ephemeral container entry from a pod spec; the "
+        "page must say so rather than promise cleanup"
+    )
+    assert re.search(r"(replaced|recreated).{0,40}(or|and).{0,20}delet", lowered), (
+        "the entry survives until the pod itself is replaced or deleted"
+    )
+    assert "node-debugger" in lowered, (
+        "only the node path creates a separate node-debugger pod; name it"
+    )
+    assert re.search(r"(deleted|removed).{0,40}by uid", lowered), (
+        "the node-debugger pod is the thing deleted by uid when the shell exits"
+    )
+    assert "approval" in lowered, "both debug paths stay approval-gated"
+    assert "audited" in lowered, "both debug paths stay audited"
+
+
+def test_readability_design_agent_limitation_matches_the_shipped_capture() -> None:
+    """Video round 2, finding 3 (comment 3859012143).
+
+    `docs/demo/agent_story.py` drives the real `AgentRuntime` over the real
+    `ToolExecutor` (`diagnose_pod`, then `get_logs`) with a deterministic
+    offline provider, and the real `EvidenceLedger` mints `[E1]`/`[E2]`. The
+    design bullet must keep the live-provider/live-cluster/answer-quality
+    limitation without claiming the clip lacks grounded tool calls.
+    """
+    spec = _source("superpowers/specs/2026-08-25-documentation-readability-design.md")
+    flat = " ".join(spec.split())
+    lowered = flat.lower()
+
+    assert "not live provider execution or grounded tool calls" not in lowered, (
+        "the capture does run grounded tool calls through the shipped runtime"
+    )
+    assert "not grounded" not in lowered, "no wording may deny the capture's grounding"
+    for real_path in ("AgentRuntime", "ToolExecutor", "EvidenceLedger", "AgentPanel"):
+        assert real_path in flat, f"the bullet must name {real_path} as a real code path"
+    for marker in ("`[E1]`", "`[E2]`"):
+        assert marker in flat, f"the ledger mints {marker}; the bullet must name it"
+    assert re.search(r"(offline|deterministic) provider", lowered), (
+        "the provider behind the capture is deterministic and offline"
+    )
+    assert "synthetic" in lowered, "the tools read a synthetic fixture, not a live cluster"
+    assert re.search(r"live(-| )model|live provider", lowered), (
+        "the live provider/model limitation must survive"
+    )
+    assert "live cluster" in lowered, "the live-cluster limitation must survive"
+    assert "quality" in lowered, "the answer-quality limitation must survive"
+
+
+def test_observability_token_validation_is_per_call_not_backend_disabling() -> None:
+    """Video round 2, finding 4 (comment 3859012162).
+
+    `obs/credentials.py::resolve_token` runs on every call (`obs/http.py::
+    _headers`) and raises `ConnectorError("config")` for a control or
+    non-ASCII byte — that refuses *that tool call*; the constructed backend
+    is untouched, so a corrected or rotated token works on the next call
+    without restarting korvid. Structurally invalid static config (both
+    token sources, an inline secret, a TLS opt-out) is different: that
+    disables the backend when the configuration is loaded.
+    """
+    section = " ".join(
+        _source("observability.md")
+        .split("\n## Credentials and TLS\n", 1)[1]
+        .split("\n## ", 1)[0]
+        .split()
+    )
+    lowered = section.lower()
+
+    assert not re.search(r"(control|non-ascii).{0,120}backend to be disabled", lowered), (
+        "an invalid token value fails the call, it does not disable the backend"
+    )
+    assert re.search(r"(refus|fail)\w*.{0,60}(that|the) call", lowered), (
+        "the page must say the invalid value refuses that call"
+    )
+    assert "`config`" in section, "the per-call refusal surfaces as a `config` error"
+    assert re.search(r"(control|non-ascii)", lowered), (
+        "the validated header-value classes must stay named"
+    )
+    assert re.search(r"(correct|rotat)\w*.{0,120}without restarting", lowered), (
+        "correcting or rotating the token must be described as restoring subsequent "
+        "calls without a restart"
+    )
+    assert re.search(r"(both|inline).{0,160}disables the backend", lowered), (
+        "structurally invalid static config still disables the backend; keep the "
+        "distinction visible"
+    )
+    assert re.search(r"(when the configuration is loaded|at startup|at config load)", lowered), (
+        "static-config disabling happens once, when the configuration is loaded"
+    )
+    assert "tls verification cannot be disabled" in lowered, (
+        "the TLS invariant must survive this edit"
+    )

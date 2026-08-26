@@ -190,8 +190,19 @@ you. Writes outside the Kubernetes API (Helm, file uploads) skip the SSAR
 step by construction. The impact section appears only for delete, rollout
 restart, a known scale-down, and Pod resize — edit, Helm, and operator
 flows have no tested per-relation semantics yet, so korvid shows nothing
-rather than a plausible guess. None of these previews ever blocks
-approval; a failed or slow one simply means the dialog opens without it.
+rather than a plausible guess.
+
+An **advisory** preview never blocks approval: when the SSAR check, the
+ownership banner, or the impact section fails, times out, or is
+unsupported, the dialog simply opens without it — still gated, still
+audited. The **Helm dry-run is the exception**, because its verdict is
+not advisory: when helm's own render fails, the real command would fail
+the same way, so korvid shows helm's error and stops before the
+confirmation dialog rather than letting you approve a doomed command
+(see [Helm and operators](helm-operators.md)). An *unsupported* preview
+is still not a verdict — old helm rejecting the preview-only
+`--hide-secret` flag opens the (gated, audited) dialog marked **preview
+unavailable**.
 
 ## Sessions that outlive the screen
 
@@ -208,8 +219,15 @@ started them closes:
 - **Debug shells** — `s` on a shell-less pod offers an ephemeral
   `kubectl debug` container; `s` on a node opens a privileged
   `kubectl debug node/` session with the host filesystem at `/host`.
-  Both pass the approval gate explicitly and clean up their pod by UID
-  when the shell exits.
+  Both pass the approval gate explicitly and are audited fail-closed, but
+  they end differently. The pod path injects an ephemeral container into
+  the **existing pod**, and Kubernetes offers no API to remove that spec
+  entry again: it stays on the pod until the pod itself is replaced or
+  deleted (a retry with a different image adds another entry rather than
+  replacing the first). Only the node path creates a **separate
+  `node-debugger-…` pod**, and that pod is deleted by UID when the shell
+  exits — pinned to the uid korvid captured at creation, so a debugger
+  someone else started is never removed.
 - **Crash recovery** — a fatal exception restores the terminal and offers
   a restart with a fresh event loop, client, and provider; no approval
   state or pending proposal survives a restart, and the append-only audit

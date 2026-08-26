@@ -126,12 +126,14 @@ A token is **named** in config, never stored there — exactly one of
 `token_env` (an environment variable name) or `token_file` (a path to a
 regular file; a FIFO or device is refused since opening one can block
 forever). Setting both, or an inline `token:`/`password:`/`api_key:`,
-disables the backend rather than guessing. The token is read at call time,
-validated — any control characters or non-ASCII bytes cause the backend to be
-disabled with a configuration error rather than sending an invalid header
-value — used in one `Authorization` header, and dropped — never in a tool
-result, error, audit record, or log line; a rotated token takes effect without
-restarting korvid. If a `url` carries userinfo, only the host is ever
+disables the backend when the configuration is loaded rather than guessing.
+The token is read at call time and its header safety is validated then —
+any control character or non-ASCII byte refuses *that call* with a `config`
+error instead of sending an invalid header value. The already-constructed
+backend stays configured, so correcting or rotating the value restores
+subsequent calls without restarting korvid. A valid token is used in one
+`Authorization` header, and dropped — never in a tool result, error, audit
+record, or log line. If a `url` carries userinfo, only the host is ever
 reported.
 
 TLS verification cannot be disabled — there is no `insecure` option, and a
