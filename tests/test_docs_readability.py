@@ -670,6 +670,16 @@ def test_ops_approval_claim_matches_what_the_confirm_dialog_can_check() -> None:
     assert re.search(r"(agent|mcp).{0,160}(no|never).{0,60}approval api", lowered) or re.search(
         r"(no|neither).{0,80}approval api", lowered
     ), "the page must keep saying no agent or MCP path can answer the dialog"
+    assert "no tool path reaches the dialog" not in lowered, (
+        "agent writes and MCP proposal review do open the shared dialog; tools only lack "
+        "the ability to answer it"
+    )
+    assert re.search(r"tools?.{0,100}(request|open).{0,100}dialog", lowered), (
+        "the page must distinguish opening the dialog from approving it"
+    )
+    assert re.search(r"no tool.{0,80}(answer|resolve|approve)", lowered), (
+        "the invariant is that no tool can answer the dialog"
+    )
     assert re.search(r"(key repeat|repeat|repeated key)", lowered), (
         "the page must disclaim post-construction key-repeat classification"
     )
