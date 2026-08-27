@@ -529,8 +529,10 @@ def test_the_raw_artifact_pointer_is_a_link_not_an_issue_number() -> None:
 
     The performance page publishes summaries and keeps the metrics JSON,
     profile dumps and seed manifests out of the product history, so the
-    issue that links their artifact commit is the reachable end of that
-    trail. Naming it without linking it leaves that trail unreachable from
+    issue that holds the `i186` run's summary and profiling tables is the
+    reachable end of that trail; the raw artifacts themselves stay out of
+    the repository and are available on request, not linked as a commit.
+    Naming the issue without linking it leaves that trail unreachable from
     the site. This checks only that the link survives pruning — it does
     not assert what the issue contains; that the issue holds no more than
     the `i186` render-path summary is pinned by

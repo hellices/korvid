@@ -192,7 +192,8 @@ Each run emits a summary, a metrics JSON, a `cProfile` dump, a `tracemalloc`
 snapshot, and the seed manifest that reproduces the exact workload. Those stay
 out of the product source history:
 [issue #186](https://github.com/hellices/korvid/issues/186) carries the
-`i186` render-path run's summary and links its artifact commit. It does not
-carry the update-path 2×2 interaction's per-round values or allocation
-accounting — that detail was cut from this page for length, not relocated,
-and no other destination holds it.
+`i186` render-path run's summary and profiling tables; the raw artifacts
+themselves stay out of the repository and are available on request. The
+issue does not carry the update-path 2×2 interaction's per-round values or
+allocation accounting — that detail was cut from this page for length, not
+relocated, and no other destination holds it.

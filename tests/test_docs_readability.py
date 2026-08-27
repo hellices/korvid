@@ -1320,9 +1320,17 @@ def test_performance_page_does_not_invent_a_home_for_deleted_detail() -> None:
     run only, and the update-path 2x2 interaction (its per-round values and
     allocation accounting) was never posted anywhere. Dropping that detail
     for length is fine; inventing a destination for it is not.
+
+    A later revision made a related but distinct false claim: that the
+    issue "links its artifact commit". It does not — issue #186 holds the
+    `i186` run's summary and profiling tables only; the raw artifacts
+    (metrics JSON, `cProfile` dump, `tracemalloc` snapshot, seed manifest)
+    were deliberately kept out of the repository and are available on
+    request, not pinned to a commit anywhere. That claim must not return.
     """
     performance = _source("performance.md")
     lowered = performance.lower()
+    flat = " ".join(lowered.split())
 
     assert "full before/after matri" not in lowered, (
         "issue #186 does not hold a full before/after matrix; do not claim it does"
@@ -1330,6 +1338,13 @@ def test_performance_page_does_not_invent_a_home_for_deleted_detail() -> None:
     assert "live with the run artifacts" not in lowered, (
         "the per-round values and allocation accounting have no artifact home; "
         "do not claim they were relocated"
+    )
+    assert "artifact commit" not in lowered, (
+        "issue #186 does not link an artifact commit; do not claim it does"
+    )
+    assert re.search(r"raw artifacts?.{0,60}(available on request|on request)", flat), (
+        "the page must say the raw artifacts stay out of the repo and are "
+        "available on request, not that they live in a linked commit"
     )
 
 
