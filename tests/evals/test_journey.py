@@ -536,7 +536,7 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
     (
         "tui-follow",
         2,
-        ("Opened on screen for you to review.",),
+        (DIRECT_OPEN_ACKNOWLEDGEMENT,),
         (
             # Narrates a log it cannot have read.
             "The log shows the application failing to connect to its database.",
