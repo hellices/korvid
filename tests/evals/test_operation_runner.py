@@ -342,3 +342,43 @@ async def test_run_operation_case_never_dialogs_for_a_no_write_fixture(tmp_path:
     run = await _run_scripted_case("scale-no-op", tmp_path)
     assert run.decisions == ()
     assert run.grade.outcome == "completed"
+
+
+async def test_run_operation_case_omits_decisions_when_no_write_is_requested(
+    tmp_path: Path,
+) -> None:
+    """`decisions` must reflect only decisions the policy actually made -
+    never the planned script. `scale-no-op`'s transcript never calls a
+    write tool at all, so even an explicit non-empty `approval_script`
+    override must publish zero decisions: `policy.decide()` was never
+    invoked, so there is nothing to report."""
+    from korvid.evals.operation_runner import run_operation_case
+
+    journey = _load("scale-no-op")
+    run = await run_operation_case(
+        journey,
+        audit_path=tmp_path / "audit.jsonl",
+        provider_factory=lambda: ScriptedProvider(OPERATION_SCRIPTS["scale-no-op"]),
+        approval_script=[ApprovalOutcome.APPROVE],
+    )
+    assert run.decisions == ()
+
+
+async def test_run_operation_case_records_a_fail_closed_decline_past_the_script(
+    tmp_path: Path,
+) -> None:
+    """A write request the script did not anticipate still gets a real
+    `ApprovalDecision` back (`ScriptedApprovalPolicy` fails closed to
+    `DECLINE`) - and that decision must appear in `run.decisions`, not be
+    silently dropped because it falls outside the authored script."""
+    from korvid.evals.operation_runner import run_operation_case
+    from korvid.tools.approval import SCRIPTED_POLICY_SOURCE
+
+    journey = _load("scale-deployment-up")
+    run = await run_operation_case(
+        journey,
+        audit_path=tmp_path / "audit.jsonl",
+        provider_factory=lambda: ScriptedProvider(OPERATION_SCRIPTS["scale-deployment-up"]),
+        approval_script=[],  # exhausted before the fixture's own single write request
+    )
+    assert run.decisions == ({"outcome": "decline", "decision_source": SCRIPTED_POLICY_SOURCE},)

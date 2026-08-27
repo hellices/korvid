@@ -65,7 +65,6 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import manifest_uid
 from korvid.tools.approval import (
-    SCRIPTED_POLICY_SOURCE,
     ApprovalDecision,
     ApprovalOutcome,
     ApprovalPolicy,
@@ -832,6 +831,34 @@ def _default_script(
     return [outcome], [intervene]
 
 
+class _RecordingApprovalPolicy(ApprovalPolicy):
+    """Wraps another `ApprovalPolicy` and records every `ApprovalDecision`
+    it actually returns, in call order.
+
+    `OperationRun.decisions` must publish exactly what the write path
+    asked for and received - never the planned script: a fixture whose
+    transcript never calls a write tool must publish zero decisions even
+    when a non-empty script was authored for it (`policy.decide()` was
+    never invoked), and a write the script did not anticipate must have
+    its fail-closed `DECLINE` recorded too, even though it falls past the
+    end of the authored script. Delegates every call unchanged; records
+    nothing the inner policy did not itself decide.
+    """
+
+    def __init__(self, inner: ApprovalPolicy) -> None:
+        self._inner = inner
+        self._decisions: list[ApprovalDecision] = []
+
+    @property
+    def decisions(self) -> tuple[ApprovalDecision, ...]:
+        return tuple(self._decisions)
+
+    async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        decision = await self._inner.decide(request)
+        self._decisions.append(decision)
+        return decision
+
+
 def _operation_interaction(journey: OperationJourney) -> InteractionContext:
     """The static workspace snapshot a TUI-free run presents.
 
@@ -917,7 +944,7 @@ async def run_operation_case(
         interventions: list[Callable[[], None] | None] = [None] * len(script)
     else:
         script, interventions = _default_script(journey, kube)
-    policy = ScriptedApprovalPolicy(script, interventions=interventions)
+    policy = _RecordingApprovalPolicy(ScriptedApprovalPolicy(script, interventions=interventions))
     bridge = ScriptedOperationBridge(
         kube=kube,
         journal=journal,
@@ -1009,8 +1036,8 @@ async def run_operation_case(
         journal=tuple(journal.payload()),
         audit=audit_records,
         decisions=tuple(
-            {"outcome": outcome.value, "decision_source": SCRIPTED_POLICY_SOURCE}
-            for outcome in script
+            {"outcome": decision.outcome.value, "decision_source": decision.decision_source}
+            for decision in policy.decisions
         ),
         wall_time_s=time.monotonic() - started,
         prompt=prompt_fingerprint(resolved_policy, grind=grind),
