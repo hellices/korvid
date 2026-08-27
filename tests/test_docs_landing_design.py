@@ -549,16 +549,18 @@ def test_install_command_scroll_region_has_a_visible_focus_ring() -> None:
 def test_hero_demo_video_focus_outline_is_inset_to_avoid_clipping() -> None:
     """The frame that hosts the hero video clips overflow, so its ring must sit inside it.
 
-    `.hero-demo__frame` sets `overflow: hidden` to keep the rounded corners
-    and drop shadow tidy. A positive `outline-offset` on the video draws the
-    ring *outside* the video's border box, and the frame's clip silently
-    swallows it — a keyboard user tabs to the video and sees no focus
-    indicator at all. The video needs its own inset ring, split out of the
-    selector group that still serves the un-clipped hero links, install
-    command, and footer links (those keep their outward ring).
+    The hero's media is now the driver stage, and the box that clips it is
+    `.scene-panels` — it sets `overflow: hidden` to keep the rounded corners
+    tidy, exactly as the retired `.hero-demo__frame` mock-up did. A positive
+    `outline-offset` on the video draws the ring *outside* the video's border
+    box, and that clip silently swallows it — a keyboard user tabs to the
+    video and sees no focus indicator at all. The video needs its own inset
+    ring, split out of the selector group that still serves the un-clipped
+    hero links, install command, and footer links (those keep their outward
+    ring).
     """
     css = _css()
-    frame = _rule(css, ".md-typeset .hero-demo__frame {")
+    frame = _rule(css, ".md-typeset .scene-panels {")
     assert "overflow: hidden" in frame, "this test only makes sense while the frame still clips"
 
     video_rule = _rule(css, ".md-typeset .hero-demo video:focus-visible")
@@ -741,6 +743,133 @@ def test_hero_demo_fills_its_product_media_column() -> None:
     """Material's fit-content figure width must not shrink-wrap the hero."""
     demo_rule = _rule(_css(), ".md-typeset .hero-demo {")
     assert "width: 100%" in demo_rule
+
+
+def test_home_media_stage_is_bounded_without_distorting_clips() -> None:
+    """The stage owns the layout box; the clips only fit inside it.
+
+    An unbounded stage let a 16:9 player grow with its column and dominate
+    (or, on a short viewport, overflow) the fold. The compact homepage caps
+    the component's width, hands the aspect-ratio box to the *frame*, and
+    lets every replaced element fill that box with `object-fit: contain` —
+    so the 1280x710 MCP clip letterboxes by a few pixels instead of being
+    stretched or cropped to a box that is not its own.
+    """
+    css = _css()
+
+    stage = _rule(css, ".md-typeset .hero-driver-stage {")
+    for declaration in ("width: 100%", "min-width: 0", "max-width: 54rem", "margin: 0"):
+        assert declaration in stage, (
+            f"the stage must declare `{declaration}` so it fills its column without "
+            f"growing past a readable measure; found {_compact(stage)!r}"
+        )
+
+    box = _rule(css, ".hero-driver-stage .scene-panels {")
+    assert "aspect-ratio: 16 / 9" in box, (
+        f"the frame, not the video, must own the ratio; found {_compact(box)!r}"
+    )
+    assert "max-height: min(58vh, 540px)" in box, (
+        f"the stage must stay inside the fold on short viewports; found {_compact(box)!r}"
+    )
+
+    fill = _rule(css, ".hero-driver-stage video,")
+    for declaration in ("width: 100%", "height: 100%"):
+        assert declaration in fill, (
+            f"the media must fill the stage's box (`{declaration}`); found {_compact(fill)!r}"
+        )
+    fill_prelude = _selector_list(css, ".hero-driver-stage video,")
+    assert ".hero-driver-stage .scene-panel__fallback" in fill_prelude, (
+        "the no-JavaScript poster must fill the same box, or it and the player "
+        f"would size differently; prelude was {_compact(fill_prelude)!r}"
+    )
+
+    contain = _rule(css, ".md-typeset .hero-driver-stage video,")
+    assert "object-fit: contain" in contain, (
+        f"a clip may letterbox but must never be cropped or stretched: {_compact(contain)!r}"
+    )
+    assert ".hero-driver-stage .scene-panel__fallback" in _selector_list(
+        css, ".md-typeset .hero-driver-stage video,"
+    ), "the no-JavaScript poster must fit the same way its player does"
+
+
+def test_capped_stage_shrinks_its_media_instead_of_clipping_it() -> None:
+    """`max-height` only bounds the stage if the media shrinks with it.
+
+    Measured on the built page at 1440x400 (the viewport where
+    `min(58vh, 540px)` actually binds): the frame resolved to 232px while
+    the clip stayed 310px tall and `.scene-panels { overflow: hidden }` cut
+    100px off the bottom of the video. The panel is a grid, and its implicit
+    `auto` row keeps the clip's intrinsic 16:9 contribution rather than
+    shrinking to the frame — so the cap that exists to protect the fold was
+    cropping the product instead. The row has to be a `minmax(0, 1fr)` track,
+    which may shrink below its content, and the panel's 1rem inset has to go:
+    an inset box inside a 16:9 frame is not itself 16:9, so `contain` would
+    pillarbox a 16:9 clip inside its own frame.
+
+    `display` must never be declared here. `.md-typeset .scene-panel[hidden]`
+    is (0,3,0) and this selector is (0,5,0), so a `display` declaration would
+    beat the `hidden` rule and reveal every deselected panel.
+    """
+    css = _css()
+    anchor = ".md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage .scene-panel {"
+    panel = _rule(css, anchor)
+    for declaration in (
+        "height: 100%",
+        "grid-template-rows: minmax(0, 1fr)",
+        "padding: 0",
+        "gap: 0",
+    ):
+        assert declaration in panel, (
+            f"the stage's panel must declare `{declaration}` so the frame's height cap "
+            f"shrinks the clip rather than cropping it; found {_compact(panel)!r}"
+        )
+    assert "display" not in panel, (
+        "declaring `display` here out-specifies `.md-typeset .scene-panel[hidden]` and "
+        f"un-hides every deselected panel; found {_compact(panel)!r}"
+    )
+
+    media = _rule(css, ".hero-driver-stage video,")
+    for declaration in ("border: 0", "border-radius: 0"):
+        assert declaration in media, (
+            f"the frame already draws the border it clips to, and under `border-box` a "
+            f"second one steals from the fitted box; missing `{declaration}` in "
+            f"{_compact(media)!r}"
+        )
+
+
+def test_bounded_stage_never_clips_the_unenhanced_three_panel_fallback() -> None:
+    """The fixed-ratio box is only correct once the controller collapses the stack.
+
+    Without JavaScript — and for the moment before the controller runs —
+    every one of the three panels is rendered in document order, and
+    `.scene-panels` clips its overflow to keep the rounded frame tidy.
+    Measured on the built page in Chromium at 1440x900 with JavaScript
+    disabled, an ungated `aspect-ratio: 16 / 9` box holds 332px while that
+    stack is 1,047px tall — 715px clipped, and not one of the three fallback
+    panels fully visible. The cap therefore hangs off the same
+    `data-enhanced` hook that already gates the tab strip, and the shared
+    `.scene-panels` rule keeps no height constraint of its own.
+    """
+    css = _css()
+
+    for anchor in (
+        ".hero-driver-stage .scene-panels {",
+        ".md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage .scene-panel {",
+        ".hero-driver-stage video,",
+    ):
+        prelude = _selector_list(css, anchor)
+        assert "[data-scene-switcher][data-enhanced]" in prelude, (
+            "the bounded stage must apply only to the enhanced switcher, or the "
+            f"unenhanced three-panel fallback is clipped; prelude was {_compact(prelude)!r}"
+        )
+
+    shared = _rule(css, ".md-typeset .scene-panels {")
+    assert "overflow: hidden" in shared, "the frame still clips, which is why the gate exists"
+    for constraint in ("aspect-ratio", "max-height", "height"):
+        assert constraint not in shared, (
+            f"the ungated frame must not constrain its own height (`{constraint}`); "
+            f"found {_compact(shared)!r}"
+        )
 
 
 def test_visual_storytelling_plan_is_marked_superseded_for_the_landing_structure() -> None:
@@ -2063,73 +2192,40 @@ def test_control_highlight_orders_confirmation_audit_and_execution() -> None:
     assert 'href="ops/"' in control, "the highlight links the approval and audit reference"
 
 
-def test_write_path_stage_grid_targets_the_ordered_list_specificity() -> None:
-    """The write-path grid must keep targeting the ordered list element directly.
-
-    The write-path stages are an ordered list, so the grid rule has to target
-    `.md-typeset ol.write-path__stages` directly in both the base rule and the
-    narrow-width fallback. If the selector were only `.md-typeset .write-path__stages`,
-    Material's ordered-list default would keep control and the stage list would
-    stop behaving like a grid.
-    """
-    raw_css = _css()
-    css = _strip_css_comments(raw_css)
-    assert css.count(".md-typeset ol.write-path__stages {") == 2
-    assert ".md-typeset .write-path__stages {" not in css
-
-
-def test_visual_storytelling_plan_write_path_css_matches_the_shipped_rules() -> None:
-    """The plan's write-path snippets must stay synced with the shipped source."""
-    plan_css = _fenced_block_after(
-        _plan(),
-        "- [ ] **Step 4: Style the semantic diagrams without relying on color**",
-        "css",
-    )
-    shipped_css = _css()
-
-    plan_base = _rule(plan_css, ".md-typeset ol.write-path__stages {")
-    shipped_base = _rule(shipped_css, ".md-typeset ol.write-path__stages {")
-    assert _compact(plan_base) == _compact(shipped_base)
-
-    plan_mobile = _media_blocks(plan_css, "@media (max-width: 799px)")
-    shipped_mobile = _media_blocks(shipped_css, "@media (max-width: 799px)")
-    assert len(plan_mobile) == len(shipped_mobile) == 1
-    assert _compact(plan_mobile[0]) == _compact(shipped_mobile[0])
-
-
-def test_evidence_figures_reserve_the_full_card_width_before_images_load() -> None:
+def test_storyboard_figures_reserve_the_full_container_width_before_images_load() -> None:
     """Material's `figure { width: fit-content }` must lose to a real override.
 
-    The mosaic images are `loading="lazy"`, so until each one decodes the
+    The storyboard images are `loading="lazy"`, so until each one decodes the
     `<figure>` has nothing but its `<figcaption>` to shrink-wrap to.
     Material for MkDocs ships `.md-typeset figure { width: fit-content }`,
     which won against the branch's `margin`-only reset and let every tile
     render at caption width and then jump 2-6x on load. The override has to
     restate the box itself — the declarations, not a comment describing
-    them, are what the browser cascade sees.
+    them, are what the browser cascade sees. The landing mosaic that first
+    exposed this is gone; `docs/agent.md` and `docs/helm-operators.md` still
+    ship the same lazy-figure pattern.
     """
-    block = _rule(_css(), ".md-typeset .evidence-card figure")
+    block = _rule(_css(), ".md-typeset .docs-storyboard figure")
     for declaration in ("width: 100%", "display: block", "margin: 0"):
         assert declaration in block, (
-            f"`.md-typeset .evidence-card figure` must declare `{declaration}` so an "
-            "unloaded lazy figure still reserves its card's box; found: "
+            f"`.md-typeset .docs-storyboard figure` must declare `{declaration}` so an "
+            "unloaded lazy figure still reserves its container's box; found: "
             f"{' '.join(block.split())!r}"
         )
 
 
 def test_korvid_figures_left_align_against_materials_centred_typeset_default() -> None:
-    """Material centres every `figure`; korvid's evidence blocks must not inherit it.
+    """Material centres every `figure`; korvid's figure blocks must not inherit it.
 
     Material for MkDocs ships `.md-typeset figure { text-align: center }`, and
     `text-align` inherits. Measured at 1440px on the built site, that centred
-    the `tui.md` pin legend's numbered list and every mosaic caption against
+    the `tui.md` pin legend's numbered list and every caption against
     left-aligned body copy around them — a legend whose markers and text
     disagree. Each korvid figure container therefore has to restate the
     alignment its own content assumes.
     """
     css = _css()
     for selector in (
-        ".md-typeset .evidence-card figure",
         ".md-typeset .docs-visual,",
         ".md-typeset .docs-storyboard figure",
     ):
@@ -2153,25 +2249,15 @@ def test_korvid_figcaptions_defeat_materials_narrow_italic_caption_default() -> 
     here.
     """
     css = _css()
-    for selector in (
-        ".md-typeset .evidence-card figcaption {",
-        ".md-typeset .docs-visual figcaption,",
-    ):
-        block = _rule(css, selector)
-        for declaration in ("max-width: none", "font-style: normal"):
-            assert declaration in block, (
-                f"`{selector.rstrip(' {,')}` must declare `{declaration}`; found: "
-                f"{' '.join(block.split())!r}"
-            )
-    concept = _rule(css, ".md-typeset .docs-visual figcaption,")
-    assert "margin: 0.8rem 0 0" in concept, (
+    block = _rule(css, ".md-typeset .docs-visual figcaption,")
+    for declaration in ("max-width: none", "font-style: normal"):
+        assert declaration in block, (
+            f"`.md-typeset .docs-visual figcaption` must declare `{declaration}`; found: "
+            f"{' '.join(block.split())!r}"
+        )
+    assert "margin: 0.8rem 0 0" in block, (
         "the concept-page caption must set all four margins so Material's "
-        f"`margin: 1em auto` cannot re-centre it; found: {' '.join(concept.split())!r}"
-    )
-    card = _rule(css, ".md-typeset .evidence-card figcaption,")
-    assert "margin-left: 1rem" in card, (
-        "the mosaic caption stays aligned with the card's own gutter, not centred; "
-        f"found: {' '.join(card.split())!r}"
+        f"`margin: 1em auto` cannot re-centre it; found: {' '.join(block.split())!r}"
     )
     hero = _rule(css, ".md-typeset .hero-demo figcaption")
     assert "max-width: 34rem" in hero, "the hero caption keeps its own deliberate measure"
@@ -2401,46 +2487,6 @@ def test_visual_storytelling_design_separates_agent_capability_from_the_capture(
     )
 
 
-def test_visual_storytelling_plan_evidence_css_matches_the_shipped_rules() -> None:
-    plan_css = _fenced_block_after(
-        _plan(),
-        "- [ ] **Step 4: Add the evidence mosaic and destination-card CSS**",
-        "css",
-    )
-    shipped_css = _css()
-
-    figure = _rule(plan_css, ".md-typeset .evidence-card figure")
-    shipped_figure = _rule(shipped_css, ".md-typeset .evidence-card figure")
-    assert _compact(figure) == _compact(shipped_figure)
-    for declaration in ("display: block", "width: 100%", "margin: 0", "text-align: left"):
-        assert declaration in figure, (
-            "the plan's `.evidence-card figure` snippet must reserve the full tile box "
-            f"before lazy images load; missing `{declaration}` in {' '.join(figure.split())!r}"
-        )
-
-    caption_gutter = _rule(plan_css, ".md-typeset .evidence-card figcaption,")
-    shipped_caption_gutter = _rule(shipped_css, ".md-typeset .evidence-card figcaption,")
-    assert _compact(caption_gutter) == _compact(shipped_caption_gutter)
-    for declaration in ("margin-right: 1rem", "margin-left: 1rem"):
-        assert declaration in caption_gutter, (
-            "the plan's figcaption gutter must match the shipped card layout; missing "
-            f"`{declaration}` in {' '.join(caption_gutter.split())!r}"
-        )
-
-    figcaption = _rule(plan_css, ".md-typeset .evidence-card figcaption {")
-    shipped_figcaption = _rule(shipped_css, ".md-typeset .evidence-card figcaption {")
-    assert _compact(figcaption) == _compact(shipped_figcaption)
-    for declaration in (
-        "margin-top: 0.85rem",
-        "max-width: none",
-        "font-style: normal",
-    ):
-        assert declaration in figcaption, (
-            "the plan's `.evidence-card figcaption` rule must match the shipped source; "
-            f"missing `{declaration}` in {' '.join(figcaption.split())!r}"
-        )
-
-
 def test_scene_tabs_stay_hidden_until_the_controller_enhances_the_switcher() -> None:
     """Without the controller the tab strip is inert, so it must not render.
 
@@ -2482,6 +2528,14 @@ def test_landing_keeps_agent_masking_distinct_from_mcp_disclosure() -> None:
     values are masked before model calls" would promise a guarantee neither
     boundary makes, so the CONTROL highlight names both and links the page
     that documents them.
+
+    A link label alone is not the claim: a visitor who never follows the
+    link reads only the paragraph, and "Provider masking, MCP disclosure"
+    as a destination name says nothing about *what* is masked or *who*
+    decides disclosure. The retired write-path block stated both in prose,
+    so the paragraph that replaced it has to carry the same two facts —
+    the embedded provider's payloads are masked, and MCP result disclosure
+    is decided per tool.
     """
     control = _highlight("CONTROL")
     lowered = " ".join(re.sub(r"<[^>]+>", " ", control).lower().split())
@@ -2496,6 +2550,18 @@ def test_landing_keeps_agent_masking_distinct_from_mcp_disclosure() -> None:
         "the two boundaries must link to the page that states their limits"
     )
 
+    paragraph = re.search(r"<p>(.*?)</p>", control, re.DOTALL)
+    assert paragraph is not None, "the CONTROL promise must keep its paragraph"
+    prose = " ".join(re.sub(r"<[^>]+>", " ", paragraph.group(1)).lower().split())
+    assert "provider payloads are masked" in prose, (
+        "the paragraph itself must say what the embedded provider masks, rather than "
+        f"leaving the boundary to a link label: {prose!r}"
+    )
+    assert "mcp result disclosure is tool-specific" in prose, (
+        "and it must say MCP disclosure is decided per tool, which is a weaker "
+        f"promise than masking and must not be read as one: {prose!r}"
+    )
+
 
 def test_plan_preserves_the_mcp_disclosure_boundary() -> None:
     plan = (
@@ -2507,6 +2573,43 @@ def test_plan_preserves_the_mcp_disclosure_boundary() -> None:
     assert "mcp" in lowered
     assert "disclosure" in lowered
     assert "secret values are masked before model calls" not in lowered
+
+
+def test_feature_highlights_stack_narrow_and_form_three_columns_on_desktop() -> None:
+    """Three promises side by side on desktop, one readable column on a phone.
+
+    The highlights replaced a six-card mosaic that had its own responsive
+    grid, but shipped with no CSS at all — so the three `<article>` cards
+    rendered as bare stacked prose at every width. The grid is authored
+    mobile-first (one column by default) and only becomes three columns at
+    the width where the rest of the landing page switches to its desktop
+    layout.
+    """
+    css = _css()
+    grid = _rule(css, ".md-typeset .feature-highlights__grid {")
+    assert "display: grid" in grid, f"the highlights must be a grid: {_compact(grid)!r}"
+    assert "grid-template-columns: 1fr" in grid, (
+        "a phone must get one full-width column by default, not a squeezed three; "
+        f"found {_compact(grid)!r}"
+    )
+
+    match = re.search(
+        r"@media \(min-width: (\d+)px\) \{\s*\.md-typeset \.feature-highlights__grid \{"
+        r"(?P<body>[^}]*)\}",
+        _strip_css_comments(css),
+    )
+    assert match is not None, (
+        "the three-column layout must sit behind a min-width query so it never "
+        "reaches a narrow viewport"
+    )
+    assert int(match.group(1)) >= 720, (
+        "three 40-word cards must not be squeezed onto a small tablet; found a "
+        f"{match.group(1)}px breakpoint"
+    )
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in match.group("body"), (
+        "desktop shows the three promises side by side in equal, non-overflowing "
+        f"columns; found {_compact(match.group('body'))!r}"
+    )
 
 
 def test_feature_highlights_are_three_linked_promises() -> None:
@@ -2658,6 +2761,47 @@ def test_landing_never_claims_the_surfaces_look_the_same() -> None:
 
 
 # --- 5. every declared value must actually take effect ----------------------
+
+
+def test_retired_landing_components_leave_no_orphan_css() -> None:
+    """Deleted markup must take its stylesheet with it.
+
+    The compact homepage removed the framed hero mock-up, the standalone
+    scene-switcher section and its heading block, the contract map, the
+    five-stage write path and the six-card evidence mosaic. Every rule that
+    styled them is now unreachable: it cannot be verified against a rendered
+    page, it makes the next reader believe those components still ship, and
+    it is exactly the kind of dead weight that gets copied into the next
+    component. No other page uses any of these classes — `docs/` is grepped
+    below so the check fails if one is ever reintroduced without its CSS.
+    """
+    css = _strip_css_comments(_css())
+    retired = (
+        ".hero-demo__frame",
+        ".hero-demo__bar",
+        ".scene-switcher",
+        ".section-heading",
+        ".contract-map",
+        ".write-path",
+        ".evidence-mosaic",
+        ".evidence-card",
+    )
+    for selector in retired:
+        assert selector not in css, (
+            f"`{selector}` styles markup the compact homepage deleted; remove the rule "
+            "rather than leave a component nobody can see"
+        )
+
+    authored = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(DOCS.rglob("*.md"))
+        if "superpowers" not in path.parts
+    )
+    for selector in retired:
+        assert f'class="{selector.lstrip(".")}' not in authored, (
+            f"`{selector}` is authored again in docs/ but has no stylesheet; restore "
+            "its rules together with the markup"
+        )
 
 
 def test_stylesheet_declares_no_inert_content_width_abstraction() -> None:

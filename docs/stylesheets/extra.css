@@ -212,37 +212,6 @@
   margin: 0;
 }
 
-.md-typeset .hero-demo__frame {
-  overflow: hidden;
-  background: var(--korvid-charcoal-sunken);
-  border: 1px solid var(--korvid-charcoal-border);
-  border-radius: var(--korvid-radius);
-  box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.28);
-}
-
-.md-typeset .hero-demo__bar {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  min-height: 2rem;
-  padding: 0 0.85rem;
-  border-bottom: 1px solid var(--korvid-charcoal-border);
-  color: var(--korvid-ink-dim);
-  font-family: var(--md-code-font-family, monospace);
-  font-size: 0.65rem;
-}
-
-.md-typeset .hero-demo__bar span {
-  width: 0.45rem;
-  height: 0.45rem;
-  border-radius: 50%;
-  background: var(--korvid-amber);
-  box-shadow:
-    0.7rem 0 0 var(--korvid-charcoal-border),
-    1.4rem 0 0 var(--korvid-charcoal-border);
-  margin-right: 1.3rem;
-}
-
 .md-typeset .hero-demo video {
   display: block;
   width: 100%;
@@ -288,19 +257,6 @@
 /* ------------------------------------------------------------------ */
 /* Scene switcher — direct / agent / MCP                              */
 /* ------------------------------------------------------------------ */
-
-.md-typeset .scene-switcher {
-  margin: 4rem 0;
-}
-
-.md-typeset .section-heading {
-  max-width: 46rem;
-  margin-bottom: 1.5rem;
-}
-
-.md-typeset .section-heading > p:last-child {
-  color: var(--korvid-ink-dim);
-}
 
 .md-typeset .scene-tabs {
   display: flex;
@@ -352,9 +308,15 @@
   overflow: hidden;
 }
 
+/* Each panel is a media-only frame now: the Input/Evidence/Result rows and
+   the per-scene paragraph the three-column grid was built for are gone, so
+   one column is the whole layout. `display` is deliberately left alone —
+   `.md-typeset .scene-panel[hidden]` ties this rule's specificity, and a
+   later `display` here would win the tie and un-hide every deselected
+   panel. */
 .md-typeset .scene-panel {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.75rem;
   padding: 1rem;
 }
@@ -364,7 +326,6 @@
 }
 
 .md-typeset .scene-panel video {
-  grid-column: 1 / -1;
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -387,7 +348,6 @@
    `data-src` in the same pass, so the video this rule uncovers always has a
    source to play. */
 .md-typeset .scene-panel__fallback {
-  grid-column: 1 / -1;
   display: block;
   width: 100%;
   height: auto;
@@ -395,204 +355,17 @@
   border-radius: calc(var(--korvid-radius) - 0.15rem);
 }
 
-.md-typeset .scene-panel > div {
-  color: var(--korvid-ink-dim);
-  font-size: 0.75rem;
-}
-
-.md-typeset .scene-panel > div strong {
-  display: block;
-  color: var(--korvid-amber);
-}
-
-.md-typeset .scene-panel p {
-  grid-column: 1 / -1;
-  margin: 0.5rem 0 0;
-}
-
-.md-typeset .scene-panel > a {
-  grid-column: 1 / -1;
-  width: fit-content;
-}
-
-@media (max-width: 599px) {
-  .md-typeset .scene-panel {
-    grid-template-columns: 1fr;
-  }
-
-  .md-typeset .scene-panel video,
-  .md-typeset .scene-panel p,
-  .md-typeset .scene-panel > a {
-    grid-column: 1;
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* Contract map — truthful read paths and shared semantics             */
-/* ------------------------------------------------------------------ */
-
-.md-typeset .contract-map,
-.md-typeset .write-path {
-  margin: 4rem 0;
-  padding: clamp(1.25rem, 3vw, 2.5rem);
-  background: var(--korvid-charcoal);
-  border: 1px solid var(--korvid-charcoal-border);
-  border-radius: var(--korvid-radius);
-}
-
-.md-typeset .contract-map__drivers {
-  display: grid;
-  gap: 0.75rem;
-}
-
-.md-typeset .contract-map__drivers article {
-  padding: 1rem;
-  background: var(--korvid-charcoal-raised);
-  border: 1px solid var(--korvid-charcoal-border);
-  border-radius: var(--korvid-radius);
-}
-
-.md-typeset .contract-map__drivers span,
-.md-typeset .contract-map__drivers strong {
-  display: block;
-}
-
-.md-typeset .contract-map__drivers span {
-  color: var(--korvid-amber);
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.md-typeset .contract-map__shared {
-  display: grid;
-  gap: 0.5rem;
-  margin: 1rem 0;
-  padding: 1rem;
-  border: 2px solid var(--korvid-amber);
-  border-radius: var(--korvid-radius);
-}
-
-.md-typeset .contract-map__truth,
-.md-typeset .write-path__boundary {
-  color: var(--korvid-ink-dim);
-  font-size: 0.8rem;
-}
-
-.md-typeset .write-path__origins {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-}
-
-.md-typeset .write-path__origins span {
-  padding: 0.4rem 0.7rem;
-  border: 1px solid var(--korvid-charcoal-border);
-  border-radius: 999px;
-}
-
-/* Material's `.md-typeset ol:not([hidden]) { display: flow-root; }` ties the
-   same specificity as this element-qualified selector, and because extra.css
-   loads later it preserves the grid instead of the generic list default. */
-.md-typeset ol.write-path__stages {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 0.75rem;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.md-typeset .write-path__stages li {
-  min-width: 0;
-  padding: 1rem;
-  background: var(--korvid-charcoal-raised);
-  border-top: 3px solid var(--korvid-amber);
-}
-
-.md-typeset .write-path__stages span,
-.md-typeset .write-path__stages strong,
-.md-typeset .write-path__stages small {
-  display: block;
-}
-
-.md-typeset .write-path__stages span {
-  color: var(--korvid-amber);
-  font-size: 0.68rem;
-}
-
-.md-typeset .write-path__stages small {
-  margin-top: 0.4rem;
-  color: var(--korvid-ink-dim);
-}
-
-.md-typeset .write-path__blocked {
-  margin: 1rem 0 0;
-  padding: 0.75rem 1rem;
-  border: 1px dashed var(--korvid-amber);
-}
-
-/* ------------------------------------------------------------------ */
-/* Evidence mosaic and flight paths                                    */
-/* ------------------------------------------------------------------ */
-
-.md-typeset .evidence-mosaic,
-.md-typeset .flight-paths {
-  margin: 4rem 0;
-}
-
-.md-typeset .evidence-mosaic__grid,
-.md-typeset .flight-paths__grid {
-  display: grid;
-  gap: var(--korvid-gap);
-}
-
-.md-typeset .evidence-card {
-  overflow: hidden;
-  background: var(--korvid-charcoal-raised);
-  border: 1px solid var(--korvid-charcoal-border);
-  border-radius: var(--korvid-radius);
-}
-
-/* Material's typeset defaults we deliberately override, in one place:
-
-     .md-typeset figure     { width: fit-content; text-align: center }
-     .md-typeset figcaption { font-style: italic; margin: 1em auto;
-                              max-width: 24rem }
-
-   `width: fit-content` shrinks an unloaded `loading="lazy"` figure down to
-   its `<figcaption>` text and makes every tile jump on load, so the box is
-   restated here and the `width`/`height` attributes hold the height through
-   the `aspect-ratio` rule below. `text-align: center` inherits into the
-   caption, and the 24rem auto-centred caption measure floats a narrow
-   italic column under a full-width image, so alignment, measure and style
-   are restated too. Every korvid figure block below repeats this set; the
-   hero caption keeps its own deliberate 34rem measure. */
-.md-typeset .evidence-card figure {
-  display: block;
-  width: 100%;
-  margin: 0;
-  text-align: left;
-}
-
-.md-typeset .evidence-card img {
-  display: block;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
-  object-position: top left;
-  background: #07090c;
-}
-
 /* Every capture on this page is 1280×720 except the MCP pair, which is
    1280×710 — the reviewed recording's own terminal geometry, declared on the
-   elements as `width="1280" height="710"`. Under the two 16/9 rules above the
-   reserved box is 4px taller than the media at full width, so the `<video>`
-   letterboxes inside a box that is not its own and the poster tile's
-   `object-fit: cover` crops the external client's prompt. These selectors
-   qualify the same elements with the class the MCP media carries, so they win
-   on specificity rather than on source order, and restate the real ratio.
+   elements as `width="1280" height="710"`. Under the generic 16/9 rule above
+   the reserved box is 4px taller than the media at full width, so the
+   `<video>` would letterbox inside a box that is not its own. This selector
+   qualifies the same element with the class the MCP media carries, so it wins
+   on specificity rather than on source order, and restates the real ratio.
+   Inside the enhanced stage the frame owns the ratio instead and the clip is
+   fitted with `object-fit: contain`; this rule is what reserves the honest
+   box everywhere the height is still the media's own — the unenhanced
+   fallback and any later reuse of a scene panel.
 
    Reserving the stored pixel box is only truthful because the clip is
    normalised to square pixels: the source GIF is 1280×711 with a 63:64
@@ -602,47 +375,146 @@
    capture recipe therefore ends its geometry pass with `setsar=1`, and
    `tests/test_docs_visual_assets.py` reads the shipped MP4's own boxes and
    fails if the stored, displayed and declared geometry ever disagree. */
-.md-typeset .scene-panel video.mcp-media,
-.md-typeset .scene-panel noscript img.mcp-media,
-.md-typeset .evidence-card img.mcp-media {
+.md-typeset .scene-panel video.mcp-media {
   aspect-ratio: 1280 / 710;
 }
 
-/* Each capture links to its own full-resolution asset so 15px terminal
-   text stays checkable; the link must not introduce its own box or
-   Material's link colour under the image. */
-.md-typeset .evidence-card__full {
+/* ------------------------------------------------------------------ */
+/* The bounded driver stage                                            */
+/* ------------------------------------------------------------------ */
+
+/* One media component carries the hero: capped at a readable measure so a
+   16:9 player cannot grow with the column and swallow the fold, and
+   `min-width: 0` so it may shrink inside the hero's grid track instead of
+   forcing it open. */
+.md-typeset .hero-driver-stage {
+  width: 100%;
+  min-width: 0;
+  max-width: 54rem;
+  margin: 0;
+}
+
+/* The frame owns the aspect ratio; the replaced elements only fit inside
+   it. Gated on the controller's own `data-enhanced` hook — the same one
+   that reveals the tab strip — because only the enhanced switcher shows a
+   single panel. Without JavaScript, and for the moment before the
+   controller runs, all three panels are stacked in document order, and a
+   fixed-ratio box that clips its overflow would hold 332px of a 1,047px
+   stack (measured on the built page in Chromium at 1440x900), leaving none
+   of the three fallback panels fully visible. */
+.md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage .scene-panels {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: min(58vh, 540px);
+}
+
+/* A cap only bounds the stage if the media shrinks with it. The panel is a
+   grid, and its implicit `auto` row keeps the clip's intrinsic 16:9
+   contribution: measured at 1440x400, where `min(58vh, 540px)` binds, a
+   232px frame still held a 310px clip and cut 100px off the bottom. A
+   `minmax(0, 1fr)` track may shrink below its content, so the row follows
+   the frame. The 1rem inset goes with it — an inset box inside a 16:9 frame
+   is not itself 16:9, so `contain` would pillarbox a 16:9 clip inside its
+   own frame. Never declare `display` here: this selector is (0,5,0) and
+   would out-specify `.md-typeset .scene-panel[hidden]`. */
+.md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage .scene-panel {
+  height: 100%;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+  padding: 0;
+}
+
+/* The frame already draws the border and the rounded corners it clips to,
+   so a second border on the replaced element sits on top of it and, under
+   the theme's `box-sizing: border-box`, steals 2px from the fitted box. */
+.md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage video,
+.md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage .scene-panel__fallback {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+
+/* `contain` is the UA default for `<video>` but `fill` for `<img>`, so the
+   no-JavaScript poster would be the one surface that stretches. Stating it
+   for both is also what lets the 1280x710 MCP clip letterbox by a few
+   pixels inside the shared 16:9 frame instead of being cropped to it. */
+.md-typeset .hero-driver-stage video,
+.md-typeset .hero-driver-stage .scene-panel__fallback {
+  min-width: 0;
+  object-fit: contain;
+}
+
+/* ------------------------------------------------------------------ */
+/* Feature highlights and flight paths                                 */
+/* ------------------------------------------------------------------ */
+
+.md-typeset .feature-highlights,
+.md-typeset .flight-paths {
+  margin: 4rem 0;
+}
+
+/* Authored one column: each promise is a short paragraph plus a list of
+   destinations, and a third of a phone's measure would break both. The
+   three-column layout arrives with the rest of the desktop page, at the
+   `min-width: 960px` block below. */
+.md-typeset .feature-highlights__grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--korvid-gap);
+}
+
+.md-typeset .flight-paths__grid {
+  display: grid;
+  gap: var(--korvid-gap);
+}
+
+.md-typeset .feature-highlights__grid article {
+  min-width: 0;
+  padding: 1.25rem;
+  background: var(--korvid-charcoal-raised);
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+}
+
+.md-typeset .feature-highlights__grid span {
   display: block;
-  color: inherit;
-}
-
-.md-typeset .evidence-card__full:focus-visible {
-  outline: 3px solid var(--korvid-amber-bright);
-  outline-offset: -3px;
-}
-
-.md-typeset .evidence-card figcaption,
-.md-typeset .evidence-card p,
-.md-typeset .evidence-card > a {
-  margin-right: 1rem;
-  margin-left: 1rem;
-}
-
-.md-typeset .evidence-card figcaption {
-  margin-top: 0.85rem;
-  max-width: none;
   color: var(--korvid-amber);
+  font-size: 0.72rem;
   font-weight: 700;
-  font-style: normal;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
-.md-typeset .evidence-card p {
+.md-typeset .feature-highlights__grid p {
+  margin: 0.5rem 0 0.9rem;
   color: var(--korvid-ink-dim);
+  font-size: 0.85rem;
 }
 
-.md-typeset .evidence-card > a {
-  display: inline-block;
-  margin-bottom: 1rem;
+/* The destinations are a short index rather than prose: Material's list
+   defaults indent from the theme's own measure and leave a trailing block
+   margin inside the card's padding. The markers stay — dropping them would
+   also drop the list role VoiceOver announces. */
+.md-typeset .feature-highlights__grid ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+}
+
+.md-typeset .feature-highlights__grid li {
+  margin: 0.25rem 0 0;
+}
+
+/* Like the hero's buttons, these would otherwise inherit the docs' default
+   link blue and read as a different product. */
+.md-typeset .feature-highlights__grid a {
+  color: var(--korvid-amber);
+}
+
+.md-typeset .feature-highlights__grid a:hover,
+.md-typeset .feature-highlights__grid a:focus-visible {
+  color: var(--korvid-amber-bright);
 }
 
 .md-typeset .flight-paths__grid a {
@@ -671,38 +543,14 @@
 }
 
 @media (min-width: 720px) {
-  .md-typeset .evidence-mosaic__grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .md-typeset .flight-paths__grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-@media (min-width: 1100px) {
-  .md-typeset .evidence-mosaic__grid {
+@media (min-width: 960px) {
+  .md-typeset .feature-highlights__grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .md-typeset .evidence-card--wide {
-    grid-column: span 2;
-  }
-}
-
-@media (min-width: 720px) {
-  .md-typeset .contract-map__drivers {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .md-typeset .contract-map__shared {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 799px) {
-  .md-typeset ol.write-path__stages {
-    grid-template-columns: 1fr;
   }
 }
 
@@ -711,9 +559,11 @@
 /* ------------------------------------------------------------------ */
 
 /* `.docs-visual` is itself a `<figure>` and `.docs-storyboard` wraps one, so
-   both meet the same Material defaults documented above the mosaic rules:
-   the shrink-wrapped box, the inherited centring, and the narrow italic
-   caption measure. */
+   both meet Material's three figure defaults head on: `width: fit-content`
+   shrink-wraps a lazy figure to its caption until the image decodes,
+   `text-align: center` inherits into legends that are numbered lists, and
+   `figcaption` is a 24rem auto-centred italic column. Each is restated
+   below, because the cascade reads declarations, not intent. */
 .md-typeset .docs-visual,
 .md-typeset .docs-storyboard {
   display: block;

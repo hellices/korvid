@@ -6,7 +6,11 @@
 > The homepage now ships one merged hero/driver stage, three highlights, and one
 > destination nav, so this plan's hero figure, per-scene Input/Evidence/Result rows,
 > contract map, write path, and six-card evidence mosaic are history, not a recipe to
-> replay. Its recordings, posters, scene controller, and CSS remain the source of
+> replay. Their CSS — the framed hero mock-up, the standalone scene-switcher section
+> and its heading block, and every contract-map, write-path and evidence-mosaic rule —
+> has been deleted along with the markup, so the snippets in Steps 4 and 5 below no
+> longer match the shipped stylesheet for those components. Its recordings, posters,
+> scene controller, and the hero, scene-panel and focus CSS remain the source of
 > record for the media the compact homepage still ships.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

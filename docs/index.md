@@ -65,7 +65,7 @@ hide:
     </article>
     <article>
       <span>CONTROL</span>
-      <p>Every write previews the change and waits for a fresh approval keystroke; a fail-closed audit append that fails blocks the action. MCP write proposals stay off by default.</p>
+      <p>Every write previews the change and waits for a fresh approval keystroke; a fail-closed audit append that fails blocks the action. MCP write proposals stay off by default. Embedded provider payloads are masked; MCP result disclosure is tool-specific.</p>
       <ul>
         <li><a href="ops/">Approval and audit</a></li>
         <li><a href="threat-model/">Provider masking, MCP disclosure</a></li>
