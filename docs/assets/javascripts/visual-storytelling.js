@@ -227,27 +227,4 @@
       console.error("korvid: scene switcher left unenhanced", error);
     }
   }
-
-  /* A standalone hero video (not part of a scene switcher) follows the same
-     enter/restart and leave/pause rules, independent of the switcher
-     enhancement above and its no-JavaScript rollback contract: there is no
-     tab strip to roll back, only a single always-visible-in-markup video. */
-  for (const hero of document.querySelectorAll("[data-autoplay-video]")) {
-    managedVideos.add(hero);
-    /* Same visible-only contract as the switcher: with no
-       `IntersectionObserver` the hero's visibility is unknown, and unknown
-       must not autoplay. The poster stands in and the native controls still
-       start it by hand. */
-    if (typeof IntersectionObserver !== "function") continue;
-    const heroObserver = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        if (entry.isIntersecting) {
-          startFromBeginning(hero);
-        } else {
-          hero.pause();
-        }
-      }
-    });
-    heroObserver.observe(hero);
-  }
 })();

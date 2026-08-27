@@ -489,6 +489,20 @@ def _compact(text: str) -> str:
     return " ".join(text.split())
 
 
+def _authored_markup() -> str:
+    """Every markup source the site actually serves, concatenated.
+
+    `docs/**/*.md` plus the active `docs/overrides/**/*.html` templates, minus
+    `docs/superpowers/**` — those are historical specs and plans that record
+    what *was* built, so a hook naming itself there proves nothing about the
+    shipped page.
+    """
+    paths = [*sorted(DOCS.rglob("*.md")), *sorted(OVERRIDES.rglob("*.html"))]
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in paths if "superpowers" not in path.parts
+    )
+
+
 # --- 1. the install command never breaks mid-token ---------------------------
 
 
@@ -1493,12 +1507,11 @@ def test_controller_withholds_autoplay_where_visibility_is_unknown() -> None:
     """Round-6 review: no `IntersectionObserver` meant "assume on screen".
 
     Playback is a visible-only contract. The switcher initialised
-    `switcherVisible` to `true` where `IntersectionObserver` was missing and
-    the hero started immediately in the same case, so exactly the browsers
-    that cannot report visibility were the ones that autoplayed unconditionally
-    — decoding video a visitor may never scroll to, and never pausing it.
-    Unknown visibility must withhold autoplay instead; the poster, the native
-    controls, and the whole tab strip still work.
+    `switcherVisible` to `true` where `IntersectionObserver` was missing, so
+    exactly the browsers that cannot report visibility were the ones that
+    autoplayed unconditionally — decoding video a visitor may never scroll to,
+    and never pausing it. Unknown visibility must withhold autoplay instead;
+    the poster, the native controls, and the whole tab strip still work.
     """
     script = _strip_js_comments(STORYTELLING_JS.read_text(encoding="utf-8"))
     switcher_loop = script.index('document.querySelectorAll("[data-scene-switcher]")')
@@ -1507,7 +1520,7 @@ def test_controller_withholds_autoplay_where_visibility_is_unknown() -> None:
     assert "let switcherVisible = false;" in enhance_block, (
         "a switcher whose visibility has not been reported yet is not visible"
     )
-    assert 'typeof IntersectionObserver !== "function"' not in enhance_block, (
+    assert 'typeof IntersectionObserver !== "function"' not in script, (
         "the absence of an observer must not be turned into an assumption of "
         "visibility; the only supported branch is 'observe when we can'"
     )
@@ -1515,14 +1528,58 @@ def test_controller_withholds_autoplay_where_visibility_is_unknown() -> None:
         "selection may still start a scene, but only in a switcher known to be visible"
     )
 
-    hero_block = script[script.index('document.querySelectorAll("[data-autoplay-video]")') :]
-    observer_at = hero_block.index("new IntersectionObserver(")
-    starts = [match.start() for match in re.finditer(r"startFromBeginning\(", hero_block)]
-    assert starts, "the hero must still start when it is reported visible"
-    assert all(at > observer_at for at in starts), (
-        "the hero may only be started from an intersection callback: without an "
-        "observer its visibility is unknown, and unknown must not autoplay"
+    starts = [match.start() for match in re.finditer(r"startFromBeginning\(", script)]
+    assert starts, "a scene must still start when its switcher is reported visible"
+    observer_start = script.index("new IntersectionObserver(")
+    observer_end = script.index("observer.observe(switcher);", observer_start)
+    guarded = script.index("if (switcherVisible) startFromBeginning(selectedVideo);")
+    definition = script.index("const startFromBeginning")
+    for at in starts:
+        inside_observer = observer_start < at < observer_end
+        assert at in (definition, guarded + len("if (switcherVisible) ")) or inside_observer, (
+            "every programmatic start must come from an intersection callback or a "
+            "`switcherVisible` guard: without an observer visibility is unknown, and "
+            f"unknown must not autoplay (call at offset {at})"
+        )
+
+
+def test_controller_queries_no_hook_the_shipped_markup_never_authors() -> None:
+    """A document-level hook with no markup is a dead entry point.
+
+    The compact homepage merged the standalone hero into the one scene
+    switcher, so `docs/index.md` stopped authoring `data-autoplay-video`
+    entirely — but the controller kept a whole top-level
+    `document.querySelectorAll("[data-autoplay-video]")` loop, its
+    `IntersectionObserver`, and its enter/restart, leave/pause branches. That
+    block could never run again: it shipped to every visitor, it was pinned
+    by the controller checksum, and it told the next maintainer a standalone
+    autoplaying hero still exists.
+
+    So the contract runs in both directions. No authored source may reintroduce
+    the retired hook without its controller branch, and no document-rooted
+    `[data-…]` hook may survive in the controller without markup that authors
+    it. Historical `docs/superpowers/**` plans are excluded: they are a record
+    of what was built, not a page anybody serves.
+    """
+    script = _strip_js_comments(STORYTELLING_JS.read_text(encoding="utf-8"))
+    authored = _authored_markup()
+
+    assert "data-autoplay-video" not in authored, (
+        "the merged stage is one switcher; a standalone autoplay hook would put a "
+        "second observer on a player the switcher already drives"
     )
+    assert "data-autoplay-video" not in script, (
+        "the shipped controller must not keep a branch for a hook no page authors; "
+        "delete the standalone-hero loop rather than ship dead JavaScript"
+    )
+
+    hooks = set(re.findall(r'document\.querySelectorAll\(\s*"\[([a-z-]+)\]"', script))
+    assert hooks, "the controller must still enter the page through a document-level hook"
+    for hook in sorted(hooks):
+        assert hook in authored, (
+            f"the controller enters the page through `[{hook}]`, but no shipped "
+            "markup authors it; the branch is unreachable"
+        )
 
 
 def test_controller_leaves_modified_navigation_keys_to_the_browser() -> None:
@@ -1569,15 +1626,13 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
     off-screen pauses still happen, that a visible switcher starts and
     restarts the selected scene, that `prefers-reduced-motion` suppresses that
     autoplay — including a preference turned on mid-visit, which must pause
-    every managed video at once and never resume one when it is turned back
-    off — that a modified `Alt`/`Ctrl`/`Cmd`/`Shift` chord keeps its browser
-    behaviour, and that a browser-blocked `play()` promise never rolls the
-    switcher back. The standalone `[data-autoplay-video]` hero has no tab strip
-    and therefore no rollback of its own, so it is covered separately: it must
-    start from zero on entry, pause on exit, restart on return, stay still
-    under reduced motion, and stay paused where `IntersectionObserver` does not
-    exist — unknown visibility is not visibility.
-    `tests/js/scene_switcher_harness.mjs` implements only the
+    every managed video of every switcher at once and never resume one when it
+    is turned back off — that a modified `Alt`/`Ctrl`/`Cmd`/`Shift` chord keeps
+    its browser behaviour, and that a browser-blocked `play()` promise never
+    rolls the switcher back. The compact homepage merged the standalone hero
+    into the one switcher, so the controller no longer has a
+    `[data-autoplay-video]` branch and the harness no longer builds a hero
+    fixture for one. `tests/js/scene_switcher_harness.mjs` implements only the
     DOM surface the controller touches, so this needs no JavaScript dependency.
     """
     result = subprocess.run(
@@ -1589,6 +1644,10 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
     )
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "not ok" not in result.stdout, result.stdout
+    assert "hero" not in result.stdout, (
+        "the standalone hero no longer ships; a scenario still named for one is "
+        f"exercising a fixture the controller cannot drive:\n{result.stdout}"
+    )
     for scenario in (
         "healthy switchers enhance",
         "starts the selected scene and restarts",
@@ -1603,8 +1662,6 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
         "left in the no-JavaScript state",
         "outside its own switcher is rejected",
         "without IntersectionObserver gets a working switcher that never autoplays",
-        "a hero without IntersectionObserver stays paused",
-        "a standalone hero plays only while on screen",
     ):
         assert scenario in result.stdout, f"the DOM harness must cover {scenario!r}"
 
@@ -2799,11 +2856,8 @@ def test_retired_landing_components_leave_no_orphan_css() -> None:
         *sorted(DOCS.rglob("*.md")),
         *sorted(OVERRIDES.rglob("*.html")),
     ]
-    authored = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in authored_paths
-        if "superpowers" not in path.parts
-    )
+    assert authored_paths, "the scan must actually read the shipped markup sources"
+    authored = _authored_markup()
     # A retired class can be reintroduced anywhere inside a multi-class
     # `class="..."` attribute (e.g. `class="foo evidence-card"`), not only as
     # the attribute's first token, so every class attribute is tokenised on

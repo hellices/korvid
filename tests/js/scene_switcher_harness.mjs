@@ -5,8 +5,7 @@
 // test cannot see: whether a switcher whose markup is broken leaves the page
 // half-enhanced (a visible tab strip that switches nothing, panels stuck
 // hidden, a revealed player with no source) and whether a later, healthy
-// switcher — and the standalone hero, which has no switcher to roll back —
-// still initializes.
+// switcher still initializes.
 //
 // The repository ships no JavaScript dependencies and must not grow one for
 // a documentation script, so this file implements exactly the DOM surface
@@ -228,27 +227,6 @@ function buildSwitcher(prefix, { brokenTab = null, panelOutside = false } = {}) 
   return { switcher, tabs, panels, videos, stray: panelOutside ? panels[2] : null };
 }
 
-/** Build the landing page's standalone hero exactly as `docs/index.md` ships
- *  it: a `[data-autoplay-video]` video with an eager `src`/`poster`, nested in
- *  the same figure/frame wrappers, and outside every scene switcher. The
- *  controller's own hero block is what runs against it — nothing here
- *  re-implements enter/restart or leave/pause. */
-function buildHero() {
-  const video = element("video", {
-    src: "assets/demo.mp4",
-    poster: "assets/scenes/cockpit-poster.png",
-    "data-autoplay-video": "",
-    controls: "",
-    preload: "metadata",
-  });
-  const figure = element(
-    "figure",
-    { class: "hero-demo" },
-    element("div", { class: "hero-demo__frame" }, video),
-  );
-  return { figure, video };
-}
-
 function buildDocument(switchers, strays = []) {
   const body = element("body", {}, ...switchers, ...strays);
   return {
@@ -457,10 +435,15 @@ const scenarios = {
   },
 
   "turning on reduced motion mid-visit pauses every managed video at once"() {
-    const built = buildSwitcher("a");
-    const hero = buildHero();
-    const document = buildDocument([built.switcher], [hero.figure]);
+    /* Two independent switchers, because the property under test is that one
+       preference flip reaches *every* video the controller has taken charge
+       of — across roots — not just the one that happens to be playing in the
+       root the flip was noticed in. */
+    const first = buildSwitcher("a");
+    const second = buildSwitcher("b");
+    const document = buildDocument([first.switcher, second.switcher]);
     const { errors, observers, media, queries } = run(document);
+    const managed = [...first.videos, ...second.videos];
 
     assert.deepEqual(errors, []);
     assert.deepEqual(
@@ -476,13 +459,17 @@ const scenarios = {
 
     observers[0].callback([{ isIntersecting: true }]);
     observers[1].callback([{ isIntersecting: true }]);
-    built.tabs[1].dispatch("click", {});
-    assert.equal(built.videos[1].played, 1, "the selected scene is playing before the flip");
-    assert.equal(hero.video.played, 1, "the hero is playing before the flip");
+    first.tabs[1].dispatch("click", {});
+    assert.equal(first.videos[1].played, 1, "the selected scene is playing before the flip");
+    assert.equal(
+      second.videos[0].played,
+      1,
+      "the second switcher's own selected scene is playing before the flip",
+    );
 
-    const pausesBefore = [...built.videos, hero.video].map((video) => video.paused);
+    const pausesBefore = managed.map((video) => video.paused);
     media.set(true);
-    for (const [index, video] of [...built.videos, hero.video].entries()) {
+    for (const [index, video] of managed.entries()) {
       assert.ok(
         video.paused > pausesBefore[index],
         "every video the controller manages must be paused the moment the visitor " +
@@ -490,10 +477,10 @@ const scenarios = {
       );
     }
 
-    const playedAfterFlip = [...built.videos, hero.video].map((video) => video.played);
+    const playedAfterFlip = managed.map((video) => video.played);
     media.set(false);
     assert.deepEqual(
-      [...built.videos, hero.video].map((video) => video.played),
+      managed.map((video) => video.played),
       playedAfterFlip,
       "turning the preference back off must never resume playback by itself; only " +
         "an ordinary visibility or selection event may start motion again",
@@ -501,7 +488,7 @@ const scenarios = {
 
     observers[0].callback([{ isIntersecting: true }]);
     assert.equal(
-      built.videos[1].played,
+      first.videos[1].played,
       playedAfterFlip[1] + 1,
       "a later ordinary visibility event may restart the selected scene once the " +
         "preference is off again — the controller simply never resumes on its own",
@@ -752,82 +739,6 @@ const scenarios = {
       "native controls stay available so the visitor can start the scene by hand",
     );
     assert.equal(built.videos[2].hidden, false, "the selected panel's video is visible");
-  },
-
-  "a hero without IntersectionObserver stays paused and stays playable by hand"() {
-    const hero = buildHero();
-    const document = buildDocument([], [hero.figure]);
-    const { errors, observers } = run(document, { intersectionObserver: false });
-
-    assert.deepEqual(errors, []);
-    assert.deepEqual(observers, [], "there is no observer to register without support for one");
-    assert.equal(
-      hero.video.played,
-      0,
-      "a hero whose visibility cannot be known must not start by itself",
-    );
-    assert.equal(
-      hero.video.getAttribute("controls"),
-      "",
-      "the hero stays playable by hand where autoplay is withheld",
-    );
-    assert.equal(
-      hero.video.getAttribute("poster"),
-      "assets/scenes/cockpit-poster.png",
-      "the poster still stands in for the withheld motion",
-    );
-  },
-
-  "a standalone hero plays only while on screen, restarts on return, and obeys reduced motion"() {
-    const hero = buildHero();
-    const document = buildDocument([], [hero.figure]);
-    const { errors, observers } = run(document);
-
-    assert.deepEqual(errors, [], "a hero outside every switcher must not report a failure");
-    assert.equal(observers.length, 1, "the hero is observed on its own, with no switcher present");
-    assert.equal(hero.video.played, 0, "a hero must not start before it is on screen");
-
-    observers[0].callback([{ isIntersecting: true }]);
-    assert.equal(hero.video.played, 1, "scrolling the hero into view starts it without a click");
-    assert.equal(hero.video.currentTime, 0, "the hero starts at zero, not wherever it was left");
-
-    hero.video.currentTime = 9;
-    observers[0].callback([{ isIntersecting: false }]);
-    assert.equal(hero.video.paused, 1, "scrolling the hero away pauses it instead of decoding on");
-    assert.equal(hero.video.played, 1, "leaving the viewport must never start playback");
-
-    observers[0].callback([{ isIntersecting: true }]);
-    assert.equal(hero.video.played, 2, "returning to the hero starts it again");
-    assert.equal(hero.video.currentTime, 0, "the return is a restart, not a resume mid-clip");
-
-    const quiet = buildHero();
-    const quietRun = run(buildDocument([], [quiet.figure]), { reducedMotion: true });
-    quietRun.observers[0].callback([{ isIntersecting: true }]);
-    assert.equal(
-      quiet.video.played,
-      0,
-      "a reduced-motion visitor must never see the hero start by itself",
-    );
-    assert.equal(
-      quiet.video.getAttribute("controls"),
-      "",
-      "the hero stays playable by hand under reduced motion",
-    );
-
-    const unobserved = buildHero();
-    const legacy = run(buildDocument([], [unobserved.figure]), { intersectionObserver: false });
-    assert.deepEqual(legacy.errors, []);
-    assert.equal(
-      unobserved.video.played,
-      0,
-      "without IntersectionObserver the hero's visibility is unknown, and unknown " +
-        "must not autoplay",
-    );
-    assert.equal(
-      unobserved.video.getAttribute("controls"),
-      "",
-      "the hero the controller declines to start must still be startable by hand",
-    );
   },
 };
 
