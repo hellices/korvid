@@ -46,6 +46,8 @@ from korvid.k8s.drain import DrainPlan
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.k8s.writes import WriteOps, restart_stamp
+from korvid.tools.write_coordinator import RESTARTABLE as RESTARTABLE
+from korvid.tools.write_coordinator import SCALABLE as SCALABLE
 from korvid.ui.drain import DrainController
 from korvid.ui.node_impact_preview import (
     compose_node_maintenance_lines,
@@ -60,16 +62,6 @@ from korvid.ui.write_coordinator import WriteCoordinator, WriteOrigin, gvr_label
 
 logger = logging.getLogger(__name__)
 
-#: Workload eligibility is keyed on (group, plural): a custom-group CRD whose
-#: plural collides with a built-in (e.g. 'deployments') must never be treated
-#: as an apps/* workload. `KorvidApp._ACTION_VIEWS` gates the keys on the same
-#: identities, so the footer legend and the flow agree.
-RESTARTABLE: frozenset[tuple[str, str]] = frozenset(
-    {("apps", "deployments"), ("apps", "statefulsets"), ("apps", "daemonsets")}
-)
-SCALABLE: frozenset[tuple[str, str]] = frozenset(
-    {("apps", "deployments"), ("apps", "replicasets"), ("apps", "statefulsets")}
-)
 
 #: `KorvidApp._get_manifest`: (kind alias, namespace, name) -> manifest.
 ManifestFetcher = Callable[[str, str | None, str], Awaitable[dict[str, Any]]]

@@ -190,3 +190,70 @@ def test_gvr_label_and_write_locus_are_pure_string_helpers() -> None:
     assert gvr_label(_PODS_META) == "pods"
     assert write_locus("default") == " in namespace default"
     assert write_locus(None) == " (cluster-scoped)"
+
+
+# --- shared action-specific write validation (issue TBD) --------------------
+#
+# `validate_scale_request`/`validate_restart_request` are the one, shared
+# implementation of the request-shape checks a scale/rollout_restart write
+# must pass before it may reach an approval policy, an audit intent, or a
+# mutation - both `korvid.ui.agent_ui_controller.AgentUiController.build_write_op`
+# and `korvid.evals.operation_runner.ScriptedOperationBridge` call these same
+# two functions, so a TUI-free eval run and a Textual run reject exactly the
+# same malformed requests, worded identically.
+
+_DEPLOYMENT_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
+_CONFIGMAP_META = ResourceMeta("ConfigMap", "configmaps", "", "v1", True)
+
+
+def test_validate_scale_request_accepts_a_scalable_kind_and_non_negative_replicas() -> None:
+    from korvid.tools.write_coordinator import validate_scale_request
+
+    assert validate_scale_request(_DEPLOYMENT_META, 3) is None
+    assert validate_scale_request(_DEPLOYMENT_META, 0) is None
+
+
+def test_validate_scale_request_rejects_a_non_scalable_kind() -> None:
+    from korvid.tools.write_coordinator import validate_scale_request
+
+    assert validate_scale_request(_CONFIGMAP_META, 3) == "ERROR: scale does not apply to configmaps"
+
+
+def test_validate_scale_request_rejects_missing_or_negative_replicas() -> None:
+    from korvid.tools.write_coordinator import validate_scale_request
+
+    assert (
+        validate_scale_request(_DEPLOYMENT_META, None)
+        == "ERROR: scale requires a 'replicas' argument >= 0"
+    )
+    assert (
+        validate_scale_request(_DEPLOYMENT_META, -1)
+        == "ERROR: scale requires a 'replicas' argument >= 0"
+    )
+
+
+def test_validate_restart_request_accepts_a_restartable_kind() -> None:
+    from korvid.tools.write_coordinator import validate_restart_request
+
+    assert validate_restart_request(_DEPLOYMENT_META) is None
+
+
+def test_validate_restart_request_rejects_a_non_restartable_kind() -> None:
+    from korvid.tools.write_coordinator import validate_restart_request
+
+    assert (
+        validate_restart_request(_CONFIGMAP_META)
+        == "ERROR: rollout restart does not apply to configmaps"
+    )
+
+
+def test_scalable_and_restartable_are_published_from_this_module() -> None:
+    """`korvid.ui.resource_write_controller` re-exports these two, unchanged,
+    so both existing UI import sites and this eval-safe module read the one
+    same set of eligible (group, plural) pairs."""
+    from korvid.tools.write_coordinator import RESTARTABLE, SCALABLE
+
+    assert ("apps", "deployments") in SCALABLE
+    assert ("apps", "deployments") in RESTARTABLE
+    assert ("", "configmaps") not in SCALABLE
+    assert ("", "configmaps") not in RESTARTABLE

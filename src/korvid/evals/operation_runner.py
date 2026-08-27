@@ -79,6 +79,8 @@ from korvid.tools.write_coordinator import (
     AuditRecorder,
     gvr_label,
     run_approved_write,
+    validate_restart_request,
+    validate_scale_request,
     write_locus,
 )
 
@@ -285,6 +287,12 @@ class ScriptedOperationBridge(UIBridge):
         meta = _ALIASES.get(kind.strip().lower())
         if meta is None:
             return f"ERROR: unknown kind {kind!r} - not a resource kind in this cluster"
+        if action == "scale":
+            error = validate_scale_request(meta, replicas)
+        else:
+            error = validate_restart_request(meta)
+        if error is not None:
+            return error
         ns = namespace.strip() or None if namespace is not None else None
         name = name.strip()
         if not self._permitted(action, meta, ns):

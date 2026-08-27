@@ -114,6 +114,64 @@ async def test_scripted_bridge_rejects_unknown_kind(tmp_path: Path) -> None:
     assert result.startswith("ERROR: unknown kind")
 
 
+async def test_scripted_bridge_rejects_negative_replicas_before_approval(tmp_path: Path) -> None:
+    """A malformed replicas argument must fail the same way production's
+    `AgentUiController._scale_op` fails it: before permission checks,
+    manifest fetch, approval, audit, or mutation - an empty (fail-closed)
+    approval script proves `decide()` was never reached, since an actual
+    call would instead return a `'denied: ...'` result."""
+    journey = _load("scale-deployment-up")
+    audit_path = tmp_path / "audit.jsonl"
+    bridge, journal, _kube = _bridge(journey, audit_path, [])
+    result = await bridge.agent_request_write(
+        "scale", journey.target.kind, journey.target.name, journey.target.namespace, replicas=-1
+    )
+    assert result == "ERROR: scale requires a 'replicas' argument >= 0"
+    assert not audit_path.exists(), "a rejected request must never audit an intent"
+    assert not journal.has("write_target_bound")
+    assert not journal.has("approval_observed")
+
+
+async def test_scripted_bridge_rejects_missing_replicas_before_approval(tmp_path: Path) -> None:
+    journey = _load("scale-deployment-up")
+    audit_path = tmp_path / "audit.jsonl"
+    bridge, journal, _kube = _bridge(journey, audit_path, [])
+    result = await bridge.agent_request_write(
+        "scale", journey.target.kind, journey.target.name, journey.target.namespace, replicas=None
+    )
+    assert result == "ERROR: scale requires a 'replicas' argument >= 0"
+    assert not audit_path.exists()
+    assert not journal.has("write_target_bound")
+
+
+async def test_scripted_bridge_rejects_scale_on_a_non_scalable_kind(tmp_path: Path) -> None:
+    """DaemonSet is RESTARTABLE but not SCALABLE - the same identity
+    production's `_scale_op` rejects via `validate_scale_request`."""
+    journey = _load("restart-daemonset")
+    audit_path = tmp_path / "audit.jsonl"
+    bridge, journal, _kube = _bridge(journey, audit_path, [])
+    result = await bridge.agent_request_write(
+        "scale", journey.target.kind, journey.target.name, journey.target.namespace, replicas=3
+    )
+    assert result == "ERROR: scale does not apply to daemonsets.apps"
+    assert not audit_path.exists()
+    assert not journal.has("write_target_bound")
+
+
+async def test_scripted_bridge_rejects_restart_on_a_non_restartable_kind(tmp_path: Path) -> None:
+    """ReplicaSet is SCALABLE but not RESTARTABLE - validation runs before
+    the manifest fetch, so no fixture object need actually exist."""
+    journey = _load("scale-deployment-up")
+    audit_path = tmp_path / "audit.jsonl"
+    bridge, journal, _kube = _bridge(journey, audit_path, [])
+    result = await bridge.agent_request_write(
+        "rollout_restart", "ReplicaSet", journey.target.name, journey.target.namespace
+    )
+    assert result == "ERROR: rollout restart does not apply to replicasets.apps"
+    assert not audit_path.exists()
+    assert not journal.has("write_target_bound")
+
+
 async def test_scripted_bridge_reports_missing_target(tmp_path: Path) -> None:
     journey = _load("scale-deployment-up")
     bridge, _journal, _kube = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.APPROVE])

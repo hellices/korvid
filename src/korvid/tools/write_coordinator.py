@@ -22,6 +22,21 @@ it: they only format a `ResourceMeta`/action pair into a permission-message
 or approval-dialog string, with no Textual or `ViewState` dependency at
 all. `korvid.ui.write_coordinator` re-exports all four so every existing
 import site keeps working unchanged.
+
+`RESTARTABLE`/`SCALABLE`/`validate_scale_request`/`validate_restart_request`
+moved here for the same reason, one requirement further: they are the one
+shared implementation of the request-shape checks a scale/rollout_restart
+write must pass *before* it may reach an `ApprovalPolicy`, a fail-closed
+intent audit, or a mutation. Duplicating them (as
+`korvid.evals.operation_runner.ScriptedOperationBridge` once did, by simply
+never checking replicas/eligibility at all) risks a TUI-free eval run
+accepting a request production would reject before approval - or, worse,
+silently coercing an invalid one (`replicas or 0`) into a mutation no
+production caller could ever trigger. `korvid.ui.agent_ui_controller`'s
+`_scale_op`/`_restart_op` and `korvid.evals.operation_runner`'s
+`agent_request_write` both call these same two functions, so a rejected
+request is rejected identically, in the same words, before either path
+ever asks for approval.
 """
 
 from __future__ import annotations
@@ -78,6 +93,38 @@ def perm_target(action: str, meta: ResourceMeta) -> tuple[str, str]:
     verb, subresource = WRITE_VERBS[action]
     target = f"{meta.plural}/{subresource}" if subresource else meta.plural
     return verb, target
+
+
+#: Workload eligibility is keyed on (group, plural): a custom-group CRD whose
+#: plural collides with a built-in (e.g. 'deployments') must never be treated
+#: as an apps/* workload. `KorvidApp._ACTION_VIEWS` gates the keys on the same
+#: identities, so the footer legend and the flow agree.
+RESTARTABLE: frozenset[tuple[str, str]] = frozenset(
+    {("apps", "deployments"), ("apps", "statefulsets"), ("apps", "daemonsets")}
+)
+SCALABLE: frozenset[tuple[str, str]] = frozenset(
+    {("apps", "deployments"), ("apps", "replicasets"), ("apps", "statefulsets")}
+)
+
+
+def validate_scale_request(meta: ResourceMeta, replicas: int | None) -> str | None:
+    """`None` if a `scale` request against `meta` with `replicas` is valid;
+    else the exact `'ERROR: ...'` message every caller must return instead
+    of asking for approval, auditing an intent, or attempting a mutation."""
+    if (meta.group, meta.plural) not in SCALABLE:
+        return f"ERROR: scale does not apply to {gvr_label(meta)}"
+    if replicas is None or replicas < 0:
+        return "ERROR: scale requires a 'replicas' argument >= 0"
+    return None
+
+
+def validate_restart_request(meta: ResourceMeta) -> str | None:
+    """`None` if a `rollout_restart` request against `meta` is valid; else
+    the exact `'ERROR: ...'` message every caller must return instead of
+    asking for approval, auditing an intent, or attempting a mutation."""
+    if (meta.group, meta.plural) not in RESTARTABLE:
+        return f"ERROR: rollout restart does not apply to {gvr_label(meta)}"
+    return None
 
 
 Severity = Literal["information", "warning", "error"]

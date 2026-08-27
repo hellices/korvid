@@ -77,9 +77,10 @@ from korvid.tools.approval import (
 )
 from korvid.tools.executor import UIBridge, incarnation_of
 from korvid.tools.follow import FOLLOWABLE_TOOLS, mirror_read
+from korvid.tools.write_coordinator import validate_restart_request, validate_scale_request
 from korvid.ui.bridge_dispatch import BridgeDispatch
 from korvid.ui.resize_impact_preview import compose_resize_impact_lines
-from korvid.ui.resource_write_controller import RESTARTABLE, SCALABLE, resize_summary
+from korvid.ui.resource_write_controller import resize_summary
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
@@ -2041,14 +2042,18 @@ class AgentUiController:
         ops = self._write_ops()
         if ops is None:
             return "ERROR: scale unavailable in this session"
-        if (meta.group, meta.plural) not in SCALABLE:
-            return f"ERROR: scale does not apply to {gvr_label(meta)}"
-        if replicas is None or replicas < 0:
-            return "ERROR: scale requires a 'replicas' argument >= 0"
+        if error := validate_scale_request(meta, replicas):
+            return error
         return (
             meta,
             ns,
-            lambda uid: ops.scale_object(meta, ns, name, replicas, uid=uid),
+            lambda uid: ops.scale_object(
+                meta,
+                ns,
+                name,
+                replicas,  # type: ignore[arg-type]  # validate_scale_request rejected None above
+                uid=uid,
+            ),
             f"PATCH {gvr_label(meta)}/{name} scale -> {replicas} replicas{write_locus(ns)}",
             f"replicas -> {replicas}; requested by agent",
         )
@@ -2059,8 +2064,8 @@ class AgentUiController:
         ops = self._write_ops()
         if ops is None:
             return "ERROR: rollout restart unavailable in this session"
-        if (meta.group, meta.plural) not in RESTARTABLE:
-            return f"ERROR: rollout restart does not apply to {gvr_label(meta)}"
+        if error := validate_restart_request(meta):
+            return error
         return (
             meta,
             ns,
