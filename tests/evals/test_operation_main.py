@@ -1,13 +1,22 @@
 """Tests for the public, TUI-free operation-journey CLI.
 
-Mirrors `tests/evals/test_cli.py`'s own approach for `python -m
-korvid.evals`: `main()` itself is exercised only through a manual smoke
-test (see the plan), while every constituent piece — argument parsing,
-selection, and `run_payload`'s exact JSON shape — is unit tested directly.
+Argument parsing, selection, and `run_payload`'s exact JSON shape are unit
+tested directly, mirroring `tests/evals/test_cli.py`. `main()`'s own
+process exit code is the one exception to that file's "never invoke
+main() end-to-end" convention: it is exercised here as a real subprocess
+(`python -m korvid.evals.operation_main`), because the promised `2` for a
+usage/config/selection/file error and `1` for a systemic failure are a
+property of the actual process exit status - `sys.exit("a string")`
+prints that string but always exits `1`, never the string's own promised
+code, so this is the only way to prove `main()` centralizes that
+correctly rather than letting a bare `SystemExit` propagate uncaught.
 """
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -142,3 +151,69 @@ async def test_run_payload_is_json_serializable(tmp_path: Path) -> None:
     run = await _run("scale-no-op", tmp_path)
     payload = run_payload([run], journeys=[next(j for j in _JOURNEYS if j.id == "scale-no-op")])
     json.dumps(payload)  # must not raise
+
+
+# --- main(): exact process exit codes -----------------------------------
+#
+# `main()`'s own module docstring documents `2` for a usage/argument error
+# and `1` for a systemic/harness error - but `_select_operation_journeys`/
+# `_read_prompt_file`/`provider_factory_from_env` all raise `SystemExit`
+# with a *string* argument, and `sys.exit("...")` only ever prints that
+# string and exits `1`, never the promised `2`, when left uncaught. These
+# run the real CLI end-to-end (as a subprocess, mirroring how an external
+# optimizer actually invokes it) specifically to prove the promised process
+# exit code, not just the constituent functions' own `SystemExit` raise.
+
+
+def _run_cli(args: list[str], env_overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env.update(env_overrides)
+    return subprocess.run(
+        [sys.executable, "-m", "korvid.evals.operation_main", *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+_VALID_ENV = {
+    "KORVID_EVAL_PROVIDER": "openai-compat",
+    "KORVID_EVAL_BASE_URL": "http://127.0.0.1:1",
+    "KORVID_EVAL_MODEL": "does-not-matter",
+}
+
+
+def test_main_exits_2_for_an_unknown_operation_id() -> None:
+    result = _run_cli(["--operation-id", "does-not-exist"], _VALID_ENV)
+    assert result.returncode == 2
+    assert "does-not-exist" in result.stderr
+
+
+def test_main_exits_2_for_a_missing_tier_pack_file(tmp_path: Path) -> None:
+    missing = tmp_path / "no-such-file.txt"
+    result = _run_cli(
+        ["--operation-id", "scale-no-op", "--tier-pack-file", str(missing)], _VALID_ENV
+    )
+    assert result.returncode == 2
+    assert "--tier-pack-file" in result.stderr
+
+
+def test_main_exits_2_for_an_invalid_provider_env_value() -> None:
+    env = {**_VALID_ENV, "KORVID_EVAL_PROVIDER": "not-a-real-provider"}
+    result = _run_cli(["--operation-id", "scale-no-op"], env)
+    assert result.returncode == 2
+    assert "KORVID_EVAL_PROVIDER" in result.stderr
+
+
+def test_main_exits_1_when_the_result_json_cannot_be_written(tmp_path: Path) -> None:
+    """`http://127.0.0.1:1` (nothing listens on port 1, an instant local
+    connection refusal - not a live endpoint) still lets a run reach a
+    graded 'unknown' outcome: this harness already treats a provider-stream
+    failure as scored evidence, exit `0`, matching its own documented
+    philosophy. The one deterministic, network-free systemic failure this
+    CLI still exercises is `--json` naming a path that cannot be written."""
+    bad_path = tmp_path / "no-such-directory" / "out.json"
+    result = _run_cli(["--operation-id", "scale-no-op", "--json", str(bad_path)], _VALID_ENV)
+    assert result.returncode == 1
+    assert not bad_path.exists()

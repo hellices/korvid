@@ -261,15 +261,41 @@ async def _run_operations(
     return runs
 
 
+#: `sys.exit("...")`'s message, bounded so a pathological SystemExit payload
+#: (e.g. an argument value echoed back unbounded) cannot blow up stderr.
+_USAGE_ERROR_MESSAGE_LIMIT = 4000
+
+
+def _usage_error(exc: SystemExit) -> int:
+    """Print `exc`'s message (bounded) to stderr and return this CLI's
+    documented usage/config/selection/file-error exit code.
+
+    `sys.exit("some string")` only ever prints that string and exits with
+    status `1` - the interpreter's own `code` attribute is not used
+    literally unless it is already an `int`. So every function this CLI
+    calls that raises `SystemExit(f"...")` for a bad `--operation-id`
+    selection, an unreadable `--tier-pack-file`/`--prompt-overlay-file`, or
+    an invalid `KORVID_EVAL_*` value must have that `SystemExit` caught
+    here in `main()` rather than left to propagate - the promised `2`
+    otherwise silently becomes `1`.
+    """
+    message = exc.code if isinstance(exc.code, str) else str(exc)
+    print(message[:_USAGE_ERROR_MESSAGE_LIMIT], file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point; returns a process exit code."""
     args = _parse_args(argv)
-    provider_factory = provider_factory_from_env(os.environ)
-    journeys = load_operation_journeys(args.operations)
-    if not journeys:
-        raise SystemExit(f"no operation YAML files found in {args.operations}")
-    journeys = _select_operation_journeys(journeys, args.operation_id)
-    grind = _prompt_grind(args)
+    try:
+        provider_factory = provider_factory_from_env(os.environ)
+        journeys = load_operation_journeys(args.operations)
+        if not journeys:
+            raise SystemExit(f"no operation YAML files found in {args.operations}")
+        journeys = _select_operation_journeys(journeys, args.operation_id)
+        grind = _prompt_grind(args)
+    except SystemExit as exc:
+        return _usage_error(exc)
     try:
         policy = resolve_eval_policy(
             provider_factory(), model_tier=args.model_tier, environment=_WRITE_ENVIRONMENT
