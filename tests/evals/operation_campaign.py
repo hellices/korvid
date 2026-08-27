@@ -31,13 +31,14 @@ from uuid import uuid4
 from korvid.agent.model_policy import PolicyEnvironment
 from korvid.evals.__main__ import (
     PROBE_TIMEOUT_SECONDS,
+    _read_prompt_file,
     capture_serving,
     httpx_fetch,
     prompt_fingerprint,
     provider_factory_from_env,
     warn_if_unpinned,
 )
-from korvid.evals.harness import resolve_eval_policy
+from korvid.evals.harness import NO_GRIND, PromptGrind, resolve_eval_policy
 from korvid.evals.operation import (
     OPERATION_SCHEMA_VERSION,
     OperationJourney,
@@ -81,6 +82,27 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="use the deterministic scripts instead of the configured provider",
     )
     parser.add_argument("--approval-timeout", type=float, default=5.0)
+    parser.add_argument(
+        "--tier-pack-file",
+        type=Path,
+        default=None,
+        help=(
+            "replace the tier's operating pack with this file's contents. "
+            "Eval-only prompt grinding: it is layered after korvid's "
+            "immutable safety contract and can never widen it. The result "
+            "JSON records the override so the run is not mistaken for a "
+            "default-prompt score"
+        ),
+    )
+    parser.add_argument(
+        "--prompt-overlay-file",
+        type=Path,
+        default=None,
+        help=(
+            "layer this file's contents on top of the tier pack as an "
+            "eval overlay, published as 'eval-overlay'"
+        ),
+    )
     parser.add_argument("--json", type=Path)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--artifacts", type=Path, default=Path("operation-artifacts"))
@@ -255,6 +277,7 @@ def _record(
         "journal": list(run.journal),
         "audit": list(run.audit),
         "error": None,
+        "prompt": run.prompt,
     }
 
 
@@ -336,6 +359,14 @@ def _validated_campaign_inputs(
     return seeds, pairs, live_provider_factory
 
 
+def _prompt_grind(args: argparse.Namespace) -> PromptGrind:
+    """The eval-only prompt levers, read from the CLI's file flags."""
+    return PromptGrind(
+        tier_pack=_read_prompt_file(args.tier_pack_file, "--tier-pack-file"),
+        overlay=_read_prompt_file(args.prompt_overlay_file, "--prompt-overlay-file"),
+    )
+
+
 async def _run(
     args: argparse.Namespace,
     pairs: list[tuple[OperationJourney, GenerationRecord | None]],
@@ -343,6 +374,7 @@ async def _run(
     run_id: str,
     run_dir: Path,
     live_provider_factory: Callable[[], Any] | None = None,
+    grind: PromptGrind = NO_GRIND,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for instance, generation in pairs:
@@ -359,6 +391,7 @@ async def _run(
                     ),
                     model_tier=args.model_tier,
                     approval_timeout_seconds=approval_timeout_for(instance, args.approval_timeout),
+                    grind=grind,
                 )
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
@@ -395,6 +428,7 @@ async def _run(
                         "journal": [],
                         "audit": [],
                         "error": error,
+                        "prompt": None,
                     }
                 )
                 continue
@@ -470,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         args = _parse_args(argv)
+        grind = _prompt_grind(args)
     except SystemExit as exc:
         return _exit_code(exc)
     try:
@@ -493,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=run_id,
             run_dir=run_dir,
             live_provider_factory=live_provider_factory,
+            grind=grind,
         )
     )
     policy = resolve_eval_policy(
@@ -503,7 +539,7 @@ def main(argv: list[str] | None = None) -> int:
             "schema_version": OPERATION_SCHEMA_VERSION,
             "korvid_revision": revision,
             "model_tier": policy.tier.value,
-            "prompts": prompt_fingerprint(policy),
+            "prompts": prompt_fingerprint(policy, grind=grind),
             "repetitions": args.reps,
             "mode": "scripted" if args.scripted else "live",
             "seeds": seeds,
