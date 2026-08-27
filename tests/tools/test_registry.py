@@ -8,6 +8,7 @@ pre-registry lists exactly.
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -154,13 +155,27 @@ def test_mcp_surface_is_read_plus_ui_drive() -> None:
 
     mcp_schemas = mcp_tool_schemas()
     assert _names(mcp_schemas) == _names(READ_TOOLS) + _names(UI_TOOLS)
-    # `continue_analysis` is agent-only (issue #320): project it out for the
-    # MCP surface rather than diverging the schema list wholesale.
-    agent_only = {"open_logs", "open_describe"}
+    # For tools that declare `mcp_omit_properties` (e.g. `continue_analysis`
+    # on open_logs/open_describe), project those properties out of a deep copy
+    # of the agent schema and assert the remainder equals the MCP schema.
+    # This prevents silent schema drift on every UI tool, including the two
+    # that previously had to be skipped.
     for agent_tool, mcp_tool in zip(UI_TOOLS, mcp_schemas[len(READ_TOOLS) :], strict=True):
-        if agent_tool["function"]["name"] in agent_only:
-            continue
-        assert agent_tool == mcp_tool
+        name = agent_tool["function"]["name"]
+        td = next((d for d in TOOL_DEFS if d.name == name), None)
+        omit = td.mcp_omit_properties if td is not None else frozenset()
+        if omit:
+            projected = copy.deepcopy(agent_tool)
+            props = projected["function"]["parameters"]["properties"]
+            for key in omit:
+                props.pop(key, None)
+            required = projected["function"]["parameters"].get("required", [])
+            projected["function"]["parameters"]["required"] = [r for r in required if r not in omit]
+            assert projected == mcp_tool, (
+                f"{name}: agent schema minus {sorted(omit)} should equal MCP schema"
+            )
+        else:
+            assert agent_tool == mcp_tool
 
 
 def test_unknown_surface_rejected() -> None:

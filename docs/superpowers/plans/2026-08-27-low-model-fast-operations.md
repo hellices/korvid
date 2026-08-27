@@ -55,7 +55,7 @@ it to the Ollama request options.
 - [ ] **Step 4: Document and verify GREEN**
 
 Add `num_predict: 192` to the native Ollama example and explain that it caps
-generation rather than reasoning. Re-run the focused tests and expect all to
+total generated tokens (thinking/reasoning tokens count too). Re-run the focused tests and expect all to
 pass.
 
 ### Task 2: Terminal direct-open operations
