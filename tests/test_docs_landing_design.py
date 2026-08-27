@@ -84,6 +84,32 @@ AGENT_CAPTURE_DISCLOSURES = (
     "not a live model",
 )
 
+#: The compact tab strip: panel id paired with the tab's visible label. The
+#: strip is only as wide as the merged stage — 291px at a 390px viewport — so
+#: the three-column grid it became can hold one driver noun per column and no
+#: more. The sentence the labels used to spell out ("You drive", "Agent
+#: delegates", "MCP connects") overflowed that strip by 146px, which is why it
+#: now lives once, in the tablist's own accessible name.
+DRIVER_TABS = (("direct", "Direct"), ("agent", "Agent"), ("mcp", "MCP"))
+
+#: The multi-word labels that made the strip wider than its container. Kept as
+#: an explicit ban so a future edit cannot restore the horizontal clip.
+RETIRED_TAB_LABELS = ("You drive", "Agent delegates", "MCP connects")
+
+#: The accessible name of the tablist. It is what tells a screen-reader user
+#: what a bare "Direct" or "MCP" selects, so shortening the visible labels is
+#: only honest while this name survives.
+TABLIST_LABEL = "Choose who drives korvid"
+
+#: The narrow-viewport breakpoint the hero already reclaims room at.
+NARROW_QUERY = "@media (max-width: 599px)"
+
+#: A focused tab paints `outline: 3px` at `outline-offset: 3px`, so its ring
+#: extends 6px beyond the button's border box on every side. The strip must
+#: reserve at least that much padding, or the ring is drawn on (or outside)
+#: the strip edge instead of inside it.
+TAB_FOCUS_RING_PX = 6.0
+
 #: Cues that turn a banned phrase into an allowed truthful denial, so a
 #: surface may state "not bounded reads" without tripping the ban. Matched as
 #: whole words/phrases anywhere in the phrase's clause, not just immediately
@@ -436,6 +462,91 @@ def _outline_offset_px(rule_block: str) -> float:
     match = re.search(r"outline-offset:\s*(-?[\d.]+)px", rule_block)
     assert match is not None, f"expected an outline-offset declaration in {rule_block!r}"
     return float(match.group(1))
+
+
+def _declaration(rule_block: str, prop: str) -> str:
+    """Return the value of `prop` in a declaration block.
+
+    Args:
+        rule_block: The text between a rule's braces.
+        prop: The property name, e.g. `"grid-template-columns"`.
+
+    Returns:
+        The declaration's value, whitespace-collapsed and without its
+        trailing semicolon.
+    """
+    match = re.search(rf"(?:^|;|\{{)\s*{re.escape(prop)}\s*:([^;}}]+)", rule_block)
+    assert match is not None, f"expected a `{prop}` declaration in {_compact(rule_block)!r}"
+    return _compact(match.group(1))
+
+
+def _padding_sides(rule_block: str) -> tuple[str, str, str, str]:
+    """Expand a `padding` shorthand into its top/right/bottom/left components.
+
+    Args:
+        rule_block: The text between a rule's braces.
+
+    Returns:
+        Four component strings in CSS order, with the shorthand's one-, two-
+        and three-value forms expanded exactly as a browser expands them.
+    """
+    parts = _declaration(rule_block, "padding").split()
+    assert 1 <= len(parts) <= 4, f"malformed padding shorthand: {parts!r}"
+    if len(parts) == 1:
+        parts *= 4
+    elif len(parts) == 2:
+        parts = [parts[0], parts[1], parts[0], parts[1]]
+    elif len(parts) == 3:
+        parts = [parts[0], parts[1], parts[2], parts[1]]
+    return parts[0], parts[1], parts[2], parts[3]
+
+
+def _px(value: str) -> float:
+    """Parse a length that must be authored in `px`.
+
+    Focus-ring room is compared against an outline width and offset that are
+    themselves `px`, so a `rem` here would make the reservation depend on the
+    theme's root font size and stop being checkable from the source.
+
+    Args:
+        value: A CSS length token.
+
+    Returns:
+        The numeric pixel value.
+    """
+    match = re.fullmatch(r"(-?[\d.]+)px", value)
+    assert match is not None, (
+        f"{value!r} must be authored in px so it can be compared with the "
+        "focus ring's own px width and offset"
+    )
+    return float(match.group(1))
+
+
+def _rem(value: str) -> float:
+    """Parse a `rem` length into its numeric value."""
+    match = re.fullmatch(r"(-?[\d.]+)rem", value)
+    assert match is not None, f"expected a rem length, got {value!r}"
+    return float(match.group(1))
+
+
+def _declaration_blocks(css: str) -> list[tuple[str, str]]:
+    """Every `prelude { declarations }` pair in the stylesheet.
+
+    `extra.css` uses no CSS nesting, so an innermost brace pair is always a
+    style rule and never an at-rule body. A rule that sits inside a media
+    query therefore yields its own selector list as the prelude, which makes
+    this usable for "no rule anywhere declares X" assertions.
+
+    Args:
+        css: Full stylesheet text.
+
+    Returns:
+        One `(prelude, declarations)` pair per style rule, comment-free.
+    """
+    stripped = _strip_css_comments(css)
+    return [
+        (match.group(1), match.group(2)) for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", stripped)
+    ]
 
 
 def _media_blocks(css: str, query: str) -> list[str]:
@@ -1130,25 +1241,123 @@ def test_landing_presents_one_incident_through_three_drivers() -> None:
 
     The compact homepage deletes the second heading and the per-scene prose,
     so the driver story is carried entirely by the tab strip and the three
-    recordings behind it. Each tab must still name its driver and address
-    its own panel.
+    recordings behind it. Each tab must still address its own panel and name
+    its driver — but with one word, not a sentence: three sentence-length
+    labels made the strip 437px wide inside a 291px stage, and the MCP tab
+    sat 146px past the visible edge on a 390px handset. The sentence moves
+    to the tablist's accessible name, which is announced before every tab.
     """
     switcher = _scene_switcher()
-    for scene, label in (
-        ("direct", "You drive"),
-        ("agent", "Agent delegates"),
-        ("mcp", "MCP connects"),
-    ):
+    for scene, label in DRIVER_TABS:
         assert f'id="scene-tab-{scene}"' in switcher
         assert f'aria-controls="scene-{scene}"' in switcher
         assert f'id="scene-{scene}"' in switcher
         assert f">{label}</button>" in switcher, (
             f"the {scene} tab must keep naming its driver: {label!r}"
         )
+        assert " " not in label, (
+            f"a {label!r} tab wraps or overflows its 1fr grid column on a handset; "
+            "each tab carries one word"
+        )
+    for retired in RETIRED_TAB_LABELS:
+        assert f">{retired}</button>" not in switcher, (
+            f"{retired!r} is what pushed the strip past its container; it must not return"
+        )
+    assert f'aria-label="{TABLIST_LABEL}"' in switcher, (
+        "one-word tabs are only self-explanatory through the tablist's own name, "
+        f"so the strip must keep {TABLIST_LABEL!r}"
+    )
     assert "same evidence" not in switcher.lower()
     assert "One incident. Three ways to drive it." not in _index(), (
         "the merged stage replaces the second heading; the hero headline leads alone"
     )
+
+
+def test_narrow_tab_strip_is_a_three_column_grid_that_never_scrolls_sideways() -> None:
+    """At handset widths the strip lays its three tabs out, it does not scroll them.
+
+    `overflow-x: auto` on a flex strip is a silent failure mode: a 390px
+    viewport rendered a 291px strip around a 437px row, so the third tab was
+    98.7% clipped, and `ArrowRight` focused it without scrolling it into view
+    — the selection moved to a control the visitor could not see. A
+    three-column grid of `minmax(0, 1fr)` tracks removes the overflow at its
+    source instead of asking JavaScript to chase it, so the fix costs no
+    controller bytes.
+
+    `overflow-x` must be returned to `visible` in the same rule: a lone
+    `overflow-x: auto` also forces the *vertical* axis to compute to `auto`,
+    which is what clips a focused tab's outward ring at the top edge.
+    """
+    css = _css()
+    base = _rule(css, ".md-typeset .scene-tabs {")
+    assert "overflow-x: auto" in base, (
+        "this test only makes sense while the wide strip still opts into scrolling"
+    )
+
+    blocks = [block for block in _media_blocks(css, NARROW_QUERY) if ".scene-tabs" in block]
+    assert len(blocks) == 1, (
+        f"exactly one {NARROW_QUERY} block must own the compact tab strip, found {len(blocks)}"
+    )
+    narrow = blocks[0]
+
+    strip = _rule(narrow, ".md-typeset .scene-tabs {")
+    assert _declaration(strip, "display") == "grid"
+    columns = _declaration(strip, "grid-template-columns")
+    assert columns in (
+        "repeat(3, minmax(0, 1fr))",
+        "minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)",
+    ), f"the three tabs must share the strip as three equal, shrinkable tracks; got {columns!r}"
+    assert _declaration(strip, "overflow-x") == "visible", (
+        "a grid that fits needs no scroll port, and keeping `auto` would still clip "
+        "the focused tab's ring on the vertical axis"
+    )
+
+    top, right, _, left = _padding_sides(strip)
+    for side, value in (("top", top), ("right", right), ("left", left)):
+        assert _px(value) >= TAB_FOCUS_RING_PX, (
+            f"the strip's {side} padding must reserve the {TAB_FOCUS_RING_PX:.0f}px focus "
+            f"ring so a focused tab's outline is painted inside the strip; got {value!r}"
+        )
+    assert _px(_declaration(strip, "gap")) >= TAB_FOCUS_RING_PX, (
+        "adjacent tracks must stay at least a ring apart, or a focused tab's outline "
+        "is drawn over its neighbour"
+    )
+
+    button = _rule(narrow, ".md-typeset .scene-tabs button {")
+    assert _declaration(button, "min-width") == "0", (
+        "a button's min-content width would otherwise push the `minmax(0, 1fr)` "
+        "tracks back over the strip's width"
+    )
+    base_padding = _padding_sides(_rule(css, ".md-typeset .scene-tabs button {"))
+    narrow_padding = _padding_sides(button)
+    assert _rem(narrow_padding[1]) < _rem(base_padding[1]), (
+        "the compact strip must spend less of each track on padding than the wide "
+        f"strip does; got {narrow_padding[1]!r} against {base_padding[1]!r}"
+    )
+
+
+def test_narrow_tab_strip_keeps_the_wide_strip_untouched() -> None:
+    """The grid is a handset override, not a rewrite of the desktop strip.
+
+    The wide stage is 593px around a 437px row, so the flex strip there
+    already fits and keeps its pill spacing. A grid rule that escaped its
+    media query would stretch three pills across the full desktop stage.
+    """
+    css = _strip_css_comments(_css())
+    base = _rule(css, ".md-typeset .scene-tabs {")
+    assert _declaration(base, "display") == "flex"
+    assert "grid-template-columns" not in base, (
+        "the wide strip must stay a flex row of intrinsically sized pills"
+    )
+
+    narrow = next(block for block in _media_blocks(css, NARROW_QUERY) if ".scene-tabs" in block)
+    outside = css.replace(narrow, " ")
+    escaped = [
+        _compact(prelude)
+        for prelude, body in _declaration_blocks(outside)
+        if ".scene-tabs" in prelude and "grid" in body
+    ]
+    assert not escaped, f"the tab grid must stay inside {NARROW_QUERY}; found {escaped}"
 
 
 def test_scene_switcher_source_is_a_complete_no_javascript_fallback() -> None:
@@ -1659,6 +1868,7 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
         "rejected play() promise is swallowed",
         "prototype-named keys are ignored",
         "modified arrow and Home/End keys keep their browser behavior",
+        "two ArrowRight presses walk the roving selection to the last scene",
         "left in the no-JavaScript state",
         "outside its own switcher is rejected",
         "without IntersectionObserver gets a working switcher that never autoplays",

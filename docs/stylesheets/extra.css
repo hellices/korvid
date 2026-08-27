@@ -296,6 +296,40 @@
   outline-offset: 3px;
 }
 
+/* Handset widths: lay the three tabs out instead of scrolling them.
+
+   The strip is only as wide as the stage it labels — 291px at a 390px
+   viewport — and three pills sized by their own content needed 437px, so
+   `overflow-x: auto` quietly parked the MCP tab 146px past the visible edge.
+   Keyboard navigation then moved the selection onto a control the visitor
+   could not see, because focus does not scroll a scroll port by itself.
+   Three `minmax(0, 1fr)` tracks remove the overflow at its source: the tabs
+   share whatever width the stage has, and the shrinkable minimum keeps a
+   button's own content from pushing the row back open. Fixing it here rather
+   than with a `scrollIntoView` in the controller keeps the shipped script
+   byte-for-byte unchanged.
+
+   `overflow-x` goes back to `visible` in the same breath. A lone
+   `overflow-x: auto` forces the *other* axis to compute to `auto` as well,
+   which clips the 3px focus outline a tab paints 3px outside itself; the
+   6px reserved on the top and both sides is exactly that ring, so a focused
+   tab's outline lands inside the strip. The 6px gap keeps that ring off the
+   neighbouring tab. */
+@media (max-width: 599px) {
+  .md-typeset .scene-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    overflow-x: visible;
+    padding: 6px 6px 0.75rem;
+  }
+
+  .md-typeset .scene-tabs button {
+    min-width: 0;
+    padding: 0.55rem 0.35rem;
+  }
+}
+
 .md-typeset .scene-panel:focus-visible {
   outline: 3px solid var(--korvid-amber-bright);
   outline-offset: -3px;

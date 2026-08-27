@@ -135,7 +135,15 @@ class HTMLElement {
     for (const handler of this.listeners.get(type) ?? []) handler(event);
   }
 
+  /* Focus is exclusive in a real DOM: moving it to one element takes it off
+     whichever element held it. The roving-tabindex tab strip depends on that
+     — a strip that "focused" three tabs at once would satisfy a sticky
+     per-element flag while leaving a visitor's focus ring behind. */
   focus() {
+    let root = this;
+    while (root.parent) root = root.parent;
+    root.focused = false;
+    for (const node of root.descendants()) node.focused = false;
     this.focused = true;
   }
 
@@ -699,6 +707,58 @@ const scenarios = {
       "the switcher's own panels stay visible",
     );
     assert.equal(built.stray.hidden, false, "a panel outside the switcher is never touched");
+  },
+
+  "two ArrowRight presses walk the roving selection to the last scene"() {
+    /* The compact strip is a three-column grid on a handset precisely so the
+       third tab is on screen when the keyboard reaches it. That is a layout
+       contract, verified in a browser; what belongs here is the half the
+       controller owns — that a second `ArrowRight` really does land the
+       selection, the roving `tabIndex`, and the focus on the MCP tab, with
+       its deferred source and poster promoted so the scene it reveals is a
+       real player rather than an empty box. */
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors, observers } = run(document);
+
+    observers[0].callback([{ isIntersecting: true }]);
+    built.tabs[0].dispatch("keydown", { key: "ArrowRight", preventDefault() {} });
+    built.tabs[1].dispatch("keydown", { key: "ArrowRight", preventDefault() {} });
+
+    assert.deepEqual(errors, []);
+    assert.deepEqual(
+      built.panels.map((panel) => panel.hidden),
+      [true, true, false],
+      "two ArrowRight presses must leave the MCP scene as the visible one",
+    );
+    assert.deepEqual(
+      built.tabs.map((tab) => tab.getAttribute("aria-selected")),
+      ["false", "false", "true"],
+      "the MCP tab must be the one that reports itself selected",
+    );
+    assert.deepEqual(
+      built.tabs.map((tab) => tab.tabIndex),
+      [-1, -1, 0],
+      "the roving tabindex must follow the selection to the last tab",
+    );
+    assert.ok(built.tabs[2].focused, "the MCP tab must hold focus after arrowing onto it");
+    assert.ok(
+      built.tabs.slice(0, 2).every((tab) => !tab.focused),
+      "focus must not be left behind on a deselected tab",
+    );
+    assert.equal(built.videos[2].getAttribute("src"), "mcp.mp4", "deferred source promoted");
+    assert.equal(built.videos[2].getAttribute("poster"), "mcp.png", "deferred poster promoted");
+    assert.ok(
+      built.videos.slice(0, 2).every((video) => video.paused > 0),
+      "the scenes arrowed past must be paused, not left decoding",
+    );
+
+    built.tabs[2].dispatch("keydown", { key: "ArrowRight", preventDefault() {} });
+    assert.deepEqual(
+      built.panels.map((panel) => panel.hidden),
+      [false, true, true],
+      "a third press wraps back to the first scene",
+    );
   },
 
   "a browser without IntersectionObserver gets a working switcher that never autoplays"() {

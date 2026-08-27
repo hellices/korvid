@@ -13,9 +13,9 @@ hide:
   </div>
   <figure class="hero-demo hero-driver-stage">
     <div class="scene-tabs" role="tablist" aria-label="Choose who drives korvid">
-      <button id="scene-tab-direct" type="button" role="tab" aria-selected="true" aria-controls="scene-direct">You drive</button>
-      <button id="scene-tab-agent" type="button" role="tab" aria-selected="false" aria-controls="scene-agent" tabindex="-1">Agent delegates</button>
-      <button id="scene-tab-mcp" type="button" role="tab" aria-selected="false" aria-controls="scene-mcp" tabindex="-1">MCP connects</button>
+      <button id="scene-tab-direct" type="button" role="tab" aria-selected="true" aria-controls="scene-direct">Direct</button>
+      <button id="scene-tab-agent" type="button" role="tab" aria-selected="false" aria-controls="scene-agent" tabindex="-1">Agent</button>
+      <button id="scene-tab-mcp" type="button" role="tab" aria-selected="false" aria-controls="scene-mcp" tabindex="-1">MCP</button>
     </div>
     <div class="scene-panels">
       <article id="scene-direct" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-direct" tabindex="0">
