@@ -196,6 +196,87 @@ def test_administration_guides_keep_their_empirical_and_contract_detail() -> Non
         assert heading in provider
 
 
+#: What a reader of the published site is willing to read on one page, per
+#: page. These are not one shared number: an operator guide and a plugin
+#: reference earn different lengths, and a page that needs more than its
+#: budget is a page that has stopped being a guide.
+PUBLIC_PAGE_WORD_LIMITS = {
+    "overview.md": 1_400,
+    "ops.md": 1_600,
+    "performance.md": 2_000,
+    "threat-model.md": 2_000,
+    "provider-plugins.md": 2_200,
+}
+
+
+def test_public_product_guides_stay_bounded() -> None:
+    """The published guides had grown past what anyone reads in one sitting.
+
+    `performance.md` reached 4,228 words by narrating an optimisation
+    campaign round by round, `threat-model.md` 3,118 by inventorying the
+    redactor's implementation, and `overview.md` 1,818 by restating the
+    feature catalog each linked guide already owns. Every fact worth
+    keeping has a home — the run artifacts, the linked guides, the
+    reference sections below — so the page links it instead of carrying a
+    second copy.
+    """
+    for page, maximum in PUBLIC_PAGE_WORD_LIMITS.items():
+        words = len(_source(page).split())
+        assert words <= maximum, f"{page} has {words} words; limit is {maximum}"
+
+
+def test_pruned_guides_keep_their_evidence_and_safety_markers() -> None:
+    """Shortening a page may not cost it the evidence it is published for.
+
+    Each marker here is the load-bearing half of one page: the measured
+    envelope and the limits that qualify it, the boundary diagram and the
+    risks korvid does *not* mitigate, the plugin API version a third party
+    compiles against, and the two invariants every write on the operations
+    page rests on.
+    """
+    performance = _source("performance.md")
+    assert "Supported envelope" in performance
+    assert "Known limits" in performance
+    assert "Raw artifacts" in performance
+    # The envelope is a measurement, not an adjective: keep its numbers.
+    assert "1,000 pods across 20 namespaces" in performance
+    assert "43,200/43,200 events applied" in performance
+    # And keep the figure the page publishes only to invalidate it.
+    assert "Pilot.press" in performance
+
+    threat_model = _source("threat-model.md")
+    assert "```mermaid" in threat_model
+    assert "Residual risks" in threat_model
+    assert "OutboundPolicy" in threat_model
+
+    provider_plugins = _source("provider-plugins.md")
+    assert "API 2" in provider_plugins
+    # Emphasis moves around; the warning it carries must not.
+    assert "not a sandbox" in provider_plugins.replace("*", "")
+
+    ops = _source("ops.md").lower()
+    assert "fresh user keystroke" in ops
+    assert "fail-closed" in ops
+
+    overview = _source("overview.md")
+    assert "KORVID — product boundary" in overview
+
+
+def test_pruned_guides_do_not_hide_their_length_in_collapsibles() -> None:
+    """A shorter page, not a folded one.
+
+    `pymdownx.details` is enabled, so a `<details>` block or a `???`
+    admonition would let a page keep every word while reporting a shorter
+    screen. The word budgets above are about what a reader has to work
+    through, so the text has to be gone rather than closed.
+    """
+    for page in PUBLIC_PAGE_WORD_LIMITS:
+        source = _source(page)
+        assert "<details" not in source.lower(), f"{page} folds content into a <details> block"
+        collapsed = [line for line in source.splitlines() if re.match(r"^\s*\?{3}\+?\s+\w", line)]
+        assert collapsed == [], f"{page} folds content into a collapsible admonition: {collapsed}"
+
+
 def _slugify(heading: str) -> str:
     """Python-Markdown's default `toc` slugify, which MkDocs inherits."""
     value = re.sub(r"[^\w\s-]", "", heading).strip().lower()

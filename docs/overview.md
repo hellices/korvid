@@ -2,21 +2,15 @@
 
 > A tool-using bird for your cluster.
 
-korvid is one program that grows with what you install. The base is a
-keyboard-first Kubernetes cockpit that needs nothing but a kubeconfig. Add an
-extra and it gains an embedded AI agent. Add another and it becomes a tool
-*other* AI clients can drive.
-
-One core, independent adapters, one safety model.
-
----
-
-The first diagram is the product contract: three independent drivers, one
-korvid boundary, and one Kubernetes adapter. Read the arrows before the
-installation combinations below; the center is a behavior contract, not a
-claim that every read shares one snapshot.
+korvid is one program that grows with what you install: a keyboard-first
+Kubernetes cockpit that needs nothing but a kubeconfig, plus one extra for an
+embedded AI agent and another that makes it a tool *other* AI clients can
+drive. One core, independent adapters, one safety model.
 
 ## The shape
+
+Three independent drivers, one korvid boundary, one Kubernetes adapter. The
+center is a behavior contract, not a claim that every read shares one snapshot.
 
 ```mermaid
 flowchart LR
@@ -56,127 +50,77 @@ flowchart LR
     style CLUSTER fill:#edf2f7,color:#1a202c,stroke:#a0aec0,stroke-dasharray: 4 4
 ```
 
-The center is a product contract, not the `src/korvid/core/` package. Every
-adapter shares cluster reads and UI control. Any write request that reaches
+The center is a product contract, not the `src/korvid/core/` package: every
+adapter shares cluster reads and UI control, and any write request that reaches
 korvid — from the TUI, the embedded agent, or an MCP write proposal — passes
-through the approval gate and is logged. MCP itself exposes read and UI-drive
-tools; write proposals are opt-in and handled inside korvid, not by the MCP
-client. Provider payload masking belongs to the embedded Agent boundary; MCP
-result disclosure remains tool-specific.
+through the approval gate and is logged. Provider payload masking belongs to
+the embedded Agent boundary; MCP result disclosure remains tool-specific.
 
-Neither optional adapter is required, and neither implies the other.
-
-The two adapter extras are **independent**, not a ladder. Each adds to the
-cockpit on its own: `korvid[mcp]` gives an editor's assistant cluster sight
-without installing an embedded agent at all, and `korvid[agent]` needs no MCP.
-Observability is an add-on to either tool surface, not a standalone base-TUI
-surface. Install what you want:
+The two adapter extras are **independent**, not a ladder, and neither implies
+the other: `korvid[mcp]` gives an editor's assistant cluster sight with no
+embedded agent, and `korvid[agent]` needs no MCP. Observability is an add-on to
+either tool surface (`korvid[agent,observability]`, `korvid[mcp,observability]`),
+never a standalone base-TUI surface:
 
 ```sh
 uv tool install korvid                 # cockpit only
 uv tool install 'korvid[agent]'        # + embedded AI agent
 uv tool install 'korvid[mcp]'          # + MCP server for external agents
-uv tool install 'korvid[agent,observability]' # agent + Prometheus/Loki tools
-uv tool install 'korvid[mcp,observability]'   # MCP + Prometheus/Loki tools
-uv tool install 'korvid[all]'          # agent,mcp,observability
+uv tool install 'korvid[all]'          # agent, mcp, observability
 
 brew install hellices/korvid/korvid    # macOS/Linux, no Python needed (= agent)
 ```
 
-Entra ID authentication for Azure OpenAI is a separate extra —
-`korvid[agent,entra]` — because it pulls in the Azure identity stack that only
-Entra users need. `[all]` does *not* include it.
-
-(`pipx` works the same way. Pin a version for a reproducible install — see the
-[README](https://github.com/hellices/korvid/blob/main/README.md) for the current one.)
-
-A missing extra is not an error. korvid starts, and the feature it powers is
-simply absent — unless you *asked* for it on the command line, in which case it
-refuses to start and tells you what to install. Silently doing nothing when you
-explicitly requested a feature is the one behaviour worth failing over.
+Entra ID auth for Azure OpenAI is a separate `korvid[agent,entra]` extra,
+excluded from `[all]`. (`pipx` works the same way.) A missing extra is not an
+error: korvid starts and the feature it powers is simply absent — unless you
+*asked* for it on the command line, in which case it refuses to start and tells
+you what to install.
 
 ---
 
-## Base — the cockpit
+## The three surfaces
 
-**What it is:** a terminal UI for operating a cluster, built for people who
-would rather not remember `kubectl` flag order.
+**The cockpit (included).** Navigate any resource kind with `:`, filter with
+`/` (fuzzy, regex, or label selectors), drill into relationships with `Enter` —
+deployment to replicaset to pods, a Helm release or operator to everything it
+installed. Split panes, live sort, CPU/MEM against enforced limits, and a
+troubled pod that explains itself before you open it. Plus log tailing, `exec`,
+file transfer without the `kubectl` binary, and port-forwards that flip to
+`broken` when their pod dies instead of failing silently. All it needs is a
+kubeconfig — no AI, no account, no network beyond your cluster. Keys in
+[`keybindings.md`](keybindings.md), the tour in [`tui.md`](tui.md).
 
-Navigate any resource kind with `:`, filter with `/` (fuzzy, regex, or label
-selectors), drill into relationships with `Enter` — pods to containers,
-deployment to replicaset to pods, a Helm release or operator to the tree of
-everything it installed. Split into two panes. Sort on live data. Pods show
-live CPU/MEM against their enforced limits, and a troubled pod explains itself
-before you open anything.
+**The agent (`korvid[agent]`).** `Ctrl-A` opens a chat panel that already knows
+your view, namespace, selection, and filter. It reads through read-only tools —
+manifests, logs, events, compound diagnostics — and **drives the UI itself**:
+"show me the crashing pod's logs" navigates, filters, and opens the log pane
+instead of printing a suggestion. Answers cite the reads behind them and a
+citation opens the actual view; korvid reports an invented reference rather
+than accepting it quietly, but it cannot force a model to cite everything, so
+an uncited sentence stays exactly that. It needs a provider (Copilot, Azure
+OpenAI, Anthropic, OpenAI, Ollama, or any OpenAI-compatible endpoint), and
+`agent.model_tier: low` targets 3B–14B models on your own hardware. See
+[`agent.md`](agent.md).
 
-Beyond browsing: live log tailing, port-forwards that notice when their target
-pod dies — flipping to `broken` with a toast, and re-attachable in place with
-one key, instead of failing silently the way a hand-run `kubectl port-forward`
-does — file transfer in and out of containers without the `kubectl` binary, and
-`exec` into a shell.
-
-**What it needs:** a kubeconfig. No AI, no network beyond your cluster, no
-account anywhere.
-
----
-
-## Agent module — an agent inside the cockpit
-
-**What it is:** `Ctrl-A` opens a chat panel that already knows what you are
-looking at — view, namespace, selection, filter. You do not describe your
-screen to it.
-
-It reads the cluster through read-only tools (manifests, logs, events, compound
-diagnostics) and **drives the UI itself**. "Show me the crashing pod's logs"
-does not print a suggestion; it navigates, filters, and opens the log pane.
-
-Its answers cite the reads behind them, and selecting a citation opens the
-actual view. korvid validates the citations that appear — an invented reference
-is reported rather than quietly accepted — but it cannot make a model cite
-everything it says, so an uncited sentence is exactly that: uncited. The point
-is that the checkable parts *are* checkable. An answer you cannot check at all
-is a guess with better grammar.
-
-**What it needs:** a provider. GitHub Copilot, Azure OpenAI, Anthropic, OpenAI,
-a local Ollama, or any OpenAI-compatible endpoint. A low model tier
-(`agent.model_tier: low`) targets 3B–14B models that run on your own
-hardware — for air-gapped clusters, or for people who would rather their
-production incidents not leave the building.
-
----
-
-## MCP module — korvid as a tool for other agents
-
-**What it is:** the same read and UI-driving tools, exposed over MCP so an
-external agent can use them. VS Code Copilot Chat, Claude Code, Cursor, Zed.
-
-Your editor's assistant gains cluster sight: it can list, describe, read logs,
-run diagnostics, and move korvid's UI so you watch what it looks at.
-
-**What it cannot do:** change anything. Cluster writes are not on the MCP
-surface at all — not gated there, *absent*.
-
-If you opt in with `mcp.write_proposals: true` (off by default), a client gains
-one further ability: leaving a write **proposal** for a human to review and
-approve inside korvid. That is the whole automation story over MCP,
-deliberately — and it stays off until you turn it on.
+**The MCP server (`korvid[mcp]`).** The same read and UI-driving tools over
+MCP, so VS Code Copilot Chat, Claude Code, Cursor, or Zed gains cluster sight
+and moves korvid's UI while you watch. It cannot change anything: cluster
+writes are not on the MCP surface — not gated there, *absent*. Opting in
+with `mcp.write_proposals: true` (off by default) adds one ability: leaving a
+write **proposal** a human approves inside korvid. See [`mcp.md`](mcp.md).
 
 ---
 
 ## Four agent/MCP adapter compositions
 
-Four core shapes come from the two independent agent/MCP adapters.
-Observability is an optional tool overlay on any shape containing agent or MCP;
-`korvid[all]` includes that overlay.
+Four core shapes come from the two independent adapters; observability is an
+optional overlay on any shape with agent or MCP, and `korvid[all]` includes it.
 
-<!-- LAYOUT NOTE (Mermaid 11 nested-subgraph rendering):
-     The subgraph declaration order below is C4 → C2 (ROW1) then C3 → C1 (ROW2).
-     Mermaid 11 renders nested subgraphs in reverse declaration order within each
-     row, so this intentional "reversed" source order produces the desired
-     rendered grid: cockpit (C1) top-left, Agent (C2) top-right, MCP (C3)
-     bottom-left, all (C4) bottom-right.
-     Do NOT "tidy" the source order to alphabetical/logical sequence — doing so
-     silently reverses the grid without any visible warning. -->
+<!-- LAYOUT NOTE: the subgraph order below is deliberately C4 → C2 then
+     C3 → C1. Mermaid 11 renders nested subgraphs in reverse declaration
+     order per row, so "tidying" this into logical order silently reverses
+     the rendered grid. -->
 ```mermaid
 flowchart TB
     subgraph ROW1["  "]
@@ -261,48 +205,41 @@ flowchart TB
 **Nothing changes your cluster without a human keystroke, and nothing changes
 it unlogged.**
 
-Most dialogs show a preview of what will change — a server-side dry-run diff
-for Kubernetes API writes, a rendered manifest for Helm. Some operations have
-none to show (a file upload into a pod), and a preview that times out does not
-hold the dialog hostage. The preview is a courtesy; the dialog and the audit
-entry are the guarantee.
-
-Not "the agent is instructed not to". Not "you can turn on confirmations". The
-write path *goes through* the dialog — there is no second route, for you, for
-the agent, or for an MCP client, and a write whose audit record cannot be
-written does not happen at all.
-
-Add `--readonly` to remove writes entirely, or mark production contexts as
-protected: every confirmation then requires typing the **context** name instead
-of a single `y` — and the operations that already demand the resource name
-(cluster-scoped deletes, node drains) keep that stronger gate.
+Not a policy prompt, not an opt-in confirmation setting. The write path *goes
+through* the dialog — there is no second route, for you, for the agent, or for
+an MCP client — and a write whose audit record cannot be
+written does not happen at all. Most dialogs preview the change (a server-side
+dry-run diff, a rendered Helm manifest); some have none, and a preview that
+times out never holds the dialog hostage: the preview is a courtesy, the dialog
+and the audit entry are the guarantee. `--readonly` removes writes entirely; a
+protected context makes every confirmation there require typing the
+**context** name instead of a single `y`.
 
 `Secret` values and the credential patterns korvid recognises are masked before
-anything reaches the **embedded** agent's provider, and `:ai payload` shows you
+anything reaches the **embedded** agent's provider, and `:ai payload` shows
 what was sent — a boundary you cannot inspect is a promise, not a control. Two
-honest limits: a secret that only your application knows is a secret, sitting in
-a log line, may pass undetected; and an external MCP client applies its own data
+honest limits: a secret only your application knows is a secret, sitting in a
+log line, may pass undetected; and an external MCP client applies its own data
 policy, not korvid's. [`threat-model.md`](threat-model.md) is specific about
-both.
+both, [`ops.md`](ops.md) about the write path itself.
 
 ---
 
 ## Why this shape
 
-Three convictions, each visible in the structure above:
+Three convictions, visible in the structure above:
 
-**An operator's tool should work without AI.** The base cockpit is complete on its own.
-The agent is an addition to a working cockpit, not the reason it exists — so
-your cluster tooling does not stop working when a provider is down, a token
-expires, or a policy forbids sending cluster data anywhere.
+**An operator's tool should work without AI.** The cockpit is complete on its
+own, so it keeps working when a provider is down, a token expires, or policy
+forbids sending cluster data anywhere.
 
 **An AI that cannot act is a search engine; one that acts unsupervised is a
-liability.** The middle ground is an agent that does everything *except* the
-irreversible part, and hands you that part with a preview attached.
+liability.** The middle ground does everything *except* the irreversible part,
+and hands you that part with a preview attached.
 
-**Where the model runs is your decision.** Frontier API, or a 3B model on a
-node in your own cluster. The low model tier and a published per-model
-scoreboard exist so that choice is informed rather than hopeful.
+**Where the model runs is your decision.** A frontier API, or a 3B model on a
+node in your own cluster; the low tier and a published per-model scoreboard
+make that choice informed rather than hopeful.
 
 ---
 
@@ -316,5 +253,6 @@ scoreboard exist so that choice is informed rather than hopeful.
 | Connect an editor over MCP | [`mcp.md`](mcp.md) |
 | Understand the write safety model | [`ops.md`](ops.md) |
 | Know exactly what reaches a model | [`threat-model.md`](threat-model.md) |
+| Check the measured envelope | [`performance.md`](performance.md) |
 | Run without internet access | [`airgap.md`](airgap.md) |
 | See how the code is organised | [`dev/specs/2026-08-12-korvid-architecture.md`](dev/specs/2026-08-12-korvid-architecture.md) |

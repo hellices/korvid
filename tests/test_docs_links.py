@@ -465,3 +465,68 @@ def test_contributor_page_links_to_quality_gates_in_the_repository() -> None:
     source = (DOCS / "dev" / "README.md").read_text(encoding="utf-8")
     assert "https://github.com/hellices/korvid/blob/main/docs/dev/quality-gates.md" in source
     assert "](quality-gates.md)" not in source
+
+
+#: What each pruned public guide has to keep pointing at. Cutting a page
+#: moves its detail to whichever page or artifact owns it; a cut that also
+#: drops the link deletes the detail instead of relocating it.
+_PRUNED_GUIDE_DESTINATIONS = {
+    "performance.md": (
+        "dev/specs/2026-08-06-large-cluster-performance-qualification-design.md",
+        "https://github.com/hellices/korvid/blob/main/tests/performance/profiles/"
+        "steady-24eps-1k.json",
+        "https://github.com/hellices/korvid/issues/186",
+    ),
+    "threat-model.md": (
+        "ops.md",
+        "mcp.md",
+        "observability.md",
+        "provider-plugins.md",
+        "airgap.md",
+        "https://github.com/hellices/korvid/blob/main/SECURITY.md",
+    ),
+    "provider-plugins.md": (
+        "threat-model.md",
+        "https://github.com/hellices/korvid/blob/main/SECURITY.md",
+    ),
+    "ops.md": ("keybindings.md", "agent.md", "threat-model.md", "helm-operators.md", "tui.md"),
+    "overview.md": (
+        "keybindings.md",
+        "agent.md",
+        "mcp.md",
+        "ops.md",
+        "threat-model.md",
+        "airgap.md",
+        "performance.md",
+    ),
+}
+
+
+@pytest.mark.parametrize("page", sorted(_PRUNED_GUIDE_DESTINATIONS))
+def test_pruned_guides_link_the_home_of_the_detail_they_dropped(page: str) -> None:
+    """A pruned page has to name where its removed detail now lives.
+
+    `performance.md` no longer narrates the optimisation campaign, so the
+    benchmark design, the committed workload profile and the issue holding
+    the run artifacts have to be reachable from it; `threat-model.md` no
+    longer inventories the redactor, so each boundary it summarises keeps
+    its own page's link; and `overview.md` is a map, so every focused
+    guide it summarises stays one click away.
+    """
+    source = (DOCS / page).read_text(encoding="utf-8")
+    for destination in _PRUNED_GUIDE_DESTINATIONS[page]:
+        anchored = re.compile(rf"\({re.escape(destination)}(?:#[^)\s]*)?\)")
+        assert anchored.search(source), f"{page} no longer links {destination}"
+
+
+def test_the_raw_artifact_pointer_is_a_link_not_an_issue_number() -> None:
+    """ "issue #186" is not something a reader of the site can follow.
+
+    The performance page publishes summaries and keeps the metrics JSON,
+    profile dumps and seed manifests out of the product history, so the
+    issue that carries them is the whole raw-artifact trail. Naming it
+    without linking it leaves that trail unreachable from the site.
+    """
+    artifacts = (DOCS / "performance.md").read_text(encoding="utf-8").split("## Raw artifacts", 1)
+    assert len(artifacts) == 2, "performance.md must keep a Raw artifacts section"
+    assert "(https://github.com/hellices/korvid/issues/186)" in artifacts[1]
