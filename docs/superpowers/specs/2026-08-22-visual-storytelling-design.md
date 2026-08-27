@@ -1,5 +1,15 @@
 # Visual storytelling for the official site
 
+> **Superseded for the landing page structure** by
+> [2026-08-27-compact-homepage-design.md](2026-08-27-compact-homepage-design.md)
+> and its plan [2026-08-27-compact-homepage.md](../plans/2026-08-27-compact-homepage.md).
+> The homepage now ships one merged hero/driver stage, three highlights, and one
+> destination nav, so this design's product contract map, guarded write path,
+> capability evidence mosaic, and the old four-card destination list and
+> per-scene Input/Evidence/Result labels are history, not a design to build
+> against. Its media, controller, privacy, and provenance rules remain binding
+> for the homepage this design still ships.
+
 ## Goal
 
 Turn the official korvid site from a polished documentation portal into a

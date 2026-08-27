@@ -46,6 +46,9 @@ DEMO_README = DOCS / "demo" / "README.md"
 STORYTELLING_JS = DOCS / "assets" / "javascripts" / "visual-storytelling.js"
 SWITCHER_HARNESS = ROOT / "tests" / "js" / "scene_switcher_harness.mjs"
 VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
+VISUAL_STORYTELLING_DESIGN = (
+    DOCS / "superpowers" / "specs" / "2026-08-22-visual-storytelling-design.md"
+)
 
 MATERIAL_ATTRIBUTION = "https://squidfunk.github.io/mkdocs-material/"
 
@@ -334,6 +337,10 @@ def _css() -> str:
 
 def _plan() -> str:
     return VISUAL_STORYTELLING_PLAN.read_text(encoding="utf-8")
+
+
+def _design() -> str:
+    return VISUAL_STORYTELLING_DESIGN.read_text(encoding="utf-8")
 
 
 def _hero() -> str:
@@ -737,15 +744,20 @@ def test_hero_demo_fills_its_product_media_column() -> None:
 
 
 def test_visual_storytelling_plan_is_marked_superseded_for_the_landing_structure() -> None:
-    """The old plan is executable prose, so it must say what it no longer builds.
+    """The old plan and design are executable/authoritative prose, so both must
+    say what they no longer build.
 
     `docs/superpowers/plans/2026-08-22-visual-storytelling.md` embeds the
     hero figure, the per-scene Input/Evidence/Result rows, the contract map,
-    the write path and the six-card mosaic verbatim. The compact homepage
-    deletes all five, so a contributor replaying those blocks would rebuild
-    the long, repetitive page this change removes. The plan therefore has to
-    point at the plan and design that replaced it, while staying the source
-    of record for the media and controller the homepage still ships.
+    the write path and the six-card mosaic verbatim. Its companion
+    `docs/superpowers/specs/2026-08-22-visual-storytelling-design.md` is the
+    design of record those blocks were built from, plus the old four-card
+    destination list. The compact homepage deletes all of it, so a
+    contributor replaying either document would rebuild the long, repetitive
+    page this change removes. Both documents therefore have to point at the
+    plan and design that replaced them, while staying the source of record
+    for the media, controller, privacy, and provenance rules the homepage
+    still binds itself to.
     """
     plan = _plan()
     header = plan[: plan.index("**For agentic workers:**")].lower()
@@ -767,6 +779,31 @@ def test_visual_storytelling_plan_is_marked_superseded_for_the_landing_structure
     for removed in ('class="contract-map', 'class="write-path', 'class="evidence-mosaic'):
         assert removed not in index, (
             f"{removed!r} is exactly what the supersede note says the homepage dropped"
+        )
+
+    design = _design()
+    design_header = design[: design.index("\n## Goal")].lower()
+    assert "superseded" in design_header, (
+        "the design must announce that its landing structure was replaced, before "
+        "a reader reaches the Goal section"
+    )
+    assert "2026-08-27-compact-homepage-design.md" in design, (
+        "the superseded design must name the compact homepage design that replaced it"
+    )
+    for retired in (
+        "contract map",
+        "write path",
+        "evidence mosaic",
+        "destination",
+        "input/evidence/result",
+    ):
+        assert retired in design_header, (
+            f"the design's supersede note must name the {retired!r} among the "
+            "landing blocks and labels that are now history"
+        )
+    for binding in ("media", "controller", "privacy", "provenance"):
+        assert binding in design_header, (
+            f"the design's supersede note must say its {binding} rules remain binding"
         )
 
 
