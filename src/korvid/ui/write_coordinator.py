@@ -35,7 +35,6 @@ What they must not own is the approval, and they do not.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import dataclasses
 import logging
 import weakref
@@ -47,7 +46,13 @@ from korvid.core.impact import ImpactAction, summarize_impact
 from korvid.core.relationships import GraphResource
 from korvid.core.store import ALL_NAMESPACES
 from korvid.k8s.discovery import ResourceMeta
-from korvid.k8s.errors import ApiStatusError
+from korvid.tools.write_coordinator import (
+    WRITE_VERBS,
+    gvr_label,
+    perm_target,
+    run_approved_write,
+    write_locus,
+)
 from korvid.ui.impact_preview import render_impact_lines, render_unavailable_lines
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
@@ -57,6 +62,22 @@ from korvid.ui.workspace_state import PaneState
 from korvid.ui.write_gate import ReservedWrite, WriteGate
 
 logger = logging.getLogger(__name__)
+
+#: `gvr_label`/`write_locus`/`perm_target`/`run_approved_write`/`WRITE_VERBS`
+#: now live in `korvid.tools.write_coordinator` (issue TBD) and are
+#: re-exported here so every existing `from korvid.ui.write_coordinator
+#: import ...` site keeps working unchanged.
+__all__ = [
+    "WRITE_VERBS",
+    "TimelineWrites",
+    "WriteCoordinator",
+    "WriteOrigin",
+    "canonical_meta_kind",
+    "gvr_label",
+    "perm_target",
+    "run_approved_write",
+    "write_locus",
+]
 
 _ResultT = TypeVar("_ResultT")
 
@@ -72,42 +93,6 @@ _PREVIEW_TIMEOUT = 3.0
 #: `_PREVIEW_TIMEOUT` because the snapshot is a bounded LIST fan-out across
 #: the relationship catalog rather than one request.
 _IMPACT_TIMEOUT = 5.0
-
-#: action -> (verb, subresource) for the SubjectAccessReview pre-check.
-WRITE_VERBS: dict[str, tuple[str, str]] = {
-    "delete": ("delete", ""),
-    "scale": ("patch", "scale"),
-    "rollout_restart": ("patch", ""),
-    "debug": ("patch", "ephemeralcontainers"),
-    "edit": ("update", ""),
-    "resize": ("patch", "resize"),
-    "install": ("create", ""),
-    "approve": ("update", ""),
-    # Operator uninstall deletes the Subscription (then its CSV); the
-    # pre-check and 403 messages therefore speak in delete terms.
-    "uninstall": ("delete", ""),
-    # Cordon/uncordon patch node.spec.unschedulable; the drain pre-check
-    # covers its cordon step (evictions are per-namespace pod
-    # subresource creations that surface individually during execution).
-    "cordon": ("patch", ""),
-    "uncordon": ("patch", ""),
-    "drain": ("patch", ""),
-    # Node shell creates a privileged debug pod in the shell namespace
-    # (kubectl debug node/, issue #46); the pre-check runs against pods.
-    "node-shell": ("create", ""),
-}
-
-
-def gvr_label(meta: ResourceMeta) -> str:
-    """Group-qualified plural ('deployments.example.io') so rejection
-    messages disambiguate same-plural resources across API groups."""
-    return f"{meta.plural}.{meta.group}" if meta.group else meta.plural
-
-
-def write_locus(ns: str | None) -> str:
-    """Namespace qualifier shown in every approval dialog so identically
-    named workloads in different namespaces are distinguishable."""
-    return f" in namespace {ns}" if ns else " (cluster-scoped)"
 
 
 def canonical_meta_kind(aliases: Mapping[str, ResourceMeta], meta: ResourceMeta) -> str:
@@ -336,9 +321,7 @@ class WriteCoordinator(WriteGate):
     @staticmethod
     def perm_target(action: str, meta: ResourceMeta) -> tuple[str, str]:
         """(verb, resource[/subresource]) as shown in permission messages."""
-        verb, subresource = WRITE_VERBS[action]
-        target = f"{meta.plural}/{subresource}" if subresource else meta.plural
-        return verb, target
+        return perm_target(action, meta)
 
     @staticmethod
     def write_locus(ns: str | None) -> str:
@@ -715,65 +698,22 @@ class WriteCoordinator(WriteGate):
     ) -> str:
         """The reserved body: the whole span publishes an in-flight progress
         label (issue #143) — between approval and the outcome toast there was
-        previously no visible state at all."""
+        previously no visible state at all. The audit -> mutate -> audit
+        sequence itself is `korvid.tools.write_coordinator.
+        run_approved_write` (issue TBD) — a pure extraction so the same
+        fail-closed ordering is available to any future non-Textual caller."""
         kind = meta.plural
         with self._ui.progress(f"{action} {kind}/{name}"):
-            return await self._run_write_inner(action, meta, namespace, name, op_factory, detail)
-
-    async def _run_write_inner(
-        self,
-        action: str,
-        meta: ResourceMeta,
-        namespace: str | None,
-        name: str,
-        op_factory: Callable[[], Awaitable[None]],
-        detail: str,
-    ) -> str:
-        kind = meta.plural
-        try:
-            await self.audit_write(action, meta, namespace, name, detail, "intent")
-        except Exception as exc:
-            # Factory was never called — no coroutine to leak.
-            logger.exception("audit intent record failed; write blocked: %s", exc)
-            self._ui.notify(
-                f"{action} {kind}/{name} blocked: audit log unavailable",
-                severity="error",
+            return await run_approved_write(
+                action,
+                meta,
+                namespace,
+                name,
+                op_factory,
+                detail,
+                audit=self.audit_write,
+                notify=self._ui.notify,
             )
-            return "blocked: audit log unavailable"
-        try:
-            await op_factory()
-        except ApiStatusError as exc:
-            with contextlib.suppress(Exception):
-                await self.audit_write(action, meta, namespace, name, detail, f"error: {exc}")
-            if exc.status == 403:
-                # The SSAR pre-check fails open and permissions can change
-                # mid-flight: keep the actionable RBAC message contract
-                # instead of a bare "API 403: Forbidden".
-                verb, target = self.perm_target(action, meta)
-                message = f"missing permission: {verb} {target}"
-            elif exc.status == 409:
-                # The uid precondition tripped: the object was deleted and
-                # recreated (or otherwise changed) after the approval was
-                # given - nothing was modified.
-                message = "conflict: the target changed since it was approved - refresh and retry"
-            else:
-                message = str(exc)
-            self._ui.notify(f"{action} {kind}/{name} failed: {message}", severity="error")
-            return f"failed: {message}"
-        except Exception as exc:
-            with contextlib.suppress(Exception):
-                await self.audit_write(action, meta, namespace, name, detail, f"error: {exc}")
-            self._ui.notify(f"{action} {kind}/{name} failed: {exc}", severity="error")
-            return f"failed: {exc}"
-        try:
-            await self.audit_write(action, meta, namespace, name, detail, "success")
-        except Exception:
-            logger.exception("audit outcome record failed after successful write")
-            self._ui.notify(
-                "Audit log write failed (operation already executed)", severity="warning"
-            )
-        self._ui.notify(f"{action} {kind}/{name}: done", severity="information")
-        return "done"
 
     async def run_shielded(
         self,
