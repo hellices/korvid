@@ -48,6 +48,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
 from korvid.k8s.writes import WriteOps
+from korvid.tools.approval import ApprovalPolicy
 from korvid.ui.agent_ui_controller import (
     AgentPanelPort,
     AgentProposals,
@@ -55,6 +56,7 @@ from korvid.ui.agent_ui_controller import (
     AgentToolUIBridge,
     AgentUiController,
     DisplayedPaneContext,
+    TextualApprovalPolicy,
 )
 from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
@@ -1842,4 +1844,22 @@ async def test_the_bridge_delegates_every_ui_tool_to_the_controller(tmp_path: Pa
     bridge = AgentToolUIBridge(env.controller, env.dispatch)
     assert await bridge.agent_set_filter("web") == "filter set to 'web' on the pods view"
     assert (await bridge.agent_get_write_proposal("p-1")).startswith("proposal p-1")
+    await env.close()
+
+
+# ---------------------------------------------------------------------------
+# Capability-based approval: production binds exactly one ApprovalPolicy
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_ui_controller_binds_textual_approval_policy(env: Env) -> None:
+    """Trust in an approval decision is established by which concrete
+    `ApprovalPolicy` class the composition root bound - never by comparing
+    a `decision_source` string at the point of use (docs/superpowers/specs/
+    2026-08-28-operation-journey-runner-design.md). Production must bind
+    exactly `TextualApprovalPolicy`; a TUI-free eval runner binds its own,
+    distinct `ScriptedApprovalPolicy` and never constructs an
+    `AgentUiController` at all."""
+    assert isinstance(env.controller._approval_policy, TextualApprovalPolicy)
+    assert isinstance(env.controller._approval_policy, ApprovalPolicy)
     await env.close()

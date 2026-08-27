@@ -71,6 +71,8 @@ from korvid.tools.approval import (
     TUI_KEYSTROKE_SOURCE,
     ApprovalDecision,
     ApprovalOutcome,
+    ApprovalPolicy,
+    ApprovalRequest,
     require_tui_keystroke_source,
 )
 from korvid.tools.executor import UIBridge, incarnation_of
@@ -478,6 +480,72 @@ def _collapse_decision(decision: ApprovalDecision) -> Literal["approved", "decli
     return "declined"
 
 
+class TextualApprovalPolicy(ApprovalPolicy):
+    """The one production `ApprovalPolicy`: a real `ConfirmScreen`, resolved
+    only by a fresh user keystroke after the dialog is posted.
+
+    `AgentUiController.__init__` binds exactly one instance of this class
+    (never any other `ApprovalPolicy`) - the composition-root fact a
+    production-composition test verifies with `isinstance`. Everything
+    below is `_await_user_approval`'s prior body, unchanged in behavior:
+    only its parameters became `request.*` attributes and its `self`
+    became `self._controller`.
+    """
+
+    def __init__(self, controller: AgentUiController) -> None:
+        self._controller = controller
+
+    async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        controller = self._controller
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + controller._approval_timeout
+        if not await controller._wait_until_surfaceable(deadline):
+            return ApprovalDecision.expired(decision_source="timeout")
+        fut: asyncio.Future[bool | None] = loop.create_future()
+
+        def _done(confirmed: bool | None) -> None:
+            if not fut.done():
+                fut.set_result(confirmed)
+
+        screen = controller._writes.confirm_screen(
+            request.title,
+            request.operation,
+            require_name=request.require_name,
+            preview=list(request.preview) if request.preview is not None else None,
+            managed_note=request.managed_note,
+            impact_lines=request.impact_lines,
+        )
+        try:
+            await controller._ui.push_screen(screen, _done)
+            # Recheck after mounting: surfacing the dialog (or push_screen
+            # itself) can consume the last of the budget, and a fixed minimum
+            # here would quietly extend the expiry contract past
+            # the approval timeout.
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+            confirmed = await asyncio.wait_for(fut, timeout=remaining)
+            return _decision_from_confirm_screen(confirmed)
+        except asyncio.CancelledError:
+            # Turn interrupted (issue #170): never leave an orphaned dialog
+            # whose 'y' would resolve a dead future. The write cannot run.
+            # push_screen is inside the guarded region so a cancel landing
+            # during the mount itself still dismisses the dialog.
+            controller._screens.dismiss_if_current(screen)
+            raise
+        except TimeoutError:
+            # Late keystrokes are a no-op (the future is already resolved),
+            # but clear the dialog when possible so it doesn't linger.
+            if controller._ui.is_current_screen(screen):
+                controller._screens.dismiss_if_current(screen)
+            elif controller._screens.is_stacked(screen):
+                controller._ui.notify(
+                    "Agent write request expired - dismiss the pending dialog with Esc",
+                    severity="warning",
+                )
+            return ApprovalDecision.expired(decision_source="timeout")
+
+
 class AgentUiController:
     """Owns the agent's session, its turn tasks, and its UI bridge reads."""
 
@@ -546,6 +614,11 @@ class AgentUiController:
         self._approval_timeout = (
             APPROVAL_TIMEOUT if approval_timeout_seconds is None else approval_timeout_seconds
         )
+        #: The one production ApprovalPolicy: bound once, here, to a real
+        #: ConfirmScreen. A TUI-free caller (an eval runner) never
+        #: constructs an AgentUiController and so never sees this policy;
+        #: it binds its own, distinct ApprovalPolicy instead (issue TBD).
+        self._approval_policy: ApprovalPolicy = TextualApprovalPolicy(self)
         self._refresh_status = refresh_status
         self._follow_bridge = follow_bridge
         self._tasks = tasks if tasks is not None else AppLoopTurnTasks()
@@ -2065,64 +2138,22 @@ class AgentUiController:
         managed_note: str | None = None,
         impact_lines: tuple[str, ...] | None = None,
     ) -> Literal["approved", "declined", "expired"]:
-        """Show a ConfirmScreen and wait for the user's decision. Only real key
-        input can resolve it. While the agent panel is collapsed, or another
-        screen (a user dialog, describe, picker) is on top, the request stays
-        pending instead of pushing a modal (spec 6.1: approval dialogs are
-        never auto-opened from the collapsed state, and never stacked over an
-        active dialog where a stray keystroke could approve it); it surfaces
-        when the panel is expanded with a clear screen. Pending and on-screen
-        time share one deadline, so an unanswered or never-surfaced request
-        resolves as "expired" (distinct from an explicit "declined", so the
-        agent is never told the user declined when nobody answered) and an
-        agent turn can never hang forever."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._approval_timeout
-        if not await self._wait_until_surfaceable(deadline):
-            return _collapse_decision(ApprovalDecision.expired(decision_source="timeout"))
-        fut: asyncio.Future[bool | None] = loop.create_future()
-
-        def _done(confirmed: bool | None) -> None:
-            if not fut.done():
-                fut.set_result(confirmed)
-
-        screen = self._writes.confirm_screen(
-            title,
-            operation,
+        """Ask the bound `ApprovalPolicy` to decide, then collapse its
+        answer to the legacy three-value contract every caller of this
+        method already depends on. Production binds `TextualApprovalPolicy`
+        (see `__init__`), which shows a ConfirmScreen and waits for a real
+        key event; see that class for the pending/surfacing/expiry
+        behavior this docstring used to describe directly."""
+        request = ApprovalRequest(
+            title=title,
+            operation=operation,
             require_name=require_name,
-            preview=preview,
+            preview=tuple(preview) if preview is not None else None,
             managed_note=managed_note,
             impact_lines=impact_lines,
         )
-        try:
-            await self._ui.push_screen(screen, _done)
-            # Recheck after mounting: surfacing the dialog (or push_screen
-            # itself) can consume the last of the budget, and a fixed minimum
-            # here would quietly extend the expiry contract past
-            # the approval timeout.
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise TimeoutError
-            confirmed = await asyncio.wait_for(fut, timeout=remaining)
-            return _collapse_decision(_decision_from_confirm_screen(confirmed))
-        except asyncio.CancelledError:
-            # Turn interrupted (issue #170): never leave an orphaned dialog
-            # whose 'y' would resolve a dead future. The write cannot run.
-            # push_screen is inside the guarded region so a cancel landing
-            # during the mount itself still dismisses the dialog.
-            self._screens.dismiss_if_current(screen)
-            raise
-        except TimeoutError:
-            # Late keystrokes are a no-op (the future is already resolved),
-            # but clear the dialog when possible so it doesn't linger.
-            if self._ui.is_current_screen(screen):
-                self._screens.dismiss_if_current(screen)
-            elif self._screens.is_stacked(screen):
-                self._ui.notify(
-                    "Agent write request expired - dismiss the pending dialog with Esc",
-                    severity="warning",
-                )
-            return _collapse_decision(ApprovalDecision.expired(decision_source="timeout"))
+        decision = await self._approval_policy.decide(request)
+        return _collapse_decision(decision)
 
     # ------------------------------------------------------------------
     # External write proposals — delegated, never implemented here

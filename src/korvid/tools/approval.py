@@ -109,7 +109,7 @@ class ApprovalRequest:
     title: str
     operation: str
     require_name: str | None = None
-    preview: str | None = None
+    preview: tuple[str, ...] | None = None
     managed_note: str | None = None
     impact_lines: tuple[str, ...] | None = None
 
