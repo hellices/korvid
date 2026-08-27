@@ -28,6 +28,8 @@ approval (today, only the Textual app) and handed to
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -93,3 +95,86 @@ def require_tui_keystroke_source(decision: ApprovalDecision) -> ApprovalDecision
             f"approval source {decision.decision_source!r} is not allowed to authorize a write"
         )
     return decision
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRequest:
+    """Everything a policy may use to decide, mirroring the Textual dialog's
+    own presentation fields (title, operation description, an optional
+    required-name confirmation, a preview, an ownership note, and impact
+    lines). A scripted/non-interactive policy is free to ignore all of it
+    and decide purely from its own pre-authored sequence.
+    """
+
+    title: str
+    operation: str
+    require_name: str | None = None
+    preview: str | None = None
+    managed_note: str | None = None
+    impact_lines: tuple[str, ...] | None = None
+
+
+class ApprovalPolicy(ABC):
+    """A composition-root-bound capability that decides approval requests.
+
+    Trust in a decision is established by *which concrete class* a
+    composition root instantiated - verified with `isinstance` in a
+    composition test - never by inspecting `ApprovalDecision.decision_source`
+    at the point a decision is consumed. Production
+    (`korvid.ui.agent_ui_controller.AgentUiController`) binds exactly one
+    `TextualApprovalPolicy`; a TUI-free eval runner binds its own, distinct
+    `ScriptedApprovalPolicy`. Do not add a generic "trusted source string"
+    check anywhere that consumes an `ApprovalDecision` - that is exactly the
+    forgeable pattern this type replaces.
+    """
+
+    @abstractmethod
+    async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        """Decide one approval request."""
+
+
+#: The `decision_source` every `ScriptedApprovalPolicy` decision carries.
+#: Distinct from `TUI_KEYSTROKE_SOURCE` by construction - a scripted
+#: decision can never be mistaken for one `require_tui_keystroke_source`
+#: (a check specific to `TextualApprovalPolicy`'s own self-consistency, not
+#: a generic gate) would accept.
+SCRIPTED_POLICY_SOURCE: Final[str] = "scripted_policy"
+
+
+class ScriptedApprovalPolicy(ApprovalPolicy):
+    """A deterministic, pre-authored approval policy for TUI-free runs.
+
+    No sleeps, no timers: `decide()` pops the next scripted outcome
+    synchronously. An unexpected extra call (a write the script did not
+    anticipate) fails closed to `DECLINE` rather than raising or silently
+    approving - a fixture that expects zero writes must see every
+    unrequested write refused, never crash the run.
+
+    `interventions[i]`, if given and not `None`, runs immediately before
+    step `i`'s outcome is returned when that outcome is `APPROVE`, standing
+    in for a fixture's declared `dialog_intervention`: there is no dialog to
+    intervene "during" in a TUI-free run, so this is the one point that
+    models it deterministically.
+    """
+
+    def __init__(
+        self,
+        outcomes: Sequence[ApprovalOutcome],
+        *,
+        interventions: Sequence[Callable[[], None] | None] | None = None,
+    ) -> None:
+        self._outcomes = list(outcomes)
+        self._interventions = list(interventions) if interventions is not None else []
+        self._index = 0
+
+    async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        if self._index >= len(self._outcomes):
+            return ApprovalDecision(ApprovalOutcome.DECLINE, SCRIPTED_POLICY_SOURCE)
+        outcome = self._outcomes[self._index]
+        intervention = (
+            self._interventions[self._index] if self._index < len(self._interventions) else None
+        )
+        self._index += 1
+        if intervention is not None and outcome is ApprovalOutcome.APPROVE:
+            intervention()
+        return ApprovalDecision(outcome, SCRIPTED_POLICY_SOURCE)
