@@ -424,11 +424,23 @@ def test_exclude_docs_rejects_patterns_the_walk_cannot_resolve() -> None:
 
 def test_published_sources_match_the_committed_exclude_docs_block() -> None:
     """The real config must keep producing the published set the walk asserts on."""
-    assert _excluded_prefixes() == ("overrides", "dev/plans", "dev/quality-gates.md", "superpowers")
+    assert _excluded_prefixes() == (
+        "overrides",
+        "dev/plans",
+        "dev/quality-gates.md",
+        "dev/specs/2026-07-24-korvid-engineering-standards.md",
+        "superpowers",
+    )
     published = {path.relative_to(DOCS).as_posix() for path in _public_markdown_sources()}
     assert "index.md" in published
     assert "tui.md" in published
     assert "dev/quality-gates.md" not in published
+    assert "dev/specs/2026-07-24-korvid-engineering-standards.md" not in published
+    # The nav'd architecture spec and the performance page's linked
+    # qualification spec must stay published: excluding one internal spec
+    # must not take its siblings down with it.
+    assert "dev/specs/2026-08-12-korvid-architecture.md" in published
+    assert "dev/specs/2026-08-06-large-cluster-performance-qualification-design.md" in published
     assert not any(
         page.startswith(("overrides/", "dev/plans/", "superpowers/")) for page in published
     )
@@ -456,15 +468,20 @@ def test_dev_readme_does_not_link_missing_directory_indexes() -> None:
     assert "https://github.com/hellices/korvid/tree/main/docs/dev/plans" in dev_readme
 
 
-def test_contributor_page_links_to_quality_gates_in_the_repository() -> None:
-    """`quality-gates.md` is excluded from the site, so link to it on GitHub instead.
+def test_contributor_page_does_not_reference_quality_gates_at_all() -> None:
+    """The quality-gates bullet was dropped, not just relinked to GitHub.
 
-    A local `](quality-gates.md)` link resolves to a page MkDocs never
-    builds, producing a dead link on the published site.
+    An earlier fix pointed `quality-gates.md` at its GitHub source once the
+    file was excluded from the build. The operator has since decided the
+    whole topic has no place on the official site (it also leaked into the
+    search index via the engineering-standards spec), so the contributor
+    page must not reference it under either spelling — not as a local link,
+    not as a GitHub link, and not as descriptive prose.
     """
     source = (DOCS / "dev" / "README.md").read_text(encoding="utf-8")
-    assert "https://github.com/hellices/korvid/blob/main/docs/dev/quality-gates.md" in source
-    assert "](quality-gates.md)" not in source
+    lowered = source.lower()
+    assert "quality gate" not in lowered
+    assert "quality-gates" not in lowered
 
 
 #: What each pruned public guide has to keep pointing at. Cutting a page

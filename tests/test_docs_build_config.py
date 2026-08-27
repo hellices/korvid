@@ -19,6 +19,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
+import sys
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -529,3 +531,40 @@ def test_quality_gates_are_not_part_of_the_public_site() -> None:
     nav_text = json.dumps(config["nav"])
     assert "dev/quality-gates.md" in excluded
     assert "quality-gates" not in nav_text.lower()
+
+
+def test_search_index_excludes_all_quality_gate_content(tmp_path: Path) -> None:
+    """No built page — not just `dev/quality-gates.md` — may leak the topic.
+
+    `dev/quality-gates.md` is excluded from the build, but
+    `dev/specs/2026-07-24-korvid-engineering-standards.md` documents the same
+    internal quality gates under its own heading (`## 4. Quality Gates —
+    Three Layers`) and is *not* excluded, so MkDocs still indexes it. The
+    operator has decided this internal process detail has no place on the
+    official site's search, so no entry's title, text, or location may
+    mention it under either spelling.
+    """
+    site_dir = tmp_path / "site"
+    result = subprocess.run(
+        [sys.executable, "-m", "mkdocs", "build", "--strict", "--site-dir", str(site_dir)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+    index_path = site_dir / "search" / "search_index.json"
+    entries = json.loads(index_path.read_text(encoding="utf-8"))["docs"]
+    assert entries, "the search index must not be empty"
+
+    for entry in entries:
+        haystack = " ".join(
+            str(entry.get(field, "")) for field in ("title", "text", "location")
+        ).lower()
+        assert "quality gate" not in haystack, (
+            f"{entry.get('location')!r} leaks 'quality gate' into the public search index"
+        )
+        assert "quality-gates" not in haystack, (
+            f"{entry.get('location')!r} leaks 'quality-gates' into the public search index"
+        )

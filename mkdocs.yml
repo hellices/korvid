@@ -14,6 +14,7 @@ exclude_docs: |
   overrides/
   dev/plans/
   dev/quality-gates.md
+  dev/specs/2026-07-24-korvid-engineering-standards.md
   superpowers/
 
 theme:
