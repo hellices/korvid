@@ -561,8 +561,8 @@ def _container_names(pod: PodSummary) -> list[str]:
     return [names[index] if index < len(names) else f"container-{index}" for index in range(count)]
 
 
-def _container_resources(pod: PodSummary) -> dict[str, Any]:
-    """The row's requests, plus the limits that make a Guaranteed pod one."""
+def _pod_resources(pod: PodSummary) -> dict[str, Any]:
+    """The row's aggregate requests, plus matching Guaranteed limits."""
     requests = {
         key: value
         for key, value in (("cpu", pod.cpu_request), ("memory", pod.mem_request))
@@ -580,14 +580,13 @@ def _container_resources(pod: PodSummary) -> dict[str, Any]:
 
 def _pod_spec(pod: PodSummary) -> dict[str, Any]:
     """A `spec` stating only what the pods table already shows."""
-    containers: list[dict[str, Any]] = []
-    for name in _container_names(pod):
-        container: dict[str, Any] = {"name": name}
-        resources = _container_resources(pod)
-        if resources:
-            container["resources"] = resources
-        containers.append(container)
+    containers = [{"name": name} for name in _container_names(pod)]
     spec: dict[str, Any] = {"containers": containers, "restartPolicy": "Always"}
+    resources = _pod_resources(pod)
+    if resources:
+        # The table carries the pod's effective aggregate, not a per-container
+        # split. Pod-level resources preserve that fact without inventing one.
+        spec["resources"] = resources
     if pod.node and pod.node != "-":
         # "-" is korvid's placeholder for an unscheduled pod, and a real
         # manifest says exactly that by carrying no `nodeName` at all.

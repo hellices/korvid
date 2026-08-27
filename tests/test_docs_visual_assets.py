@@ -2255,6 +2255,25 @@ def test_running_demo_pod_is_ready_only_when_every_container_is_ready() -> None:
     assert harness._pod_status(pod)["conditions"] == [{"type": "Ready", "status": "False"}]
 
 
+def test_multi_container_demo_manifest_preserves_aggregate_resource_requests() -> None:
+    harness = _demo_harness()
+    pod = harness._pod(
+        "multi-container",
+        "shop",
+        ready="2/2",
+        cpu="500m",
+        mem="256Mi",
+    )
+
+    spec = harness._pod_spec(pod)
+
+    assert spec["resources"]["requests"] == {
+        "cpu": "500m",
+        "memory": "256Mi",
+    }
+    assert all("resources" not in container for container in spec["containers"])
+
+
 def test_diagnose_pod_reports_the_scheduled_nodes_conditions_not_unavailable() -> None:
     """The regression this guards: `RELATED` must resolve the real node.
 
