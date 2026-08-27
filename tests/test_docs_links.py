@@ -265,7 +265,7 @@ def test_local_media_urls_ignores_inline_code_examples(tmp_path: Path) -> None:
 def test_raw_html_hero_primary_cta_resolves_to_a_docs_source() -> None:
     """Raw HTML bypasses MkDocs' relative-link tree processor, so resolve it here."""
     index = (DOCS / "index.md").read_text(encoding="utf-8")
-    hero = index[index.index('<section class="hero">') : index.index("</section>")]
+    hero = index[index.index('<section class="hero') : index.index("</section>")]
     match = re.search(r'<a class="md-button md-button--primary" href="([^"]+)"', hero)
     assert match is not None, "the hero must keep its primary CTA"
 
@@ -319,14 +319,17 @@ def test_raw_html_media_resolves_from_every_published_page_url() -> None:
             )
             checked.add((source.relative_to(ROOT).as_posix(), url))
 
+    #: Every storytelling capture the compact site still renders. The homepage
+    #: merge retired the evidence mosaic, so `diagnosis.png` and
+    #: `merged-logs.png` stay checked in and documented in
+    #: `docs/demo/visual-storytelling.md` without being embedded anywhere —
+    #: this walk only covers assets a browser really requests.
     expected_storytelling = {
         "agent-demo.mp4",
         "agent-poster.png",
         "cockpit-poster.png",
-        "diagnosis.png",
         "mcp-follow-demo.mp4",
         "mcp-poster.png",
-        "merged-logs.png",
         "relationship-graph.png",
     }
     storytelling = {

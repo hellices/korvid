@@ -1303,6 +1303,37 @@ def test_mcp_capture_instructions_derive_the_readme_gif_from_the_approved_clip()
     assert "assets/scenes/mcp-poster.png" in landing
 
 
+def test_compact_landing_keeps_every_approved_recording_and_its_poster() -> None:
+    """Compacting the page must remove duplication, never approved evidence.
+
+    The homepage now authors one media stage instead of a hero clip plus a
+    three-scene switcher, so the Direct recording appears exactly once. What
+    it must not do is lose a driver: all three reviewed recordings, each
+    with the reviewed poster frame that stands in for it before selection,
+    stay on the page — the Direct clip eagerly, the Agent and MCP clips
+    behind the `data-` attributes the controller promotes.
+    """
+    landing = LANDING.read_text(encoding="utf-8")
+    assert landing.count("<video") == 3, (
+        "the page authors one recording per driver: Direct, Agent, MCP"
+    )
+    for authored, times in (
+        ('src="assets/demo.mp4"', 1),
+        ('data-src="assets/scenes/agent-demo.mp4"', 1),
+        ('data-src="assets/scenes/mcp-follow-demo.mp4"', 1),
+        ('poster="assets/scenes/cockpit-poster.png"', 1),
+        ('data-poster="assets/scenes/agent-poster.png"', 1),
+        ('data-poster="assets/scenes/mcp-poster.png"', 1),
+    ):
+        assert landing.count(authored) == times, (
+            f"the compact landing page must author {authored!r} exactly {times} time(s)"
+        )
+    for recording in ("demo.mp4", "agent-demo.mp4", "mcp-follow-demo.mp4"):
+        assert (DOCS / "assets" / recording).is_file() or (SCENES / recording).is_file(), (
+            f"{recording} must still be checked in; compacting the page removes no media"
+        )
+
+
 def test_readme_gif_inherits_the_clips_geometry_and_documented_frame_rate() -> None:
     """The documented recipe and the checked-in GIF must agree.
 

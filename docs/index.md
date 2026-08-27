@@ -6,17 +6,31 @@ hide:
   - toc
 ---
 
-<section class="hero">
+<section class="hero hero--drivers" data-scene-switcher>
   <div class="hero-heading">
     <p class="eyebrow">AI-NATIVE KUBERNETES TUI</p>
     <h1>See the cluster.<br>Drive the response.</h1>
   </div>
-  <figure class="hero-demo">
-    <div class="hero-demo__frame">
-      <div class="hero-demo__bar" aria-hidden="true"><span></span><strong>ctx:(current) · ns:shop</strong></div>
-      <video src="assets/demo.mp4" poster="assets/scenes/cockpit-poster.png" data-autoplay-video controls muted loop playsinline preload="metadata" aria-label="korvid browsing, filtering, describing, and following logs for a failing workload">Your browser does not support the korvid demo video.</video>
+  <figure class="hero-demo hero-driver-stage">
+    <div class="scene-tabs" role="tablist" aria-label="Choose who drives korvid">
+      <button id="scene-tab-direct" type="button" role="tab" aria-selected="true" aria-controls="scene-direct">You drive</button>
+      <button id="scene-tab-agent" type="button" role="tab" aria-selected="false" aria-controls="scene-agent" tabindex="-1">Agent delegates</button>
+      <button id="scene-tab-mcp" type="button" role="tab" aria-selected="false" aria-controls="scene-mcp" tabindex="-1">MCP connects</button>
     </div>
-    <figcaption><strong>Real korvid, synthetic cluster.</strong> The cockpit needs only your kubeconfig; AI is optional.</figcaption>
+    <div class="scene-panels">
+      <article id="scene-direct" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-direct" tabindex="0">
+        <video src="assets/demo.mp4" poster="assets/scenes/cockpit-poster.png" controls muted loop playsinline preload="metadata" aria-label="korvid browsing, filtering, describing, and following logs for a failing workload">Your browser does not support the korvid demo video.</video>
+      </article>
+      <article id="scene-agent" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-agent" tabindex="0">
+        <video data-src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="A deterministic synthetic-cluster walkthrough: a prompt submitted in korvid's real AgentPanel, real diagnose_pod and get_logs reads that agent follow mirrors onto the screen, and a grounded answer citing E1 and E2">Your browser does not support this deterministic synthetic-cluster walkthrough.</video>
+        <img class="scene-panel__fallback" src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel ending a deterministic synthetic-cluster walkthrough: the submitted prompt, real diagnose_pod and get_logs tool events, a grounded answer citing E1 and E2, and the describe pane agent follow mirrored beside it">
+      </article>
+      <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
+        <video data-src="assets/scenes/mcp-follow-demo.mp4" class="mcp-media" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="A clean local MCP SDK client making real read-only MCP requests over Streamable HTTP while korvid follow mode mirrors each answer onto the screen">Your browser does not support this MCP follow demo.</video>
+        <img class="scene-panel__fallback mcp-media" src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="A clean local MCP SDK client reading a synthetic cluster over Streamable HTTP while korvid follow mode mirrors the same table, describe, and log views">
+      </article>
+    </div>
+    <figcaption><strong>Real korvid, synthetic cluster.</strong> The Agent tab is a deterministic synthetic-cluster walkthrough: real read tools over a fixture, not a live model, a live cluster, or an answer-quality claim.</figcaption>
   </figure>
   <div class="hero-copy-column">
     <p class="hero-copy">Operate from the keyboard, delegate bounded investigation to an agent, or connect an external assistant over MCP. Every write still stops for you.</p>
@@ -28,138 +42,44 @@ hide:
   </div>
 </section>
 
-<section class="scene-switcher" data-scene-switcher aria-labelledby="scene-switcher-title">
-  <div class="section-heading">
-    <p class="eyebrow">ONE OPERATIONAL EXPERIENCE</p>
-    <h2 id="scene-switcher-title">One incident. Three ways to drive it.</h2>
-    <p>Find the failing workload, inspect its evidence, and land on the useful screen—directly, through the embedded agent, or from an external MCP client.</p>
-  </div>
-  <div class="scene-tabs" role="tablist" aria-label="Choose who drives korvid">
-    <button id="scene-tab-direct" type="button" role="tab" aria-selected="true" aria-controls="scene-direct">You drive</button>
-    <button id="scene-tab-agent" type="button" role="tab" aria-selected="false" aria-controls="scene-agent" tabindex="-1">Agent delegates</button>
-    <button id="scene-tab-mcp" type="button" role="tab" aria-selected="false" aria-controls="scene-mcp" tabindex="-1">MCP connects</button>
-  </div>
-  <div class="scene-panels">
-    <article id="scene-direct" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-direct" tabindex="0">
-      <video src="assets/demo.mp4" poster="assets/scenes/cockpit-poster.png" controls muted loop playsinline preload="none" aria-label="An operator filters to a failing pod, describes it, and opens its logs in korvid">Your browser does not support this direct-operation demo.</video>
-      <div><strong>Input</strong> Keyboard intent</div>
-      <div><strong>Evidence</strong> Watch-backed table + fresh describe and log reads</div>
-      <div><strong>Result</strong> The real korvid view</div>
-      <p>You stay on the live cockpit and choose every next step.</p>
-      <a href="tui/">Explore the TUI</a>
+<section class="feature-highlights" aria-labelledby="highlights-title">
+  <h2 id="highlights-title">One product contract, whoever drives.</h2>
+  <div class="feature-highlights__grid">
+    <article>
+      <span>SEE</span>
+      <p>Keyboard-first browsing of live resource tables, log streams, and metadata-only relationships.</p>
+      <ul>
+        <li><a href="tui/">Resource cockpit</a></li>
+        <li><a href="tui/#work-with-logs">Log workflow</a></li>
+        <li><a href="resource-relationships/">Relationships</a></li>
+      </ul>
     </article>
-    <article id="scene-agent" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-agent" tabindex="0">
-      <video data-src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="A deterministic synthetic-cluster walkthrough: a prompt submitted in korvid's real AgentPanel, real diagnose_pod and get_logs reads that agent follow mirrors onto the screen, and a grounded answer citing E1 and E2">Your browser does not support this deterministic synthetic-cluster walkthrough.</video>
-      <img class="scene-panel__fallback" src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel ending a deterministic synthetic-cluster walkthrough: the submitted prompt, real diagnose_pod and get_logs tool events, a grounded answer citing E1 and E2, and the describe pane agent follow mirrored beside it">
-      <div><strong>Input</strong> Prompt submitted through the real AgentPanel</div>
-      <div><strong>Evidence</strong> Real read tools over a deterministic synthetic cluster</div>
-      <div><strong>Result</strong> Grounded answer rendered by the real Agent loop</div>
-      <p>A deterministic synthetic-cluster walkthrough, not a live-model quality claim. The describe pane beside the panel is agent follow mirroring a read.</p>
-      <a href="agent/">Explore the embedded agent</a>
+    <article>
+      <span>GROUND</span>
+      <p>Bounded fresh reads ground the embedded agent and every MCP client. Those reads and the watch-backed table land at different moments, so snapshots can differ.</p>
+      <ul>
+        <li><a href="agent/">Embedded agent</a></li>
+        <li><a href="mcp/">MCP tools</a></li>
+        <li><a href="tui/#follow-one-signal">Diagnosis surfaces</a></li>
+      </ul>
     </article>
-    <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
-      <video data-src="assets/scenes/mcp-follow-demo.mp4" class="mcp-media" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="A clean local MCP SDK client making real read-only MCP requests over Streamable HTTP while korvid follow mode mirrors each answer onto the screen">Your browser does not support this MCP follow demo.</video>
-      <img class="scene-panel__fallback mcp-media" src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="A clean local MCP SDK client reading a synthetic cluster over Streamable HTTP while korvid follow mode mirrors the same table, describe, and log views">
-      <div><strong>Input</strong> Real read-only MCP requests from a clean local SDK client</div>
-      <div><strong>Evidence</strong> Tool-specific bounded fresh reads</div>
-      <div><strong>Result</strong> Real follow navigation mirroring each answer</div>
-      <p>MCP exposes bounded tools; write proposals are off by default.</p>
-      <a href="mcp/">Explore MCP</a>
-    </article>
-  </div>
-</section>
-
-<section class="contract-map" aria-labelledby="contract-title">
-  <div class="section-heading">
-    <p class="eyebrow">ONE PRODUCT CONTRACT</p>
-    <h2 id="contract-title">Different reads. Shared context and safety.</h2>
-    <p>Korvid keeps each surface honest about where its evidence came from while preserving the same operational frame.</p>
-  </div>
-  <div class="contract-map__drivers">
-    <article><span>Human operator</span><strong>Watch-backed table + fresh describe and log reads</strong></article>
-    <article><span>Model / provider</span><strong>Bounded fresh reads</strong></article>
-    <article><span>Editor / external assistant</span><strong>Bounded fresh reads over MCP</strong></article>
-  </div>
-  <div class="contract-map__shared" role="group" aria-label="Shared operational contract">
-    <strong>Active cluster context</strong>
-    <strong>Navigation semantics</strong>
-    <strong>Approval gate</strong>
-    <strong>Fail-closed audit</strong>
-  </div>
-  <p class="contract-map__truth">The watch-backed table, korvid's own describe and log reads, and each tool's fresh reads are taken at different moments, so snapshots can differ without splitting the product contract.</p>
-  <a href="overview/">Inspect the complete architecture</a>
-</section>
-
-<section class="write-path" aria-labelledby="write-path-title">
-  <div class="section-heading">
-    <p class="eyebrow">SHARP TOOLS. HUMAN HANDS.</p>
-    <h2 id="write-path-title">Every mutation stops at the same gate.</h2>
-  </div>
-  <div class="write-path__origins" role="group" aria-label="Write initiators">
-    <span>Direct action</span>
-    <span>Agent proposal</span>
-    <span>Opt-in MCP proposal</span>
-  </div>
-  <ol class="write-path__stages">
-    <li data-stage="observe"><span>01</span><strong>Observe</strong><small>Gather bounded evidence</small></li>
-    <li data-stage="propose"><span>02</span><strong>Propose</strong><small>Render the intended change</small></li>
-    <li data-stage="confirm"><span>03</span><strong>Confirm</strong><small>Fresh human keystroke</small></li>
-    <li data-stage="audit"><span>04</span><strong>Audit</strong><small>Append must succeed</small></li>
-    <li data-stage="execute"><span>05</span><strong>Execute</strong><small>Validate and mutate</small></li>
-  </ol>
-  <p class="write-path__blocked"><strong>Audit write failed</strong> <span aria-hidden="true">→</span> action blocked. The audit path is fail-closed.</p>
-  <p class="write-path__boundary">Embedded provider payloads are masked; MCP result disclosure is tool-specific. <a href="threat-model/">Inspect both boundaries.</a></p>
-</section>
-
-<section class="evidence-mosaic" aria-labelledby="evidence-title">
-  <div class="section-heading">
-    <p class="eyebrow">PRODUCT EVIDENCE</p>
-    <h2 id="evidence-title">Built for the incident, not the screenshot.</h2>
-    <p>Each surface below is a real korvid view captured against synthetic or disposable local cluster data.</p>
-  </div>
-  <div class="evidence-mosaic__grid">
-    <article class="evidence-card evidence-card--wide">
-      <figure><a class="evidence-card__full" href="assets/scenes/cockpit-poster.png"><img src="assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table for a synthetic shop namespace with the crash-looping payment worker selected and its BackOff warning in the ops hint strip"></a><figcaption>Resource cockpit</figcaption></figure>
-      <p>Browse and filter live resources, keeping status, scope, and restart signals in one keyboard path.</p>
-      <a href="tui/">Browse the cockpit</a>
-    </article>
-    <article class="evidence-card">
-      <figure><a class="evidence-card__full" href="assets/scenes/relationship-graph.png"><img src="assets/scenes/relationship-graph.png" width="1280" height="720" loading="lazy" alt="Korvid relationship screen showing a pod's declared ConfigMap dependency and the Service that depends on the pod"></a><figcaption>Relationship graph</figcaption></figure>
-      <p>Follow metadata-only dependencies without exposing Secret values.</p>
-      <a href="resource-relationships/">Follow relationships</a>
-    </article>
-    <article class="evidence-card">
-      <figure><a class="evidence-card__full" href="assets/scenes/merged-logs.png"><img src="assets/scenes/merged-logs.png" width="1280" height="720" loading="lazy" alt="Korvid split workspace streaming one synthetic payment worker pod's logs beside the filtered table"></a><figcaption>Pod log stream</figcaption></figure>
-      <p>Follow, filter, and reconnect a selected pod's logs beside the table you started from.</p>
-      <a href="tui/#work-with-logs">Read the log workflow</a>
-    </article>
-    <article class="evidence-card">
-      <figure><a class="evidence-card__full" href="assets/scenes/diagnosis.png"><img src="assets/scenes/diagnosis.png" width="1280" height="720" loading="lazy" alt="Korvid describe view showing a synthetic failing pod and warning events"></a><figcaption>Operational evidence</figcaption></figure>
-      <p>Put manifests, warning events, and failure context beside the selected resource.</p>
-      <a href="tui/#follow-one-signal">Inspect diagnosis surfaces</a>
-    </article>
-    <article class="evidence-card">
-      <figure><a class="evidence-card__full" href="assets/scenes/agent-poster.png"><img src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel ending a deterministic synthetic-cluster walkthrough: the submitted prompt, real diagnose_pod and get_logs tool events, a grounded answer citing E1 and E2, and the describe pane agent follow mirrored beside it"></a><figcaption>Agent panel walkthrough</figcaption></figure>
-      <p>A deterministic synthetic-cluster walkthrough: real read tools, a real evidence ledger, a grounded answer — not a live-model quality claim.</p>
-      <a href="agent/">Use the embedded agent</a>
-    </article>
-    <article class="evidence-card evidence-card--wide">
-      <figure><a class="evidence-card__full" href="assets/scenes/mcp-poster.png"><img src="assets/scenes/mcp-poster.png" class="mcp-media" width="1280" height="710" loading="lazy" alt="A clean local MCP SDK client reading a synthetic cluster over Streamable HTTP while korvid follow mode mirrors the same table, describe, and log views"></a><figcaption>MCP follow</figcaption></figure>
-      <p>Let an external assistant read bounded tools while korvid can mirror where it went.</p>
-      <a href="mcp/#read-once-or-follow-activity">Connect over MCP</a>
+    <article>
+      <span>CONTROL</span>
+      <p>Every write previews the change and waits for a fresh approval keystroke; a fail-closed audit append that fails blocks the action. MCP write proposals stay off by default.</p>
+      <ul>
+        <li><a href="ops/">Approval and audit</a></li>
+        <li><a href="threat-model/">Provider masking, MCP disclosure</a></li>
+        <li><a href="overview/">Architecture</a></li>
+      </ul>
     </article>
   </div>
 </section>
 
 <nav class="flight-paths" aria-labelledby="flight-paths-title">
-  <div class="section-heading">
-    <p class="eyebrow">CHOOSE A FLIGHT PATH</p>
-    <h2 id="flight-paths-title">Go from proof to practice.</h2>
-  </div>
+  <h2 id="flight-paths-title">Go from proof to practice.</h2>
   <div class="flight-paths__grid">
-    <a href="getting-started/"><strong>Operate a cluster</strong><span>Install and take the five-minute route.</span></a>
-    <a href="agent/"><strong>Add the embedded agent</strong><span>Choose a provider and inspect its boundary.</span></a>
-    <a href="mcp/"><strong>Connect an MCP client</strong><span>Expose bounded reads and optional proposals.</span></a>
+    <a href="getting-started/"><strong>Start operating</strong><span>Install korvid and take the five-minute route.</span></a>
+    <a href="agent/"><strong>Explore Agent and MCP</strong><span>Choose a provider, then expose bounded read-only tools.</span></a>
     <a href="performance/"><strong>Evaluate production use</strong><span>Check scale, air-gap, and threat assumptions.</span></a>
   </div>
 </nav>

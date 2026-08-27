@@ -311,21 +311,16 @@ def test_unnegated_folds_hyphenation_so_it_cannot_launder_a_claim() -> None:
     )
 
 
-def test_unnegated_accepts_the_shipped_agent_scene_and_tile_copy() -> None:
-    """Regression pin: the real Agent scene and evidence tile stay clean."""
+def test_unnegated_accepts_the_shipped_agent_scene_and_caption_copy() -> None:
+    """Regression pin: the real Agent panel and its stage caption stay clean."""
     scene = _section('<article id="scene-agent"', "</article>")
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    card = next(
-        card
-        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
-        if "agent-poster.png" in card
-    )
+    caption = _stage_caption()
     for overclaim in AGENT_CAPTURE_OVERCLAIMS:
         assert not _unnegated(scene, overclaim), (
-            f"the shipped Agent scene must not claim {overclaim!r}"
+            f"the shipped Agent panel must not claim {overclaim!r}"
         )
-        assert not _unnegated(card, overclaim), (
-            f"the shipped agent evidence tile must not claim {overclaim!r}"
+        assert not _unnegated(caption, overclaim), (
+            f"the shipped stage caption must not claim {overclaim!r}"
         )
 
 
@@ -341,8 +336,33 @@ def _plan() -> str:
     return VISUAL_STORYTELLING_PLAN.read_text(encoding="utf-8")
 
 
+def _hero() -> str:
+    """The hero section, which is also the page's only scene switcher."""
+    return _section('<section class="hero hero--drivers"', "</section>")
+
+
 def _scene_switcher() -> str:
-    return _section('<section class="scene-switcher"', "</section>")
+    """The merged driver stage: the tab strip, the three panels, the caption."""
+    return _section('<figure class="hero-demo hero-driver-stage"', "</figure>")
+
+
+def _highlights() -> str:
+    return _section('<section class="feature-highlights"', "</section>")
+
+
+def _stage_caption() -> str:
+    """The one caption that speaks for all three recordings' provenance."""
+    caption = re.search(r"<figcaption>.*?</figcaption>", _scene_switcher(), re.DOTALL)
+    assert caption is not None, "the driver stage must keep its shared provenance caption"
+    return caption.group(0)
+
+
+def _highlight(label: str) -> str:
+    """One SEE / GROUND / CONTROL card of the highlights section."""
+    cards = re.findall(r"<article>.*?</article>", _highlights(), re.DOTALL)
+    matching = [card for card in cards if f">{label}<" in card]
+    assert len(matching) == 1, f"exactly one highlight must carry the {label!r} promise"
+    return matching[0]
 
 
 def _strip_css_comments(css: str) -> str:
@@ -624,15 +644,21 @@ def test_footer_link_targets_are_real_documentation_pages() -> None:
 
 
 def test_hero_leads_with_real_korvid_media() -> None:
-    hero = _section('<section class="hero">', "</section>")
-    assert 'class="hero-demo"' in hero
+    hero = _hero()
+    assert 'class="hero-demo hero-driver-stage"' in hero, (
+        "the hero's media column is now the driver stage itself, so the hero keeps "
+        "its media box and gains the stage hook the compact CSS bounds"
+    )
+    assert "data-scene-switcher" in hero, (
+        "the merged hero is the switcher root the controller enhances"
+    )
     assert 'src="assets/demo.mp4"' in hero
     assert 'poster="assets/scenes/cockpit-poster.png"' in hero
     assert "hero-panel" not in hero
 
 
 def test_hero_media_is_controllable_and_has_a_text_fallback() -> None:
-    hero = _section('<section class="hero">', "</section>")
+    hero = _hero()
     video = re.search(r"<video\b[^>]*>", hero)
     assert video is not None
     hero_video = video.group(0)
@@ -643,8 +669,9 @@ def test_hero_media_is_controllable_and_has_a_text_fallback() -> None:
         assert re.search(rf"\b{attribute}\b", hero_video)
     assert 'preload="metadata"' in hero_video
     assert not re.search(r"(?<!data-)\bautoplay\b", hero_video)
-    assert "data-autoplay-video" in hero_video, (
-        "the hero video must opt into the visibility-aware GIF-like controller behavior"
+    assert "data-autoplay-video" not in hero, (
+        "the merged stage is driven by the scene-switcher half of the controller; a "
+        "second `data-autoplay-video` hook would observe the same player twice"
     )
     assert "Your browser does not support the korvid demo video." in hero
     assert "<figcaption>" in hero
@@ -677,9 +704,9 @@ def test_hero_becomes_two_columns_only_at_wide_widths() -> None:
 
 def test_hero_keeps_heading_then_demo_then_copy_in_source_and_desktop_grid() -> None:
     """Mobile/tablet flow must surface the product before the supporting copy."""
-    hero = _section('<section class="hero">', "</section>")
+    hero = _hero()
     heading = hero.find('class="hero-heading"')
-    demo = hero.find('class="hero-demo"')
+    demo = hero.find('class="hero-demo hero-driver-stage"')
     copy = hero.find('class="hero-copy-column"')
     assert heading != -1, "the hero must keep a dedicated .hero-heading wrapper"
     assert demo != -1, "the hero must keep the real product demo figure"
@@ -709,15 +736,38 @@ def test_hero_demo_fills_its_product_media_column() -> None:
     assert "width: 100%" in demo_rule
 
 
-def test_visual_storytelling_plan_hero_markup_matches_the_shipped_sources() -> None:
-    """The plan's hero markup must stay identical to the shipped landing page."""
-    plan_hero = _fenced_block_after(
-        _plan(),
-        "- [ ] **Step 4: Replace the hero markup and remove the separate demo figure**",
-        "html",
+def test_visual_storytelling_plan_is_marked_superseded_for_the_landing_structure() -> None:
+    """The old plan is executable prose, so it must say what it no longer builds.
+
+    `docs/superpowers/plans/2026-08-22-visual-storytelling.md` embeds the
+    hero figure, the per-scene Input/Evidence/Result rows, the contract map,
+    the write path and the six-card mosaic verbatim. The compact homepage
+    deletes all five, so a contributor replaying those blocks would rebuild
+    the long, repetitive page this change removes. The plan therefore has to
+    point at the plan and design that replaced it, while staying the source
+    of record for the media and controller the homepage still ships.
+    """
+    plan = _plan()
+    header = plan[: plan.index("**For agentic workers:**")].lower()
+    assert "superseded" in header, (
+        "the plan must announce that its landing structure was replaced, before "
+        "a reader reaches the first executable step"
     )
-    shipped_hero = _section('<section class="hero">', "</section>")
-    assert _compact(plan_hero) == _compact(shipped_hero)
+    for pointer in (
+        "2026-08-27-compact-homepage.md",
+        "2026-08-27-compact-homepage-design.md",
+    ):
+        assert pointer in plan, f"the superseded plan must name {pointer}"
+    for retired in ("contract map", "write path", "evidence mosaic"):
+        assert retired in header, (
+            f"the note must name the {retired} among the blocks that are now history"
+        )
+
+    index = _index()
+    for removed in ('class="contract-map', 'class="write-path', 'class="evidence-mosaic'):
+        assert removed not in index, (
+            f"{removed!r} is exactly what the supersede note says the homepage dropped"
+        )
 
 
 def test_visual_storytelling_plan_hero_css_matches_the_shipped_rules() -> None:
@@ -844,17 +894,81 @@ def test_rule_helper_ignores_selectors_that_only_appear_in_a_comment() -> None:
     assert "break-word" not in block, "the helper must not return a comment's contents"
 
 
+# --- the compact homepage is one media story --------------------------------
+
+
+def test_homepage_is_one_media_story_not_repeated_sections() -> None:
+    """The homepage must show the product once, not narrate it four times.
+
+    The long page repeated its own evidence: the Direct recording played in
+    both the hero and the switcher, the switcher restated in prose what its
+    videos already showed, and the contract map, write path and six-card
+    mosaic re-explained the same contract a third and fourth time. The
+    compact page keeps one media stage, three highlights and one destination
+    nav — so the counts are pinned here, where a re-expansion would show up
+    before anyone re-reads a screenshot.
+    """
+    source = _index()
+    assert len(source.split()) < 800, (
+        f"the homepage must stay short; found {len(source.split())} words"
+    )
+    assert source.count("<video") == 3, "one recording per driver, and no duplicate"
+    assert source.count('src="assets/demo.mp4"') == 1, (
+        "the Direct recording is authored once, in the merged hero stage"
+    )
+    assert source.count("<section") + source.count("<nav") <= 3, (
+        "at most three major blocks: the hero stage, the highlights, the destinations"
+    )
+    for removed in ("contract-map", "write-path", "evidence-mosaic"):
+        assert f'class="{removed}' not in source, (
+            f"{removed!r} restated what the recordings and the focused guides "
+            "already say; it must not come back"
+        )
+
+
+def test_homepage_highlights_the_three_product_promises() -> None:
+    """The three highlights carry the product contract the removed prose did.
+
+    Compacting the page must not drop the claims it exists to make, so the
+    SEE / GROUND / CONTROL cards keep keyboard-first operation, bounded
+    evidence, the fresh approval keystroke, and the fail-closed audit.
+    """
+    source = _index()
+    for label in ("SEE", "GROUND", "CONTROL"):
+        assert f">{label}<" in source, f"the highlights must keep the {label} promise"
+    for claim in ("Keyboard", "Bounded", "Fresh approval", "Fail-closed audit"):
+        assert claim.lower() in source.lower(), (
+            f"the compact page must still make the {claim!r} claim"
+        )
+
+
 # --- 4. one incident, three drivers -----------------------------------------
 
 
 def test_landing_presents_one_incident_through_three_drivers() -> None:
+    """One stage, three tabs — the tabs are what name the drivers now.
+
+    The compact homepage deletes the second heading and the per-scene prose,
+    so the driver story is carried entirely by the tab strip and the three
+    recordings behind it. Each tab must still name its driver and address
+    its own panel.
+    """
     switcher = _scene_switcher()
-    assert "One incident. Three ways to drive it." in switcher
-    for scene in ("direct", "agent", "mcp"):
+    for scene, label in (
+        ("direct", "You drive"),
+        ("agent", "Agent delegates"),
+        ("mcp", "MCP connects"),
+    ):
         assert f'id="scene-tab-{scene}"' in switcher
         assert f'aria-controls="scene-{scene}"' in switcher
         assert f'id="scene-{scene}"' in switcher
+        assert f">{label}</button>" in switcher, (
+            f"the {scene} tab must keep naming its driver: {label!r}"
+        )
     assert "same evidence" not in switcher.lower()
+    assert "One incident. Three ways to drive it." not in _index(), (
+        "the merged stage replaces the second heading; the hero headline leads alone"
+    )
 
 
 def test_scene_switcher_source_is_a_complete_no_javascript_fallback() -> None:
@@ -1362,7 +1476,6 @@ def test_mcp_media_reserves_its_own_intrinsic_ratio_not_the_generic_16_9() -> No
     """
     css = _strip_css_comments(_css())
     switcher = _scene_switcher()
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
 
     mcp_video = re.search(r"<video[^>]*mcp-follow-demo\.mp4[^>]*>", switcher)
     assert mcp_video is not None, "the MCP scene keeps its video"
@@ -1370,17 +1483,12 @@ def test_mcp_media_reserves_its_own_intrinsic_ratio_not_the_generic_16_9() -> No
         f"the MCP scene video must claim its own ratio class: {mcp_video.group(0)}"
     )
 
-    mcp_tile = next(
-        card
-        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
-        if "mcp-poster.png" in card
+    mcp_fallback = re.search(r"<img[^>]*mcp-poster\.png[^>]*>", switcher)
+    assert mcp_fallback is not None, "the MCP scene keeps its no-JavaScript poster"
+    assert re.search(r'class="[^"]*\bmcp-media\b[^"]*"', mcp_fallback.group(0)), (
+        f"the MCP fallback image must claim its own ratio class: {mcp_fallback.group(0)}"
     )
-    tile_image = re.search(r"<img[^>]*>", mcp_tile)
-    assert tile_image is not None
-    assert 'class="mcp-media"' in tile_image.group(0), (
-        f"the MCP evidence tile image must claim its own ratio class: {tile_image.group(0)}"
-    )
-    assert 'width="1280" height="710"' in tile_image.group(0)
+    assert 'width="1280" height="710"' in mcp_fallback.group(0)
 
     ratio_rule = _rule(css, "video.mcp-media")
     assert "aspect-ratio: 1280 / 710" in ratio_rule, (
@@ -1393,21 +1501,20 @@ def test_mcp_media_reserves_its_own_intrinsic_ratio_not_the_generic_16_9() -> No
             "{", css.index("video.mcp-media")
         )
     ]
-    for generic in (".md-typeset .scene-panel video", ".md-typeset .evidence-card img"):
-        qualified = f"{generic}.mcp-media"
-        assert qualified in prelude, (
-            f"the override must qualify `{generic}` with the class so it wins on "
-            f"specificity, not on source order alone; prelude was {_compact(prelude)!r}"
-        )
-        assert css.index(generic + " {") < css.index("video.mcp-media"), (
-            f"the generic `{generic}` rule must come first so the MCP override "
-            "cannot be undone by a later declaration"
-        )
+    generic = ".md-typeset .scene-panel video"
+    qualified = f"{generic}.mcp-media"
+    assert qualified in prelude, (
+        f"the override must qualify `{generic}` with the class so it wins on "
+        f"specificity, not on source order alone; prelude was {_compact(prelude)!r}"
+    )
+    assert css.index(generic + " {") < css.index("video.mcp-media"), (
+        f"the generic `{generic}` rule must come first so the MCP override "
+        "cannot be undone by a later declaration"
+    )
 
     assert "aspect-ratio: 16 / 9" in _rule(css, ".md-typeset .scene-panel video {"), (
         "the 1280x720 captures keep the generic 16:9 reservation"
     )
-    assert "aspect-ratio: 16 / 9" in _rule(css, ".md-typeset .evidence-card img {")
 
 
 def test_no_landing_media_declares_a_box_its_asset_cannot_fill() -> None:
@@ -1438,7 +1545,12 @@ def test_no_landing_media_declares_a_box_its_asset_cannot_fill() -> None:
 
 
 def test_visual_storytelling_plan_mcp_ratio_snippets_match_the_shipped_sources() -> None:
-    """A plan replay must not restore the stretched 16:9 MCP box."""
+    """A plan replay must not restore the stretched 16:9 MCP box.
+
+    The compact homepage drops the plan's per-scene copy and its evidence
+    mosaic, so only the media elements are still comparable — and they are
+    exactly the parts that carry the ratio class the override depends on.
+    """
     plan = _plan()
     scene_markup = _fenced_block_after(
         plan,
@@ -1446,24 +1558,11 @@ def test_visual_storytelling_plan_mcp_ratio_snippets_match_the_shipped_sources()
         "html",
     )
     shipped_scene = _section('<article id="scene-mcp"', "</article>")
-    assert _compact(shipped_scene) in _compact(scene_markup), (
-        "the plan's MCP scene snippet must be the shipped one, ratio class included"
-    )
-
-    mosaic_markup = _fenced_block_after(
-        plan,
-        "Delete the old “Find your flight path” list and add:",
-        "html",
-    )
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    shipped_tile = next(
-        card
-        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
-        if "mcp-poster.png" in card
-    )
-    assert _compact(shipped_tile) in _compact(mosaic_markup), (
-        "the plan's MCP evidence tile must carry the shipped ratio class"
-    )
+    for element in re.findall(r"<(?:video|img)\b[^>]*>", shipped_scene):
+        assert _compact(element) in _compact(scene_markup), (
+            "the plan's MCP scene media must stay the shipped element, ratio class "
+            f"included; {element!r} is not in the plan"
+        )
 
     assert "aspect-ratio: 1280 / 710" in plan, (
         "the plan's CSS must ship the MCP ratio override it tells contributors to build"
@@ -1476,32 +1575,30 @@ def test_scene_videos_never_autoplay_and_below_fold_media_preloads_nothing() -> 
     No `<video>` may declare the native `autoplay` attribute: playback is
     driven entirely by the visibility-aware controller, gated on
     `prefers-reduced-motion`, and never by the browser's own eager-fetch
-    behavior. The hero opts into that controller via `data-autoplay-video`.
-    The direct scene keeps its real `src` so the default scene is never
-    empty; the Agent and MCP scenes defer their video bytes behind
-    `data-src` until the controller promotes them on selection, so a
-    below-fold scene never downloads video before a visitor picks it.
+    behavior. The merged stage is one switcher, so the Direct clip is the
+    page's single eager medium and keeps its real `src`; the Agent and MCP
+    clips defer their bytes behind `data-src` until the controller promotes
+    them on selection, so an unselected driver never downloads video before
+    a visitor picks it.
     """
     videos = re.findall(r"<video[^>]*>", _index())
-    assert len(videos) == 4, "the hero video plus one per scene"
+    assert len(videos) == 3, "one video per driver, authored once each"
     for video in videos:
         assert not re.search(r"(?<!data-)\bautoplay\b", video), (
             f"no landing video may declare the native autoplay attribute: {video}"
         )
-    hero_video, direct_video, *deferred_scene_videos = videos
-    assert "data-autoplay-video" in hero_video, (
-        "the hero is the only standalone (non-switcher) video, so it opts into "
-        "the visibility-aware controller through this data attribute"
-    )
-    assert 'preload="metadata"' in hero_video, (
-        "the hero video is the page's lead evidence, so its metadata may load"
-    )
+    direct_video, *deferred_scene_videos = videos
     assert 'src="assets/demo.mp4"' in direct_video, (
         "the default scene must keep a real, immediately playable source"
     )
-    assert 'preload="none"' in direct_video
+    assert 'preload="metadata"' in direct_video, (
+        "the selected driver is the page's lead evidence, so its metadata may load"
+    )
+    assert "data-autoplay-video" not in _index(), (
+        "there is no standalone video left: every player belongs to the one switcher"
+    )
     for video in deferred_scene_videos:
-        assert 'data-src="' in video, f"a below-fold scene must defer its source: {video}"
+        assert 'data-src="' in video, f"an unselected scene must defer its source: {video}"
         assert not re.search(r'(?<!data-)src="', video), (
             f"a deferred scene must not also declare a real, eagerly-fetchable src: {video}"
         )
@@ -1556,90 +1653,66 @@ def test_design_asset_rule_states_the_playback_contract_the_controller_ships() -
     )
 
 
-def test_product_contract_map_keeps_the_read_paths_truthful() -> None:
-    contract = _section('<section class="contract-map"', "</section>")
-    lowered = " ".join(re.sub(r"<[^>]+>", " ", contract).lower().split())
+def test_ground_highlight_keeps_the_read_paths_truthful() -> None:
+    """The contract map's one load-bearing claim survives its own deletion.
+
+    The map explained, in three lanes and a truth sentence, that the
+    watch-backed table and each driver's bounded fresh reads are taken at
+    different moments. The compact page states that once, in the GROUND
+    highlight, and must never trade it for a "same evidence" shortcut.
+    """
+    ground = _highlight("GROUND")
+    lowered = " ".join(re.sub(r"<[^>]+>", " ", ground).lower().split())
     for fact in (
-        "human operator",
-        "watch-backed table",
-        "fresh describe and log reads",
-        "model / provider",
         "bounded fresh reads",
-        "editor / external assistant",
-        "active cluster context",
-        "navigation semantics",
+        "watch-backed table",
+        "different moments",
         "snapshots can differ",
     ):
-        assert fact in lowered
-    assert "same evidence" not in lowered
+        assert fact in lowered, f"the GROUND highlight must keep stating {fact!r}: {lowered!r}"
+    for overclaim in ("same evidence", "same snapshot", "one snapshot"):
+        assert overclaim not in lowered, (
+            f"the drivers read at different moments, so {overclaim!r} would be false"
+        )
+    for destination in ('href="agent/"', 'href="mcp/"'):
+        assert destination in ground, (
+            f"the GROUND highlight replaces the removed scene links, so it must keep {destination}"
+        )
 
 
-def test_human_lane_and_direct_scene_name_the_fresh_tui_reads_the_demo_shows() -> None:
+def test_no_landing_surface_reduces_the_tui_to_a_watch_backed_snapshot() -> None:
     """The TUI lane is not one watch-backed snapshot from end to end.
 
     The Direct recording filters the watch-backed pod table, then presses
     Describe — which fetches the manifest and that object's events in
     `KorvidApp.action_describe` — and opens a live log stream in
-    `KorvidApp._live_log_stream`. Labelling either the scene or the human
-    contract lane "watch-backed TUI snapshot" hides the very freshness
-    distinction this page exists to explain, and it makes the contract map
-    factually incomplete by showing fresh reads only for agent and MCP.
+    `KorvidApp._live_log_stream`. Labelling that "watch-backed TUI snapshot"
+    hides the very freshness distinction this page exists to explain.
 
-    The fix must stay honest in the other direction too: korvid's own
-    describe/log reads are not the agent's tool reads and not MCP's
-    tool-specific reads, so the three lanes keep three distinct labels and
-    none of them may collapse into one shared snapshot.
+    The compact page carries the distinction in one sentence instead of a
+    three-lane map, and the three drivers stay distinct: the agent clip is
+    described by its own read tools and the MCP clip by its own tool-specific
+    read-only requests, so none of them collapses into a shared snapshot.
     """
-    mixed = "watch-backed table + fresh describe and log reads"
     watch_only = "watch-backed tui snapshot"
-
-    scene = _section('<article id="scene-direct"', "</article>")
-    scene_evidence = re.search(r"<div><strong>Evidence</strong>\s*([^<]+)</div>", scene)
-    assert scene_evidence is not None, "the Direct scene must keep an Evidence label"
-    assert " ".join(scene_evidence.group(1).lower().split()) == mixed, (
-        "the Direct scene shows a watch-backed table, a fresh Describe read, and a "
-        f"live log stream; its Evidence label must say so, found: {scene_evidence.group(1)!r}"
-    )
-
-    contract = _section('<section class="contract-map"', "</section>")
-    human_lane = re.search(
-        r"<article><span>Human operator</span><strong>([^<]+)</strong></article>", contract
-    )
-    assert human_lane is not None, "the contract map must keep the human operator lane"
-    assert " ".join(human_lane.group(1).lower().split()) == mixed, (
-        "the human contract lane must carry the same mixed evidence claim as the "
-        f"Direct scene, found: {human_lane.group(1)!r}"
-    )
-
-    truth = re.search(r'<p class="contract-map__truth">(.*?)</p>', contract, re.DOTALL)
-    assert truth is not None, "the contract map must keep its freshness truth sentence"
-    truth_text = " ".join(re.sub(r"<[^>]+>", " ", truth.group(1)).lower().split())
-    assert watch_only not in truth_text, (
-        "the truth sentence must not reduce the TUI to a single watch-backed "
-        f"snapshot either, found: {truth_text!r}"
-    )
-    assert "snapshots can differ" in truth_text
-    for shared_snapshot in ("same snapshot", "one snapshot", "identical"):
-        assert shared_snapshot not in truth_text, (
-            f"the lanes must not be described as sharing a snapshot: {shared_snapshot!r}"
-        )
-
     index_lowered = _index().lower()
     assert watch_only not in index_lowered, (
         "no landing surface may still label the TUI's evidence as watch-backed only"
     )
 
-    agent = _section('<article id="scene-agent"', "</article>")
-    assert AGENT_SCENE_EVIDENCE in agent, (
-        "the agent scene keeps its own distinct label — real read tools over a "
-        "deterministic synthetic cluster, not the watch-backed table the direct "
-        "lane reads"
+    ground = " ".join(re.sub(r"<[^>]+>", " ", _highlight("GROUND")).lower().split())
+    assert "snapshots can differ" in ground
+    assert "identical" not in ground
+
+    agent = _flatten(_section('<article id="scene-agent"', "</article>"))
+    assert "real diagnose_pod and get_logs reads" in agent, (
+        "the agent clip keeps its own distinct read description — the real tool "
+        "reads it runs, not the watch-backed table the direct driver reads"
     )
-    mcp = _section('<article id="scene-mcp"', "</article>")
-    assert "Tool-specific bounded fresh reads" in mcp, (
-        "the MCP scene keeps its own distinct tool-specific bounded-fresh-read language"
+    mcp = _flatten(_section('<article id="scene-mcp"', "</article>"))
+    assert "real read only mcp requests" in mcp, (
+        "the MCP clip keeps its own distinct read-only request language"
     )
-    assert "Bounded fresh reads over MCP" in contract
 
 
 def test_agent_scene_states_the_grounded_deterministic_walkthrough() -> None:
@@ -1655,40 +1728,33 @@ def test_agent_scene_states_the_grounded_deterministic_walkthrough() -> None:
     cluster, or answer quality — `DemoAgentProvider` is offline and always
     chooses the same two calls.
 
-    So the scene must state both halves, and must never again describe
-    injected events, an empty ledger, or a flagged citation.
+    So the stage must state both halves, and must never again describe
+    injected events, an empty ledger, or a flagged citation. The compact page
+    has no per-scene prose left, so the accessible descriptions of the media
+    and the stage caption carry the disclosure between them.
     """
+    stage = _scene_switcher()
     scene = _section('<article id="scene-agent"', "</article>")
-    lowered = " ".join(scene.lower().split())
-    flattened = _flatten(scene)
+    lowered = " ".join(stage.lower().split())
+    flattened = _flatten(stage)
 
-    labels = dict(re.findall(r"<div><strong>(\w+)</strong>\s*([^<]+)</div>", scene))
-    assert set(labels) == {"Input", "Evidence", "Result"}, (
-        f"the Agent scene keeps its three visible labels; found {sorted(labels)}"
-    )
-    assert labels["Input"].strip() == "Prompt submitted through the real AgentPanel", (
-        "the Input label must name the real panel the prompt goes through; "
-        f"found {labels['Input']!r}"
-    )
-    assert labels["Evidence"].strip() == AGENT_SCENE_EVIDENCE, (
-        "the Evidence label must name the real read tools and the deterministic "
-        f"synthetic cluster they read; found {labels['Evidence']!r}"
-    )
-    result = labels["Result"].lower()
-    for token in ("grounded", "real agent loop"):
-        assert token in result, (
-            "the Result label must credit the real agent loop's grounded answer; "
-            f"{token!r} missing from {labels['Result']!r}"
+    description = re.search(r'<video[^>]*data-src="[^"]*agent-demo\.mp4"[^>]*>', scene)
+    assert description is not None, "the Agent panel keeps its video"
+    aria = _flatten(description.group(0))
+    for token in ("real agentpanel", "real diagnose_pod and get_logs reads", "grounded answer"):
+        assert token in aria, (
+            "the Agent media's accessible description must credit the real panel, "
+            f"the real read tools, and the grounded answer; {token!r} missing from {aria!r}"
         )
-    assert "ui drive" not in result, (
+    assert "ui drive" not in aria, (
         "the capture's screen changes are `agent.follow` mirroring the reads, not "
-        f"a UI-drive tool call; found {labels['Result']!r}"
+        f"a UI-drive tool call; found {aria!r}"
     )
 
     for phrase in AGENT_CAPTURE_DISCLOSURES:
-        assert phrase in flattened, f"the Agent scene must state {phrase!r}; found {flattened!r}"
+        assert phrase in flattened, f"the media stage must state {phrase!r}; found {flattened!r}"
     assert "deterministic synthetic-cluster walkthrough" in lowered, (
-        "the scene must ship the exact hyphenated label every other surface uses"
+        "the stage must ship the exact hyphenated label every other surface uses"
     )
     assert "unsupported citation" not in lowered, (
         "the shipped turn validates both markers, so no surface may still say "
@@ -1696,7 +1762,7 @@ def test_agent_scene_states_the_grounded_deterministic_walkthrough() -> None:
     )
     for stale in ("scripted", "injected", "nothing is read"):
         assert stale not in lowered, (
-            f"the old panel-only story must not survive anywhere in the scene: {stale!r}"
+            f"the old panel-only story must not survive anywhere in the stage: {stale!r}"
         )
 
     described = [
@@ -1705,7 +1771,7 @@ def test_agent_scene_states_the_grounded_deterministic_walkthrough() -> None:
         re.search(r'<img class="scene-panel__fallback[^"]*"[^>]*alt="([^"]+)"', scene),
     ]
     assert all(part is not None for part in described), (
-        "the scene keeps an aria-label, an in-video fallback, and a fallback image"
+        "the panel keeps an aria-label, an in-video fallback, and a fallback image"
     )
     for part in described:
         assert part is not None  # narrowed above; keeps mypy and the reader honest
@@ -1715,12 +1781,13 @@ def test_agent_scene_states_the_grounded_deterministic_walkthrough() -> None:
         )
 
     for overclaim in AGENT_CAPTURE_OVERCLAIMS:
-        assert not _unnegated(scene, overclaim), (
-            f"the Agent scene must not claim {overclaim!r} from a deterministic capture"
+        assert not _unnegated(stage, overclaim), (
+            f"the media stage must not claim {overclaim!r} from a deterministic capture"
         )
 
-    assert 'href="agent/"' in scene, (
-        "the scene keeps the link to the real embedded-agent documentation"
+    assert 'href="agent/"' in _highlight("GROUND"), (
+        "the highlight that replaced the scene copy keeps the link to the real "
+        "embedded-agent documentation"
     )
 
 
@@ -1757,13 +1824,7 @@ def test_mcp_scene_states_the_real_read_only_requests_and_follow() -> None:
     describe it as one.
     """
     scene = _section('<article id="scene-mcp"', "</article>")
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    tile = next(
-        card
-        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
-        if "mcp-poster.png" in card
-    )
-    published_mcp_description = _flatten(scene + tile)
+    published_mcp_description = _flatten(scene)
 
     assert "real read only mcp requests" in published_mcp_description, (
         "the MCP scene must state the requests are real and read-only; "
@@ -1781,42 +1842,35 @@ def test_mcp_scene_states_the_real_read_only_requests_and_follow() -> None:
         "the clip is recorded against the in-memory synthetic fixture the `mcp` "
         "demo scene serves, not a disposable cluster"
     )
-    assert 'href="mcp/"' in scene, "the scene keeps the link to the MCP guide"
+    assert 'href="mcp/"' in _highlight("GROUND"), (
+        "the highlight that replaced the scene copy keeps the link to the MCP guide"
+    )
 
 
 def test_mcp_landing_copy_keeps_the_production_write_and_follow_limits() -> None:
     """Recording a truthful read demo must not soften the production limits."""
-    scene = _section('<article id="scene-mcp"', "</article>")
-    flattened = _flatten(scene)
-    assert "proposal" in flattened, "MCP writes stay opt-in proposals on the landing page"
-    assert "off by default" in flattened, "and the page must keep saying they are off"
+    control = _flatten(_highlight("CONTROL"))
+    assert "proposal" in control, "MCP writes stay opt-in proposals on the landing page"
+    assert "off by default" in control, "and the page must keep saying they are off"
 
 
-def test_agent_evidence_tile_claims_only_the_grounded_deterministic_capture() -> None:
-    """The mosaic tile must match the frame it renders, in both directions.
+def test_agent_fallback_frame_claims_only_the_grounded_deterministic_capture() -> None:
+    """The fallback image must match the frame it renders, in both directions.
 
-    The tile used to deny live tool execution and validated evidence,
-    because the old capture had neither. The shipped frame has both, over a
-    synthetic fixture, so denying them now understates the product exactly
-    as badly as the old copy overstated it. What stays denied is the model
-    and the cluster.
+    The evidence tile that used to render this poster is gone with the
+    mosaic, but the same frame still ships as the Agent panel's
+    no-JavaScript fallback — so its description carries the same duty. It
+    used to deny live tool execution and validated evidence, because the old
+    capture had neither. The shipped frame has both, over a synthetic
+    fixture, so denying them now understates the product exactly as badly as
+    the old copy overstated it. What stays denied is the model and the
+    cluster.
     """
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    card = next(
-        card
-        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
-        if "agent-poster.png" in card
-    )
+    scene = _section('<article id="scene-agent"', "</article>")
+    fallback = re.search(r'<img class="scene-panel__fallback[^>]*>', scene)
+    assert fallback is not None, "the agent panel keeps its no-JavaScript frame"
 
-    caption = re.search(r"<figcaption>([^<]+)</figcaption>", card)
-    assert caption is not None, "the agent tile keeps a caption"
-    caption_text = caption.group(1).lower()
-    for token in ("agent", "walkthrough"):
-        assert token in caption_text, (
-            f"the caption must name the agent panel walkthrough it shows: {caption.group(1)!r}"
-        )
-
-    alt = re.search(r'<img[^>]*alt="([^"]+)"', card)
+    alt = re.search(r'alt="([^"]+)"', fallback.group(0))
     assert alt is not None
     alt_text = " ".join(alt.group(1).lower().replace("-", " ").split())
     for signal in ("deterministic synthetic cluster walkthrough", "prompt", "diagnose_pod", "e1"):
@@ -1824,41 +1878,36 @@ def test_agent_evidence_tile_claims_only_the_grounded_deterministic_capture() ->
             "the alt must describe the grounded turn this frame ends on; "
             f"{signal!r} missing from {alt.group(1)!r}"
         )
-
-    body = re.search(r"<p>(.*?)</p>", card, re.DOTALL)
-    assert body is not None
-    body_text = _flatten(body.group(1))
-    for stale in ("scripted", "no live tool execution", "no validated evidence"):
-        assert stale not in body_text, (
-            "the shipped capture executes real read tools and validates its own "
-            f"citations, so the tile must not still deny {stale!r}: {body.group(1)!r}"
+    for token in ("agentpanel", "walkthrough"):
+        assert token in alt_text, (
+            f"the alt must name the agent panel walkthrough it shows: {alt.group(1)!r}"
         )
-    assert "not a live model" in body_text, (
-        f"the tile must keep the one denial that is still true: {body.group(1)!r}"
+
+    caption_text = _flatten(_stage_caption())
+    for stale in ("scripted", "no live tool execution", "no validated evidence"):
+        assert stale not in caption_text, (
+            "the shipped capture executes real read tools and validates its own "
+            f"citations, so the stage must not still deny {stale!r}: {caption_text!r}"
+        )
+    assert "not a live model" in caption_text, (
+        f"the stage must keep the one denial that is still true: {caption_text!r}"
     )
 
     for overclaim in AGENT_CAPTURE_OVERCLAIMS:
-        assert not _unnegated(card, overclaim), (
-            f"the agent evidence tile must not claim {overclaim!r}"
-        )
+        assert not _unnegated(scene, overclaim), f"the agent panel must not claim {overclaim!r}"
 
 
 def test_agent_capture_surfaces_state_the_validated_citations_they_show() -> None:
     """Every capture-specific surface tells the same, current story.
 
-    The scene, the mosaic tile and the `docs/agent.md` storyboard all render
-    the same frame, so a stale disclosure on any one of them contradicts the
-    other two — and contradicts the frame itself, which shows `[E1]`/`[E2]`
-    with no warning beneath them. The production turn flow beside the
-    storyboard is untouched.
+    The panel, the stage caption that speaks for it and the `docs/agent.md`
+    storyboard all render the same frame, so a stale disclosure on any one of
+    them contradicts the other two — and contradicts the frame itself, which
+    shows `[E1]`/`[E2]` with no warning beneath them. The production turn flow
+    beside the storyboard is untouched.
     """
     scene = _section('<article id="scene-agent"', "</article>")
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    tile = next(
-        card
-        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
-        if "agent-poster.png" in card
-    )
+    caption = _stage_caption()
     agent_page = (DOCS / "agent.md").read_text(encoding="utf-8")
     storyboard = agent_page[
         agent_page.index('<section class="docs-storyboard"') : agent_page.index("</section>")
@@ -1866,7 +1915,11 @@ def test_agent_capture_surfaces_state_the_validated_citations_they_show() -> Non
     ]
     figure = storyboard[storyboard.index("<figure>") : storyboard.index("</figure>")]
 
-    for name, surface in (("scene", scene), ("tile", tile), ("storyboard figure", figure)):
+    for name, surface in (
+        ("panel", scene),
+        ("stage caption", caption),
+        ("storyboard figure", figure),
+    ):
         flattened = _flatten(surface)
         assert "deterministic synthetic cluster walkthrough" in flattened, (
             f"the {name} must carry the shared label for this media: {flattened!r}"
@@ -1917,13 +1970,7 @@ def test_agent_capture_never_presents_the_selected_row_as_grounding() -> None:
     offer it as evidence.
     """
     scene = _section('<article id="scene-agent"', "</article>")
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    tile = next(
-        card
-        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
-        if "agent-poster.png" in card
-    )
-    for surface in (scene, tile):
+    for surface in (scene, _stage_caption()):
         flattened = _flatten(surface)
         for grounding in ("selected row", "selected pod", "screen context", "context grounding"):
             assert grounding not in flattened, (
@@ -1939,25 +1986,35 @@ def test_agent_capture_never_presents_the_selected_row_as_grounding() -> None:
     )
 
 
-def test_guarded_write_path_orders_confirmation_audit_and_execution() -> None:
-    path = _section('<section class="write-path"', "</section>")
-    lowered = " ".join(re.sub(r"<[^>]+>", " ", path).lower().split())
-    for origin in ("direct action", "agent proposal", "opt-in mcp proposal"):
-        assert origin in lowered
-    stages = ["observe", "propose", "confirm", "audit", "execute"]
-    positions = [path.index(f'data-stage="{stage}"') for stage in stages]
-    assert positions == sorted(positions)
-    assert "fresh human keystroke" in lowered
-    assert "audit write failed" in lowered
-    assert "action blocked" in lowered
-    assert "fail-closed" in lowered
+def test_control_highlight_orders_confirmation_audit_and_execution() -> None:
+    """The write path's guarantee survives the diagram that carried it.
 
+    The five-stage strip is gone, but its promise is a security invariant:
+    every write previews first, waits for a fresh human keystroke, and is
+    blocked outright when the fail-closed audit append fails. The CONTROL
+    highlight is now the only place the landing page states it, so it must
+    state all three parts, in that order, for every origin the product has.
+    """
+    control = _highlight("CONTROL")
+    lowered = " ".join(re.sub(r"<[^>]+>", " ", control).lower().split())
 
-def test_guarded_write_failure_arrow_keeps_readable_spacing() -> None:
-    """Inline tags must not collapse the failure copy around the arrow."""
-    pattern = re.compile(r"</strong>\s+<span aria-hidden=\"true\">→</span>\s+action blocked")
-    for label, source in (("landing", _index()), ("plan", _plan())):
-        assert pattern.search(source), f"{label} must render spaces around the visual arrow"
+    assert "every write" in lowered, (
+        f"the guarantee must cover every origin, not one of them: {lowered!r}"
+    )
+    ordered = ["preview", "fresh approval keystroke", "audit"]
+    positions = [lowered.find(stage) for stage in ordered]
+    assert all(position != -1 for position in positions), (
+        f"the CONTROL copy must name preview, approval and audit: {lowered!r}"
+    )
+    assert positions == sorted(positions), (
+        f"approval comes after the preview and before the audit gate: {lowered!r}"
+    )
+    assert "fail-closed" in lowered, "the audit gate must keep its fail-closed name"
+    assert "blocks the action" in lowered, (
+        f"a failed audit append must be shown to block the write: {lowered!r}"
+    )
+    assert "opt-in mcp" not in lowered or "off by default" in lowered
+    assert 'href="ops/"' in control, "the highlight links the approval and audit reference"
 
 
 def test_write_path_stage_grid_targets_the_ordered_list_specificity() -> None:
@@ -2169,73 +2226,47 @@ def test_visual_storytelling_plan_scene_controller_matches_the_shipped_script() 
     assert _compact(plan_script) == _compact(shipped_script)
 
 
-def test_visual_storytelling_plan_contract_snippets_match_the_shipped_evidence_lanes() -> None:
+def test_visual_storytelling_plan_keeps_no_watch_only_claim_after_the_merge() -> None:
     """The plan is an executable recipe, so its snippets carry the same claim.
 
-    `docs/superpowers/plans/2026-08-22-visual-storytelling.md` embeds the
-    scene markup, the contract-map markup, and the contract test verbatim. A
-    contributor replaying those blocks would reintroduce the watch-only
-    "Watch-backed TUI snapshot" label the shipped page no longer makes, so
-    the plan has to move with `docs/index.md`.
+    `docs/superpowers/plans/2026-08-22-visual-storytelling.md` embedded the
+    scene markup, the contract-map markup and the contract test verbatim. The
+    compact homepage retired the contract map and the per-scene evidence
+    labels, so those blocks are marked superseded rather than kept in sync —
+    but the one claim they must never restore is the watch-only
+    "Watch-backed TUI snapshot" label the shipped page does not make.
     """
     plan = _plan()
-    mixed = "Watch-backed table + fresh describe and log reads"
-
-    scene_markup = _fenced_block_after(
-        plan,
-        "- [ ] **Step 3: Replace the numbered cards with complete scene markup**",
-        "html",
-    )
-    assert f"<div><strong>Evidence</strong> {mixed}</div>" in scene_markup, (
-        "the plan's Direct scene snippet must carry the shipped mixed evidence label"
-    )
-    assert f"<div><strong>Evidence</strong> {AGENT_SCENE_EVIDENCE}</div>" in scene_markup
-    assert "<div><strong>Evidence</strong> Tool-specific bounded fresh reads</div>" in scene_markup
-
-    contract_markup = _fenced_block_after(
-        plan,
-        "- [ ] **Step 3: Replace the long safety paragraph with the two visual flows**",
-        "html",
-    )
-    shipped_contract = _section('<section class="contract-map"', "</section>")
-    for lane in re.findall(
-        r"<article><span>[^<]+</span><strong>[^<]+</strong></article>", shipped_contract
-    ):
-        assert lane in contract_markup, f"the plan's contract map must ship the lane {lane!r}"
-    shipped_truth = re.search(
-        r'<p class="contract-map__truth">.*?</p>', shipped_contract, re.DOTALL
-    )
-    assert shipped_truth is not None
-    assert _compact(shipped_truth.group(0)) in _compact(contract_markup), (
-        "the plan's contract map must carry the shipped freshness truth sentence"
-    )
-
-    contract_test = _fenced_block_after(
-        plan,
-        "Replace `test_safety_section_converges_every_actor_on_one_write_path` with:",
-        "python",
-    )
-    for fact in ('"watch-backed table"', '"fresh describe and log reads"'):
-        assert fact in contract_test, (
-            f"the plan's embedded contract test must assert on {fact}, or replaying the "
-            "plan reproduces the watch-only claim"
-        )
 
     assert "watch-backed tui snapshot" not in plan.lower(), (
         "no plan snippet or constraint may still reduce the TUI's evidence to a "
         "watch-backed snapshot"
     )
+    assert "watch-backed table" in plan.lower(), (
+        "the plan must keep the mixed-evidence language the shipped GROUND highlight still states"
+    )
+    superseded = plan[: plan.index("\n## ")].lower()
+    assert "superseded" in superseded, (
+        "a plan whose landing snippets no longer match the shipped page must say "
+        "so above its first section, or a contributor will replay them"
+    )
+    for retired in ("contract map", "evidence mosaic"):
+        assert retired in superseded, (
+            f"the supersede notice must name the retired {retired!r} block by name"
+        )
 
 
 def test_visual_storytelling_plan_agent_snippets_match_the_shipped_copy() -> None:
     """The plan is executable, so a replay must not restore stale copy.
 
     `docs/superpowers/plans/2026-08-22-visual-storytelling.md` embeds the
-    Agent scene, the agent evidence tile, the `docs/agent.md` storyboard and
-    the provenance page verbatim. Whatever the shipped pages say about the
-    capture, those snippets have to say too, or the next contributor
-    following the recipe reintroduces a panel-only scripted walkthrough for
-    media that now runs korvid's real runtime, executor and evidence ledger.
+    Agent scene media, the `docs/agent.md` storyboard and the provenance page
+    verbatim. Whatever the shipped pages say about the capture, those
+    snippets have to say too, or the next contributor following the recipe
+    reintroduces a panel-only scripted walkthrough for media that now runs
+    korvid's real runtime, executor and evidence ledger. Only the media
+    elements are still compared: the compact homepage dropped the per-scene
+    prose the plan's snippet wrapped them in.
     """
     plan = _plan()
 
@@ -2245,27 +2276,11 @@ def test_visual_storytelling_plan_agent_snippets_match_the_shipped_copy() -> Non
         "html",
     )
     shipped_scene = _section('<article id="scene-agent"', "</article>")
-    assert _compact(shipped_scene) in _compact(scene_markup), (
-        "the plan's Agent scene snippet must be the shipped Agent scene, "
-        "grounded-capture labels and disclosure sentence included"
-    )
-
-    mosaic_markup = _fenced_block_after(
-        plan,
-        "Delete the old “Find your flight path” list and add:",
-        "html",
-    )
-    shipped_mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    shipped_tile = next(
-        card
-        for card in re.findall(
-            r'<article class="evidence-card[^"]*".*?</article>', shipped_mosaic, re.S
+    for element in re.findall(r"<(?:video|img)\b[^>]*>", shipped_scene):
+        assert _compact(element) in _compact(scene_markup), (
+            "the plan's Agent media must stay the shipped element, grounded-capture "
+            f"description included; {element!r} is not in the plan"
         )
-        if "agent-poster.png" in card
-    )
-    assert _compact(shipped_tile) in _compact(mosaic_markup), (
-        "the plan's agent evidence tile must carry the shipped caption, alt and copy"
-    )
 
     storyboard_markup = _fenced_block_after(
         plan,
@@ -2340,33 +2355,6 @@ def test_visual_storytelling_design_separates_agent_capability_from_the_capture(
     )
 
 
-def test_visual_storytelling_plan_evidence_markup_matches_the_shipped_sources() -> None:
-    plan_markup = _fenced_block_after(
-        _plan(),
-        "Delete the old “Find your flight path” list and add:",
-        "html",
-    )
-    shipped_mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    shipped_links = re.findall(
-        r'<a class="evidence-card__full" href="([^"]+)"([^>]*)>\s*<img[^>]*alt="([^"]+)"',
-        shipped_mosaic,
-        re.DOTALL,
-    )
-    planned_links = re.findall(
-        r'<a class="evidence-card__full" href="([^"]+)"([^>]*)>\s*<img[^>]*alt="([^"]+)"',
-        plan_markup,
-        re.DOTALL,
-    )
-    assert len(planned_links) == len(shipped_links) == 6
-    for shipped, planned in zip(shipped_links, planned_links, strict=True):
-        assert planned[0] == shipped[0]
-        assert planned[2] == shipped[2]
-        assert "aria-label" not in planned[1], (
-            "the plan's evidence links must let the nested image alt remain the "
-            f"accessible name instead of overriding it: {planned[1]!r}"
-        )
-
-
 def test_visual_storytelling_plan_evidence_css_matches_the_shipped_rules() -> None:
     plan_css = _fenced_block_after(
         _plan(),
@@ -2428,7 +2416,7 @@ def test_scene_tabs_stay_hidden_until_the_controller_enhances_the_switcher() -> 
     assert 'switcher.dataset.enhanced = "true"' in script, (
         "the controller must set the hook the no-JS gate depends on"
     )
-    switcher = _scene_switcher()
+    switcher = _hero()
     assert "data-scene-switcher" in switcher
     assert "data-enhanced" not in switcher, (
         "the enhancement hook must be applied by the controller at runtime, "
@@ -2441,11 +2429,26 @@ def test_scene_tabs_stay_hidden_until_the_controller_enhances_the_switcher() -> 
 
 
 def test_landing_keeps_agent_masking_distinct_from_mcp_disclosure() -> None:
-    path = _section('<section class="write-path"', "</section>")
-    lowered = " ".join(re.sub(r"<[^>]+>", " ", path).lower().split())
-    assert "embedded provider payloads are masked" in lowered
-    assert "mcp result disclosure is tool-specific" in lowered
+    """Two different boundaries, named separately, on the one control surface.
+
+    Provider masking protects what leaves for the embedded agent's model;
+    MCP result disclosure is decided per tool. Collapsing them into "secret
+    values are masked before model calls" would promise a guarantee neither
+    boundary makes, so the CONTROL highlight names both and links the page
+    that documents them.
+    """
+    control = _highlight("CONTROL")
+    lowered = " ".join(re.sub(r"<[^>]+>", " ", control).lower().split())
+    assert "provider masking" in lowered, (
+        f"the control surface must name the embedded provider's masking: {lowered!r}"
+    )
+    assert "mcp disclosure" in lowered, (
+        f"and must name MCP's tool-specific disclosure separately: {lowered!r}"
+    )
     assert "secret values are masked before model calls" not in lowered
+    assert 'href="threat-model/"' in control, (
+        "the two boundaries must link to the page that states their limits"
+    )
 
 
 def test_plan_preserves_the_mcp_disclosure_boundary() -> None:
@@ -2460,144 +2463,121 @@ def test_plan_preserves_the_mcp_disclosure_boundary() -> None:
     assert "secret values are masked before model calls" not in lowered
 
 
-def test_capability_mosaic_contains_six_real_linked_product_scenes() -> None:
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    cards = re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.DOTALL)
-    assert len(cards) == 6
+def test_feature_highlights_are_three_linked_promises() -> None:
+    """The mosaic's six tiles compress into three promises, still linked.
+
+    The mosaic sold six captures; the compact page sells one contract in
+    three parts. Each part still has to be short enough to scan and still has
+    to hand the visitor a real destination, or the page trades length for
+    a dead end.
+    """
+    cards = re.findall(r"<article>.*?</article>", _highlights(), re.DOTALL)
+    assert len(cards) == 3, f"exactly three promises; found {len(cards)}"
+    labels = [re.search(r"<span>([^<]+)</span>", card) for card in cards]
+    assert [label.group(1) for label in labels if label is not None] == [
+        "SEE",
+        "GROUND",
+        "CONTROL",
+    ], "the promises stay in the order a visitor meets them"
     for card in cards:
-        assert "<img" in card
-        assert 'loading="lazy"' in card
-        assert "<figcaption>" in card
-        assert re.search(r'href="[^"]+/(?:#[^"]+)?"', card)
         paragraphs = re.findall(r"<p>(.*?)</p>", card, re.DOTALL)
-        assert len(paragraphs) == 1
-        assert len(re.sub(r"<[^>]+>", " ", paragraphs[0]).split()) <= 30
+        assert len(paragraphs) == 1, "one paragraph per promise keeps the page scannable"
+        assert len(re.sub(r"<[^>]+>", " ", paragraphs[0]).split()) <= 40
+        links = re.findall(r'<a href="([^"]+)"', card)
+        assert len(links) >= 2, f"a promise must hand over real destinations: {card[:80]!r}"
+        for href in links:
+            assert re.fullmatch(r"[a-z0-9-]+/(?:#[a-z0-9-]+)?", href), (
+                f"highlight links stay inside the docs site: {href!r}"
+            )
 
 
 def test_evidence_copy_claims_only_what_its_capture_actually_shows() -> None:
-    """A caption must not promise a signal the screenshot cannot contain.
+    """A description must not promise a signal the recording cannot contain.
 
     The cockpit capture comes from an in-memory fixture with no metrics
     source, so every CPU/MEM column renders an em-dash placeholder. Claiming
     the frame shows "utilization" made the page's own headline evidence
-    contradict itself.
+    contradict itself, and the merge deleted the caption that used to carry
+    the risk — so the ban now covers the whole page.
     """
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    cockpit = next(
-        card
-        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
-        if "cockpit-poster.png" in card
+    assert "utilization" not in _index().lower(), (
+        "the cockpit capture has no live metrics, so no landing surface may "
+        "describe it as showing utilization"
     )
-    assert "utilization" not in cockpit.lower(), (
-        "the cockpit capture has no live metrics, so its caption must describe "
-        "what it does show (status, scope, restarts) instead"
-    )
-    for signal in ("status", "scope", "restart"):
-        assert signal in cockpit.lower()
+    direct = _section('<article id="scene-direct"', "</article>")
+    described = _flatten(direct)
+    for signal in ("browsing", "filtering", "describing", "following logs"):
+        assert signal in described, (
+            f"the Direct media must describe what it does show; {signal!r} missing "
+            f"from {described!r}"
+        )
 
 
 def test_generic_grouped_containers_carry_a_role_aria_can_use() -> None:
     """`aria-label` is ignored on `role=generic`, so the label needs a role.
 
-    Both containers are bare `div`s that group several related items and
-    name that grouping for assistive technology. Without an explicit role
-    the name is silently dropped and the group reads as loose text.
+    A bare `div` that groups several related items and names that grouping
+    for assistive technology drops the name silently unless it declares a
+    role, and the group reads as loose text. The rule is enforced for every
+    labelled `div` on the page, not a fixed list, so it survives the next
+    time the landing markup is rewritten.
     """
-    index = _index()
-    for class_name in ("contract-map__shared", "write-path__origins"):
-        match = re.search(rf'<div class="{class_name}"([^>]*)>', index)
-        assert match is not None, f"the landing page must keep the {class_name} grouping"
-        attributes = match.group(1)
-        assert "aria-label=" in attributes
-        assert 'role="group"' in attributes, (
-            f"{class_name} carries an aria-label, so it needs an explicit role "
-            f"assistive technology can name; found: {attributes.strip()!r}"
-        )
-
-
-def test_every_evidence_capture_links_to_its_full_resolution_asset() -> None:
-    """A 1280x720 terminal capture is unreadable at a third of its size.
-
-    Each mosaic tile renders at ~374px wide, which shrinks 15px terminal
-    text to about 4px. Wrapping the image in a plain link to the asset
-    itself keeps the evidence checkable without a lightbox, a framework, or
-    any additional runtime code.
-
-    The link must not carry its own `aria-label`: an accessible name on the
-    `<a>` wins over the nested `<img alt>`, so a generic "open the
-    full-resolution … capture" label would replace the one description that
-    actually carries the evidence for a screen-reader visitor. The image's
-    alt names the link instead.
-    """
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    cards = re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.DOTALL)
-    assert len(cards) == 6
-    for card in cards:
-        image = re.search(r'<img src="(assets/scenes/[^"]+)"', card)
-        assert image is not None
-        link = re.search(
-            r'<a class="evidence-card__full" href="([^"]+)"([^>]*)>\s*<img[^>]*alt="([^"]+)"',
-            card,
-        )
-        assert link is not None, (
-            f"the capture in this tile must be a link to its own full-resolution "
-            f"asset: {card[:120]!r}"
-        )
-        assert link.group(1) == image.group(1), "the link must open the very asset the tile renders"
-        assert "aria-label" not in link.group(2), (
-            "the link must let its nested image's descriptive alt be the accessible "
-            f"name instead of overriding it: {link.group(0)[:160]!r}"
-        )
-        assert len(link.group(3).split()) >= 8, (
-            "that alt is now the link's accessible name, so it has to describe the "
-            f"capture, not label a control: {link.group(3)!r}"
+    labelled = [
+        match.group(0)
+        for match in re.finditer(r"<div\b[^>]*>", _index())
+        if "aria-label=" in match.group(0)
+    ]
+    assert labelled, "the landing page must keep at least one named grouping"
+    for tag in labelled:
+        assert re.search(r'\brole="[a-z]+"', tag), (
+            "this div carries an aria-label, so it needs an explicit role "
+            f"assistive technology can name; found: {tag!r}"
         )
 
 
 def test_landing_provenance_matches_every_captures_real_source() -> None:
-    """One tile was captured against a disposable local cluster, not a fixture.
+    """One caption now speaks for all three recordings, so it must be true.
 
-    `mcp-poster.png` comes from a real k3d cluster (`ctx:k3d-korvid-demo`),
-    which `docs/demo/visual-storytelling.md` states plainly. A blanket
-    "synthetic cluster data" claim above it is not true of every tile.
+    Every shipped clip is recorded against the deterministic in-memory
+    fixture the `docs/demo` harness serves — never a live cluster. The merged
+    stage states that once, above all three panels, and must keep saying both
+    halves: the product is real, the cluster is not.
     """
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    heading = mosaic[: mosaic.index('<div class="evidence-mosaic__grid">')]
-    assert "synthetic or disposable local cluster" in heading.lower(), (
-        "the mosaic's provenance line must cover the disposable-cluster capture "
-        f"as well as the in-memory ones; found: {heading.strip()[-160:]!r}"
+    caption = _flatten(_stage_caption())
+    assert "real korvid" in caption, (
+        f"the caption must keep crediting the real product: {caption!r}"
     )
-
-
-def test_single_pod_log_evidence_is_not_labelled_as_a_merged_stream() -> None:
-    """`merged-logs.png` shows the single-pod `l` view, not the merged `L` view.
-
-    Its header reads `payment-worker-.../app [json] - streaming`, one pod and
-    one container. Korvid does have a multi-log view; this capture is not it,
-    so the tile must not be named for a screen it does not show.
-    """
-    mosaic = _section('<section class="evidence-mosaic"', "</section>")
-    card = next(
-        card
-        for card in re.findall(r'<article class="evidence-card[^"]*".*?</article>', mosaic, re.S)
-        if "merged-logs.png" in card
+    assert "synthetic cluster" in caption, (
+        f"and must keep disclosing the synthetic source of every clip: {caption!r}"
     )
-    text = re.sub(r"<[^>]+>", " ", card).lower()
-    for overclaim in ("merged logs", "merge"):
-        assert overclaim not in text, (
-            f"this capture is a single-pod stream, so it must not claim {overclaim!r}"
+    for overclaim in ("live cluster", "real cluster", "production cluster"):
+        assert not _unnegated(_stage_caption(), overclaim), (
+            f"no recording may be sold as a {overclaim!r}"
         )
-    assert "stream" in text
+
+
+def test_landing_never_labels_a_single_pod_stream_as_a_merged_one() -> None:
+    """Korvid has a merged log view; none of the shipped media shows it.
+
+    The retired mosaic rendered `merged-logs.png`, a single-pod `l` view
+    whose header reads `payment-worker-.../app [json] - streaming`. Nothing
+    on the compact page may reintroduce that name for a screen it does not
+    show, and the destinations it hands over must be the three the compact
+    page promises.
+    """
+    assert "merge" not in _index().lower(), (
+        "the landing media shows single-pod streams, so nothing may claim a merge"
+    )
 
     paths = _section('<nav class="flight-paths"', "</nav>")
-    for label, href in (
-        ("Operate a cluster", "getting-started/"),
-        ("Add the embedded agent", "agent/"),
-        ("Connect an MCP client", "mcp/"),
-        ("Evaluate production use", "performance/"),
-    ):
-        assert label in paths
-        assert f'href="{href}"' in paths
+    destinations = re.findall(r'<a href="([^"]+)"><strong>([^<]+)</strong>', paths)
+    assert destinations == [
+        ("getting-started/", "Start operating"),
+        ("agent/", "Explore Agent and MCP"),
+        ("performance/", "Evaluate production use"),
+    ], f"three destinations, install first and production last; found {destinations}"
+    for _, label in destinations:
+        assert len(label.split()) <= 4, f"a destination label must stay scannable: {label!r}"
     assert "Contributing?" not in paths
 
 

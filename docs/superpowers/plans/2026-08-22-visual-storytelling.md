@@ -1,5 +1,14 @@
 # Official Site Visual Storytelling Implementation Plan
 
+> **Superseded for the landing page structure** by
+> [2026-08-27-compact-homepage.md](2026-08-27-compact-homepage.md) and its design
+> [2026-08-27-compact-homepage-design.md](../specs/2026-08-27-compact-homepage-design.md).
+> The homepage now ships one merged hero/driver stage, three highlights, and one
+> destination nav, so this plan's hero figure, per-scene Input/Evidence/Result rows,
+> contract map, write path, and six-card evidence mosaic are history, not a recipe to
+> replay. Its recordings, posters, scene controller, and CSS remain the source of
+> record for the media the compact homepage still ships.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the official site's prose-led landing page with real korvid product evidence, a truthful three-driver architecture, an explicit guarded-write flow, and selectively visual core documentation.
