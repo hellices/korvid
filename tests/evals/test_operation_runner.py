@@ -21,8 +21,11 @@ from korvid.evals.operation import OperationJourney, bundled_operations_dir, loa
 from korvid.evals.operation_journal import ActionJournal
 from korvid.evals.operation_runner import ScriptedOperationBridge, approval_from_result
 from korvid.evals.operation_state import StatefulFakeKubeClient
+from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.approval import ApprovalOutcome, ScriptedApprovalPolicy
 from korvid.tools.audit import AuditLog
+
+from .operation_scripts import OPERATION_SCRIPTS
 
 
 def _load(journey_id: str) -> OperationJourney:
@@ -289,3 +292,53 @@ async def test_journaling_executor_records_write_requested_and_reported(
     assert "write_requested" in events
     assert "approval_reported" in events
     assert approval_from_result(result) == "approved" or result.startswith("approved and executed")
+
+
+_BUNDLED_JOURNEYS = load_operation_journeys(bundled_operations_dir())
+_BUNDLED_IDS = [journey.id for journey in _BUNDLED_JOURNEYS]
+
+
+async def _run_scripted_case(journey_id: str, tmp_path: Path) -> Any:
+    from korvid.evals.operation_runner import run_operation_case
+
+    journey = _load(journey_id)
+    return await run_operation_case(
+        journey,
+        audit_path=tmp_path / "audit.jsonl",
+        provider_factory=lambda: ScriptedProvider(OPERATION_SCRIPTS[journey_id]),
+    )
+
+
+@pytest.mark.parametrize("journey_id", _BUNDLED_IDS)
+async def test_run_operation_case_matches_the_fixture_pack(journey_id: str, tmp_path: Path) -> None:
+    """`run_operation_case` grades every bundled fixture exactly as its
+    Textual-driven counterpart (`run_operation_journey`) does: same
+    scripted transcript, same safety verdict, same outcome."""
+    run = await _run_scripted_case(journey_id, tmp_path)
+    journey = _load(journey_id)
+    assert run.journey_id == journey_id
+    assert run.grade.safe is True
+    assert run.grade.outcome == journey.expected_outcome
+    assert run.wall_time_s >= 0.0
+
+
+async def test_run_operation_case_publishes_prompt_and_decisions(tmp_path: Path) -> None:
+    """The published run carries prompt identity and decision provenance,
+    not just the grade."""
+    from korvid.tools.approval import SCRIPTED_POLICY_SOURCE
+
+    run = await _run_scripted_case("scale-deployment-up", tmp_path)
+    assert run.prompt["pack"]
+    assert run.prompt["sha256"]
+    assert run.decisions == ({"outcome": "approve", "decision_source": SCRIPTED_POLICY_SOURCE},)
+    assert any(event["event"] == "outcome_reported" for event in run.journal)
+    assert run.audit  # the scale mutation left at least one persisted audit record
+
+
+async def test_run_operation_case_never_dialogs_for_a_no_write_fixture(tmp_path: Path) -> None:
+    """A fixture with `expected_approval_dialogs == 0` scripts zero
+    outcomes: `run.decisions` is empty, proving the policy was never
+    consulted for a write the fixture never expected."""
+    run = await _run_scripted_case("scale-no-op", tmp_path)
+    assert run.decisions == ()
+    assert run.grade.outcome == "completed"

@@ -19,19 +19,32 @@ ever need screen navigation, so every other `UIBridge` method is a lean
 from __future__ import annotations
 
 import asyncio
+import json
 import re
-from collections.abc import AsyncIterator, Mapping, Sequence
+import time
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from yaml import YAMLError, safe_load
 
 from korvid.agent.events import AgentError, AgentEvent, TextDelta, ToolCallFinished
+from korvid.agent.interaction import InteractionContext, PaneContext, ResourceIdentity
+from korvid.agent.model_policy import PolicyEnvironment
 from korvid.agent.outbound import sanitize_recorded_tool_result
 from korvid.agent.session import DefaultAgentSession
+from korvid.evals.__main__ import prompt_fingerprint
 from korvid.evals.fake_kube import builtin_aliases
+from korvid.evals.harness import NO_GRIND, PromptGrind, build_eval_harness, resolve_eval_policy
+from korvid.evals.interaction import EvalUiBridge
 from korvid.evals.operation import OperationJourney, OperationTarget, StateAssertion
-from korvid.evals.operation_grader import evaluate_assertion_document
+from korvid.evals.operation_grader import (
+    OperationGrade,
+    evaluate_assertion,
+    evaluate_assertion_document,
+    grade_operation,
+)
 from korvid.evals.operation_journal import (
     ActionJournal,
     JournalTarget,
@@ -42,16 +55,25 @@ from korvid.evals.operation_journal import (
 from korvid.evals.operation_state import (
     AuditIntentProbe,
     AuditRecord,
+    FakeClusterState,
     StatefulFakeKubeClient,
     StatefulFakeWriteOps,
     parse_audit_records,
 )
+from korvid.evals.runner import _CountingProvider
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import manifest_uid
-from korvid.tools.approval import ApprovalDecision, ApprovalOutcome, ApprovalPolicy, ApprovalRequest
+from korvid.tools.approval import (
+    SCRIPTED_POLICY_SOURCE,
+    ApprovalDecision,
+    ApprovalOutcome,
+    ApprovalPolicy,
+    ApprovalRequest,
+    ScriptedApprovalPolicy,
+)
 from korvid.tools.audit import AuditLog
-from korvid.tools.executor import RecordedExecution, ToolOutcome, UIBridge
+from korvid.tools.executor import RecordedExecution, ToolExecutor, ToolOutcome, UIBridge
 from korvid.tools.registry import TOOLS_BY_NAME
 from korvid.tools.write_coordinator import (
     WRITE_VERBS,
@@ -66,6 +88,17 @@ from korvid.tools.write_coordinator import (
 _STATE_READ_TOOL = "get_resource"
 
 _ALIASES: dict[str, ResourceMeta] = builtin_aliases()
+
+#: Unlike `korvid.evals.harness.EVAL_ENVIRONMENT`, writes are armed here:
+#: an operation journey *is* the write path under test, gated only by the
+#: injected `ApprovalPolicy` and the real fail-closed `AuditLog` — never
+#: by a harness shortcut. Copied from `tests/evals/operation_app.py`'s
+#: `_WRITE_ENVIRONMENT` (not imported: that module is test-only).
+_WRITE_ENVIRONMENT = PolicyEnvironment(
+    readonly=False,
+    resize_supported=False,
+    observability_backends=frozenset(),
+)
 
 #: Every `run_approved_write` failure is surfaced as `f"ERROR: {action}
 #: {gvr} {outcome}"`; this pattern recognizes the subset of those that
@@ -676,3 +709,309 @@ class _AnswerCapturingSession(DefaultAgentSession):
                 result="error" if not completed or failed else ("captured" if answer else "empty"),
                 detail=summarize_untrusted(chars=len(answer)),
             )
+
+
+def _read_audit(
+    audit_path: Path, *, journal: ActionJournal | None = None
+) -> tuple[dict[str, Any], ...]:
+    """Read back the persisted audit lines this run's `AuditLog` wrote.
+
+    Ported unchanged from `tests/evals/operation_app.py`'s `_read_audit`.
+    """
+    if not audit_path.exists():
+        return ()
+    records: list[dict[str, Any]] = []
+    malformed = 0
+    for line in audit_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+        else:
+            malformed += 1
+    if malformed and journal is not None:
+        journal.append(
+            event="audit_unparsable",
+            actor="audit",
+            result="error",
+            detail=summarize_untrusted(count=malformed),
+        )
+    return tuple(records)
+
+
+def _audit_result(outcome: str) -> str:
+    """Map one persisted audit outcome onto the journal's status vocabulary.
+
+    Ported unchanged from `tests/evals/operation_app.py`'s `_audit_result`.
+    """
+    if outcome in {"intent", "success", "blocked"}:
+        return outcome
+    return "error" if outcome else "missing"
+
+
+def _journal_audit_records(journal: ActionJournal, records: Sequence[dict[str, Any]]) -> None:
+    """Journal the persisted audit lines after the run.
+
+    Ported unchanged from `tests/evals/operation_app.py`'s
+    `_journal_audit_records`.
+    """
+    for record in records:
+        journal.append(
+            event="audit_record",
+            actor="audit",
+            action=summarize_action(str(record.get("action") or "")),
+            result=_audit_result(str(record.get("outcome") or "")),
+            detail=summarize_untrusted(
+                kind=record.get("kind"),
+                name=record.get("name"),
+                context=record.get("context"),
+            ),
+        )
+
+
+def _journal_grader_reads(
+    journal: ActionJournal, state: FakeClusterState, journey: OperationJourney
+) -> None:
+    """Journal each postcondition read the grader itself performs, so the
+    published journal explains where a `grader_read` checkpoint credit
+    came from. Ported unchanged from `tests/evals/operation_app.py`'s
+    `_journal_grader_reads`."""
+    for assertion in journey.postconditions:
+        target = assertion.target
+        result = evaluate_assertion(state, assertion)
+        live_uid = state.uid_of(
+            group=target.group, kind=target.kind, namespace=target.namespace, name=target.name
+        )
+        journal.append(
+            event="grader_read",
+            actor="grader",
+            target=replace(JournalTarget.of(target), uid=live_uid),
+            result="found" if result.found else "absent",
+            detail=summarize_untrusted(path=assertion.path),
+        )
+
+
+def _default_script(
+    journey: OperationJourney, kube: StatefulFakeKubeClient
+) -> tuple[list[ApprovalOutcome], list[Callable[[], None] | None]]:
+    """Map one fixture's authored `approval`/`dialog_intervention` onto a
+    scripted policy's script.
+
+    Every bundled fixture's `expected_approval_dialogs` is 0 or 1 (never
+    more) and its `approval` field is a single scalar outcome, so a
+    one-element (or empty, for a fixture that never reaches a dialog)
+    script always suffices — no bundled fixture needs
+    `approval_rerequest_turns` to replay more than one dialog.
+    """
+    if journey.expected_approval_dialogs == 0 or journey.approval == "none":
+        return [], []
+    outcome = {
+        "approved": ApprovalOutcome.APPROVE,
+        "denied": ApprovalOutcome.DECLINE,
+        "expired": ApprovalOutcome.EXPIRE,
+    }[journey.approval]
+    if journey.dialog_intervention is None:
+        return [outcome], [None]
+    replacement_uid = journey.dialog_intervention.replace_target.uid
+    target = journey.target
+
+    def intervene() -> None:
+        kube.state.replace_incarnation(
+            group=target.group,
+            kind=target.kind,
+            namespace=target.namespace,
+            name=target.name,
+            uid=replacement_uid,
+        )
+
+    return [outcome], [intervene]
+
+
+def _operation_interaction(journey: OperationJourney) -> InteractionContext:
+    """The static workspace snapshot a TUI-free run presents.
+
+    `initial_selection: neutral` vs `target` models a Textual table
+    cursor, which does not exist here — every bundled fixture's scripted
+    transcript drives cluster tools directly, never a screen-navigation
+    tool, so this always presents the fixture's own target as already
+    selected rather than modelling cursor movement.
+    """
+    target = journey.target
+    return InteractionContext(
+        kube_context=target.context,
+        context_epoch=0,
+        focused_pane=PaneContext(
+            kind=target.plural,
+            scope=target.namespace,
+            filter_pattern=None,
+            selected=ResourceIdentity(
+                kind=target.kind, namespace=target.namespace, name=target.name, uid=target.uid
+            ),
+        ),
+        secondary_pane=None,
+        timeline_cursor=None,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class OperationRun:
+    """The complete, publishable result of one TUI-free operation-journey run."""
+
+    journey_id: str
+    answer: str
+    grade: OperationGrade
+    journal: tuple[dict[str, Any], ...]
+    audit: tuple[dict[str, Any], ...]
+    #: One entry per approval decision the scripted policy actually made,
+    #: in order — empty for a fixture that never reaches a dialog.
+    decisions: tuple[dict[str, str], ...]
+    wall_time_s: float
+    prompt: dict[str, Any]
+
+
+async def run_operation_case(
+    journey: OperationJourney,
+    *,
+    audit_path: Path,
+    provider_factory: Callable[[], Any],
+    approval_script: Sequence[ApprovalOutcome] | None = None,
+    model_tier: str | None = None,
+    grind: PromptGrind = NO_GRIND,
+) -> OperationRun:
+    """Run one operation journey end to end, entirely TUI-free, and grade it.
+
+    Builds the exact same production graph
+    `korvid.evals.harness.build_eval_harness` composes for the read-only
+    scenario/journey runners, over the exact same shared write path a
+    Textual run uses (`run_approved_write`, a real `AuditLog`,
+    `StatefulFakeWriteOps`) — the only substitution is `ApprovalPolicy`,
+    an explicit `ScriptedApprovalPolicy` in place of a `ConfirmScreen`.
+
+    Args:
+        journey: the loaded fixture.
+        audit_path: where the real `AuditLog` writes; read back for grading.
+        provider_factory: builds the LLM provider — `ScriptedProvider` in
+            deterministic mode, a configured live provider otherwise.
+        approval_script: overrides the fixture's own authored
+            `approval`/`dialog_intervention` derivation. `None` (the
+            default) derives one scripted outcome from the fixture itself.
+        model_tier: `"low"`, `"high"`, or `None` for automatic routing.
+        grind: The eval-only prompt levers, composed after the immutable
+            safety contract; published in the returned `OperationRun.prompt`.
+
+    Returns:
+        The graded run: its answer, journal, persisted audit records,
+        approval decisions, wall-clock time, and prompt identity.
+    """
+    started = time.monotonic()
+    kube = StatefulFakeKubeClient(journey.cluster)
+    journal = ActionJournal()
+    audit = AuditLog(audit_path, context=journey.target.context)
+    if approval_script is not None:
+        script: list[ApprovalOutcome] = list(approval_script)
+        interventions: list[Callable[[], None] | None] = [None] * len(script)
+    else:
+        script, interventions = _default_script(journey, kube)
+    policy = ScriptedApprovalPolicy(script, interventions=interventions)
+    bridge = ScriptedOperationBridge(
+        kube=kube,
+        journal=journal,
+        journey=journey,
+        audit=audit,
+        audit_path=audit_path,
+        policy=policy,
+    )
+    raw_provider = provider_factory()
+    provider = _CountingProvider(raw_provider)
+    resolved_policy = resolve_eval_policy(
+        provider, model_tier=model_tier, environment=_WRITE_ENVIRONMENT
+    )
+    executor = _OperationJournalingExecutor(
+        ToolExecutor(kube, _ALIASES, ui=bridge),
+        journal,
+        journey,
+        max_result_chars=resolved_policy.max_result_chars,
+    )
+    ui_bridge = EvalUiBridge(_operation_interaction(journey))
+    harness = build_eval_harness(
+        provider=provider,
+        execution=executor,
+        bridge=ui_bridge,
+        policy=resolved_policy,
+        grind=grind,
+    )
+    session = _AnswerCapturingSession(
+        engine=harness.engine,
+        bridge=harness.bridge,
+        prompt_harness=harness.prompts,
+        conversation=harness.conversation,
+        gateway=harness.gateway,
+        tools=harness.tools,
+        policy=harness.policy,
+        cluster=harness.cluster,
+        user_rules=harness.user_rules,
+        journal=journal,
+    )
+    try:
+        for index, text in enumerate(journey.turns):
+            journal.append(
+                event="user_turn",
+                actor="fixture_actor",
+                detail=summarize_untrusted(count=index + 1),
+            )
+            if index + 1 in journey.approval_rerequest_turns:
+                journal.append(
+                    event="approval_rerequested",
+                    actor="fixture_actor",
+                    detail=summarize_untrusted(count=index + 1),
+                )
+            if index == 0:
+                journal.append(
+                    event="goal_received",
+                    actor="fixture_actor",
+                    action=journey.goal,
+                    detail=summarize_untrusted(chars=len(text)),
+                )
+            async for _event in session.run_turn(text):
+                pass
+    finally:
+        aclose = getattr(raw_provider, "aclose", None)
+        if callable(aclose):
+            await aclose()
+        await session.aclose()
+    answer = session.answers[-1] if session.answers else ""
+    journal.append(
+        event="outcome_reported",
+        actor="model_tool",
+        result="captured" if answer else "empty",
+        detail=summarize_untrusted(chars=len(answer)),
+    )
+    audit_records = _read_audit(audit_path, journal=journal)
+    _journal_audit_records(journal, audit_records)
+    _journal_grader_reads(journal, kube.state, journey)
+    grade = grade_operation(
+        journey,
+        journal,
+        kube.state,
+        answer,
+        tool_calls=executor.tool_calls,
+        iterations=provider.completions,
+    )
+    return OperationRun(
+        journey_id=journey.id,
+        answer=answer,
+        grade=grade,
+        journal=tuple(journal.payload()),
+        audit=audit_records,
+        decisions=tuple(
+            {"outcome": outcome.value, "decision_source": SCRIPTED_POLICY_SOURCE}
+            for outcome in script
+        ),
+        wall_time_s=time.monotonic() - started,
+        prompt=prompt_fingerprint(resolved_policy, grind=grind),
+    )
