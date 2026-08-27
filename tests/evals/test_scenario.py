@@ -11,7 +11,10 @@ from korvid.evals.scenario import Scenario, load_scenario, load_scenarios
 _MINIMAL = """\
 id: oom-killed
 question: Why does the checkout pod keep dying?
-screen: "pods view, namespace shop"
+interaction:
+  kube_context: eval-cluster
+  context_epoch: 1
+  focused_pane: {kind: pods, scope: shop}
 root_cause: oom_killed
 grading:
   must_mention:
@@ -52,7 +55,10 @@ def test_load_scenario_parses_all_fields(tmp_path: Path) -> None:
     assert scenario.id == "oom-killed"
     assert scenario.root_cause == "oom_killed"
     assert scenario.question.startswith("Why does")
-    assert scenario.screen == "pods view, namespace shop"
+    assert scenario.interaction.kube_context == "eval-cluster"
+    assert scenario.interaction.context_epoch == 1
+    assert scenario.interaction.focused_pane.kind == "pods"
+    assert scenario.interaction.focused_pane.scope == "shop"
     assert scenario.must_mention == (("oomkilled", "oom"), ("137",))
     assert scenario.must_not_mention == (("image pull",),)
     evidence = scenario.expected_evidence[0][0]
@@ -69,7 +75,10 @@ def test_load_scenario_defaults_optional_sections(tmp_path: Path) -> None:
     text = """\
 id: crashloop
 question: Why does this deployment keep restarting?
-screen: deployments view
+interaction:
+  kube_context: eval-cluster
+  context_epoch: 1
+  focused_pane: {kind: pods, scope: shop}
 root_cause: crashloop
 grading:
   must_mention:
@@ -277,3 +286,52 @@ def test_load_scenario_rejects_future_unquoted_yaml_datetimes(tmp_path: Path) ->
     )
     with pytest.raises(ValueError, match="after the scenario anchor"):
         load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_requires_an_explicit_starting_interaction(tmp_path: Path) -> None:
+    """The workspace a turn starts from is authored, never inferred.
+
+    Deriving it from the question would make the eval measure a screen no
+    fixture ever declared, and a change in phrasing would silently change
+    what the model was shown.
+    """
+    text = _MINIMAL.replace(
+        "interaction:\n"
+        "  kube_context: eval-cluster\n"
+        "  context_epoch: 1\n"
+        "  focused_pane: {kind: pods, scope: shop}\n",
+        "",
+    )
+    with pytest.raises(ValueError, match="interaction"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_the_retired_screen_prose_field(tmp_path: Path) -> None:
+    text = _MINIMAL + 'screen: "pods view, namespace shop"\n'
+    with pytest.raises(ValueError, match="unknown keys"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_an_interaction_without_a_focused_pane(tmp_path: Path) -> None:
+    text = _MINIMAL.replace("  focused_pane: {kind: pods, scope: shop}\n", "")
+    with pytest.raises(ValueError, match="focused_pane"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_reads_the_selected_resource_identity(tmp_path: Path) -> None:
+    text = _MINIMAL.replace(
+        "  focused_pane: {kind: pods, scope: shop}\n",
+        "  focused_pane:\n"
+        "    kind: pods\n"
+        "    scope: shop\n"
+        "    filter: checkout\n"
+        "    selected: {kind: Pod, namespace: shop, name: checkout-1, uid: pod-1}\n",
+    )
+    selected = load_scenario(_write(tmp_path, text)).interaction.focused_pane.selected
+    assert selected is not None
+    assert (selected.kind, selected.namespace, selected.name, selected.uid) == (
+        "Pod",
+        "shop",
+        "checkout-1",
+        "pod-1",
+    )

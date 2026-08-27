@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import cast
+from typing import Final, cast
 
 
 def _freeze_option_value(value: object) -> object:
@@ -26,6 +26,13 @@ def _freeze_options(options: Mapping[str, object]) -> Mapping[str, object]:
     return cast("Mapping[str, object]", _freeze_option_value(options))
 
 
+#: The three routes korvid ships: an explicit tier, or automatic routing.
+#: The same set `KorvidConfig` accepts for `agent.model_tier`, checked
+#: again here because the wizard, a plugin and a `dataclasses.replace`
+#: can all build settings without going through config parsing.
+MODEL_TIERS: Final[tuple[str, ...]] = ("low", "high")
+
+
 @dataclass(frozen=True)
 class AgentSettings:
     provider: str
@@ -33,11 +40,26 @@ class AgentSettings:
     base_url: str | None
     model: str
     api_key_env: str | None = None
-    #: Model-capability profile (issue #71): `full` or `small`.
-    profile: str = "full"
+    #: Explicit model-capability tier override: `low`, `high`, or `None`
+    #: for automatic routing (replaces the old retired arm names).
+    model_tier: str | None = None
     options: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # Checked before the options are frozen: everything downstream
+        # treats the tier as already validated — `ModelRouter.resolve`
+        # takes a non-None tier as the user's own decision and routes it
+        # without falling back, and `save_agent_config` writes whatever
+        # it is handed. An unroutable value would otherwise surface as a
+        # policy nobody chose, reported in the header as the user's.
+        if self.model_tier is not None and (
+            type(self.model_tier) is not str or self.model_tier not in MODEL_TIERS
+        ):
+            detail = repr(self.model_tier) if type(self.model_tier) is str else "<invalid type>"
+            raise ValueError(
+                f"model_tier must be one of {', '.join(MODEL_TIERS)} or None for automatic "
+                f"routing, got {detail}"
+            )
         object.__setattr__(self, "options", _freeze_options(self.options))
 
 

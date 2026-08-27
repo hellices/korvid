@@ -1,17 +1,31 @@
 # Local Model Agent Scoreboard
 
+> **Every row on this page predates the model-tier harness (issue #316).**
+> They were produced by the capability-profile runner that issue #316
+> deleted, and are kept
+> as historical rows: no score here has been restated, recomputed, or
+> relabelled under a tier. Read `small` as "the budget the `low` tier now
+> carries" and see
+> [*Migrating pre-tier campaigns*](methodology.md#migrating-pre-tier-campaigns)
+> for what does and does not carry over — in particular, pre-tier runs
+> offered write schemas to the model and armed no screen actions, so a
+> pre-tier row is **not** directly comparable with a post-tier row of the
+> same model. A future campaign publishes `model_tier`, `meta.limits`,
+> `meta.tools.armed`, the prompt pack and catalog version, and each
+> scenario's starting interaction.
+
 ## Current Results — 2026-08-10 matrix
 
 Nine models on the task pack ×3, run on `main` revision `bdfb645` under the
-standard AKS/Ollama protocol (`Standard_D32s_v5`, `small` profile,
-`prompts.source: default`).
+standard AKS/Ollama protocol (`Standard_D32s_v5`, `small` profile — the
+pre-tier equivalent of today's `low` tier — and `prompts.source: default`).
 
 **Protocol conformance (#176).** Against the standard for a publishable row:
 
 | Condition | This matrix |
 |---|---|
 | Shared AKS environment | met |
-| Pin profile | met (`small`) |
+| Pin capability arm | met (`small` profile — the pre-tier equivalent of today's `low` tier) |
 | Pin scenario SHA | met (revision `bdfb645`) |
 | Pin node SKU | met (`Standard_D32s_v5`) |
 | Pin serving engine/version | **missing** |
@@ -28,7 +42,7 @@ fully standard-protocol run**. **Treat the journey column as provisional.**
 closes the other.
 
 **What is and is not pinned.** Pinned: the korvid revision (`bdfb645`), the
-16-tool surface, the node SKU, the profile, and the composed-prompt fingerprint
+16-tool surface, the node SKU, the capability arm, and the composed-prompt fingerprint
 (sha256 `3e1c34ba4f673fd2f8d1be45e3920bba6b3a11048b5a6aae3a66fc9168775804`,
 recorded in every retained run). *Not* pinned: the serving
 engine — the deployment runs `ollama/ollama:latest` and the resolved version

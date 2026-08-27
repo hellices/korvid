@@ -1,6 +1,12 @@
 id: missing-configmap-mount
 question: Pod render-1 in namespace media is stuck in ContainerCreating. What is holding it up?
-screen: "resource view: pods, namespace media, selected: media/render-1 (ContainerCreating)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: media
+    selected: {kind: Pod, namespace: media, name: render-1, uid: pod-render-1}
 root_cause: missing_configmap
 grading:
   must_mention:

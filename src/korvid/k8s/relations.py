@@ -18,10 +18,19 @@ _DRILL_CHILDREN: dict[str, str] = {
     "helmreleases": "helmrevisions",
 }
 
+_DRILL_ALIASES: dict[str, str] = {
+    "deploy": "deployments",
+    "deployment": "deployments",
+    "rs": "replicasets",
+    "replicaset": "replicasets",
+    "helmrelease": "helmreleases",
+}
+
 
 def drill_child(parent_kind: str) -> str | None:
-    """Child kind (lowercase plural) shown when drilling into *parent_kind*."""
-    return _DRILL_CHILDREN.get(parent_kind)
+    """Child kind shown for a canonical kind or supported navigation alias."""
+    normalized = parent_kind.lower()
+    return _DRILL_CHILDREN.get(_DRILL_ALIASES.get(normalized, normalized))
 
 
 def owned_by(obj: Any, parent_uid: str) -> bool:

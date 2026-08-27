@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import copy
 import dataclasses
 import hashlib
 import json
@@ -28,18 +27,29 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from korvid.agent.profiles import AgentProfile, PromptOverrides, build_profile
-from korvid.agent.prompts import compose_system_prompt
+from korvid.agent.model_policy import ResolvedAgentPolicy
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
+from korvid.evals.harness import (
+    NO_GRIND,
+    PromptGrind,
+    UnknownEvalToolError,
+    armed_tool_names,
+    baseline_eval_policy,
+    eval_surface_names,
+    ground_eval_policy,
+    resolve_eval_policy,
+    static_prompt,
+)
+from korvid.evals.interaction import interaction_payload
 from korvid.evals.runner import (
     DEFAULT_REPETITIONS,
     ScenarioReport,
-    _eval_tools,
     render_markdown,
     run_scenario,
 )
 from korvid.evals.scenario import Scenario, bundled_scenarios_dir, load_scenarios
 from korvid.evals.serving import ProbeResult, ollama_root, serving_metadata
+from korvid.providers.ollama import OllamaProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
 from korvid.providers.static_creds import StaticHeaderSource
 from korvid.tools.executor import ToolExecutor
@@ -47,6 +57,9 @@ from korvid.tools.executor import ToolExecutor
 
 def provider_factory_from_env(env: Mapping[str, str]) -> Callable[[], Any]:
     """Build a live-provider factory from `KORVID_EVAL_*` variables."""
+    provider_id = env.get("KORVID_EVAL_PROVIDER", "openai-compat").strip()
+    if provider_id not in {"ollama", "openai-compat"}:
+        raise SystemExit("KORVID_EVAL_PROVIDER must be 'ollama' or 'openai-compat'.")
     base_url = env.get("KORVID_EVAL_BASE_URL", "").strip()
     model = env.get("KORVID_EVAL_MODEL", "").strip()
     if not base_url or not model:
@@ -63,8 +76,15 @@ def provider_factory_from_env(env: Mapping[str, str]) -> Callable[[], Any]:
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise SystemExit("KORVID_EVAL_TIMEOUT_SECONDS must be a positive number.")
 
-    def factory() -> OpenAICompatProvider:
+    def factory() -> OllamaProvider | OpenAICompatProvider:
         credentials = StaticHeaderSource(api_key) if api_key else None
+        if provider_id == "ollama":
+            return OllamaProvider(
+                base_url,
+                model,
+                credentials=credentials,
+                timeout_seconds=timeout_seconds,
+            )
         return OpenAICompatProvider(
             base_url,
             model,
@@ -191,94 +211,160 @@ async def warm_up(base_url: str, model: str, *, fetch: Fetch) -> bool:
 
 
 def report_payload(reports: list[ScenarioReport]) -> list[dict[str, Any]]:
-    """JSON-serializable form of the reports, for machine consumption."""
+    """JSON-serializable form of the reports, for machine consumption.
+
+    `successes` counts repetitions whose **diagnosis** was graded correct
+    (`grade.diagnosis_success`), which is the historical scoreboard number
+    and is deliberately narrower than the run's `outcome`: a run can
+    diagnose correctly and still be published as a failure because it
+    missed its evidence, errored, or violated the write boundary.
+
+    The journey artifact does not reuse this key. A conversation has no
+    single diagnosis, so it publishes `successful_journeys` — repetitions
+    in which every turn's outcome was `success` — rather than two
+    different measurements under one name.
+    """
     return [
         {
             "scenario": report.scenario_id,
             "root_cause": report.root_cause,
             "successes": report.successes,
             "evidence_hits": report.evidence_hits,
+            # The screen the question was asked from. A diagnostic score
+            # without it is not reproducible: the same question against a
+            # different starting pane is a different measurement.
+            "interaction": (
+                None if report.interaction is None else interaction_payload(report.interaction)
+            ),
+            "max_tool_calls": report.max_tool_calls,
             "runs": [dataclasses.asdict(run) for run in report.runs],
         }
         for report in reports
     ]
 
 
+def policy_payload(policy: ResolvedAgentPolicy) -> dict[str, Any]:
+    """Which model, which tier, and who decided the tier."""
+    return {
+        "provider": policy.model.provider,
+        "model": policy.model.model,
+        "tier": policy.tier.value,
+        "route_source": policy.route_source.value,
+        "prompt_pack": policy.prompt_pack_id,
+        "overlays": list(policy.prompt_overlay_ids),
+    }
+
+
+def limits_payload(policy: ResolvedAgentPolicy) -> dict[str, Any]:
+    """Every budget the run was bound by.
+
+    Published in full because they are not implied by the tier for a
+    reader outside this repository, and a tier's budgets can change
+    between releases.
+    """
+    return {
+        "max_iterations": policy.max_iterations,
+        "max_history_chars": policy.max_history_chars,
+        "max_result_chars": policy.max_result_chars,
+        "max_tool_calls_per_iteration": policy.max_tool_calls_per_iteration,
+        "allow_parallel_tool_calls": policy.allow_parallel_tool_calls,
+        "strict_history_budget": policy.strict_history_budget,
+    }
+
+
+def capabilities_payload(policy: ResolvedAgentPolicy) -> dict[str, Any]:
+    """The merged capability facts, each with the source that supplied it.
+
+    Provenance matters more than the values: a tier routed from a catalog
+    entry and one routed from a provider's own claim are different
+    evidence for the same number.
+    """
+    capabilities = policy.capabilities
+    tier = capabilities.recommended_tier
+    return {
+        "context_window_tokens": capabilities.context_window_tokens,
+        "supports_tools": capabilities.supports_tools,
+        "supports_parallel_tools": capabilities.supports_parallel_tools,
+        "supports_reasoning": capabilities.supports_reasoning,
+        "recommended_tier": None if tier is None else tier.value,
+        "provenance": {
+            fact: source.value for fact, source in sorted(capabilities.provenance.items())
+        },
+    }
+
+
+def tools_payload(policy: ResolvedAgentPolicy, omitted: list[str]) -> dict[str, Any]:
+    """The exact armed names, their count, and what a controlled arm dropped."""
+    armed = list(armed_tool_names(policy))
+    return {"armed": armed, "count": len(armed), "omitted": omitted}
+
+
 def prompt_fingerprint(
-    profile: AgentProfile,
+    policy: ResolvedAgentPolicy,
     *,
-    tools: list[dict[str, Any]] | None = None,
-) -> dict[str, str]:
+    grind: PromptGrind = NO_GRIND,
+) -> dict[str, Any]:
     """Which prompt produced a run.
 
-    A scoreboard row that does not say which prompt it was measured under is
-    not comparable with any other row, so every run records this.
+    A scoreboard row that does not say which prompt it was measured under
+    is not comparable with any other row, so every run records this.
 
     The digest covers what the model actually receives: the *composed*
-    system prompt for the surface in question — role statement plus the UI
-    and write/no-write clauses `AgentRuntime` appends — and the complete
-    tool schemas, which are retransmitted on every request. Hashing only
-    the role statement would mark behaviourally different runs as
-    comparable.
+    system message for this policy — the immutable safety contract, the
+    common role, the tier pack, any overlay, and the armed-capability
+    clauses — plus the complete tool schemas, which are retransmitted on
+    every request. Hashing only the tier pack would mark behaviourally
+    different runs as comparable.
 
     Args:
-        profile: the built profile, already carrying any overrides. It is
-            the only input: `source` is decided by comparing this profile
-            against the shipped prompts, not by inspecting what was
-            configured, so an override that reproduces korvid's own wording
-            is correctly reported as `default`.
-        tools: the schemas actually offered. Defaults to the task pack's
-            surface (`_eval_tools`, which drops the UI tools); journey runs
-            offer `profile.tools` unchanged and must pass them, or a UI
-            schema change would leave the digest untouched.
+        policy: The resolved policy, exactly as the run was composed
+            against it. A campaign passes its already-ground policy, so
+            `overlays` here is the same list `meta.policy` publishes.
+        grind: The eval-only prompt levers this run applied.
 
     Returns:
-        `source` (`default` or `override`) and the `sha256` digest.
-        `source` reflects the *effect* of the configuration: an override
-        that reproduces the shipped prompt byte for byte still yields a
-        comparable, publishable run.
+        The `pack` id, the composed `overlays`, `source` (`default` or
+        `override`) and the `sha256` digest. `source` reflects the
+        *effect* of the grind: text that reproduces korvid's own wording
+        byte for byte still yields a comparable, publishable run.
     """
-    offered = _eval_tools(profile) if tools is None else tools
-    digest = _prompt_digest(profile.system_prompt, profile.ui_prompt, offered)
-    return {"source": _source(profile, offered, digest), "sha256": digest}
+    ground = ground_eval_policy(policy, grind)
+    # The baseline is korvid's own wording, which the shipped registry can
+    # only compose for a policy that does not name the eval overlay.
+    baseline_policy = baseline_eval_policy(policy)
+    digest = _prompt_digest(static_prompt(ground, grind), ground)
+    baseline = _prompt_digest(static_prompt(baseline_policy), baseline_policy)
+    return {
+        "pack": ground.prompt_pack_id,
+        "overlays": list(ground.prompt_overlay_ids),
+        "source": "default" if digest == baseline else "override",
+        "sha256": digest,
+    }
 
 
-def _source(profile: AgentProfile, offered: list[dict[str, Any]], digest: str) -> str:
-    """`default` when the configuration had no effect on what the model sees.
-
-    Compared against the shipped prompts **on the same tool set**, so the
-    answer does not depend on which tools this cluster happened to arm. An
-    override that reproduces korvid's own wording byte for byte still
-    yields a comparable, publishable run.
-    """
-    shipped = build_profile(
-        profile.name, readonly=False, resize_supported=True, overrides=PromptOverrides()
-    )
-    descriptions = {t["function"]["name"]: t["function"]["description"] for t in shipped.tools}
-    baseline_tools = copy.deepcopy(offered)
-    for tool in baseline_tools:
-        function = tool["function"]
-        shipped_description = descriptions.get(function["name"])
-        if shipped_description is not None:
-            function["description"] = shipped_description
-    baseline = _prompt_digest(shipped.system_prompt, shipped.ui_prompt, baseline_tools)
-    return "default" if digest == baseline else "override"
-
-
-def _prompt_digest(system_prompt: str, ui_prompt: str, tools: list[dict[str, Any]]) -> str:
-    composed = compose_system_prompt(tools, None, system_prompt=system_prompt, ui_prompt=ui_prompt)
+def _prompt_digest(system_prompt: str, policy: ResolvedAgentPolicy) -> str:
+    schemas = [_plain(tool) for tool in policy.tools]
     digest = hashlib.sha256()
-    digest.update(composed.encode("utf-8"))
+    digest.update(system_prompt.encode("utf-8"))
     digest.update(b"\x00")
-    digest.update(json.dumps(tools, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    digest.update(json.dumps(schemas, sort_keys=True, ensure_ascii=False).encode("utf-8"))
     return digest.hexdigest()
+
+
+def _plain(value: Any) -> Any:
+    """Deep-copy a frozen schema into plain JSON-serializable containers."""
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
 
 
 def run_payload(
     reports: list[ScenarioReport],
     *,
-    profile: AgentProfile,
-    overrides: PromptOverrides,
+    policy: ResolvedAgentPolicy,
+    grind: PromptGrind = NO_GRIND,
     serving: dict[str, Any] | None = None,
     omitted_tools: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -291,13 +377,15 @@ def run_payload(
     # De-duplicated: the flag is repeatable, and naming a tool twice still
     # removed one tool.
     omitted = sorted(set(omitted_tools or []))
-    offered = _eval_tools(profile, frozenset(omitted))
     meta: dict[str, Any] = {
-        "profile": profile.name,
-        "prompts": prompt_fingerprint(profile, tools=offered),
-        # Named, not left to be inferred from the digest: recovering the arm
-        # from a hash means keeping a lookup table outside the artifact.
-        "tools": {"omitted": omitted, "count": len(offered)},
+        "policy": policy_payload(policy),
+        "limits": limits_payload(policy),
+        "capabilities": capabilities_payload(policy),
+        "catalog_version": policy.catalog_version,
+        "prompts": prompt_fingerprint(policy, grind=grind),
+        # Named, not left to be inferred from the digest: recovering the
+        # arm from a hash means keeping a lookup table outside the artifact.
+        "tools": tools_payload(policy, omitted),
     }
     if serving is not None:
         meta["serving"] = serving
@@ -329,26 +417,34 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=f"repetitions per scenario, at least 1 (default: {DEFAULT_REPETITIONS})",
     )
     parser.add_argument(
-        "--profile",
-        choices=("full", "small"),
-        default="full",
-        help="agent capability profile to evaluate (issue #71; default: full)",
-    )
-    parser.add_argument(
-        "--system-prompt-file",
-        type=Path,
+        "--model-tier",
+        choices=("low", "high"),
         default=None,
         help=(
-            "replace the profile's role statement with this file's contents; "
-            "the result JSON records the override so the run is not mistaken "
-            "for a default-prompt score"
+            "evaluate this capability tier; omit to let the shipped model "
+            "catalog route the model exactly as the TUI does"
         ),
     )
     parser.add_argument(
-        "--prompt-append-file",
+        "--tier-pack-file",
         type=Path,
         default=None,
-        help="append this file's contents to the profile's role statement",
+        help=(
+            "replace the tier's operating pack with this file's contents. "
+            "Eval-only prompt grinding: it is layered after korvid's "
+            "immutable safety contract and can never widen it. The result "
+            "JSON records the override so the run is not mistaken for a "
+            "default-prompt score"
+        ),
+    )
+    parser.add_argument(
+        "--prompt-overlay-file",
+        type=Path,
+        default=None,
+        help=(
+            "layer this file's contents on top of the tier pack as an "
+            "eval overlay, published as 'eval-overlay'"
+        ),
     )
     parser.add_argument(
         "--without-tool",
@@ -382,29 +478,31 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="also write per-run metrics as JSON to this file",
     )
     args = parser.parse_args(argv)
-    _validate_tool_names(args.without_tool, args.profile)
+    _validate_tool_names(args.without_tool, args.model_tier)
     return args
 
 
-def _validate_tool_names(names: list[str], profile_name: str) -> None:
-    """Refuse a name that is not on the surface this run actually offers.
+def _validate_tool_names(names: list[str], model_tier: str | None) -> None:
+    """Refuse a name this run's tier does not actually arm.
 
-    Checked against `_eval_tools`, not `profile.tools`: the UI tools are
-    already excluded from every eval run, so naming one would drop nothing
-    while `meta.tools.omitted` claimed it did - an arm published as reduced
-    that is byte-identical to the full one. The same reasoning covers a
-    plain typo, which would measure the full surface under the reduced
-    arm's name.
+    Checked against the resolved surface, not the whole registry: a write
+    tool is never armed in an eval (the environment is read-only) and a
+    high-tier navigation tool is not on the low surface, so naming either
+    would drop nothing while `meta.tools.omitted` claimed it did — an arm
+    published as reduced that is byte-identical to the full one. The same
+    reasoning covers a plain typo.
+
+    An omitted `--model-tier` is checked against the low surface, which is
+    what automatic routing selects for every catalogued model today; name
+    the tier explicitly to reduce a high-tier-only tool.
     """
-    profile = build_profile(
-        profile_name, readonly=False, resize_supported=True, overrides=PromptOverrides()
-    )
-    known = {tool["function"]["name"] for tool in _eval_tools(profile)}
+    known = eval_surface_names(model_tier)
     unknown = sorted(set(names) - known)
     if unknown:
+        tier = model_tier or "low"
         raise SystemExit(
             f"--without-tool: {', '.join(unknown)} not on the measured surface;"
-            f" the {profile_name} profile offers {', '.join(sorted(known))}"
+            f" the {tier} tier arms {', '.join(sorted(known))}"
         )
 
 
@@ -428,9 +526,8 @@ async def _run_all(
     scenarios: list[Scenario],
     provider_factory: Callable[[], Any],
     repetitions: int,
-    profile: str,
-    overrides: PromptOverrides,
-    omit_tools: frozenset[str] = frozenset(),
+    policy: ResolvedAgentPolicy,
+    grind: PromptGrind,
 ) -> list[ScenarioReport]:
     reports: list[ScenarioReport] = []
     for scenario in scenarios:
@@ -441,9 +538,8 @@ async def _run_all(
                 provider_factory=provider_factory,
                 executor_factory=_executor_factory(scenario),
                 repetitions=repetitions,
-                profile=profile,
-                overrides=overrides,
-                omit_tools=omit_tools,
+                policy=policy,
+                grind=grind,
             )
         )
     return reports
@@ -466,12 +562,42 @@ def exit_code(reports: list[ScenarioReport]) -> int:
     return 0
 
 
-def _sweep_overrides(args: argparse.Namespace) -> PromptOverrides:
-    """Prompt overrides for a sweep run, read from the CLI's file flags."""
-    return PromptOverrides(
-        system=_read_prompt_file(args.system_prompt_file, "--system-prompt-file"),
-        append=_read_prompt_file(args.prompt_append_file, "--prompt-append-file"),
+def _prompt_grind(args: argparse.Namespace) -> PromptGrind:
+    """The eval-only prompt levers, read from the CLI's file flags."""
+    return PromptGrind(
+        tier_pack=_read_prompt_file(args.tier_pack_file, "--tier-pack-file"),
+        overlay=_read_prompt_file(args.prompt_overlay_file, "--prompt-overlay-file"),
     )
+
+
+def _resolve_policy(
+    provider_factory: Callable[[], Any],
+    args: argparse.Namespace,
+    grind: PromptGrind = NO_GRIND,
+) -> ResolvedAgentPolicy:
+    """Route and ground once, for the whole campaign.
+
+    Every repetition of every scenario is composed against this one
+    policy, so the artifact's `meta.policy` describes the run rather than
+    whichever repetition happened to be inspected. The grind's overlay id
+    is applied here too: the session, `meta.policy`, `meta.prompts` and
+    the report then all read the same object, and grounding being
+    idempotent keeps the harness from naming the overlay twice.
+    """
+    provider = provider_factory()
+    try:
+        policy = resolve_eval_policy(
+            provider,
+            model_tier=args.model_tier,
+            omit_tools=frozenset(args.without_tool),
+        )
+    except UnknownEvalToolError as exc:
+        raise SystemExit(f"--without-tool: {exc}") from exc
+    finally:
+        aclose = getattr(provider, "aclose", None)
+        if callable(aclose):
+            asyncio.run(aclose())
+    return ground_eval_policy(policy, grind)
 
 
 def _read_prompt_file(path: Path | None, flag: str) -> str | None:
@@ -498,7 +624,8 @@ def main(argv: list[str] | None = None) -> int:
     scenarios = load_scenarios(args.scenarios)
     if not scenarios:
         raise SystemExit(f"no scenario YAML files found in {args.scenarios}")
-    overrides = _sweep_overrides(args)
+    grind = _prompt_grind(args)
+    policy = _resolve_policy(provider_factory, args, grind)
     serving = asyncio.run(
         capture_serving(
             os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),
@@ -519,30 +646,16 @@ def main(argv: list[str] | None = None) -> int:
             f"warning: serving environment not fully pinned: {', '.join(serving['unavailable'])}",
             file=sys.stderr,
         )
-    reports = asyncio.run(
-        _run_all(
-            scenarios,
-            provider_factory,
-            args.reps,
-            args.profile,
-            overrides,
-            frozenset(args.without_tool),
-        )
-    )
+    reports = asyncio.run(_run_all(scenarios, provider_factory, args.reps, policy, grind))
     markdown = render_markdown(reports)
     print(markdown)
     if args.out is not None:
         args.out.write_text(markdown + "\n")
     if args.json is not None:
-        # The profile is rebuilt here purely to fingerprint the run; the
-        # scenarios above each built their own from the same inputs.
-        profile = build_profile(
-            args.profile, readonly=False, resize_supported=True, overrides=overrides
-        )
         payload = run_payload(
             reports,
-            profile=profile,
-            overrides=overrides,
+            policy=policy,
+            grind=grind,
             serving=serving,
             omitted_tools=args.without_tool,
         )

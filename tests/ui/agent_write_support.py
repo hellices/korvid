@@ -91,12 +91,24 @@ def make_app(
         assert permitted is not None
         return permitted
 
+    async def default_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        return {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "uid": "deploy-uid-1",
+                "resourceVersion": "1",
+            },
+        }
+
     return KorvidApp(
         config=KorvidConfig(namespace="default", readonly=readonly),
         store=store,
         watch_manager=WatchManager(store, source),
         aliases=dict(_ALIASES),
-        get_manifest=get_manifest,
+        get_manifest=get_manifest or default_manifest,
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,

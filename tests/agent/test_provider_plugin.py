@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator, Mapping
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
+from types import MappingProxyType
 from typing import Any
 
 import pytest
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import (
+    CapabilitySource,
+    ModelCapabilities,
+    ModelDescriptor,
+    ModelTier,
+)
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
@@ -15,6 +22,8 @@ from korvid.agent.provider_plugin import (
     ProviderPluginContractError,
     ProviderPluginMetadata,
     ValidatedPluginProvider,
+    _known_capability_fact_names,
+    _validate_plugin_capabilities,
 )
 
 
@@ -24,8 +33,12 @@ class _ScriptedProvider(LLMProvider):
         self.close_calls = 0
 
     @property
-    def name(self) -> str:
-        return "scripted-provider"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "scripted-provider")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,
@@ -97,13 +110,263 @@ def test_provider_plugin_is_abstract() -> None:
         ProviderPlugin()  # type: ignore[abstract]  # instantiating the ABC is the test
 
 
-def test_provider_plugin_api_version_is_v1() -> None:
-    assert PROVIDER_PLUGIN_API_VERSION == 1
+def test_provider_plugin_api_version_is_v2() -> None:
+    """The plugin contract is bumped to v2 for descriptor/capabilities
+    reporting (issue #189) — every third-party plugin metadata must match."""
+    assert PROVIDER_PLUGIN_API_VERSION == 2
 
 
 def test_validated_plugin_provider_requires_llm_provider_instance() -> None:
     with pytest.raises(ProviderPluginContractError, match="LLMProvider"):
         ValidatedPluginProvider(object())
+
+
+def test_validated_plugin_provider_exposes_descriptor_and_capabilities() -> None:
+    """Step 3: the wrapper delegates both facts after validating them."""
+    wrapped = ValidatedPluginProvider(_ScriptedProvider([{"type": "done"}]))
+    assert wrapped.descriptor == ModelDescriptor("test", "scripted-provider")
+    assert wrapped.capabilities == ModelCapabilities.unknown()
+
+
+def test_validated_plugin_provider_rejects_descriptor_provider_id_mismatch() -> None:
+    """The descriptor's provider id must match the plugin's registered
+    (normalized) name — a plugin cannot claim to be a different provider."""
+    with pytest.raises(ProviderPluginContractError, match="provider id"):
+        ValidatedPluginProvider(
+            _ScriptedProvider([{"type": "done"}]), provider_id="a-different-plugin"
+        )
+
+
+def test_validated_plugin_provider_translates_a_raising_descriptor_property() -> None:
+    """A plugin's own exception from `descriptor` must not reach korvid raw.
+
+    The wrapper reads the property while constructing, so third-party code
+    runs before korvid has validated anything. A lazy credential read or
+    endpoint probe in there can fail carrying whatever it was holding — so
+    the failure becomes the same fixed, bounded contract error every other
+    plugin fault does, naming the exception type and nothing else.
+    """
+
+    class _ExplodingDescriptor(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            raise RuntimeError("PLUGIN_DESCRIPTOR_SECRET_abc123" * 20)
+
+    with pytest.raises(ProviderPluginContractError) as caught:
+        ValidatedPluginProvider(_ExplodingDescriptor([{"type": "done"}]))
+
+    message = str(caught.value)
+    assert "descriptor" in message
+    assert "RuntimeError" in message
+    assert "PLUGIN_DESCRIPTOR_SECRET" not in message
+    assert len(message) < 512
+
+
+def test_validated_plugin_provider_translates_a_raising_capabilities_property() -> None:
+    """The capability read is wrapped on its own, so the message says which
+    read failed without ever repeating what the plugin raised."""
+
+    class _ExplodingCapabilities(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            raise RuntimeError("PLUGIN_CAPABILITIES_SECRET_xyz789" * 20)
+
+    with pytest.raises(ProviderPluginContractError) as caught:
+        ValidatedPluginProvider(_ExplodingCapabilities([{"type": "done"}]))
+
+    message = str(caught.value)
+    assert "capabilities" in message
+    assert "RuntimeError" in message
+    assert "PLUGIN_CAPABILITIES_SECRET" not in message
+    assert len(message) < 512
+
+
+def test_a_raising_property_is_translated_even_when_it_raises_a_contract_error() -> None:
+    """A plugin may raise korvid's own error type with a payload of its own.
+
+    Re-raising it unchanged would publish that payload under a name the
+    rest of korvid treats as safe, so the wrapper translates by exception
+    type rather than by trusting the class.
+    """
+
+    class _ContractErrorDescriptor(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            raise ProviderPluginContractError("PLUGIN_TOKEN_LEAK_qqq" * 20)
+
+    with pytest.raises(ProviderPluginContractError) as caught:
+        ValidatedPluginProvider(_ContractErrorDescriptor([{"type": "done"}]))
+
+    assert "PLUGIN_TOKEN_LEAK" not in str(caught.value)
+
+
+def test_a_raising_property_does_not_hide_cancellation() -> None:
+    """`BaseException` is not a contract violation: a cancelled start must
+    still cancel, not be reported as a broken plugin."""
+
+    class _CancelledDescriptor(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            raise KeyboardInterrupt("start interrupted")
+
+    with pytest.raises(KeyboardInterrupt, match="start interrupted"):
+        ValidatedPluginProvider(_CancelledDescriptor([{"type": "done"}]))
+
+
+def test_validated_plugin_provider_rejects_empty_model_id() -> None:
+    class _EmptyModelProvider(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "")
+
+    with pytest.raises(ProviderPluginContractError, match="model"):
+        ValidatedPluginProvider(_EmptyModelProvider([{"type": "done"}]))
+
+
+def test_validated_plugin_provider_rejects_oversized_model_id() -> None:
+    class _HugeModelProvider(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "m" * 10_000)
+
+    with pytest.raises(ProviderPluginContractError, match="model"):
+        ValidatedPluginProvider(_HugeModelProvider([{"type": "done"}]))
+
+
+@pytest.mark.parametrize("field", ["provider", "model"])
+@pytest.mark.parametrize("value", [42, " ", "m" * 257])
+def test_validated_plugin_provider_rejects_invalid_descriptor_fields(
+    field: str, value: object
+) -> None:
+    class _InvalidDescriptorProvider(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            values: dict[str, object] = {
+                "provider": "test",
+                "model": "scripted-provider",
+            }
+            values[field] = value
+            return ModelDescriptor(**values)  # type: ignore[arg-type]  # malformed plugin object
+
+    with pytest.raises(ProviderPluginContractError, match=field):
+        ValidatedPluginProvider(_InvalidDescriptorProvider([{"type": "done"}]))
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, "4096"])
+def test_validated_plugin_provider_rejects_invalid_context_window(value: object) -> None:
+    class _InvalidCapabilitiesProvider(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities(
+                context_window_tokens=value  # type: ignore[arg-type]  # malformed plugin object
+            )
+
+    with pytest.raises(ProviderPluginContractError, match="context_window_tokens"):
+        ValidatedPluginProvider(_InvalidCapabilitiesProvider([{"type": "done"}]))
+
+
+@pytest.mark.parametrize(
+    "field", ["supports_tools", "supports_parallel_tools", "supports_reasoning"]
+)
+@pytest.mark.parametrize("value", ["false", 0, 1])
+def test_validated_plugin_provider_rejects_invalid_boolean_capabilities(
+    field: str, value: object
+) -> None:
+    class _InvalidCapabilitiesProvider(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities(
+                **{field: value}  # type: ignore[arg-type]  # malformed plugin object
+            )
+
+    with pytest.raises(ProviderPluginContractError, match=field):
+        ValidatedPluginProvider(_InvalidCapabilitiesProvider([{"type": "done"}]))
+
+
+def test_validated_plugin_provider_rejects_invalid_recommended_tier() -> None:
+    class _InvalidCapabilitiesProvider(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities(
+                recommended_tier="low"  # type: ignore[arg-type]  # malformed plugin object
+            )
+
+    with pytest.raises(ProviderPluginContractError, match="recommended_tier"):
+        ValidatedPluginProvider(_InvalidCapabilitiesProvider([{"type": "done"}]))
+
+
+def test_descriptor_validation_never_invokes_plugin_string_methods() -> None:
+    class _HostileString(str):
+        def strip(self, chars: str | None = None) -> str:
+            raise RuntimeError("PLUGIN_DESCRIPTOR_SECRET")
+
+    class _HostileDescriptorProvider(_ScriptedProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor(_HostileString("test"), "model")
+
+    with pytest.raises(ProviderPluginContractError, match="provider") as caught:
+        ValidatedPluginProvider(_HostileDescriptorProvider([{"type": "done"}]))
+
+    assert "PLUGIN_DESCRIPTOR_SECRET" not in str(caught.value)
+
+
+def test_capability_validation_copies_mapping_proxy_without_plugin_dispatch() -> None:
+    class _HostileMapping(dict[str, CapabilitySource]):
+        def items(self) -> Any:
+            raise RuntimeError("PLUGIN_CAPABILITIES_SECRET")
+
+    class _HostileCapabilitiesProvider(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            capabilities = ModelCapabilities.unknown()
+            object.__setattr__(
+                capabilities,
+                "provenance",
+                MappingProxyType(_HostileMapping()),
+            )
+            return capabilities
+
+    wrapped = ValidatedPluginProvider(_HostileCapabilitiesProvider([{"type": "done"}]))
+
+    assert wrapped.capabilities.provenance == {}
+
+
+def test_validated_plugin_provider_accepts_valid_capability_values() -> None:
+    capabilities = ModelCapabilities(
+        context_window_tokens=4096,
+        supports_tools=True,
+        supports_parallel_tools=False,
+        supports_reasoning=None,
+        recommended_tier=ModelTier.LOW,
+    )
+
+    assert _validate_plugin_capabilities(capabilities) == capabilities
+
+
+def test_validated_plugin_provider_rejects_unknown_provenance_fact() -> None:
+    class _BadProvenanceProvider(_ScriptedProvider):
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities(provenance={"not_a_real_fact": CapabilitySource.PROVIDER})
+
+    with pytest.raises(ProviderPluginContractError, match="provenance"):
+        ValidatedPluginProvider(_BadProvenanceProvider([{"type": "done"}]))
+
+
+def test_known_capability_fact_names_follow_model_capabilities_fields() -> None:
+    expected_fact_names = frozenset(
+        field.name for field in fields(ModelCapabilities) if field.name != "provenance"
+    )
+
+    assert _known_capability_fact_names() == expected_fact_names
+
+
+def test_validated_plugin_provider_accepts_all_known_provenance_facts() -> None:
+    for fact in _known_capability_fact_names():
+        caps = ModelCapabilities(provenance={fact: CapabilitySource.PROVIDER})
+        validated = _validate_plugin_capabilities(caps)
+        assert validated.provenance[fact] is CapabilitySource.PROVIDER
 
 
 def test_concrete_plugin_returns_provider_instance() -> None:
@@ -141,7 +404,8 @@ async def test_validated_plugin_provider_normalizes_all_event_shapes() -> None:
         )
     )
 
-    assert wrapped.name == "scripted-provider"
+    assert wrapped.descriptor == ModelDescriptor("test", "scripted-provider")
+    assert wrapped.capabilities == ModelCapabilities.unknown()
     assert await _collect_events(wrapped) == [
         {"type": "text_delta", "text": "hello"},
         {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": '{"pod":"web-1"}'},
@@ -250,8 +514,12 @@ class _ExplodingProvider(LLMProvider):
         self._exc = exc
 
     @property
-    def name(self) -> str:
-        return "exploding-provider"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "exploding-provider")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,
@@ -312,8 +580,12 @@ async def test_validated_aclose_translates_secret_exception() -> None:
 
     class _ExplodingCloseProvider(LLMProvider):
         @property
-        def name(self) -> str:
-            return "boom-closer"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "boom-closer")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -343,8 +615,12 @@ async def test_validated_aclose_preserves_exactly_once_guard() -> None:
             self.close_calls = 0
 
         @property
-        def name(self) -> str:
-            return "one-shot"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "one-shot")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -486,8 +762,12 @@ class _SecretContractErrorProvider(LLMProvider):
     """Provider that raises ProviderPluginContractError with secret payload."""
 
     @property
-    def name(self) -> str:
-        return "secret-error-provider"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "secret-error-provider")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,
@@ -547,8 +827,12 @@ class _TrackingCloseProvider(LLMProvider):
         self.close_exception: Exception | None = None
 
     @property
-    def name(self) -> str:
-        return "tracking-close"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "tracking-close")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,
@@ -613,8 +897,12 @@ async def test_iterator_closed_on_consumer_cancellation() -> None:
             self.close_calls = 0
 
         @property
-        def name(self) -> str:
-            return "blocking"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "blocking")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -656,8 +944,12 @@ async def test_close_raises_secret_primary_error_preserved() -> None:
             self.close_calls = 0
 
         @property
-        def name(self) -> str:
-            return "after-done-close-raises"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "after-done-close-raises")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -694,8 +986,12 @@ async def test_normal_close_failure_becomes_contract_error() -> None:
             self.close_calls = 0
 
         @property
-        def name(self) -> str:
-            return "close-fails-exhaust"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "close-fails-exhaust")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -738,8 +1034,12 @@ class _CreationFailsProvider(LLMProvider):
         self._exc = exc
 
     @property
-    def name(self) -> str:
-        return "creation-fails"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("test", "creation-fails")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     def complete(
         self,
@@ -845,8 +1145,12 @@ async def test_hostile_mapping_iterator_still_closed() -> None:
             self.close_calls = 0
 
         @property
-        def name(self) -> str:
-            return "track-close"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "track-close")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -883,8 +1187,12 @@ async def test_plugin_message_hook_is_not_forwarded() -> None:
             self.hook_calls = 0
 
         @property
-        def name(self) -> str:
-            return "hook-plugin"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "hook-plugin")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             self.hook_calls += 1

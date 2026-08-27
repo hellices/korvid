@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import CapabilitySource, ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.providers.net import make_client
 from korvid.providers.openai_compat import ProviderError
@@ -69,6 +70,7 @@ class OllamaProvider(LLMProvider):
         *,
         options: OllamaOptions | None = None,
         ca_bundle: str | None = None,
+        timeout_seconds: float = 300.0,
     ) -> None:
         self._base_url = normalize_base_url(base_url)
         self._model = model
@@ -76,6 +78,7 @@ class OllamaProvider(LLMProvider):
         self._client = client  # injected or lazily created on first call
         self._owns_client = client is None
         self._ca_bundle = ca_bundle
+        self._timeout_seconds = timeout_seconds
         self._options = options or OllamaOptions()
         # Monotonic counter for generated tool-call ids: ids must stay
         # unique across completions within one agent conversation.
@@ -86,15 +89,40 @@ class OllamaProvider(LLMProvider):
         self._thinking_by_call_id: OrderedDict[str, str] = OrderedDict()
 
     @property
-    def name(self) -> str:
-        return self._model
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("ollama", self._model)
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        """Only what the configured request options directly prove.
+
+        `num_ctx` is the exact context window this adapter will request
+        (issue #189); Ollama's native API can return multiple tool calls in
+        one assistant message, so `supports_parallel_tools` is known-true.
+        Neither tool support, reasoning, nor tier is inferred from the model
+        tag.
+        """
+        return ModelCapabilities(
+            context_window_tokens=self._options.num_ctx,
+            supports_parallel_tools=True,
+            provenance={
+                "context_window_tokens": CapabilitySource.PROVIDER,
+                "supports_parallel_tools": CapabilitySource.PROVIDER,
+            },
+        )
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             # A generous read timeout: a cold start (model load after
             # keep_alive expiry) can take well over a minute to the first
             # token on large local models.
-            self._client = make_client(self._ca_bundle, timeout=httpx.Timeout(300.0, connect=10.0))
+            self._client = make_client(
+                self._ca_bundle,
+                timeout=httpx.Timeout(
+                    self._timeout_seconds,
+                    connect=min(10.0, self._timeout_seconds),
+                ),
+            )
         return self._client
 
     async def aclose(self) -> None:

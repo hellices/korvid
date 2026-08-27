@@ -132,9 +132,10 @@ is that the checkable parts *are* checkable. An answer you cannot check at all
 is a guess with better grammar.
 
 **What it needs:** a provider. GitHub Copilot, Azure OpenAI, Anthropic, OpenAI,
-a local Ollama, or any OpenAI-compatible endpoint. A `small` profile targets
-3B–14B models that run on your own hardware — for air-gapped clusters, or for
-people who would rather their production incidents not leave the building.
+a local Ollama, or any OpenAI-compatible endpoint. A low model tier
+(`agent.model_tier: low`) targets 3B–14B models that run on your own
+hardware — for air-gapped clusters, or for people who would rather their
+production incidents not leave the building.
 
 ---
 
@@ -294,7 +295,7 @@ liability.** The middle ground is an agent that does everything *except* the
 irreversible part, and hands you that part with a preview attached.
 
 **Where the model runs is your decision.** Frontier API, or a 3B model on a
-node in your own cluster. The `small` profile and a published per-model
+node in your own cluster. The low model tier and a published per-model
 scoreboard exist so that choice is informed rather than hopeful.
 
 ---

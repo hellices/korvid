@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import gc
 import importlib.metadata
+import logging
 import sys
 import textwrap
+import warnings
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -13,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
@@ -76,6 +81,17 @@ def _discover_from_path(
             if ep.group == "korvid.provider":
                 results.append((ep, dist_name))
     return results
+
+
+async def _drain_close_tasks(turns: int = 50) -> None:
+    """Let the loop run the background close `create` scheduled, if any.
+
+    Loop turns, not wall-clock: the close task and its done callback both
+    need the loop to come back round, and a sleep with a duration would
+    make the assertion a race against a timer.
+    """
+    for _ in range(turns):
+        await asyncio.sleep(0)
 
 
 @pytest.fixture
@@ -244,7 +260,39 @@ class TestMetadataValidation:
             return_value=_BadVersionPlugin,
         ):
             reg = ProviderPluginRegistry()
-            with pytest.raises(ProviderPluginError, match="api_version"):
+            with pytest.raises(ProviderPluginError, match="unsupported"):
+                reg.load_selected("company-llm")
+
+    def test_api_v1_plugin_is_rejected_with_the_fixed_migration_message(
+        self, plugin_site: Any
+    ) -> None:
+        """A plugin still declaring API v1 gets a fixed, actionable message
+        naming both the version it declared and the version required."""
+
+        class _ApiV1Plugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=1,
+                    name="company-llm",
+                    display_name="Legacy",
+                    auth_methods=("api_key",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_ApiV1Plugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(
+                ProviderPluginError,
+                match="provider plugin API 1 is unsupported; expected 2",
+            ):
                 reg.load_selected("company-llm")
 
     def test_huge_int_api_version_bounded_no_stringify(self, plugin_site: Any) -> None:
@@ -272,7 +320,7 @@ class TestMetadataValidation:
             return_value=_HugeVersionPlugin,
         ):
             reg = ProviderPluginRegistry()
-            with pytest.raises(ProviderPluginError, match="api_version") as exc_info:
+            with pytest.raises(ProviderPluginError, match="unsupported") as exc_info:
                 reg.load_selected("company-llm")
             msg = str(exc_info.value)
             # Must not contain the raw huge int representation
@@ -662,6 +710,355 @@ class TestFactoryFailure:
             with pytest.raises(ProviderPluginError, match="must return an LLMProvider"):
                 reg.create("company-llm", config, None)
 
+    def test_a_raising_descriptor_property_becomes_a_plugin_error(
+        self, plugin_site: Any, registry: ProviderPluginRegistry
+    ) -> None:
+        """Validation wrapping is part of `create`, so its refusals are too.
+
+        `ValidatedPluginProvider` reads `descriptor`/`capabilities` while
+        wrapping, and raises `ProviderPluginContractError`. The composition
+        root degrades a bad plugin by catching `ProviderPluginError`, so a
+        contract error escaping `create` would crash a start instead of
+        disabling the agent — it is translated here, still bounded and
+        still carrying nothing the plugin raised.
+        """
+
+        class _ExplodingDescriptorProvider(LLMProvider):
+            @property
+            def descriptor(self) -> ModelDescriptor:
+                raise RuntimeError("REGISTRY_SECRET_LEAK_abc123" * 50)
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                return ModelCapabilities.unknown()
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                stream: bool = True,
+            ) -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "done"}
+
+        class _ExplodingPropertyPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="Exploding property",
+                    auth_methods=("none",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return _ExplodingDescriptorProvider()
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_ExplodingPropertyPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="none",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="company-llm") as exc_info:
+                reg.create("company-llm", config, None)
+
+        message = str(exc_info.value)
+        assert "REGISTRY_SECRET_LEAK" not in message
+        assert len(message) <= 200
+
+    async def test_a_wrapper_rejection_closes_the_provider_it_refused(
+        self, plugin_site: Any, registry: ProviderPluginRegistry, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A refused provider is still a built one, and it owns resources.
+
+        `plugin.create` has already run by the time the wrapper reads
+        `descriptor`: an HTTP client, a socket, a credential handle may
+        exist. Dropping the reference on the refusal path leaks whatever
+        the plugin opened for the rest of the process — the composition
+        root never sees the object, so nothing else can close it.
+
+        The close is scheduled on the running loop rather than awaited,
+        because `create` is called from synchronous wiring; the task is
+        held strongly until it completes, and its failure is consumed
+        with a fixed message.
+        """
+        closed: list[str] = []
+
+        class _ExplodingDescriptorProvider(LLMProvider):
+            @property
+            def descriptor(self) -> ModelDescriptor:
+                raise RuntimeError("REGISTRY_SECRET_LEAK_abc123")
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                return ModelCapabilities.unknown()
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                stream: bool = True,
+            ) -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "done"}
+
+            async def aclose(self) -> None:
+                closed.append("aclose")
+
+        provider = _ExplodingDescriptorProvider()
+
+        class _ExplodingPropertyPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="Exploding property",
+                    auth_methods=("none",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return provider
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_ExplodingPropertyPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="none",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="company-llm") as exc_info:
+                reg.create("company-llm", config, None)
+
+        await _drain_close_tasks()
+
+        assert closed == ["aclose"], "the refused provider was not closed exactly once"
+        message = str(exc_info.value)
+        assert "REGISTRY_SECRET_LEAK" not in message
+        assert len(message) <= 200
+        assert "REGISTRY_SECRET_LEAK" not in caplog.text
+
+    async def test_a_refused_provider_whose_close_fails_is_logged_by_type_only(
+        self, plugin_site: Any, registry: ProviderPluginRegistry, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The close is best effort, and its failure is plugin text too.
+
+        A background task whose exception nobody retrieves prints a
+        warning at collection; one whose exception is logged verbatim
+        prints whatever the plugin's `aclose` was carrying. Only the
+        exception's type name survives, and the refusal the caller sees
+        is unchanged.
+        """
+
+        class _UncloseableProvider(LLMProvider):
+            @property
+            def descriptor(self) -> ModelDescriptor:
+                raise RuntimeError("descriptor unavailable")
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                return ModelCapabilities.unknown()
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                stream: bool = True,
+            ) -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "done"}
+
+            async def aclose(self) -> None:
+                raise RuntimeError("CLOSE_SECRET_LEAK_xyz789")
+
+        class _UncloseablePlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="Uncloseable",
+                    auth_methods=("none",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return _UncloseableProvider()
+
+        with (
+            caplog.at_level(logging.DEBUG, logger="korvid.providers.plugin_registry"),
+            patch(
+                "korvid.providers.plugin_registry._load_entry_point",
+                return_value=_UncloseablePlugin,
+            ),
+        ):
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="none",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="company-llm"):
+                reg.create("company-llm", config, None)
+
+            await _drain_close_tasks()
+
+        assert "CLOSE_SECRET_LEAK" not in caplog.text
+        assert "RuntimeError" in caplog.text
+
+    def test_a_wrapper_rejection_without_a_running_loop_refuses_without_closing(
+        self, plugin_site: Any, registry: ProviderPluginRegistry
+    ) -> None:
+        """The startup caller is synchronous, and must not be blocked.
+
+        `_create_initial_provider` runs before the app's event loop
+        exists. There is nothing to schedule the close on, so the refusal
+        is reported immediately — and no coroutine is created that would
+        be garbage-collected as "never awaited", which under this suite's
+        `filterwarnings = ["error"]` is a failure somewhere else entirely.
+        """
+        closed: list[str] = []
+
+        class _ExplodingCapabilitiesProvider(LLMProvider):
+            @property
+            def descriptor(self) -> ModelDescriptor:
+                return ModelDescriptor("company-llm", "m")
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                raise RuntimeError("capabilities unavailable")
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                stream: bool = True,
+            ) -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "done"}
+
+            async def aclose(self) -> None:
+                closed.append("aclose")
+
+        class _NoLoopPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="No loop",
+                    auth_methods=("none",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return _ExplodingCapabilitiesProvider()
+
+        with (
+            warnings.catch_warnings(record=True) as caught,
+            patch(
+                "korvid.providers.plugin_registry._load_entry_point",
+                return_value=_NoLoopPlugin,
+            ),
+        ):
+            warnings.simplefilter("always")
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="none",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="company-llm"):
+                reg.create("company-llm", config, None)
+            gc.collect()
+
+        assert closed == []
+        assert [w for w in caught if "never awaited" in str(w.message)] == []
+
+    def test_a_descriptor_that_claims_another_provider_becomes_a_plugin_error(
+        self, plugin_site: Any, registry: ProviderPluginRegistry
+    ) -> None:
+        """The wrapper's own contract refusals reach the caller the same way.
+
+        Nothing about a plugin naming itself something else should end a
+        start with a traceback either.
+        """
+
+        class _ImpostorProvider(LLMProvider):
+            @property
+            def descriptor(self) -> ModelDescriptor:
+                return ModelDescriptor("some-other-plugin", "m")
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                return ModelCapabilities.unknown()
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                stream: bool = True,
+            ) -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "done"}
+
+        class _ImpostorPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="Impostor",
+                    auth_methods=("none",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return _ImpostorProvider()
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_ImpostorPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="none",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="company-llm"):
+                reg.create("company-llm", config, None)
+
 
 # ---------------------------------------------------------------------------
 # Cache — loads selected plugin once
@@ -772,6 +1169,41 @@ class TestMetadataBoundary:
             reg = ProviderPluginRegistry()
             with pytest.raises(ProviderPluginError, match="api_version"):
                 reg.load_selected("company-llm")
+
+    def test_api_version_int_subclass_is_rejected_without_stringifying(
+        self, plugin_site: Any
+    ) -> None:
+        class _HostileInt(int):
+            def __str__(self) -> str:
+                raise RuntimeError("PLUGIN_API_VERSION_SECRET")
+
+            def __ne__(self, other: object) -> bool:
+                raise RuntimeError("PLUGIN_API_VERSION_SECRET")
+
+        class _HostileVersionPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=_HostileInt(PROVIDER_PLUGIN_API_VERSION),
+                    name="company-llm",
+                    display_name="Hostile",
+                    auth_methods=("api_key",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_HostileVersionPlugin,
+        ):
+            registry = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="api_version") as caught:
+                registry.load_selected("company-llm")
+
+        assert "PLUGIN_API_VERSION_SECRET" not in str(caught.value)
 
     def test_name_empty_rejected(self, plugin_site: Any) -> None:
         """metadata.name that is empty string is rejected."""
@@ -887,8 +1319,12 @@ class TestMetadataBoundary:
 
         class _InlineProvider(LLMProvider):
             @property
-            def name(self) -> str:
-                return "inline"
+            def descriptor(self) -> ModelDescriptor:
+                return ModelDescriptor("company-llm", "inline")
+
+            @property
+            def capabilities(self) -> ModelCapabilities:
+                return ModelCapabilities.unknown()
 
             async def complete(
                 self,

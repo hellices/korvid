@@ -31,8 +31,8 @@ events, a compound `diagnose_pod`) and **drives the UI itself**: "show me the
 crashing pod's logs" navigates, filters, and opens the actual log pane.
 Secret data is masked before it reaches the model. Works with GitHub
 Copilot, Azure OpenAI, Anthropic, OpenAI, local Ollama, or any
-OpenAI-compatible endpoint — including a `small` profile tuned for 3B–14B
-local models.
+OpenAI-compatible endpoint — including a low model tier
+(`agent.model_tier: low`) tuned for 3B–14B local models.
 
 **Writes are gated and audited — no exceptions.** Every mutation (yours or
 agent-requested) executes only after you confirm it in a dialog, and every
@@ -142,12 +142,13 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
   OLM operator catalog with approval-gated installs and uninstalls.
 - **[AI agent](https://hellices.github.io/korvid/agent/)** — screen-context awareness, UI-driving
   tools, `diagnose_pod`, cloud-provider awareness (AKS / EKS / GKE),
-  provider setup (`:ai` wizard), capability profiles for small local
-  models, and an eval harness that grades diagnosis quality.
-- **[Provider plugins](https://hellices.github.io/korvid/provider-plugins/)** — the API-v1 contract for
-  third-party LLM adapters, selected-only loading, exact event and option
-  limits, and guidance on when a plugin is warranted instead of an
-  OpenAI-compatible endpoint.
+  provider setup (`:ai` wizard), a low/high model tier that sizes the tool
+  surface, budgets and prompt pack for small local models, and an eval
+  harness that grades diagnosis quality.
+- **[Provider plugins](https://hellices.github.io/korvid/provider-plugins/)** — the provider-plugin
+  API 2 contract for third-party LLM adapters, selected-only loading, exact
+  event and option limits, and guidance on when a plugin is warranted
+  instead of an OpenAI-compatible endpoint.
 - **[Observability connectors](https://hellices.github.io/korvid/observability/)** — bounded read-only
   Prometheus and Loki investigation: a fixed signal catalogue rather than
   free-form queries, enforced window/size/timeout/concurrency limits,
@@ -192,7 +193,7 @@ the Helm release browser.
 ## Status
 
 Work in progress — core TUI, log viewer, live metrics, MCP server, and
-agent runtime are functional. Read-heavy by design: cluster writes exist
+the agent harness are functional. Read-heavy by design: cluster writes exist
 (delete / scale / rollout restart / edit / resize / node ops / helm / OLM)
 but every one is approval-gated and audited.
 

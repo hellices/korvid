@@ -2,7 +2,13 @@ id: quota-blocked-scheduling
 question: >-
   The batch deployment in namespace jobs shows 0 of 3 pods running and no pods
   are being created. What is preventing them?
-screen: "resource view: deployments, namespace jobs, selected: jobs/batch (0/3 ready)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: deployments
+    scope: jobs
+    selected: {kind: Deployment, namespace: jobs, name: batch, uid: deploy-batch-1}
 root_cause: quota_blocked
 grading:
   must_mention:

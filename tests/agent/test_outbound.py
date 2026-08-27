@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
 import pytest
 import yaml
 
+from korvid.agent.model_catalog import MODEL_CATALOG
+from korvid.agent.model_policy import (
+    ModelCapabilities,
+    ModelDescriptor,
+    ModelRouter,
+    ModelTier,
+    PolicyEnvironment,
+)
 from korvid.agent.outbound import (
     OutboundPolicy,
     OutboundPolicyError,
@@ -19,7 +28,6 @@ from korvid.agent.outbound import (
     sanitize_screen_context,
     sanitize_tool_result,
 )
-from korvid.agent.profiles import build_profile
 from korvid.core.redaction import RedactionRecord
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.tools.executor import (
@@ -30,6 +38,11 @@ from korvid.tools.executor import (
     WRITE_TOOLS,
 )
 from korvid.tools.structured import dump_yaml
+from tests.tools.executor_fakes import (
+    LONG_NAME_ENV_SENTINEL,
+    NESTED_SECRET_SENTINEL,
+    oversized_crd_with_nested_credentials,
+)
 
 _DEEP_NESTING = 2_000
 
@@ -652,34 +665,61 @@ def test_structured_values_of_any_shape_under_compound_credential_keys_are_maske
         assert sentinel not in sanitized
 
 
-@pytest.mark.parametrize("profile_name", ["full", "small"])
+def _thaw(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """A plain dict copy of a deeply frozen policy schema.
+
+    `ResolvedAgentPolicy.tools` are `MappingProxyType` all the way down so
+    no consumer can mutate the shared surface; `json.dumps` refuses them.
+    """
+    return {
+        key: _thaw(value)
+        if isinstance(value, Mapping)
+        else [_thaw(item) if isinstance(item, Mapping) else item for item in value]
+        if isinstance(value, list | tuple)
+        else value
+        for key, value in schema.items()
+    }
+
+
+@pytest.mark.parametrize("tier", [ModelTier.LOW, ModelTier.HIGH])
 def test_derived_ceiling_admits_a_history_budget_worth_of_escaped_content(
-    profile_name: str,
+    tier: ModelTier,
 ) -> None:
     """The ceiling must clear the conversations the history budget keeps.
 
     A full retained history of quote- and newline-heavy text serializes to
     roughly twice its character count and carries the tool schemas on top;
     when the ceiling equalled the history budget, that ordinary case was
-    blocked (issue #189)."""
-    profile = build_profile(profile_name, readonly=True, resize_supported=False)
-    tools_chars = len(json.dumps(profile.tools))
+    blocked (issue #189).
+
+    Both budgets come from the production router, so a tier whose budget
+    is retuned is re-checked here instead of against a copy of the number.
+    """
+    resolved = ModelRouter(MODEL_CATALOG).resolve(
+        descriptor=ModelDescriptor("ollama", "qwen3:8b"),
+        provider_capabilities=ModelCapabilities.unknown(),
+        explicit_tier=tier.value,
+        environment=PolicyEnvironment(
+            readonly=True, resize_supported=False, observability_backends=frozenset()
+        ),
+    )
+    schemas = [_thaw(schema) for schema in resolved.tools]
     policy = OutboundPolicy(
         max_request_chars=request_char_budget(
-            max_history_chars=profile.max_history_chars,
-            tools_chars=tools_chars,
+            max_history_chars=resolved.max_history_chars,
+            tools_chars=len(json.dumps(schemas)),
         )
     )
     unit = 'line "quoted"\n'
-    content = unit * (profile.max_history_chars // len(unit))
+    content = unit * (resolved.max_history_chars // len(unit))
     messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": content},
     ]
 
-    prepared = policy.prepare("openai", messages, profile.tools, iteration=1)
+    prepared = policy.prepare("openai", messages, schemas, iteration=1)
 
-    assert len(prepared.snapshot.payload_json) > profile.max_history_chars
+    assert len(prepared.snapshot.payload_json) > resolved.max_history_chars
     assert content in json.loads(prepared.snapshot.payload_json)["messages"][1]["content"]
 
 
@@ -1708,3 +1748,100 @@ def test_a_document_that_says_one_thing_still_crosses() -> None:
     assert loaded["kind"] == "Secret"
     assert loaded["data"]["ca.crt"] == MASK_PLACEHOLDER
     assert loaded["spec"]["kind"] == "nested"
+
+
+# ---------------------------------------------------------------------------
+# Size elision is inventoried, at the path the payload really carries
+# ---------------------------------------------------------------------------
+
+
+def test_a_structurally_elided_document_is_inventoried_as_a_size_elision() -> None:
+    """Bounding a redacted document is a change the inventory must report.
+
+    `_sanitize_structured_result` redacts first and shrinks second, so what
+    leaves is parseable — but entries the shrink dropped are *gone*, not
+    masked, and a reader of the payload inspector cannot see the absence.
+    The record is the only evidence that the model was shown less than the
+    executor produced.
+    """
+    records: list[RedactionRecord] = []
+
+    sanitized = sanitize_tool_result(
+        "get_resource",
+        dump_yaml(oversized_crd_with_nested_credentials()),
+        max_chars=3_000,
+        records=records,
+    )
+
+    assert len(sanitized) <= 3_000
+    assert RedactionRecord(path="tool_result", reason="size-elision") in records
+    assert [r for r in records if r.reason == "size-elision"] == [
+        RedactionRecord(path="tool_result", reason="size-elision")
+    ]
+
+
+def test_a_document_that_fits_is_not_reported_as_elided() -> None:
+    """The premise of the test above: the reason is about size, not shape."""
+    records: list[RedactionRecord] = []
+
+    sanitize_tool_result(
+        "get_resource",
+        dump_yaml({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "web"}}),
+        max_chars=3_000,
+        records=records,
+    )
+
+    assert [r for r in records if r.reason == "size-elision"] == []
+
+
+def test_the_credentials_a_size_elision_removed_never_reach_the_payload() -> None:
+    """Elision must not be the pass that *creates* the leak.
+
+    Both sentinels are recognizable only through classifiers (`kind:
+    Secret`, a long credential-spelling env name) that the size reduction
+    itself removes. Redacting first is what keeps them out; the inventory
+    below is what proves the reduction really happened on this payload.
+    """
+    records: list[RedactionRecord] = []
+    sanitized = sanitize_tool_result(
+        "get_resource",
+        dump_yaml(oversized_crd_with_nested_credentials()),
+        max_chars=3_000,
+        records=records,
+    )
+
+    policy = OutboundPolicy(max_request_chars=200_000)
+    prepared = policy.prepare(
+        "qwen3:8b",
+        _tool_exchange(sanitized),
+        [],
+        iteration=1,
+        ingress={2: tuple(records)},
+    )
+
+    assert NESTED_SECRET_SENTINEL not in prepared.snapshot.payload_json
+    assert LONG_NAME_ENV_SENTINEL not in prepared.snapshot.payload_json
+    assert MASK_PLACEHOLDER in prepared.snapshot.payload_json
+
+
+def test_a_carried_size_elision_is_re_rooted_onto_the_payload_path() -> None:
+    """The record travels: an inventory is only useful at a findable path.
+
+    The producer records `tool_result`; the payload carries that content at
+    `messages[2].content`, and that is where the inspector must show it.
+    """
+    records = [RedactionRecord(path="tool_result", reason="size-elision")]
+
+    policy = OutboundPolicy(max_request_chars=200_000)
+    prepared = policy.prepare(
+        "qwen3:8b",
+        _tool_exchange("kind: Pod\nmetadata:\n  name: web\n"),
+        [],
+        iteration=1,
+        ingress={2: tuple(records)},
+    )
+
+    assert (
+        RedactionRecord(path="messages[2].content", reason="size-elision")
+        in prepared.snapshot.redactions
+    )

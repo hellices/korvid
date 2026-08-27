@@ -6,6 +6,7 @@ non-interactive or explicitly disabled."""
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 import pytest
 
@@ -254,7 +255,7 @@ async def test_provider_created_before_a_later_wiring_failure_is_released(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The provider is owned by the teardown guard's box the moment it
-    exists — a failure in the rest of the agent wiring (executor, runtime,
+    exists — a failure in the rest of the agent wiring (tools, session,
     configurator) must still close it (review on #179)."""
     import korvid.__main__ as main_mod
 
@@ -315,14 +316,8 @@ async def test_provider_created_before_a_later_wiring_failure_is_released(
 
     provider_seen: list[object] = []
 
-    async def fake_teardown(
-        controller: object,
-        discovery: object,
-        provider: object,
-        kube: object,
-        observability: object = None,
-    ) -> None:
-        provider_seen.append(provider)
+    async def fake_teardown(state: Any, kube: object) -> None:
+        provider_seen.append(state.provider_box[0])
         await kube.close()  # type: ignore[attr-defined]  # fake in test
 
     monkeypatch.setattr(main_mod, "_teardown", fake_teardown)

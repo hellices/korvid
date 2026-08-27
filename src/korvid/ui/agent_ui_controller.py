@@ -3,9 +3,9 @@
 `AgentUiController` owns everything about the embedded agent that used to
 live directly on `KorvidApp`:
 
-- the session state — runtime, model, settings, capability profile, the
-  configurator/rebuild/disconnect seams, the `:ai off` disconnect marker and
-  the follow flag;
+- the session state — session, model, settings, the configured model tier
+  the wizard and `:model` rebuild from, the configurator/rebuild/disconnect
+  seams, the `:ai off` disconnect marker and the follow flag;
 - the turn lifecycle — the bare app-loop task, its cancellation, the
   interrupt-and-submit replacement queue, the finalization of an interrupted
   turn, and the shutdown drain;
@@ -42,8 +42,15 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from textual.screen import Screen
 
-from korvid.agent.events import AgentError, AgentEvent, ToolCallFinished, ToolCallStarted
+from korvid.agent.events import (
+    AgentError,
+    AgentEvent,
+    ToolCallFinished,
+    ToolCallStarted,
+    TurnInterrupted,
+)
 from korvid.agent.install_hint import isolated_install_hint
+from korvid.agent.interaction import PaneContext, ResourceIdentity
 from korvid.agent.navigation import EvidenceTarget, target_for
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
@@ -77,9 +84,10 @@ from korvid.ui.write_coordinator import WriteCoordinator, gvr_label, write_locus
 
 if TYPE_CHECKING:
     # Annotation-only: the base TUI must not import the embedded-agent
-    # runtime at startup (issue #73) — the composition root injects it only
+    # session at startup (issue #73) — the composition root injects it only
     # when the [agent] extra is installed and wired.
-    from korvid.agent.runtime import AgentRuntime
+    from korvid.agent.session import AgentSession
+    from korvid.ui.agent_workspace_bridge import AgentWorkspaceBridge
 
 logger = logging.getLogger(__name__)
 
@@ -89,9 +97,14 @@ APPROVAL_TIMEOUT = 120.0
 
 #: Upper bound on the pre-approval uid lookup: a stalled API server must
 #: never leave an agent tool call (or the debug offer) pending indefinitely.
-#: On timeout the lookup fails open (write proceeds without a precondition,
-#: still approval-gated and audited).
+#: Best-effort inspection callers fail open; direct agent writes opt into the
+#: strict path and are blocked when identity cannot be established.
 UID_LOOKUP_TIMEOUT = 10.0
+
+
+class TargetIdentityUnavailable(RuntimeError):
+    """A direct agent write could not establish its target incarnation."""
+
 
 #: `KorvidApp._get_manifest`: (kind alias, namespace, name) -> manifest.
 ManifestFetcher = Callable[[str, str | None, str], Awaitable[dict[str, Any]]]
@@ -103,10 +116,27 @@ WriteOpBuild = tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[
 Triple = tuple[str, str, str]
 
 
+async def _aclose(iterator: object) -> None:
+    """Close an async generator the controller stopped consuming.
+
+    Whoever abandons an `async for` owns the generator it left suspended.
+    An agent turn is driven by a generator that releases the session in
+    its `finally`, so dropping it without closing it would hold the turn
+    open forever. Closing is best-effort: it runs the producer's cleanup,
+    and any failure in that cleanup must not displace the reason we
+    stopped consuming in the first place.
+    """
+    closer = getattr(iterator, "aclose", None)
+    if closer is None:
+        return
+    with contextlib.suppress(BaseException):
+        await closer()
+
+
 class AgentPanelPort(ABC):
     """The chat panel, as the controller is allowed to drive it.
 
-    Only what the agent session needs: visibility, the header the runtime's
+    Only what the agent session needs: visibility, the header the session's
     identity renders into, the two unconfigured-state hints, and the
     transcript operations a turn performs. Handing over the widget itself
     would hand over its whole Textual surface (and its `app`).
@@ -140,9 +170,9 @@ class AgentPanelPort(ABC):
         output_tokens: int,
         *,
         estimated: bool,
-        profile: str,
+        tier: str | None = None,
     ) -> None:
-        """Render the live runtime's model, usage and capability profile."""
+        """Render the live session's model, token usage and routed tier."""
 
     @abstractmethod
     def show_setup_hint(self) -> None:
@@ -170,7 +200,7 @@ class AgentPanelPort(ABC):
 
     @abstractmethod
     def apply_event(self, event: AgentEvent) -> None:
-        """Render one runtime event into the transcript."""
+        """Render one session event into the transcript."""
 
 
 class AgentScreens(ABC):
@@ -217,6 +247,27 @@ class AgentScreens(ABC):
         footer_note: str | None,
     ) -> None:
         """Show a describe view in the non-modal pane beside the chat panel."""
+
+    @abstractmethod
+    def selected_identity(self, table_id: str, kind: str) -> ResourceIdentity | None:
+        """The resource under the cursor in the named pane, or None.
+
+        Reads the pane's current selection by its widget table-id without
+        changing focus.  The *kind* hint names the resource kind rendered in
+        that pane so the identity can carry it even when the row key does not.
+        """
+
+    @abstractmethod
+    def displayed_pane_context(self) -> DisplayedPaneContext | None:
+        """The describe/log target currently shown above the resource table."""
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class DisplayedPaneContext:
+    """A rendered describe/log pane and the workspace pane that opened it."""
+
+    context: PaneContext
+    owner: object | None
 
 
 class WorkspaceOps(Protocol):
@@ -315,7 +366,7 @@ class AppLoopTurnTasks(TurnTasks):
         return asyncio.create_task(coro)
 
 
-class AgentUIBridge(UIBridge):
+class AgentToolUIBridge(UIBridge):
     """`UIBridge` adapter over an `AgentUiController` and a dispatch surface.
 
     The layer-boundary interface must be an `abc.ABC` (AGENTS.md); this is
@@ -433,10 +484,10 @@ class AgentUiController:
         #: degraded wiring) falls back to this controller's own adapter.
         follow_bridge: Callable[[], UIBridge | None] = lambda: None,
         tasks: TurnTasks | None = None,
-        runtime: AgentRuntime | None = None,
+        session: AgentSession | None = None,
         model_name: str | None = None,
         configurator: AgentConfigurator | None = None,
-        rebuild: Callable[[AgentSettings], AgentRuntime | None] | None = None,
+        rebuild: Callable[[AgentSettings], AgentSession | None] | None = None,
         disconnect: Callable[[], None] | None = None,
         available: bool = True,
     ) -> None:
@@ -466,8 +517,12 @@ class AgentUiController:
         self._refresh_status = refresh_status
         self._follow_bridge = follow_bridge
         self._tasks = tasks if tasks is not None else AppLoopTurnTasks()
-        self._runtime = runtime
-        self._model_name = model_name
+        self._session = session
+        #: One close from this controller, however many times teardown
+        #: asks: the app's unmount path and a defensive `shutdown` both
+        #: run on the way down.
+        self._session_closed = False
+        self._model_name = session.policy.model.model if session is not None else model_name
         self._configurator = configurator
         self._rebuild = rebuild
         #: Releases the live provider on `:ai off` (issue #167) — session
@@ -478,22 +533,25 @@ class AgentUiController:
         self._available = available
         settings = config()
         self._settings: AgentSettings | None = None
-        #: capability profile of the live runtime (issue #71); shown in the
-        #: agent panel header so users know which mode the agent runs in.
-        self._profile = settings.agent_profile or "full"
-        #: profile as explicitly configured (None = unset) — the `:ai`
-        #: wizard only suggests `small` for Ollama when this is unset.
-        self._configured_profile = settings.agent_profile
-        # A runtime built from config.yaml at startup must seed the settings
-        # snapshot so :model works without running the :ai wizard first.
-        if runtime is not None and settings.agent_provider and settings.agent_model:
+        #: model tier as explicitly configured (None = Automatic) — seeds
+        #: the `:ai` wizard's tier step and `:model` rebuilds so an
+        #: explicit low/high override survives across them.
+        self._configured_tier = settings.agent_model_tier
+        # config.yaml naming a provider and a model is enough to seed the
+        # settings snapshot, whether or not the composition root managed to
+        # build a session from it. A startup that degraded (a provider the
+        # router refuses, say `supports_tools=False`) still has to be
+        # recoverable with a single `:model <name>` — and reconnect and the
+        # `:ai` wizard have to open on what is configured — instead of
+        # asking the operator to retype a configuration korvid already has.
+        if settings.agent_provider and settings.agent_model:
             self._settings = AgentSettings(
                 provider=settings.agent_provider,
                 auth_method=settings.agent_auth_method or "none",
                 base_url=settings.agent_base_url,
                 model=settings.agent_model,
                 api_key_env=settings.agent_api_key_env,
-                profile=settings.agent_profile or "full",
+                model_tier=settings.agent_model_tier,
                 options=settings.agent_options,
             )
         #: Agent follow: mirror the built-in agent's cluster reads on screen
@@ -510,13 +568,11 @@ class AgentUiController:
         self._replacement: str | None = None
         self._turn_finalized = False
         self._shutting_down = False
-        #: One-shot notice injected into the agent's next screen context
-        #: after a switch, so a running conversation learns the cluster
-        #: changed under it.
-        self._context_note: str | None = None
         #: Identity of the object the last evidence open actually displayed.
         self._displayed_incarnation: str | None = None
-        self._bridge = AgentUIBridge(self, dispatch)
+        self._bridge = AgentToolUIBridge(self, dispatch)
+        #: Lazily created typed workspace bridge (see `workspace_bridge`).
+        self._workspace_bridge: AgentWorkspaceBridge | None = None
 
     # ------------------------------------------------------------------
     # Session state, observable but not mutable from outside
@@ -528,20 +584,21 @@ class AgentUiController:
         return self._available
 
     @property
-    def runtime(self) -> AgentRuntime | None:
-        """The live runtime — the `:ai` wizard may have replaced the initial
+    def session(self) -> AgentSession | None:
+        """The live session — the `:ai` wizard may have replaced the initial
         one, so per-cluster retargeting (issue #36) must read it here."""
-        return self._runtime
+        return self._session
 
     @property
     def model_name(self) -> str | None:
-        """Model of the live runtime, as the panel header shows it."""
+        """Model of the live session, as the panel header shows it."""
         return self._model_name
 
     @property
-    def profile(self) -> str:
-        """Capability profile the live runtime runs in (issue #71)."""
-        return self._profile
+    def configured_model_tier(self) -> str | None:
+        """Explicitly configured model tier (None = Automatic), as last set
+        by config.yaml or the `:ai` wizard."""
+        return self._configured_tier
 
     @property
     def settings(self) -> AgentSettings | None:
@@ -568,16 +625,45 @@ class AgentUiController:
         """This controller as a serialized `UIBridge` (the follow fallback)."""
         return self._bridge
 
+    @property
+    def workspace_bridge(self) -> AgentWorkspaceBridge:
+        """The typed workspace-action bridge (`AgentUiBridge`) for this session.
+
+        Created once and cached. `timeline_cursor` is deliberately left at
+        its default (always `None`) here, and that is the production
+        behaviour: a cursor names *the timeline entry the user is looking
+        at*, and korvid has no user-visible timeline selection to read it
+        from yet. Synthesising one — "the newest entry", say — would hand
+        the agent a cursor no user ever placed, so `timeline_cursor=None`
+        is the honest answer until such a selection exists. The parameter
+        stays on `AgentWorkspaceBridge` for the tests that exercise cursor
+        handling and for the composition root to wire on the day the
+        selection lands.
+        """
+        bridge = self._workspace_bridge
+        if bridge is None:
+            # Lazy: agent_workspace_bridge imports this module for the
+            # controller it drives, so a module-level import here would
+            # close the cycle.
+            from korvid.ui.agent_workspace_bridge import AgentWorkspaceBridge
+
+            bridge = AgentWorkspaceBridge(
+                config=self._config,
+                context=self._context,
+                workspace=self._workspace,
+                screens=self._screens,
+                controller=self,
+                dispatch=self._dispatch,
+            )
+            self._workspace_bridge = bridge
+        return bridge
+
     def blocked_in_protected(self) -> bool:
         """`agent.disable_in_protected` (issue #83): agent turns are refused
         entirely while a protected context is active."""
         return self._writes.protected_context is not None and (
             self._config().agent_disable_in_protected
         )
-
-    def note_context_switch(self, note: str) -> None:
-        """Tell the running conversation the cluster changed under it."""
-        self._context_note = note
 
     # ------------------------------------------------------------------
     # `:ai` / `:model` commands
@@ -605,8 +691,8 @@ class AgentUiController:
 
     def _open_payload_inspector(self) -> None:
         """Open the latest stable redacted provider payload, if available."""
-        runtime = self._runtime
-        if runtime is None:
+        session = self._session
+        if session is None:
             self._ui.notify("Agent is off", severity="warning")
             return
         if self.busy:
@@ -615,21 +701,21 @@ class AgentUiController:
                 severity="warning",
             )
             return
-        snapshot = runtime.latest_outbound_payload
+        snapshot = session.latest_outbound_payload
         if snapshot is None:
             self._ui.notify("No provider payload has been sent", severity="warning")
             return
         self._ui.push_screen(PayloadInspectorScreen(snapshot))
 
     def _handle_off(self) -> None:
-        """`:ai off` (issue #167): disconnect the runtime for this session.
+        """`:ai off` (issue #167): disconnect the agent for this session.
 
-        Keeps the configured provider/model/profile/credentials so bare
+        Keeps the configured provider/model/tier/credentials so bare
         `:ai` reconnects without re-entry; never rewrites `agent.enabled`
         or the persisted config. Refused while a turn runs — cancelling
         midway is the interrupt key's job, not a state command's.
         """
-        if self._runtime is None:
+        if self._session is None:
             self._ui.notify("Agent is already off")
             return
         if self.busy:
@@ -640,7 +726,7 @@ class AgentUiController:
             return
         if self._disconnect is not None:
             self._disconnect()
-        self._runtime = None
+        self._session = None
         # Disconnected-but-configured (vs never-configured): visibility
         # toggles must show the reconnect hint, never the setup wipe.
         self._disconnected = True
@@ -662,7 +748,7 @@ class AgentUiController:
             AgentSetupScreen(
                 self._configurator,
                 apply_settings=self.apply_settings,
-                current_profile=self._configured_profile,
+                current_tier=self._configured_tier,
                 current_settings=self._settings,
             )
         )
@@ -674,8 +760,8 @@ class AgentUiController:
             return
         if not args:
             # Report only a live model: at startup config may carry a model
-            # name even though provider creation failed (runtime is None).
-            if self._runtime is not None and self._model_name:
+            # name even though provider creation failed (session is None).
+            if self._session is not None and self._model_name:
                 self._ui.notify(f"Agent model: {self._model_name}")
             else:
                 self._ui.notify("Agent not configured — run :ai first", severity="warning")
@@ -694,7 +780,7 @@ class AgentUiController:
                 return  # apply_settings already notified the reason
             try:
                 await configurator.save(new_settings)
-            except Exception as exc:  # runtime is live but disk is stale
+            except Exception as exc:  # session is live but disk is stale
                 # Do not name a revert target: after a previous failed save
                 # the in-memory snapshot may itself never have been persisted.
                 self._ui.notify(
@@ -721,9 +807,9 @@ class AgentUiController:
         )
 
     def apply_settings(self, settings: AgentSettings) -> bool:
-        """Swap in a fresh runtime built from the wizard's settings.
+        """Swap in a fresh session built from the wizard's settings.
 
-        Transactional: on any failure the previous runtime/settings are kept
+        Transactional: on any failure the previous session/settings are kept
         and False is returned; the swap is also refused while a turn is live.
         """
         if self._rebuild is None:
@@ -739,40 +825,56 @@ class AgentUiController:
             )
             return False
         try:
-            runtime = self._rebuild(settings)
+            session = self._rebuild(settings)
         except Exception as exc:
             self._ui.notify(f"Agent rebuild failed: {exc}", severity="error", markup=False)
             return False
-        if runtime is None:
+        if session is None:
             self._ui.notify(
                 "Agent rebuild failed — check configuration; keeping previous agent",
                 severity="error",
             )
             return False
-        self._runtime = runtime
+        self._session = session
+        self._session_closed = False  # a fresh session, not the closed one
         self._disconnected = False  # reconnected (issue #167)
-        self._model_name = settings.model
+        self._model_name = session.policy.model.model
         self._settings = settings
-        self._profile = settings.profile
-        # Once applied (and persisted by the wizard) the profile is an
-        # explicit choice — reopening :ai must preserve it.
-        self._configured_profile = settings.profile
+        # Once applied (and persisted by the wizard) the tier is an explicit
+        # choice — reopening :ai must preserve it.
+        self._configured_tier = settings.model_tier
         self._refresh_status()
         # Always re-enable: the hint may have disabled the input while the
         # panel was open earlier; only focus/header rendering depends on
         # visibility.
         self._panel.enable_input()
         if self._panel.expanded():
-            in_tok, out_tok = runtime.total_tokens
-            self._panel.set_header(
-                settings.model,
-                in_tok,
-                out_tok,
-                estimated=runtime.usage_estimated,
-                profile=settings.profile,
-            )
+            self._render_header(session, self._model_name)
             self._panel.focus_input()
         return True
+
+    @staticmethod
+    def _tier_label(session: AgentSession) -> str:
+        """How the resolved tier is shown: the tier the session actually
+        runs on, and where that decision came from.
+
+        Deliberately the *resolved* policy rather than the requested
+        override: a request the catalogue could not honour must read as
+        the fallback it became, not as the choice the user typed.
+        """
+        policy = session.policy
+        return f"{policy.tier.value} ({policy.route_source.value})"
+
+    def _render_header(self, session: AgentSession, model: str | None) -> None:
+        """Paint the panel header from the live session's own numbers."""
+        in_tok, out_tok = session.total_tokens
+        self._panel.set_header(
+            model or "",
+            in_tok,
+            out_tok,
+            estimated=session.usage_estimated,
+            tier=self._tier_label(session),
+        )
 
     # ------------------------------------------------------------------
     # Panel toggle and prompt submission
@@ -786,7 +888,7 @@ class AgentUiController:
             self._panel.hide()
             return
         self._panel.show()
-        if self._runtime is None:
+        if self._session is None:
             if self._disconnected:
                 # Disconnected-but-configured (:ai off, issue #167): the
                 # transcript must survive visibility toggles — never the
@@ -796,14 +898,7 @@ class AgentUiController:
                 self._panel.show_setup_hint()
             return
         if self._model_name:
-            in_tok, out_tok = self._runtime.total_tokens
-            self._panel.set_header(
-                self._model_name,
-                in_tok,
-                out_tok,
-                estimated=self._runtime.usage_estimated,
-                profile=self._profile,
-            )
+            self._render_header(self._session, self._model_name)
         self._panel.focus_input()
 
     def submit_prompt(self, text: str) -> None:
@@ -825,7 +920,7 @@ class AgentUiController:
                 severity="warning",
             )
             return
-        if self._runtime is None:
+        if self._session is None:
             return
         task = self._task
         if task is not None and not task.done():
@@ -841,6 +936,7 @@ class AgentUiController:
                 # cancelling: a second CancelledError can interrupt the
                 # cleanup itself (review on #175). The depth-one queue
                 # above already holds the newest correction.
+                self._signal_interrupt()
                 task.cancel()
             return
         self._replacement = None  # a direct turn supersedes any queue
@@ -866,9 +962,9 @@ class AgentUiController:
         if task.cancelled() and not self._turn_finalized:
             # Cancelled before the coroutine's first step: its own
             # CancelledError handler never ran, so finalize here — the
-            # runtime is untouched (finalize is inert then) but the panel
+            # session is untouched (finalize is inert then) but the panel
             # must still leave its running state.
-            self._finish_interrupted_turn(self._runtime)
+            self._finish_interrupted_turn(self._session)
         replacement, self._replacement = self._replacement, None
         if replacement is None or self._context.switching() or self._shutting_down:
             return
@@ -884,7 +980,20 @@ class AgentUiController:
             return
         self._replacement = None
         if task.cancelling() == 0:
+            self._signal_interrupt()
             task.cancel()
+
+    def _signal_interrupt(self) -> None:
+        """Tell the session to stop before the task is cancelled.
+
+        Order matters: cancellation arrives as an exception wherever the
+        turn happens to be suspended, while `interrupt` is the session's
+        own cooperative stop. Signalling first lets the turn wind down at
+        a boundary it chose; cancelling first would only ever unwind it.
+        Only while a turn is live — an idle stop must signal nothing.
+        """
+        if self._session is not None:
+            self._session.interrupt()
 
     async def wait_for_turn(self) -> None:
         """Drain the in-flight turn: await its task, absorbing the
@@ -897,78 +1006,98 @@ class AgentUiController:
             await task
 
     # ------------------------------------------------------------------
-    # Screen context and the turn itself
+    # The turn itself
     # ------------------------------------------------------------------
 
-    def screen_context(self) -> str:
-        """What the agent is told about the screen: the focused pane in
-        detail plus a one-line summary of the other pane (issue #48), so
-        context stays bounded in a split workspace."""
-        selected = self._screens.selected_row_key() or "-"
-        selected_ns = ""
-        if "/" in selected:
-            # Row keys are 'namespace/name' composites; fed verbatim they
-            # teach the model to paste the whole string as a resource name
-            # (observed: get_resource name='default/otel-…' -> 404). Hand
-            # over the two fields the tool calls actually take.
-            selected_ns, _, selected = selected.partition("/")
-        context = (
-            f"context={self._config().kube_context or '-'} "
-            f"view={self._view.current_kind()} scope={self._view.current_scope()} "
-            f"selected={selected}"
-        )
-        if selected_ns:
-            context += f" selected_ns={selected_ns}"
-        context += f" filter={self._workspace.filter_pattern or '-'}"
-        if self._workspace.is_split:
-            other = self._workspace.panes[1 - self._workspace.focused_index]
-            context += f" other_pane={other.kind} other_scope={other.scope}"
-        return context
-
     async def run_turn(self, user_text: str) -> None:
-        """One agent turn: stream the runtime's events into the panel and
-        mirror its cluster reads when follow is on."""
-        runtime = self._runtime
-        if runtime is None:
+        """One agent turn: stream the session's events into the panel and
+        mirror its cluster reads when follow is on.
+
+        The user's text is all the controller hands over. What is on
+        screen is not prose assembled here any more: the session reads it
+        through the workspace port at the moment it needs it, so a turn
+        that outlives a navigation sees the screen it is actually on.
+        """
+        session = self._session
+        if session is None:
             return
-        screen_context = self.screen_context()
-        if self._context_note is not None:
-            # One-shot: the conversation only needs to learn about the
-            # switch once; afterwards the context= field carries the truth.
-            screen_context += f" NOTE: {self._context_note}"
-            self._context_note = None
         # Agent follow: started cluster reads awaiting their result, keyed
         # by call id (the finish event does not carry the arguments).
         pending_reads: dict[str, tuple[str, str]] = {}
-        gen = runtime.run_turn(user_text, screen_context)
+        gen = session.run_turn(user_text)
         try:
             async for event in gen:
                 self._panel.apply_event(event)
                 await self._maybe_follow_read(event, pending_reads)
+            with contextlib.suppress(Exception):
+                self._render_header(session, self._model_name)
         except asyncio.CancelledError:
             # Close the generator first: if the cancel landed between
             # yields the generator is still suspended, and finalize must
             # not race a later resume that appends to the history.
-            closer = getattr(gen, "aclose", None)
-            if closer is not None:
-                with contextlib.suppress(BaseException):
-                    await closer()
-            self._finish_interrupted_turn(runtime)
+            await _aclose(gen)
+            self._finish_interrupted_turn(session)
             raise
         except Exception as exc:
+            # The failure is ours (a panel/follow error), not the
+            # session's: the session is still suspended at its `yield`,
+            # holding the turn. Abandoning it there would strand the turn
+            # and every later prompt would be refused as "a turn is
+            # already running". So close the generator, let the session
+            # repair the half-written history if it has one to repair,
+            # and only then surface the error.
+            await _aclose(gen)
+            if session.finalization_pending:
+                session.finalize_interrupt()
+                # Finalization commits whatever the abandoned turn already
+                # spent to the session's totals, but the error reported
+                # below carries no usage for the panel to add. Repainting
+                # from the session's own absolute numbers settles the
+                # header now instead of leaving it stale until some later
+                # turn happens to refresh it; `set_header` takes totals,
+                # not a delta, so nothing the panel already added is
+                # counted twice.
+                #
+                # Best-effort on purpose: a panel that just failed is
+                # exactly where a repaint can fail too, and that must not
+                # replace the failure the user needs to see — nor skip the
+                # `AgentError` below, which is the only event that takes
+                # the panel out of its running state.
+                with contextlib.suppress(Exception):
+                    self._render_header(session, self._model_name)
             self._panel.apply_event(AgentError(message=str(exc)))
 
-    def _finish_interrupted_turn(self, runtime: Any) -> None:
+    def _finish_interrupted_turn(self, session: AgentSession | None) -> None:
         """Settle an interrupted turn: repair the conversation history and
         mark the transcript (issue #170). The queued replacement, if any, is
         drained by the task's done callback — not here, because a task
-        cancelled before its coroutine first ran never reaches this code."""
+        cancelled before its coroutine first ran never reaches this code.
+
+        Finalization is asked for only when the session says it has a turn
+        to finalize: a task cancelled before its coroutine ever ran left
+        the session untouched, and demanding a repair it has no record of
+        would raise. The panel still leaves its running state either way —
+        the transcript belongs to the UI, not to the session.
+
+        `TurnInterrupted` carries what *this* turn spent, not what the
+        session has spent so far. The panel adds each turn's usage to the
+        running total it shows, so a stop with nothing to finalize reports
+        a zero delta: the session's cumulative totals would be counted a
+        second time and the header would double after every stop.
+        """
         self._turn_finalized = True
-        finalize = getattr(runtime, "finalize_interrupt", None)
-        if finalize is not None:
-            event = finalize()
-            if not self._shutting_down:
-                self._panel.apply_event(event)
+        if session is None:
+            event = TurnInterrupted(input_tokens=0, output_tokens=0, estimated=False)
+        elif session.finalization_pending:
+            event = session.finalize_interrupt()
+        else:
+            # The turn never ran, so it spent nothing. Whatever the
+            # session has already committed is on the header already.
+            event = TurnInterrupted(
+                input_tokens=0, output_tokens=0, estimated=session.usage_estimated
+            )
+        if not self._shutting_down:
+            self._panel.apply_event(event)
 
     async def _maybe_follow_read(
         self,
@@ -1028,11 +1157,20 @@ class AgentUiController:
         only await this.
         """
         self.begin_shutdown()
-        if self._task is None:
-            return
-        if self._task.cancelling() == 0:
-            self._task.cancel()
-        await self.wait_for_turn()
+        if self._task is not None:
+            if self._task.cancelling() == 0:
+                self._signal_interrupt()
+                self._task.cancel()
+            await self.wait_for_turn()
+        session = self._session
+        if session is not None and not self._session_closed:
+            # After the drain, never before: closing a session out from
+            # under a turn that is still unwinding would tear its cleanup
+            # in half. Closed at most once from here even when teardown
+            # calls `shutdown` twice; the composition root's guard may
+            # still close the same session again, which `aclose` absorbs.
+            self._session_closed = True
+            await session.aclose()
 
     # ------------------------------------------------------------------
     # UIBridge implementation (spec §4.1 UI Bus): the agent drives the
@@ -1056,10 +1194,10 @@ class AgentUiController:
         reach a screen the agent itself is not allowed to open - the
         approval-dialog guard included.
         """
-        runtime = self._runtime
-        if runtime is None:
+        session = self._session
+        if session is None:
             return "ERROR: the agent is not configured in this session"
-        item = runtime.evidence.resolve(ref)
+        item = session.evidence.resolve(ref)
         if item is None:
             return f"ERROR: {ref} is not evidence from this turn"
         target = target_for(item)
@@ -1507,10 +1645,25 @@ class AgentUiController:
             # plural that collides across groups could otherwise resolve to
             # a different resource than the one validated above. The same
             # snapshot feeds the ownership banner - no second round trip.
-            snapshot = await self.target_manifest(kind.strip().lower(), ns, name)
+            snapshot = await self.target_manifest(
+                kind.strip().lower(),
+                ns,
+                name,
+                strict=True,
+            )
         except ApiStatusError:
             return f"ERROR: {gvr_label(meta)}/{name} not found{write_locus(ns)}"
+        except TargetIdentityUnavailable:
+            return (
+                f"ERROR: target identity unavailable for {gvr_label(meta)}/{name}"
+                f"{write_locus(ns)}; write blocked"
+            )
         uid = manifest_uid(snapshot) if snapshot is not None else None
+        if uid is None:
+            return (
+                f"ERROR: target identity has no UID for {gvr_label(meta)}/{name}"
+                f"{write_locus(ns)}; write blocked"
+            )
         preview = await self.preview_for_action(
             action, meta, ns, name, replicas, resources, uid, stamp
         )
@@ -1600,7 +1753,12 @@ class AgentUiController:
         return compose_resize_impact_lines(graph_lines, context)
 
     async def target_manifest(
-        self, kind_alias: str, ns: str | None, name: str
+        self,
+        kind_alias: str,
+        ns: str | None,
+        name: str,
+        *,
+        strict: bool = False,
     ) -> dict[str, Any] | None:
         """Manifest of a write target at request time, looked up by the same
         alias the write was validated with (both resolve through the one
@@ -1608,25 +1766,33 @@ class AgentUiController:
         address the same resource even when plurals collide across groups).
         Raises ApiStatusError(404) when the target does not exist (the caller
         turns that into an actionable error before bothering the user with a
-        dialog). Fails open (None -> no precondition, matching the previous
-        behaviour) when no manifest source is wired or the lookup fails for
-        infrastructure reasons - including a lookup slower than
-        UID_LOOKUP_TIMEOUT, so a stalled API server cannot leave the caller
-        pending forever - the write stays approval-gated and audited."""
+        dialog). Best-effort callers fail open when no manifest source is
+        wired or infrastructure lookup fails. Direct agent writes pass
+        `strict=True`, translating those failures to
+        `TargetIdentityUnavailable` so no approval can execute against an
+        unverified replacement."""
         get_manifest = self._get_manifest()
         if get_manifest is None:
+            if strict:
+                raise TargetIdentityUnavailable
             return None
         try:
             return await asyncio.wait_for(get_manifest(kind_alias, ns, name), UID_LOOKUP_TIMEOUT)
         except ApiStatusError as exc:
             if exc.status == 404:
                 raise
+            if strict:
+                raise TargetIdentityUnavailable from None
             logger.warning("uid lookup for %s/%s failed; writing without precondition", ns, name)
             return None
         except TimeoutError:
+            if strict:
+                raise TargetIdentityUnavailable from None
             logger.warning("uid lookup for %s/%s timed out; writing without precondition", ns, name)
             return None
         except Exception:
+            if strict:
+                raise TargetIdentityUnavailable from None
             logger.exception("uid lookup for %s/%s failed; writing without precondition", ns, name)
             return None
 

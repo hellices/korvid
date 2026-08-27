@@ -1,6 +1,12 @@
 id: pending-insufficient-cpu
 question: Pod trainer-1 in namespace ml has been Pending for 15 minutes. Why is it not scheduled?
-screen: "resource view: pods, namespace ml, selected: ml/trainer-1 (Pending)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: ml
+    selected: {kind: Pod, namespace: ml, name: trainer-1, uid: pod-trainer-1}
 root_cause: insufficient_resources
 grading:
   must_mention:

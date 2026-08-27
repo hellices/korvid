@@ -1,4 +1,4 @@
-"""Typed events yielded by AgentRuntime to the UI (design §6.1 panel contents)."""
+"""Typed events the agent engine yields to the UI (design §6.1 panel contents)."""
 
 from __future__ import annotations
 

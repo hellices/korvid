@@ -111,7 +111,7 @@ class OutboundSnapshot:
     """Immutable canonical record of the exact redacted provider payload."""
 
     #: The model the request was addressed to. Named for what it holds:
-    #: every adapter's `LLMProvider.name` returns its model identifier,
+    #: every adapter's `descriptor.model` returns its model identifier,
     #: so labelling `qwen3:8b` a "provider" told a reader of an exported
     #: payload the wrong thing about where their data went.
     model: str
@@ -317,7 +317,7 @@ def _sanitize_tool_result(
         raise _blocked("tool name and result must be text")
     if not error and _resolved_result_format(name, result_format) == "structured_yaml":
         # A structured result is always bounded: the ingest cap applies
-        # even when no tighter profile budget was given, because the
+        # even when no tighter tier budget was given, because the
         # bound must be enforced on the *redacted* document.
         return _sanitize_structured_result(
             result,

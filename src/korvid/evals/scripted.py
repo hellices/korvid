@@ -1,7 +1,8 @@
 """ScriptedProvider: deterministic provider for harness smoke tests (issue #69).
 
 Replays a fixed sequence of completions so CI can exercise the real
-AgentRuntime + ToolExecutor path without a live model.
+agent session (engine, gateway, tool harness, executor) without a live
+model.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import LLMProvider
 
 
@@ -25,8 +27,12 @@ class ScriptedProvider(LLMProvider):
         self._cursor = 0
 
     @property
-    def name(self) -> str:
-        return "scripted"
+    def descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor("scripted", "scripted")
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities.unknown()
 
     async def complete(
         self,

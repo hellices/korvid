@@ -298,7 +298,7 @@ So the boundaries that matter are named:
   context-pinned CLI wrappers). Implemented by `AppContextSurface` and
   `AppSessionConfiguration`; neither runs any part of the transaction.
 - **`AgentPanelPort`** (`ui/agent_ui_controller.py`) — the chat panel as the
-  agent session may drive it: visibility, the header the live runtime renders
+  agent session may drive it: visibility, the header the live session renders
   into, the two unconfigured-state hints, and the transcript operations a turn
   performs. Implemented by `AppAgentPanel`.
 - **`AgentScreens`** (`ui/agent_ui_controller.py`) — the screen the agent may
@@ -443,9 +443,9 @@ owns everything about the built-in agent that used to live on `KorvidApp`:
 
 | Owned | Notes |
 |---|---|
-| runtime, model, settings, capability profile, configurator/rebuild/disconnect seams, the `:ai off` disconnect marker, the follow flag | `:ai`, `:ai off`, `:ai follow`, `:ai payload` and `:model` are all handled here; the app routes the command word and nothing else |
+| the `AgentSession`, model name, settings, configurator/rebuild/disconnect seams, the `:ai off` disconnect marker, the follow flag | `:ai`, `:ai off`, `:ai follow`, `:ai payload` and `:model` are all handled here; the app routes the command word and nothing else. The tier and budgets are not the controller's to pick — `ModelRouter` resolves them into the session's `ResolvedAgentPolicy`, and the controller only paints the routed tier in the header |
 | the turn task | A bare app-loop task, created through the `TurnTasks` port: the interrupt key must cancel *this* turn, the queued interrupt-and-submit replacement starts from the cancelled task's done callback, and `shutdown()` cancels and reaps it |
-| the screen context the model is told about | Composed from `WorkspaceState` and the selected row, plus the one-shot `:ctx` note the switch coordinator hands over through `note_context_switch` |
+| the workspace snapshot the session is handed | An `InteractionContext` composed from `WorkspaceState` and the selected row, through `AgentWorkspaceBridge`. It carries a `context_epoch`, not a sentence: a `:ctx` switch bumps the epoch and the `PromptHarness` decides what — if anything — the model is told about it, so no model-facing prose is written here |
 | follow mirroring | Successful cluster reads are mirrored through the injected serialized bridge (the composition root's `_UIBridgeProxy`), falling back to the controller's own `AgentUIBridge` |
 | every `UIBridge` read | evidence open, navigate, filter, drill, logs, describe — each with the approval-dialog and describe-screen guards |
 | the direct agent write | `agent_request_write`, its target manifest/uid/ownership lookups, the dry-run preview, the resize impact lines, and the write-op construction the proposal path shares |
@@ -614,8 +614,8 @@ tests added before the move where the behaviour is not already pinned.
     delegates and re-exports the eligibility sets for `_ACTION_VIEWS` and the
     agent write ops.
 12. ~~The agent session and its UI bridge~~ — done (#187);
-    `AgentUiController` (`ui/agent_ui_controller.py`) owns the runtime /
-    settings / profile / follow state, the turn task with its
+    `AgentUiController` (`ui/agent_ui_controller.py`) owns the session /
+    settings / model tier / follow state, the turn task with its
     interrupt-and-submit lifecycle, the screen context, follow mirroring, all
     `UIBridge` reads, and the direct approval-gated agent write. `AppUIBridge`
     became an adapter over it plus `AppContextDispatch`

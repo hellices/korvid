@@ -3,11 +3,16 @@ id: compare-namespaces
 # journey exists to catch is severity-by-count: `staging` has more warning
 # events, and `prod` is the one that is down.
 root_cause: service_selector_mismatch
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: "*"
 turns:
   - user: >-
       Compare namespaces prod and staging. Which one needs attention first,
       and why?
-    screen: "resource view: pods, all namespaces"
     grading:
       must_mention:
         - [prod]
@@ -61,7 +66,12 @@ turns:
   - user: >-
       Give me the specific cause in the namespace you picked, and say what
       is actually wrong in the other one.
-    screen: "resource view: services, namespace prod"
+    interaction:
+      kube_context: eval-fixture
+      context_epoch: 1
+      focused_pane:
+        kind: services
+        scope: prod
     grading:
       must_mention:
         # prod: the Service selects a label no pod carries, so it has no

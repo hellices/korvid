@@ -217,8 +217,8 @@ def as_recorded(executor: object) -> RecordedExecution:
 
     The explicit on-ramp for something that is not a `RecordedExecution` —
     a test fake, a third-party integration — and it is the **caller's** to
-    invoke. `AgentRuntime` used to do it silently, which made a structural
-    shape the real constructor boundary; composing the adapter is a
+    invoke. Adapting silently inside an agent constructor would make a
+    structural shape the real boundary; composing the adapter is a
     decision, and it belongs where the executor is chosen (PR #197 review).
 
     Args:
@@ -242,15 +242,17 @@ def as_recorded(executor: object) -> RecordedExecution:
 
 def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
     """Enforce the tool-result ingest cap; shared by every path that feeds
-    a result into conversation history. Profiles may pass a tighter
-    `limit` (issue #71) so a full turn of results fits their history
-    budget."""
+    a result into conversation history. A resolved policy may pass a
+    tighter `limit` (issue #71) so a full turn of results fits its tier's
+    history budget."""
     if len(result) > limit:
-        return result[:limit] + _TRUNCATION_SUFFIX
+        if limit <= len(_TRUNCATION_SUFFIX):
+            return "…"[:limit]
+        return result[: limit - len(_TRUNCATION_SUFFIX)] + _TRUNCATION_SUFFIX
     return result
 
 
-_MIDDLE_TRUNCATION_MARKER = "\n… [middle truncated — profile result budget]\n"
+_MIDDLE_TRUNCATION_MARKER = "\n… [middle truncated — tier result budget]\n"
 
 
 #: Per-value clamp for list_resources facts: long enough for any real
@@ -538,7 +540,7 @@ def redacted_and_compacted(text: str, limit: int, path: str, records: list[Redac
 
 #: Derived surfaces (issue #91): the registry in `korvid.tools.registry`
 #: is the single source of tool metadata; these lists are kept as the
-#: public module API for the agent runtime, profiles, evals, and tests.
+#: public module API for the agent harness, evals, and tests.
 #: Built from deep copies (issue #97): the lists ride into provider
 #: plugins by default, and a mutation there must not corrupt the registry.
 READ_TOOLS: list[dict[str, Any]] = [
@@ -1730,7 +1732,7 @@ class ToolExecutor(RecordedExecution):
             - (len(omitted_line) if omitted_line else 0),
         )
         share = remaining // max(1, len(selected))
-        # The runtime preserves the report tail when applying the smaller profile cap.
+        # The harness preserves the report tail when applying the smaller tier cap.
         for pod in reversed(selected):
             try:
                 diagnosis = await self._diagnose_pod(

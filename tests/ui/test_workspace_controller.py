@@ -19,6 +19,8 @@ import dataclasses
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from typing import Any
 
+import pytest
+
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.k8s.components import ComponentRef
@@ -470,6 +472,31 @@ async def test_navigate_serializes_under_nav_lock() -> None:
     assert b.state.current_kind == "deployments"
 
 
+async def test_navigate_commits_state_only_when_the_new_table_can_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    b = _make(kind="pods", scope="default")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def gated_start(kind: str, scope: str) -> None:
+        entered.set()
+        await release.wait()
+        b.watch.started.append((kind, scope))
+
+    monkeypatch.setattr(b.watch, "start", gated_start)
+    task = asyncio.create_task(b.ctl.navigate("deployments", None))
+    await entered.wait()
+
+    assert b.state.current_kind == "pods"
+    assert ("render", "deployments") not in b.surface.calls
+
+    release.set()
+    await task
+    assert b.state.current_kind == "deployments"
+    assert ("render", "deployments") in b.surface.calls
+
+
 async def test_navigate_bails_when_initiating_pane_closed() -> None:
     b = _make(kind="pods", scope="default")
     b.state.split()  # focus pane-1
@@ -643,6 +670,32 @@ async def test_drill_into_pushes_level_and_navigates() -> None:
     )
     err = await b.ctl.drill_into("default", "web")
     assert err is None
+    assert b.state.current_kind == "replicasets"
+    assert b.state.focused.drill.parent_uid == "dep-uid"
+
+
+async def test_drill_render_failure_keeps_the_committed_drill_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    b = _make(kind="deployments", scope="default")
+    b.store.apply_event(
+        "deployments", "default", "ADDED", _summary("web", kind="Deployment", uid="dep-uid")
+    )
+    b.store.apply_event(
+        "replicasets",
+        "default",
+        "ADDED",
+        _summary("web-rs", kind="ReplicaSet", uid="rs", owner_uids=("dep-uid",)),
+    )
+
+    def fail_render(kind: str, *, only: PaneState | None = None) -> None:
+        raise RuntimeError("render failed")
+
+    monkeypatch.setattr(b.surface, "render_table", fail_render)
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        await b.ctl.drill_into("default", "web")
+
     assert b.state.current_kind == "replicasets"
     assert b.state.focused.drill.parent_uid == "dep-uid"
 

@@ -54,7 +54,7 @@ class TestTheEffectIsDeclared:
             schema=_schema("sneaky"),
             effect="external_read",
             dispatch="agent_navigate",
-            surfaces=frozenset({"full_agent"}),
+            surfaces=frozenset({"high_agent"}),
             result_format="untrusted_text",
         )
         with pytest.raises(ValueError, match="executor"):
@@ -66,7 +66,7 @@ class TestTheEffectIsDeclared:
             schema=_schema("sneaky"),
             effect="external_read",
             dispatch="_query_metrics",
-            surfaces=frozenset({"full_agent"}),
+            surfaces=frozenset({"high_agent"}),
             result_format="untrusted_text",
             write_action="delete",
         )
@@ -94,14 +94,14 @@ class TestTheEffectIsDeclared:
 
 class TestTheToolsAreGatedOnConfiguration:
     def test_no_backend_means_neither_tool_is_offered(self) -> None:
-        names = _names(agent_tool_schemas("full_agent", readonly=True, resize_supported=False))
+        names = _names(agent_tool_schemas("high_agent", readonly=True, resize_supported=False))
         assert "query_metrics" not in names
         assert "search_logs" not in names
 
     def test_a_metrics_backend_offers_only_the_metrics_tool(self) -> None:
         names = _names(
             agent_tool_schemas(
-                "full_agent",
+                "high_agent",
                 readonly=True,
                 resize_supported=False,
                 observability_backends=frozenset({"metrics"}),
@@ -113,7 +113,7 @@ class TestTheToolsAreGatedOnConfiguration:
     def test_a_logs_backend_offers_only_the_logs_tool(self) -> None:
         names = _names(
             agent_tool_schemas(
-                "full_agent",
+                "high_agent",
                 readonly=True,
                 resize_supported=False,
                 observability_backends=frozenset({"logs"}),
@@ -131,7 +131,7 @@ class TestTheToolsAreGatedOnConfiguration:
     def test_an_unknown_backend_name_offers_nothing(self) -> None:
         names = _names(
             agent_tool_schemas(
-                "full_agent",
+                "high_agent",
                 readonly=True,
                 resize_supported=False,
                 observability_backends=frozenset({"tracing"}),
@@ -144,7 +144,7 @@ class TestTheToolsAreGatedOnConfiguration:
         """They are reads: a read-only session is exactly where they belong."""
         names = _names(
             agent_tool_schemas(
-                "full_agent",
+                "high_agent",
                 readonly=True,
                 resize_supported=False,
                 observability_backends=frozenset({"metrics", "logs"}),

@@ -141,11 +141,24 @@ def make_app(ops: WriteOps, audit_path: Path) -> KorvidApp:
         while True:
             await asyncio.sleep(0.01)
 
+    async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        return {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "uid": "u-web",
+                "resourceVersion": "1",
+            },
+        }
+
     return KorvidApp(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),
         aliases=dict(_ALIASES),
+        get_manifest=get_manifest,
         write_ops=ops,
         audit=AuditLog(audit_path),
     )
@@ -306,7 +319,7 @@ async def test_agent_write_dialog_shows_preview(tmp_path: Path) -> None:
             label="agent write confirmation dialog opened",
         )
         assert "~ spec.replicas: 3 -> 4" in _preview_render(app)
-        assert ("scale", "default", "web", 4, None) in ops.preview_calls
+        assert ("scale", "default", "web", 4, "u-web") in ops.preview_calls
         await pilot.press("y")
         result = await task
         assert result.startswith("approved and executed")

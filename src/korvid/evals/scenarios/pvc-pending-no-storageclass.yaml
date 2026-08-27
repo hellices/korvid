@@ -1,6 +1,12 @@
 id: pvc-pending-no-storageclass
 question: Pod db-0 in namespace data has been Pending for 20 minutes. What is blocking it?
-screen: "resource view: pods, namespace data, selected: data/db-0 (Pending)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: data
+    selected: {kind: Pod, namespace: data, name: db-0, uid: pod-pvc-1}
 root_cause: pvc_pending_no_storageclass
 grading:
   must_mention:

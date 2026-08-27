@@ -5,18 +5,35 @@ from __future__ import annotations
 import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from types import MappingProxyType
 from typing import Any, Final
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import (
+    CapabilitySource,
+    ModelCapabilities,
+    ModelDescriptor,
+    ModelTier,
+)
 from korvid.agent.provider import LLMProvider
 
-PROVIDER_PLUGIN_API_VERSION: Final[int] = 1
+PROVIDER_PLUGIN_API_VERSION: Final[int] = 2
 _MAX_TEXT_DELTA_BYTES: Final[int] = 65_536
 _MAX_TOOL_CALL_FIELD_LENGTH: Final[int] = 256
 _MAX_TOOL_ARGUMENTS_BYTES: Final[int] = 65_536
 _MAX_USAGE_TOKENS: Final[int] = 1_000_000_000
+_MAX_MODEL_ID_LENGTH: Final[int] = 256
+
+
+def _known_capability_fact_names() -> frozenset[str]:
+    """Return the `ModelCapabilities` fact names allowed in provenance."""
+    return frozenset(
+        field.name for field in fields(ModelCapabilities) if field.name != "provenance"
+    )
+
+
+_KNOWN_CAPABILITY_FACTS: Final[frozenset[str]] = _known_capability_fact_names()
 
 
 @dataclass(frozen=True)
@@ -60,18 +77,151 @@ class ProviderPluginContractError(Exception):
 _MAX_EXCEPTION_BYTES: Final[int] = 2048
 
 
+def _validate_plugin_descriptor(descriptor: object, provider_id: str | None) -> ModelDescriptor:
+    """Validate and copy-own a plugin-reported `ModelDescriptor`.
+
+    `provider_id` is the plugin's normalized, registered name — when the
+    caller (the plugin registry) supplies it, a mismatching
+    `descriptor.provider` means the plugin is claiming to be a different
+    provider than the one it was loaded as, which is rejected.
+    """
+    if type(descriptor) is not ModelDescriptor:
+        raise ProviderPluginContractError(
+            "provider plugin descriptor must be a ModelDescriptor instance"
+        )
+    provider = _validate_descriptor_field(descriptor.provider, "provider")
+    model = _validate_descriptor_field(descriptor.model, "model")
+    if provider_id is not None and provider != provider_id:
+        raise ProviderPluginContractError(
+            "provider plugin descriptor's provider id does not match its registered name"
+        )
+    return ModelDescriptor(provider, model)
+
+
+def _validate_descriptor_field(value: object, name: str) -> str:
+    """Return one bounded, non-blank plugin descriptor field."""
+    if type(value) is not str or not value.strip() or len(value) > _MAX_MODEL_ID_LENGTH:
+        raise ProviderPluginContractError(
+            f"provider plugin descriptor {name} must be a non-blank string of at most "
+            f"{_MAX_MODEL_ID_LENGTH} characters"
+        )
+    return value
+
+
+def _validate_plugin_capabilities(capabilities: object) -> ModelCapabilities:
+    """Validate and copy-own a plugin-reported `ModelCapabilities`.
+
+    Every provenance key must name a known capability fact and every value
+    must be a real `CapabilitySource` member — a plugin's own object is
+    never trusted; a fresh instance is built from its (validated) fields.
+    """
+    if type(capabilities) is not ModelCapabilities:
+        raise ProviderPluginContractError(
+            "provider plugin capabilities must be a ModelCapabilities instance"
+        )
+    context_window_tokens = capabilities.context_window_tokens
+    if context_window_tokens is not None and (
+        type(context_window_tokens) is not int or context_window_tokens <= 0
+    ):
+        raise ProviderPluginContractError(
+            "provider plugin capabilities context_window_tokens must be a positive integer or None"
+        )
+    for name in ("supports_tools", "supports_parallel_tools", "supports_reasoning"):
+        value = getattr(capabilities, name)
+        if value is not None and type(value) is not bool:
+            raise ProviderPluginContractError(
+                f"provider plugin capabilities {name} must be a boolean or None"
+            )
+    if (
+        capabilities.recommended_tier is not None
+        and type(capabilities.recommended_tier) is not ModelTier
+    ):
+        raise ProviderPluginContractError(
+            "provider plugin capabilities recommended_tier must be a ModelTier or None"
+        )
+    provenance = _copy_plugin_provenance(capabilities.provenance)
+    return ModelCapabilities(
+        context_window_tokens=capabilities.context_window_tokens,
+        supports_tools=capabilities.supports_tools,
+        supports_parallel_tools=capabilities.supports_parallel_tools,
+        supports_reasoning=capabilities.supports_reasoning,
+        recommended_tier=capabilities.recommended_tier,
+        provenance=provenance,
+    )
+
+
+def _copy_plugin_provenance(value: object) -> dict[str, CapabilitySource]:
+    """Copy validated provenance without dispatching to plugin methods."""
+    if type(value) is not MappingProxyType:
+        raise ProviderPluginContractError(
+            "provider plugin capabilities provenance must be a mapping"
+        )
+    try:
+        provenance = dict(value)
+    except Exception:
+        raise ProviderPluginContractError(
+            "provider plugin capabilities provenance could not be read"
+        ) from None
+    for fact, source in provenance.items():
+        if type(fact) is not str or fact not in _KNOWN_CAPABILITY_FACTS:
+            raise ProviderPluginContractError(
+                "provider plugin capabilities provenance names an unknown fact"
+            )
+        if type(source) is not CapabilitySource:
+            raise ProviderPluginContractError(
+                "provider plugin capabilities provenance values must be CapabilitySource"
+            )
+    return provenance
+
+
+def _read_plugin_fact(provider: LLMProvider, name: str) -> object:
+    """Read one plugin-reported property, translating anything it raises.
+
+    A `descriptor`/`capabilities` property is plugin code: it may probe an
+    endpoint or read a credential, and fail carrying whatever it was
+    holding. Re-raising that unchanged would end a start with a
+    third party's exception — including one spelling itself
+    `ProviderPluginContractError` with a payload of its own — so the type
+    name is all that survives.
+
+    `BaseException` is deliberately not caught: a cancellation or a
+    `KeyboardInterrupt` during startup is not a contract violation.
+    """
+    try:
+        return getattr(provider, name)
+    except Exception as exc:
+        exc_type = type(exc).__name__
+        raise ProviderPluginContractError(
+            f"provider plugin {name} read failed: {_bounded_exception(exc_type)}"
+        ) from None
+
+
 class ValidatedPluginProvider(LLMProvider):
     """LLMProvider wrapper that enforces the provider plugin event contract."""
 
-    def __init__(self, provider: object) -> None:
+    def __init__(self, provider: object, *, provider_id: str | None = None) -> None:
         if not isinstance(provider, LLMProvider):
             raise ProviderPluginContractError("provider plugin must return an LLMProvider instance")
         self._provider = provider
         self._closed = False
+        # Both reads run third-party code (a lazy probe, a credential
+        # read), so each is wrapped on its own: the message says which
+        # fact korvid could not obtain, and names only the exception type
+        # — never what the plugin's exception carried.
+        self._descriptor = _validate_plugin_descriptor(
+            _read_plugin_fact(provider, "descriptor"), provider_id
+        )
+        self._capabilities = _validate_plugin_capabilities(
+            _read_plugin_fact(provider, "capabilities")
+        )
 
     @property
-    def name(self) -> str:
-        return self._provider.name
+    def descriptor(self) -> ModelDescriptor:
+        return self._descriptor
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return self._capabilities
 
     async def complete(
         self,

@@ -3,6 +3,7 @@ from typing import Any, cast
 
 import pytest
 
+from korvid.agent.model_policy import ModelDescriptor
 from korvid.providers.ollama import OllamaOptions, OllamaProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
 from korvid.providers.registry import create_provider
@@ -33,9 +34,12 @@ def test_openai_compat_created(monkeypatch: pytest.MonkeyPatch) -> None:
         api_key_env="K",
     )
     assert isinstance(p, OpenAICompatProvider)
+    assert p.descriptor == ModelDescriptor("openai-compat", "m")
 
 
 def test_aliases_accepted() -> None:
+    """Each alias is the canonical provider id in the resulting descriptor —
+    never guessed from the base_url or model tag (issue #189)."""
     for alias in ("openai", "azure", "vllm", "github", "anthropic", "claude"):
         p = create_provider(
             enabled=True,
@@ -46,6 +50,7 @@ def test_aliases_accepted() -> None:
             api_key_env=None,
         )
         assert isinstance(p, OpenAICompatProvider)
+        assert p.descriptor.provider == alias
 
 
 def test_ollama_routes_to_native_provider() -> None:
@@ -58,7 +63,7 @@ def test_ollama_routes_to_native_provider() -> None:
         api_key_env=None,
     )
     assert isinstance(p, OllamaProvider)
-    assert p.name == "qwen3:8b"
+    assert p.descriptor.model == "qwen3:8b"
 
 
 def test_ollama_receives_options() -> None:
@@ -188,13 +193,18 @@ def test_unknown_name_routes_through_plugin_registry() -> None:
     from collections.abc import AsyncIterator
     from unittest.mock import MagicMock
 
+    from korvid.agent.model_policy import ModelCapabilities
     from korvid.agent.provider import LLMProvider
     from korvid.agent.provider_plugin import ProviderPluginMetadata
 
     class _FakeProvider(LLMProvider):
         @property
-        def name(self) -> str:
-            return "custom"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "custom")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -241,13 +251,18 @@ def test_plugin_receives_credentials_and_config_only(monkeypatch: pytest.MonkeyP
     from collections.abc import AsyncIterator
     from unittest.mock import MagicMock
 
+    from korvid.agent.model_policy import ModelCapabilities
     from korvid.agent.provider import LLMProvider
     from korvid.agent.provider_plugin import ProviderPluginConfig, ProviderPluginMetadata
 
     class _FakeProvider(LLMProvider):
         @property
-        def name(self) -> str:
-            return "c"
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor("test", "c")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
 
         async def complete(
             self,
@@ -502,6 +517,7 @@ def test_github_copilot_defaults_base_url() -> None:
         oauth_token="gho_x",
     )
     assert isinstance(p, OpenAICompatProvider)
+    assert p.descriptor == ModelDescriptor("github-copilot", "gpt-4o")
 
 
 def test_entra_auth_builds_provider() -> None:

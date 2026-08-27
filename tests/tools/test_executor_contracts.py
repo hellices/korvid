@@ -38,7 +38,7 @@ def _ui_def(name: str, dispatch: str) -> ToolDef:
         schema={"type": "function", "function": {"name": name, "parameters": {}}},
         effect="ui_only",
         dispatch=dispatch,
-        surfaces=frozenset({"full_agent"}),
+        surfaces=frozenset({"high_agent"}),
         result_format="untrusted_text",
     )
 

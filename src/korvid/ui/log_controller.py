@@ -236,6 +236,11 @@ class LogController:
         """(ns, pod, container) triples currently shown (a copy)."""
         return list(self._current_triples)
 
+    @property
+    def owner(self) -> object | None:
+        """Workspace pane that opened the current log view."""
+        return self._owner
+
     # ------------------------------------------------------------------
     # Open / toggle entry points (`l` and `L`)
     # ------------------------------------------------------------------

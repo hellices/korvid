@@ -85,12 +85,18 @@ agent:
 in the config file. Plugin auth methods are limited to `none`, `api_key`, and
 `entra`.
 
-## API-v1: exact public surface
+## API 2: exact public surface
 
 Import only from korvid's public agent boundary:
 
 ```python
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import (
+    CapabilitySource,
+    ModelCapabilities,
+    ModelDescriptor,
+    ModelTier,
+)
 from korvid.agent.provider import LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
@@ -100,7 +106,7 @@ from korvid.agent.provider_plugin import (
 )
 ```
 
-The published API-v1 surface is:
+The published API 2 surface is:
 
 ```python
 class CredentialSource(ABC):
@@ -108,9 +114,28 @@ class CredentialSource(ABC):
     async def aclose(self) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ModelDescriptor:
+    provider: str   # your registered plugin name
+    model: str      # the model tag, e.g. "company-llm:v2"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCapabilities:
+    context_window_tokens: int | None = None
+    supports_tools: bool | None = None
+    supports_parallel_tools: bool | None = None
+    supports_reasoning: bool | None = None
+    recommended_tier: ModelTier | None = None       # ModelTier.LOW / .HIGH
+    provenance: Mapping[str, CapabilitySource] = ...
+
+
 class LLMProvider(ABC):
     @property
-    def name(self) -> str: ...     # the model tag, e.g. "company-llm:v2"
+    def descriptor(self) -> ModelDescriptor: ...
+
+    @property
+    def capabilities(self) -> ModelCapabilities: ...
 
     async def complete(
         self,
@@ -153,13 +178,50 @@ class ProviderPlugin(ABC):
     ) -> LLMProvider: ...
 ```
 
+### What changed in API 2 (breaking)
+
+`LLMProvider` no longer has a `name` property. A plugin must implement two
+properties instead, and both are validated the moment korvid wraps it:
+
+| API 1 | API 2 |
+| --- | --- |
+| `name -> str` (the model tag) | `descriptor -> ModelDescriptor` (provider id **and** model tag) |
+| *(nothing)* | `capabilities -> ModelCapabilities` |
+
+The reason is routing. korvid resolves a **model tier** per session — which
+tool surface is armed, how many iterations a turn gets, how much history is
+retained, which prompt pack is composed — and a bare model string cannot
+answer that. `capabilities` is how a plugin participates in that decision
+instead of being routed by the fallback.
+
+Reporting nothing is a valid, safe answer: return
+`ModelCapabilities.unknown()` and korvid falls back to the shipped catalog
+and then to the `low` tier. Report only what your backend actually knows:
+
+- `supports_tools=False` is a **hard stop** — korvid refuses to start the
+  agent rather than routing a model that cannot call tools.
+- `supports_parallel_tools` is honored only on the `high` tier; the `low`
+  tier is always sequential.
+- `recommended_tier` is a request, not a command: an explicit
+  `agent.model_tier` in `config.yaml` still wins.
+- `provenance` maps a fact name to a `CapabilitySource`; korvid rejects an
+  unknown fact name or a non-`CapabilitySource` value.
+
+Validation is strict, and rejection is immediate rather than at first use:
+
+- `descriptor` must be a real `ModelDescriptor`, its `provider` must equal
+  your registered plugin name (a plugin cannot claim to be another
+  provider), and its `model` must be non-empty and reasonably short.
+- `capabilities` must be a real `ModelCapabilities`.
+
 Notes:
 
-- `PROVIDER_PLUGIN_API_VERSION` is currently **exactly `1`**.
+- `PROVIDER_PLUGIN_API_VERSION` is currently **exactly `2`**. A plugin whose
+  `metadata.api_version` differs is rejected at load.
 - `metadata.name` must match the normalized entry-point name.
 - `auth_methods` must be a tuple of unique strings from `{ "none", "api_key",
   "entra" }`.
-- `supports_generic_setup` is part of API-v1 metadata, but current korvid
+- `supports_generic_setup` is part of API 2 metadata, but current korvid
   releases do **not** auto-discover third-party plugins in the `:ai` wizard.
   Treat it as forward-compatibility metadata for now.
 - `LLMProvider.complete()` must be an **async generator** (`async def` with
@@ -185,6 +247,12 @@ from typing import Any
 import httpx
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.model_policy import (
+    CapabilitySource,
+    ModelCapabilities,
+    ModelDescriptor,
+    ModelTier,
+)
 from korvid.agent.provider import LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
@@ -210,8 +278,28 @@ class CompanyProvider(LLMProvider):
         self._client = httpx.AsyncClient(timeout=30.0)
 
     @property
-    def name(self) -> str:
-        return f"company-llm:{self._model}"
+    def descriptor(self) -> ModelDescriptor:
+        # `provider` must equal the registered plugin name, or korvid
+        # rejects the provider rather than letting it claim another id.
+        return ModelDescriptor("company-llm", self._model)
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        # Report only what this backend actually knows. Everything omitted
+        # stays unknown and routing falls back to korvid's catalog, then to
+        # the `low` tier. `ModelCapabilities.unknown()` is a valid answer.
+        return ModelCapabilities(
+            context_window_tokens=128_000,
+            supports_tools=True,
+            supports_parallel_tools=False,
+            recommended_tier=ModelTier.HIGH,
+            provenance={
+                "context_window_tokens": CapabilitySource.PROVIDER,
+                "supports_tools": CapabilitySource.PROVIDER,
+                "supports_parallel_tools": CapabilitySource.PROVIDER,
+                "recommended_tier": CapabilitySource.PROVIDER,
+            },
+        )
 
     async def complete(
         self,
@@ -318,7 +406,7 @@ These four are the whole contract. korvid's built-in adapters yield one
 extra internal event to tell the runtime their HTTP request has actually
 reached the transport — the `:ai payload` inspector uses it so a request
 that was never sent is not shown as the session's last handoff. It is not
-part of API v1 and a plugin that yields it is rejected like any other
+part of API 2 and a plugin that yields it is rejected like any other
 unknown type. Your request is recorded when you yield your **first** event
 instead, which is equally proof that it ran; a `complete()` that yields
 nothing records nothing.
@@ -331,7 +419,7 @@ closes are swallowed.
 
 ## Options contract, immutability, and secret policy
 
-`agent.options` is the only plugin-specific config bag. API-v1 accepts only
+`agent.options` is the only plugin-specific config bag. API 2 accepts only
 JSON-like values:
 
 - `null`
@@ -422,4 +510,4 @@ Before shipping a plugin:
    installed distribution after normalization.
 3. Keep secrets out of `agent.options`; use env vars and `CredentialSource`.
 4. Test both startup and live reconfiguration paths.
-5. Verify every emitted event matches the API-v1 table above.
+5. Verify every emitted event matches the API 2 table above.

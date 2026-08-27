@@ -17,6 +17,14 @@ Reproduce any of it with the benchmark command described in
 | Session length | 31 minutes unattended, no reconnect, no relist |
 | Correctness | 43,200/43,200 events applied, final digest matches, 0 dropped updates |
 
+The agent is not part of any number on this page. The performance harness
+measures korvid's watch/render path with no agent composed at all, and the
+agent's own budgets — iterations, retained history, per-result caps — are
+resolved per session by the model router from the capability tier, not from
+anything measured here. A workload that needs an agent budget takes it from
+`ModelRouter` over the shipped catalog; there are no separate agent
+performance knobs to tune.
+
 Replay-only profiles reach 10,000 and 50,000 objects. Those establish that the
 store and diff paths do not fall over at that size; they are **not** a claim
 that the live budgets below hold there, because they do not exercise the API

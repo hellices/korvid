@@ -28,7 +28,7 @@ Effect = Literal["cluster_read", "external_read", "ui_only", "cluster_write", "w
 Approval = Literal["none", "user_confirmation"]
 Capability = Literal["none", "pod_resize", "metrics_backend", "logs_backend"]
 ResultFormat = Literal["structured_yaml", "untrusted_text"]
-Surface = Literal["full_agent", "small_agent", "mcp", "mcp_proposal"]
+Surface = Literal["high_agent", "low_agent", "mcp", "mcp_proposal"]
 
 _EFFECTS = ("cluster_read", "external_read", "ui_only", "cluster_write", "write_proposal")
 _APPROVALS = ("none", "user_confirmation")
@@ -43,7 +43,7 @@ _BACKEND_CAPABILITIES: dict[str, str] = {
     "logs_backend": "logs",
 }
 _RESULT_FORMATS = ("structured_yaml", "untrusted_text")
-_SURFACES = ("full_agent", "small_agent", "mcp", "mcp_proposal")
+_SURFACES = ("high_agent", "low_agent", "mcp", "mcp_proposal")
 
 #: The only bridge method allowed to receive a cluster write: the
 #: user-confirmation approval gate (design doc security invariant).
@@ -162,6 +162,19 @@ def tool_result_format(name: str) -> ResultFormat | None:
     """
     definition = TOOLS_BY_NAME.get(name)
     return definition.result_format if definition is not None else None
+
+
+def tool_def(name: str) -> ToolDef | None:
+    """The frozen `ToolDef` registered under exactly `name`, or None.
+
+    The narrow lookup the agent tool harness (issue #316) uses to route a
+    call by its registered effect, result format and dispatch without
+    duplicating any of the registry's name or effect lists. It returns the
+    registry's own frozen definition — not a copy — so the registry stays
+    the single source and callers read metadata off it rather than
+    re-deriving a second classification that could drift.
+    """
+    return TOOLS_BY_NAME.get(name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,7 +338,7 @@ def agent_tool_schemas(
     """Derive one agent surface's schema list, in registry order.
 
     Args:
-        surface: `full_agent` or `small_agent`.
+        surface: `high_agent` or `low_agent`.
         readonly: when True, write tools are omitted entirely — the model
             is never even told they exist.
         resize_supported: whether discovery found pods/resize; the resize
@@ -338,7 +351,7 @@ def agent_tool_schemas(
     Raises:
         ValueError: for a surface other than the two agent surfaces.
     """
-    if surface not in ("full_agent", "small_agent"):
+    if surface not in ("high_agent", "low_agent"):
         raise ValueError(f"unknown surface {surface!r}")
     schemas: list[dict[str, Any]] = []
     for d in TOOL_DEFS:
@@ -390,12 +403,12 @@ def mcp_tool_schemas(
     ]
 
 
-_ALL_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent", "mcp"})
-_FULL_AND_MCP: frozenset[Surface] = frozenset({"full_agent", "mcp"})
-#: Surfaces an embedded-agent profile can offer. Public because callers
+_ALL_SURFACES: frozenset[Surface] = frozenset({"high_agent", "low_agent", "mcp"})
+_HIGH_AND_MCP: frozenset[Surface] = frozenset({"high_agent", "mcp"})
+#: Surfaces an embedded-agent policy can offer. Public because callers
 #: outside this module need to tell "not armed on this cluster" apart from
-#: "no agent profile can ever offer this" (e.g. the MCP-only proposal tools).
-AGENT_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent"})
+#: "no agent tier can ever offer this" (e.g. the MCP-only proposal tools).
+AGENT_SURFACES: frozenset[Surface] = frozenset({"high_agent", "low_agent"})
 _AGENT_SURFACES = AGENT_SURFACES
 
 
@@ -746,7 +759,7 @@ TOOL_DEFS: list[ToolDef] = [
         name="query_metrics",
         effect="external_read",
         dispatch="_query_metrics",
-        surfaces=_FULL_AND_MCP,
+        surfaces=_HIGH_AND_MCP,
         result_format="untrusted_text",
         capability="metrics_backend",
         schema={
@@ -806,7 +819,7 @@ TOOL_DEFS: list[ToolDef] = [
         name="search_logs",
         effect="external_read",
         dispatch="_search_logs",
-        surfaces=_FULL_AND_MCP,
+        surfaces=_HIGH_AND_MCP,
         result_format="untrusted_text",
         capability="logs_backend",
         schema={
@@ -870,7 +883,7 @@ TOOL_DEFS: list[ToolDef] = [
         name="navigate",
         effect="ui_only",
         dispatch="agent_navigate",
-        surfaces=_FULL_AND_MCP,
+        surfaces=_HIGH_AND_MCP,
         result_format="untrusted_text",
         schema={
             "type": "function",
@@ -907,7 +920,7 @@ TOOL_DEFS: list[ToolDef] = [
         name="set_filter",
         effect="ui_only",
         dispatch="agent_set_filter",
-        surfaces=_FULL_AND_MCP,
+        surfaces=_HIGH_AND_MCP,
         result_format="untrusted_text",
         schema={
             "type": "function",
@@ -1002,7 +1015,7 @@ TOOL_DEFS: list[ToolDef] = [
         name="drill_down",
         effect="ui_only",
         dispatch="agent_drill_down",
-        surfaces=_FULL_AND_MCP,
+        surfaces=_HIGH_AND_MCP,
         result_format="untrusted_text",
         schema={
             "type": "function",

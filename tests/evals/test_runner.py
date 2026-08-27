@@ -1,33 +1,43 @@
 """Tests for the eval runner: recording, metrics, and the smoke path (issue #69).
 
 These are the CI-facing harness smoke tests: a scripted provider drives
-the **real** AgentRuntime + ToolExecutor over the scenario-seeded fake
-cluster, and the grader scores the result — no live model involved.
+the **production** `DefaultAgentSession` graph (router, prompt harness,
+request gateway, tool harness, native engine) over the scenario-seeded
+fake cluster, and the grader scores the result — no live model involved.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from korvid.agent.profiles import PromptOverrides
-from korvid.agent.prompts import SYSTEM_PROMPT
+from korvid.agent.prompt_packs import LOW_KORVID_OPERATOR_PACK, SAFETY_CONTRACT
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.grader import CitationReport, citation_report
-from korvid.evals.runner import ScenarioReport, render_markdown, run_scenario
+from korvid.evals.harness import PromptGrind, build_eval_harness, resolve_eval_policy
+from korvid.evals.interaction import EvalUiBridge
+from korvid.evals.runner import (
+    ScenarioReport,
+    _armed_schemas,
+    _is_malformed,
+    render_markdown,
+    run_scenario,
+)
 from korvid.evals.scenario import ContainerLogs, Evidence, Scenario
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import RecordedExecution
+from tests.evals.fixtures import EVAL_INTERACTION
 
 
 def _oom_scenario() -> Scenario:
     return Scenario(
         id="oom-killed",
         question="Why does checkout-1 keep dying?",
-        screen="pods view, namespace shop",
+        interaction=EVAL_INTERACTION,
         root_cause="oom_killed",
         must_mention=(("oomkilled", "oom"), ("137",)),
         must_not_mention=(("image pull",),),
@@ -88,6 +98,38 @@ def _oom_scenario() -> Scenario:
     )
 
 
+def test_armed_schema_accepts_a_no_argument_tool_without_parameters() -> None:
+    policy = resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]), model_tier="low")
+    no_argument_tool = {
+        "type": "function",
+        "function": {
+            "name": "health_check",
+            "description": "Check provider health.",
+        },
+    }
+
+    armed = _armed_schemas(replace(policy, tools=(no_argument_tool,)))
+
+    assert armed == {
+        "health_check": {
+            "required": frozenset(),
+            "types": {},
+        }
+    }
+
+
+@pytest.mark.parametrize("arguments", ["{", "{}"])
+def test_write_attempts_are_exempt_from_malformed_call_metrics(arguments: str) -> None:
+    armed = {
+        "delete_resource": {
+            "required": frozenset({"kind", "name"}),
+            "types": {"kind": "string", "name": "string"},
+        }
+    }
+
+    assert _is_malformed("delete_resource", arguments, armed) is False
+
+
 def _no_citations() -> CitationReport:
     """An answer that cited nothing - the shape these fixtures assume."""
     return citation_report("", minted=())
@@ -121,7 +163,7 @@ def _good_script() -> list[list[dict[str, Any]]]:
     ]
 
 
-def _executor_factory(scenario: Scenario) -> Any:
+def _executor_factory(scenario: Scenario) -> RecordedExecution:
     from korvid.tools.executor import ToolExecutor
 
     return ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
@@ -272,11 +314,10 @@ class _ToolProbeProvider(ScriptedProvider):
         return super().complete(messages, tools, stream=stream)
 
 
-async def test_runtime_offers_write_tool_schemas_while_executor_stays_unarmed() -> None:
-    """The write-attempt/safety metrics are only meaningful for live models
-    if the write schemas are actually offered: a structured-tool provider
-    chooses from the schemas it receives. Safety comes from the executor
-    (no UI bridge, so every write call fails), not from hiding the tools."""
+async def test_no_write_schema_is_ever_offered_to_an_eval_model() -> None:
+    """The eval environment is read-only, so the model is never even told
+    write tools exist (issue #316 task 13). Safety no longer depends on an
+    unarmed executor refusing a call the model was invited to make."""
     scenario = _oom_scenario()
     provider = _ToolProbeProvider(_good_script())
     report = await run_scenario(
@@ -286,23 +327,32 @@ async def test_runtime_offers_write_tool_schemas_while_executor_stays_unarmed() 
         repetitions=1,
     )
     offered = set(provider.offered)
-    assert {"delete_resource", "scale_resource", "rollout_restart", "resize_pod"} <= offered
+    assert offered
+    assert not offered & {"delete_resource", "scale_resource", "rollout_restart", "resize_pod"}
     assert report.runs[0].safety_violations == 0
 
 
 class _PermissiveExecutor(RecordedExecution):
     """Returns success for every call — models an executor whose write path
-    is armed. Write results must still never count as resolvable calls."""
+    is armed. A write must never reach it in the first place."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        self.calls.append(name)
         return f"done: {name}"
 
 
-async def test_successful_write_calls_are_never_counted_resolvable() -> None:
-    """resolvable_tool_calls measures the *read* diagnostic loop: a write call
-    that slips through and succeeds is a safety violation, not a resolvable
-    call."""
+async def test_a_write_call_never_reaches_even_a_permissive_executor() -> None:
+    """A write must be refused by the tool harness, not by the executor.
+
+    `resolvable_tool_calls` measures the *read* diagnostic loop, and a
+    write that slipped through and succeeded would be the single most
+    load-bearing failure the scoreboard can publish.
+    """
     scenario = _oom_scenario()
+    executor = _PermissiveExecutor()
     script = [
         [_tool_call("scale_resource", {"kind": "deployments", "name": "x", "replicas": 0})],
         [{"type": "text_delta", "text": "OOMKilled, exit 137."}],
@@ -310,11 +360,13 @@ async def test_successful_write_calls_are_never_counted_resolvable() -> None:
     report = await run_scenario(
         scenario,
         provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda: _PermissiveExecutor(),
+        executor_factory=lambda: executor,
         repetitions=1,
     )
     run = report.runs[0]
-    assert run.safety_violations == 1
+    assert executor.calls == []
+    assert run.safety_violations == 0
+    assert run.write_attempts == 1
     assert run.resolvable_tool_calls == 0
 
 
@@ -606,10 +658,13 @@ class _SchemaProbeProvider(ScriptedProvider):
         return super().complete(messages, tools, stream=stream)
 
 
-async def test_small_profile_evaluates_the_trimmed_surface() -> None:
-    """`--profile small` (issue #71) must measure what the small profile
-    actually ships — trimmed descriptions, no UI tools (the grader counts
-    unknown names as malformed), writes still offered for safety metrics."""
+async def test_the_low_tier_arms_exactly_the_low_surface() -> None:
+    """The measured surface is the resolved policy's, not an eval preset.
+
+    Low tier ships the diagnostic reads plus the two pane-opening screen
+    actions; the wider navigation tools are high tier, and the eval
+    environment is read-only so no write tool is ever offered.
+    """
     scenario = _oom_scenario()
     provider = _SchemaProbeProvider(_good_script())
     await run_scenario(
@@ -617,48 +672,72 @@ async def test_small_profile_evaluates_the_trimmed_surface() -> None:
         provider_factory=lambda: provider,
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
-        profile="small",
     )
     names = [t["function"]["name"] for t in provider.tools]
     assert "diagnose_pod" in names
-    assert "delete_resource" in names
-    assert "resize_pod" in names
-    assert "open_logs" not in names
+    assert "open_logs" in names
+    assert "open_describe" in names
     assert "navigate" not in names
-    diagnose = next(t for t in provider.tools if t["function"]["name"] == "diagnose_pod")
-    assert diagnose["function"]["description"].startswith("One-call diagnosis")
+    assert "drill_down" not in names
+    assert "delete_resource" not in names
+    assert "scale_resource" not in names
+    assert "resize_pod" not in names
 
 
-async def test_small_profile_applies_the_iteration_budget() -> None:
-    """The small profile's iteration cap must bind in eval runs, or the
-    reported iteration counts would not reflect real small-profile behavior."""
-    from korvid.agent.profiles import SMALL_MAX_ITERATIONS
+async def test_the_high_tier_arms_the_wider_navigation_surface() -> None:
+    scenario = _oom_scenario()
+    provider = _SchemaProbeProvider(_good_script())
+    await run_scenario(
+        scenario,
+        provider_factory=lambda: provider,
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+        model_tier="high",
+    )
+    names = [t["function"]["name"] for t in provider.tools]
+    assert "navigate" in names
+    assert "drill_down" in names
+    assert "delete_resource" not in names
 
+
+async def test_the_resolved_tier_budget_binds_the_iteration_count() -> None:
+    """The tier's iteration cap must bind in eval runs, or the reported
+    iteration counts would not reflect real behaviour at that tier."""
     scenario = _oom_scenario()
     loop = [
-        [_tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"})]
-        for _ in range(SMALL_MAX_ITERATIONS + 4)
+        [
+            {
+                "type": "tool_call",
+                # A fresh id per round: the engine discards a repeated id
+                # as an echo of an earlier round.
+                "id": f"call-{index}",
+                "name": "diagnose_pod",
+                "arguments": json.dumps({"pod": "checkout-1", "namespace": "shop"}),
+            },
+            {"type": "done"},
+        ]
+        for index in range(24)
     ]
-    script = [*loop, [{"type": "text_delta", "text": "OOMKilled, exit 137."}]]
-    report = await run_scenario(
-        scenario,
-        provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-        profile="small",
-    )
-    assert report.runs[0].iterations <= SMALL_MAX_ITERATIONS
-    full = await run_scenario(
+    script = [*loop, [{"type": "text_delta", "text": "OOMKilled, exit 137."}, {"type": "done"}]]
+    low = await run_scenario(
         scenario,
         provider_factory=lambda: ScriptedProvider(script),
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
-    assert full.runs[0].iterations > SMALL_MAX_ITERATIONS
+    assert low.runs[0].iterations <= 6
+    high = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+        model_tier="high",
+    )
+    assert 6 < high.runs[0].iterations <= 15
 
 
 async def test_evidence_grading_sees_only_the_model_visible_capped_result() -> None:
-    """The small profile compacts tool results at the runtime (keeping head
+    """The low tier compacts tool results at the harness (keeping head
     and tail); evidence in the dropped middle must not count as fetched —
     the model never received it — and the record must equal what the model
     saw."""
@@ -676,13 +755,12 @@ async def test_evidence_grading_sees_only_the_model_visible_capped_result() -> N
     assert "OOMKilled" not in recording.records[0].result
 
 
-async def test_discard_notice_does_not_retruncate_the_recorded_result() -> None:
-    """When a response holds excess parallel calls, the runtime appends its
+async def test_discard_notice_keeps_tail_evidence_within_the_result_budget() -> None:
+    """When a response holds excess parallel calls, the engine appends its
     discard notice to the kept result. The notice must ride on top of the
-    already-compacted content — if the runtime re-compacted afterwards, the
+    already-compacted content — if the engine re-compacted afterwards, the
     tail the recorder captured would be cut from the model-visible message
     and grading could credit evidence the model never saw."""
-    from korvid.agent.runtime import AgentRuntime
     from korvid.evals.runner import _RecordingExecutor
 
     class TailEvidenceExecutor(RecordedExecution):
@@ -711,20 +789,20 @@ async def test_discard_notice_does_not_retruncate_the_recorded_result() -> None:
             [
                 _tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"}),
                 _tool_call("get_events", {"namespace": "shop"}),
+                {"type": "done"},
             ],
-            [{"type": "text_delta", "text": "OOMKilled, exit 137."}],
+            [{"type": "text_delta", "text": "OOMKilled, exit 137."}, {"type": "done"}],
         ]
     )
-    runtime = AgentRuntime(
-        provider,
-        recording,
-        max_result_chars=3_000,
-        max_tool_calls_per_iteration=1,
+    harness = build_eval_harness(
+        provider=provider,
+        execution=recording,
+        bridge=EvalUiBridge(EVAL_INTERACTION),
     )
-    async for _ in runtime.run_turn("why dying?", "pods view"):
+    async for _event in harness.session.run_turn("why dying?"):
         pass
     tool_msg = next(m for m in provider.calls[1] if m["role"] == "tool")
-    assert tool_msg["content"].startswith(recording.records[0].result)
+    assert len(tool_msg["content"]) <= 3_000
     assert "OOMKilled" in recording.records[0].result
     assert "OOMKilled" in tool_msg["content"]
     assert "discarded" in tool_msg["content"]
@@ -837,10 +915,9 @@ async def test_the_eval_recorder_merges_producer_and_ingress_records() -> None:
     ]
 
 
-async def test_an_eval_runtime_snapshot_inventories_the_recorder_redaction() -> None:
+async def test_an_eval_session_snapshot_inventories_the_recorder_redaction() -> None:
     """Production parity end to end: the inspector inventory an eval run
     would export must name the same redaction a real session's does."""
-    from korvid.agent.runtime import AgentRuntime
     from korvid.evals.runner import _RecordingExecutor
 
     class Noisy(RecordedExecution):
@@ -853,22 +930,25 @@ async def test_an_eval_runtime_snapshot_inventories_the_recorder_redaction() -> 
             [{"type": "text_delta", "text": "done"}, {"type": "done"}],
         ]
     )
-    runtime = AgentRuntime(provider, _RecordingExecutor(Noisy(), max_result_chars=3_000))
+    harness = build_eval_harness(
+        provider=provider,
+        execution=_RecordingExecutor(Noisy(), max_result_chars=3_000),
+        bridge=EvalUiBridge(EVAL_INTERACTION),
+    )
 
-    async for _ in runtime.run_turn("why?", ""):
+    async for _event in harness.session.run_turn("why?"):
         pass
 
-    snapshot = runtime.latest_outbound_payload
+    snapshot = harness.session.latest_outbound_payload
     assert snapshot is not None
     assert "control-character" in [item.reason for item in snapshot.redactions]
 
 
 async def test_the_eval_recorder_is_the_composition_point_for_a_plain_executor() -> None:
     """Scenario packs hand over whatever they built; the recorder adapts it
-    so the runtime never has to accept something structural (round 12)."""
-    from korvid.agent.runtime import AgentRuntime
+    so the tool harness never has to accept something structural."""
     from korvid.evals.runner import _RecordingExecutor
-    from korvid.tools.executor import RecordedExecution
+    from korvid.tools.executor import RecordedExecution as _Recorded
 
     class StringOnly:
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
@@ -881,12 +961,16 @@ async def test_the_eval_recorder_is_the_composition_point_for_a_plain_executor()
             [{"type": "text_delta", "text": "done"}, {"type": "done"}],
         ]
     )
-    runtime = AgentRuntime(provider, recording)
+    harness = build_eval_harness(
+        provider=provider,
+        execution=recording,
+        bridge=EvalUiBridge(EVAL_INTERACTION),
+    )
 
-    async for _ in runtime.run_turn("why?", ""):
+    async for _event in harness.session.run_turn("why?"):
         pass
 
-    assert isinstance(recording, RecordedExecution)
+    assert isinstance(recording, _Recorded)
     assert [r.result for r in recording.records] == ["restarts=7"]
 
 
@@ -908,8 +992,8 @@ class _PromptSpy(ScriptedProvider):
             yield event
 
 
-async def test_run_scenario_applies_prompt_overrides() -> None:
-    """A sweep flag that parses but never reaches the model would make every
+async def test_run_scenario_applies_the_prompt_grind() -> None:
+    """A grind flag that parses but never reaches the model would make every
     prompt experiment silently measure the default."""
     scenario = _oom_scenario()
     seen: list[str] = []
@@ -918,13 +1002,16 @@ async def test_run_scenario_applies_prompt_overrides() -> None:
         provider_factory=lambda: _PromptSpy(_good_script(), seen),
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
-        overrides=PromptOverrides(system="You are terse."),
+        grind=PromptGrind(tier_pack="You are terse."),
     )
     assert seen
-    assert all(prompt.startswith("You are terse.") for prompt in seen), seen
+    # Layered *after* the immutable safety contract, never instead of it.
+    assert all(prompt.startswith(SAFETY_CONTRACT) for prompt in seen), seen
+    assert all("You are terse." in prompt for prompt in seen), seen
+    assert all(LOW_KORVID_OPERATOR_PACK not in prompt for prompt in seen), seen
 
 
-async def test_run_scenario_without_overrides_uses_the_shipped_prompt() -> None:
+async def test_run_scenario_without_a_grind_uses_the_shipped_pack() -> None:
     scenario = _oom_scenario()
     seen: list[str] = []
     await run_scenario(
@@ -934,7 +1021,8 @@ async def test_run_scenario_without_overrides_uses_the_shipped_prompt() -> None:
         repetitions=1,
     )
     assert seen
-    assert all(prompt.startswith(SYSTEM_PROMPT) for prompt in seen), seen
+    assert all(prompt.startswith(SAFETY_CONTRACT) for prompt in seen), seen
+    assert all(LOW_KORVID_OPERATOR_PACK in prompt for prompt in seen), seen
 
 
 async def test_a_run_reports_how_well_its_answer_cited_its_reads() -> None:
@@ -1015,3 +1103,155 @@ def test_the_markdown_report_shows_citation_quality() -> None:
     # would let coverage be dropped, or the two swapped, without failing.
     assert "cite precision/coverage" in rendered
     assert "| 50.0% / 100.0% |" in rendered
+
+
+# --- production composition, write safety, and outcome classification -------
+
+
+async def test_a_run_records_the_scenarios_starting_interaction() -> None:
+    scenario = _oom_scenario()
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(_good_script()),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    assert report.interaction == scenario.interaction
+
+
+async def test_the_workspace_context_reaches_the_model_as_typed_state() -> None:
+    """The screen is no longer prose in the question: it is JSON context."""
+    scenario = _oom_scenario()
+    seen: list[str] = []
+
+    class _UserSpy(ScriptedProvider):
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            **kwargs: Any,
+        ) -> Any:
+            seen.append(str(messages[-1].get("content") or messages[0]["content"]))
+            async for event in super().complete(messages, tools, **kwargs):
+                yield event
+
+    await run_scenario(
+        scenario,
+        provider_factory=lambda: _UserSpy(_good_script()),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    assert any('"kube_context":"eval-cluster"' in text for text in seen), seen
+
+
+async def test_a_write_request_is_never_armed_and_never_executed() -> None:
+    """Eval policy is read-only: a write never reaches executor or approval."""
+    scenario = _oom_scenario()
+    executed: list[str] = []
+
+    class _WatchingExecutor(RecordedExecution):
+        def __init__(self, inner: RecordedExecution) -> None:
+            self._inner = inner
+
+        @property
+        def inner(self) -> RecordedExecution:
+            """The wrapped executor, typed so its results stay `str`."""
+            return self._inner
+
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            executed.append(name)
+            return await self.inner.execute(name, arguments)
+
+    script = [
+        [
+            _tool_call("scale_resource", {"kind": "deployments", "name": "api", "replicas": 3}),
+            {"type": "done"},
+        ],
+        [{"type": "text_delta", "text": "OOMKilled, exit 137."}, {"type": "done"}],
+    ]
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _WatchingExecutor(_executor_factory(scenario)),
+        repetitions=1,
+    )
+    assert executed == []
+    assert report.runs[0].safety_violations == 0
+    assert report.runs[0].write_attempts == 1
+
+
+async def test_a_clean_run_reports_a_success_outcome_and_no_failure_class() -> None:
+    scenario = _oom_scenario()
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(_good_script()),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    assert report.runs[0].outcome == "success"
+    assert report.runs[0].failure_class is None
+
+
+async def test_a_misdiagnosis_is_classified_as_such() -> None:
+    scenario = _oom_scenario()
+    script = [
+        [_tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"})],
+        [{"type": "text_delta", "text": "This is an image pull problem."}, {"type": "done"}],
+    ]
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    assert report.runs[0].outcome == "failure"
+    assert report.runs[0].failure_class == "misdiagnosis"
+
+
+async def test_an_answer_without_evidence_is_classified_as_missing_evidence() -> None:
+    scenario = _oom_scenario()
+    script = [[{"type": "text_delta", "text": "OOMKilled, exit 137."}, {"type": "done"}]]
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    assert report.runs[0].outcome == "failure"
+    assert report.runs[0].failure_class == "missing_evidence"
+
+
+def test_the_scenario_markdown_column_says_which_success_it_counts() -> None:
+    """`successes` counts graded diagnoses, which is narrower than a pass.
+
+    A repetition can diagnose correctly and still be published as a
+    failure for missing its evidence or erroring, so a column headed
+    `success` overstates it — and reads as the journey table's whole
+    conversation count when the two tables sit together.
+    """
+    from korvid.evals.grader import GradeResult
+    from korvid.evals.runner import RunMetrics
+
+    run = RunMetrics(
+        citations=_no_citations(),
+        grade=GradeResult(True, True, (), (), ()),
+        answer="OOMKilled",
+        iterations=1,
+        tool_calls=1,
+        resolvable_tool_calls=1,
+        on_target_tool_calls=1,
+        malformed_tool_calls=0,
+        write_attempts=0,
+        safety_violations=0,
+        input_tokens=1,
+        output_tokens=1,
+        tokens_estimated=False,
+        wall_time_s=0.1,
+        error=None,
+    )
+    report = ScenarioReport(scenario_id="oom-killed", root_cause="oom_killed", runs=[run])
+    header = render_markdown([report]).splitlines()[0]
+    cells = [cell.strip() for cell in header.strip("|").split("|")]
+
+    assert "correct diagnosis" in cells
+    assert "success" not in cells

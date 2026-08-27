@@ -5,14 +5,68 @@ import httpx
 import pytest
 import yaml
 
-from korvid.agent.outbound import OutboundPolicy
+from korvid.agent.conversation import ConversationState
+from korvid.agent.engine import AgentTurnRequest
+from korvid.agent.evidence import EvidenceLedger
+from korvid.agent.model_policy import CapabilitySource, ModelDescriptor
+from korvid.agent.native_engine import NativeAgentEngine
+from korvid.agent.outbound import OutboundPolicy, request_char_budget
+from korvid.agent.prompt_harness import ComposedPrompt
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
-from korvid.agent.runtime import AgentRuntime
+from korvid.agent.request_gateway import RequestGateway
+from korvid.agent.tool_harness import ToolHarness
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.providers.ollama import OllamaOptions, OllamaProvider
 from korvid.providers.openai_compat import ProviderError
 from korvid.providers.static_creds import StaticHeaderSource
 from korvid.tools.executor import RecordedExecution
+from korvid.tools.registry import resolve_result_formats
+from tests.agent.engine_fakes import (
+    TURN_SYSTEM_MESSAGE,
+    RecordingBridge,
+    interaction,
+    make_policy,
+)
+
+
+def _turn(
+    provider: LLMProvider,
+    execution: RecordedExecution,
+    *,
+    user_text: str = "why?",
+) -> tuple[NativeAgentEngine, RequestGateway, AgentTurnRequest]:
+    """One production agent turn over a real provider adapter.
+
+    These cases are about what this adapter puts on the socket, so they
+    are driven through the same engine/gateway/tool wiring the TUI
+    composes rather than a fake loop that could disagree with it.
+    """
+    policy = make_policy(tool_names=("get_logs",))
+    schemas = [json.loads(json.dumps(schema)) for schema in policy.tools]
+    outbound = OutboundPolicy(
+        request_char_budget(
+            max_history_chars=policy.max_history_chars,
+            tools_chars=len(json.dumps(schemas)),
+        ),
+        resolve_result_formats(schemas),
+    )
+    gateway = RequestGateway(provider, outbound)
+    engine = NativeAgentEngine(
+        conversation=ConversationState(max_history_chars=policy.max_history_chars),
+        gateway=gateway,
+        tools=ToolHarness(
+            policy=policy,
+            execution=execution,
+            bridge=RecordingBridge(),
+            evidence=EvidenceLedger(),
+        ),
+    )
+    request = AgentTurnRequest(
+        prompt=ComposedPrompt(system_message=TURN_SYSTEM_MESSAGE, user_message=user_text),
+        policy=policy,
+        interaction=interaction(),
+    )
+    return engine, gateway, request
 
 
 def _ndjson(*chunks: dict[str, Any]) -> str:
@@ -227,9 +281,30 @@ async def test_aclose_closes_owned_client_only() -> None:
     assert client.is_closed
 
 
-def test_name_is_the_model() -> None:
+def test_descriptor_is_ollama_and_the_model_tag() -> None:
     provider = OllamaProvider(base_url="http://x:11434", model="qwen3:8b")
-    assert provider.name == "qwen3:8b"
+    assert provider.descriptor == ModelDescriptor("ollama", "qwen3:8b")
+
+
+def test_capabilities_report_context_window_and_multiple_tool_calls() -> None:
+    """Ollama reports only what it directly knows: the configured `num_ctx`
+    and that its native response can carry multiple tool calls (issue #189).
+    It must never infer tier or reasoning from the model tag."""
+    provider = OllamaProvider(
+        base_url="http://localhost:11434",
+        model="qwen3:8b",
+        credentials=None,
+        options=OllamaOptions(num_ctx=16_384),
+    )
+
+    assert provider.descriptor == ModelDescriptor("ollama", "qwen3:8b")
+    assert provider.capabilities.context_window_tokens == 16_384
+    assert provider.capabilities.supports_parallel_tools is True
+    assert provider.capabilities.provenance["context_window_tokens"] is CapabilitySource.PROVIDER
+    assert provider.capabilities.provenance["supports_parallel_tools"] is CapabilitySource.PROVIDER
+    assert provider.capabilities.supports_tools is None
+    assert provider.capabilities.supports_reasoning is None
+    assert provider.capabilities.recommended_tier is None
 
 
 async def test_mid_stream_error_object_raises() -> None:
@@ -522,7 +597,7 @@ async def test_default_provider_augmentation_is_the_identity() -> None:
     assert LLMProvider.prepare_messages(provider, history) == history
 
 
-async def test_runtime_sends_exactly_the_snapshot_to_ollama() -> None:
+async def test_a_turn_sends_exactly_the_snapshot_to_ollama() -> None:
     """End-to-end: what the inspector shows is what the socket carries.
 
     The model's reasoning quotes a credential it saw in a tool result; the
@@ -565,13 +640,14 @@ async def test_runtime_sends_exactly_the_snapshot_to_ollama() -> None:
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         options=OllamaOptions(think=True),
     )
-    runtime = AgentRuntime(provider, _Executor())
+    engine, gateway, request = _turn(provider, _Executor())
 
-    events = [event async for event in runtime.run_turn("why?", "view=pods")]
+    events = [event async for event in engine.run(request)]
+    await engine.aclose()
 
     assert not [event for event in events if type(event).__name__ == "AgentError"]
     assert len(bodies) == 2
-    snapshot = runtime.latest_outbound_payload
+    snapshot = gateway.latest_outbound_payload
     assert snapshot is not None
     assert bodies[1]["messages"] == json.loads(snapshot.payload_json)["messages"]
     assert "raw-thinking-secret" not in json.dumps(bodies, ensure_ascii=False)
@@ -606,11 +682,12 @@ async def test_the_snapshot_labels_the_model_not_the_provider() -> None:
         model="qwen3:8b",
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-    runtime = AgentRuntime(provider, _Executor())
+    engine, gateway, request = _turn(provider, _Executor())
 
-    [event async for event in runtime.run_turn("why?", "view=pods")]
+    [event async for event in engine.run(request)]
+    await engine.aclose()
 
-    snapshot = runtime.latest_outbound_payload
+    snapshot = gateway.latest_outbound_payload
     assert snapshot is not None
     assert snapshot.model == "qwen3:8b"
     assert not hasattr(snapshot, "provider")
@@ -661,11 +738,12 @@ async def test_carried_redaction_records_survive_the_native_dialect_hook() -> No
         model="qwen3:8b",
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-    runtime = AgentRuntime(provider, _Executor())
+    engine, gateway, request = _turn(provider, _Executor(), user_text="why?\x07 the pod restarted")
 
-    [event async for event in runtime.run_turn("why?", "view=pods\x07ns=default")]
+    [event async for event in engine.run(request)]
+    await engine.aclose()
 
-    snapshot = runtime.latest_outbound_payload
+    snapshot = gateway.latest_outbound_payload
     assert snapshot is not None
     reported = {(r.path, r.reason) for r in snapshot.redactions}
     assert ("messages[1].content", "control-character") in reported

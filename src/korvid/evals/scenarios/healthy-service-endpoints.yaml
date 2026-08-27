@@ -2,7 +2,13 @@ id: healthy-service-endpoints
 question: >-
   Users occasionally report slow responses from the search service in
   namespace front. Is anything wrong with the service or its pods?
-screen: "resource view: services, namespace front, selected: front/search"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: services
+    scope: front
+    selected: {kind: Service, namespace: front, name: search, uid: svc-search-1}
 root_cause: none
 grading:
   must_mention:

@@ -94,6 +94,7 @@ def create_provider(
         model=model,
         credentials=credentials,
         ca_bundle=ca_bundle,
+        provider_id=name,
     )
 
 
@@ -122,6 +123,7 @@ def _create_github_copilot(
         base_url=base_url or COPILOT_CHAT_BASE_URL,
         model=model,
         credentials=CopilotCredentialSource(oauth_token),
+        provider_id=GITHUB_COPILOT_PROVIDER,
     )
 
 

@@ -1,10 +1,15 @@
 id: live-triage-and-correct
 root_cause: image_pull_failure
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: eval-template
 turns:
   - user: >-
       Explore namespace eval-template broadly. Which pods need attention, and
       which one should we inspect first?
-    screen: "resource view: pods, namespace eval-template"
     grading:
       must_mention:
         - [checkout]
@@ -21,7 +26,13 @@ turns:
   - user: >-
       Focus on payments, not checkout. Find the exact cause and keep the
       namespace straight.
-    screen: "resource view: pods, namespace eval-template, selected: payments-1"
+    interaction:
+      kube_context: eval-fixture
+      context_epoch: 1
+      focused_pane:
+        kind: pods
+        scope: eval-template
+        selected: {kind: Pod, namespace: eval-template, name: payments-1}
     grading:
       must_mention:
         - [payments]
@@ -37,7 +48,6 @@ turns:
       - {pod: checkout-1, namespace: eval-template}
       - {name: checkout-1, namespace: eval-template}
   - user: Show the payments evidence on screen and summarize the next action.
-    screen: "resource view: pods, namespace eval-template, selected: payments-1"
     grading:
       must_mention:
         - [payments]

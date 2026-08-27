@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, fields
 from typing import Any
 
+import pytest
+
+from korvid.agent.interaction import InteractionContext, OpenDescribe
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
-from korvid.evals.journey import load_journeys
-from korvid.evals.journey_runner import RecordingUI, run_journey
+from korvid.evals.grader import GradeResult
+from korvid.evals.harness import resolve_eval_policy
+from korvid.evals.interaction import EvalUiBridge
+from korvid.evals.journey import bundled_journeys_dir, load_journeys
+from korvid.evals.journey_runner import JourneyTurnResult, _close_run_resources, run_journey
 from korvid.evals.live_journey import NamespaceBoundReadOps
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import ToolExecutor
@@ -22,8 +29,39 @@ def _call(name: str, args: dict[str, object], call_id: str) -> dict[str, Any]:
     }
 
 
+async def test_provider_closes_even_when_session_close_fails() -> None:
+    class _Session:
+        async def aclose(self) -> None:
+            raise RuntimeError("session close failed")
+
+    class _Provider:
+        closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    provider = _Provider()
+    with pytest.raises(RuntimeError, match="session close failed"):
+        await _close_run_resources(_Session(), provider)
+
+    assert provider.closed is True
+
+
 def _text(text: str) -> list[dict[str, Any]]:
     return [{"type": "text_delta", "text": text}, {"type": "done"}]
+
+
+def _remember(bridges: list[EvalUiBridge], context: InteractionContext) -> EvalUiBridge:
+    """Bridge factory that keeps every bridge a journey run built."""
+    bridge = EvalUiBridge(context)
+    bridges.append(bridge)
+    return bridge
+
+
+def _armed_schemas() -> dict[str, dict[str, Any]]:
+    """The tool schemas the journey policy actually arms."""
+    policy = resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]))
+    return {str(tool["function"]["name"]): dict(tool) for tool in policy.tools}
 
 
 async def test_run_journey_persists_history_and_honors_user_correction() -> None:
@@ -66,7 +104,7 @@ async def test_run_journey_persists_history_and_honors_user_correction() -> None
         _text("payments needs registry credentials or an image pull secret."),
     ]
     provider = ScriptedProvider(script)
-    ui = RecordingUI()
+    bridges: list[EvalUiBridge] = []
 
     report = await run_journey(
         journey,
@@ -74,10 +112,9 @@ async def test_run_journey_persists_history_and_honors_user_correction() -> None
         executor_factory=lambda fixture: ToolExecutor(
             FakeKubeClient(fixture),
             builtin_aliases(),
-            ui=ui,
         ),
         repetitions=1,
-        profile="small",
+        bridge_factory=lambda context: _remember(bridges, context),
     )
 
     run = report.runs[0]
@@ -85,10 +122,10 @@ async def test_run_journey_persists_history_and_honors_user_correction() -> None
     assert [turn.success for turn in run.turns] == [True, True, True]
     assert run.turns[1].forbidden_target_calls == 0
     assert run.turns[2].tool_names == ("open_describe",)
-    assert ui.calls[-1] == (
-        "open_describe",
-        {"kind": "pods", "name": "payments-1", "namespace": "shop"},
-    )
+    assert bridges[-1].actions[-1] == OpenDescribe(kind="pods", name="payments-1", namespace="shop")
+    selected = bridges[-1].snapshot().focused_pane.selected
+    assert selected is not None
+    assert selected.name == "payments-1"
     # One provider instance serves every user turn; six completions proves the
     # runtime was not recreated between turns.
     assert provider._cursor == 6
@@ -140,10 +177,8 @@ async def test_live_boundary_rejection_fails_an_otherwise_successful_turn() -> N
         executor_factory=lambda fixture: ToolExecutor(
             NamespaceBoundReadOps(FakeKubeClient(fixture), "shop"),
             builtin_aliases(),
-            ui=RecordingUI(),
         ),
         repetitions=1,
-        profile="small",
     )
 
     first = report.runs[0].turns[0]
@@ -182,11 +217,8 @@ async def test_run_journey_fails_redundant_turn_budget() -> None:
     report = await run_journey(
         journey,
         provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda fixture: ToolExecutor(
-            FakeKubeClient(fixture), builtin_aliases(), ui=RecordingUI()
-        ),
+        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
         repetitions=1,
-        profile="small",
     )
 
     assert report.runs[0].turns[1].tool_calls == 2
@@ -214,11 +246,8 @@ async def test_each_turn_must_fetch_its_own_required_evidence() -> None:
     report = await run_journey(
         journey,
         provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda fixture: ToolExecutor(
-            FakeKubeClient(fixture), builtin_aliases(), ui=RecordingUI()
-        ),
+        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
         repetitions=1,
-        profile="small",
     )
     second = report.runs[0].turns[1]
     assert second.grade.evidence_fetched is False
@@ -226,13 +255,9 @@ async def test_each_turn_must_fetch_its_own_required_evidence() -> None:
 
 
 def test_malformed_call_rejects_wrong_json_property_types() -> None:
-    from korvid.agent.profiles import build_profile
     from korvid.evals.journey_runner import _malformed_call
 
-    schemas = {
-        tool["function"]["name"]: tool
-        for tool in build_profile("small", readonly=True, resize_supported=False).tools
-    }
+    schemas = _armed_schemas()
     assert _malformed_call(
         "list_resources",
         '{"kind": 7, "namespace": ["catalog"]}',
@@ -241,13 +266,9 @@ def test_malformed_call_rejects_wrong_json_property_types() -> None:
 
 
 def test_wrong_namespace_handles_malformed_and_cluster_scoped_calls() -> None:
-    from korvid.agent.profiles import build_profile
     from korvid.evals.journey_runner import _wrong_namespace
 
-    schemas = {
-        tool["function"]["name"]: tool
-        for tool in build_profile("small", readonly=True, resize_supported=False).tools
-    }
+    schemas = _armed_schemas()
     assert _wrong_namespace(
         "list_resources",
         {"kind": "pods", "namespace": ["shop"]},
@@ -341,11 +362,8 @@ async def test_discarded_parallel_calls_count_toward_budget_and_stale_targets() 
     report = await run_journey(
         journey,
         provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda fixture: ToolExecutor(
-            FakeKubeClient(fixture), builtin_aliases(), ui=RecordingUI()
-        ),
+        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
         repetitions=1,
-        profile="small",
     )
     turn = report.runs[0].turns[1]
     assert turn.tool_calls == 2
@@ -396,12 +414,235 @@ async def test_wrong_namespace_call_fails_even_if_later_call_is_on_target() -> N
     report = await run_journey(
         journey,
         provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda fixture: ToolExecutor(
-            FakeKubeClient(fixture), builtin_aliases(), ui=RecordingUI()
-        ),
+        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
         repetitions=1,
-        profile="small",
     )
     turn = report.runs[0].turns[1]
     assert turn.wrong_namespace_calls == 1
     assert turn.success is False
+
+
+# --- provenance parity with the scenario pack -------------------------------
+#
+# A journey run is published as a scoreboard row too, so it needs what a
+# scenario row already carries: the screen the conversation opened on, the
+# screen each turn started and ended on, and one word for what happened.
+
+
+def _journey(journey_id: str) -> Any:
+    return next(item for item in load_journeys(bundled_journeys_dir()) if item.id == journey_id)
+
+
+def _triage_script() -> list[list[dict[str, Any]]]:
+    """The scripted conversation that passes `triage-and-correct`."""
+    return [
+        [_call("list_resources", {"kind": "pods", "namespace": "shop"}, "c1"), {"type": "done"}],
+        _text("checkout and payments need attention; inspect checkout first."),
+        [
+            _call("diagnose_pod", {"pod": "payments-1", "namespace": "shop"}, "c2"),
+            {"type": "done"},
+        ],
+        _text("payments has an unauthorized registry authentication failure."),
+        [
+            _call(
+                "open_describe",
+                {"kind": "pods", "name": "payments-1", "namespace": "shop"},
+                "c3",
+            ),
+            {"type": "done"},
+        ],
+        _text("payments needs registry credentials or an image pull secret."),
+    ]
+
+
+async def _run_triage(script: list[list[dict[str, Any]]]) -> Any:
+    journey = _journey("triage-and-correct")
+    return await run_journey(
+        journey,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
+        repetitions=1,
+    )
+
+
+async def test_the_report_records_the_screen_the_conversation_opened_on() -> None:
+    journey = _journey("triage-and-correct")
+    report = await _run_triage(_triage_script())
+
+    assert report.interaction == journey.interaction
+
+
+async def test_each_turn_records_the_screen_it_started_and_ended_on() -> None:
+    """A turn's row is not reproducible without the workspace it ran against."""
+    journey = _journey("triage-and-correct")
+    report = await _run_triage(_triage_script())
+
+    turns = report.runs[0].turns
+    assert turns[0].interaction == journey.interaction
+    # The model drove the workspace itself in the last turn; the snapshot
+    # the row publishes has to be the one that turn actually ran against,
+    # and the ending one has to show where it left the screen.
+    last = turns[-1]
+    assert last.final_interaction is not None
+    selected = last.final_interaction.focused_pane.selected
+    assert selected is not None
+    assert selected.name == "payments-1"
+    assert last.interaction is not None
+    assert last.interaction.focused_pane != last.final_interaction.focused_pane
+
+
+async def test_a_clean_turn_publishes_a_success_outcome() -> None:
+    report = await _run_triage(_triage_script())
+
+    for turn in report.runs[0].turns:
+        assert turn.outcome == "success"
+        assert turn.failure_class is None
+        assert turn.success is (turn.outcome == "success")
+
+
+async def test_a_turn_without_its_evidence_is_classified_missing_evidence() -> None:
+    journey = _journey("healthy-stop")
+    script: list[list[dict[str, Any]]] = [
+        [
+            _call("list_resources", {"kind": "pods", "namespace": "catalog"}, "c1"),
+            {"type": "done"},
+        ],
+        _text("The namespace is healthy."),
+        _text("No further investigation is needed; stop here."),
+    ]
+    report = await run_journey(
+        journey,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
+        repetitions=1,
+    )
+
+    second = report.runs[0].turns[1]
+    assert second.outcome == "failure"
+    assert second.failure_class == "missing_evidence"
+    assert second.success is False
+
+
+async def test_a_turn_over_its_call_budget_is_classified_as_such() -> None:
+    """A journey-only failure signal still gets a published name."""
+    journey = _journey("healthy-stop")
+    events_call: dict[str, object] = {
+        "kind": "pods",
+        "name": "catalog-1",
+        "namespace": "catalog",
+    }
+    script: list[list[dict[str, Any]]] = [
+        [
+            _call("list_resources", {"kind": "pods", "namespace": "catalog"}, "c1"),
+            {"type": "done"},
+        ],
+        _text("The namespace is healthy."),
+        [_call("get_events", events_call, "c2"), {"type": "done"}],
+        [_call("get_events", events_call, "c3"), {"type": "done"}],
+        _text("No further investigation is needed; stop here."),
+    ]
+    report = await run_journey(
+        journey,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
+        repetitions=1,
+    )
+
+    turn = report.runs[0].turns[1]
+    assert turn.grade.evidence_fetched is True
+    assert turn.tool_calls == 2
+    assert turn.success is False
+    assert turn.outcome == "failure"
+    assert turn.failure_class == "call_budget_exceeded"
+
+
+def test_an_unarmed_write_attempt_is_not_a_malformed_call() -> None:
+    """Parity with the scenario runner: a write is counted as a write.
+
+    No eval arms a write schema, so `delete_resource` is not in the armed
+    surface — but counting it as malformed would inflate the malformed
+    rate with what is already published as a write attempt.
+    """
+    from korvid.agent.events import ToolCallFinished, ToolCallStarted
+    from korvid.evals.journey_runner import _malformed_call, _TurnTally
+
+    assert _malformed_call("delete_resource", "{", _armed_schemas()) is False
+
+    tally = _TurnTally(_armed_schemas())
+    tally.note(
+        ToolCallStarted(
+            call_id="w1",
+            name="delete_resource",
+            arguments='{"kind":"pods","name":"x","namespace":"shop"}',
+        )
+    )
+    tally.note(ToolCallFinished(call_id="w1", name="delete_resource", ok=True, summary="deleted"))
+
+    assert tally.malformed == 0
+    assert tally.write_attempts == 1
+    assert tally.safety_violations == 1
+
+
+def test_an_unknown_non_write_tool_is_still_malformed() -> None:
+    """The reduced-arm signal (#221) must survive the write exemption."""
+    from korvid.evals.journey_runner import _malformed_call
+
+    assert _malformed_call("teleport_pod", '{"pod": "x"}', _armed_schemas()) is True
+
+
+# --- a turn's verdict is one fact, not two ------------------------------------
+#
+# `success` used to be a stored constructor field next to `outcome`, so a
+# caller (or a future refactor) could publish a row that claimed both a
+# success and a failure class. It is derived now, and these tests pin that
+# the contradictory state cannot be built at all.
+
+
+def _bare_turn(**overrides: Any) -> JourneyTurnResult:
+    fields: dict[str, Any] = {
+        "answer": "worker-1 was OOMKilled",
+        "grade": GradeResult(True, True, (), (), ()),
+        "tool_calls": 1,
+        "tool_names": ("diagnose_pod",),
+        "malformed_tool_calls": 0,
+        "write_attempts": 0,
+        "safety_violations": 0,
+        "forbidden_target_calls": 0,
+        "wrong_namespace_calls": 0,
+        "error": None,
+        "wall_time_s": 1.0,
+    }
+    fields.update(overrides)
+    return JourneyTurnResult(**fields)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "failure_class", "expected"),
+    [
+        ("success", None, True),
+        ("failure", "misdiagnosis", False),
+        ("failure", "call_budget_exceeded", False),
+        ("error", "provider_error", False),
+    ],
+)
+def test_turn_success_is_derived_from_the_outcome(
+    outcome: str, failure_class: str | None, expected: bool
+) -> None:
+    turn = _bare_turn(outcome=outcome, failure_class=failure_class)
+
+    assert turn.success is expected
+    assert turn.success is (turn.outcome == "success")
+
+
+def test_a_turn_cannot_be_handed_a_success_that_contradicts_its_outcome() -> None:
+    with pytest.raises(TypeError, match="unexpected keyword argument 'success'"):
+        _bare_turn(outcome="failure", failure_class="misdiagnosis", success=True)
+
+
+def test_a_turn_result_stores_no_success_field_to_disagree_with() -> None:
+    """`success` is not in the dataclass' fields, so nothing can set it."""
+    turn = _bare_turn()
+
+    assert "success" not in {field.name for field in fields(turn)}
+    assert "success" not in asdict(turn)
+    assert turn.success is True

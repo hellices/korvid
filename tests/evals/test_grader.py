@@ -8,6 +8,7 @@ import pytest
 
 from korvid.evals.grader import GradeResult, ToolRecord, citation_report, grade, matches_target
 from korvid.evals.scenario import Evidence, Scenario
+from tests.evals.fixtures import EVAL_INTERACTION
 
 _EVIDENCE = Evidence(
     tool="diagnose_pod",
@@ -20,7 +21,7 @@ def _scenario(**overrides: Any) -> Scenario:
     fields: dict[str, Any] = {
         "id": "s1",
         "question": "q",
-        "screen": "pods view",
+        "interaction": EVAL_INTERACTION,
         "root_cause": "oom_killed",
         "must_mention": (("oomkilled", "oom killed"), ("137",)),
         "must_not_mention": (("image pull", "imagepull"),),
@@ -870,3 +871,125 @@ def test_a_trailing_citation_belongs_to_the_claim_before_it() -> None:
     report = citation_report("pod failed. [E1]", minted=("E1",))
 
     assert report.coverage == 1.0
+
+
+# --- screen actions are not cluster evidence --------------------------------
+#
+# The eval bridge files each applied screen action into the same ordered
+# record stream as the reads, so a journey can grade "and it put that on
+# screen". That stream is also what evidence is graded against, and a
+# screen action's *message* names the resource it moved to — so an action
+# whose target collides with an expected read must never be credited as
+# having fetched it. Only evidence that explicitly names the screen action
+# may be satisfied by one.
+
+
+def _screen_record(
+    name: str = "select_resource",
+    result: str = "selected worker-1",
+    arguments: dict[str, Any] | None = None,
+) -> ToolRecord:
+    """One applied screen action, as the eval bridge reports it."""
+    if arguments is None:
+        arguments = {"kind": "Pod", "name": "worker-1", "namespace": "jobs", "uid": None}
+    return ToolRecord(name=name, arguments=arguments, result=result, screen_action=True)
+
+
+def _read_scenario() -> Scenario:
+    return _scenario(
+        must_mention=(("oomkilled",),),
+        must_not_mention=(),
+        expected_evidence=(
+            (
+                Evidence(
+                    tool="get_resource",
+                    contains="worker-1",
+                    args={"kind": "pods", "name": "worker-1", "namespace": "jobs"},
+                ),
+            ),
+        ),
+    )
+
+
+def test_a_screen_action_never_satisfies_cluster_evidence_it_does_not_name() -> None:
+    """A colliding target *and* a colliding result must still not count.
+
+    `select_resource(kind=Pod, name=worker-1, namespace=jobs)` targets the
+    same object as the expected `get_resource` read, and its message
+    ("selected worker-1") contains the expected substring. Nothing was
+    fetched, so nothing may be graded as fetched.
+    """
+    result = grade(_read_scenario(), "worker-1 was OOMKilled.", [_screen_record()])
+
+    assert result.evidence_fetched is False
+    assert result.missing_evidence != ()
+
+
+def test_evidence_that_names_the_screen_action_is_still_credited() -> None:
+    """The TUI-following journeys grade exactly this, and must keep working."""
+    scenario = _scenario(
+        must_mention=(("oomkilled",),),
+        must_not_mention=(),
+        expected_evidence=(
+            (
+                Evidence(
+                    tool="open_describe",
+                    contains="opened describe",
+                    args={"kind": "pods", "name": "worker-1", "namespace": "jobs"},
+                ),
+            ),
+        ),
+    )
+    record = _screen_record(
+        name="open_describe",
+        result="opened describe for worker-1",
+        arguments={"kind": "pods", "name": "worker-1", "namespace": "jobs"},
+    )
+
+    result = grade(scenario, "worker-1 was OOMKilled.", [record])
+
+    assert result.evidence_fetched is True
+
+
+def test_read_record_cannot_satisfy_ui_action_evidence() -> None:
+    scenario = _scenario(
+        must_mention=(("oomkilled",),),
+        must_not_mention=(),
+        expected_evidence=(
+            (
+                Evidence(
+                    tool="open_describe",
+                    contains="opened describe",
+                    args={"kind": "pods", "name": "worker-1", "namespace": "jobs"},
+                ),
+            ),
+        ),
+    )
+    read = ToolRecord(
+        name="get_resource",
+        arguments={"kind": "pods", "name": "worker-1", "namespace": "jobs"},
+        result="opened describe for worker-1",
+    )
+
+    result = grade(scenario, "worker-1 was OOMKilled.", [read])
+
+    assert result.evidence_fetched is False
+
+
+def test_a_real_read_still_satisfies_evidence_after_a_colliding_screen_action() -> None:
+    """The guard drops the action, not the read that actually happened."""
+    read = ToolRecord(
+        name="get_resource",
+        arguments={"kind": "pods", "name": "worker-1", "namespace": "jobs"},
+        result="name: worker-1\nphase: Running",
+    )
+
+    result = grade(_read_scenario(), "worker-1 was OOMKilled.", [_screen_record(), read])
+
+    assert result.evidence_fetched is True
+
+
+def test_a_tool_record_is_a_cluster_read_unless_it_says_otherwise() -> None:
+    """The executor's own records carry no flag; only the bridge sets it."""
+    assert _record().screen_action is False
+    assert _screen_record().screen_action is True

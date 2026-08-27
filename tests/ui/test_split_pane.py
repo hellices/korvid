@@ -209,23 +209,28 @@ async def test_chord_prefix_swallows_unrelated_key() -> None:
         assert app.is_running
 
 
-async def test_agent_screen_context_reports_focused_and_other_pane() -> None:
+async def test_agent_workspace_snapshot_reports_focused_and_other_pane() -> None:
+    """What the agent is told about a split workspace is a typed snapshot
+    now, not prose: the focused pane plus the one beside it."""
     app = make_app([_pod("api-1")], extra_data={"deployments": [_deploy("web")]})
     async with app.run_test() as pilot:
         await _first_render(app, pilot)
         await _split(app, pilot)
         await _type_command(pilot, "deploy")
         await until(pilot, lambda: app.current_kind == "deployments", label="pane 2 on deploys")
-        context = app._agent_ui.screen_context()
-        assert "view=deployments" in context
-        assert "other_pane=pods" in context
+        snapshot = app.agent_ui.workspace_bridge.snapshot()
+        assert snapshot.focused_pane.kind == "deployments"
+        assert snapshot.secondary_pane is not None
+        assert snapshot.secondary_pane.kind == "pods"
 
 
-async def test_single_pane_context_has_no_other_pane_summary() -> None:
+async def test_single_pane_snapshot_has_no_secondary_pane() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
         await _first_render(app, pilot)
-        assert "other_pane" not in app._agent_ui.screen_context()
+        snapshot = app.agent_ui.workspace_bridge.snapshot()
+        assert snapshot.focused_pane.kind == "pods"
+        assert snapshot.secondary_pane is None
 
 
 async def test_split_clones_active_filter() -> None:

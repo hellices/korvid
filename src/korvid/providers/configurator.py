@@ -193,7 +193,7 @@ class ProviderConfigurator(AgentConfigurator):
         text = ""
         try:
             prepared = self._outbound.prepare(
-                provider.name,
+                provider.descriptor.model,
                 provider_prepared_messages(provider, [_PROBE_MESSAGE]),
                 [],
                 iteration=1,

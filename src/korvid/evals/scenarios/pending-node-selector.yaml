@@ -2,7 +2,13 @@ id: pending-node-selector
 question: >-
   Pod gpu-worker-1 in namespace ml stays Pending forever while other pods in
   the namespace schedule fine. What is blocking this one?
-screen: "resource view: pods, namespace ml, selected: ml/gpu-worker-1 (Pending)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: ml
+    selected: {kind: Pod, namespace: ml, name: gpu-worker-1, uid: pod-gpuworker-1}
 root_cause: node_selector_mismatch
 grading:
   must_mention:

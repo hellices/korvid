@@ -11,12 +11,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from korvid.agent.model_policy import ResolvedAgentPolicy
 from korvid.evals.__main__ import _positive_int, provider_factory_from_env
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
+from korvid.evals.harness import NO_GRIND, PromptGrind, resolve_eval_policy
 from korvid.evals.journey import bundled_journeys_dir, load_journeys
 from korvid.evals.journey_runner import (
     JourneyReport,
-    RecordingUI,
     render_markdown,
     report_payload,
     run_journey,
@@ -35,7 +36,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
     )
     parser.add_argument("--reps", type=_positive_int, default=3)
-    parser.add_argument("--profile", choices=("full", "small"), default="small")
+    parser.add_argument(
+        "--model-tier",
+        choices=("low", "high"),
+        default=None,
+        help=(
+            "evaluate this capability tier; omit to let the shipped model "
+            "catalog route the model exactly as the TUI does"
+        ),
+    )
     parser.add_argument(
         "--warmup",
         action="store_true",
@@ -65,31 +74,46 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _fake_executor(fixture: Any) -> ToolExecutor:
-    return ToolExecutor(
-        FakeKubeClient(fixture),
-        builtin_aliases(),
-        ui=RecordingUI(),
-    )
+    # No UI bridge: screen actions are typed `UiAction` values applied to
+    # the eval workspace bridge, and no write is ever armed, so nothing
+    # this executor dispatches needs one.
+    return ToolExecutor(FakeKubeClient(fixture), builtin_aliases())
 
 
-async def _run(args: argparse.Namespace) -> list[JourneyReport]:
+async def _run(
+    args: argparse.Namespace,
+    policy: ResolvedAgentPolicy | None = None,
+) -> list[JourneyReport]:
+    """Run every journey in the pack against one resolved policy.
+
+    Args:
+        args: The parsed CLI arguments.
+        policy: The campaign's policy, routed once by `main`. Every
+            conversation is composed against this exact object, so the
+            artifact's `meta` describes the run rather than whichever
+            conversation happened to be inspected. `None` (a direct
+            caller, or a test) falls back to per-conversation routing
+            from `--model-tier`.
+    """
     journeys = load_journeys(args.journeys)
     if not journeys:
         raise SystemExit(f"no journey YAML files found in {args.journeys}")
     provider_factory = provider_factory_from_env(os.environ)
     live_environment: Any | None = None
     if args.live:
-        from korvid.evals.live_journey import (
-            LiveJourneyEnvironment,
-            retarget_journey_namespace,
-        )
+        from korvid.evals import live_journey as live
 
-        live_environment = await LiveJourneyEnvironment.connect(
+        live_environment = await live.LiveJourneyEnvironment.connect(
             args.context,
             args.namespace,
         )
         try:
-            journeys = [retarget_journey_namespace(journey, args.namespace) for journey in journeys]
+            # The run's own context, not the fixture's: a live row must
+            # name the cluster the conversation actually ran against.
+            journeys = [
+                live.retarget_journey_namespace(journey, args.namespace, context=args.context)
+                for journey in journeys
+            ]
         except Exception:
             await live_environment.close()
             raise
@@ -106,7 +130,8 @@ async def _run(args: argparse.Namespace) -> list[JourneyReport]:
                     provider_factory=provider_factory,
                     executor_factory=executor_factory,
                     repetitions=args.reps,
-                    profile=args.profile,
+                    policy=policy,
+                    model_tier=args.model_tier,
                 )
             )
     finally:
@@ -118,28 +143,30 @@ async def _run(args: argparse.Namespace) -> list[JourneyReport]:
 def journey_run_payload(
     reports: list[JourneyReport],
     *,
-    profile_name: str,
+    policy: ResolvedAgentPolicy,
+    grind: PromptGrind = NO_GRIND,
     serving: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Journey results with the same provenance envelope as the task pack.
 
     Journey runs are published as scoreboard rows too, so they must record
-    which prompt and tool schemas produced them. Journeys cannot yet be
-    swept from the CLI, so `source` is always `default`; the digest still
-    makes a profile or tool-schema change visible.
+    which model tier, prompt and tool schemas produced them.
     """
-    from korvid.agent.profiles import PromptOverrides, build_profile
-    from korvid.evals.__main__ import prompt_fingerprint
-
-    overrides = PromptOverrides()
-    profile = build_profile(
-        profile_name, readonly=True, resize_supported=False, overrides=overrides
+    from korvid.evals.__main__ import (
+        capabilities_payload,
+        limits_payload,
+        policy_payload,
+        prompt_fingerprint,
+        tools_payload,
     )
+
     meta: dict[str, Any] = {
-        "profile": profile.name,
-        # Journeys offer the full profile surface, UI tools included,
-        # so the digest must cover those schemas too.
-        "prompts": prompt_fingerprint(profile, tools=profile.tools),
+        "policy": policy_payload(policy),
+        "limits": limits_payload(policy),
+        "capabilities": capabilities_payload(policy),
+        "catalog_version": policy.catalog_version,
+        "prompts": prompt_fingerprint(policy, grind=grind),
+        "tools": tools_payload(policy, []),
     }
     if serving is not None:
         meta["serving"] = serving
@@ -172,15 +199,35 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     warn_if_unpinned(serving)
-    reports = asyncio.run(_run(args))
+    provider_factory = provider_factory_from_env(os.environ)
+    policy = _resolve_policy(provider_factory, args.model_tier)
+    reports = asyncio.run(_run(args, policy))
     markdown = render_markdown(reports)
     print(markdown)
     if args.out:
         args.out.write_text(markdown + "\n")
     if args.json:
-        payload = journey_run_payload(reports, profile_name=args.profile, serving=serving)
+        payload = journey_run_payload(reports, policy=policy, serving=serving)
         args.json.write_text(json.dumps(payload, indent=2) + "\n")
     return exit_code(reports)
+
+
+def _resolve_policy(
+    provider_factory: Callable[[], Any], model_tier: str | None
+) -> ResolvedAgentPolicy:
+    """Route once, so the artifact describes the campaign, not one run.
+
+    The same object then flows through `_run` into every conversation and
+    into `journey_run_payload`, exactly as the scenario campaign does.
+    This CLI has no prompt-grinding flags, so there is nothing to ground.
+    """
+    provider = provider_factory()
+    try:
+        return resolve_eval_policy(provider, model_tier=model_tier)
+    finally:
+        aclose = getattr(provider, "aclose", None)
+        if callable(aclose):
+            asyncio.run(aclose())
 
 
 def exit_code(reports: list[JourneyReport]) -> int:

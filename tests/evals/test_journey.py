@@ -17,6 +17,7 @@ from korvid.evals.journey import (
 )
 from korvid.evals.scenario import Scenario
 from korvid.tools.executor import UI_TOOL_NAMES, ToolExecutor
+from tests.evals.fixtures import EVAL_INTERACTION
 
 
 def _write(path: Path, text: str) -> Path:
@@ -30,9 +31,12 @@ def test_load_journey_preserves_ordered_turns_and_cluster(tmp_path: Path) -> Non
         """
 id: triage-and-correct
 root_cause: image_pull_auth
+interaction:
+  kube_context: eval-cluster
+  context_epoch: 1
+  focused_pane: {kind: pods, scope: shop}
 turns:
   - user: What needs attention in namespace shop?
-    screen: "resource view: pods, namespace shop"
     grading:
       must_mention: [[checkout, payments]]
       must_not_mention: [[healthy]]
@@ -42,7 +46,6 @@ turns:
           contains: payments
       max_tool_calls: 3
   - user: Focus on payments, not checkout. What is the exact cause?
-    screen: "resource view: pods, namespace shop"
     grading:
       must_mention: [[payments], [unauthorized, authentication]]
       must_not_mention: [[oomkilled]]
@@ -81,9 +84,12 @@ def test_load_journey_rejects_unknown_turn_keys(tmp_path: Path) -> None:
         """
 id: bad
 root_cause: none
+interaction:
+  kube_context: eval-cluster
+  context_epoch: 1
+  focused_pane: {kind: pods, scope: shop}
 turns:
   - user: hello
-    screen: pods
     surprise: true
     grading:
       must_mention: [healthy]
@@ -93,7 +99,6 @@ turns:
           args: {kind: pods}
           contains: healthy
   - user: stop?
-    screen: pods
     grading:
       must_mention: [healthy]
       must_not_mention: [oomkilled]
@@ -114,9 +119,12 @@ def test_load_journey_rejects_zero_tool_call_budget(tmp_path: Path) -> None:
         """
 id: zero-budget
 root_cause: none
+interaction:
+  kube_context: eval-cluster
+  context_epoch: 1
+  focused_pane: {kind: pods, scope: shop}
 turns:
   - user: inspect
-    screen: pods
     grading:
       must_mention: [healthy]
       must_not_mention: [broken]
@@ -126,7 +134,6 @@ turns:
           args: {kind: pods}
           contains: pod
   - user: stop
-    screen: pods
     grading:
       must_mention: [stop]
       must_not_mention: [broken]
@@ -147,9 +154,12 @@ def test_load_journey_rejects_empty_forbidden_target(tmp_path: Path) -> None:
         """
 id: empty-target
 root_cause: none
+interaction:
+  kube_context: eval-cluster
+  context_epoch: 1
+  focused_pane: {kind: pods, scope: shop}
 turns:
   - user: inspect
-    screen: pods
     grading:
       must_mention: [healthy]
       must_not_mention: [broken]
@@ -159,7 +169,6 @@ turns:
           contains: pod
     forbidden_targets: [{}]
   - user: stop
-    screen: pods
     grading:
       must_mention: [stop]
       must_not_mention: [broken]
@@ -178,9 +187,12 @@ def test_load_journeys_rejects_duplicate_ids(tmp_path: Path) -> None:
     text = """
 id: same
 root_cause: none
+interaction:
+  kube_context: eval-cluster
+  context_epoch: 1
+  focused_pane: {kind: pods, scope: shop}
 turns:
   - user: hello
-    screen: pods
     grading:
       must_mention: [healthy]
       must_not_mention: [oomkilled]
@@ -189,7 +201,6 @@ turns:
           args: {kind: pods}
           contains: healthy
   - user: stop?
-    screen: pods
     grading:
       must_mention: [healthy]
       must_not_mention: [oomkilled]
@@ -236,7 +247,7 @@ async def test_bundled_journey_evidence_is_reachable_through_the_real_tools(
     scenario = Scenario(
         id=journey.id,
         question="q",
-        screen="s",
+        interaction=EVAL_INTERACTION,
         root_cause=journey.root_cause,
         must_mention=(),
         must_not_mention=(),
@@ -284,7 +295,7 @@ def test_triage_requires_an_explicit_priority_not_just_both_names() -> None:
     scenario = Scenario(
         id="priority",
         question=turn.user,
-        screen=turn.screen,
+        interaction=journey.interaction,
         root_cause=journey.root_cause,
         must_mention=turn.must_mention,
         must_not_mention=turn.must_not_mention,
@@ -354,7 +365,7 @@ def _turn_scenario(turn: JourneyTurn, root_cause: str = "r") -> Scenario:
     return Scenario(
         id="x",
         question="q",
-        screen="s",
+        interaction=EVAL_INTERACTION,
         root_cause=root_cause,
         must_mention=turn.must_mention,
         must_not_mention=turn.must_not_mention,
@@ -384,9 +395,12 @@ def test_rollout_journey_keywords_discriminate(
 _JOURNEY_WITH_FORBIDDEN = """
 id: j
 root_cause: none
+interaction:
+  kube_context: eval-cluster
+  context_epoch: 1
+  focused_pane: {kind: pods, scope: shop}
 turns:
   - user: u
-    screen: s
     grading:
       must_mention: [[a]]
       expected_evidence:
@@ -394,7 +408,6 @@ turns:
           args: {kind: pods, name: p, namespace: n}
           contains: x
   - user: u2
-    screen: s
     grading:
       must_mention: [[a]]
       expected_evidence:
@@ -777,3 +790,84 @@ def test_a_selector_the_matcher_cannot_honour_is_rejected(
     )
     with pytest.raises(ValueError, match=match):
         load_journeys(tmp_path)
+
+
+_JOURNEY_WITH_INTERACTION = """
+id: interaction-journey
+root_cause: none
+interaction:
+  kube_context: eval-cluster
+  context_epoch: 2
+  focused_pane: {kind: pods, scope: shop}
+turns:
+  - user: what is failing?
+    grading:
+      must_mention: [healthy]
+      must_not_mention: [oomkilled]
+      expected_evidence:
+        - tool: list_resources
+          args: {kind: pods, namespace: shop}
+          contains: healthy
+  - user: show me the pod
+    interaction:
+      kube_context: eval-cluster
+      context_epoch: 2
+      focused_pane:
+        kind: pods
+        scope: shop
+        selected: {kind: Pod, namespace: shop, name: payments-1, uid: pod-1}
+    grading:
+      must_mention: [healthy]
+      must_not_mention: [oomkilled]
+      expected_evidence:
+        - tool: list_resources
+          args: {kind: pods, namespace: shop}
+          contains: healthy
+cluster: {objects: [], events: [], logs: {}}
+"""
+
+
+def test_load_journey_records_the_starting_interaction(tmp_path: Path) -> None:
+    journey = load_journey(_write(tmp_path / "j.yaml", _JOURNEY_WITH_INTERACTION))
+    assert journey.interaction.context_epoch == 2
+    assert journey.interaction.focused_pane.kind == "pods"
+    assert journey.interaction.focused_pane.selected is None
+
+
+def test_a_turn_may_restate_the_interaction_the_operator_moved_to(tmp_path: Path) -> None:
+    """Between turns the *operator* moves the screen; that is authored too."""
+    journey = load_journey(_write(tmp_path / "j.yaml", _JOURNEY_WITH_INTERACTION))
+    assert journey.turns[0].interaction is None
+    turn = journey.turns[1].interaction
+    assert turn is not None
+    assert turn.focused_pane.selected is not None
+    assert turn.focused_pane.selected.name == "payments-1"
+
+
+def test_load_journey_requires_a_starting_interaction(tmp_path: Path) -> None:
+    text = _JOURNEY_WITH_INTERACTION.replace(
+        "interaction:\n  kube_context: eval-cluster\n  context_epoch: 2\n"
+        "  focused_pane: {kind: pods, scope: shop}\n",
+        "",
+        1,
+    )
+    with pytest.raises(ValueError, match="interaction"):
+        load_journey(_write(tmp_path / "j.yaml", text))
+
+
+def test_load_journey_rejects_the_retired_turn_screen_field(tmp_path: Path) -> None:
+    text = _JOURNEY_WITH_INTERACTION.replace(
+        "  - user: what is failing?\n",
+        "  - user: what is failing?\n    screen: pods\n",
+        1,
+    )
+    with pytest.raises(ValueError, match="unknown keys"):
+        load_journey(_write(tmp_path / "j.yaml", text))
+
+
+def test_every_bundled_journey_records_a_starting_interaction() -> None:
+    journeys = load_journeys(bundled_journeys_dir())
+    assert journeys
+    for journey in journeys:
+        assert journey.interaction.focused_pane.kind, journey.id
+        assert journey.interaction.focused_pane.scope, journey.id

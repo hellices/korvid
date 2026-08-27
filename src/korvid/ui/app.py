@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     # Annotation-only: the base TUI must not import the embedded-agent
     # runtime at startup (issue #73) — the composition root injects it
     # only when the [agent] extra is installed and wired.
-    from korvid.agent.runtime import AgentRuntime
+    from korvid.agent.session import AgentSession
 
 from rich.text import Text
 from textual.app import App, ComposeResult, ScreenStackError
@@ -40,6 +40,7 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, WorkerError, WorkerState
 
 from korvid.agent.events import AgentEvent
+from korvid.agent.interaction import PaneContext, ResourceIdentity
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -79,8 +80,9 @@ from korvid.tools.proposals import ProposalStore, WriteProposal
 from korvid.ui.agent_ui_controller import (
     AgentPanelPort,
     AgentScreens,
-    AgentUIBridge,
+    AgentToolUIBridge,
     AgentUiController,
+    DisplayedPaneContext,
 )
 from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.command import command_help
@@ -354,10 +356,10 @@ class KorvidApp(App[None]):
         get_helm_components: (Callable[[str, str], Awaitable[list[ComponentRef]]] | None) = None,
         get_events: EventsFetcher | None = None,
         stream_logs: Callable[..., AsyncIterator[LogLine]] | None = None,
-        agent_runtime: AgentRuntime | None = None,
+        agent_session: AgentSession | None = None,
         agent_model_name: str | None = None,
         agent_configurator: AgentConfigurator | None = None,
-        rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
+        rebuild_agent: Callable[[AgentSettings], AgentSession | None] | None = None,
         disconnect_agent: Callable[[], None] | None = None,
         agent_available: bool = True,
         write_ops: WriteOps | None = None,
@@ -811,8 +813,8 @@ class KorvidApp(App[None]):
             refresh_status=lambda: self._refresh_status(),
         )
         #: The built-in agent's session and UI ownership (issue #187 / Deep
-        #: Task 6): the runtime/settings/profile/follow state, the turn task
-        #: with its interrupt-and-submit lifecycle, the screen context the
+        #: Task 6): the runtime/settings/model-tier/follow state, the turn
+        #: task with its interrupt-and-submit lifecycle, the screen context the
         #: model is told about, and every `UIBridge` read plus the direct,
         #: approval-gated agent write. It composes the same
         #: `WriteCoordinator` perimeter every other write path uses, and
@@ -846,12 +848,12 @@ class KorvidApp(App[None]):
             # patch `_refresh_status` after the app is constructed.
             refresh_status=lambda: self._refresh_status(),
             # Agent-follow mirrors route through the shared serialized bridge
-            # (the composition root's `_UIBridgeProxy`) so they serialize with
+            # (the composition root's tool-bridge proxy) so they serialize with
             # the agent's own UI tools and concurrent MCP UI calls - log-pane
             # swaps and describes must never interleave. None (tests, degraded
             # wiring) falls back to the controller's own adapter.
             follow_bridge=lambda: agent_follow_bridge,
-            runtime=agent_runtime,
+            session=agent_session,
             model_name=agent_model_name,
             configurator=agent_configurator,
             rebuild=rebuild_agent,
@@ -927,10 +929,20 @@ class KorvidApp(App[None]):
         return self._workspace.drill
 
     @property
-    def agent_runtime(self) -> AgentRuntime | None:
-        """The live runtime — the :ai wizard may have replaced the initial
+    def agent_session(self) -> AgentSession | None:
+        """The live session — the :ai wizard may have replaced the initial
         one, so per-cluster retargeting (issue #36) must read it here."""
-        return self._agent_ui.runtime
+        return self._agent_ui.session
+
+    @property
+    def agent_ui(self) -> AgentUiController:
+        """The agent's UI controller.
+
+        Exposed so the composition root can bind the session's workspace
+        port to the live controller after construction — the app owns the
+        controller, but the port has to point somewhere real.
+        """
+        return self._agent_ui
 
     @property
     def current_namespace(self) -> str:
@@ -1764,8 +1776,8 @@ class KorvidApp(App[None]):
         # Availability comes from the actual runtime, not the config flag —
         # create_provider may return None (unknown provider, missing base_url/
         # model) while agent_enabled is still true in config.
-        label = "AI on" if self._agent_ui.runtime is not None else "AI off"
-        if self._agent_ui.runtime is not None and self._agent_ui.blocked_in_protected():
+        label = "AI on" if self._agent_ui.session is not None else "AI off"
+        if self._agent_ui.session is not None and self._agent_ui.blocked_in_protected():
             label = "AI blocked"
         mcp_label = self._mcp.status() if self._mcp is not None else ""
         follow = self._integrations.follow_enabled
@@ -1881,7 +1893,7 @@ class KorvidApp(App[None]):
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,
-    # loop logic in AgentRuntime.
+    # loop logic in the agent session.
     # ------------------------------------------------------------------
 
     #: Resource identities — (group, plural), see `_RESTARTABLE` — where each
@@ -2056,15 +2068,15 @@ class KorvidApp(App[None]):
         await self.watch_manager.stop_all()
 
 
-class AppUIBridge(AgentUIBridge):
+class AppUIBridge(AgentToolUIBridge):
     """The app's `UIBridge`: `AgentUiController` plus the app's dispatcher.
 
     The layer-boundary interface must be an `abc.ABC` (AGENTS.md), but
     Textual's `App` metaclass conflicts with `ABCMeta`, so the app cannot
-    inherit `UIBridge` directly. The behaviour lives in `AgentUIBridge`; this
-    subclass exists only so the composition root can name one bridge for one
-    app - it holds no app reference and routes no agent operation through app
-    methods.
+    inherit `UIBridge` directly. The behaviour lives in `AgentToolUIBridge`;
+    this subclass exists only so the composition root can name one bridge for
+    one app - it holds no app reference and routes no agent operation through
+    app methods.
     """
 
     def __init__(self, app: KorvidApp) -> None:
@@ -2107,10 +2119,10 @@ class AppAgentPanel(AgentPanelPort):
         output_tokens: int,
         *,
         estimated: bool,
-        profile: str,
+        tier: str | None = None,
     ) -> None:
         self._app._agent_panel.set_header(
-            model, input_tokens, output_tokens, estimated=estimated, profile=profile
+            model, input_tokens, output_tokens, estimated=estimated, tier=tier
         )
 
     def show_setup_hint(self) -> None:
@@ -2140,6 +2152,21 @@ class AppAgentPanel(AgentPanelPort):
         self._app._agent_panel.apply_event(event)
 
 
+def _displayed_resource_context(
+    identity: ResourceIdentity, *, owner: object | None
+) -> DisplayedPaneContext:
+    """Build display context for one resource shown by describe."""
+    return DisplayedPaneContext(
+        context=PaneContext(
+            kind=identity.kind,
+            scope=identity.namespace or ALL_NAMESPACES,
+            filter_pattern=None,
+            selected=identity,
+        ),
+        owner=owner,
+    )
+
+
 class AppAgentScreens(AgentScreens):
     """Nominal `AgentScreens` adapter over `KorvidApp`'s screen stack.
 
@@ -2151,6 +2178,9 @@ class AppAgentScreens(AgentScreens):
 
     def __init__(self, app: KorvidApp) -> None:
         self._app = app
+        self._describe_owner: object | None = None
+        self._log_generation: int | None = None
+        self._log_uids: dict[tuple[str, str], str | None] = {}
 
     def approval_dialog_active(self) -> bool:
         return isinstance(
@@ -2197,7 +2227,123 @@ class AppAgentScreens(AgentScreens):
         *,
         footer_note: str | None,
     ) -> None:
+        self._describe_owner = self._app._pane
         self._app._describe_pane.show(title, manifest, events, footer_note=footer_note)
+
+    def selected_identity(self, table_id: str, kind: str) -> ResourceIdentity | None:
+        """The resource under the cursor in the named pane table.
+
+        Reads the row key from the table widget identified by *table_id*,
+        parses the namespace and name from it, then looks up the uid from the
+        current store bucket so the identity is complete.  Returns None when
+        the table is absent, has no rows, or the cursor is out of range.
+        """
+        try:
+            table = self._app.query_one(f"#{table_id}", ResourceTable)
+        except NoMatches:
+            return None
+        if table.row_count == 0:
+            return None
+        ordered = table.ordered_rows
+        if table.cursor_row >= len(ordered):
+            return None
+        row_key = str(ordered[table.cursor_row].key.value)
+        # Row keys use the 'namespace/name' composite when namespaced.
+        if "/" in row_key:
+            namespace, _, name = row_key.partition("/")
+        else:
+            namespace, name = "", row_key
+        # Look up the uid from the live store for the pane's current scope.
+        pane_state = next((p for p in self._app._workspace.panes if p.table_id == table_id), None)
+        scope = pane_state.scope if pane_state is not None else ""
+        uid: str | None = None
+        for summary in self._app._view.resources(kind, scope):
+            if summary.name == name and (not namespace or summary.namespace == namespace):
+                uid = getattr(summary, "uid", None) or None
+                break
+        return ResourceIdentity(
+            kind=kind,
+            namespace=namespace or None,
+            name=name,
+            uid=uid,
+        )
+
+    def displayed_pane_context(self) -> DisplayedPaneContext | None:
+        """Describe or log target currently shown instead of the table selection."""
+        if isinstance(self._app.screen, DescribeScreen):
+            identity = self._app.screen.resource_identity
+            if identity is not None:
+                return _displayed_resource_context(identity, owner=None)
+            return DisplayedPaneContext(
+                context=PaneContext(
+                    kind="unknown",
+                    scope=ALL_NAMESPACES,
+                    filter_pattern=None,
+                    selected=None,
+                ),
+                owner=None,
+            )
+
+        triples = self._app._logs.current_triples if self._app._logs.mode else []
+        if triples:
+            pods = {(namespace, pod) for namespace, pod, _container in triples}
+            generation = int(getattr(self._app._logs, "pane_gen", 0))
+            if generation != self._log_generation:
+                self._log_generation = generation
+                self._log_uids = {
+                    (namespace, pod): self._displayed_resource_uid(
+                        "pods",
+                        namespace,
+                        pod,
+                        owner=self._app._logs.owner,
+                    )
+                    for namespace, pod in pods
+                }
+            namespaces = {namespace for namespace, _pod in pods}
+            scope = namespaces.pop() if len(namespaces) == 1 else ALL_NAMESPACES
+            selected: ResourceIdentity | None = None
+            if len(pods) == 1:
+                namespace, pod = pods.pop()
+                selected = ResourceIdentity(
+                    kind="pods",
+                    namespace=namespace,
+                    name=pod,
+                    uid=self._log_uids.get((namespace, pod)),
+                )
+            return DisplayedPaneContext(
+                context=PaneContext(
+                    kind="pods",
+                    scope=scope,
+                    filter_pattern=None,
+                    selected=selected,
+                ),
+                owner=self._app._logs.owner,
+            )
+
+        if self._app._describe_pane.display:
+            identity = self._app._describe_pane.resource_identity
+            if identity is not None:
+                return _displayed_resource_context(identity, owner=self._describe_owner)
+        return None
+
+    def _displayed_resource_uid(
+        self,
+        kind: str,
+        namespace: str,
+        name: str,
+        *,
+        owner: object | None,
+    ) -> str | None:
+        """Resolve the current store UID for a displayed namespaced resource."""
+        owner_scope = getattr(owner, "scope", None)
+        scopes = dict.fromkeys(
+            scope for scope in (owner_scope, namespace, ALL_NAMESPACES) if isinstance(scope, str)
+        )
+        for scope in scopes:
+            for summary in self._app._view.resources(kind, scope):
+                if summary.name == name and summary.namespace == namespace:
+                    return getattr(summary, "uid", None) or None
+        return None
 
 
 class AppProposalScreens(ProposalScreens):

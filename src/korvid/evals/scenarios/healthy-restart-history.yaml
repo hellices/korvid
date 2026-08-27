@@ -2,7 +2,13 @@ id: healthy-restart-history
 question: >-
   Pod cache-1 in namespace shop shows 2 restarts. Is something wrong with it
   right now?
-screen: "resource view: pods, namespace shop, selected: shop/cache-1 (Running, restarts: 2)"
+interaction:
+  kube_context: eval-fixture
+  context_epoch: 1
+  focused_pane:
+    kind: pods
+    scope: shop
+    selected: {kind: Pod, namespace: shop, name: cache-1, uid: pod-cache-1}
 root_cause: none
 grading:
   must_mention:

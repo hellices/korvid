@@ -47,10 +47,10 @@ class FakeConfigurator(AgentConfigurator):
 
 
 class _Host(App[None]):
-    def __init__(self, configurator: FakeConfigurator, current_profile: str | None = None) -> None:
+    def __init__(self, configurator: FakeConfigurator, current_tier: str | None = None) -> None:
         super().__init__()
         self.configurator = configurator
-        self.current_profile = current_profile
+        self.current_tier = current_tier
         self.result: AgentSettings | str | None = "unset"
 
     def on_mount(self) -> None:
@@ -58,7 +58,7 @@ class _Host(App[None]):
             self.result = res
 
         self.push_screen(
-            AgentSetupScreen(self.configurator, current_profile=self.current_profile),
+            AgentSetupScreen(self.configurator, current_tier=self.current_tier),
             callback=_done,
         )
 
@@ -83,6 +83,24 @@ async def _pump(pilot: Any, n: int = 8) -> None:
         await pilot.pause()
 
 
+async def _accept_automatic_tier(pilot: Any) -> None:
+    """Accept the wizard's default Automatic tier choice (highlighted index
+    0 of Automatic/Low/High) so the flow proceeds to the connection probe."""
+    await pilot.press("enter")
+    await _pump(pilot)
+
+
+async def _wait_for_tier_list(app: App[None], pilot: Any) -> OptionList:
+    """Wait for the Automatic/Low/High tier step to become visible and
+    return its `OptionList` widget."""
+    await until(
+        pilot,
+        lambda: app.screen.query_one("#setup-tier", OptionList).display,
+        label="tier step shown",
+    )
+    return app.screen.query_one("#setup-tier", OptionList)
+
+
 async def test_ollama_path_tests_saves_and_dismisses() -> None:
     """No models from the API -> typed model input fallback with defaults."""
     cfg = FakeConfigurator()
@@ -95,11 +113,13 @@ async def test_ollama_path_tests_saves_and_dismisses() -> None:
         await _pump(pilot)  # fetch models (empty) -> fallback input
         await pilot.press("enter")  # accept model default
         await _pump(pilot)
+        await _accept_automatic_tier(pilot)
         assert isinstance(app.result, AgentSettings)
         assert app.result.provider == "ollama"
         assert app.result.auth_method == "none"
         assert app.result.base_url == "http://localhost:11434"
         assert app.result.model == "llama3"
+        assert app.result.model_tier is None
         assert _kinds(cfg) == ["list_models", "test", "save"]
 
 
@@ -118,6 +138,7 @@ async def test_model_list_offers_fetched_models() -> None:
         _select(app, "#setup-model-list", "mistral")
         await pilot.press("enter")
         await _pump(pilot)
+        await _accept_automatic_tier(pilot)
         assert isinstance(app.result, AgentSettings)
         assert app.result.model == "mistral"
 
@@ -140,6 +161,7 @@ async def test_model_list_typing_filters_options() -> None:
         assert prompts == ["claude-sonnet-4"]
         await pilot.press("enter")  # accept the single highlighted match
         await _pump(pilot)
+        await _accept_automatic_tier(pilot)
         assert isinstance(app.result, AgentSettings)
         assert app.result.model == "claude-sonnet-4"
 
@@ -165,6 +187,7 @@ async def test_github_copilot_logs_in_then_lists_models() -> None:
         _select(app, "#setup-model-list", "claude-sonnet-4")
         await pilot.press("enter")
         await _pump(pilot)
+        await _accept_automatic_tier(pilot)
         assert isinstance(app.result, AgentSettings)
         assert app.result.provider == "github-copilot"
         assert app.result.auth_method == "device-login"
@@ -231,6 +254,7 @@ async def test_probe_failure_keeps_screen_open_and_shows_error() -> None:
         await _pump(pilot)
         await pilot.press("enter")  # model default
         await _pump(pilot)
+        await _accept_automatic_tier(pilot)
         assert app.result == "unset"  # not dismissed
         status = app.screen.query_one("#setup-status", Static)
         assert "connection refused" in str(status.render())
@@ -260,6 +284,7 @@ async def test_azure_offers_auth_choice() -> None:
         model.focus()
         await pilot.press("enter")
         await _pump(pilot)
+        await _accept_automatic_tier(pilot)
         assert isinstance(app.result, AgentSettings)
         assert app.result.auth_method == "entra"
         assert app.result.model == "gpt-4o"
@@ -291,6 +316,7 @@ async def test_save_failure_shows_error_and_keeps_screen_open() -> None:
         await _pump(pilot)
         await pilot.press("enter")
         await _pump(pilot)
+        await _accept_automatic_tier(pilot)
         assert app.result == "unset"  # not dismissed
         status = app.screen.query_one("#setup-status", Static)
         assert "disk full" in str(status.render())
@@ -336,6 +362,7 @@ async def test_save_failure_after_apply_warns_about_restart_revert() -> None:
         await _pump(pilot)
         await pilot.press("enter")
         await _pump(pilot)
+        await _accept_automatic_tier(pilot)
         assert applied  # runtime swap happened before the failing save
         assert app.result == "unset"  # not dismissed
         text = str(app.screen.query_one("#setup-status", Static).render())
@@ -357,6 +384,7 @@ async def test_retry_uses_edited_inputs() -> None:
         await _pump(pilot)
         await pilot.press("enter")
         await _pump(pilot)
+        await _accept_automatic_tier(pilot)
         cfg.test_error = None
         model_input = app.screen.query_one("#setup-model", Input)
         model_input.value = "edited-model"
@@ -393,60 +421,19 @@ async def test_apply_failure_keeps_wizard_open_and_skips_save() -> None:
         await _pump(pilot)
         await pilot.press("enter")
         await _pump(pilot)
+        await _accept_automatic_tier(pilot)
         assert app.result == "unset"  # not dismissed
         assert "save" not in _kinds(cfg)  # config untouched
         status = app.screen.query_one("#setup-status", Static)
         assert "Apply failed" in str(status.render())
 
 
-async def test_ollama_provider_suggests_the_small_profile() -> None:
-    """Local Ollama endpoints usually serve 3B-14B models: with no profile
-    configured, the wizard saves the reduced capability profile for them
-    (issue #71)."""
+async def test_wizard_presents_automatic_low_and_high_tier_options() -> None:
+    """The wizard's tier step offers exactly Automatic/Low/High — the old
+    full/small profile language and the Ollama-only `small` suggestion are
+    both gone."""
     cfg = FakeConfigurator()
     app = _Host(cfg)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        _select(app, "#setup-provider", "ollama")
-        await pilot.press("enter")  # pick provider
-        await pilot.press("enter")  # accept base_url default
-        # No models from the API -> typed model input fallback.
-        await until(
-            pilot,
-            lambda: app.screen.query_one("#setup-model", Input).display,
-            label="model input shown",
-        )
-        await pilot.press("enter")  # accept model default
-        # app.result starts as the "unset" sentinel, so wait for the actual
-        # AgentSettings the dismiss callback produces — not merely non-None.
-        await until(
-            pilot,
-            lambda: isinstance(app.result, AgentSettings),
-            label="wizard result",
-        )
-        assert isinstance(app.result, AgentSettings)
-        assert app.result.profile == "small"
-
-
-async def test_cloud_providers_keep_the_full_profile() -> None:
-    cfg = FakeConfigurator()
-    app = _Host(cfg)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        screen = app.screen
-        assert isinstance(screen, AgentSetupScreen)
-        screen._provider = "openai-compat"
-        screen._auth_method = "api_key"
-        settings = screen._draft_settings("gpt-4o-mini")
-        assert settings.profile == "full"
-
-
-async def test_explicit_full_profile_survives_the_ollama_wizard() -> None:
-    """`agent.profile: full` is a deliberate choice — reopening `:ai` for an
-    Ollama endpoint must preserve it instead of silently overriding it with
-    the `small` suggestion, which is only for an unset profile."""
-    cfg = FakeConfigurator()
-    app = _Host(cfg, current_profile="full")
     async with app.run_test() as pilot:
         await pilot.pause()
         _select(app, "#setup-provider", "ollama")
@@ -458,22 +445,126 @@ async def test_explicit_full_profile_survives_the_ollama_wizard() -> None:
             label="model input shown",
         )
         await pilot.press("enter")  # accept model default
-        # app.result starts as the "unset" sentinel, so wait for the actual
-        # AgentSettings the dismiss callback produces — not merely non-None.
+        tier_list = await _wait_for_tier_list(app, pilot)
+        labels = [
+            str(tier_list.get_option_at_index(i).prompt) for i in range(tier_list.option_count)
+        ]
+        assert labels == ["Automatic", "Low", "High"]
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai-compat"])
+async def test_tier_step_defaults_to_automatic_for_every_provider(provider: str) -> None:
+    """No provider ever gets a silent `Low` suggestion (the old Ollama
+    heuristic is gone) — every provider starts on `Automatic`."""
+    cfg = FakeConfigurator()
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", provider)
+        await pilot.press("enter")  # pick provider
+        if provider == "openai-compat":
+            await pilot.press("enter")  # accept base_url default
+            await pilot.press("enter")  # accept api key env default
+        else:
+            await pilot.press("enter")  # accept base_url default
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#setup-model", Input).display,
+            label="model input shown",
+        )
+        await pilot.press("enter")  # accept model default
+        tier_list = await _wait_for_tier_list(app, pilot)
+        assert tier_list.highlighted == 0
+        assert str(tier_list.get_option_at_index(0).prompt) == "Automatic"
+
+
+async def test_choosing_low_tier_saves_it() -> None:
+    cfg = FakeConfigurator()
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#setup-model", Input).display,
+            label="model input shown",
+        )
+        await pilot.press("enter")
+        tier_list = await _wait_for_tier_list(app, pilot)
+        _select(app, "#setup-tier", "low")
+        await pilot.press("enter")
         await until(
             pilot,
             lambda: isinstance(app.result, AgentSettings),
             label="wizard result",
         )
         assert isinstance(app.result, AgentSettings)
-        assert app.result.profile == "full"
+        assert app.result.model_tier == "low"
+        assert tier_list.display is False
 
 
-async def test_explicit_small_profile_survives_a_cloud_provider() -> None:
-    """The preservation rule is symmetric: an explicit `small` is kept even
-    when the wizard would otherwise draft `full` for a cloud provider."""
+async def test_choosing_high_tier_saves_it() -> None:
     cfg = FakeConfigurator()
-    app = _Host(cfg, current_profile="small")
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#setup-model", Input).display,
+            label="model input shown",
+        )
+        await pilot.press("enter")
+        await _wait_for_tier_list(app, pilot)
+        _select(app, "#setup-tier", "high")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: isinstance(app.result, AgentSettings),
+            label="wizard result",
+        )
+        assert isinstance(app.result, AgentSettings)
+        assert app.result.model_tier == "high"
+
+
+async def test_explicit_low_tier_survives_wizard_reopen() -> None:
+    """An explicit `low` override is a deliberate choice — reopening `:ai`
+    must pre-highlight it rather than resetting to Automatic."""
+    cfg = FakeConfigurator()
+    app = _Host(cfg, current_tier="low")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#setup-model", Input).display,
+            label="model input shown",
+        )
+        await pilot.press("enter")
+        tier_list = await _wait_for_tier_list(app, pilot)
+        assert tier_list.highlighted == 1
+        assert str(tier_list.get_option_at_index(1).prompt) == "Low"
+        await pilot.press("enter")  # accept the preserved Low selection
+        await until(
+            pilot,
+            lambda: isinstance(app.result, AgentSettings),
+            label="wizard result",
+        )
+        assert isinstance(app.result, AgentSettings)
+        assert app.result.model_tier == "low"
+
+
+async def test_explicit_high_tier_survives_a_cloud_provider() -> None:
+    """The preservation rule is symmetric and provider-independent: an
+    explicit `high` override is kept for a cloud provider too."""
+    cfg = FakeConfigurator()
+    app = _Host(cfg, current_tier="high")
     async with app.run_test() as pilot:
         await pilot.pause()
         screen = app.screen
@@ -481,7 +572,23 @@ async def test_explicit_small_profile_survives_a_cloud_provider() -> None:
         screen._provider = "openai-compat"
         screen._auth_method = "api_key"
         settings = screen._draft_settings("gpt-4o-mini")
-        assert settings.profile == "small"
+        assert settings.model_tier == "high"
+
+
+async def test_cloud_provider_defaults_to_automatic_via_draft_settings() -> None:
+    """Direct `_draft_settings` access (used by :model reopen flows) must
+    never invent a `full`/`small`-style default — Automatic (None) unless
+    the wizard's tier step (or a preserved override) said otherwise."""
+    cfg = FakeConfigurator()
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, AgentSetupScreen)
+        screen._provider = "openai-compat"
+        screen._auth_method = "api_key"
+        settings = screen._draft_settings("gpt-4o-mini")
+        assert settings.model_tier is None
 
 
 class _HostWithSettings(App[None]):

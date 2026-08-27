@@ -14,6 +14,7 @@ from korvid.tools.executor import (
     READ_TOOLS,
     UI_TOOLS,
     ToolExecutor,
+    cap_result,
 )
 from korvid.tools.registry import TOOLS_BY_NAME, ToolDef
 from korvid.tools.structured import ERROR_PREFIX
@@ -41,6 +42,10 @@ def test_read_tools_schema_names() -> None:
         "diagnose_service",
         "diagnose_pvc",
     ]
+
+
+def test_tiny_result_cap_keeps_a_visible_truncation_marker() -> None:
+    assert cap_result("abcdef", limit=1) == "…"
 
 
 def test_read_tools_all_have_type_function() -> None:
@@ -726,7 +731,7 @@ async def test_write_resize_path_routes_by_write_action_not_tool_name(
         schema={"type": "function", "function": {"name": "shrink_pod", "parameters": {}}},
         effect="cluster_write",
         dispatch="agent_request_write",
-        surfaces=frozenset({"full_agent"}),
+        surfaces=frozenset({"high_agent"}),
         result_format="untrusted_text",
         approval="user_confirmation",
         write_action="resize",
@@ -751,7 +756,7 @@ async def test_write_resize_path_still_validates_resources_under_any_name(
         schema={"type": "function", "function": {"name": "shrink_pod", "parameters": {}}},
         effect="cluster_write",
         dispatch="agent_request_write",
-        surfaces=frozenset({"full_agent"}),
+        surfaces=frozenset({"high_agent"}),
         result_format="untrusted_text",
         approval="user_confirmation",
         write_action="resize",

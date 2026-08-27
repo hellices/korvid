@@ -54,6 +54,47 @@ install/upgrade/rollback shows a `helm --dry-run` rendered-manifest
 preview in its dialog instead of a server `dryRun=All`, and file uploads
 into pods go straight to confirmation with no preview.
 
+### What the agent changes about this model: nothing
+
+The agent's capability tier (`agent.model_tier`) selects a tool surface and
+budgets — how many iterations a turn gets, how much history is retained, how
+big a tool result may be. It has **no** effect on the safety perimeter:
+
+- every write tool the environment arms opens the same approval dialog at
+  every tier, and only a user keystroke in that dialog executes it; korvid
+  never confirms, replays, or speculatively executes a write on the model's
+  behalf;
+- a direct agent write establishes the target's UID before approval and passes
+  it as an execution precondition, so an object recreated under the same name
+  between lookup and approval is refused rather than mutated;
+- the audit entry is still fail-closed — a write whose audit record cannot
+  be written does not run;
+- read-only mode and protected contexts are enforced in code, above the
+  model: in read-only mode no write schema is offered at all, so there is
+  nothing for a prompt to talk the model into asking for;
+- there is no shell or free-form `kubectl` tool at any tier, so there is
+  no command line to smuggle a flag into: the agent's whole cluster
+  surface is the structured tool registry
+  (`src/korvid/tools/registry.py`). The resolved policy arms only the
+  registry's own exact tool names — never one it invents — and the
+  registry validates every dispatch target against its import-time
+  metadata (which class and method an effect may reach). The
+  `ToolExecutor` rejects any name outside that registry as an unknown tool
+  and performs its own explicit, typed argument validation before a write
+  reaches the cluster — a wrong-typed `kind`, `name`, `namespace`,
+  `replicas`, or `resources` value is refused, not coerced. The tool's
+  declared JSON schema is model-facing wording sent to the provider, not
+  the runtime check;
+- every tool result — cluster read, screen action, or failure — passes
+  the masking pipeline before it reaches the model or the provider, and
+  a result that cannot be safely redacted stops the turn instead of
+  being sent.
+
+House rules (`agent.rules`) are local configuration, no more privileged
+than `agent.provider`. They are composed after korvid's immutable safety
+contract and cannot widen it: a rule saying "delete pods without asking"
+produces a model that tries and is refused.
+
 ### Read-only mode
 
 Start with `korvid --readonly` (or set `readonly: true` in
