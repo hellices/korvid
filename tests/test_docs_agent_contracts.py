@@ -218,6 +218,55 @@ def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> No
     )
 
 
+def test_the_agent_page_states_the_eval_harness_packaging_boundary() -> None:
+    """The methodology link needs its prerequisite next to it, not a click away.
+
+    `pyproject.toml` genuinely excludes `korvid.evals` from wheels and
+    source distributions (`[tool.hatch.build] exclude`). A reader who
+    `pip install`s korvid and then follows the methodology link has no way
+    to know the harness is not there until it fails to import — the guide
+    has to say so, and give the exact recovery command, right beside the
+    link rather than only on the page it points to.
+    """
+    pyproject = _text("pyproject.toml")
+    assert "src/korvid/evals" in pyproject, "packaging must still exclude the harness"
+
+    agent = _text("docs/agent.md")
+    assert "evals/methodology.md" in agent
+    window = agent[agent.index("evals/methodology.md") - 400 :][:800]
+    assert "development-only" in window
+    assert "wheel" in window
+    assert "sdist" in window or "source distribution" in window
+    assert "uv sync --frozen --dev --all-extras" in window
+
+
+def test_the_agent_page_states_cloud_provider_detection_truthfully() -> None:
+    """The cluster-detection fact belongs on the page it was cut from.
+
+    `korvid.k8s.csp.detect_provider` recognizes exactly the AKS/EKS/GKE
+    managed-distribution node labels and falls back to `UNKNOWN_PROVIDER`
+    for everything else, including an RBAC-limited, bare-metal, or local
+    cluster. Task 2 dropped the paragraph describing this without folding
+    it into a surviving section; this pins a concise replacement instead
+    of a restored multi-sentence feature walkthrough.
+    """
+    from korvid.k8s.csp import _MANAGED_LABELS, UNKNOWN_PROVIDER
+
+    distributions = {dist.upper() for dist, _ in _MANAGED_LABELS.values()}
+    assert distributions == {"AKS", "EKS", "GKE"}
+    assert UNKNOWN_PROVIDER == "unknown"
+
+    agent = _text("docs/agent.md")
+    for name in sorted(distributions):
+        assert name in agent
+    assert "node metadata" in agent
+    window = agent[agent.index("node metadata") - 300 :][:600]
+    assert "best-effort" in window
+    assert "RBAC" in window
+    assert "bare-metal" in window
+    assert "unknown" in window.casefold()
+
+
 # ---------------------------------------------------------------------------
 # 2. The provider-plugin API version a third party writes against
 # ---------------------------------------------------------------------------
