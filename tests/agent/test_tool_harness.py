@@ -499,6 +499,25 @@ async def test_open_logs_with_non_bool_continue_analysis_is_rejected_before_brid
     assert bridge.actions == [], "bridge must not be called when arguments are invalid"
 
 
+async def test_open_logs_with_explicit_null_continue_analysis_is_rejected_before_bridge() -> None:
+    """An explicit JSON `null` is a *provided* value, not an absent key —
+    the schema requires a boolean when the key is present, so `null` must
+    be rejected the same as any other non-boolean, not silently treated
+    as the omitted-key default."""
+    bridge = _RecordingBridge()
+    harness = _harness(_policy(["open_logs"], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute(
+        "c1",
+        "open_logs",
+        {"pod": "api-1", "namespace": "default", "continue_analysis": None},
+    )
+
+    assert result.outcome.error is True
+    assert "continue_analysis" in result.outcome.text
+    assert bridge.actions == [], "bridge must not be called when arguments are invalid"
+
+
 @pytest.mark.parametrize(
     "bad_value",
     ["true", "false", "1", "0", 1, 0],
@@ -521,6 +540,25 @@ async def test_open_describe_with_non_bool_continue_analysis_is_rejected_before_
             "namespace": "default",
             "continue_analysis": bad_value,
         },
+    )
+
+    assert result.outcome.error is True
+    assert "continue_analysis" in result.outcome.text
+    assert bridge.actions == [], "bridge must not be called when arguments are invalid"
+
+
+async def test_open_describe_with_explicit_null_continue_analysis_is_rejected_before_bridge() -> (
+    None
+):
+    """Mirrors the `open_logs` explicit-`null` case: a present-but-null
+    `continue_analysis` must be rejected, not treated as an absent key."""
+    bridge = _RecordingBridge()
+    harness = _harness(_policy(["open_describe"], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute(
+        "c1",
+        "open_describe",
+        {"kind": "pods", "name": "api-1", "namespace": "default", "continue_analysis": None},
     )
 
     assert result.outcome.error is True

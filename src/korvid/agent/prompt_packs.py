@@ -111,9 +111,10 @@ LOW_KORVID_OPERATOR_PACK: Final[str] = (
     "call the tool and let the result speak. When opening a UI pane, pass "
     "continue_analysis: true only if the user also asked for analysis after "
     "the display; omit it or set it false for display-only requests, and stop "
-    "after the open_* call. Limit every final answer to root cause, evidence, "
-    "and the next operation the user or agent should take — no generic advice, "
-    "no restating what you already showed, no filler text."
+    "after the open_* call. Limit every final answer to at most three short "
+    "bullets — root cause, decisive evidence, and the next operation the user "
+    "or agent should take — no generic advice, no restating what you already "
+    "showed, no filler text."
 )
 
 #: Layer 3, high tier (design doc §6): broader diagnostic/TUI-navigation

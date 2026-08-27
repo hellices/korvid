@@ -152,12 +152,44 @@ def test_low_agent_surface_offers_two_ui_tools() -> None:
 def test_mcp_surface_is_read_plus_ui_drive() -> None:
     from korvid.tools.executor import READ_TOOLS, UI_TOOLS
 
-    assert mcp_tool_schemas() == READ_TOOLS + UI_TOOLS
+    mcp_schemas = mcp_tool_schemas()
+    assert _names(mcp_schemas) == _names(READ_TOOLS) + _names(UI_TOOLS)
+    # `continue_analysis` is agent-only (issue #320): project it out for the
+    # MCP surface rather than diverging the schema list wholesale.
+    agent_only = {"open_logs", "open_describe"}
+    for agent_tool, mcp_tool in zip(UI_TOOLS, mcp_schemas[len(READ_TOOLS) :], strict=True):
+        if agent_tool["function"]["name"] in agent_only:
+            continue
+        assert agent_tool == mcp_tool
 
 
 def test_unknown_surface_rejected() -> None:
     with pytest.raises(ValueError, match="unknown surface"):
         agent_tool_schemas("mcp", readonly=False, resize_supported=False)
+
+
+# --- agent-only schema properties (issue #320: MCP surface projection) --
+
+
+@pytest.mark.parametrize("tool_name", ["open_logs", "open_describe"])
+def test_continue_analysis_is_agent_only_on_the_mcp_surface(tool_name: str) -> None:
+    """`continue_analysis` only affects the native engine's terminal fast
+    path; MCP has no such path, so the MCP schema must not advertise a
+    no-op argument."""
+    schemas = {s["function"]["name"]: s for s in mcp_tool_schemas()}
+    properties = schemas[tool_name]["function"]["parameters"]["properties"]
+    assert "continue_analysis" not in properties
+
+
+@pytest.mark.parametrize("surface", ["high_agent", "low_agent"])
+@pytest.mark.parametrize("tool_name", ["open_logs", "open_describe"])
+def test_continue_analysis_is_preserved_on_agent_surfaces(tool_name: str, surface: str) -> None:
+    schemas = {
+        s["function"]["name"]: s
+        for s in agent_tool_schemas(surface, readonly=True, resize_supported=False)
+    }
+    properties = schemas[tool_name]["function"]["parameters"]["properties"]
+    assert "continue_analysis" in properties
 
 
 # --- validation of malformed definitions --------------------------------

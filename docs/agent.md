@@ -232,7 +232,7 @@ agent:
     seed: 42          # reproducible sampling (omitted when unset)
     think: false      # reasoning tokens off; enable for R1-style models
     keep_alive: 10m   # keep the model warm between turns ("10m" or seconds)
-    num_predict: 192  # cap generation tokens (not reasoning); omit to let Ollama decide
+    num_predict: 192  # cap total generated tokens (thinking/reasoning tokens count too); omit to let Ollama decide
 ```
 
 To keep using the OpenAI-compatibility shim instead, set

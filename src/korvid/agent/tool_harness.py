@@ -514,15 +514,18 @@ def _optional_str(arguments: dict[str, Any], key: str) -> str | None:
 
 
 def _optional_bool(arguments: dict[str, Any], key: str) -> bool | None:
-    """An optional boolean argument: absent/None is None; non-bool is refused.
+    """An optional boolean argument: an absent key is None; any *provided*
+    value (including an explicit JSON `null`) must be a JSON boolean.
 
-    Strings like `"true"` and integers like `1` are refused because they
-    indicate a misbehaving model that coerced the value from a schema that
-    declares the field as a JSON boolean.
+    An absent key and an explicit `null` are not the same thing: the
+    schema promises a boolean when the argument is present at all, so a
+    model that sends `"continue_analysis": null` has provided a value —
+    just not a valid one — and must be rejected the same as `"true"` or
+    `1`, rather than silently falling back to the omitted-key default.
     """
-    value = arguments.get(key)
-    if value is None:
+    if key not in arguments:
         return None
+    value = arguments[key]
     if not isinstance(value, bool):
         raise ValueError(
             f"{key!r} must be a JSON boolean (true/false) when provided,"

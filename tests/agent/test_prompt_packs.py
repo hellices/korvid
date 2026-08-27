@@ -210,6 +210,17 @@ def test_the_low_tier_dispatches_tools_immediately_without_narrating_a_plan() ->
     assert "next operation" in pack.casefold()
 
 
+def test_the_low_tier_caps_the_final_answer_at_three_short_bullets() -> None:
+    """The design doc requires "at most three short bullets" (root cause,
+    decisive evidence, next operation) — an output-latency bound on a small
+    serving context, not just a topic list. A clause that only constrains
+    *which* topics may appear still permits long prose per topic, so this
+    must name both the bullet form and the exact count."""
+    pack = LOW_KORVID_OPERATOR_PACK
+    assert re.search(r"at most three|no more than three|three short bullets", pack, re.IGNORECASE)
+    assert "bullet" in pack.casefold()
+
+
 def test_the_safety_contract_is_unchanged_by_the_low_rules() -> None:
     """Behavioural grinding never widens what a tier is permitted to do."""
     assert "Only a user keystroke can approve a write" in SAFETY_CONTRACT

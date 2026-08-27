@@ -86,6 +86,13 @@ class ToolDef:
     #: Action keyword passed to ``UIBridge.agent_request_write``; required
     #: for (and only valid on) cluster writes.
     write_action: str | None = None
+    #: Schema property names that are agent-only (issue #320): meaningful
+    #: to the native engine (e.g. `continue_analysis`'s terminal fast
+    #: path) but a no-op for the MCP adapter, which has no such path. The
+    #: MCP surface projection strips these instead of forking a second
+    #: ToolDef, so the agent and MCP schemas cannot silently diverge on
+    #: everything else.
+    mcp_omit_properties: frozenset[str] = frozenset()
 
 
 def validate_tool_defs(defs: list[ToolDef]) -> None:
@@ -113,6 +120,23 @@ def _validate_one(d: ToolDef) -> None:
         raise ValueError(f"tool {d.name!r} has no dispatch target")
     _validate_enums(d)
     _validate_write_policy(d)
+    _validate_mcp_omit_properties(d)
+
+
+def _validate_mcp_omit_properties(d: ToolDef) -> None:
+    if not d.mcp_omit_properties:
+        return
+    if "mcp" not in d.surfaces:
+        raise ValueError(
+            f"tool {d.name!r}: mcp_omit_properties is set but {d.name!r} is not "
+            f"on the mcp surface at all"
+        )
+    properties = d.schema.get("function", {}).get("parameters", {}).get("properties", {})
+    unknown = d.mcp_omit_properties - set(properties)
+    if unknown:
+        raise ValueError(
+            f"tool {d.name!r}: mcp_omit_properties names {sorted(unknown)} not in schema"
+        )
 
 
 def _validate_enums(d: ToolDef) -> None:
@@ -372,6 +396,29 @@ def agent_tool_schemas(
     return schemas
 
 
+def _project_schema(schema: dict[str, Any], *, omit_properties: frozenset[str]) -> dict[str, Any]:
+    """A deep-copied schema with `omit_properties` stripped for a narrower surface.
+
+    The single place a surface projects a tool's schema down (issue #320):
+    a property meaningful only to the agent-facing surface (e.g.
+    `continue_analysis`, which drives the native engine's terminal fast
+    path and is a no-op for MCP) is removed here instead of forking a
+    second `ToolDef` that could drift from the agent schema over time.
+    """
+    projected = copy.deepcopy(schema)
+    if not omit_properties:
+        return projected
+    parameters = projected.get("function", {}).get("parameters", {})
+    properties = parameters.get("properties")
+    if isinstance(properties, dict):
+        for name in omit_properties:
+            properties.pop(name, None)
+    required = parameters.get("required")
+    if isinstance(required, list):
+        parameters["required"] = [name for name in required if name not in omit_properties]
+    return projected
+
+
 def mcp_tool_schemas(
     *,
     write_proposals: bool = False,
@@ -386,13 +433,14 @@ def mcp_tool_schemas(
     themselves, they queue an immutable proposal for TUI review.
     External reads (issue #193) appear only for the backends this session
     configured. Returns deep copies so a caller mutating a schema cannot
-    corrupt the registry (issue #97).
+    corrupt the registry (issue #97); any `mcp_omit_properties` declared
+    on the `ToolDef` (issue #320) is projected out of that copy.
     """
     surfaces: set[Surface] = {"mcp"}
     if write_proposals:
         surfaces.add("mcp_proposal")
     return [
-        copy.deepcopy(d.schema)
+        _project_schema(d.schema, omit_properties=d.mcp_omit_properties)
         for d in TOOL_DEFS
         if d.surfaces & surfaces
         and _capability_available(
@@ -957,6 +1005,7 @@ TOOL_DEFS: list[ToolDef] = [
         dispatch="agent_open_logs",
         surfaces=_ALL_SURFACES,
         result_format="untrusted_text",
+        mcp_omit_properties=frozenset({"continue_analysis"}),
         schema={
             "type": "function",
             "function": {
@@ -996,6 +1045,7 @@ TOOL_DEFS: list[ToolDef] = [
         dispatch="agent_open_describe",
         surfaces=_ALL_SURFACES,
         result_format="untrusted_text",
+        mcp_omit_properties=frozenset({"continue_analysis"}),
         schema={
             "type": "function",
             "function": {

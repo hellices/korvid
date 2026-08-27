@@ -392,7 +392,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_ollama_seed=_parse_seed(ollama_raw.get("seed")),
         agent_ollama_think=ollama_raw.get("think") is True,
         agent_ollama_keep_alive=_parse_keep_alive(ollama_raw.get("keep_alive")),
-        agent_ollama_num_predict=_parse_positive_int(ollama_raw.get("num_predict")),
+        agent_ollama_num_predict=_parse_num_predict(ollama_raw.get("num_predict"), warnings),
         keybindings=dict(raw.get("keybindings") or {}),
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
         log_wrap=logs_raw.get("wrap") is True,
@@ -849,7 +849,13 @@ def _parse_num_ctx(value: Any) -> int:
 
 
 def _parse_positive_int(value: Any) -> int | None:
-    """Coerce a value to a positive int, or None."""
+    """Coerce a value to a positive int, or None.
+
+    Permissive on purpose (existing `num_ctx`/legacy compatibility): a
+    numeric string or a value `int()` can otherwise accept is coerced
+    rather than rejected. `num_predict` does *not* use this — see
+    `_parse_num_predict` for that stricter contract.
+    """
     if isinstance(value, bool):  # YAML `true` would silently become 1
         return None
     try:
@@ -857,6 +863,27 @@ def _parse_positive_int(value: Any) -> int | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _parse_num_predict(value: Any, warnings: list[str]) -> int | None:
+    """Coerce `agent.ollama.num_predict` to a strictly positive `int`, or None.
+
+    Unlike `_parse_positive_int` (kept for `num_ctx`'s existing permissive
+    compatibility), this rejects anything that is not *already* an actual
+    positive `int`: a `bool` (a stealth `int` subclass), a `float` (even
+    one that looks integral, like `2.0`, or truncates cleanly, like
+    `1.9`), a numeric string, and any non-positive integer. An absent
+    value is silently `None` — the provider then omits the option. A
+    *provided* invalid value both resolves to `None` and appends a
+    startup config warning, so a typo is surfaced instead of silently
+    capping (or not capping) generation.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        warnings.append("agent.ollama.num_predict: must be a positive integer — ignoring the value")
+        return None
+    return value
 
 
 def _parse_seed(value: Any) -> int | None:
