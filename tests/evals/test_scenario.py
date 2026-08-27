@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from korvid.evals.scenario import Scenario, load_scenario, load_scenarios
+from korvid.evals.scenario import (
+    Scenario,
+    case_pack_identity,
+    load_scenario,
+    load_scenarios,
+    select_scenarios,
+)
 
 _MINIMAL = """\
 id: oom-killed
@@ -335,3 +341,109 @@ def test_load_scenario_reads_the_selected_resource_identity(tmp_path: Path) -> N
         "checkout-1",
         "pod-1",
     )
+
+
+# --- exact scenario selection + deterministic case-pack identity -----------
+#
+# The external-optimizer protocol needs to name one scenario, or a fixed
+# named set, and run exactly that every time — without copying fixture
+# files into a scratch directory just to change which ones load — and to
+# publish an identity for the exact set it measured against that a
+# consumer can compare across runs.
+
+_SECOND = _MINIMAL.replace("id: oom-killed", "id: crashloop-app-panic").replace(
+    "root_cause: oom_killed", "root_cause: crashloop"
+)
+
+
+def _two_scenarios(tmp_path: Path) -> list[Scenario]:
+    _write(tmp_path, _MINIMAL, "a.yaml")
+    _write(tmp_path, _SECOND, "b.yaml")
+    return load_scenarios(tmp_path)
+
+
+def test_select_scenarios_returns_the_named_subset_sorted_by_id(tmp_path: Path) -> None:
+    scenarios = _two_scenarios(tmp_path)
+    selected = select_scenarios(scenarios, ["crashloop-app-panic", "oom-killed"])
+    assert [s.id for s in selected] == ["crashloop-app-panic", "oom-killed"]
+
+
+def test_select_scenarios_result_does_not_depend_on_request_order(tmp_path: Path) -> None:
+    scenarios = _two_scenarios(tmp_path)
+    forward = select_scenarios(scenarios, ["oom-killed", "crashloop-app-panic"])
+    backward = select_scenarios(scenarios, ["crashloop-app-panic", "oom-killed"])
+    assert [s.id for s in forward] == [s.id for s in backward]
+
+
+def test_select_scenarios_rejects_an_empty_selection(tmp_path: Path) -> None:
+    scenarios = _two_scenarios(tmp_path)
+    with pytest.raises(ValueError, match="at least one scenario id"):
+        select_scenarios(scenarios, [])
+
+
+def test_select_scenarios_rejects_a_blank_id(tmp_path: Path) -> None:
+    scenarios = _two_scenarios(tmp_path)
+    with pytest.raises(ValueError, match="non-empty strings"):
+        select_scenarios(scenarios, ["oom-killed", "   "])
+
+
+def test_select_scenarios_rejects_a_duplicate_id(tmp_path: Path) -> None:
+    scenarios = _two_scenarios(tmp_path)
+    with pytest.raises(ValueError, match="duplicate scenario id"):
+        select_scenarios(scenarios, ["oom-killed", "oom-killed"])
+
+
+def test_select_scenarios_rejects_an_unknown_id(tmp_path: Path) -> None:
+    scenarios = _two_scenarios(tmp_path)
+    with pytest.raises(ValueError, match="unknown scenario id"):
+        select_scenarios(scenarios, ["nonexistent-scenario"])
+
+
+def test_case_pack_identity_is_deterministic_regardless_of_input_order(tmp_path: Path) -> None:
+    scenarios = _two_scenarios(tmp_path)
+    forward = case_pack_identity(scenarios)
+    reversed_input = case_pack_identity(list(reversed(scenarios)))
+    assert forward == reversed_input
+    assert forward["scenario_ids"] == ["crashloop-app-panic", "oom-killed"]
+    assert forward["count"] == 2
+    assert len(forward["sha256"]) == 64
+
+
+def test_case_pack_identity_is_unaffected_by_the_loading_directory_or_file_name(
+    tmp_path: Path,
+) -> None:
+    """The hash is derived from scenario content, not paths or mtimes: the
+    same fixture text loaded from a different directory and file name must
+    still produce the same identity."""
+    scenarios = _two_scenarios(tmp_path)
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+    _write(other_dir, _MINIMAL, "x.yaml")
+    _write(other_dir, _SECOND, "y.yaml")
+    same_scenarios = load_scenarios(other_dir)
+    assert case_pack_identity(scenarios) == case_pack_identity(same_scenarios)
+
+
+def test_case_pack_identity_changes_when_scenario_content_changes(tmp_path: Path) -> None:
+    baseline = case_pack_identity(_two_scenarios(tmp_path))
+    mutated_dir = tmp_path / "mutated"
+    mutated_dir.mkdir()
+    changed_question = _MINIMAL.replace(
+        "question: Why does the checkout pod keep dying?",
+        "question: Why is checkout crash-looping?",
+    )
+    _write(mutated_dir, changed_question, "a.yaml")
+    _write(mutated_dir, _SECOND, "b.yaml")
+    mutated = case_pack_identity(load_scenarios(mutated_dir))
+    assert mutated["scenario_ids"] == baseline["scenario_ids"]
+    assert mutated["sha256"] != baseline["sha256"]
+
+
+def test_case_pack_identity_reflects_a_selected_subset(tmp_path: Path) -> None:
+    scenarios = _two_scenarios(tmp_path)
+    selected = select_scenarios(scenarios, ["oom-killed"])
+    identity = case_pack_identity(selected)
+    full = case_pack_identity(scenarios)
+    assert identity["scenario_ids"] == ["oom-killed"]
+    assert identity["count"] == 1
+    assert identity["sha256"] != full["sha256"]

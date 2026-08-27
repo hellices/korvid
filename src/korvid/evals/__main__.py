@@ -23,9 +23,9 @@ import json
 import math
 import os
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from korvid.agent.model_policy import ResolvedAgentPolicy
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
@@ -47,12 +47,27 @@ from korvid.evals.runner import (
     render_markdown,
     run_scenario,
 )
-from korvid.evals.scenario import Scenario, bundled_scenarios_dir, load_scenarios
+from korvid.evals.scenario import (
+    Scenario,
+    bundled_scenarios_dir,
+    case_pack_identity,
+    load_scenarios,
+    select_scenarios,
+)
 from korvid.evals.serving import ProbeResult, ollama_root, serving_metadata
 from korvid.providers.ollama import OllamaProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
 from korvid.providers.static_creds import StaticHeaderSource
 from korvid.tools.executor import ToolExecutor
+
+#: Version of the machine-readable JSON contract this module publishes
+#: under `meta.protocol_version`, independent of the package's own
+#: `pyproject.toml` version. An external optimizer pins against this
+#: number, not against a korvid release, so it can detect a breaking
+#: contract change (a field removed or its meaning changed) even across
+#: otherwise-compatible korvid releases. Bump on any breaking change to an
+#: existing field; a purely additive field does not require a bump.
+EVAL_PROTOCOL_VERSION: Final[str] = "1.0"
 
 
 def provider_factory_from_env(env: Mapping[str, str]) -> Callable[[], Any]:
@@ -367,17 +382,29 @@ def run_payload(
     grind: PromptGrind = NO_GRIND,
     serving: dict[str, Any] | None = None,
     omitted_tools: list[str] | None = None,
+    scenarios: Sequence[Scenario] | None = None,
 ) -> dict[str, Any]:
     """The full JSON artifact: run metadata plus per-scenario results.
 
+    This is the external-optimizer contract (see `docs/evals/protocol.md`):
+    `meta.protocol_version` is published unconditionally so a consumer can
+    detect a breaking change before parsing the rest of the document.
+
     `serving` is omitted when it was not captured, so an artifact written
     before #235 stays distinguishable from one whose probe returned
-    nothing.
+    nothing. `scenarios` is likewise optional: passing it publishes
+    `meta.case_pack`, the deterministic identity of the exact scenario
+    definitions this run measured against; omitting it (as any caller
+    written before this contract existed still does) leaves `meta` exactly
+    as it was, so an old artifact and a new one that never selected a
+    subset stay byte-for-byte comparable except for the added
+    `protocol_version` key.
     """
     # De-duplicated: the flag is repeatable, and naming a tool twice still
     # removed one tool.
     omitted = sorted(set(omitted_tools or []))
     meta: dict[str, Any] = {
+        "protocol_version": EVAL_PROTOCOL_VERSION,
         "policy": policy_payload(policy),
         "limits": limits_payload(policy),
         "capabilities": capabilities_payload(policy),
@@ -389,6 +416,8 @@ def run_payload(
     }
     if serving is not None:
         meta["serving"] = serving
+    if scenarios is not None:
+        meta["case_pack"] = case_pack_identity(scenarios)
     return {"meta": meta, "scenarios": report_payload(reports)}
 
 
@@ -409,6 +438,21 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=Path,
         default=bundled_scenarios_dir(),
         help="directory of scenario YAML files (default: bundled pack)",
+    )
+    parser.add_argument(
+        "--scenario-id",
+        action="append",
+        default=[],
+        metavar="ID",
+        dest="scenario_id",
+        help=(
+            "run only this scenario id, repeatable, for an exact and "
+            "repeatable case pack without copying fixture files into a "
+            "separate directory. An id --scenarios does not contain, an "
+            "empty id, or a repeated id is refused rather than silently "
+            "narrowed or widened. Omit to run every scenario in "
+            "--scenarios (unchanged default behavior)"
+        ),
     )
     parser.add_argument(
         "--reps",
@@ -600,6 +644,18 @@ def _resolve_policy(
     return ground_eval_policy(policy, grind)
 
 
+def _select_scenarios(scenarios: list[Scenario], scenario_ids: list[str]) -> list[Scenario]:
+    """Apply `--scenario-id`, if given, turning a bad selection into an exit
+    message instead of a traceback; an omitted flag returns `scenarios`
+    unchanged, which is the pre-existing, unselected behavior."""
+    if not scenario_ids:
+        return scenarios
+    try:
+        return select_scenarios(scenarios, scenario_ids)
+    except ValueError as exc:
+        raise SystemExit(f"--scenario-id: {exc}") from exc
+
+
 def _read_prompt_file(path: Path | None, flag: str) -> str | None:
     if path is None:
         return None
@@ -624,6 +680,7 @@ def main(argv: list[str] | None = None) -> int:
     scenarios = load_scenarios(args.scenarios)
     if not scenarios:
         raise SystemExit(f"no scenario YAML files found in {args.scenarios}")
+    scenarios = _select_scenarios(scenarios, args.scenario_id)
     grind = _prompt_grind(args)
     policy = _resolve_policy(provider_factory, args, grind)
     serving = asyncio.run(
@@ -658,6 +715,7 @@ def main(argv: list[str] | None = None) -> int:
             grind=grind,
             serving=serving,
             omitted_tools=args.without_tool,
+            scenarios=scenarios,
         )
         args.json.write_text(json.dumps(payload, indent=2) + "\n")
     return exit_code(reports)

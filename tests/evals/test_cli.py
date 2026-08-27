@@ -16,10 +16,12 @@ import pytest
 
 from korvid.agent import prompt_harness, prompt_packs
 from korvid.evals.__main__ import (
+    EVAL_PROTOCOL_VERSION,
     _parse_args,
     _positive_int,
     _prompt_grind,
     _resolve_policy,
+    _select_scenarios,
     capture_serving,
     exit_code,
     probe_serving,
@@ -33,6 +35,7 @@ from korvid.evals.__main__ import (
 from korvid.evals.grader import CitationReport, GradeResult, citation_report
 from korvid.evals.harness import PromptGrind, resolve_eval_policy
 from korvid.evals.runner import RunMetrics, ScenarioReport
+from korvid.evals.scenario import Evidence, Scenario
 from korvid.evals.scripted import ScriptedProvider
 from korvid.evals.serving import ProbeResult, serving_metadata
 from korvid.providers.ollama import OllamaProvider
@@ -458,6 +461,93 @@ def test_run_payload_records_the_serving_block_when_captured() -> None:
     payload = run_payload([_report()], policy=_policy(), serving=serving)
     assert payload["meta"]["serving"]["engine"] == {"name": "ollama", "version": "0.5.1"}
     json.dumps(payload)
+
+
+# --- machine protocol: version, exact selection, case-pack identity --------
+#
+# The stable, versioned surface external prompt optimizers parse. Backward
+# compatibility means: an old caller that never passes `scenarios=` and
+# never sets `--scenario-id` gets the same `meta` shape it always did, plus
+# the new `protocol_version` key.
+
+
+def _scenario(scenario_id: str, question: str = "Why does it fail?") -> Scenario:
+    return Scenario(
+        id=scenario_id,
+        question=question,
+        interaction=EVAL_INTERACTION,
+        root_cause="oom_killed",
+        must_mention=(("oomkilled", "oom"),),
+        expected_evidence=(
+            (Evidence(tool="diagnose_pod", contains="exit=137", args={"pod": "checkout-1"}),),
+        ),
+    )
+
+
+def test_protocol_version_is_a_stable_published_constant() -> None:
+    """A version bump is a deliberate, reviewable act: the constant is a
+    plain literal, not derived from the package version, so an external
+    optimizer's pin survives an unrelated korvid release."""
+    assert isinstance(EVAL_PROTOCOL_VERSION, str)
+    assert EVAL_PROTOCOL_VERSION
+
+
+def test_run_payload_always_publishes_the_protocol_version() -> None:
+    payload = run_payload([_report()], policy=_policy())
+    assert payload["meta"]["protocol_version"] == EVAL_PROTOCOL_VERSION
+
+
+def test_run_payload_omits_case_pack_when_scenarios_is_not_given() -> None:
+    """Backward compatibility: a caller that predates this contract (and
+    every caller that never selects a subset) gets the exact previous
+    `meta` shape, aside from the always-published protocol version."""
+    payload = run_payload([_report()], policy=_policy())
+    assert "case_pack" not in payload["meta"]
+
+
+def test_run_payload_publishes_the_case_pack_identity_when_scenarios_is_given() -> None:
+    scenarios = [_scenario("oom-killed"), _scenario("crashloop-app-panic")]
+    payload = run_payload([_report()], policy=_policy(), scenarios=scenarios)
+    case_pack = payload["meta"]["case_pack"]
+    assert case_pack["scenario_ids"] == ["crashloop-app-panic", "oom-killed"]
+    assert case_pack["count"] == 2
+    assert len(case_pack["sha256"]) == 64
+    json.dumps(payload)
+
+
+def test_scenario_id_flag_defaults_to_empty_and_is_repeatable() -> None:
+    assert _parse_args([]).scenario_id == []
+    args = _parse_args(["--scenario-id", "oom-killed", "--scenario-id", "crashloop-app-panic"])
+    assert args.scenario_id == ["oom-killed", "crashloop-app-panic"]
+
+
+def test_select_scenarios_helper_returns_all_scenarios_when_the_flag_is_omitted() -> None:
+    scenarios = [_scenario("oom-killed"), _scenario("crashloop-app-panic")]
+    assert _select_scenarios(scenarios, []) is scenarios
+
+
+def test_select_scenarios_helper_narrows_to_the_named_ids() -> None:
+    scenarios = [_scenario("oom-killed"), _scenario("crashloop-app-panic")]
+    selected = _select_scenarios(scenarios, ["oom-killed"])
+    assert [s.id for s in selected] == ["oom-killed"]
+
+
+def test_select_scenarios_helper_exits_on_an_unknown_id() -> None:
+    scenarios = [_scenario("oom-killed")]
+    with pytest.raises(SystemExit, match="unknown scenario id"):
+        _select_scenarios(scenarios, ["not-a-real-scenario"])
+
+
+def test_select_scenarios_helper_exits_on_a_duplicate_id() -> None:
+    scenarios = [_scenario("oom-killed"), _scenario("crashloop-app-panic")]
+    with pytest.raises(SystemExit, match="duplicate scenario id"):
+        _select_scenarios(scenarios, ["oom-killed", "oom-killed"])
+
+
+def test_select_scenarios_helper_exits_on_a_blank_id() -> None:
+    scenarios = [_scenario("oom-killed")]
+    with pytest.raises(SystemExit, match="non-empty strings"):
+        _select_scenarios(scenarios, [" "])
 
 
 def test_probe_serving_collects_version_show_and_tags() -> None:

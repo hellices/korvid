@@ -9,7 +9,10 @@ take any diagnostic path while the ground truth stays fixed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,7 +21,7 @@ from typing import Any
 import yaml
 
 from korvid.agent.interaction import InteractionContext
-from korvid.evals.interaction import load_interaction
+from korvid.evals.interaction import interaction_payload, load_interaction
 
 #: The instant scenario fixture timestamps are authored against. Every
 #: fixture timestamp must be at or before this instant — the fake cluster
@@ -294,3 +297,117 @@ def load_scenarios(directory: Path) -> list[Scenario]:
             raise ValueError(f"duplicate scenario id {scenario.id!r}")
         seen.add(scenario.id)
     return sorted(scenarios, key=lambda s: s.id)
+
+
+def select_scenarios(scenarios: Sequence[Scenario], scenario_ids: Sequence[str]) -> list[Scenario]:
+    """Select an exact, repeatable subset of already-loaded scenarios by id.
+
+    This is the machine-protocol counterpart to an external optimizer that
+    wants one named scenario, or a fixed named set, run every time — without
+    resorting to copying fixture files into a scratch directory just to
+    change which of them load. Selection operates purely in memory over
+    `scenarios`, whatever directory produced them.
+
+    Fail-closed, deliberately stricter than a filter: an empty selection, a
+    duplicate id, or an id absent from `scenarios` all raise rather than
+    silently running zero scenarios, running one twice, or dropping the
+    unknown name. A caller that mistypes an id must see an error, not a
+    quietly smaller (or larger) case pack than it asked for.
+
+    Args:
+        scenarios: Already-loaded scenarios, e.g. from `load_scenarios`.
+        scenario_ids: The exact ids to run, in any order; the result is
+            still sorted by id, matching `load_scenarios`' own order so a
+            selection is never distinguishable from a differently-ordered
+            request for the same ids.
+
+    Returns:
+        The matching scenarios, sorted by id.
+
+    Raises:
+        ValueError: the selection is empty, names an id `scenarios` does
+            not contain, or repeats an id.
+    """
+    ids = list(scenario_ids)
+    if not ids:
+        raise ValueError("scenario selection must name at least one scenario id")
+    blank = [raw for raw in ids if not isinstance(raw, str) or not raw.strip()]
+    if blank:
+        raise ValueError("scenario selection ids must be non-empty strings")
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for scenario_id in ids:
+        if scenario_id in seen:
+            duplicates.add(scenario_id)
+        seen.add(scenario_id)
+    if duplicates:
+        raise ValueError(f"duplicate scenario id(s) in selection: {sorted(duplicates)}")
+    by_id = {scenario.id: scenario for scenario in scenarios}
+    unknown = sorted(set(ids) - by_id.keys())
+    if unknown:
+        known = sorted(by_id)
+        raise ValueError(f"unknown scenario id(s): {unknown}; known ids: {known}")
+    return sorted((by_id[scenario_id] for scenario_id in ids), key=lambda s: s.id)
+
+
+def _evidence_content(evidence: Evidence) -> dict[str, Any]:
+    return {"tool": evidence.tool, "contains": evidence.contains, "args": dict(evidence.args)}
+
+
+def _scenario_content(scenario: Scenario) -> dict[str, Any]:
+    """A deep, JSON-safe view of everything that defines a scenario's behavior.
+
+    Used only to derive the case-pack content hash. Every field that a
+    grader or the agent can observe is included — fixtures, grading, and
+    the starting interaction — so the hash changes whenever any of them
+    changes, not just when the id does. Nothing here is a file path or a
+    filesystem timestamp: two scenarios with identical content hash
+    identically no matter which directory or mtime produced them.
+    """
+    return {
+        "id": scenario.id,
+        "question": scenario.question,
+        "interaction": interaction_payload(scenario.interaction),
+        "root_cause": scenario.root_cause,
+        "must_mention": [list(group) for group in scenario.must_mention],
+        "must_not_mention": [list(group) for group in scenario.must_not_mention],
+        "expected_evidence": [
+            [_evidence_content(evidence) for evidence in group]
+            for group in scenario.expected_evidence
+        ],
+        "objects": [dict(obj) for obj in scenario.objects],
+        "events": [dict(event) for event in scenario.events],
+        "logs": {
+            key: {"current": list(logs.current), "previous": list(logs.previous)}
+            for key, logs in scenario.logs.items()
+        },
+        "forbidden": [dict(entry) for entry in scenario.forbidden],
+    }
+
+
+def case_pack_identity(scenarios: Sequence[Scenario]) -> dict[str, Any]:
+    """Deterministic identity for an exact set of loaded scenario definitions.
+
+    Published so an external optimizer can confirm which case pack a run
+    actually measured against without trusting a directory path or file
+    mtimes (which say nothing once fixtures are packaged, mirrored, or
+    checked out fresh). `scenario_ids` is sorted so the identity does not
+    depend on selection or filesystem enumeration order; `sha256` is a
+    digest of the scenarios' own content (question, interaction, grading,
+    and cluster fixtures), so it is identical for two runs that loaded the
+    same definitions and changes whenever any of them do.
+
+    Args:
+        scenarios: The exact scenarios the run loaded (the full bundled
+            pack, a custom directory, or a `select_scenarios` subset).
+
+    Returns:
+        A mapping with `scenario_ids` (sorted), `count`, and `sha256`.
+    """
+    ordered = sorted(scenarios, key=lambda s: s.id)
+    ids = [scenario.id for scenario in ordered]
+    content = [_scenario_content(scenario) for scenario in ordered]
+    digest = hashlib.sha256(
+        json.dumps(content, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return {"scenario_ids": ids, "count": len(ids), "sha256": digest}

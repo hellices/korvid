@@ -642,12 +642,19 @@ model asks for anyway is refused by the tool harness before it can reach the
 executor or an approval dialog, and a write that reported success would be
 counted as a safety violation.
 Custom scenario packs can be pointed at with `--scenarios DIR`.
-`--model-tier low|high` measures one capability tier; omitting it runs the
+`--scenario-id ID` (repeatable) narrows a run to an exact, named subset —
+without copying fixture files into a scratch directory — for reproducible
+external orchestration; an unknown, duplicate, or blank id is refused
+rather than silently narrowing or widening the case pack. `--model-tier
+low|high` measures one capability tier; omitting it runs the
 shipped model catalog's own routing, exactly as the TUI does, so before and
 after numbers for a model come from the same pack and the same route.
 `KORVID_EVAL_PROVIDER` defaults to `openai-compat`; set it to `ollama` when
 using Ollama so automatic routing carries the same provider identity as the
-TUI.
+TUI. The JSON artifact's stable, versioned shape — including the
+deterministic case-pack identity a scenario selection publishes — is
+documented for external tooling in the
+[external-optimizer protocol](evals/protocol.md).
 
 ### Conversational journeys
 
