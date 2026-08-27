@@ -424,10 +424,11 @@ def test_exclude_docs_rejects_patterns_the_walk_cannot_resolve() -> None:
 
 def test_published_sources_match_the_committed_exclude_docs_block() -> None:
     """The real config must keep producing the published set the walk asserts on."""
-    assert _excluded_prefixes() == ("overrides", "dev/plans", "superpowers")
+    assert _excluded_prefixes() == ("overrides", "dev/plans", "dev/quality-gates.md", "superpowers")
     published = {path.relative_to(DOCS).as_posix() for path in _public_markdown_sources()}
     assert "index.md" in published
     assert "tui.md" in published
+    assert "dev/quality-gates.md" not in published
     assert not any(
         page.startswith(("overrides/", "dev/plans/", "superpowers/")) for page in published
     )
@@ -453,3 +454,14 @@ def test_dev_readme_does_not_link_missing_directory_indexes() -> None:
     assert "](../index.md)" in dev_readme
     assert "https://github.com/hellices/korvid/tree/main/docs/dev/specs" in dev_readme
     assert "https://github.com/hellices/korvid/tree/main/docs/dev/plans" in dev_readme
+
+
+def test_contributor_page_links_to_quality_gates_in_the_repository() -> None:
+    """`quality-gates.md` is excluded from the site, so link to it on GitHub instead.
+
+    A local `](quality-gates.md)` link resolves to a page MkDocs never
+    builds, producing a dead link on the published site.
+    """
+    source = (DOCS / "dev" / "README.md").read_text(encoding="utf-8")
+    assert "https://github.com/hellices/korvid/blob/main/docs/dev/quality-gates.md" in source
+    assert "](quality-gates.md)" not in source

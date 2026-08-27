@@ -13,6 +13,7 @@ use_directory_urls: true
 exclude_docs: |
   overrides/
   dev/plans/
+  dev/quality-gates.md
   superpowers/
 
 theme:
@@ -58,7 +59,6 @@ nav:
   - Project:
       - Architecture: dev/specs/2026-08-12-korvid-architecture.md
       - Contributor docs: dev/README.md
-      - Quality gates: dev/quality-gates.md
       - Release notes:
           - Unreleased: release-notes/unreleased.md
           - v0.3.0: release-notes/v0.3.0.md

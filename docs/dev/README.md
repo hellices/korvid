@@ -17,7 +17,7 @@ design document states the original intent.
 - [`plans/`](https://github.com/hellices/korvid/tree/main/docs/dev/plans) — dated implementation plans for individual phases
   and slices. Historical once executed; kept for traceability, not
   updated retroactively.
-- [`quality-gates.md`](quality-gates.md) — which checks run locally, in CI,
+- [`quality-gates.md`](https://github.com/hellices/korvid/blob/main/docs/dev/quality-gates.md) — which checks run locally, in CI,
   and at release, and why each is placed where it is. Read this before
   adding a check anywhere.
 - [`contract-tests.md`](contract-tests.md) — the live-cluster contract

@@ -17,6 +17,7 @@ Homebrew guidance without reaching out to PyPI or the tap during tests.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import tomllib
 from collections.abc import Callable
@@ -514,3 +515,17 @@ def test_mkdocs_excludes_repository_only_history_from_site_search() -> None:
     excluded_paths = {line.strip().rstrip("/") for line in excluded.splitlines() if line.strip()}
     assert "dev/plans" in excluded_paths
     assert "superpowers" in excluded_paths
+
+
+def test_quality_gates_are_not_part_of_the_public_site() -> None:
+    """The internal quality-gates reference stays out of the published site.
+
+    `docs/dev/quality-gates.md` documents contributor-only checks (lint,
+    typecheck, coverage gates). It must never be built into `site/` or
+    listed in the public navigation.
+    """
+    config = _load_mkdocs_config()
+    excluded = str(config["exclude_docs"])
+    nav_text = json.dumps(config["nav"])
+    assert "dev/quality-gates.md" in excluded
+    assert "quality-gates" not in nav_text.lower()
