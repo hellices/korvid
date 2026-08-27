@@ -35,6 +35,7 @@ htmlcov/
 # docs/demo/mcp-follow.tape and docs/demo/record-mcp-follow.sh, never
 # committed.
 .korvid-mcp-demo.tmux.sock
+.korvid-mcp-demo.lock
 
 # The unreviewed render docs/demo/mcp-follow.tape writes on every attempt,
 # successful or not. VHS exits 0 whatever the recording did, so the tape may

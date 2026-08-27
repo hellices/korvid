@@ -968,6 +968,11 @@ must resolve inside that root, lexically (absolute, no `..`) and physically
 (deepest existing ancestor resolved with `cd -P`, which catches a symlink out
 of the root). The whole check stands in front of the `EXIT` trap, so nothing
 the wrapper would not accept is something it has already deleted. Because the
+wrapper acquires an atomic `.korvid-mcp-demo.lock` directory after validation
+and before cleanup, concurrent runs cannot delete or certify one another's
+candidate, markers or tmux session; one `EXIT` teardown removes the lock last,
+including on `INT`/`TERM`. If `SIGKILL` strands it, the refusal prints the exact
+`rmdir` recovery to use after confirming no recorder remains. Because the
 single
 `mv` is only atomic inside one directory, the candidate and the published clip
 must resolve to the same physical parent: the wrapper checks that before it

@@ -10,6 +10,7 @@ import importlib.util
 import math
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -134,6 +135,7 @@ MCP_TMUX_SESSION = "korvid-mcp-demo"
 #: is a server this recording creates, owns and tears down, which is what
 #: makes the fixed name safe.
 MCP_TMUX_SOCKET = ".korvid-mcp-demo.tmux.sock"
+MCP_RECORDER_LOCK_DIR = ".korvid-mcp-demo.lock"
 #: `tmux` as a *command word*, so a socket path (`.korvid-mcp-demo.tmux.sock`)
 #: or an environment variable (`KORVID_MCP_TMUX_SOCKET`) is not mistaken for
 #: an invocation the contracts below have to grade.
@@ -6681,6 +6683,41 @@ def test_mcp_recorder_resolves_its_checkout_before_validating_test_root(
     assert "ok" in run.scratch_left
     assert "must sit outside this checkout" in run.output
     assert MCP_RECORDER_REJECTION in run.output
+
+
+def test_mcp_recorder_serializes_shared_capture_state(tmp_path: Path) -> None:
+    script = MCP_RECORDER.read_text(encoding="utf-8")
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert MCP_RECORDER_LOCK_DIR in gitignore
+    assert "trap 'exit 130' INT TERM" in script
+    assert "trap 'cleanup; exit 130' INT TERM" not in script
+
+    blocked_root = tmp_path / "blocked recorder"
+    blocked_root.mkdir()
+    lock_dir = blocked_root / MCP_RECORDER_LOCK_DIR
+    lock_dir.mkdir()
+
+    blocked = _run_recorder(blocked_root, seeded_marker="ok")
+
+    assert blocked.status != 0
+    assert not blocked.vhs_ran
+    assert blocked.tmux == ""
+    assert "ok" in blocked.scratch_left
+    assert blocked.published == MCP_PUBLISHED_BYTES
+    assert lock_dir.is_dir()
+    assert "already running" in blocked.output
+    recovery = next(line for line in blocked.output.splitlines() if "stale lock with:" in line)
+    assert shlex.split(recovery.split("stale lock with:", 1)[1]) == [
+        "rmdir",
+        "--",
+        str(lock_dir),
+    ]
+
+    completed_root = tmp_path / "completed"
+    completed = _run_recorder(completed_root)
+
+    assert completed.status == 0
+    assert not (completed_root / MCP_RECORDER_LOCK_DIR).exists()
 
 
 def test_mcp_recorder_isolated_paths_cannot_point_into_the_checkout(tmp_path: Path) -> None:

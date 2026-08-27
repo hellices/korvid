@@ -93,6 +93,7 @@ session=korvid-mcp-demo
 # The tape composes on the same literal path (it cannot read this environment —
 # VHS types shell into a pane), and a contract compares the two.
 socket=${KORVID_MCP_TMUX_SOCKET:-.korvid-mcp-demo.tmux.sock}
+lock_dir=$root/.korvid-mcp-demo.lock
 
 # Nothing above this line has been checked, and every one of those values names
 # something a run destroys: five paths `cleanup` unlinks, the clip it promotes
@@ -223,6 +224,7 @@ if [ "$test_mode" = 1 ]; then
   confine_to_test_root KORVID_MCP_GO "$go_marker"
   confine_to_test_root KORVID_MCP_TMUX_SOCKET "$socket"
   expected_digest=${KORVID_MCP_TAPE_SHA256:-$reviewed_tape_sha256}
+  lock_dir=$resolved_test_root/.korvid-mcp-demo.lock
 fi
 
 # Cleanup must know whether the candidate is another spelling of the approved
@@ -268,10 +270,15 @@ end_session() {
 cleanup() {
   clean_scratch
   end_session
+  rmdir -- "$lock_dir" >/dev/null 2>&1 || true
 }
 
+printf -v lock_recovery '%q' "$lock_dir"
+mkdir -- "$lock_dir" >/dev/null 2>&1 ||
+  fail "another MCP recording is already running (lock: $lock_dir);\
+ if none is active, remove the stale lock with: rmdir -- $lock_recovery"
 trap cleanup EXIT
-trap 'cleanup; exit 130' INT TERM
+trap 'exit 130' INT TERM
 
 [ "$candidate_aliases_final" -eq 0 ] ||
   fail "the candidate and published clip must be different files"

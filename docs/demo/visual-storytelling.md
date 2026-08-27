@@ -191,12 +191,12 @@ endpoint file. The client speaks only to `127.0.0.1:7878`, no credential is
 used, the demo server writes no MCP endpoint file, and the tape turns the
 tmux status line off before the first captured frame — that line is the only
 surface that would print a hostname, a user or today's date into a landing
-asset. The shell that composes the panes is never captured, and the six
-repository-local files a recording makes — the handshake pair
+asset. The shell that composes the panes is never captured, and the seven
+repository-local paths a recording makes — the handshake pair
 (`.korvid-mcp-demo-ready` and `.korvid-mcp-demo-go`), the client's status
 pair (`.korvid-mcp-demo-client-ok` and `.korvid-mcp-demo-client-failed`),
-the private tmux socket (`.korvid-mcp-demo.tmux.sock`)
-and the candidate render described below — are all
+the private tmux socket (`.korvid-mcp-demo.tmux.sock`), the atomic run-lock
+directory (`.korvid-mcp-demo.lock`) and the candidate render described below — are all
 created and removed inside the checkout.
 
 The client is never released on a timer. `--scene mcp` publishes
@@ -307,6 +307,14 @@ root is caught too). All of that happens before the `EXIT` trap is armed, so a
 value the wrapper will not accept is one it also never acts on:
 `KORVID_MCP_TAPE_SHA256` is read only in that same mode, and a test digest
 therefore has no way to publish repository files.
+
+The wrapper then acquires `.korvid-mcp-demo.lock` with atomic `mkdir` before it
+cleans any shared marker, candidate or tmux state. If another invocation finds
+that lock, the wrapper would refuse it without touching those paths; cleanup
+releases the lock only after the owning run has finished tearing them down.
+`INT` and `TERM` exit through that one `EXIT` teardown rather than running it
+twice. A `SIGKILL` can leave the directory behind; after confirming no recorder
+is active, use the exact `rmdir` command printed by the refusal to clear it.
 
 Two literal checks stand beside the pin, and neither parses a directive. The
 published clip's own basename must be **absent** from the tape's bytes —
