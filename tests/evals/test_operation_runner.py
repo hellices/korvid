@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from korvid.evals.fake_kube import builtin_aliases
 from korvid.evals.operation import OperationJourney, bundled_operations_dir, load_operation_journeys
 from korvid.evals.operation_journal import ActionJournal
 from korvid.evals.operation_runner import ScriptedOperationBridge, approval_from_result
@@ -34,7 +35,7 @@ def _bridge(
     audit_path: Path,
     outcomes: Sequence[ApprovalOutcome],
     **kwargs: Any,
-) -> tuple[ScriptedOperationBridge, ActionJournal]:
+) -> tuple[ScriptedOperationBridge, ActionJournal, StatefulFakeKubeClient]:
     kube = StatefulFakeKubeClient(journey.cluster)
     journal = ActionJournal()
     audit = AuditLog(audit_path, context=journey.target.context)
@@ -48,12 +49,12 @@ def _bridge(
         policy=policy,
         **kwargs,
     )
-    return bridge, journal
+    return bridge, journal, kube
 
 
 async def test_scripted_bridge_scales_on_approve(tmp_path: Path) -> None:
     journey = _load("scale-deployment-up")
-    bridge, journal = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.APPROVE])
+    bridge, journal, _kube = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.APPROVE])
     result = await bridge.agent_request_write(
         "scale",
         journey.target.kind,
@@ -70,7 +71,7 @@ async def test_scripted_bridge_scales_on_approve(tmp_path: Path) -> None:
 
 async def test_scripted_bridge_denies_on_decline(tmp_path: Path) -> None:
     journey = _load("scale-deployment-up")
-    bridge, journal = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.DECLINE])
+    bridge, journal, _kube = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.DECLINE])
     result = await bridge.agent_request_write(
         "scale", journey.target.kind, journey.target.name, journey.target.namespace, replicas=5
     )
@@ -82,7 +83,7 @@ async def test_scripted_bridge_denies_on_decline(tmp_path: Path) -> None:
 
 async def test_scripted_bridge_reports_expiry(tmp_path: Path) -> None:
     journey = _load("restart-approval-expired")
-    bridge, journal = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.EXPIRE])
+    bridge, journal, _kube = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.EXPIRE])
     result = await bridge.agent_request_write(
         "rollout_restart", journey.target.kind, journey.target.name, journey.target.namespace
     )
@@ -94,7 +95,7 @@ async def test_scripted_bridge_reports_expiry(tmp_path: Path) -> None:
 
 async def test_scripted_bridge_rejects_unsupported_action(tmp_path: Path) -> None:
     journey = _load("edit-unsupported")
-    bridge, _journal = _bridge(journey, tmp_path / "audit.jsonl", [])
+    bridge, _journal, _kube = _bridge(journey, tmp_path / "audit.jsonl", [])
     result = await bridge.agent_request_write(
         "edit", journey.target.kind, journey.target.name, journey.target.namespace
     )
@@ -103,7 +104,7 @@ async def test_scripted_bridge_rejects_unsupported_action(tmp_path: Path) -> Non
 
 async def test_scripted_bridge_rejects_unknown_kind(tmp_path: Path) -> None:
     journey = _load("scale-deployment-up")
-    bridge, _journal = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.APPROVE])
+    bridge, _journal, _kube = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.APPROVE])
     result = await bridge.agent_request_write(
         "scale", "NotAKind", journey.target.name, journey.target.namespace, replicas=5
     )
@@ -112,7 +113,7 @@ async def test_scripted_bridge_rejects_unknown_kind(tmp_path: Path) -> None:
 
 async def test_scripted_bridge_reports_missing_target(tmp_path: Path) -> None:
     journey = _load("scale-deployment-up")
-    bridge, _journal = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.APPROVE])
+    bridge, _journal, _kube = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.APPROVE])
     result = await bridge.agent_request_write(
         "scale", journey.target.kind, "does-not-exist", journey.target.namespace, replicas=5
     )
@@ -122,7 +123,7 @@ async def test_scripted_bridge_reports_missing_target(tmp_path: Path) -> None:
 
 async def test_scripted_bridge_honors_permission_denial(tmp_path: Path) -> None:
     journey = _load("scale-rbac-denied")
-    bridge, journal = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.APPROVE])
+    bridge, journal, _kube = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.APPROVE])
     result = await bridge.agent_request_write(
         "scale", journey.target.kind, journey.target.name, journey.target.namespace, replicas=5
     )
@@ -168,7 +169,9 @@ async def test_concurrent_bridges_do_not_leak_decisions(tmp_path: Path) -> None:
     journey = _load("scale-deployment-up")
 
     async def run(outcome: ApprovalOutcome, path_suffix: str) -> str:
-        bridge, _journal = _bridge(journey, tmp_path / f"audit-{path_suffix}.jsonl", [outcome])
+        bridge, _journal, _kube = _bridge(
+            journey, tmp_path / f"audit-{path_suffix}.jsonl", [outcome]
+        )
         return await bridge.agent_request_write(
             "scale",
             journey.target.kind,
@@ -230,3 +233,59 @@ async def test_scripted_bridge_applies_dialog_intervention_before_approval(
         name=journey.target.name,
     )
     assert live_uid == new_uid
+
+
+async def test_journaling_executor_records_precondition_read(tmp_path: Path) -> None:
+    """The ported executor journals a target-resolving read and credits it."""
+    from korvid.evals.operation_runner import _OperationJournalingExecutor
+    from korvid.tools.executor import ToolExecutor
+
+    journey = _load("scale-deployment-up")
+    bridge, journal, kube = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.APPROVE])
+    executor = _OperationJournalingExecutor(
+        ToolExecutor(kube, builtin_aliases(), ui=bridge),
+        journal,
+        journey,
+        max_result_chars=20000,
+    )
+    result = await executor.execute(
+        "get_resource",
+        {
+            "kind": journey.target.kind,
+            "name": journey.target.name,
+            "namespace": journey.target.namespace,
+        },
+    )
+    events = {event.event for event in journal.events}
+    assert "target_resolved" in events
+    assert "precondition_read" in events
+    assert result
+
+
+async def test_journaling_executor_records_write_requested_and_reported(
+    tmp_path: Path,
+) -> None:
+    from korvid.evals.operation_runner import _OperationJournalingExecutor
+    from korvid.tools.executor import ToolExecutor
+
+    journey = _load("scale-deployment-up")
+    bridge, journal, kube = _bridge(journey, tmp_path / "audit.jsonl", [ApprovalOutcome.APPROVE])
+    executor = _OperationJournalingExecutor(
+        ToolExecutor(kube, builtin_aliases(), ui=bridge),
+        journal,
+        journey,
+        max_result_chars=20000,
+    )
+    result = await executor.execute(
+        "scale_resource",
+        {
+            "kind": journey.target.kind,
+            "name": journey.target.name,
+            "namespace": journey.target.namespace,
+            "replicas": 5,
+        },
+    )
+    events = [event.event for event in journal.events]
+    assert "write_requested" in events
+    assert "approval_reported" in events
+    assert approval_from_result(result) == "approved" or result.startswith("approved and executed")

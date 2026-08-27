@@ -20,12 +20,25 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from yaml import YAMLError, safe_load
+
+from korvid.agent.events import AgentError, AgentEvent, TextDelta, ToolCallFinished
+from korvid.agent.outbound import sanitize_recorded_tool_result
+from korvid.agent.session import DefaultAgentSession
 from korvid.evals.fake_kube import builtin_aliases
-from korvid.evals.operation import OperationJourney
-from korvid.evals.operation_journal import ActionJournal, JournalTarget, summarize_untrusted
+from korvid.evals.operation import OperationJourney, OperationTarget, StateAssertion
+from korvid.evals.operation_grader import evaluate_assertion_document
+from korvid.evals.operation_journal import (
+    ActionJournal,
+    JournalTarget,
+    summarize_action,
+    summarize_arguments,
+    summarize_untrusted,
+)
 from korvid.evals.operation_state import (
     AuditIntentProbe,
     AuditRecord,
@@ -38,7 +51,8 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import manifest_uid
 from korvid.tools.approval import ApprovalDecision, ApprovalOutcome, ApprovalPolicy, ApprovalRequest
 from korvid.tools.audit import AuditLog
-from korvid.tools.executor import UIBridge
+from korvid.tools.executor import RecordedExecution, ToolOutcome, UIBridge
+from korvid.tools.registry import TOOLS_BY_NAME
 from korvid.tools.write_coordinator import (
     WRITE_VERBS,
     AuditRecorder,
@@ -46,6 +60,10 @@ from korvid.tools.write_coordinator import (
     run_approved_write,
     write_locus,
 )
+
+#: The one read tool that can earn state credit: it returns the target's
+#: own sanitized YAML document, so the result can be parsed and walked.
+_STATE_READ_TOOL = "get_resource"
 
 _ALIASES: dict[str, ResourceMeta] = builtin_aliases()
 
@@ -354,3 +372,307 @@ class ScriptedOperationBridge(UIBridge):
             )
             return False
         return True
+
+
+# ---------------------------------------------------------------------------
+# Journaling executor + answer-capturing session
+#
+# Ported near-verbatim from `tests/evals/operation_app.py`'s
+# `_JournalingExecutor`/`_AnswerCapturingSession` and their private helpers:
+# every piece below has zero Textual dependency in the source module
+# already, so this is a straight port (import paths only), not a rewrite.
+# Faithful, not simplified: fixture-grading parity depends on the exact
+# event names, actors, and ordering these emit.
+# ---------------------------------------------------------------------------
+
+
+def _read_document(text: str) -> dict[str, Any] | None:
+    """The manifest a `get_resource` result showed, or None.
+
+    `get_resource` returns a sanitized YAML document, so the authoritative
+    check is a parse and a walk, not a substring. A parse failure or a
+    size-elided document that no longer round-trips is *not* evidence the
+    model saw the state, so it yields None and earns no credit.
+    """
+    try:
+        document = safe_load(text)
+    except YAMLError:
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _is_target_document(
+    document: Mapping[str, Any], target: OperationTarget, incarnation: str | None
+) -> bool:
+    """Whether a parsed read is about the journey's own target object.
+
+    Group/kind/namespace/name must match, and a UID reported by the result
+    or parsed document must be the target uid: a same-named replacement
+    that happens to carry the asserted value is a different object, and
+    reading it is not an observation of the one that was approved.
+    """
+    metadata = document.get("metadata") or {}
+    group, _, _version = str(document.get("apiVersion") or "").rpartition("/")
+    document_uid = metadata.get("uid")
+    reported_uid = (
+        incarnation
+        if incarnation is not None
+        else (document_uid if isinstance(document_uid, str) and document_uid else None)
+    )
+    return (
+        str(document.get("kind") or "") == target.kind
+        and group == target.group
+        and str(metadata.get("namespace") or "") == target.namespace
+        and str(metadata.get("name") or "") == target.name
+        and reported_uid == target.uid
+    )
+
+
+def _shows_state(document: Mapping[str, Any], assertions: Sequence[StateAssertion]) -> bool:
+    """Whether the read document carries every assertion's required state.
+
+    Delegates to the grader's own `evaluate_assertion_document`, so the
+    walked paths and typed operators cannot drift.
+    """
+    if not assertions:
+        return False
+    for assertion in assertions:
+        result = evaluate_assertion_document(document, assertion)
+        if not result.satisfied:
+            return False
+    return True
+
+
+def _safe_argument(arguments: Mapping[str, Any], key: str) -> str | None:
+    """Project one untrusted argument through the journal's token policy."""
+    value = arguments.get(key)
+    if key in {"kind", "name", "namespace"} and isinstance(value, str):
+        value = value.strip()
+    detail = summarize_untrusted(**{key: value})
+    prefix = f"{key}="
+    suffix = " dropped=0"
+    if not detail.startswith(prefix) or not detail.endswith(suffix):
+        return None
+    return detail[len(prefix) : -len(suffix)]
+
+
+def _write_request_target(
+    journey: OperationJourney, arguments: Mapping[str, Any]
+) -> JournalTarget | None:
+    kind = _safe_argument(arguments, "kind")
+    name = _safe_argument(arguments, "name")
+    namespace = _safe_argument(arguments, "namespace")
+    meta = _ALIASES.get(kind.strip().lower()) if kind is not None else None
+    if meta is None or name is None or namespace is None:
+        return None
+    if (
+        meta.group != journey.target.group
+        or meta.kind != journey.target.kind
+        or meta.plural != journey.target.plural
+    ):
+        return None
+    if name != journey.target.name or namespace != journey.target.namespace:
+        return None
+    return JournalTarget(
+        context=journey.target.context,
+        namespace=journey.target.namespace,
+        group=meta.group,
+        kind=meta.kind,
+        plural=meta.plural,
+        name=journey.target.name,
+        uid=None,
+    )
+
+
+def _write_request_state(action: str, arguments: Mapping[str, Any]) -> dict[str, int]:
+    replicas = arguments.get("replicas")
+    if action != "scale" or isinstance(replicas, bool) or not isinstance(replicas, int):
+        return {}
+    return {"spec.replicas": replicas}
+
+
+def _mutation_pending_verification(journal: ActionJournal) -> bool:
+    return journal.count("mutation_finished") > journal.count("postcondition_read")
+
+
+class _OperationJournalingExecutor(RecordedExecution):
+    """The real `ToolExecutor`, with model-side journal attribution."""
+
+    def __init__(
+        self,
+        executor: RecordedExecution,
+        journal: ActionJournal,
+        journey: OperationJourney,
+        *,
+        max_result_chars: int | None,
+    ) -> None:
+        self._executor = executor
+        self._journal = journal
+        self._journey = journey
+        self._target = JournalTarget.of(journey.target)
+        self._max_result_chars = max_result_chars
+        self.tool_calls = 0
+
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        return (await self.execute_recorded(name, arguments)).text
+
+    async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        definition = TOOLS_BY_NAME.get(name)
+        effect = definition.effect if definition is not None else "unknown"
+        journal_name = name if definition is not None else ""
+        request_target = (
+            _write_request_target(self._journey, arguments) if effect == "cluster_write" else None
+        )
+        dialogs_before = self._journal.count("approval_observed")
+        self.tool_calls += 1
+        self._journal.append(
+            event="tool_call",
+            actor="model_tool",
+            action=summarize_action(journal_name),
+            detail=summarize_arguments(journal_name, arguments),
+        )
+        if effect == "cluster_write":
+            action = (definition.write_action if definition is not None else None) or name
+            self._journal.append(
+                event="write_requested",
+                actor="model_tool",
+                action=action,
+                target=request_target,
+                post_state=_write_request_state(action, arguments),
+                result="requested",
+                detail=summarize_arguments(name, arguments),
+            )
+        outcome = await self._executor.execute_recorded(name, arguments)
+        if effect == "cluster_write":
+            approval = approval_from_result(outcome.text)
+            new_approvals = [
+                event for event in self._journal.events if event.event == "approval_observed"
+            ][dialogs_before:]
+            if approval == "approved" and not any(
+                event.approval == "approved" for event in new_approvals
+            ):
+                approval = "error"
+            self._journal.append(
+                event="approval_reported",
+                actor="model_tool",
+                action=name,
+                target=request_target,
+                approval=approval,
+                result="reported",
+                detail=summarize_untrusted(tool=name, chars=len(outcome.text)),
+            )
+        elif effect in {"cluster_read", "external_read"}:
+            visible_text, _records = sanitize_recorded_tool_result(
+                name,
+                outcome.text,
+                outcome.redactions,
+                max_chars=self._max_result_chars,
+                error=outcome.error,
+                result_format=definition.result_format if definition is not None else None,
+            )
+            self._note_read(name, outcome, visible_text)
+        return outcome
+
+    def _note_read(self, name: str, outcome: ToolOutcome, visible_text: str) -> None:
+        """Journal a model read and decide whether it earns state credit.
+
+        Credit needs *parsed evidence about this object*: a `get_resource`
+        whose sanitized YAML parses, whose identity matches the fixture
+        target, and whose walked assertion paths are satisfied under the
+        grader's own operator semantics. A listing, an events read, a
+        failed call, an unparsable or elided document, or a read of a
+        same-named replacement is journaled and earns nothing.
+        """
+        target = self._journey.target
+        document = (
+            _read_document(visible_text) if name == _STATE_READ_TOOL and not outcome.error else None
+        )
+        if document is None or not _is_target_document(document, target, outcome.incarnation):
+            self._journal.append(
+                event="off_target_read",
+                actor="model_tool",
+                action=name,
+                target=self._target,
+                result="no_credit",
+                detail=summarize_untrusted(tool=name, reason="not_a_target_document"),
+            )
+            return
+        after = _mutation_pending_verification(self._journal)
+        assertions = self._journey.postconditions if after else self._journey.preconditions
+        shows = _shows_state(document, assertions)
+        checkpoint = "postcondition_read" if after else "precondition_read"
+        if not after:
+            self._journal.append(
+                event="target_resolved",
+                actor="model_tool",
+                action=name,
+                target=JournalTarget.of(target, uid=outcome.incarnation or target.uid),
+                result="resolved",
+                detail=summarize_untrusted(tool=name),
+            )
+        self._journal.append(
+            event=checkpoint if shows else "read_without_state",
+            actor="model_tool",
+            action=name,
+            target=JournalTarget.of(target, uid=outcome.incarnation or target.uid),
+            result="credited" if shows else "no_credit",
+            detail=summarize_untrusted(tool=name, checkpoint=checkpoint, count=len(assertions)),
+            credit=shows,
+        )
+
+
+class _AnswerCapturingSession(DefaultAgentSession):
+    """The production session, recording each turn's final assistant text
+    and journaling the turn boundary.
+
+    The answer is the text streamed after the last tool call. `turn_started`
+    /`turn_finished` are the harness's observable turn signal:
+    `turn_finished` is appended in a `finally`, *after* the answer, so a
+    wait on it can never observe a finished turn whose answer is not
+    captured yet. Interrupted or errored turns end the wait with an empty,
+    ungradable answer instead of publishing a partial completion claim.
+
+    `run_turn` stays synchronous, like `DefaultAgentSession.run_turn`: it
+    delegates to the base implementation *before* wrapping, so a session
+    that is closed or mid-turn still raises at the call, and only the
+    journaling/capture below is deferred to the first `__anext__`.
+    """
+
+    def __init__(self, *args: Any, journal: ActionJournal, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._journal = journal
+        self.answers: list[str] = []
+
+    def run_turn(self, user_text: str) -> AsyncIterator[AgentEvent]:
+        return self._capture(user_text, super().run_turn(user_text))
+
+    async def _capture(
+        self, user_text: str, events: AsyncIterator[AgentEvent]
+    ) -> AsyncIterator[AgentEvent]:
+        self._journal.append(
+            event="turn_started",
+            actor="app_internal",
+            detail=summarize_untrusted(chars=len(user_text)),
+        )
+        buffer = ""
+        completed = False
+        failed = False
+        try:
+            async for event in events:
+                if isinstance(event, TextDelta):
+                    buffer += event.text
+                elif isinstance(event, ToolCallFinished):
+                    buffer = ""
+                elif isinstance(event, AgentError):
+                    failed = True
+                yield event
+            completed = True
+        finally:
+            answer = buffer if completed and not failed else ""
+            self.answers.append(answer)
+            self._journal.append(
+                event="turn_finished",
+                actor="app_internal",
+                result="error" if not completed or failed else ("captured" if answer else "empty"),
+                detail=summarize_untrusted(chars=len(answer)),
+            )
