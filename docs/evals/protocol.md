@@ -29,9 +29,14 @@ release that touches nothing this page describes.
   **breaking** change and bumps `protocol_version`.
 - A new, additive field (present alongside everything already documented)
   is not a breaking change and does not require a bump. `meta.case_pack`
-  (below) is one such field: an artifact that never selects a scenario
-  subset omits it, matching every artifact written before this contract
-  existed.
+  (below) is one such field: the CLI always publishes it — `main()` always
+  passes the exact scenarios it loaded to `run_payload`, whether or not
+  `--scenario-id` narrowed the run, so every artifact `python -m
+  korvid.evals --json ...` writes carries it. Only a caller that invokes
+  `run_payload` directly without its `scenarios=` argument — every call
+  site written before this contract existed, and any future caller with no
+  scenario set to report — omits it, keeping that artifact's `meta` shape
+  byte-for-byte what it always was, plus the added `protocol_version` key.
 
 An external optimizer should refuse to parse an artifact whose
 `protocol_version` it does not recognize, rather than guess at a shape it
@@ -89,8 +94,10 @@ publishes `meta.case_pack`:
 - `sha256` — a digest of the **exact loaded scenario definitions**:
   question, starting interaction, grading assertions (`must_mention`,
   `must_not_mention`, `expected_evidence`), and cluster fixtures (objects,
-  events, log tails, forbidden reads) for every selected scenario, in id
-  order.
+  events, log tails) for every selected scenario, in id order — exactly
+  the fields `Scenario` accepts; a scenario fixture has no way to declare
+  a forbidden read the way a conversational journey or operation fixture
+  can, so none is hashed here.
 
 `sha256` is content-derived, not path- or mtime-derived: the same fixture
 text loaded from a different directory, a renamed file, or a fresh
@@ -99,6 +106,16 @@ change to what a scenario actually asserts or simulates — even one that
 leaves its id and file name alone — changes it. Two runs reporting the
 same `sha256` measured the identical case pack; two reporting a different
 one did not, whatever their `scenario_ids` say.
+
+The digest is computed over a canonical encoding, not a bare `json.dumps`
+of whatever Python types a YAML fixture happened to parse into: every
+value is tagged with its own type before it is nested, so an unquoted
+fixture timestamp (`yaml.safe_load` turns it into a `datetime`) can never
+collide with a string that merely renders the same way, and mapping keys
+must be strings. A scenario whose content holds a value this encoding does
+not recognize fails closed with a `ValueError` rather than silently
+hashing a `str()` fallback that would make two differently-typed case
+packs look identical.
 
 This is what lets an external optimizer trust a scoreboard comparison
 across two runs it did not orchestrate back-to-back: pin the expected

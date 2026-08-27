@@ -12,9 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -385,6 +385,74 @@ def _scenario_content(scenario: Scenario) -> dict[str, Any]:
     }
 
 
+def _canonical_scalar(value: Any) -> Any | None:
+    """Encode `value` if it is a canonical-hash scalar type; `None` sentinel
+    reserved for "not a scalar this function handles" is impossible to
+    confuse with an encoded `None` fixture value, which is always the
+    2-element list `["null", None]` — never a bare `None`."""
+    if value is None:
+        return ["null", None]
+    if isinstance(value, bool):
+        # `bool` subclasses `int`; checked first so `True` is never folded
+        # into the `int` branch below.
+        return ["bool", value]
+    if isinstance(value, int):
+        return ["int", value]
+    if isinstance(value, float):
+        return ["float", value]
+    if isinstance(value, str):
+        return ["str", value]
+    if isinstance(value, datetime):
+        # `datetime` subclasses `date`; checked first for the same reason.
+        # A naive fixture timestamp is UTC (matching `_as_instant`), so the
+        # canonical form is always a single, unambiguous, timezone-aware
+        # instant — never dependent on how the author happened to spell it.
+        instant = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return ["datetime", instant.astimezone(UTC).isoformat()]
+    if isinstance(value, date):
+        return ["date", value.isoformat()]
+    return None
+
+
+def _canonical_value(value: Any) -> Any:
+    """Recursively encode `value` into a canonical, type-preserving,
+    JSON-safe structure for the case-pack content hash.
+
+    A YAML fixture can legitimately hold an unquoted timestamp (`yaml.safe_load`
+    turns `2026-07-20T10:00:00Z` into a `datetime` and a bare `2026-07-20`
+    into a `date`), so the hash must accept both — but it must never treat
+    one the same as a string that merely renders the same way. Every value
+    is tagged with its own type name before it is nested (`_canonical_scalar`
+    handles the leaf types), so `datetime`, `date`, and `str` values that
+    would collide under a naive `str()` fallback instead hash differently
+    by construction. A mapping key must be a string — coercing a non-string
+    key would hide a fixture-authoring mistake, not hash it — and any value
+    of a type this function does not know how to canonicalize (a `set`,
+    for instance) is rejected outright rather than silently passed through
+    `str()`, which would make the digest meaningless for exactly the
+    content it could not represent.
+    """
+    scalar = _canonical_scalar(value)
+    if scalar is not None:
+        return scalar
+    if isinstance(value, Mapping):
+        pairs: list[tuple[str, Any]] = []
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(
+                    "case-pack content mapping keys must be strings, got"
+                    f" {key!r} ({type(key).__name__})"
+                )
+            pairs.append((key, _canonical_value(item)))
+        pairs.sort(key=lambda pair: pair[0])
+        return ["dict", pairs]
+    if isinstance(value, list | tuple):
+        return ["list", [_canonical_value(item) for item in value]]
+    raise ValueError(
+        f"case-pack content has an unsupported value of type {type(value).__name__}: {value!r}"
+    )
+
+
 def case_pack_identity(scenarios: Sequence[Scenario]) -> dict[str, Any]:
     """Deterministic identity for an exact set of loaded scenario definitions.
 
@@ -403,11 +471,16 @@ def case_pack_identity(scenarios: Sequence[Scenario]) -> dict[str, Any]:
 
     Returns:
         A mapping with `scenario_ids` (sorted), `count`, and `sha256`.
+
+    Raises:
+        ValueError: a scenario's content holds a mapping with a non-string
+            key, or a value of a type the canonical content encoding does
+            not recognize (e.g. a `set`) — both are scenario-authoring
+            defects, not values a content hash may silently paper over.
     """
     ordered = sorted(scenarios, key=lambda s: s.id)
     ids = [scenario.id for scenario in ordered]
     content = [_scenario_content(scenario) for scenario in ordered]
-    digest = hashlib.sha256(
-        json.dumps(content, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
+    canonical = _canonical_value(content)
+    digest = hashlib.sha256(json.dumps(canonical, ensure_ascii=False).encode("utf-8")).hexdigest()
     return {"scenario_ids": ids, "count": len(ids), "sha256": digest}

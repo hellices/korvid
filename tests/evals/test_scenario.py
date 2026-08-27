@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 from korvid.evals.scenario import (
     Scenario,
@@ -447,3 +450,96 @@ def test_case_pack_identity_reflects_a_selected_subset(tmp_path: Path) -> None:
     assert identity["scenario_ids"] == ["oom-killed"]
     assert identity["count"] == 1
     assert identity["sha256"] != full["sha256"]
+
+
+# --- canonical content hashing: type-preserving, fail-closed --------------
+#
+# `case_pack_identity`'s digest must derive from the scenarios' own typed
+# content, not from a lossy `json.dumps(..., default=str)` fallback: a
+# YAML-parsed `datetime` (from an unquoted fixture timestamp) and a string
+# that merely renders the same way must never hash identically, and a
+# scenario whose content holds something the encoding cannot represent
+# (a non-string mapping key, or a value of an unrecognized type) must fail
+# closed instead of silently being coerced into a string.
+
+_UNQUOTED_TIMESTAMP = _MINIMAL.replace(
+    "      metadata: {name: checkout-1, namespace: shop}\n",
+    "      metadata: {name: checkout-1, namespace: shop, createdAt: 2026-07-20T10:00:00Z}\n",
+)
+
+# `str(datetime.datetime(2026, 7, 20, 10, 0, tzinfo=UTC))` renders exactly
+# this text — the naive `default=str` fallback this test guards against
+# would have hashed the two fixtures below identically.
+_STRING_THAT_LOOKS_LIKE_THE_SAME_DATETIME = _MINIMAL.replace(
+    "      metadata: {name: checkout-1, namespace: shop}\n",
+    '      metadata: {name: checkout-1, namespace: shop, createdAt: "2026-07-20 10:00:00+00:00"}\n',
+)
+
+
+def test_case_pack_identity_distinguishes_a_datetime_value_from_an_equal_looking_string(
+    tmp_path: Path,
+) -> None:
+    datetime_dir = tmp_path / "datetime"
+    datetime_dir.mkdir()
+    _write(datetime_dir, _UNQUOTED_TIMESTAMP, "a.yaml")
+    datetime_scenario = load_scenario(datetime_dir / "a.yaml")
+
+    string_dir = tmp_path / "string"
+    string_dir.mkdir()
+    _write(string_dir, _STRING_THAT_LOOKS_LIKE_THE_SAME_DATETIME, "a.yaml")
+    string_scenario = load_scenario(string_dir / "a.yaml")
+
+    # Sanity check: the fixture text really does differ only by a `datetime`
+    # vs. a `str` that `str()` would render identically, not by the value.
+    assert (
+        datetime_scenario.objects[0]["metadata"]["createdAt"]
+        != string_scenario.objects[0]["metadata"]["createdAt"]
+    )
+    assert (
+        str(datetime_scenario.objects[0]["metadata"]["createdAt"])
+        == (string_scenario.objects[0]["metadata"]["createdAt"])
+    )
+
+    datetime_identity = case_pack_identity([datetime_scenario])
+    string_identity = case_pack_identity([string_scenario])
+    assert datetime_identity["sha256"] != string_identity["sha256"]
+
+
+def test_case_pack_identity_is_deterministic_for_a_fixture_with_a_typed_timestamp(
+    tmp_path: Path,
+) -> None:
+    """The same unquoted-timestamp fixture, loaded twice, hashes identically —
+    the canonical encoding does not introduce nondeterminism of its own."""
+    first_dir = tmp_path / "first"
+    first_dir.mkdir()
+    _write(first_dir, _UNQUOTED_TIMESTAMP, "a.yaml")
+    second_dir = tmp_path / "second"
+    second_dir.mkdir()
+    _write(second_dir, _UNQUOTED_TIMESTAMP, "a.yaml")
+
+    first = case_pack_identity(load_scenarios(first_dir))
+    second = case_pack_identity(load_scenarios(second_dir))
+    assert first == second
+
+
+def test_case_pack_identity_rejects_a_non_string_mapping_key(tmp_path: Path) -> None:
+    scenario = load_scenario(_write(tmp_path, _MINIMAL))
+    # A fixture author's stray unquoted numeric key parses through YAML as
+    # an `int` key — `load_scenario` does not itself validate manifest
+    # mapping keys, so this is exactly the shape the content hash must
+    # still catch.
+    bad_object: dict[str, Any] = dict(scenario.objects[0])
+    bad_object["metadata"] = yaml.safe_load("name: checkout-1\n42: not-a-string-key\n")
+    mutated = replace(scenario, objects=(bad_object,))
+    with pytest.raises(ValueError, match="mapping keys must be strings"):
+        case_pack_identity([mutated])
+
+
+def test_case_pack_identity_rejects_an_unsupported_value_type(tmp_path: Path) -> None:
+    scenario = load_scenario(_write(tmp_path, _MINIMAL))
+    unsupported: Any = {1, 2, 3}
+    bad_object: dict[str, Any] = dict(scenario.objects[0])
+    bad_object["weird"] = unsupported
+    mutated = replace(scenario, objects=(bad_object,))
+    with pytest.raises(ValueError, match="unsupported value of type"):
+        case_pack_identity([mutated])
