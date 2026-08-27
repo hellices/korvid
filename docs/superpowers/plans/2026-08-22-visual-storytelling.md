@@ -587,7 +587,7 @@ def main() -> None:
 Create `docs/demo/agent.tape`:
 
 ```text
-Output docs/assets/scenes/agent-demo.mp4
+Output docs/assets/scenes/.agent-demo.candidate.mp4
 
 Set FontSize 15
 Set Width 1280
@@ -622,7 +622,7 @@ Type "q"
 Create `docs/demo/relationships.tape`:
 
 ```text
-Output docs/assets/scenes/relationship-demo.mp4
+Output docs/assets/scenes/.relationship-demo.candidate.mp4
 
 Set FontSize 15
 Set Width 1280
@@ -659,6 +659,9 @@ Run:
 ```bash
 vhs docs/demo/agent.tape
 vhs docs/demo/relationships.tape
+mv -f docs/assets/scenes/.agent-demo.candidate.mp4 docs/assets/scenes/agent-demo.mp4
+mv -f docs/assets/scenes/.relationship-demo.candidate.mp4 \
+  docs/assets/scenes/relationship-demo.mp4
 
 ffmpeg -y -ss 00:00:11 -i docs/assets/scenes/agent-demo.mp4 \
   -frames:v 1 docs/assets/scenes/agent-poster.png
@@ -747,6 +750,7 @@ synthetic-cluster walkthrough.
 
 ```sh
 vhs docs/demo/agent.tape
+mv -f docs/assets/scenes/.agent-demo.candidate.mp4 docs/assets/scenes/agent-demo.mp4
 ffmpeg -y -ss 00:00:11 -i docs/assets/scenes/agent-demo.mp4 \
   -frames:v 1 docs/assets/scenes/agent-poster.png
 ```
@@ -758,6 +762,8 @@ metadata-only synthetic facts from `docs/demo/demo.py`.
 
 ```sh
 vhs docs/demo/relationships.tape
+mv -f docs/assets/scenes/.relationship-demo.candidate.mp4 \
+  docs/assets/scenes/relationship-demo.mp4
 ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/relationship-demo.mp4 \
   -frames:v 1 docs/assets/scenes/relationship-graph.png
 ```

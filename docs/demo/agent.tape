@@ -1,4 +1,4 @@
-Output docs/assets/scenes/agent-demo.mp4
+Output docs/assets/scenes/.agent-demo.candidate.mp4
 
 Set FontSize 15
 Set Width 1280

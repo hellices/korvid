@@ -42,3 +42,9 @@ htmlcov/
 # promotes this candidate onto docs/assets/scenes/mcp-follow-demo.mp4 only
 # when the client pane certified its run, and removes it on every other path.
 docs/assets/scenes/.mcp-follow-demo.candidate.mp4
+
+# Human-reviewed Agent and relationship takes. VHS cannot report whether the
+# typed story succeeded, so each tape writes scratch and the documented recipe
+# promotes it only after a human has inspected the complete candidate.
+docs/assets/scenes/.agent-demo.candidate.mp4
+docs/assets/scenes/.relationship-demo.candidate.mp4

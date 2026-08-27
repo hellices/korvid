@@ -1,4 +1,4 @@
-Output docs/assets/scenes/relationship-demo.mp4
+Output docs/assets/scenes/.relationship-demo.candidate.mp4
 
 Set FontSize 15
 Set Width 1280

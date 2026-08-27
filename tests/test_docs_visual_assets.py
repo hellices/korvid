@@ -155,6 +155,8 @@ MCP_RECORDER_COMMAND = "docs/demo/record-mcp-follow.sh"
 #: The only file the tape may write. Hidden, beside the published clip, and
 #: never committed.
 MCP_CANDIDATE_CLIP = "docs/assets/scenes/.mcp-follow-demo.candidate.mp4"
+AGENT_CANDIDATE_CLIP = "docs/assets/scenes/.agent-demo.candidate.mp4"
+RELATIONSHIP_CANDIDATE_CLIP = "docs/assets/scenes/.relationship-demo.candidate.mp4"
 #: The published clip. In the whole recording chain this name may appear only
 #: as the wrapper's promotion target.
 MCP_FINAL_CLIP = "docs/assets/scenes/mcp-follow-demo.mp4"
@@ -1204,6 +1206,27 @@ def test_storytelling_capture_instructions_name_every_generated_asset() -> None:
     assert "vhs docs/demo/relationships.tape" in instructions
     assert MCP_RECORDER_COMMAND in instructions
     assert "docs/assets/mcp-follow-demo.gif" in instructions
+
+
+def test_human_reviewed_tapes_render_candidates_before_explicit_promotion() -> None:
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    instructions = INSTRUCTIONS.read_text(encoding="utf-8")
+    normalized_instructions = " ".join(instructions.replace("\\\n", "").split())
+    recordings = (
+        (AGENT_TAPE, AGENT_CANDIDATE_CLIP, "docs/assets/scenes/agent-demo.mp4"),
+        (
+            DEMO_DIR / "relationships.tape",
+            RELATIONSHIP_CANDIDATE_CLIP,
+            "docs/assets/scenes/relationship-demo.mp4",
+        ),
+    )
+
+    for tape_path, candidate, final in recordings:
+        tape = tape_path.read_text(encoding="utf-8")
+        assert f"Output {candidate}" in tape
+        assert f"Output {final}" not in tape
+        assert candidate in gitignore
+        assert f"mv -f {candidate} {final}" in normalized_instructions
 
 
 def test_mcp_capture_instructions_derive_the_readme_gif_from_the_approved_clip() -> None:

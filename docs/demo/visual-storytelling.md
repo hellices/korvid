@@ -116,9 +116,13 @@ them, leaving the undocked log pane no room to render alongside.
 
 ```sh
 vhs docs/demo/agent.tape
+mv -f docs/assets/scenes/.agent-demo.candidate.mp4 docs/assets/scenes/agent-demo.mp4
 ffmpeg -y -ss 00:00:11 -i docs/assets/scenes/agent-demo.mp4 \
   -frames:v 1 docs/assets/scenes/agent-poster.png
 ```
+
+Inspect the complete hidden candidate before the `mv`; a failed take must never
+replace the reviewed clip merely because VHS returned zero.
 
 ## Relationship graph
 
@@ -141,9 +145,13 @@ fails if either disappears.
 
 ```sh
 vhs docs/demo/relationships.tape
+mv -f docs/assets/scenes/.relationship-demo.candidate.mp4 \
+  docs/assets/scenes/relationship-demo.mp4
 ffmpeg -y -ss 00:00:05 -i docs/assets/scenes/relationship-demo.mp4 \
   -frames:v 1 docs/assets/scenes/relationship-graph.png
 ```
+
+As with the Agent take, promote only after reviewing the candidate end to end.
 
 ## MCP follow
 

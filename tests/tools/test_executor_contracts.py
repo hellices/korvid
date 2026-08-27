@@ -145,6 +145,28 @@ async def test_ui_only_bridge_success_text_is_not_an_error() -> None:
     assert outcome.text == "switched to pods"
 
 
+async def test_write_bridge_failure_text_is_reported_as_an_error() -> None:
+    class DenyingWriteBridge(FakeBridge):
+        async def agent_request_write(
+            self,
+            action: str,
+            kind: str,
+            name: str,
+            namespace: str | None = None,
+            replicas: int | None = None,
+            resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        ) -> str:
+            return f"{ERROR_PREFIX} UI not ready"
+
+    outcome = await make_ui_executor(DenyingWriteBridge()).execute_recorded(
+        "rollout_restart",
+        {"kind": "deployments", "name": "web", "namespace": "shop"},
+    )
+
+    assert outcome.error is True
+    assert outcome.text.startswith(ERROR_PREFIX)
+
+
 # --- The recorded-execution contract is an ABC (round 6) -------------------
 #
 # The agent loop used to runtime-check a private Protocol it declared

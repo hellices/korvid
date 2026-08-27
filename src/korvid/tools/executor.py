@@ -173,6 +173,11 @@ class ToolOutcome:
     container: str | None = None
 
 
+def _bridge_outcome(text: str) -> ToolOutcome:
+    """Classify the `UIBridge` string verdict at its typed boundary."""
+    return ToolOutcome(text=text, error=text.startswith(ERROR_PREFIX))
+
+
 class RecordedExecution(ABC):
     """The tool-execution contract the agent loop depends on.
 
@@ -951,9 +956,9 @@ class ToolExecutor(RecordedExecution):
                 f"tool {tool.name!r}: no argument adapter for UI dispatch {tool.dispatch!r}"
             )
         text = await adapter(self._ui, args)
-        return ToolOutcome(text=text, error=text.startswith(ERROR_PREFIX))
+        return _bridge_outcome(text)
 
-    async def _dispatch_write(self, tool: ToolDef, args: dict[str, Any]) -> str:
+    async def _dispatch_write(self, tool: ToolDef, args: dict[str, Any]) -> ToolOutcome:
         if self._ui is None:
             raise ValueError("write actions require the interactive TUI session")
         action = tool.write_action
@@ -982,13 +987,15 @@ class ToolExecutor(RecordedExecution):
         # The validated dispatch key names the approval-gated bridge
         # entrypoint; the registry rejects writes routed anywhere else.
         request_write: Callable[..., Awaitable[str]] = getattr(self._ui, tool.dispatch)
-        return await request_write(
-            action,
-            kind,
-            target,
-            namespace,
-            replicas,
-            resources,
+        return _bridge_outcome(
+            await request_write(
+                action,
+                kind,
+                target,
+                namespace,
+                replicas,
+                resources,
+            )
         )
 
     async def _dispatch_proposal(self, tool: ToolDef, args: dict[str, Any]) -> str:
