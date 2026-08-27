@@ -41,7 +41,7 @@ from korvid.evals.__main__ import (
     provider_factory_from_env,
     tools_payload,
 )
-from korvid.evals.harness import NO_GRIND, PromptGrind, resolve_eval_policy
+from korvid.evals.harness import NO_GRIND, PromptGrind, ground_eval_policy, resolve_eval_policy
 from korvid.evals.operation import (
     OperationJourney,
     bundled_operations_dir,
@@ -261,6 +261,23 @@ async def _run_operations(
     return runs
 
 
+def _resolve_policy(provider: Any, *, model_tier: str | None, grind: PromptGrind) -> Any:
+    """Route and ground once, for the whole run's published meta.
+
+    Mirrors `korvid.evals.__main__._resolve_policy`: grounding only ever
+    *adds* the `eval-overlay` id when `grind.overlay` is set, so a policy
+    resolved here but never grounded would publish `meta.policy.overlays`
+    as `[]` while `meta.prompts` (via `prompt_fingerprint`, which grounds
+    internally) published `['eval-overlay'` for the identical run —
+    two fields of the one JSON artifact disagreeing about the same fact.
+    Grounding is idempotent, so `run_operation_case`'s own internal
+    resolution (composed against the same `grind`) still agrees with
+    whatever this returns.
+    """
+    policy = resolve_eval_policy(provider, model_tier=model_tier, environment=_WRITE_ENVIRONMENT)
+    return ground_eval_policy(policy, grind)
+
+
 #: `sys.exit("...")`'s message, bounded so a pathological SystemExit payload
 #: (e.g. an argument value echoed back unbounded) cannot blow up stderr.
 _USAGE_ERROR_MESSAGE_LIMIT = 4000
@@ -297,9 +314,7 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return _usage_error(exc)
     try:
-        policy = resolve_eval_policy(
-            provider_factory(), model_tier=args.model_tier, environment=_WRITE_ENVIRONMENT
-        )
+        policy = _resolve_policy(provider_factory(), model_tier=args.model_tier, grind=grind)
     except Exception as exc:  # a provider that cannot even route is systemic
         print(f"error: {exc}", file=sys.stderr)
         return 1

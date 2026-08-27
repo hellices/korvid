@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 
 from korvid.evals.__main__ import EVAL_PROTOCOL_VERSION
+from korvid.evals.harness import NO_GRIND
 from korvid.evals.operation import bundled_operations_dir, load_operation_journeys
 from korvid.evals.operation_main import (
     _parse_args,
@@ -151,6 +152,55 @@ async def test_run_payload_is_json_serializable(tmp_path: Path) -> None:
     run = await _run("scale-no-op", tmp_path)
     payload = run_payload([run], journeys=[next(j for j in _JOURNEYS if j.id == "scale-no-op")])
     json.dumps(payload)  # must not raise
+
+
+# --- policy grounding: meta.policy and meta.prompts must agree -------------
+#
+# `_resolve_policy` (mirroring `korvid.evals.__main__._resolve_policy`) must
+# route and *ground* the policy once, before it is handed to both
+# `policy_payload` and `prompt_fingerprint`: grounding only ever adds the
+# `eval-overlay` id when `grind.overlay` is set, so an ungrounded policy
+# publishes `meta.policy.overlays == []` while `meta.prompts.overlays`
+# (which grounds internally) publishes `["eval-overlay"]` for the exact
+# same run - a reproducible cross-field inconsistency an external
+# optimizer parsing both fields could not reconcile.
+
+
+async def test_resolve_policy_grounds_once_so_policy_and_prompts_overlays_agree() -> None:
+    from korvid.evals.__main__ import policy_payload, prompt_fingerprint, tools_payload
+    from korvid.evals.harness import PromptGrind, ground_eval_policy
+    from korvid.evals.operation_main import _resolve_policy
+
+    grind = PromptGrind(tier_pack="be extra careful with scale requests", overlay="double-check")
+    provider = ScriptedProvider(OPERATION_SCRIPTS["scale-no-op"])
+    policy = _resolve_policy(provider, model_tier=None, grind=grind)
+
+    published_policy = policy_payload(policy)
+    published_prompts = prompt_fingerprint(policy, grind=grind)
+    assert published_policy["overlays"] == published_prompts["overlays"] == ["eval-overlay"]
+    assert published_policy["prompt_pack"] == published_prompts["pack"]
+
+    # The tool surface a write-capable operation journey needs stays armed;
+    # grounding only ever touches prompt_overlay_ids, never tool arming.
+    assert "scale_resource" in tools_payload(policy, [])["armed"]
+    assert "rollout_restart" in tools_payload(policy, [])["armed"]
+
+    # Grounding is idempotent: re-grounding an already-ground policy must
+    # not name the overlay twice.
+    assert ground_eval_policy(policy, grind).prompt_overlay_ids == policy.prompt_overlay_ids
+
+
+async def test_resolve_policy_without_a_grind_overlay_publishes_no_overlay() -> None:
+    """Backward-compatible default: an unselected/no-overlay run's
+    `meta.policy.overlays` stays `[]`, matching pre-existing behavior."""
+    from korvid.evals.__main__ import policy_payload, prompt_fingerprint
+    from korvid.evals.operation_main import _resolve_policy
+
+    provider = ScriptedProvider(OPERATION_SCRIPTS["scale-no-op"])
+    policy = _resolve_policy(provider, model_tier=None, grind=NO_GRIND)
+
+    assert policy_payload(policy)["overlays"] == []
+    assert prompt_fingerprint(policy, grind=NO_GRIND)["overlays"] == []
 
 
 # --- main(): exact process exit codes -----------------------------------
