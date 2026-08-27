@@ -267,6 +267,36 @@ def test_the_agent_page_states_cloud_provider_detection_truthfully() -> None:
     assert "unknown" in window.casefold()
 
 
+def test_the_ollama_row_names_the_namespace_its_six_keys_actually_live_under() -> None:
+    """The tuning knobs are read out of `agent.ollama.*`, not the bare names.
+
+    `Config` groups exactly six `agent_ollama_<key>` fields directly under
+    the "Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml"
+    comment, ending at the unrelated `keybindings` field. The provider
+    table's Ollama row lists the six key names but, before this test, never
+    said which namespace an operator has to nest them under in
+    `config.yaml` — `num_ctx: 32768` at the top level of the agent block is
+    silently ignored. Both the six keys and the `agent.ollama` namespace
+    they require have to be on the page.
+    """
+    config = _text("src/korvid/core/config.py")
+    start = config.index("Native Ollama tuning (issue #72)")
+    end = config.index("keybindings", start)
+    block = config[start:end]
+    keys = re.findall(r"agent_ollama_(\w+):", block)
+    assert keys == ["num_ctx", "temperature", "seed", "think", "keep_alive", "num_predict"], (
+        "the six ollama keys config.py actually defines must drive this test, not a hand-written list"
+    )
+
+    agent = _text("docs/agent.md")
+    row = next(line for line in agent.splitlines() if line.strip().startswith("| Ollama"))
+    for key in keys:
+        assert key in row, f"the Ollama row must still name {key}"
+    assert "agent.ollama" in row, (
+        "the Ollama row must say the six keys nest under the `agent.ollama` namespace"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 2. The provider-plugin API version a third party writes against
 # ---------------------------------------------------------------------------
