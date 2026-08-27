@@ -228,8 +228,11 @@ keystroke must never approve, and a stale keystroke that declines costs the
 user a retry, which is the safe direction to fail.
 
 **Audit is written *before* the mutation, and failure cancels it.** The intent
-record lands first; if it cannot be written, `_run_write_inner` returns
-`blocked: audit log unavailable` **without calling `op_factory()`** — the
+record lands first; if it cannot be written,
+`korvid.tools.write_coordinator.run_approved_write` (the pure audit ->
+mutate -> audit orchestration `WriteCoordinator._run_write` delegates to)
+returns `blocked: audit log unavailable` **without calling `op_factory()`**
+— the
 mutation is never constructed, let alone sent. Taking a factory rather than a
 coroutine is what makes that possible: there is no half-created operation to
 clean up. The log itself is
@@ -515,7 +518,7 @@ The distinction between *checked* and *reviewed* is the point of this table.
 | Cluster writes are not exposed on MCP | `_validate_write_policy` | **import** |
 | A write dispatches only via `agent_request_write` | `validate_dispatch_targets` | **import** |
 | Every tool's dispatch target exists on its class | `validate_dispatch_targets` | **import** |
-| An unwritten audit record blocks the write | `_run_write_inner` | runtime |
+| An unwritten audit record blocks the write | `korvid.tools.write_coordinator.run_approved_write` | runtime |
 | Only fresh keystrokes confirm a dialog | `ConfirmScreen` / `FreshKeysInput` | runtime |
 | Provider-bound data crosses one policy | `agent/outbound.py` | runtime (request refused) |
 | Secrets are redacted before size bounding | `core/redaction.py`, at the producer | runtime |
