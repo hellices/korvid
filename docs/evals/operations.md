@@ -214,6 +214,34 @@ comma-separated list of integers, and `--approval-timeout` must be at
 least 1 second. An expiry fixture is automatically given that floor
 instead of the default so it does not idle.
 
+## Grinding the operation prompt
+
+The operation campaign accepts the same eval-only prompt levers as the
+scenario/journey CLI (`python -m korvid.evals`): `--tier-pack-file` replaces
+the routed tier's operating pack, and `--prompt-overlay-file` layers an
+additional eval overlay on top. Both compose *after* korvid's immutable
+safety contract, which always stays the first text in the system message —
+grinding can change how the model is instructed to operate, never what it
+is permitted to do, and it can never widen the armed tool surface (writes
+are always armed for this pack regardless of tier or grind).
+
+```bash
+uv run python -m tests.evals.operation_campaign --scripted --reps 1 \
+  --tier-pack-file ./grind/tier-pack.md \
+  --prompt-overlay-file ./grind/overlay.md \
+  --json operations.json
+```
+
+Every run in the artifact carries this same composed prompt's identity
+under its own `"prompt"` key (`pack`, `overlays`, `source`, `sha256`) —
+identical in shape and derivation to `meta.prompts` — so a reader can
+confirm which prompt a specific journey's specific repetition ran under
+without recomputing the digest. `source` is `"override"` only when the
+grind actually changed the composed system message versus korvid's shipped
+wording; text that reproduces it byte for byte still reports `"default"`.
+Omitting both flags reproduces today's default-prompt behavior exactly —
+every existing JSON field, and every existing CLI exit code, is unchanged.
+
 ## Metamorphic generation
 
 `korvid.evals.operation_generation.generate_instance(template, seed)`
